@@ -86,6 +86,14 @@ pub struct RegionKey {
 /// absolute, carries a drive or network-share prefix or a backslash, contains
 /// a `..` component, or names no file at all.
 fn ensure_contained(path: &str, context: &str) -> Result<(), AppError> {
+    ensure_contained_with(path, context, contained_path_shape)
+}
+
+fn ensure_contained_with<'a>(
+    path: &'a str,
+    context: &str,
+    shape: impl FnOnce(&'a str, &str) -> Result<(usize, &'a str), AppError>,
+) -> Result<(), AppError> {
     // The format is `/`-separated, and the platforms disagree about `\`:
     // Windows treats it as a separator, Unix as an ordinary filename character.
     // A path carrying one therefore denotes different things on different
@@ -104,7 +112,7 @@ fn ensure_contained(path: &str, context: &str) -> Result<(), AppError> {
     if path.contains('\\') || drive_qualified {
         bail!("{context} '{path}' must be a relative path inside the repository");
     }
-    let (names, last) = contained_path_shape(path, context)?;
+    let (names, last) = shape(path, context)?;
     if path_names_no_file(names, last) {
         bail!("{context} '{path}' must name a file inside the repository");
     }
@@ -465,6 +473,39 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn scanner_host_paths_reject_escapes_with_the_field_context() {
+        let error = super::Manifest::parse("version = 2\njson_scanner_hosts = ['../outside.json']\n").unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "`json_scanner_hosts` entry '../outside.json' must be a relative path inside the repository"
+        );
+    }
+
+    #[test]
+    fn survivor_drive_qualified_paths_are_rejected_before_platform_component_classification() {
+        for path in ["C:file", "z:nested/file"] {
+            let calls = std::cell::Cell::new(0);
+            let error = ensure_contained_with(path, "portable", |path, _| {
+                calls.set(calls.get() + 1);
+                Ok((path.split('/').count(), path.rsplit('/').next().unwrap()))
+            })
+            .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!("portable '{path}' must be a relative path inside the repository")
+            );
+            assert_eq!(calls.get(), 0);
+        }
+        let calls = std::cell::Cell::new(0);
+        ensure_contained_with("folder/file", "portable", |path, _| {
+            calls.set(calls.get() + 1);
+            Ok((2, path.rsplit('/').next().unwrap()))
+        })
+        .unwrap();
+        assert_eq!(calls.get(), 1);
+    }
 
     #[test]
     fn drive_qualified_paths_are_rejected_independently_of_backslashes() {

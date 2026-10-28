@@ -7,7 +7,6 @@ use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode, Output, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::{env, fs, io};
 
 use cargo_coverage_gate::filter_lcov_many;
@@ -16,8 +15,12 @@ use ohno::{AppError, EnrichableExt as _, IntoAppError};
 use semver::Version;
 
 use crate::cli::{CollectionArgs, CoverageGateArgs, FeatureConfiguration};
+#[cfg(any(windows, test))]
+use crate::report_file::TemporaryPath;
+#[cfg(test)]
+use crate::report_file::{SynchronizedWrite, missing_lcov_parent_error, write_temporary_contents};
+use crate::report_file::{TEMPORARY_SEQUENCE, publish_reports, reserve_temporary_sequence};
 
-static TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const MIN_CARGO_LLVM_COV_VERSION: &str = "0.9.0";
 const METADATA_LOAD_CONTEXT: &str = "failed to load cargo workspace metadata";
 const NEXTEST_DESCRIPTION: &str = "cargo llvm-cov nextest";
@@ -27,10 +30,6 @@ const RUSTC_TARGET_LIBDIR_PARENT_ERROR: &str = "rustc target-libdir output had n
 
 fn diagnostic_path(path: &Path) -> String {
     crate::package_glob::diagnostic(&path.display().to_string())
-}
-
-fn missing_lcov_parent_error(path: &Path) -> AppError {
-    AppError::new(format!("LCOV path `{}` has no parent directory", diagnostic_path(path)))
 }
 
 pub(crate) fn run(args: &CoverageGateArgs, collection: &CollectionArgs) -> Result<ExitCode, AppError> {
@@ -92,10 +91,39 @@ pub(crate) fn run(args: &CoverageGateArgs, collection: &CollectionArgs) -> Resul
     for configuration in configurations {
         collected.push(collect_configuration(&execution, configuration)?);
     }
-    let lcov_paths = filter_and_publish_reports(&execution, &collected)?;
+    let evaluation = filter_then_evaluate(&execution, &collected, |lcov_paths| {
+        crate::run::evaluate_filtered_paths(args, lcov_paths, &selection.gated_names(), Some(&effective_target.triple), |path| {
+            fs::read_to_string(path)
+        })
+    });
+    complete_collection(evaluation, || coverage_scratch.cleanup())
+}
 
-    let evaluation = crate::run::evaluate_filtered_paths(args, &lcov_paths, &selection.gated_names(), Some(&effective_target.triple));
-    combine_evaluation_and_cleanup(evaluation, coverage_scratch.cleanup()).complete()
+fn complete_collection(
+    evaluation: Result<Result<ExitCode, AppError>, AppError>,
+    cleanup: impl FnOnce() -> Result<(), AppError>,
+) -> Result<ExitCode, AppError> {
+    let evaluation = evaluation?;
+    combine_evaluation_and_cleanup(evaluation, cleanup()).complete()
+}
+
+fn filter_then_evaluate(
+    execution: &CollectionExecution<'_>,
+    collected: &[CollectedReport],
+    evaluate: impl FnOnce(&[PathBuf]) -> Result<ExitCode, AppError>,
+) -> Result<Result<ExitCode, AppError>, AppError> {
+    filter_then_evaluate_with(execution, collected, filter_and_publish_reports, evaluate)
+}
+
+fn filter_then_evaluate_with(
+    execution: &CollectionExecution<'_>,
+    collected: &[CollectedReport],
+    publish: impl FnOnce(&CollectionExecution<'_>, &[CollectedReport]) -> Result<Vec<PathBuf>, AppError>,
+    evaluate: impl FnOnce(&[PathBuf]) -> Result<ExitCode, AppError>,
+) -> Result<Result<ExitCode, AppError>, AppError> {
+    // Publication failures return before evaluation; gate failures still need explicit scratch cleanup.
+    let paths = publish(execution, collected)?;
+    Ok(evaluate(&paths))
 }
 
 fn prepare_collection(
@@ -621,25 +649,16 @@ fn filter_and_publish_reports_with_reader(
     let raw_refs = raw.iter().map(String::as_str).collect::<Vec<_>>();
     let manifest = execution.workspace.root.join("Cargo.toml");
     let filtered = filter(&raw_refs, &manifest)?;
-    let mut staged = Vec::with_capacity(collected.len());
-    for (index, report) in collected.iter().enumerate() {
+    publish_reports(collected.iter().enumerate().map(|(index, report)| {
         let contents = filtered
             .get(index)
             .expect("filter_lcov_many preserves one output for every input tracefile");
-        let directory = report
-            .stable_path
-            .parent()
-            .ok_or_else(|| missing_lcov_parent_error(&report.stable_path))?;
-        let temporary = TemporaryPath::write(
-            directory,
-            &format!("{}-filtered.info", report.configuration.artifact_name()),
-            contents.as_bytes(),
-        )?;
-        staged.push((temporary, report.stable_path.clone()));
-    }
-    for (temporary, target) in staged {
-        temporary.publish(&target)?;
-    }
+        (
+            report.stable_path.as_path(),
+            format!("{}-filtered.info", report.configuration.artifact_name()),
+            contents.as_str(),
+        )
+    }))?;
     Ok(collected.iter().map(|report| report.stable_path.clone()).collect())
 }
 
@@ -1148,84 +1167,6 @@ fn command_display(command: &Command) -> String {
 }
 
 #[derive(Debug)]
-struct TemporaryPath {
-    path: PathBuf,
-    armed: bool,
-}
-
-/// A temporary-file writer boundary that makes durability failures independently testable.
-trait SynchronizedWrite: io::Write {
-    fn sync_all(&self) -> io::Result<()>;
-}
-
-impl SynchronizedWrite for fs::File {
-    #[mutants::skip] // Trivial File delegation; the injected writer test double covers synchronization failures.
-    fn sync_all(&self) -> io::Result<()> {
-        Self::sync_all(self)
-    }
-}
-
-impl TemporaryPath {
-    fn new(directory: &Path, label: &str) -> Self {
-        let sequence = reserve_temporary_sequence(&TEMPORARY_SEQUENCE);
-        Self {
-            path: directory.join(format!(".coverage-gate-{}-{sequence}-{label}", std::process::id())),
-            armed: true,
-        }
-    }
-
-    fn write(directory: &Path, label: &str, contents: &[u8]) -> Result<Self, AppError> {
-        let (temporary, mut file) = Self::create(directory, label)?;
-        Self::finish_write(temporary, &mut file, contents)
-    }
-
-    fn finish_write(temporary: Self, writer: &mut impl SynchronizedWrite, contents: &[u8]) -> Result<Self, AppError> {
-        write_temporary_contents(&temporary, writer, contents)?;
-        Ok(temporary)
-    }
-
-    fn create(directory: &Path, label: &str) -> Result<(Self, fs::File), AppError> {
-        let temporary = Self::new(directory, label);
-        let file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(temporary.path())
-            .into_app_err(format!("failed to create temporary file `{}`", temporary.path().display()))?;
-        Ok((temporary, file))
-    }
-
-    fn path(&self) -> &Path {
-        &self.path
-    }
-
-    fn publish(self, target: &Path) -> Result<(), AppError> {
-        fs::rename(&self.path, target).into_app_err(format!(
-            "failed to publish staged coverage report `{}` to `{}`",
-            self.path.display(),
-            target.display()
-        ))?;
-        Ok(())
-    }
-}
-
-impl Drop for TemporaryPath {
-    fn drop(&mut self) {
-        if self.armed {
-            let _ = fs::remove_file(&self.path);
-        }
-    }
-}
-
-fn write_temporary_contents(temporary: &TemporaryPath, writer: &mut impl SynchronizedWrite, contents: &[u8]) -> Result<(), AppError> {
-    writer
-        .write_all(contents)
-        .into_app_err(format!("failed to write temporary file `{}`", temporary.path().display()))?;
-    writer
-        .sync_all()
-        .into_app_err(format!("failed to flush temporary file `{}`", temporary.path().display()))
-}
-
-#[derive(Debug)]
 struct TemporaryDirectory {
     path: PathBuf,
     armed: bool,
@@ -1288,10 +1229,6 @@ fn remove_dir_if_present(path: &Path) -> io::Result<()> {
     }
 }
 
-fn reserve_temporary_sequence(sequence: &AtomicU64) -> u64 {
-    sequence.fetch_add(1, Ordering::Relaxed)
-}
-
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
@@ -1302,6 +1239,7 @@ mod tests {
     #[cfg(windows)]
     use std::os::windows::process::ExitStatusExt as _;
     use std::process::{ExitStatus, id as process_id};
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     use tempfile::tempdir;
 
@@ -1309,6 +1247,58 @@ mod tests {
 
     const RAW_ALL_FEATURES: &str = "TN:all-features\nSF:fixture.rs\nDA:1,1\nend_of_record\n";
     const RAW_NO_DEFAULT: &str = "TN:no-default\nSF:fixture.rs\nDA:1,1\nend_of_record\n";
+
+    #[test]
+    fn survivor_publication_filter_preserves_exact_manifest_and_failure_context_without_outputs() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let workspace = workspace(root);
+        let selection = Selection {
+            explicit: false,
+            members: workspace.members.clone(),
+        };
+        let args = collection_args();
+        let tools = ToolPrograms {
+            cargo: OsString::from("never-invoked"),
+            rustc: OsString::from("never-invoked"),
+        };
+        let execution = CollectionExecution {
+            workspace: &workspace,
+            selection: &selection,
+            args: &args,
+            scratch_dir: root,
+            coverage_target_root: root,
+            target: "x86_64-pc-windows-msvc",
+            tools: &tools,
+            quiet: false,
+        };
+        let calls = Cell::new(0);
+        let error = filter_then_evaluate_with(
+            &execution,
+            &[],
+            |execution, collected| {
+                filter_and_publish_reports_with(execution, collected, |raw, manifest| {
+                    assert!(raw.is_empty());
+                    assert_eq!(manifest, root.join("Cargo.toml"));
+                    calls.set(calls.get() + 1);
+                    Err(app_error("scripted filtering failure")).into_app_err("failed to filter LCOV to released Cargo surfaces")
+                })
+            },
+            |_| panic!("failed filtering must never reach gate evaluation"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("failed to filter LCOV to released Cargo surfaces"), "{error}");
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn complete_collection_returns_publication_errors_without_evaluating_cleanup() {
+        let error = complete_collection(Err(app_error("publication failed")), || {
+            panic!("publication failures use the scratch owner's fallback cleanup")
+        })
+        .unwrap_err();
+        assert_eq!(error.to_string(), "publication failed");
+    }
 
     fn member(name: &str, version: &str) -> WorkspaceMember {
         WorkspaceMember {
@@ -1350,6 +1340,47 @@ mod tests {
             target_dir: root.join("target"),
             members: vec![member("zeta", "2.0.0"), member("alpha", "1.0.0")],
         }
+    }
+
+    #[test]
+    fn survivor_raw_report_validation_returns_errors_before_filtering_or_staging() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let workspace = workspace(root);
+        let selection = Selection {
+            explicit: false,
+            members: workspace.members.clone(),
+        };
+        let args = collection_args();
+        let tools = ToolPrograms {
+            cargo: OsString::from("never-invoked"),
+            rustc: OsString::from("never-invoked"),
+        };
+        let execution = CollectionExecution {
+            workspace: &workspace,
+            selection: &selection,
+            args: &args,
+            scratch_dir: root,
+            coverage_target_root: root,
+            target: "x86_64-pc-windows-msvc",
+            tools: &tools,
+            quiet: false,
+        };
+        let collected = [CollectedReport {
+            raw_path: PathBuf::from("in-memory-raw.info"),
+            stable_path: root.join("must-not-be-created.info"),
+            configuration: FeatureConfiguration::AllFeatures,
+        }];
+        let error = filter_and_publish_reports_with_reader(
+            &execution,
+            &collected,
+            |_| Ok("not LCOV".to_owned()),
+            |_, _| panic!("malformed raw LCOV must never reach filtering or staging"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("in-memory-raw.info"), "{error}");
+        assert!(error.contains("all-features"), "{error}");
+        assert!(error.contains("not well-formed"), "{error}");
     }
 
     fn collection_args() -> CollectionArgs {
@@ -3143,11 +3174,64 @@ mod tests {
 
     #[test]
     fn temporary_paths_reserve_distinct_sequence_numbers() {
-        let mut first = TemporaryPath::new(Path::new("scratch"), "response");
-        let mut second = TemporaryPath::new(Path::new("scratch"), "response");
+        let first = TemporaryPath::new(Path::new("scratch"), "response");
+        let second = TemporaryPath::new(Path::new("scratch"), "response");
         assert_ne!(first.path(), second.path());
-        first.armed = false;
-        second.armed = false;
+        assert!(!first.armed);
+        assert!(!second.armed);
+    }
+
+    #[test]
+    fn temporary_creation_collision_never_removes_an_unowned_path() {
+        let path = PathBuf::from("scripted-existing-staging-file");
+        let mut temporary = TemporaryPath {
+            path: path.clone(),
+            armed: false,
+        };
+        let opens = Cell::new(0);
+        let error = temporary
+            .create_with(|actual| {
+                assert_eq!(actual, path);
+                opens.set(opens.get() + 1);
+                Err::<(), _>(io::Error::from(io::ErrorKind::AlreadyExists))
+            })
+            .unwrap_err();
+        assert_eq!(error.find_source::<io::Error>().unwrap().kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(opens.get(), 1);
+        assert!(!temporary.armed);
+        let removals = Cell::new(0);
+        temporary.cleanup_with(|_| {
+            removals.set(removals.get() + 1);
+            Ok(())
+        });
+        assert_eq!(removals.get(), 0);
+    }
+
+    #[test]
+    fn temporary_creation_arms_cleanup_only_for_the_created_path() {
+        let path = PathBuf::from("scripted-created-staging-file");
+        let mut temporary = TemporaryPath {
+            path: path.clone(),
+            armed: false,
+        };
+        let opens = Cell::new(0);
+        let file = temporary
+            .create_with(|actual| {
+                assert_eq!(actual, path);
+                opens.set(opens.get() + 1);
+                Ok(17)
+            })
+            .unwrap();
+        assert_eq!(file, 17);
+        assert_eq!(opens.get(), 1);
+        assert!(temporary.armed);
+        let mut removed = Vec::new();
+        temporary.cleanup_with(|actual| {
+            removed.push(actual.to_path_buf());
+            Ok(())
+        });
+        assert_eq!(removed, [path]);
+        assert!(!temporary.armed);
     }
 
     #[test]

@@ -50,6 +50,13 @@ pub(crate) fn unstyled_width(text: &str) -> usize {
     unstyled(text).width()
 }
 
+#[cfg(test)]
+type FitScanObserver = Box<dyn FnMut(usize, usize)>;
+#[cfg(test)]
+thread_local! {
+    static FIT_SCAN: std::cell::RefCell<Option<FitScanObserver>> = const { std::cell::RefCell::new(None) };
+}
+
 /// Fits terminal text to `width`, preserving complete control sequences and visible clusters.
 pub(crate) fn fit(text: &str, width: usize) -> String {
     if unstyled_width(text) <= width {
@@ -63,6 +70,12 @@ pub(crate) fn fit(text: &str, width: usize) -> String {
     let mut at = 0;
 
     while at < text.len() {
+        #[cfg(test)]
+        FIT_SCAN.with_borrow_mut(|observer| {
+            if let Some(observer) = observer {
+                observer(at, text.len());
+            }
+        });
         let character = text[at..]
             .chars()
             .next()
@@ -101,7 +114,12 @@ pub(crate) fn fit(text: &str, width: usize) -> String {
                 continue;
             }
             if next.width().unwrap_or(0) == 0 {
+                let previous = at;
                 at += next.len_utf8();
+                assert!(
+                    at > previous,
+                    "consuming a zero-width character must still advance its UTF-8 byte cursor"
+                );
                 continue;
             }
             // #[gamma::skip(loop.break_to_continue, loop.delete_break, tag = "timeout", reason = "a new visible cluster ends this scan; continuing revisits the same character")]
@@ -196,6 +214,58 @@ pub(crate) fn bytes(count: u64) -> String {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recovered_fitting_cursor_never_visits_eof_or_revisits_an_incomplete_control_sequence() {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                FIT_SCAN.with_borrow_mut(|observer| *observer = None);
+            }
+        }
+        for suffix in ["", "\u{1b}["] {
+            let text = format!("{}{suffix}", "❤\u{1b}[31m\u{fe0f}".repeat(4));
+            let length = text.len();
+            let maximum = text.chars().count();
+            let boundaries = text.char_indices().map(|(at, _)| at).collect::<Vec<_>>();
+            let visits = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            FIT_SCAN.with_borrow_mut(|observer| {
+                assert!(observer.is_none());
+                *observer = Some(Box::new({
+                    let visits = std::rc::Rc::clone(&visits);
+                    move |at, actual_length| {
+                        assert_eq!(actual_length, length);
+                        assert!(at < length);
+                        assert!(boundaries.contains(&at));
+                        let mut visits = visits.borrow_mut();
+                        assert!(visits.last().is_none_or(|previous| *previous < at));
+                        assert!(visits.len() < maximum);
+                        visits.push(at);
+                    }
+                }));
+            });
+            let reset = Reset;
+            let fitted = fit(&text, 7);
+            assert_eq!(visits.borrow().first(), Some(&0));
+            assert!(unstyled(&fitted).ends_with("..."));
+            assert!(fitted.ends_with("\u{1b}[0m"));
+            for (at, character) in fitted.char_indices() {
+                if character == '\u{1b}' {
+                    assert!(control_sequence_end(&fitted, at).is_some());
+                }
+            }
+            drop(reset);
+        }
+    }
+
+    #[test]
+    fn recovered_unknown_width_controls_remain_inside_the_following_joined_cluster() {
+        for control in ['\0', '\u{7}', '\u{7f}'] {
+            assert_eq!(control.width(), None);
+            let text = format!("a{control}\u{200d}bcdef");
+            assert_eq!(fit(&text, 4), "...");
+        }
+    }
 
     #[test]
     fn survivor_fitting_preserves_variation_selectors_joined_emoji_and_utf8_after_color_sequences() {

@@ -162,8 +162,14 @@ fn sarif_fitting(
         let rules = rules(&kept[..length], level);
         let log = log(&results[..length], rules);
 
-        if accepts(measure(&log)?) || length == 0 {
-            let text = serde_json::to_string_pretty(&log)
+        if accepts(
+            // #[gamma::skip(try.propagate_to_unwrap, reason = "Concrete SARIF Log and its twelve derived DTOs contain only UTF-8 strings,usize,lists,fixed structs,and HashMap<String,String>. No user Serialize/nonstring map keys exist. Counted::write/flush unconditionally return Ok and String serialization has no external writer. Both measurement and rendering serializers therefore cannot return Err; the wrapped measure likewise has no Err.", tag = "equivalent")]
+            measure(&log)?,
+        ) || length == 0
+        {
+            let text =
+            // #[gamma::skip(try.propagate_to_unwrap, reason = "Concrete SARIF Log and its twelve derived DTOs contain only UTF-8 strings,usize,lists,fixed structs,and HashMap<String,String>. No user Serialize/nonstring map keys exist. Counted::write/flush unconditionally return Ok and String serialization has no external writer. Both measurement and rendering serializers therefore cannot return Err; the wrapped measure likewise has no Err.", tag = "equivalent")]
+            serde_json::to_string_pretty(&log)
                 .map_err(|cause| crate::error::error!("could not serialize the SARIF log").caused_by(cause))?;
             let truncation = (found > length).then_some(Truncation { found, written: length });
 
@@ -194,6 +200,7 @@ const fn fits(bytes: usize) -> bool {
 fn measure(log: &Log<'_>) -> Result<usize> {
     let mut counter = Counted::default();
 
+    // #[gamma::skip(try.propagate_to_unwrap, reason = "Concrete SARIF Log and its twelve derived DTOs contain only UTF-8 strings,usize,lists,fixed structs,and HashMap<String,String>. No user Serialize/nonstring map keys exist. Counted::write/flush unconditionally return Ok and String serialization has no external writer. Both measurement and rendering serializers therefore cannot return Err; the wrapped measure likewise has no Err.", tag = "equivalent")]
     serde_json::to_writer_pretty(&mut counter, log)
         .map_err(|cause| crate::error::error!("could not serialize the SARIF log").caused_by(cause))?;
 
@@ -309,11 +316,22 @@ fn results(kept: &[&Mutant], root: &Utf8Path, level: Level) -> Vec<Finding> {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use serde_json::Value;
+    use serde_json::{Value, from_str, json, to_vec_pretty};
 
     use super::*;
     use crate::model::Outcome;
     use crate::testing::ci_fixture::{mutant, root};
+
+    #[test]
+    fn recovered_an_empty_sarif_prefix_is_returned_even_when_the_predicate_rejects_every_size() {
+        let population = [mutant("/w/src/a.rs", 12, "relational.gt_to_ge", Outcome::Survived)];
+        let (text, truncation) = sarif_fitting(&population, &root(), Level::Warning, |_| false).unwrap();
+        let document: Value = from_str(&text).unwrap();
+        assert_eq!(document["runs"][0]["results"], json!([]));
+        assert_eq!(document["runs"][0]["tool"]["driver"]["rules"], json!([]));
+        let truncation = truncation.unwrap();
+        assert_eq!((truncation.found, truncation.written), (1, 0));
+    }
 
     #[test]
     fn survivor_one_oversized_sarif_finding_is_removed_instead_of_bypassing_the_byte_budget() {
@@ -324,7 +342,7 @@ mod tests {
         assert!(one.len() > budget, "the budget lies strictly between zero and one actual findings");
         let (text, truncation) = sarif_fitting(&population, &root(), Level::Warning, |bytes| bytes <= budget)
             .expect("bounded fitting uses the same real serializer");
-        let document: serde_json::Value = serde_json::from_str(&text).expect("the rendered document is valid JSON");
+        let document: Value = from_str(&text).expect("the rendered document is valid JSON");
         assert!(
             document["runs"][0]["results"]
                 .as_array()
@@ -346,7 +364,7 @@ mod tests {
         ];
 
         let (text, truncation) = sarif(&mutants, &root(), Level::Note).expect("sarif");
-        let log: Value = serde_json::from_str(&text).expect("valid json");
+        let log: Value = from_str(&text).expect("valid json");
 
         assert_eq!(truncation, None);
 
@@ -361,7 +379,7 @@ mod tests {
     fn a_sarif_result_is_fingerprinted_by_mutant_id() {
         let mutants = vec![mutant("/w/src/a.rs", 7, "relational.gt_to_ge", Outcome::Survived)];
         let (text, _) = sarif(&mutants, &root(), Level::Warning).expect("sarif");
-        let log: Value = serde_json::from_str(&text).expect("valid json");
+        let log: Value = from_str(&text).expect("valid json");
         let result = &log["runs"][0]["results"][0];
 
         assert_eq!(result["level"], "warning");
@@ -395,7 +413,7 @@ mod tests {
         let kept = [&mutants[0]];
         let results = results(&kept, &root(), Level::Warning);
         let document = log(&results, rules(&kept, Level::Warning));
-        let expected = serde_json::to_vec_pretty(&document).expect("valid JSON").len();
+        let expected = to_vec_pretty(&document).expect("valid JSON").len();
 
         assert_eq!(measure(&document).expect("measurable JSON"), expected);
     }
@@ -413,7 +431,7 @@ mod tests {
         assert_eq!(mutants.len(), SARIF_LIMIT + 1);
 
         let (text, truncation) = sarif(&mutants, &root(), Level::Warning).expect("sarif");
-        let log: Value = serde_json::from_str(&text).expect("valid json");
+        let log: Value = from_str(&text).expect("valid json");
         let truncation = truncation.expect("one finding past the cap must be reported as truncated");
 
         // The rendered log is what GitHub sees, so the cap is asserted there and not only on the

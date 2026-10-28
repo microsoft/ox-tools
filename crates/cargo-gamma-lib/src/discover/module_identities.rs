@@ -125,6 +125,8 @@ pub(super) fn layouts(roots: &[Utf8PathBuf], declarations: &[(Utf8PathBuf, Vec<E
             let _old = modules.insert(file.clone(), module.clone());
             let Some(Some(declared)) = edges.get(file.as_path()) else {
                 uncertain = true;
+
+                // #[gamma::skip(loop.continue_to_break, reason = "This continue follows uncertain=true after an absent/ambiguous declaration. uncertain never becomes false; final publication is guarded by !uncertain. Breaking earlier discards the same entire root layout; remaining traversal has only local maps/queues.", tag = "equivalent")]
                 continue;
             };
             for edge in *declared {

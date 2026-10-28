@@ -215,6 +215,11 @@ mod tests {
     use super::*;
 
     #[test]
+    fn recovered_default_parallelism_saturates_at_the_exact_native_watch_capacity() {
+        assert_eq!(Config::default_with_parallelism(|| usize::MAX).jobs, watchable());
+    }
+
+    #[test]
     fn interior_job_widths_are_preserved_and_default_stack_settings_are_exact() {
         for jobs in [1, 2, 7, 31] {
             assert_eq!(resolve_jobs(Some(jobs)), jobs.min(watchable()));

@@ -149,12 +149,17 @@ serde_json = { workspace = true }
 tempfile = { workspace = true }
 tick = { workspace = true, features = ["test-util"] }
 tokio = { workspace = true, features = ["test-util"] }
+tracing = { workspace = true, features = ["std"] }
 wiremock = { workspace = true }
 
 # Every integration test reaches into the crate through the `internals` facade, directly or
 # through `tests/support`, so they are all gated on that feature.
 [[test]]
 name = "advisory_provider_integration"
+required-features = ["internals"]
+
+[[test]]
+name = "archive_integration"
 required-features = ["internals"]
 
 [[test]]

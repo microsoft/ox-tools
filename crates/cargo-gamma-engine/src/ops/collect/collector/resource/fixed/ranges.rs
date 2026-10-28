@@ -17,14 +17,23 @@ fn unsigned(value: &Value) -> Option<(u128, u128, Primitive)> {
     match value {
         Value::Int(value, ty @ Primitive::Unsigned(_)) => Some((*value, *value, *ty)),
         Value::UnsignedRange(low, high, ty, _) => Some((*low, *high, *ty)),
-        Value::Symbol(_, Binding::Primitive(ty @ Primitive::Unsigned(_))) => Some((0, ty.mask()?, *ty)),
+        Value::Symbol(_, Binding::Primitive(ty @ Primitive::Unsigned(_))) => Some((
+            0,
+            // #[gamma::skip(try.propagate_to_unwrap, reason = "The established named unsigned widths 8, 16, 32, 64, and 128 always have a mask.", tag = "equivalent")]
+            ty.mask()?,
+            *ty,
+        )),
         _ => None,
     }
 }
 
 fn unsigned_value(low: u128, high: u128, ty: Primitive, identity: String) -> Option<Value> {
-    if low > high || high > ty.mask()? {
-        return None;
+    if low > high
+        || high >
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "The established named unsigned widths 8, 16, 32, 64, and 128 always have a mask.", tag = "equivalent")]
+        ty.mask()?
+    {
+        return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
     }
     Some(if low == high {
         Value::Int(low, ty)
@@ -35,7 +44,7 @@ fn unsigned_value(low: u128, high: u128, ty: Primitive, identity: String) -> Opt
 
 fn finite(low: f64, high: f64, ty: Primitive, identity: String) -> Option<Value> {
     if !low.is_finite() || !high.is_finite() || low < 0.0 || low > high {
-        return None;
+        return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
     }
     if low.to_bits() == high.to_bits() {
         return float(low, ty);
@@ -44,21 +53,23 @@ fn finite(low: f64, high: f64, ty: Primitive, identity: String) -> Option<Value>
 }
 
 pub(super) fn wrapping(method: &str, left: &Value, right: &Value) -> Option<Value> {
-    if matches!(left, Value::Int(..)) && matches!(right, Value::Int(..)) {
-        return None;
+    if matches!(left, Value::Int(..)) {
+        return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
     }
     let (low, high, ty) = unsigned(left)?;
-    let Value::Int(amount, same) = right else { return None };
+    let Value::Int(amount, same) = right else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
     if *same != ty {
-        return None;
+        return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
     }
-    let mask = ty.mask()?;
+    let mask =
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "The established named unsigned widths 8, 16, 32, 64, and 128 always have a mask.", tag = "equivalent")]
+        ty.mask()?;
     let bounds = match method {
         "wrapping_add" if high.checked_add(*amount).is_some_and(|sum| sum <= mask) => (low + amount, high + amount),
         "wrapping_sub" if low >= *amount => (low - amount, high - amount),
         "wrapping_mul" if high.checked_mul(*amount).is_some_and(|product| product <= mask) => (low * amount, high * amount),
         "wrapping_add" | "wrapping_sub" | "wrapping_mul" => (0, mask),
-        _ => return None,
+        _ => return None, // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
     };
     unsigned_value(bounds.0, bounds.1, ty, identity(format_args!("{method}({left:?},{right:?})"))?)
 }
@@ -68,20 +79,20 @@ pub(super) fn binary(op: &BinOp, left: &Value, right: &Value) -> Option<Value> {
         && !matches!(left, Value::Int(..))
     {
         let (low, high, ty @ Primitive::Unsigned(width)) = unsigned(left)? else {
-            return None;
+            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         };
-        let Value::Int(shift, _) = right else { return None };
+        let Value::Int(shift, _) = right else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         if *shift >= u128::from(width) {
-            return None;
+            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         }
         return unsigned_value(low >> shift, high >> shift, ty, identity(format_args!("{left:?}>>{right:?}"))?);
     }
     let (Value::Float(bits, ty), Value::FiniteRange(low, high, other, _)) = (left, right) else {
-        return None;
+        return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
     };
     let (value, low, high) = (f64::from_bits(*bits), f64::from_bits(*low), f64::from_bits(*high));
-    if ty != other || low <= 0.0 || *ty != Primitive::Float(64) || !value.is_finite() || value < 0.0 {
-        return None;
+    if ty != other || low <= 0.0 || *ty != Primitive::Float(64) || value < 0.0 {
+        return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
     }
     match op {
         BinOp::Div(_) => finite(value / high, value / low, *ty, identity(format_args!("{left:?}/{right:?}"))?),
@@ -97,23 +108,31 @@ pub(super) fn binary(op: &BinOp, left: &Value, right: &Value) -> Option<Value> {
 pub(super) fn cast(value: &Value, target: Primitive) -> Option<Value> {
     let (low, high, _) = unsigned(value)?;
     if target != Primitive::Float(64) {
-        return None;
+        return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
     }
     finite(low as f64, high as f64, target, identity(format_args!("{value:?} as f64"))?)
 }
 
 pub(super) fn from(value: Value, target: Primitive) -> Option<Value> {
-    let Binding::Primitive(source) = value.kind() else { return None };
+    let Binding::Primitive(source) = value.kind() else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
     let lossless = match (source, target) {
         (Primitive::Unsigned(a), Primitive::Unsigned(b)) | (Primitive::Signed(a), Primitive::Signed(b)) => a <= b,
         (Primitive::Unsigned(a), Primitive::Signed(b)) => a < b,
-        (Primitive::Unsigned(a) | Primitive::Signed(a), Primitive::Float(64)) => a <= 32,
-        (Primitive::Unsigned(a) | Primitive::Signed(a), Primitive::Float(32)) => a <= 16,
+        (Primitive::Unsigned(a) | Primitive::Signed(a), Primitive::Float(64)) => {
+            a <=
+            // #[gamma::skip(literal.int_increment, reason = "The supported named integer widths contain neither 33 nor 17, so incrementing this cutoff admits no new width.", tag = "equivalent")]
+            32
+        }
+        (Primitive::Unsigned(a) | Primitive::Signed(a), Primitive::Float(32)) => {
+            a <=
+            // #[gamma::skip(literal.int_increment, reason = "The supported named integer widths contain neither 33 nor 17, so incrementing this cutoff admits no new width.", tag = "equivalent")]
+            16
+        }
         (Primitive::Float(32), Primitive::Float(64)) => true,
         _ => false,
     };
     if !lossless {
-        return None;
+        return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
     }
     if let Value::Symbol(_, _) = value {
         return Some(Value::Symbol(
@@ -127,7 +146,91 @@ pub(super) fn from(value: Value, target: Primitive) -> Option<Value> {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use syn::parse_quote;
+
     use super::*;
+
+    #[test]
+    fn negative_subnormal_operands_are_not_admitted_after_rounding_to_negative_zero() {
+        let negative = -f64::from_bits(1);
+        let left = Value::Float(negative.to_bits(), Primitive::Float(64));
+        for (operator, low, high) in [(parse_quote!(/), 2.0_f64, 4.0_f64), (parse_quote!(*), 0.25_f64, 0.5_f64)] {
+            let right = Value::FiniteRange(low.to_bits(), high.to_bits(), Primitive::Float(64), "input".into());
+            assert_eq!(binary(&operator, &left, &right), None);
+        }
+        assert_eq!((negative / 2.0).to_bits(), (-0.0_f64).to_bits());
+        assert_eq!((negative * 0.5).to_bits(), (-0.0_f64).to_bits());
+    }
+
+    #[test]
+    fn derived_interval_identities_withhold_oversized_provenance_without_panicking() {
+        let unsigned = Value::UnsignedRange(3, 7, Primitive::Unsigned(8), "x".repeat(8192));
+        assert_eq!(binary(&parse_quote!(>>), &unsigned, &Value::Int(1, Primitive::Unsigned(8))), None);
+        assert_eq!(cast(&unsigned, Primitive::Float(64)), None);
+        let right = Value::FiniteRange(2.0_f64.to_bits(), 4.0_f64.to_bits(), Primitive::Float(64), "x".repeat(8192));
+        for operator in [parse_quote!(*), parse_quote!(/)] {
+            assert_eq!(
+                binary(&operator, &Value::Float(12.0_f64.to_bits(), Primitive::Float(64)), &right),
+                None
+            );
+        }
+        assert_eq!(
+            from(
+                Value::Symbol("x".repeat(8150), Binding::Primitive(Primitive::Unsigned(8))),
+                Primitive::Unsigned(16)
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn finite_intervals_preserve_provenance_and_reject_zero_or_mixed_precision_operands() {
+        let ty = Primitive::Float(64);
+        let first = finite(1.0, 4.0, ty, "first input".into()).unwrap();
+        let second = finite(1.0, 4.0, ty, "second input".into()).unwrap();
+        assert_ne!(first, second, "different inputs must not share predicate identity");
+        assert!(same_invariant(&first, &second));
+        assert!(!same_invariant(&first, &finite(2.0, 4.0, ty, "first input".into()).unwrap()));
+        assert!(!same_invariant(
+            &first,
+            &finite(1.0, 4.0, Primitive::Float(32), "first input".into()).unwrap()
+        ));
+        for (left, right) in [
+            (
+                Value::Float(12.0_f64.to_bits(), ty),
+                finite(0.0, 4.0, ty, "includes zero".into()).unwrap(),
+            ),
+            (
+                Value::Float(12.0_f64.to_bits(), ty),
+                finite(1.0, 4.0, Primitive::Float(32), "narrow denominator".into()).unwrap(),
+            ),
+            (
+                Value::Float(12.0_f64.to_bits(), Primitive::Float(32)),
+                finite(1.0, 4.0, Primitive::Float(32), "narrow denominator".into()).unwrap(),
+            ),
+        ] {
+            for op in [parse_quote!(*), parse_quote!(/)] {
+                assert_eq!(binary(&op, &left, &right), None, "{left:?} {op:?} {right:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn unsigned_to_float_cast_preserves_both_endpoints_and_distinguishes_source_identity() {
+        let make = |identity: &str| Value::UnsignedRange(3, 7, Primitive::Unsigned(8), identity.into());
+        let first = cast(&make("first"), Primitive::Float(64)).unwrap();
+        let second = cast(&make("second"), Primitive::Float(64)).unwrap();
+        let Value::FiniteRange(low, high, ty, _) = &first else {
+            panic!("a non-singleton unsigned interval yields floating bounds");
+        };
+        assert_eq!((*low, *high, *ty), (3.0_f64.to_bits(), 7.0_f64.to_bits(), Primitive::Float(64)));
+        assert_ne!(first, second);
+        assert!(same_invariant(&first, &second));
+        assert_eq!(
+            binary(&parse_quote!(>>), &Value::Bool(true), &Value::Int(1, Primitive::Unsigned(8))),
+            None
+        );
+    }
 
     fn bounds(value: Value) -> (u128, u128) {
         match value {
@@ -197,10 +300,10 @@ mod tests {
             (8, None),
             (128, None),
         ] {
-            assert_eq!(binary(&syn::parse_quote!(>>), &value, &Value::Int(shift, ty)).map(bounds), expected);
+            assert_eq!(binary(&parse_quote!(>>), &value, &Value::Int(shift, ty)).map(bounds), expected);
         }
-        assert!(binary(&syn::parse_quote!(<<), &value, &Value::Int(1, ty)).is_none());
-        assert!(binary(&syn::parse_quote!(>>), &value, &Value::Bool(true)).is_none());
+        assert!(binary(&parse_quote!(<<), &value, &Value::Int(1, ty)).is_none());
+        assert!(binary(&parse_quote!(>>), &value, &Value::Bool(true)).is_none());
         assert!(unsigned_value(2, 1, ty, "bad".into()).is_none());
         assert!(unsigned_value(0, 256, ty, "bad".into()).is_none());
         assert_eq!(unsigned_value(255, 255, ty, "singleton".into()), Some(Value::Int(255, ty)));
@@ -213,22 +316,22 @@ mod tests {
         let ty = Primitive::Float(64);
         let left = Value::Float(12.0_f64.to_bits(), ty);
         let right = finite(2.0, 4.0, ty, "denominator".into()).unwrap();
-        for (op, low, high) in [(syn::parse_quote!(/), 3.0_f64, 6.0_f64), (syn::parse_quote!(*), 24.0, 48.0)] {
+        for (op, low, high) in [(parse_quote!(/), 3.0_f64, 6.0_f64), (parse_quote!(*), 24.0, 48.0)] {
             let Some(Value::FiniteRange(actual_low, actual_high, actual_ty, _)) = binary(&op, &left, &right) else {
                 panic!("expected finite bounds");
             };
             assert_eq!((actual_low, actual_high, actual_ty), (low.to_bits(), high.to_bits(), ty));
         }
-        assert!(binary(&syn::parse_quote!(/), &left, &finite(0.0, 4.0, ty, "zero".into()).unwrap()).is_none());
-        assert!(binary(&syn::parse_quote!(+), &left, &right).is_none());
+        assert!(binary(&parse_quote!(/), &left, &finite(0.0, 4.0, ty, "zero".into()).unwrap()).is_none());
+        assert!(binary(&parse_quote!(+), &left, &right).is_none());
         for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0] {
             assert!(finite(invalid, 4.0, ty, "bad".into()).is_none());
             assert!(finite(0.0, invalid, ty, "bad".into()).is_none());
         }
         assert!(finite(4.0, 2.0, ty, "reversed".into()).is_none());
         assert_eq!(finite(2.0, 2.0, ty, "point".into()), Some(Value::Float(2.0_f64.to_bits(), ty)));
-        assert!(binary(&syn::parse_quote!(*), &Value::Float(f64::INFINITY.to_bits(), ty), &right).is_none());
-        assert!(binary(&syn::parse_quote!(*), &Value::Float((-1.0_f64).to_bits(), ty), &right).is_none());
+        assert!(binary(&parse_quote!(*), &Value::Float(f64::INFINITY.to_bits(), ty), &right).is_none());
+        assert!(binary(&parse_quote!(*), &Value::Float((-1.0_f64).to_bits(), ty), &right).is_none());
     }
 
     #[test]

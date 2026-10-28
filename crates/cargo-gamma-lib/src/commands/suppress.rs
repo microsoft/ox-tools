@@ -288,6 +288,8 @@ fn recorded_mutant(candidate: &Mutant, outcome: Outcome, suppression: Option<Sup
     mutant.suppression = suppression;
     // #[gamma::skip(stmt.delete_assign, reason = "into_mutants initializes each fresh candidate's elapsed_ms to zero")]
     mutant.elapsed_ms = 0;
+
+    // #[gamma::skip(stmt.delete_assign, reason = "recorded_mutant's sole production caller selects candidates freshly produced by current_sources -> ops::into_mutants -> Mutant::from_definition, which initializes killed_by=None. No execution or later mutation occurs between generation and this call. Cloning that candidate already has None, so deleting killed_by=None preserves its exact value.", tag = "equivalent")]
     mutant.killed_by = None;
     // #[gamma::skip(stmt.delete_assign, reason = "into_mutants initializes each fresh candidate's note to None")]
     mutant.note = None;
@@ -871,7 +873,10 @@ pub mod native_test_util;
 mod tests {
     use std::fmt::Write as _;
 
+    use serde_json::{Value, from_value, json, to_value};
+
     use super::*;
+    use crate::HashMap;
     #[cfg(unix)]
     use crate::testing::workdir;
     use crate::testing::{Sink, fails_at_every_line};
@@ -928,7 +933,7 @@ mod tests {
     fn plan_over(root: &Utf8PathBuf, files: &[&str]) -> Plan {
         Plan {
             skipped: Vec::new(),
-            digests: crate::HashMap::default(),
+            digests: HashMap::default(),
             root: root.clone(),
             files: files
                 .iter()
@@ -944,8 +949,8 @@ mod tests {
             idle: Vec::new(),
             sharded_out: 0,
             settled_out: 0,
-            reach: crate::HashMap::default(),
-            specs: crate::HashMap::default(),
+            reach: HashMap::default(),
+            specs: HashMap::default(),
         }
     }
 
@@ -994,7 +999,7 @@ mod tests {
                 names,
                 "the fixture must not accidentally inherit lexicographic HashMap iteration"
             );
-            let invalid = change_first_entry(&record, |entry| entry["site"]["digest"] = serde_json::json!("invalid"));
+            let invalid = change_first_entry(&record, |entry| entry["site"]["digest"] = json!("invalid"));
             let (_, stale) = plan_from_record(&root, &invalid, &[crate::fix::Eligible::Timeout])
                 .expect("corrupt persisted identity is reported as stale");
             assert_eq!(stale.len(), 1);
@@ -1247,7 +1252,7 @@ mod tests {
         };
         let before = Plan {
             skipped: Vec::new(),
-            digests: crate::HashMap::default(),
+            digests: HashMap::default(),
             root: root.clone(),
             files: vec![TargetFile {
                 path: Utf8PathBuf::from("src/lib.rs"),
@@ -1260,8 +1265,8 @@ mod tests {
             idle: Vec::new(),
             sharded_out: 0,
             settled_out: 0,
-            reach: crate::HashMap::default(),
-            specs: crate::HashMap::default(),
+            reach: HashMap::default(),
+            specs: HashMap::default(),
         };
         let mut host = Sink::default();
 
@@ -1379,7 +1384,7 @@ mod tests {
 
         let before = Plan {
             skipped: Vec::new(),
-            digests: crate::HashMap::default(),
+            digests: HashMap::default(),
             root: root.clone(),
             files: vec![TargetFile {
                 path: Utf8PathBuf::from("src/lib.rs"),
@@ -1392,8 +1397,8 @@ mod tests {
             idle: Vec::new(),
             sharded_out: 0,
             settled_out: 0,
-            reach: crate::HashMap::default(),
-            specs: crate::HashMap::default(),
+            reach: HashMap::default(),
+            specs: HashMap::default(),
         };
 
         // Naming an id that no mutant carries makes the intended set impossible to satisfy, which
@@ -1427,7 +1432,7 @@ mod tests {
         let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("utf8");
         let before = Plan {
             skipped: Vec::new(),
-            digests: crate::HashMap::default(),
+            digests: HashMap::default(),
             root: root.clone(),
             files: Vec::new(),
             mutants: Vec::new(),
@@ -1435,8 +1440,8 @@ mod tests {
             idle: Vec::new(),
             sharded_out: 0,
             settled_out: 0,
-            reach: crate::HashMap::default(),
-            specs: crate::HashMap::default(),
+            reach: HashMap::default(),
+            specs: HashMap::default(),
         };
 
         fails_at_every_line(2, |host| {
@@ -2447,8 +2452,8 @@ mod tests {
         RunRecord::from_run(root, mutants, &context, &[root.join("src")])
     }
 
-    fn change_first_entry(record: &RunRecord, change: impl FnOnce(&mut serde_json::Value)) -> RunRecord {
-        let mut value = serde_json::to_value(record).expect("record serialization");
+    fn change_first_entry(record: &RunRecord, change: impl FnOnce(&mut Value)) -> RunRecord {
+        let mut value = to_value(record).expect("record serialization");
         let entry = value["files"]
             .as_array_mut()
             .expect("files array")
@@ -2456,7 +2461,7 @@ mod tests {
             .find_map(|file| file["mutants"].as_array_mut().expect("mutants array").first_mut())
             .expect("fixture records at least one entry");
         change(entry);
-        serde_json::from_value(value).expect("alteration retains the persisted record's JSON schema")
+        from_value(value).expect("alteration retains the persisted record's JSON schema")
     }
 
     #[test]
@@ -2479,8 +2484,8 @@ mod tests {
             assert_eq!(counts.get(Utf8Path::new("src/lib.rs")).copied().unwrap_or(0), expected);
         }
         let legacy = change_first_entry(&record, |entry| {
-            entry["site"] = serde_json::Value::Null;
-            entry["outcome"] = serde_json::to_value(Outcome::Timeout).expect("outcome serialization");
+            entry["site"] = Value::Null;
+            entry["outcome"] = to_value(Outcome::Timeout).expect("outcome serialization");
         });
         let selected = [crate::fix::Eligible::Timeout];
         let failure = eligible_files(&legacy, &selected).expect_err("selected legacy entries cannot be promoted");
@@ -2489,8 +2494,8 @@ mod tests {
         let none_selected = eligible_files(&legacy, &[]).expect("unselected legacy entry is harmless");
         assert!(none_selected.is_empty());
         let invalid = change_first_entry(&record, |entry| {
-            entry["outcome"] = serde_json::to_value(Outcome::Timeout).expect("outcome serialization");
-            entry["site"]["digest"] = serde_json::json!("invalid");
+            entry["outcome"] = to_value(Outcome::Timeout).expect("outcome serialization");
+            entry["site"]["digest"] = json!("invalid");
         });
         let (_, stale) = plan_from_record(&root, &invalid, &[crate::fix::Eligible::Timeout, crate::fix::Eligible::OutOfMemory])
             .expect("any selected verdict is eligible");
@@ -2519,10 +2524,10 @@ mod tests {
             "id",
         ] {
             let changed = change_first_entry(&record, |entry| match field {
-                "digest" => entry["site"][field] = serde_json::json!("wrong-digest"),
+                "digest" => entry["site"][field] = json!("wrong-digest"),
                 "item" => {
-                    entry["site"]["item"] = serde_json::json!("different_item");
-                    entry["site"]["digest"] = serde_json::json!(format!(
+                    entry["site"]["item"] = json!("different_item");
+                    entry["site"]["digest"] = json!(format!(
                         "{:032x}",
                         crate::model::site_key(
                             "different_item",
@@ -2531,13 +2536,13 @@ mod tests {
                         )
                     ));
                 }
-                "replacement" => entry["site"][field] = serde_json::json!("999"),
-                "shape" => entry["site"][field] = serde_json::to_value(crate::ops::collect::Shape::Stmt).expect("shape serialization"),
-                "original" => entry["site"][field] = serde_json::json!("42 "),
-                "id" => entry[field] = serde_json::json!("0123456789abcdef0123456789abcdef"),
+                "replacement" => entry["site"][field] = json!("999"),
+                "shape" => entry["site"][field] = to_value(crate::ops::collect::Shape::Stmt).expect("shape serialization"),
+                "original" => entry["site"][field] = json!("42 "),
+                "id" => entry[field] = json!("0123456789abcdef0123456789abcdef"),
                 _ => {
                     let previous = entry["site"][field].as_u64().expect("integer identity field");
-                    entry["site"][field] = serde_json::json!(previous + 1);
+                    entry["site"][field] = json!(previous + 1);
                 }
             });
             let (plan, stale) =
@@ -2590,7 +2595,7 @@ mod tests {
         let second = recorded_mutant_in(&root, "src/lib.rs", "42", "", Outcome::Timeout);
         let record = record_for(&root, &[first.clone(), second.clone()]);
         for mode in ["missing", "invalid", "moved"] {
-            let mut value = serde_json::to_value(&record).expect("record serialization");
+            let mut value = to_value(&record).expect("record serialization");
             let entry = value["files"]
                 .as_array_mut()
                 .expect("files")
@@ -2599,9 +2604,9 @@ mod tests {
                 .find(|entry| entry["id"].as_str() == Some(first.id.as_str()))
                 .expect("killed entry");
             match mode {
-                "missing" => entry["site"] = serde_json::Value::Null,
-                "invalid" => entry["site"]["digest"] = serde_json::json!("invalid"),
-                _ => entry["site"]["occurrence"] = serde_json::json!(999),
+                "missing" => entry["site"] = Value::Null,
+                "invalid" => entry["site"]["digest"] = json!("invalid"),
+                _ => entry["site"]["occurrence"] = json!(999),
             }
             for file in value["files"].as_array_mut().expect("files") {
                 file["mutants"]
@@ -2609,7 +2614,7 @@ mod tests {
                     .expect("entries")
                     .sort_by_key(|entry| usize::from(entry["id"].as_str() != Some(first.id.as_str())));
             }
-            let changed: RunRecord = serde_json::from_value(value).expect("valid record schema");
+            let changed: RunRecord = from_value(value).expect("valid record schema");
             let (plan, stale) =
                 plan_from_record(&root, &changed, &[crate::fix::Eligible::Timeout]).expect("only selected stale sites warn");
             assert!(stale.is_empty(), "{mode}: {stale:?}");
@@ -2647,7 +2652,7 @@ mod tests {
                 .all(|mutant| mutant.package.as_ref() == "subject")
         );
         let unknown_selector = change_first_entry(&record, |entry| {
-            entry["site"]["mutator"] = serde_json::json!("not.a_mutator");
+            entry["site"]["mutator"] = json!("not.a_mutator");
         });
         assert!(current_sources(&root, &unknown_selector, &affected).is_err());
         for invalid in [b"pub fn broken( {".as_slice(), b"\xff".as_slice()] {

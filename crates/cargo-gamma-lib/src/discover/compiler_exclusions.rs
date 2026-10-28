@@ -54,16 +54,19 @@ impl CompilerExclusions {
                     .into_iter()
                     .chain(incomplete.ordering())
                     .chain(hints.ordering())
-                    .map(|id| {
-                        (
-                            id.to_owned(),
-                            "historical compiler exclusion imported from earlier campaign evidence".into(),
-                        )
-                    })
-                    .collect();
-                Ok(Self { version: VERSION, mutants })
+                    .map(str::to_owned);
+                Ok(Self::from_historical(mutants))
             }
             Err(cause) => Err(error!("could not read compiler exclusion inventory `{path}`").caused_by(cause)),
+        }
+    }
+
+    fn from_historical(ids: impl Iterator<Item = String>) -> Self {
+        Self {
+            version: VERSION,
+            mutants: ids
+                .map(|id| (id, "historical compiler exclusion imported from earlier campaign evidence".into()))
+                .collect(),
         }
     }
 
@@ -86,7 +89,9 @@ impl CompilerExclusions {
 
     /// Publishes the complete inventory to the campaign output directory.
     pub fn store(&self, base: &Utf8Path) -> Result<()> {
-        let text = serde_json::to_string_pretty(self)
+        let text =
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "CompilerExclusions serializer derives solely over version:u32 and BTreeMap<String,String>. Every key/value is JSON representable, no user serializer or I/O writer is accepted, so to_string_pretty cannot return Err for panic_on_failure.", tag = "equivalent")]
+        serde_json::to_string_pretty(self)
             .map_err(|cause| error!("could not serialize compiler exclusion inventory").caused_by(cause))?;
         crate::elements::write(&base.join(FILE), &text)
     }
@@ -111,6 +116,19 @@ impl CompilerExclusions {
 mod tests {
     use super::*;
     use crate::testing::ci_fixture::mutant;
+
+    #[test]
+    fn recovered_imported_exclusions_preserve_the_exact_historical_reason_for_each_identity() {
+        let inventory = CompilerExclusions::from_historical(["first", "second", "first"].map(str::to_owned).into_iter());
+        assert_eq!(inventory.version, 1);
+        assert_eq!(inventory.mutants.len(), 2);
+        for id in ["first", "second"] {
+            assert_eq!(
+                inventory.mutants.get(id).map(String::as_str),
+                Some("historical compiler exclusion imported from earlier campaign evidence")
+            );
+        }
+    }
 
     fn candidate(ordinal: u32) -> Mutant {
         Mutant {

@@ -230,13 +230,17 @@ impl SpawnGuard {
     /// the wait. The window cannot be reopened then, and the caller must abandon the retry rather
     /// than create a child this process may not outlive.
     #[cfg_attr(
-        not(unix),
+        not(any(unix, test)),
         expect(
             clippy::unnecessary_wraps,
             reason = "the shared API is fallible on Unix, where reopening the interrupt window can fail"
         )
     )]
     pub(crate) fn backoff(self, duration: Duration) -> Result<Self, PlatformError> {
+        #[cfg(test)]
+        if let Some(error) = tests::BACKOFF_FAILURE.take() {
+            return Err(error);
+        }
         #[cfg(target_os = "linux")]
         {
             let Self { spawning, cgroup, metered } = self;
@@ -1974,6 +1978,33 @@ mod tests {
 
     use super::*;
     use crate::testing;
+
+    thread_local! {
+        pub(super) static BACKOFF_FAILURE: core::cell::RefCell<Option<PlatformError>> = const { core::cell::RefCell::new(None) };
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn survivor_prepared_backoff_propagates_native_interrupt_refusals_without_spawning() {
+        struct Restore(Option<PlatformError>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                BACKOFF_FAILURE.with_borrow_mut(|failure| *failure = self.0.take());
+            }
+        }
+        let _restore = Restore(BACKOFF_FAILURE.replace(Some(PlatformError::new_static(
+            Situation::Interrupted,
+            "native interrupt-window reopen probe",
+        ))));
+        let prepared = PreparedCommand {
+            command: Command::new("never-spawned-backoff-probe"),
+            guard: SpawnGuard::default(),
+        };
+        let error = prepared.backoff(Duration::ZERO).unwrap_err();
+        assert_eq!(error.situation(), Situation::Interrupted);
+        assert!(error.to_string().contains("native interrupt-window reopen probe"));
+        assert!(BACKOFF_FAILURE.with_borrow(Option::is_none));
+    }
 
     struct PausedReader {
         reads: usize,

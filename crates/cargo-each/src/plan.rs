@@ -262,7 +262,7 @@ fn validate_target_filters(
 }
 
 fn validate_target_requirement(members: &[&Member], options: BuildOptions<'_>) -> Result<(), EachError> {
-    if !options.require_target_per_package || members.is_empty() {
+    if !options.require_target_per_package {
         return Ok(());
     }
 
@@ -295,7 +295,7 @@ fn packages_flags(members: &[&Member], packages: PackagesExpansion) -> Vec<Strin
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use serde_json::Value;
+    use serde_json::{Value, json};
 
     use super::*;
     use crate::workspace::MemberTarget;
@@ -651,7 +651,7 @@ mod tests {
         let test_kinds = std::iter::once(TargetKind::Test).collect();
 
         let mut relevant = member("relevant");
-        relevant.metadata = serde_json::json!({"cargo-each": {"excluded-targets": "test"}});
+        relevant.metadata = json!({"cargo-each": {"excluded-targets": "test"}});
         relevant.targets.push(MemberTarget {
             name: "test".to_owned(),
             kinds: std::iter::once(TargetKind::Test).collect(),
@@ -698,6 +698,30 @@ mod tests {
                 },
             )
             .expect("members outside kind selection are outside metadata preflight")
+        );
+    }
+
+    #[test]
+    fn target_metadata_preflight_rejects_invalid_metadata_for_a_later_matching_kind() {
+        let mut member = member("mixed");
+        member.metadata = serde_json::json!({"checks": {"names": false}});
+        member.targets = vec![
+            MemberTarget {
+                name: "example".to_owned(),
+                kinds: BTreeSet::from([TargetKind::Example]),
+                required_features: BTreeSet::new(),
+            },
+            MemberTarget {
+                name: "library".to_owned(),
+                kinds: BTreeSet::from([TargetKind::Lib, TargetKind::RLib]),
+                required_features: BTreeSet::new(),
+            },
+        ];
+        let filters = [TargetPredicate::parse("name-in-metadata:checks.names").unwrap()];
+        let error = validate_target_filters(&[&member], &BTreeSet::from([TargetKind::Lib]), &filters).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "package `mixed` metadata `checks.names` must be an array of strings when used by `name-in-metadata:checks.names`"
         );
     }
 

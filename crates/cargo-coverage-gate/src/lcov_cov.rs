@@ -194,6 +194,20 @@ fn merge_line_coverage(merged: &mut LineCoverage, report: lcov::Report) -> Resul
 mod tests {
     use super::*;
 
+    #[test]
+    fn survivor_merging_an_absent_checksum_cannot_erase_an_earlier_checksum() {
+        let mut merged = LineCoverage::new();
+        for suffix in [",retained", ""] {
+            let report = lcov::Report::from_reader(lcov::Reader::new(
+                format!("TN:\nSF:source.rs\nDA:1,1{suffix}\nend_of_record\n").as_bytes(),
+            ))
+            .unwrap();
+            merge_line_coverage(&mut merged, report).unwrap();
+        }
+        let source = &merged[Path::new("source.rs")];
+        assert_eq!(source[&1].checksum.as_deref(), Some("retained"));
+        assert!(source[&1].covered);
+    }
     const SINGLE_FILE: &str = include_str!("../tests/fixtures/lcov/single_file.info");
     const MULTI_FILE: &str = include_str!("../tests/fixtures/lcov/multi_file.info");
     const EMPTY: &str = include_str!("../tests/fixtures/lcov/empty.info");

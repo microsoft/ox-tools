@@ -1650,7 +1650,7 @@ fn resource_binding_and_iterator_initialization_require_exact_trusted_evidence()
         ("&mut std::iter::Peekable<std::str::Chars<'static>>", Some(Binding::PeekableChars)),
     ] {
         assert_eq!(
-            collector.resource_binding(&syn::parse_str(text).unwrap(), &Vec::new(), &mut crate::HashSet::default()),
+            collector.resource_binding(&syn::parse_str(text).unwrap(), &Vec::new()),
             expected,
             "{text}"
         );
@@ -1679,10 +1679,7 @@ fn resource_binding_and_iterator_initialization_require_exact_trusted_evidence()
         );
     }
     collector.generics.push("T".to_owned());
-    assert_eq!(
-        collector.resource_binding(&syn::parse_quote!(T), &Vec::new(), &mut crate::HashSet::default()),
-        None
-    );
+    assert_eq!(collector.resource_binding(&syn::parse_quote!(T), &Vec::new()), None);
 }
 
 #[test]

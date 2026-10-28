@@ -711,6 +711,58 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ordinary_plan_items_never_claim_structural_json_ownership() {
+        let target = || Target::Region {
+            host: "settings.json".to_owned(),
+            id: "ordinary".to_owned(),
+        };
+        for item in [
+            PlanItem::repair_region("settings.json", "ordinary", "repaired".to_owned()),
+            PlanItem::noop(target(), Decision::LeaveAlone),
+            PlanItem::insync(target(), "checksum".to_owned()),
+            PlanItem::write_file("owned.json", "{}".to_owned(), "checksum".to_owned()),
+            PlanItem::propose_file("owned.json", "{}".to_owned(), "checksum".to_owned()),
+            PlanItem::write_region(
+                "settings.json",
+                "ordinary",
+                "body".to_owned(),
+                "host".to_owned(),
+                "checksum".to_owned(),
+            ),
+            PlanItem::remove_file("owned.json"),
+            PlanItem::remove_region("settings.json", "ordinary", "remaining".to_owned()),
+            PlanItem::orphaned_kept(target()),
+        ] {
+            assert_eq!(item.json_array_path, None, "{item:?}");
+            assert!(!item.json_scanner, "{item:?}");
+            let mut plan = Plan::default();
+            plan.push(item);
+            let next = plan.projected_manifest(&Manifest::default());
+            assert!(next.json_array_paths.is_empty());
+            assert!(next.json_scanner_hosts.is_empty());
+        }
+    }
+
+    #[test]
+    fn scanner_provenance_survives_an_ordinary_in_sync_region() {
+        let mut plan = Plan::default();
+        plan.push(
+            PlanItem::insync(
+                Target::Region {
+                    host: "settings.json".to_owned(),
+                    id: "ordinary".to_owned(),
+                },
+                "checksum".to_owned(),
+            )
+            .with_json_scanner(),
+        );
+        let next = plan.projected_manifest(&Manifest::default());
+        assert_eq!(next.json_scanner_hosts, BTreeSet::from(["settings.json".to_owned()]));
+        assert!(next.json_array_paths.is_empty());
+        assert_eq!(next.region_checksum("settings.json", "ordinary"), Some("checksum"));
+    }
+
+    #[test]
     fn checksum_update_requires_a_matching_region_with_a_rendered_checksum() {
         let mut plan = Plan::default();
         plan.push(PlanItem::repair_region("config.json", "settings", "{}".to_owned()));

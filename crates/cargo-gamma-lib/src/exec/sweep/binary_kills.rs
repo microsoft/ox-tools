@@ -34,7 +34,9 @@ impl BinaryKills {
     pub(super) fn record(&mut self, ordinal: u32, binary: &TestBinary) {
         let identity = BinaryIdentity::from_binary(binary);
         if let Some(previous) = self.credited.insert(ordinal, identity.clone()) {
-            if previous == identity {
+            if
+            // #[gamma::skip(cond.always_false, reason = "On reconfirmation previous==new identity, forcing the early-return guard false decrements that identity's count then increments the very same entry. Credited map was already updated identically; count>=1 is guaranteed by its credited member. No callback/order read occurs between decrement/increment. Final counts and all exposed ranking remain identical.", tag = "equivalent")]
+            previous == identity {
                 return;
             }
             let count = self
@@ -79,9 +81,46 @@ impl BinaryKills {
 mod tests {
     use core::time::Duration;
 
+    use super::super::Mutant;
     use super::*;
     use crate::exec::sweep::staged::killer_for;
     use crate::exec::sweep::tests::{ranked_binaries, unreachable_harness};
+    use crate::fixtures;
+
+    #[test]
+    fn recovered_missing_legacy_binary_credit_is_exactly_zero_after_a_qualified_hit() {
+        let binary = TestBinary {
+            package: "package".into(),
+            target: "same-name".into(),
+            target_kind: "test".into(),
+            ..crate::testing::test_binary("unused")
+        };
+        let mut killers = Killers::default();
+        killers.record("historical".into(), killer_for(&binary, "known"));
+        let counts = BinaryKills::new(&fixtures::plan(Vec::new()), &killers);
+        assert_ne!(BinaryIdentity::from_binary(&binary).target, binary.target);
+        assert_eq!(counts.count(&binary), 1);
+        let uncredited = TestBinary {
+            target_kind: "bench".into(),
+            ..binary
+        };
+        assert_eq!(counts.count(&uncredited), 0);
+    }
+
+    #[test]
+    fn recovered_zero_ordinal_hints_do_not_become_executable_credits_or_packages() {
+        let mutant = Mutant {
+            ordinal: 0,
+            ..fixtures::mutant()
+        };
+        let binary = crate::testing::test_binary("unused-binary");
+        let mut killers = Killers::default();
+        killers.record(mutant.id.clone(), killer_for(&binary, "known"));
+        let counts = BinaryKills::new(&fixtures::plan(vec![mutant]), &killers);
+        assert!(counts.credited.is_empty());
+        assert!(counts.packages.is_empty());
+        assert_eq!(counts.count(&binary), 1);
+    }
 
     #[test]
     fn known_mutants_are_counted_once_and_credit_moves_when_the_killer_changes() {

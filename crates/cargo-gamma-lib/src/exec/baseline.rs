@@ -208,6 +208,8 @@ where
     let mut omitted_failed_tests = 0;
 
     // Folded in binary order so the aggregate is deterministic regardless of worker completion.
+
+    // #[gamma::skip(loop.continue_to_break, reason = "sweep_binaries_with starts at least one worker, atomically assigns every valid binary index exactly once, and each assigned index always sends its observation even for refusal/failed verdicts. Receiver remains alive and drains all sends, recording every in-bounds slot. Any spawn/observer panic unwinds thread::scope instead of returning to this fold. Therefore every measured entry is Some on normal return; this continue branch is unreachable.", tag = "equivalent")]
     for (entry, taken) in binaries.iter_mut().zip(measured) {
         let Some((took, observation)) = taken else {
             continue;
@@ -395,6 +397,7 @@ fn baseline_failure_error_with_limit(
     let directory = working_directory(work, binary);
     let (kind, test, last_test, reason, limit) = match verdict {
         Verdict::Failed(test) | Verdict::Flaky(test) => ("testFailure", test.as_deref(), None, None, None),
+        Verdict::Unconfirmed(_, reason) => ("infrastructureFailure", None, None, Some(*reason), None),
         Verdict::TestEnumerationFailed(reason) => ("enumerationFailure", None, None, Some(reason.as_str()), None),
         Verdict::TimedOut => (
             "timeout",
@@ -604,7 +607,9 @@ fn filesystem_component(value: &str, cap: usize) -> String {
     for character in value.chars() {
         if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
             component.push(character);
-            separated = false;
+            separated =
+            // #[gamma::skip(assign_value.default, reason = "The assigned false is exactly the inferred primitive type's Default value.", tag = "equivalent")]
+            false;
         } else if !separated {
             component.push('_');
             separated = true;
@@ -629,6 +634,47 @@ fn filesystem_component(value: &str, cap: usize) -> String {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod final_survivor_tests {
+    use serde_json::json;
+
+    #[test]
+    fn recovered_identical_artifact_collisions_stop_at_the_first_unused_ordinal_with_a_bounded_search() {
+        let directory = "baseline-failures/package/target/tests/leaf";
+        let value = json!({
+            "package":"package", "target":"target", "packageId":"id",
+            "executable":"path", "kind":"testFailure", "test":"test"
+        });
+        let mut failure = super::Error::new(String::new());
+        // Fill the bare name and every digest-prefix slot, then require several ordinal fallbacks.
+        for _ in 0..19 {
+            failure = failure.with_nested_artifact(directory.into(), "failure.json", value.clone());
+        }
+        let visited = std::cell::Cell::new(0);
+        super::disambiguate_artifact_directories_with(&mut failure, || (2_u64..7).inspect(|_| visited.set(visited.get() + 1)));
+        let directories = failure
+            .artifacts()
+            .iter()
+            .map(|artifact| artifact.directory.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(directories.len(), 19);
+        assert_eq!(
+            directories
+                .iter()
+                .map(|directory| directory.to_ascii_lowercase())
+                .collect::<crate::HashSet<_>>()
+                .len(),
+            19
+        );
+        assert_eq!(
+            &directories[16..],
+            [
+                "baseline-failures/package/target/tests/leaf--2",
+                "baseline-failures/package/target/tests/leaf--3",
+                "baseline-failures/package/target/tests/leaf--4",
+            ]
+        );
+        assert_eq!(visited.get(), 6);
+    }
+
     #[test]
     fn unsafe_runs_separated_by_safe_characters_each_get_a_separator() {
         assert_eq!(super::filesystem_component("a??b::c", 64), "a_b_c");
@@ -663,6 +709,12 @@ fn directory_with_suffix(directory: &str, suffix: &str) -> String {
 
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn disambiguate_artifact_directories(failure: &mut Error) {
+    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
+    disambiguate_artifact_directories_with(failure, || 2_u64..);
+}
+
+/// Resolves collisions through digest prefixes, then a supplied finite ordinal source for bounded tests.
+fn disambiguate_artifact_directories_with<I: Iterator<Item = u64>>(failure: &mut Error, ordinals: impl Fn() -> I) {
     let mut used = crate::HashSet::default();
 
     for artifact in failure.artifacts_mut() {
@@ -697,7 +749,7 @@ fn disambiguate_artifact_directories(failure: &mut Error) {
         }
 
         if !placed {
-            for ordinal in 2_u64.. {
+            for ordinal in ordinals() {
                 let candidate = directory_with_suffix(&artifact.directory, &format!("--{ordinal}"));
                 if used.insert(candidate.to_ascii_lowercase()) {
                     artifact.directory = candidate;
@@ -721,6 +773,21 @@ const fn runner_name(nextest: bool) -> &'static str {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recovered_native_baseline_wrapper_launches_exactly_the_requested_worker_width_even_for_an_empty_inventory() {
+        let work = Workspace::adopt("never-read-native-baseline".into(), "never-written-native-baseline-target".into());
+        let before = BASELINE_WORKERS.get();
+        let measured = measure_baseline(&work, &mut [], MemoryRequest::default(), 3, None, || {
+            panic!("an empty baseline has no completed binary");
+        })
+        .unwrap();
+        assert_eq!(BASELINE_WORKERS.get() - before, 3);
+        assert_eq!(measured.elapsed, Duration::ZERO);
+        assert_eq!(measured.quiet, Duration::ZERO);
+        assert_eq!(measured.tests, None);
+        assert_eq!(measured.peak, None);
+    }
 
     #[test]
     fn a_partial_stream_note_from_a_baseline_worker_reaches_the_parent() {
@@ -1559,6 +1626,35 @@ mod tests {
                     assert!(artifact["peakBytes"].is_null());
                 }
             }
+        }
+    }
+
+    #[test]
+    fn unfinished_baseline_confirmations_do_not_fabricate_failed_test_evidence() {
+        let work = scripted_workspace();
+        let binary = crate::testing::test_binary("never-launched-unfinished-baseline");
+        for (test, reason) in [
+            (Some("case::unfinished".to_owned()), "exceeded its time budget"),
+            (None, "stopped reporting progress"),
+        ] {
+            let failure = baseline_failure_error(
+                &work,
+                &binary,
+                Duration::ZERO,
+                Duration::from_secs(1),
+                &Verdict::Unconfirmed(test, reason),
+                None,
+            );
+            let artifact = &failure
+                .artifact()
+                .expect("baseline infrastructure failures carry a durable record")
+                .value;
+            assert_eq!(artifact["kind"], "infrastructureFailure");
+            assert_eq!(artifact["reason"], reason);
+            assert!(artifact["test"].is_null());
+            assert_eq!(artifact["observedFailedTests"], json!([]));
+            assert!(artifact["lastObservedTest"].is_null());
+            assert!(artifact["peakBytes"].is_null());
         }
     }
 

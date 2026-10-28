@@ -88,6 +88,7 @@ pub fn merge(reports: &[(String, Report)], now: u64, window: Option<u64>) -> Mer
 
         for (path, file) in &report.files {
             let Some(source) = sources.get(path.as_str()) else {
+                // #[gamma::skip(loop.continue_to_break, reason = "sources visits every file of every compatible report and inserts one Source for each path; merge then iterates the identical compatible reports and files. sources.get(path) cannot be None, so its let-else continue/break branch is unreachable.", tag = "equivalent")]
                 continue;
             };
             let (source_at, source_origin, source_lineage) = source_provenance(input_name, report, path, file, &mut lineages);
@@ -124,6 +125,8 @@ pub fn merge(reports: &[(String, Report)], now: u64, window: Option<u64>) -> Mer
                 let (tested_at, origin, lineage, name_filtered) =
                     verdict_provenance(input_name, report, mutant, source_name_filtered(report, path), &mut lineages);
                 let compatible = file.source == source.file.source && file.language == source.file.language;
+
+                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
                 retain(
                     &mut latest,
                     Candidate {
@@ -626,6 +629,7 @@ impl<'report> Lineages<'report> {
         // mutant, and hashing them would give a lineage nothing else would ever reproduce. Emptied
         // instead, which is the same input the owned-vector form hashed when it could not encode.
         if serde_json::to_writer(&mut self.scratch, mutant).is_err() {
+            // #[gamma::skip(stmt.delete_call, reason = "The clear is in the error arm of serializing concrete derived mutant records to Vec JSON. That concrete encoding has no error path, so this arm is unreachable.", tag = "equivalent")]
             self.scratch.clear();
         }
 
@@ -724,7 +728,14 @@ fn rebuild(
 ) -> Option<Report> {
     let base = reports
         .iter()
-        .max_by(|left, right| rank(&left.0, started_at(&left.1), "").cmp(&rank(&right.0, started_at(&right.1), "")))
+        .max_by(|left, right| {
+            rank(&left.0, started_at(&left.1), "").cmp(&rank(
+                &right.0,
+                started_at(&right.1),
+                // #[gamma::skip(literal.str_to_xyzzy, reason = "Earlier rank fields still dominate. On an exact timestamp/name tie, changing only the right lineage from empty to xyzzy changes Equal to Less; max_by selects the same right-hand report in either case.", tag = "equivalent")]
+                "",
+            ))
+        })
         .map(|(_, report)| report)?;
 
     let mut provenance = MergeProvenance::default();
@@ -733,7 +744,9 @@ fn rebuild(
     let merged_files = files
         .into_iter()
         .filter_map(|(path, mutants)| {
-            let source = sources.get(path)?;
+            let source =
+            // #[gamma::skip(try.propagate_to_unwrap, reason = "Private rebuild is called only by merge with the sources map covering every compatible file path. Its files map receives only Verdicts originating from those compatible file paths. Therefore sources.get(path) is always Some and panic_on_failure cannot observe a None.", tag = "equivalent")]
+            sources.get(path)?;
             let _ = provenance.sources.insert(
                 path.to_owned(),
                 SourceProvenance {
@@ -748,7 +761,9 @@ fn rebuild(
             let mut mutants: Vec<MutantResult> = mutants
                 .into_iter()
                 .filter_map(|verdict| {
-                    let presentation = verdict.presentation?;
+                    let presentation =
+                    // #[gamma::skip(try.propagate_to_unwrap, reason = "Private rebuild receives files assembled in merge only after if verdict.presentation.is_none(){continue}. No mutation of presentation occurs between that check and rebuild, so the propagated Option is always Some and wrapping panic_on_failure is inert.", tag = "equivalent")]
+                    verdict.presentation?;
                     newest = newest.max(verdict.tested_at);
 
                     // The winning verdict supplies the identity and outcome fields; the selected
@@ -794,13 +809,7 @@ fn rebuild(
                 })
                 .collect();
 
-            mutants.sort_by(|left, right| {
-                left.location
-                    .start
-                    .line
-                    .cmp(&right.location.start.line)
-                    .then(left.id.cmp(&right.id))
-            });
+            mutants.sort_by(|left, right| (left.location.start.line, &left.id).cmp(&(right.location.start.line, &right.id)));
 
             Some((
                 path.to_owned(),
@@ -837,6 +846,8 @@ fn rebuild(
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use serde_json::{Value, from_str, from_value, to_value, to_vec};
+
     use super::*;
     use crate::elements::{Location, Position};
     use crate::fixtures;
@@ -846,7 +857,7 @@ mod tests {
     const DAY: u64 = 86_400;
 
     fn assert_schema_valid(report: &Report) {
-        let report = serde_json::to_value(report).expect("concrete report fixtures serialize");
+        let report = to_value(report).expect("concrete report fixtures serialize");
         crate::elements::validate_schema(&report).expect("these report fixtures are accepted by the actual input schema");
     }
 
@@ -856,7 +867,7 @@ mod tests {
         let file = &report.files["src/lib.rs"];
         let mut cached = Lineages::default();
         let source_identity = lineage(&[b"source", b"origin.json", file.language.as_bytes(), file.source.as_bytes()]);
-        let owned_encoding = serde_json::to_vec(&file.mutants[0]).expect("the concrete mutant serializes");
+        let owned_encoding = to_vec(&file.mutants[0]).expect("the concrete mutant serializes");
         let verdict_identity = lineage(&[b"verdict", b"origin.json", &owned_encoding]);
         assert_eq!(cached.source("origin.json", file), source_identity);
         assert_eq!(cached.verdict("origin.json", &file.mutants[0]), verdict_identity);
@@ -1066,6 +1077,75 @@ mod tests {
         assert_eq!(cached.verdict("first", &file.mutants[0]), a);
         assert_eq!(cached.verdict("first", &file.mutants[1]), b);
         assert_eq!(Lineages::default().verdict("first", &file.mutants[1]), b);
+    }
+
+    #[test]
+    fn recovered_lineage_scratch_contains_only_the_current_verdict_serialization() {
+        let report = report(None, 17, vec![mutant("long-first-id", 1, "Killed"), mutant("b", 2, "Survived")]);
+        let file = &report.files["src/lib.rs"];
+        let mut lineages = Lineages::default();
+        for index in [0, 1, 0, 1] {
+            let mutant = &file.mutants[index];
+            let expected = to_vec(mutant).unwrap();
+            let actual = lineages.verdict("origin", mutant);
+            assert_eq!(lineages.scratch, expected);
+            assert_eq!(actual, lineage(&[b"verdict", b"origin", &expected]));
+        }
+    }
+
+    #[test]
+    fn recovered_source_generation_must_remain_strictly_newer_than_the_old_population() {
+        let old = report_with_source(None, 1, "fn old() {}\n", vec![mutant("old", 1, "Killed")]);
+        let mut newer = report_with_source(None, 2, "fn new() {}\n", vec![mutant("new", 1, "Survived")]);
+        newer.config.as_mut().unwrap().population_complete = false;
+        let merged = merge(&[("z-old".to_owned(), old), ("a-new".to_owned(), newer)], 2, None);
+        assert_eq!((merged.withdrawn, merged.valid, merged.incompatible), (0, 1, 1));
+        let report = merged.report.unwrap();
+        assert_eq!(report.files["src/lib.rs"].source, "fn new() {}\n");
+        assert_eq!(report.files["src/lib.rs"].mutants[0].id, "new");
+    }
+
+    #[test]
+    fn recovered_equal_opaque_source_ranks_keep_the_first_selected_bytes() {
+        let mut first = report_with_source(None, 3, "fn first() {}\n", Vec::new());
+        let mut second = report_with_source(None, 3, "fn second() {}\n", Vec::new());
+        for report in [&mut first, &mut second] {
+            let mut provenance = MergeProvenance::default();
+            provenance.sources.insert(
+                "src/lib.rs".to_owned(),
+                SourceProvenance {
+                    started_at: 1,
+                    origin: "same".to_owned(),
+                    lineage: "a".repeat(64),
+                    name_filtered: false,
+                },
+            );
+            report.config.as_mut().unwrap().merge_provenance = Some(provenance);
+        }
+        let inputs = [("first".to_owned(), first), ("second".to_owned(), second)];
+        let references = inputs.iter().collect::<Vec<_>>();
+        let selected = sources(&references, &mut Lineages::default());
+        assert_eq!(selected["src/lib.rs"].file.source, "fn first() {}\n");
+    }
+
+    #[test]
+    fn recovered_inconsistent_names_sort_and_not_built_reasons_require_ignored_status() {
+        let merged = merge(
+            &[
+                ("z".to_owned(), report(Some((0, 2)), 1, Vec::new())),
+                ("a".to_owned(), report(Some((0, 3)), 1, Vec::new())),
+                ("widest".to_owned(), report(Some((0, 4)), 1, Vec::new())),
+            ],
+            1,
+            None,
+        );
+        assert_eq!(merged.inconsistent, ["a", "z"]);
+        for status in ["Killed", "Survived", "Pending", "Ignored"] {
+            let mut entry = mutant("site", 1, status);
+            entry.status_reason = Some(format!("{}scripted", crate::elements::NOT_BUILT_PREFIX));
+            let report = report(None, 1, vec![entry]);
+            assert_eq!(merged_not_built(&report.files), (status == "Ignored").then_some(1));
+        }
     }
 
     #[test]
@@ -1708,7 +1788,7 @@ mod tests {
         );
 
         let text = crate::elements::to_json(&merged.report.expect("a report")).expect("serializes");
-        let parsed: Report = serde_json::from_str(&text).expect("the document must read back");
+        let parsed: Report = from_str(&text).expect("the document must read back");
 
         assert_eq!(parsed.files["src/lib.rs"].mutants[0].id, "aaa");
         let config = parsed.config.expect("merge info survives");
@@ -1855,13 +1935,13 @@ mod tests {
         for complete in [Some(false), None] {
             let old = report(None, 100, vec![mutant("a", 1, "Survived"), mutant("b", 2, "Survived")]);
             let newer = report(None, 200, vec![mutant("a", 1, "Killed")]);
-            let mut newer = serde_json::to_value(newer).unwrap();
+            let mut newer = to_value(newer).unwrap();
             if let Some(complete) = complete {
                 newer["config"]["populationComplete"] = complete.into();
             } else {
                 newer["config"].as_object_mut().unwrap().remove("populationComplete");
             }
-            let newer = serde_json::from_value(newer).unwrap();
+            let newer = from_value(newer).unwrap();
             let merged = merge(&[("old".into(), old), ("partial".into(), newer)], 300, None);
             assert_eq!(merged.withdrawn, 0);
             assert_eq!(merged.valid, 2);
@@ -2105,9 +2185,9 @@ mod tests {
         filtered.config.as_mut().expect("the fixture includes run metadata").name_filtered = true;
 
         // Merge reads persisted reports, so check that the marker survives the JSON boundary.
-        let filtered = serde_json::to_value(filtered).expect("the filtered report serializes");
+        let filtered = to_value(filtered).expect("the filtered report serializes");
         assert_eq!(filtered["config"]["nameFiltered"], true);
-        let filtered = serde_json::from_value(filtered).expect("the filtered report deserializes");
+        let filtered = from_value(filtered).expect("the filtered report deserializes");
 
         let merged = merge(&[("previous".to_owned(), previous), ("filtered".to_owned(), filtered)], 300, None);
 
@@ -2234,17 +2314,14 @@ mod tests {
         assert_eq!((first.incompatible, first.unpresentable_filtered), (0, 0));
         let staged = first.report.expect("the complete B listing presents the filtered verdict");
         assert_eq!(staged.files["src/lib.rs"].mutants[0].status, "Killed");
-        let staged = serde_json::to_value(staged).expect("the staged report serializes");
+        let staged = to_value(staged).expect("the staged report serializes");
         assert_eq!(
             staged["config"]["mergeProvenance"]["sources"]["src/lib.rs"]["nameFiltered"],
-            serde_json::Value::Null
+            Value::Null
         );
-        assert_eq!(
-            staged["config"]["mergeProvenance"]["sightings"]["aaa"]["nameFiltered"],
-            serde_json::Value::Null
-        );
+        assert_eq!(staged["config"]["mergeProvenance"]["sightings"]["aaa"]["nameFiltered"], Value::Null);
         assert_eq!(staged["config"]["mergeProvenance"]["verdicts"]["aaa"]["nameFiltered"], true);
-        let staged = serde_json::from_value(staged).expect("the staged report deserializes");
+        let staged = from_value(staged).expect("the staged report deserializes");
         let second = merge(&[("staged".to_owned(), staged), ("run".to_owned(), run.clone())], 400, None);
         let mut originals = originals;
         originals.push(("run".to_owned(), run));
@@ -2312,9 +2389,9 @@ mod tests {
         let staged = merge(&[("filtered".to_owned(), filtered)], 300, None)
             .report
             .expect("a filtered input can be staged");
-        let staged = serde_json::to_value(staged).expect("the staged report serializes");
+        let staged = to_value(staged).expect("the staged report serializes");
         assert_eq!(staged["config"]["mergeProvenance"]["sources"]["src/lib.rs"]["nameFiltered"], true);
-        let staged = serde_json::from_value(staged).expect("the staged report deserializes");
+        let staged = from_value(staged).expect("the staged report deserializes");
 
         let merged = merge(&[("previous".to_owned(), previous), ("staged".to_owned(), staged)], 400, None);
         let file = &merged.report.as_ref().expect("a merged report").files["src/lib.rs"];
@@ -2346,10 +2423,10 @@ mod tests {
         let staged = merge(&[("first".to_owned(), first), ("filtered".to_owned(), filtered)], 400, None)
             .report
             .expect("the first merge produces a report");
-        let staged = serde_json::to_value(staged).expect("the staged report serializes");
+        let staged = to_value(staged).expect("the staged report serializes");
         assert_eq!(staged["config"]["mergeProvenance"]["sources"]["src/lib.rs"]["startedAt"], 100);
         assert_eq!(staged["config"]["mergeProvenance"]["sightings"]["aaa"]["startedAt"], 300);
-        let staged: Report = serde_json::from_value(staged).expect("the staged report deserializes");
+        let staged: Report = from_value(staged).expect("the staged report deserializes");
         let final_population = report_with_source(None, 400, "old source\n", vec![mutant("bbb", 2, "Survived")]);
         let withdrawn = merge(
             &[("stage".to_owned(), staged.clone()), ("final".to_owned(), final_population)],
@@ -2603,7 +2680,7 @@ mod tests {
         let merged = merge(&inputs, 300, None);
         let document = merged.report.expect("produces a document");
         let text = crate::elements::to_json(&document).expect("serializes");
-        let parsed: Report = serde_json::from_str(&text).expect("round-trips");
+        let parsed: Report = from_str(&text).expect("round-trips");
 
         assert_eq!(parsed.schema_version, "2");
         assert!(parsed.config.as_ref().unwrap().merged);

@@ -160,6 +160,7 @@ impl Progress {
 }
 
 pub(super) fn runtime_startup_failure(text: &[u8]) -> bool {
+    // #[gamma::skip(collection.reverse_array, reason = "Both startup markers are consumed only by nested pure any/window byte equality. Reversing existential membership probes changes neither Boolean result nor side effects.", tag = "equivalent")]
     [gamma_rt::ENVIRONMENT_ERROR_MARKER, gamma_rt::PRE_INSTALL_ERROR_MARKER]
         .into_iter()
         .any(|marker| text.windows(marker.len()).any(|window| window == marker))

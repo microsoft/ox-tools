@@ -90,6 +90,7 @@ fn generate_with_serializer<W: Write>(
                     Risk::Medium => &medium_risk_format,
                     Risk::High => &high_risk_format,
                 };
+                // #[gamma::skip(try.propagate_to_unwrap, reason = "The preceding header accepted this column, and the bounded appraisal status cannot exceed Excel string limits.", tag = "equivalent")]
                 #[expect(clippy::cast_possible_truncation, reason = "Column index limited by Excel's u16 column limit")]
                 propagate_xlsx(worksheet.write_string_with_format(row, (col_idx + 1) as u16, value, format))?;
             }

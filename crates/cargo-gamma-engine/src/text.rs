@@ -85,9 +85,8 @@ fn encode(text: &str, keep_color: bool) -> Cow<'_, str> {
         // be confused with an ASCII control.
         // A `0x80` byte can only be a UTF-8 continuation byte here. Sending it through the
         // printable-byte arm below advances the cursor by the same one byte.
-        // #[gamma::skip(relational.ge_to_gt, reason = "the boundary byte takes an equivalent one-byte advance through the next branch")]
-        if byte >= 0x80 {
-            if byte == C1_LEAD && bytes.get(cursor + 1).is_some_and(|&low| (0x80..=0x9F).contains(&low)) {
+        if !byte.is_ascii() {
+            if byte == C1_LEAD && bytes.get(cursor + 1).is_some_and(|&low| low <= 0x9F) {
                 let control = char::from(bytes[cursor + 1]);
                 // #[gamma::skip(all, reason = "capacity affects allocation behavior only; escaped text is unchanged")]
                 let out = encoded.get_or_insert_with(|| String::with_capacity(text.len() + ESCAPE_HEADROOM));
@@ -185,7 +184,9 @@ fn push_escape(out: &mut String, control: char) {
 /// of its own sequence, so it must be encoded rather than passed on in the hope of a later `m`.
 fn style_sequence_end(bytes: &[u8], start: usize) -> Option<usize> {
     if bytes.get(start + 1) != Some(&b'[') {
-        return None;
+        return
+        // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+        None;
     }
 
     let mut cursor = start + 2;
@@ -204,7 +205,11 @@ fn style_sequence_end(bytes: &[u8], start: usize) -> Option<usize> {
 
                 return allowed_style(parameters).then_some(cursor + 1);
             }
-            _ => return None,
+            _ => {
+                return
+            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+            None;
+            }
         }
     }
 
@@ -222,37 +227,51 @@ fn allowed_style(parameters: &str) -> bool {
     while let Some(parameter) = parameters.next() {
         if parameter.contains(':') {
             if !allowed_colon_color(parameter) {
-                return false;
+                return
+                // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+                false;
             }
 
             continue;
         }
 
         let Ok(code) = parameter.parse::<u16>() else {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         };
 
         match code {
             0 | 1 | 22 | 30..=37 | 39 | 40..=47 | 49 | 90..=97 | 100..=107 => {}
             38 | 48 => {
                 let Some(mode) = parameters.next().and_then(|value| value.parse::<u16>().ok()) else {
-                    return false;
+                    return
+                    // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+                    false;
                 };
                 let components = if mode == 5 {
                     1
                 } else if mode == 2 {
                     3
                 } else {
-                    return false;
+                    return
+                    // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+                    false;
                 };
 
                 for _component in 0..components {
                     if !parameters.next().is_some_and(color_component) {
-                        return false;
+                        return
+                        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+                        false;
                     }
                 }
             }
-            _ => return false,
+            _ => {
+                return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
+            }
         }
     }
 
@@ -264,7 +283,9 @@ fn allowed_colon_color(parameter: &str) -> bool {
     let mut parts = parameter.split(':');
 
     if !matches!(parts.next(), Some("38" | "48")) {
-        return false;
+        return
+        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+        false;
     }
 
     match parts.next() {

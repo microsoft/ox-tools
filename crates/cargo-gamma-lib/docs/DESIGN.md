@@ -49,6 +49,12 @@ verdicts, incremental reuse, reporting, and command dispatch.
   missing reach observations mean whole-binary work, never uncovered code.
   Only sealed, passing whole-binary observations may exclude another replacement
   at the same stable source site while deterministic reach narrowing is enabled.
+  Exclusion additionally requires no calibrated timeout budget, stall budget,
+  memory metering, or confirmation policy. Timeout eligibility uses the
+  unscaled budget's presence, not its duration: per-mutant multipliers cannot
+  remove an existing budget or create an absent one. This policy check never
+  rescales durations, including for extreme finite multipliers; actual execution
+  retains its ordinary timeout calculation.
 - A reachable exact killer hint is probed before inferred tests, regardless of
   its binary's canonical position. Confirmed kills settle immediately.
   Confirmation and containment requirements apply to every phase.
@@ -285,6 +291,12 @@ reachable order determines the reported resource/flakiness/inconclusive outcome.
 Only mutants whose required full-binary runs all pass are survivors. An empty
 reachable set, including one established by sealed whole-binary evidence at the
 site, is no coverage. Loss of containment aborts immediately.
+
+Flaky outcomes are score-neutral. Their notes distinguish a test that failed
+with and without the mutant from an unmutated confirmation that timed out,
+stalled, or exceeded its memory ceiling. An unfinished confirmation names its
+resource failure rather than claiming the test failed twice; neither case
+establishes a kill or a survivor.
 
 Settled kills publish learning before their assignment is released. Named
 inference can use every exact-pass kill and full-binary discoveries from earlier

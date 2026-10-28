@@ -56,7 +56,11 @@ impl Collector<'_> {
             {
                 1
             }
-            _ => return None,
+            _ => {
+                return
+            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+            None;
+            }
         };
         types.payload(expected, payload).map(std::borrow::Cow::into_owned)
     }
@@ -68,7 +72,9 @@ impl Collector<'_> {
             // Without full method resolution, any local by_ref implementation could be the
             // selected method. The file-wide blocker deliberately sacrifices recognition.
             if call.method == "by_ref" && self.calls.has_method_named("by_ref") {
-                return false;
+                return
+                // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+                false;
             }
             return self.is_read_receiver(&call.receiver);
         }
@@ -79,7 +85,9 @@ impl Collector<'_> {
             return true;
         }
         let Some(ty) = self.inferred_expression_type(expression) else {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         };
         self.is_read_type(&ty, self.current_imports())
     }
@@ -124,9 +132,15 @@ impl Collector<'_> {
         // Bounds already identify the reader trait; concrete types additionally need a lexical
         // trait import so similarly named methods are not mistaken for standard reader APIs.
         if !self.read_trait_in_scope() {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         }
-        let Some(path) = types.unshadowed_type_path(ty) else { return false };
+        let Some(path) = types.unshadowed_type_path(ty) else {
+            return
+        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+        false;
+        };
         matches!(
             path.as_slice(),
             [root, module, name] if root == "std" && matches!(
@@ -144,9 +158,15 @@ impl Collector<'_> {
             Expr::Group(group) => return self.some_constructor(&group.expr),
             _ => {}
         }
-        let Expr::Path(callee) = expression else { return false };
+        let Expr::Path(callee) = expression else {
+            return
+        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+        false;
+        };
         if callee.qself.is_some() {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         }
         let mut path = callee.path.clone();
         if path.segments.len() == 1
@@ -164,9 +184,16 @@ impl Collector<'_> {
             path = imported;
         }
         if path.segments.last().is_none_or(|segment| segment.ident != "Some") {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         }
-        if path.segments.len() == 1 {
+        if
+        // #[gamma::skip(cond.always_false, reason = "The path is source-parsed and nonempty. For a singleton Some, omitting the early true pops that sole segment. The empty path cannot resolve to a standard Option or a nominal declaration in Calls or source identities, so the final !is_enum && !source_is_enum returns true as before. Qualified paths never entered this early branch.", tag = "equivalent")]
+        path.segments.len() ==
+        // #[gamma::skip(literal.int_decrement, reason = "The path is source-parsed and nonempty. For a singleton Some, omitting the early true pops that sole segment. The empty path cannot resolve to a standard Option or a nominal declaration in Calls or source identities, so the final !is_enum && !source_is_enum returns true as before. Qualified paths never entered this early branch.", tag = "equivalent")]
+        1
+        {
             return true;
         }
         let _constructor = path.segments.pop();
@@ -176,7 +203,9 @@ impl Collector<'_> {
             qself: None,
             path: path.clone(),
         });
-        if self.types().supports_option_api(&ty) {
+        if
+        // #[gamma::skip(cond.always_false, reason = "A positive supports_option_api answer identifies the standard Option, excluding local or imported source enums and module/type shadows. The final fallback's calls.is_enum and source_is_enum therefore both return false for every positive early-return case. Disabling the early return still reaches the same true answer.", tag = "equivalent")]
+        self.types().supports_option_api(&ty) {
             return true;
         }
         if let Some(Some(none)) = self.current_imports().get("None")
@@ -200,9 +229,15 @@ impl Collector<'_> {
     }
 
     pub(super) fn standard_constructor_type(&self, call: &syn::ExprCall) -> Option<Type> {
-        let Expr::Path(callee) = &*call.func else { return None };
+        let Expr::Path(callee) = &*call.func else {
+            return
+        // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+        None;
+        };
         if callee.qself.is_some() {
-            return None;
+            return
+            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+            None;
         }
         let constructor = Type::Path(syn::TypePath {
             attrs: Vec::new(),
@@ -220,11 +255,20 @@ impl Collector<'_> {
         }) {
             return Some(syn::parse_quote!(std::result::Result<_, _>));
         }
-        if callee.path.segments.len() < 2 {
-            return None;
+        if
+        // #[gamma::skip(cond.always_false, reason = "A source-parsed callee path is nonempty. Omitting the <2 guard only admits singleton paths not already handled by the Result constructor special case. Popping their sole segment leaves an empty type path; unshadowed_type_path calls resolved_type_path and then first()?, which returns None. Thus the function still returns None before any factory match.", tag = "equivalent")]
+        callee.path.segments.len() <
+        // #[gamma::skip(literal.int_decrement, literal.int_to_zero, reason = "A source-parsed callee path is nonempty. Omitting the <2 guard only admits singleton paths not already handled by the Result constructor special case. Popping their sole segment leaves an empty type path; unshadowed_type_path calls resolved_type_path and then first()?, which returns None. Thus the function still returns None before any factory match.", tag = "equivalent")]
+        2
+        {
+            return
+            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+            None;
         }
         let mut path = callee.path.clone();
-        let method = path.segments.pop()?.ident.to_string();
+        let method =
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "segments.pop() follows the callee.path.segments.len() >= 2 guard, and no segment was removed before that pop. Its Option cannot be None.", tag = "equivalent")]
+        path.segments.pop()?.ident.to_string();
         let _separator = path.segments.pop_punct();
         let ty = Type::Path(syn::TypePath {
             attrs: Vec::new(),
@@ -271,6 +315,36 @@ impl Collector<'_> {
                 Some(syn::parse_quote!(std::time::Duration))
             }
             _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Collector;
+    use crate::cfg::CfgSet;
+    use crate::ops::collect::Defaults;
+    use crate::ops::collect::collector::types::LOCAL_MODULE;
+    use crate::ops::registry::Selection;
+    use crate::parse::SourceFile;
+
+    #[test]
+    fn reader_named_module_metadata_is_not_a_reader_trait_import() {
+        for name in ["Read", "BufRead"] {
+            let source = format!("mod std {{ mod io {{ mod {name} {{}} }} }}");
+            let file = SourceFile::parse("fixture.rs", source).unwrap();
+            let selection = Selection::everything();
+            let cfg = CfgSet::parse("");
+            let defaults = Defaults::of(&file.ast);
+            let mut collector = Collector::new(&file, &selection, &[], &cfg, &defaults);
+            let expected = vec!["std".to_owned(), "io".to_owned(), name.to_owned()];
+            collector.scope_path = collector
+                .scope_imports
+                .iter()
+                .find(|(_, imports)| imports.get(LOCAL_MODULE).and_then(Option::as_ref) == Some(&expected))
+                .map(|(scope, _)| scope.clone())
+                .unwrap();
+            assert!(!collector.read_trait_in_scope(), "{name}");
         }
     }
 }

@@ -24,6 +24,7 @@ pub(super) fn explain<H: Host>(host: &mut H, args: &ExplainArgs) -> crate::Resul
 
     for name in names {
         let Some(mutator) = registry::find(name) else {
+            // #[gamma::skip(loop.continue_to_break, reason = "names is returned by registry::resolve, which expands only names registered in the static registry. registry::find(name) is therefore Some for every iteration; this mutated None continue/break arm is unreachable.", tag = "equivalent")]
             continue;
         };
 
@@ -68,7 +69,14 @@ fn explain_mutant_with<H: Host>(
     let explicit_report = args
         .report
         .as_ref()
-        .map(|path| crate::merge::read_limited(path, u64::MAX).map(|read| read.report))
+        .map(|path| {
+            crate::merge::read_limited(
+                path,
+                // #[gamma::skip(expr.decrement, reason = "merge::read_limited clamps passed limit to MAX_BYTES=256MiB before size checks/reading. Both u64::MAX and MAX-1 are strictly larger than256MiB, so the exact same effective byte budget and behavior result.", tag = "equivalent")]
+                u64::MAX,
+            )
+            .map(|read| read.report)
+        })
         .transpose()?;
     let explicit_report_contains_subject = explicit_report.as_ref().is_some_and(|report| {
         report
@@ -91,7 +99,9 @@ fn explain_mutant_with<H: Host>(
         config.apply_selection(&mut select)?;
         select.mutators = Some("all".to_owned());
 
-        let selection = select.selection()?;
+        let selection =
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "Immediately preceding assignment replaces select.mutators with the literal Some(all). SelectArgs::selection's only fallible operation parses that known registered selector; its error customization branches return Ok. Thus this exact selection() call cannot yield Err.", tag = "equivalent")]
+        select.selection()?;
         let plan = discover(&select, &selection, &cargo)?;
         Ok((plan, config.artifact_dir))
     };
@@ -113,7 +123,14 @@ fn explain_mutant_with<H: Host>(
     let report = if explicit_report.is_some() {
         explicit_report
     } else if report_path.as_std_path().is_file() {
-        Some(crate::merge::read_limited(&report_path, u64::MAX)?.report)
+        Some(
+            crate::merge::read_limited(
+                &report_path,
+                // #[gamma::skip(expr.decrement, reason = "merge::read_limited clamps passed limit to MAX_BYTES=256MiB before size checks/reading. Both u64::MAX and MAX-1 are strictly larger than256MiB, so the exact same effective byte budget and behavior result.", tag = "equivalent")]
+                u64::MAX,
+            )?
+            .report,
+        )
     } else {
         None
     };
@@ -269,6 +286,25 @@ mod tests {
                     .contains("explanation output denied")
             );
         }
+    }
+
+    #[test]
+    fn recovered_optimistic_explanation_returns_the_write_error_on_its_own_line() {
+        let name = registry::resolve("all")
+            .unwrap()
+            .into_iter()
+            .find(|name| registry::optimistic_requires_explicit(name))
+            .unwrap();
+        let args = args(name, ".".into());
+        let mut host = LineLimitedHost {
+            remaining: 3,
+            output: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let error = explain(&mut host, &args).unwrap_err();
+        assert!(error.to_string().contains("explanation output denied"));
+        assert_eq!(host.remaining, 0);
+        assert_eq!(host.output.split(|byte| *byte == b'\n').count(), 4);
     }
 
     fn args(subject: impl Into<String>, dir: Utf8PathBuf) -> ExplainArgs {

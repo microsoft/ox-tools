@@ -150,7 +150,9 @@ pub(super) fn settled_verdict(status: &str, reason: Option<&str>) -> Option<Outc
     let reason_is = |prefix: &str| reason.is_some_and(|reason| reason.starts_with(prefix));
 
     match status {
-        "Survived" if reason_is(OUT_OF_MEMORY_PREFIX) => None,
+        "Survived" if
+        // #[gamma::skip(match_guard.always_false, reason = "For status Survived with reason starting out of memory:, original arm returns None. Disabling it reaches the Survived timed out: arm, which cannot match that disjoint prefix, then wildcard None. All other statuses/reasons already skip the original guard.", tag = "equivalent")]
+        reason_is(OUT_OF_MEMORY_PREFIX) => None,
         "Survived" if reason_is(TIMEOUT_PREFIX) => Some(Outcome::Timeout),
         "Timeout" if reason.is_none() || reason_is(OUT_OF_MEMORY_PREFIX) => None,
         "Ignored" if reason.is_none() || reason_is(NOT_BUILT_PREFIX) || super::report::is_flaky_status(status, reason) => None,

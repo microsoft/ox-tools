@@ -128,7 +128,10 @@ impl<'args> HarnessFilters<'args> {
     pub(super) fn selecting(&self) -> Vec<&'args str> {
         // Each stored argument is pushed at most once, and the tail appends every filter, so this
         // sum is an upper bound available up front.
-        let mut args: Vec<&str> = Vec::with_capacity(self.flags.len() + self.filters.len());
+        let mut args: Vec<&str> = Vec::with_capacity(
+            // #[gamma::skip(arith.add_to_mul, reason = "Only private initial allocation capacity changes; subsequent pushes/writes determine identical output contents.", tag = "equivalent")]
+            self.flags.len() + self.filters.len(),
+        );
         let mut index = 0;
 
         while let Some(flag) = self.flags.get(index) {

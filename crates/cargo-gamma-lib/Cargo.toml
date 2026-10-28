@@ -129,6 +129,14 @@ name = "native_build"
 required-features = ["internals"]
 
 [[test]]
+name = "native_regressions"
+required-features = ["internals"]
+
+[[test]]
+name = "storage_native"
+required-features = ["internals"]
+
+[[test]]
 name = "mutation_correctness"
 required-features = ["internals"]
 

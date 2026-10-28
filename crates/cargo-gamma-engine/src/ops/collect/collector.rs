@@ -18,8 +18,8 @@ use syn::{
     Arm, Attribute, BinOp, Block, Expr, ExprArray, ExprAsync, ExprBinary, ExprBreak, ExprCall, ExprCast, ExprClosure, ExprContinue,
     ExprForLoop, ExprIf, ExprIndex, ExprLet, ExprLit, ExprLoop, ExprMatch, ExprMethodCall, ExprRange, ExprReference, ExprRepeat,
     ExprReturn, ExprStruct, ExprTry, ExprUnary, ExprWhile, FnArg, GenericArgument, Generics, ImplItem, ImplItemConst, ImplItemFn, Item,
-    ItemConst, ItemFn, ItemImpl, ItemMod, ItemStatic, ItemTrait, Lit, Local, Macro, Member, Pat, RangeLimits, ReturnType, Signature, Stmt,
-    TraitItemConst, TraitItemFn, Type, UnOp, Variant,
+    ItemConst, ItemFn, ItemImpl, ItemMod, ItemStatic, ItemTrait, Lit, Local, Macro, Member, Pat, PathArguments, RangeLimits, ReturnType,
+    Signature, Stmt, TraitItemConst, TraitItemFn, Type, UnOp, Variant,
 };
 
 use super::stated::stated_range;
@@ -282,6 +282,7 @@ pub(super) struct Collector<'a> {
     implicit_prelude: bool,
     aliases: HashMap<String, Option<types::Alias>>,
     scope_aliases: HashMap<ScopePath, HashMap<String, Option<types::Alias>>>,
+    #[cfg(test)]
     block_scopes: HashSet<ScopePath>,
 
     /// Names in the enclosing function declared by a `let` that supplies no initialiser.
@@ -453,6 +454,7 @@ impl<'a> Collector<'a> {
                 .any(|attribute| attribute.path().is_ident("no_implicit_prelude")),
             aliases: indexes.scope_aliases.get(&Vec::new()).cloned().unwrap_or_default(),
             scope_aliases: indexes.scope_aliases,
+            #[cfg(test)]
             block_scopes: indexes.block_scopes,
             deferred: HashSet::default(),
             undo: Vec::new(),
@@ -530,7 +532,9 @@ impl<'a> Collector<'a> {
         shape: Shape,
         confidence: Confidence,
     ) {
-        if !self.wants(mutator) {
+        if
+        // #[gamma::skip(cond.always_false, reason = "emit_shaped_with_confidence immediately delegates to emit_at_conditionally, which repeats the identical wants(mutator) gate. parameter_shadows repeats its wants gate internally. The err_with body also emits through that same gate. Relaxing these prefilters cannot record an unselected or inert candidate or reserve its identity.", tag = "equivalent")]
+        !self.wants(mutator) {
             return;
         }
         let included = confidence != Confidence::Optimistic
@@ -640,7 +644,9 @@ impl<'a> Collector<'a> {
 
         let identity_key = self.reserve_identity_occurrence(mutator, &range, identity_span.clone());
         if !included
-            || self
+            ||
+            // #[gamma::skip(iter.remove_rev, reason = "Each LoopProof::omits takes &self and evaluates an independent proof against immutable source/range/replacement inputs. The containing any asks only whether at least one proof omits the edit. Reversing this side-effect-free membership scan preserves its boolean.", tag = "equivalent")]
+            self
                 .loops
                 .iter()
                 .rev()
@@ -718,12 +724,10 @@ impl<'a> Collector<'a> {
             .and_then(Option::as_ref)
             .map_or(&[][..], Vec::as_slice);
         let modules_verified = self.defaults.resource_namespace_transparent(self.file.path.as_ref(), inline);
-        if !self.resource_transparent
-            || !self.implicit_prelude
-            || !self.local_calls.resource_scope_is_transparent(&self.scope_path, modules_verified)
-            || expression.span().byte_range().len() > 4096
-        {
-            return None;
+        if !self.resource_transparent || !self.local_calls.resource_scope_is_transparent(&self.scope_path, modules_verified) {
+            return
+            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+            None;
         }
         let mut bindings = self
             .resource_iterators
@@ -734,7 +738,7 @@ impl<'a> Collector<'a> {
             if !binding.resource_trusted {
                 continue;
             }
-            let Some(mut kind) = self.resource_binding(&binding.ty, &binding.scope, &mut HashSet::default()) else {
+            let Some(mut kind) = self.resource_binding(&binding.ty, &binding.scope) else {
                 continue;
             };
             if kind == resource::Binding::Integer {
@@ -748,18 +752,23 @@ impl<'a> Collector<'a> {
             let _prior = bindings.insert(name.clone(), kind);
         }
         for (name, site) in resource::projection_sites(expression) {
-            let root = name.split('.').next()?;
+            let root =
+            // #[gamma::skip(try.propagate_to_unwrap, reason = "str::split yields at least one component even for the empty string. A source-parsed Type::Path has at least one path segment. Neither Option can be None at these sites.", tag = "equivalent")]
+            name.split('.').next()?;
             let Some(binding) = self.binding_types.get(root).filter(|binding| binding.resource_trusted) else {
                 continue;
             };
-            let Expr::Field(field) = site else { continue };
+            let Expr::Field(field) = site else {
+                // #[gamma::skip(loop.continue_to_break, reason = "projection_sites constructs every returned site explicitly as Expr::Field and preserves source-preorder. The non-Field continue is unreachable for every producer result.", tag = "equivalent")]
+                continue;
+            };
             if !matches!(&*field.base, Expr::Path(path) if path.path.is_ident(root)) {
                 continue;
             }
             let Some(ty) = self.calls.field(&binding.ty, &field.member, &binding.scope, &binding.imports) else {
                 continue;
             };
-            let Some(kind) = self.resource_binding(&ty, &self.scope_path, &mut HashSet::default()) else {
+            let Some(kind) = self.resource_binding(&ty, &self.scope_path) else {
                 continue;
             };
             if matches!(kind, resource::Binding::Bool | resource::Binding::Integer)
@@ -787,7 +796,9 @@ impl<'a> Collector<'a> {
             )
         }) && !self.defaults.resource_sources().closed_methods_for(self.file.path.as_ref(), inline)
         {
-            return None;
+            return
+            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+            None;
         }
         resource::LoopProof::new(expression, bindings, self.types().supports_char_api()).map(|proof| {
             proof
@@ -797,7 +808,27 @@ impl<'a> Collector<'a> {
         })
     }
 
-    fn resource_binding(&self, ty: &Type, scope: &ScopePath, visited: &mut HashSet<(ScopePath, String)>) -> Option<resource::Binding> {
+    fn resource_binding(&self, ty: &Type, scope: &ScopePath) -> Option<resource::Binding> {
+        // Test headroom covers every block/root scope per available alias plus terminal lookups.
+        // This progress assertion does not impose a production inference limit.
+        #[cfg(test)]
+        let mut remaining =
+            (self.block_scopes.len() + 1) * (self.scope_aliases.values().map(HashMap::len).sum::<usize>() + self.aliases.len() + 2);
+        self.resource_binding_with(ty, scope, &mut |_| {
+            #[cfg(test)]
+            {
+                assert!(
+                    remaining > 0,
+                    "resource alias lookup must stop after exhausting its lexical scopes and aliases"
+                );
+                remaining -= 1;
+            }
+        })
+    }
+
+    /// Observes each eligible bare-name alias lookup, including recursive alias targets, so tests
+    /// can check scope progress without replacing resource inference.
+    fn resource_binding_with(&self, ty: &Type, scope: &ScopePath, on_scope: &mut impl FnMut(&ScopePath)) -> Option<resource::Binding> {
         let imports = self.scope_imports.get(scope).unwrap_or(&self.root_imports);
         let mut types = self.types_with(imports);
         types.aliases = None;
@@ -805,46 +836,56 @@ impl<'a> Collector<'a> {
             return Some(resource::Binding::StrReference);
         }
         if let Type::Reference(reference) = ty {
-            let kind = self.resource_binding(&reference.elem, scope, visited)?;
+            let kind = self.resource_binding_with(&reference.elem, scope, on_scope)?;
             return match kind {
                 resource::Binding::Vec | resource::Binding::VecChar | resource::Binding::VecString => Some(kind),
                 resource::Binding::PeekableChars if reference.mutability.is_some() => Some(kind),
                 _ => None,
             };
         }
-        let Type::Path(path) = ty else { return None };
-        let first = path.path.segments.first()?.ident.to_string();
+        let Type::Path(path) = ty else {
+            return
+        // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+        None;
+        };
+        let first =
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "A source-parsed Type::Path always has at least one segment, so this first() cannot fail.", tag = "equivalent")]
+        path.path.segments.first()?.ident.to_string();
         if self.generics.contains(&first) || self.defaulted.contains(&first) {
-            return None;
+            return
+            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+            None;
         }
         if path.qself.is_none() && path.path.segments.len() == 1 && !imports.contains_key(&first) {
-            let mut declaring = scope.clone();
-            loop {
-                if let Some(alias) = self.scope_aliases.get(&declaring).and_then(|aliases| aliases.get(&first)) {
-                    let alias = alias.as_ref()?;
-                    if !alias.parameters.is_empty()
-                        || !match &path.path.segments[0].arguments {
-                            syn::PathArguments::None => true,
-                            syn::PathArguments::AngleBracketed(arguments) => arguments
-                                .args
-                                .iter()
-                                .all(|argument| matches!(argument, syn::GenericArgument::Lifetime(_))),
-                            syn::PathArguments::Parenthesized(_) => false,
+            on_scope(scope);
+            // Published scope maps already inherit block aliases and expand or poison cycles.
+            if let Some(alias) = self.scope_aliases.get(scope).and_then(|aliases| aliases.get(&first)) {
+                let alias = alias.as_ref()?;
+                if !alias.parameters.is_empty()
+                    || !match &path.path.segments[0].arguments {
+                        PathArguments::None => true,
+                        PathArguments::AngleBracketed(arguments) => arguments
+                            .args
+                            .iter()
+                            .all(|argument| matches!(argument, syn::GenericArgument::Lifetime(_))),
+                        PathArguments::Parenthesized(_) =>
+                        // #[gamma::skip(literal.bool_flip, reason = "Parenthesized arguments cannot be parsed as a Type::Path here; callable trait syntax is a TraitObject instead.", tag = "equivalent")]
+                        {
+                            false
                         }
-                        || !visited.insert((declaring.clone(), first.clone()))
-                    {
-                        return None;
                     }
-                    return self.resource_binding(&alias.target, &declaring, visited);
+                {
+                    return
+                    // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+                    None;
                 }
-                if !self.block_scopes.contains(&declaring) {
-                    break;
-                }
-                let _parent = declaring.pop();
+                return self.resource_binding_with(&alias.target, scope, on_scope);
             }
         }
         if !types.standard_constructor_root(ty) {
-            return None;
+            return
+            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+            None;
         }
         if types.supports_peekable_chars(ty) {
             Some(resource::Binding::PeekableChars)
@@ -863,12 +904,12 @@ impl<'a> Collector<'a> {
         } else if types.supports_collection_api(ty) && types.standard_type_name(ty).as_deref() == Some("Vec") {
             let characters = matches!(ty, Type::Path(path)
                 if path.path.segments.last().is_some_and(|segment| matches!(&segment.arguments,
-                    syn::PathArguments::AngleBracketed(arguments) if matches!(arguments.args.first(),
+                    PathArguments::AngleBracketed(arguments) if matches!(arguments.args.first(),
                         Some(syn::GenericArgument::Type(Type::Path(element))) if element.path.is_ident("char")))))
                 && types.supports_char_api();
             let strings = matches!(ty, Type::Path(path)
                 if path.path.segments.last().is_some_and(|segment| matches!(&segment.arguments,
-                    syn::PathArguments::AngleBracketed(arguments) if matches!(arguments.args.first(),
+                    PathArguments::AngleBracketed(arguments) if matches!(arguments.args.first(),
                         Some(syn::GenericArgument::Type(element)) if types.supports_string_api(element)))));
             Some(if characters {
                 resource::Binding::VecChar
@@ -888,30 +929,48 @@ impl<'a> Collector<'a> {
 
     fn resource_iterator_initializer(&self, expression: &Expr) -> bool {
         let Expr::MethodCall(peekable) = expression else {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         };
         if !peekable.attrs.is_empty() || peekable.turbofish.is_some() || !peekable.args.is_empty() || peekable.method != "peekable" {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         }
         let Expr::MethodCall(chars) = &*peekable.receiver else {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         };
         if !chars.attrs.is_empty() || chars.turbofish.is_some() || !chars.args.is_empty() || chars.method != "chars" {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         }
         let Expr::Path(source) = &*chars.receiver else {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         };
-        if !source.attrs.is_empty() || source.qself.is_some() {
-            return false;
+        if
+        // #[gamma::skip(logical.or_remove_right, reason = "These sites independently require Path::get_ident/is_ident after the qself guard. On parsed syn paths, <Owner>::Name has a leading_colon, so get_ident/is_ident rejects it independently; <Owner as Trait>::Name contains at least two segments and is also rejected independently. The prior simple qualified-name negative assertions therefore never distinguished this guard. The proof is for parsed production inputs, not artificially inconsistent manually constructed paths.", tag = "equivalent")]
+        !source.attrs.is_empty() || source.qself.is_some() {
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         }
         let Some(name) = source.path.get_ident() else {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         };
         let Some(binding) = self.binding_types.get(&name.to_string()).filter(|binding| binding.resource_trusted) else {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         };
-        self.resource_binding(&binding.ty, &binding.scope, &mut HashSet::default()) == Some(resource::Binding::StrReference)
+        self.resource_binding(&binding.ty, &binding.scope) == Some(resource::Binding::StrReference)
     }
 
     /// Returns the source text a span covers, or an empty string if the span is not in the file.
@@ -972,7 +1031,9 @@ impl<'a> Collector<'a> {
 
         // #[gamma::skip(cond.always_false, reason = "a parsed trait path always has a non-trivia token; an empty path can only be an unmapped expansion")]
         if trait_path.is_empty() {
-            return self_type;
+            return
+            // #[gamma::skip(return_value.default, reason = "The changed impl_scope return is reached only if the compacted parsed trait path is empty. A source-written trait path necessarily contains an identifier, and Collector does not descend into unmapped macro expansions. This defensive fallback is unreachable.", tag = "equivalent")]
+            self_type;
         }
 
         format!("<{self_type} as {trait_path}>")
@@ -999,7 +1060,9 @@ impl<'a> Collector<'a> {
             return;
         }
 
-        if self.wants("parameter.default_shadow") {
+        if
+        // #[gamma::skip(cond.always_true, reason = "emit_shaped_with_confidence immediately delegates to emit_at_conditionally, which repeats the identical wants(mutator) gate. parameter_shadows repeats its wants gate internally. The err_with body also emits through that same gate. Relaxing these prefilters cannot record an unselected or inert candidate or reserve its identity.", tag = "equivalent")]
+        self.wants("parameter.default_shadow") {
             self.parameter_shadows(sig, body);
         }
 
@@ -1060,6 +1123,7 @@ impl<'a> Collector<'a> {
             let index = u32::try_from(index).unwrap_or(u32::MAX);
 
             if recursive && mutator == "fn_value.default" {
+                // #[gamma::skip(loop.continue_to_break, reason = "values_for produces fn_value.default only in a singleton fallback/default vector. Wrapper/Cow forwarding preserves that singleton; Option/Result/iterator/tuple composition renames nested default entries. Thus skipping a recursive fn_value.default is also skipping the last/only entry, and break leaves the same emitted values.", tag = "equivalent")]
                 continue;
             }
 
@@ -1068,10 +1132,13 @@ impl<'a> Collector<'a> {
             // Offering both would ask the same question twice at one site, and the second answer
             // would be the one the author had already said was wrong.
             if stated.is_some() {
+                // #[gamma::skip(loop.continue_to_break, reason = "stated is fixed before the loop. When Some, every ordinary value is skipped; breaking on the first entry skips the same entire vector. The stated replacement is emitted once after the loop in both versions.", tag = "equivalent")]
                 continue;
             }
 
-            let value_shape = if matches!(shape, Shape::IterWrappedBlock { .. }) && absent_iterator_value(&value) {
+            let value_shape = if
+            // #[gamma::skip(logical.and_remove_left, reason = "The possible shapes are Block, IterBlock and IterWrappedBlock. Applying the absent fallback to Block keeps Block. IterBlock comes from an iterator result, whose generated values are core::iter::empty()/once(...) and never absent None/Err forms. Wrapped iterator shapes already take the original absent-value branch.", tag = "equivalent")]
+            matches!(shape, Shape::IterWrappedBlock { .. }) && absent_iterator_value(&value) {
                 Shape::Block
             } else {
                 shape
@@ -1091,7 +1158,9 @@ impl<'a> Collector<'a> {
         // Caller-supplied error values, which reach the error types `Err(Default::default())`
         // cannot. Their indices continue the static list's so that adding one does not renumber
         // the mutants already generated at this site.
-        if returns_result(&sig.output) && self.wants("fn_value.err_with") {
+        if
+        // #[gamma::skip(logical.and_remove_right, reason = "emit_shaped_with_confidence immediately delegates to emit_at_conditionally, which repeats the identical wants(mutator) gate. parameter_shadows repeats its wants gate internally. The err_with body also emits through that same gate. Relaxing these prefilters cannot record an unselected or inert candidate or reserve its identity.", tag = "equivalent")]
+        returns_result(&sig.output) && self.wants("fn_value.err_with") {
             for (offset, error) in self.errors.iter().enumerate() {
                 let index = saturating_ordinal(value_count.saturating_add(offset));
                 let replacement = format_compact!("Err({error})");
@@ -1144,7 +1213,9 @@ impl<'a> Collector<'a> {
     /// through a field, an index or a dereference presupposes that the binding already holds one.
     fn initializes_deferred(&self, target: &Expr) -> bool {
         let Expr::Path(path) = target else {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         };
 
         path.path
@@ -1175,7 +1246,9 @@ impl<'a> Collector<'a> {
     /// This is not a complete `Copy` classifier: false also means unsupported or exhausted evidence.
     fn noncopy_type(&self, ty: &Type, remaining: usize) -> bool {
         if remaining == 0 {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         }
         let types = self.types();
         let ty = types.resolve_alias(ty);
@@ -1220,7 +1293,9 @@ impl<'a> Collector<'a> {
                             || self.current_imports().contains_key(&name)
                             || self.current_imports().contains_key("*")
                         {
-                            return None;
+                            return
+                            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+                            None;
                         }
                         let member = match member {
                             Member::Named(name) => name.to_string(),
@@ -1249,7 +1324,9 @@ impl<'a> Collector<'a> {
             .get(span)
             .is_some_and(|places| places.iter().any(|place| self.noncopy_place(place)))
         {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         }
         let owning = self
             .numeric_evidence
@@ -1314,10 +1391,12 @@ impl<'a> Collector<'a> {
         // behind a predicate that does not hold is not in the program at all, so relying on it
         // would produce a mutant whose match is no longer exhaustive. Suppression is deliberately
         // not consulted — a suppressed arm is still compiled and still keeps the match exhaustive.
-        let wildcard = node
-            .arms
-            .iter()
-            .position(|arm| !matches!(&arm.pat, Pat::Guard(_)) && is_catch_all(&arm.pat) && self.cfg.holds_for(&arm.attrs));
+        let wildcard = node.arms.iter().position(|arm| {
+            (
+                // #[gamma::skip(logical.and_remove_left, reason = "is_catch_all accepts only Wild, a binding-case Ident without subpattern, or parentheses around those forms. It returns false for Pat::Guard. Removing the separate negative Pat::Guard conjunct therefore cannot admit any additional catch-all arm.", tag = "equivalent")]
+                !matches!(&arm.pat, Pat::Guard(_)) && is_catch_all(&arm.pat)
+            ) && self.cfg.holds_for(&arm.attrs)
+        });
 
         for (index, arm) in node.arms.iter().enumerate() {
             if self.skipped(&arm.attrs) {
@@ -1365,7 +1444,14 @@ impl<'a> Collector<'a> {
 
         let whole = node.span().byte_range();
 
-        if whole.start >= whole.end || whole.end > self.file.text.len() {
+        if
+        // #[gamma::skip(logical.or_remove_left, reason = "struct_fields receives parser-produced ExprStruct spans from the same SourceFile. A path plus braces makes the whole span nonempty. Each field starts strictly after the opening path/brace, and its next field or .. token starts strictly later but before the closing brace. Hence the removed/strictness-adjusted invalid-span tests are always false, including inclusive comparisons at whole boundaries; their continue is unreachable.", tag = "equivalent")]
+
+        // #[gamma::skip(relational.ge_to_gt, reason = "struct_fields receives parser-produced ExprStruct spans from the same SourceFile. A path plus braces makes the whole span nonempty. Each field starts strictly after the opening path/brace, and its next field or .. token starts strictly later but before the closing brace. Hence the removed/strictness-adjusted invalid-span tests are always false, including inclusive comparisons at whole boundaries; their continue is unreachable.", tag = "equivalent")]
+        whole.start >= whole.end ||
+        // #[gamma::skip(relational.gt_to_ge, reason = "A parser-produced ExprStruct belongs inside an item and necessarily precedes its semicolon or enclosing delimiter. Its span therefore ends strictly before SourceFile.text.len(). The newly rejected equality boundary cannot occur for the collector's actual file-AST producer.", tag = "equivalent")]
+        whole.end > self.file.text.len()
+        {
             return;
         }
 
@@ -1386,7 +1472,19 @@ impl<'a> Collector<'a> {
             let from = field.span().byte_range().start;
 
             // Everything between the two is the field, its comma and the space after it.
-            if from < whole.start || to > whole.end || from >= to {
+            if
+            // #[gamma::skip(logical.or_remove_right, reason = "struct_fields receives parser-produced ExprStruct spans from the same SourceFile. A path plus braces makes the whole span nonempty. Each field starts strictly after the opening path/brace, and its next field or .. token starts strictly later but before the closing brace. Hence the removed/strictness-adjusted invalid-span tests are always false, including inclusive comparisons at whole boundaries; their continue is unreachable.", tag = "equivalent")]
+
+            // #[gamma::skip(logical.or_remove_right, reason = "struct_fields receives parser-produced ExprStruct spans from the same SourceFile. A path plus braces makes the whole span nonempty. Each field starts strictly after the opening path/brace, and its next field or .. token starts strictly later but before the closing brace. Hence the removed/strictness-adjusted invalid-span tests are always false, including inclusive comparisons at whole boundaries; their continue is unreachable.", tag = "equivalent")]
+
+            // #[gamma::skip(relational.lt_to_le, reason = "struct_fields receives parser-produced ExprStruct spans from the same SourceFile. A path plus braces makes the whole span nonempty. Each field starts strictly after the opening path/brace, and its next field or .. token starts strictly later but before the closing brace. Hence the removed/strictness-adjusted invalid-span tests are always false, including inclusive comparisons at whole boundaries; their continue is unreachable.", tag = "equivalent")]
+            from < whole.start ||
+            // #[gamma::skip(relational.gt_to_ge, reason = "struct_fields receives parser-produced ExprStruct spans from the same SourceFile. A path plus braces makes the whole span nonempty. Each field starts strictly after the opening path/brace, and its next field or .. token starts strictly later but before the closing brace. Hence the removed/strictness-adjusted invalid-span tests are always false, including inclusive comparisons at whole boundaries; their continue is unreachable.", tag = "equivalent")]
+            to > whole.end ||
+            // #[gamma::skip(relational.ge_to_gt, reason = "struct_fields receives parser-produced ExprStruct spans from the same SourceFile. A path plus braces makes the whole span nonempty. Each field starts strictly after the opening path/brace, and its next field or .. token starts strictly later but before the closing brace. Hence the removed/strictness-adjusted invalid-span tests are always false, including inclusive comparisons at whole boundaries; their continue is unreachable.", tag = "equivalent")]
+            from >= to
+            {
+                // #[gamma::skip(loop.continue_to_break, reason = "struct_fields receives parser-produced ExprStruct spans from the same SourceFile. A path plus braces makes the whole span nonempty. Each field starts strictly after the opening path/brace, and its next field or .. token starts strictly later but before the closing brace. Hence the removed/strictness-adjusted invalid-span tests are always false, including inclusive comparisons at whole boundaries; their continue is unreachable.", tag = "equivalent")]
                 continue;
             }
 
@@ -1472,9 +1570,13 @@ impl<'a> Collector<'a> {
     fn reverse_elements(&mut self, mutator: &'static str, whole: Range<usize>, elements: &Punctuated<Expr, Comma>) {
         // Guard instrumentation changes temporary lifetime extension, so reversing an array that
         // contains a borrowed temporary slice could turn compiling source into a build failure.
-        if !self.wants(mutator)
-            || elements.len() < 2
-            || mutator == "collection.reverse_array" && elements.iter().any(|element| self.text_of(element.span()).contains(".as_slice()"))
+        if (
+            // #[gamma::skip(logical.or_remove_left, reason = "These mutations relax only a mutator-selection prefilter. All eventual emit paths recheck wants(mutator) before allocating an occurrence or recording a candidate. For the parameter-prefilter combinations, its only production caller function() already returns for const functions, making the removed const guard redundant too. The remaining syntax/type guards and selected candidates are unchanged.", tag = "equivalent")]
+            !self.wants(mutator)
+                || elements.len() <
+            // #[gamma::skip(literal.int_decrement, reason = "Admitting a singleton into reverse_elements reconstructs identical text: the same head, sole element and tail. emit_at_conditionally rejects that exact-text no-op before reserving identity, checking loop proofs or recording a candidate.", tag = "equivalent")]
+            2
+        ) || mutator == "collection.reverse_array" && elements.iter().any(|element| self.text_of(element.span()).contains(".as_slice()"))
         {
             return;
         }
@@ -1521,7 +1623,14 @@ impl<'a> Collector<'a> {
 
         // A method call whose receiver spans a macro expansion can put the name outside the call,
         // in which case there is nothing meaningful to splice.
-        if name.start < whole.start || name.end > whole.end {
+        if
+        // #[gamma::skip(cond.always_false, logical.or_remove_left, logical.or_remove_right, logical.or_to_and, reason = "A parsed method identifier lies strictly inside its ExprMethodCall span: receiver and dot precede it, and argument parentheses follow it. Thus neither out-of-whole comparison can hold, even after changing the comparisons to inclusive ones. Removing or combining these defensive bounds tests changes no parser-produced method rewrite.", tag = "equivalent")]
+
+        // #[gamma::skip(relational.lt_to_le, reason = "A parsed method identifier lies strictly inside its ExprMethodCall span: receiver and dot precede it, and argument parentheses follow it. Thus neither out-of-whole comparison can hold, even after changing the comparisons to inclusive ones. Removing or combining these defensive bounds tests changes no parser-produced method rewrite.", tag = "equivalent")]
+        name.start < whole.start ||
+        // #[gamma::skip(relational.gt_to_ge, reason = "A parsed method identifier lies strictly inside its ExprMethodCall span: receiver and dot precede it, and argument parentheses follow it. Thus neither out-of-whole comparison can hold, even after changing the comparisons to inclusive ones. Removing or combining these defensive bounds tests changes no parser-produced method rewrite.", tag = "equivalent")]
+        name.end > whole.end
+        {
             return;
         }
 
@@ -1533,9 +1642,13 @@ impl<'a> Collector<'a> {
         let (before, after) = (before.to_owned(), after.to_owned());
 
         for (index, (mutator, replacement)) in swaps.iter().enumerate() {
-            let index = u32::try_from(index).unwrap_or(u32::MAX);
+            let index = u32::try_from(index).unwrap_or(
+                // #[gamma::skip(expr.decrement, reason = "rename_method enumerates the finite hard-coded method_renames slice, with at most a handful of entries. Every index fits u32, so its unwrap_or(u32::MAX) fallback is unreachable and changing only that fallback to MAX-1 changes no candidate.", tag = "equivalent")]
+                u32::MAX,
+            );
 
             if *mutator == "iter.last_to_first" && !self.receiver_has_first(&node.receiver) {
+                // #[gamma::skip(loop.continue_to_break, reason = "The continue can fire only for iter.last_to_first. method_renames(last,0) returns a singleton slice, so continuing and breaking both end the entire rename loop.", tag = "equivalent")]
                 continue;
             }
 
@@ -1551,17 +1664,38 @@ impl<'a> Collector<'a> {
     }
 
     fn character_receiver(&self, receiver: &Expr) -> bool {
+        // Deliberately generous test-only headroom detects stalled walks; it is not a supported
+        // type-size limit or a production work budget.
+        #[cfg(test)]
+        let mut remaining = 16384;
+        self.character_receiver_with(receiver, |_| {
+            #[cfg(test)]
+            {
+                assert!(
+                    remaining > 0,
+                    "character receiver inference must stop at a repeated alias reference"
+                );
+                remaining -= 1;
+            }
+        })
+    }
+
+    /// Reports each alias-resolved type before pointer deduplication, including a repeated type,
+    /// allowing deterministic cycle/progress assertions while preserving ordinary inference.
+    fn character_receiver_with(&self, receiver: &Expr, mut on_visit: impl FnMut(*const Type)) -> bool {
         let Some(ty) = self.inferred_expression_type(receiver) else {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         };
         let mut ty = &ty;
         let types = self.types();
         let mut visited = HashSet::default();
-        loop {
+        while {
             ty = types.resolve_alias(ty);
-            if !visited.insert(core::ptr::from_ref(ty)) {
-                return false;
-            }
+            on_visit(core::ptr::from_ref(ty));
+            visited.insert(core::ptr::from_ref(ty))
+        } {
             match values::strip(ty) {
                 Type::Reference(reference) => ty = &reference.elem,
                 Type::Path(path) => {
@@ -1570,9 +1704,14 @@ impl<'a> Collector<'a> {
                             || path_matches(&path.path, &["core", "primitive", "char"])
                             || path_matches(&path.path, &["std", "primitive", "char"]));
                 }
-                _ => return false,
+                _ => {
+                    return
+                // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+                false;
+                }
             }
         }
+        false
     }
 
     /// Rewrites a source-backed subspan while retaining all surrounding spelling.
@@ -1589,7 +1728,9 @@ impl<'a> Collector<'a> {
     }
 
     fn rename_method_as(&mut self, node: &ExprMethodCall, mutator: &'static str, replacement: &str, shape: Shape) {
-        if !self.wants(mutator) {
+        if
+        // #[gamma::skip(cond.always_false, reason = "These mutations relax only a mutator-selection prefilter. All eventual emit paths recheck wants(mutator) before allocating an occurrence or recording a candidate. For the parameter-prefilter combinations, its only production caller function() already returns for const functions, making the removed const guard redundant too. The remaining syntax/type guards and selected candidates are unchanged.", tag = "equivalent")]
+        !self.wants(mutator) {
             return;
         }
 
@@ -1606,7 +1747,9 @@ impl<'a> Collector<'a> {
             ("is_ok", 0) => self.rename_method_as(node, "result.is_ok_to_is_err", "is_err", Shape::Expr),
             ("is_err", 0) => self.rename_method_as(node, "result.is_err_to_is_ok", "is_ok", Shape::Expr),
             ("unwrap_or", 1) => {
-                if node
+                if
+                // #[gamma::skip(iter.first_to_last, reason = "These first()/last() calls are reached only from method_semantics' unwrap_or/unwrap_or_else arms with args.len()==1, or regex_semantics after its args.len()!=1 rejection. The single argument is both first and last.", tag = "equivalent")]
+                node
                     .args
                     .first()
                     .is_some_and(|fallback| self.expression_can_directly_default(fallback) && !self.expression_is_known_default(fallback))
@@ -1621,7 +1764,9 @@ impl<'a> Collector<'a> {
                 }
             }
             ("unwrap_or_else", 1) => {
-                if let Some(Expr::Closure(closure)) = node.args.first()
+                if let Some(Expr::Closure(closure)) =
+                    // #[gamma::skip(iter.first_to_last, reason = "These first()/last() calls are reached only from method_semantics' unwrap_or/unwrap_or_else arms with args.len()==1, or regex_semantics after its args.len()!=1 rejection. The single argument is both first and last.", tag = "equivalent")]
+                    node.args.first()
                     && self.expression_can_directly_default(&closure.body)
                     && !self.expression_is_known_default(&closure.body)
                     && let Some(rewritten) = self.rewrite_part(node.span(), closure.body.span(), "Default::default()")
@@ -1691,7 +1836,9 @@ impl<'a> Collector<'a> {
     }
 
     fn current_imports(&self) -> &HashMap<String, Option<Vec<String>>> {
-        if self.scope_path.is_empty() {
+        if
+        // #[gamma::skip(cond.always_false, reason = "Indexes::Walk writes root imports to root_imports, reserving scope_imports entries for scopes after pushing a module or block ID. No empty scope_imports key is inserted by canonicalization or annotation. Looking up the empty scope therefore falls back to the same root_imports reference selected by the original is_empty branch.", tag = "equivalent")]
+        self.scope_path.is_empty() {
             &self.root_imports
         } else {
             self.scope_imports.get(&self.scope_path).unwrap_or(&self.root_imports)
@@ -1700,6 +1847,7 @@ impl<'a> Collector<'a> {
 
     fn can_directly_default(&self, ty: &Type) -> bool {
         let types = self.types();
+        // #[gamma::skip(logical.and_remove_right, reason = "When resolve_type(resolve_alias(ty)) is Result, has_default(ty) returns false in its explicit Kind::Result arm; no earlier success bypasses that match. The conjunction's Result exclusion therefore removes no true has_default answer.", tag = "equivalent")]
         types.has_default(ty) && resolve_type(types.resolve_alias(ty)) != Kind::Result
     }
 
@@ -1743,7 +1891,9 @@ impl<'a> Collector<'a> {
 
     fn expression_is_known_default_for_type(&self, expression: &Expr, ty: &Type) -> bool {
         if !self.standard_default_replacement() {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         }
         if self.expression_is_known_default(expression) {
             return true;
@@ -1910,13 +2060,13 @@ impl<'a> Collector<'a> {
     }
 
     fn boolean_expression(&mut self, expression: &Expr, expected: &Type) {
-        if !self.wants("bool_expr.negate")
-            || resolve_type(self.types().resolve_alias(expected)) != Kind::Bool
-            || matches!(
-                expression,
-                Expr::Lit(ExprLit { lit: Lit::Bool(_), .. }) | Expr::Unary(ExprUnary { op: UnOp::Not(_), .. })
-            )
-            || binds_a_pattern(expression)
+        if (
+            // #[gamma::skip(logical.or_remove_left, reason = "These mutations relax only a mutator-selection prefilter. All eventual emit paths recheck wants(mutator) before allocating an occurrence or recording a candidate. For the parameter-prefilter combinations, its only production caller function() already returns for const functions, making the removed const guard redundant too. The remaining syntax/type guards and selected candidates are unchanged.", tag = "equivalent")]
+            !self.wants("bool_expr.negate") || resolve_type(self.types().resolve_alias(expected)) != Kind::Bool
+        ) || matches!(
+            expression,
+            Expr::Lit(ExprLit { lit: Lit::Bool(_), .. }) | Expr::Unary(ExprUnary { op: UnOp::Not(_), .. })
+        ) || binds_a_pattern(expression)
         {
             return;
         }
@@ -1928,9 +2078,13 @@ impl<'a> Collector<'a> {
     }
 
     fn parameter_shadows(&mut self, sig: &Signature, body: &Block) {
-        if !self.wants("parameter.default_shadow")
-            || sig.constness.is_some()
-            || matches!(&sig.output, ReturnType::Type(_, ty) if matches!(&**ty, Type::ImplTrait(_)) && resolve_type(ty) != Kind::Iterator)
+        if
+        // #[gamma::skip(logical.or_remove_left, reason = "These mutations relax only a mutator-selection prefilter. All eventual emit paths recheck wants(mutator) before allocating an occurrence or recording a candidate. For the parameter-prefilter combinations, its only production caller function() already returns for const functions, making the removed const guard redundant too. The remaining syntax/type guards and selected candidates are unchanged.", tag = "equivalent")]
+        (
+            // #[gamma::skip(logical.or_remove_left, logical.or_to_and, reason = "These mutations relax only a mutator-selection prefilter. All eventual emit paths recheck wants(mutator) before allocating an occurrence or recording a candidate. For the parameter-prefilter combinations, its only production caller function() already returns for const functions, making the removed const guard redundant too. The remaining syntax/type guards and selected candidates are unchanged.", tag = "equivalent")]
+            // #[gamma::skip(logical.or_remove_right, reason = "parameter_shadows is called only from function(), which already returns immediately for sig.constness.is_some(). Deleting the second const guard cannot change any production call; the selection and opaque-return guards remain intact.", tag = "equivalent")]
+            !self.wants("parameter.default_shadow") || sig.constness.is_some()
+        ) || matches!(&sig.output, ReturnType::Type(_, ty) if matches!(&**ty, Type::ImplTrait(_)) && resolve_type(ty) != Kind::Iterator)
         {
             return;
         }
@@ -1987,7 +2141,9 @@ impl<'a> Collector<'a> {
             .get_ident()
             .expect("guarded above to be a single-segment path")
             .to_string();
-        if self.bindings.contains_key(&name) {
+        if
+        // #[gamma::skip(cond.always_false, reason = "call_semantics delegates to call_signature, which passes the identical bindings.contains_key predicate into Calls::signature. A bare callee shadowed by a local binding is rejected there even without this preliminary early return.", tag = "equivalent")]
+        self.bindings.contains_key(&name) {
             return;
         }
         if matches!(name.as_str(), "Some" | "Ok" | "Err" | "drop" | "default") {
@@ -2009,10 +2165,14 @@ impl<'a> Collector<'a> {
         } else {
             Confidence::Optimistic
         };
-        if self.wants("call.replace_with_default") {
+        if
+        // #[gamma::skip(cond.always_true, reason = "These mutations relax only a mutator-selection prefilter. All eventual emit paths recheck wants(mutator) before allocating an occurrence or recording a candidate. For the parameter-prefilter combinations, its only production caller function() already returns for const functions, making the removed const guard redundant too. The remaining syntax/type guards and selected candidates are unchanged.", tag = "equivalent")]
+        self.wants("call.replace_with_default") {
             self.emit_confident("call.replace_with_default", node.span(), "Default::default()", 0, confidence);
         }
-        if self.wants("call_result.default") {
+        if
+        // #[gamma::skip(cond.always_true, reason = "These mutations relax only a mutator-selection prefilter. All eventual emit paths recheck wants(mutator) before allocating an occurrence or recording a candidate. For the parameter-prefilter combinations, its only production caller function() already returns for const functions, making the removed const guard redundant too. The remaining syntax/type guards and selected candidates are unchanged.", tag = "equivalent")]
+        self.wants("call_result.default") {
             let call = self.text_of(node.span());
             let included = !self.standard_default_replacement()
                 || !self.local_calls.returns_unit(&node.func, &self.scope_path, self.current_imports());
@@ -2037,7 +2197,9 @@ impl<'a> Collector<'a> {
             "regex.plus_to_star",
             "regex.optional_to_required",
         ];
-        if !MUTATORS.iter().any(|mutator| self.wants(mutator)) {
+        if
+        // #[gamma::skip(cond.always_false, reason = "These mutations relax only a mutator-selection prefilter. All eventual emit paths recheck wants(mutator) before allocating an occurrence or recording a candidate. For the parameter-prefilter combinations, its only production caller function() already returns for const functions, making the removed const guard redundant too. The remaining syntax/type guards and selected candidates are unchanged.", tag = "equivalent")]
+        !MUTATORS.iter().any(|mutator| self.wants(mutator)) {
             return;
         }
         let Expr::Path(path) = &*node.func else {
@@ -2048,7 +2210,9 @@ impl<'a> Collector<'a> {
         }
         let Some(Expr::Lit(ExprLit {
             lit: Lit::Str(literal), ..
-        })) = node.args.first()
+        })) =
+        // #[gamma::skip(iter.first_to_last, reason = "These first()/last() calls are reached only from method_semantics' unwrap_or/unwrap_or_else arms with args.len()==1, or regex_semantics after its args.len()!=1 rejection. The single argument is both first and last.", tag = "equivalent")]
+        node.args.first()
         else {
             return;
         };
@@ -2139,7 +2303,9 @@ impl<'a> Collector<'a> {
             Expr::Group(group) => self.type_of_place(&group.expr),
             Expr::Unary(unary) if matches!(unary.op, UnOp::Deref(_)) => {
                 let Type::Reference(reference) = self.type_of_place(&unary.expr)? else {
-                    return None;
+                    return
+                    // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+                    None;
                 };
                 Some(&reference.elem)
             }
@@ -2319,6 +2485,22 @@ impl<'a> Collector<'a> {
     }
 
     fn inferred_method_type(&self, call: &ExprMethodCall) -> Option<Type> {
+        // Deliberately generous test-only headroom catches a reference walk that stops advancing;
+        // production inference has no corresponding counter or supported-depth cutoff.
+        #[cfg(test)]
+        let mut remaining = 16384;
+        self.inferred_method_type_with(call, || {
+            #[cfg(test)]
+            {
+                assert!(remaining > 0, "method inference must advance through its finite reference layers");
+                remaining -= 1;
+            }
+        })
+    }
+
+    /// Exposes each peeled receiver reference to deterministic progress checks; direct method
+    /// signature resolution returns before this fallback traversal.
+    fn inferred_method_type_with(&self, call: &ExprMethodCall, mut on_reference: impl FnMut()) -> Option<Type> {
         let receiver = self.inferred_expression_type(&call.receiver)?;
         if let Some(signature) = self
             .calls
@@ -2327,22 +2509,13 @@ impl<'a> Collector<'a> {
             return signature
                 .asyncness
                 .is_none()
-                .then(|| {
-                    let output = return_type(&signature.output)?;
-                    let mut owner = &receiver;
-                    while let Type::Reference(reference) = values::strip(owner) {
-                        owner = &reference.elem;
-                    }
-                    Some(types::substitute_type(
-                        output,
-                        &HashMap::from_iter([("Self".into(), owner.clone())]),
-                    ))
-                })
+                .then(|| return_type(&signature.output).cloned())
                 .flatten();
         }
         let types = self.types();
         let mut receiver_type = types.resolve_alias(&receiver);
         while let Type::Reference(reference) = values::strip(receiver_type) {
+            on_reference();
             receiver_type = types.resolve_alias(&reference.elem);
         }
         if call.method == "iter" && call.args.is_empty() {
@@ -2416,7 +2589,9 @@ impl<'a> Collector<'a> {
 
     fn inferred_call_type(&self, expression: &Expr) -> Option<Type> {
         let Expr::Call(call) = expression else {
-            return None;
+            return
+            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+            None;
         };
         if let Some(ty) = self.standard_constructor_type(call) {
             return Some(ty);
@@ -2429,7 +2604,9 @@ impl<'a> Collector<'a> {
         }
         let path = called_path(&call.func)?;
         let mut segments = path.segments.iter().rev();
-        let method = &segments.next()?.ident;
+        let method = &
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "This is the FIRST reversed segments.next(), assigning method, not the later qualifier access. called_path supplies a nonempty parsed Path, so that first access cannot fail. The previous unqualified factory() oracle tests the untouched second access.", tag = "equivalent")]
+        segments.next()?.ident;
         let qualifier = &segments.next()?.ident;
         if qualifier == "String" && method == "new" && !self.current_imports().contains_key("String") && !self.defaults.defines("String") {
             return Some(syn::parse_quote!(String));
@@ -2475,7 +2652,9 @@ impl<'a> Collector<'a> {
             defaults: self.defaults,
             aliases: Some(self.current_aliases()),
             self_type: self.impl_self_type.as_ref(),
-            self_associated: Some(&self.impl_self_associated),
+            self_associated:
+            // #[gamma::skip(option.some_to_none, reason = "The local Types values in these helpers are used only through resolve_alias. That method reads aliases, imports, abstracts and defaulted, never self_associated. Clearing this otherwise-unused field cannot affect textual/temporal or first() evidence.", tag = "equivalent")]
+            Some(&self.impl_self_associated),
         };
         let ty = types.resolve_alias(ty);
 
@@ -2492,11 +2671,15 @@ impl<'a> Collector<'a> {
                     || standard_type_path(&path.path, self.current_imports(), "String", &["alloc", "string"])
                     || standard_type_path(&path.path, self.current_imports(), "OsString", &["std", "ffi"])
                     || standard_type_path(&path.path, self.current_imports(), "PathBuf", &["std", "path"])
-                    || ["Instant", "SystemTime", "Duration"]
+                    ||
+                    // #[gamma::skip(collection.reverse_array, reason = "These arrays are consumed only by any over pure standard_type_path membership checks. Reversing their names changes evaluation order, not the boolean answer.", tag = "equivalent")]
+                    ["Instant", "SystemTime", "Duration"]
                         .iter()
                         .any(|name| standard_type_path(&path.path, self.current_imports(), name, &["std", "time"]))
                     || standard_type_path(&path.path, self.current_imports(), "Duration", &["core", "time"])
-                    || ["DateTime", "NaiveDateTime"]
+                    ||
+                    // #[gamma::skip(collection.reverse_array, reason = "These arrays are consumed only by any over pure standard_type_path membership checks. Reversing their names changes evaluation order, not the boolean answer.", tag = "equivalent")]
+                    ["DateTime", "NaiveDateTime"]
                         .iter()
                         .any(|name| standard_type_path(&path.path, self.current_imports(), name, &["chrono"]))
                     || standard_option
@@ -2513,7 +2696,9 @@ impl<'a> Collector<'a> {
             inferred = ty;
             &inferred
         } else {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         };
         let types = Types {
             abstracts: &self.generics,
@@ -2522,17 +2707,24 @@ impl<'a> Collector<'a> {
             defaults: self.defaults,
             aliases: Some(self.current_aliases()),
             self_type: self.impl_self_type.as_ref(),
-            self_associated: Some(&self.impl_self_associated),
+            self_associated:
+            // #[gamma::skip(option.some_to_none, reason = "The local Types values in these helpers are used only through resolve_alias. That method reads aliases, imports, abstracts and defaulted, never self_associated. Clearing this otherwise-unused field cannot affect textual/temporal or first() evidence.", tag = "equivalent")]
+            Some(&self.impl_self_associated),
         };
         let Type::Path(path) = values::strip(types.resolve_alias(ty)) else {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         };
 
+        // #[gamma::skip(collection.reverse_array, reason = "These arrays are consumed only by any over pure standard_type_path membership checks. Reversing their names changes evaluation order, not the boolean answer.", tag = "equivalent")]
         ["Instant", "SystemTime", "Duration"]
             .iter()
             .any(|name| standard_type_path(&path.path, self.current_imports(), name, &["std", "time"]))
             || standard_type_path(&path.path, self.current_imports(), "Duration", &["core", "time"])
-            || ["DateTime", "NaiveDateTime"]
+            ||
+            // #[gamma::skip(collection.reverse_array, reason = "These arrays are consumed only by any over pure standard_type_path membership checks. Reversing their names changes evaluation order, not the boolean answer.", tag = "equivalent")]
+            ["DateTime", "NaiveDateTime"]
                 .iter()
                 .any(|name| standard_type_path(&path.path, self.current_imports(), name, &["chrono"]))
     }
@@ -2578,7 +2770,9 @@ impl<'a> Collector<'a> {
 
     fn receiver_has_first(&self, expression: &Expr) -> bool {
         let Some(ty) = self.type_of_expression(expression) else {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         };
         let types = Types {
             abstracts: &self.generics,
@@ -2587,7 +2781,9 @@ impl<'a> Collector<'a> {
             defaults: self.defaults,
             aliases: Some(self.current_aliases()),
             self_type: self.impl_self_type.as_ref(),
-            self_associated: Some(&self.impl_self_associated),
+            self_associated:
+            // #[gamma::skip(option.some_to_none, reason = "The local Types values in these helpers are used only through resolve_alias. That method reads aliases, imports, abstracts and defaulted, never self_associated. Clearing this otherwise-unused field cannot affect textual/temporal or first() evidence.", tag = "equivalent")]
+            Some(&self.impl_self_associated),
         };
 
         type_has_first(types.resolve_alias(ty))
@@ -2601,6 +2797,7 @@ impl<'a> Collector<'a> {
             self.undeletable_statements.push(statement.span().byte_range());
         }
         let loops_outer = self.value_required_loops.len();
+        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
         value_position_loop_spans(diverge, &mut self.value_required_loops);
         self.visit_expr(diverge);
         self.value_required_loops.truncate(loops_outer);
@@ -2672,7 +2869,9 @@ impl<'a> Collector<'a> {
             .type_of_expression(expression)
             .is_some_and(|ty| is_numeric_binding(self.types().resolve_alias(ty)))
         {
-            return Confidence::Proven;
+            return
+            // #[gamma::skip(return_value.default, reason = "Confidence declares Proven as its #[default] variant in confidence.rs. Replacing this exact Confidence::Proven value with Default::default() preserves the value.", tag = "equivalent")]
+            Confidence::Proven;
         }
 
         match expression {
@@ -2687,7 +2886,9 @@ impl<'a> Collector<'a> {
                     Confidence::Optimistic
                 }
             }
-            Expr::MethodCall(call) if returns_numeric(&call.method.to_string()) => {
+            Expr::MethodCall(call) if
+            // #[gamma::skip(match_guard.always_true, reason = "Every primitive_numeric_method, collection/iterator/textual numeric result method, and temporal numeric method checked inside this numeric_confidence arm is already in returns_numeric. A method newly admitted by an always-true arm guard therefore reaches Optimistic, the same answer as the original fallback.", tag = "equivalent")]
+            returns_numeric(&call.method.to_string()) => {
                 let receiver_type = self.type_of_expression(&call.receiver);
                 let method = call.method.to_string();
                 let collection_result = matches!(method.as_str(), "len" | "capacity")
@@ -2755,15 +2956,23 @@ impl<'a> Collector<'a> {
 
     fn is_primitive_numeric_associated_call(&self, call: &ExprCall) -> bool {
         let Expr::Path(path) = &*call.func else {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         };
         if path.qself.is_some() {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         }
         let mut qualifier = path.path.clone();
         let _function = qualifier.segments.pop();
-        if qualifier.segments.is_empty() {
-            return false;
+        if
+        // #[gamma::skip(cond.always_false, reason = "An unqualified call leaves an empty qualifier after removing its function name. Without the early return, supports_primitive_kind receives that empty Type::Path and returns false for every primitive kind, preserving the original false answer.", tag = "equivalent")]
+        qualifier.segments.is_empty() {
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         }
         let ty = Type::Path(syn::TypePath {
             attrs: Vec::new(),
@@ -2839,6 +3048,7 @@ impl<'a> Collector<'a> {
                         let name = ident.to_string();
 
                         self.bindings.get(&name).copied().unwrap_or_else(|| {
+                            // #[gamma::skip(logical.or_remove_right, reason = "The earlier last-segment expression already includes is_primitive_constant(path). If that predicate is true it short-circuits the whole return before the later binding fallback; if false, the repeated primitive-constant disjunct in that fallback is false.", tag = "equivalent")]
                             self.numeric_evidence.numeric.contains(&path.span().byte_range())
                                 || path.path.get_ident().is_some_and(|_| self.is_primitive_constant(&path.path))
                         })
@@ -2859,8 +3069,7 @@ impl<'a> Collector<'a> {
             // `usize::from(..)`, `u64::try_from(..).unwrap()`: the type is written at the call
             // site, so there is nothing to guess.
             Expr::Call(call) => {
-                numeric_associated_call(call)
-                    || callee_type(&call.func).is_some_and(|name| supports_unit_arithmetic_type(&name) || name.starts_with("NonZero"))
+                callee_type(&call.func).is_some_and(|name| supports_unit_arithmetic_type(&name) || name.starts_with("NonZero"))
                     || self.type_of_expression(expression).is_some_and(is_numeric_binding)
             }
 
@@ -3016,13 +3225,19 @@ impl<'a> Collector<'a> {
                         syn::ReceiverKind::Typed(_, annotated) => {
                             types::substitute_type(annotated, &HashMap::from_iter([("Self".into(), ty)]))
                         }
-                        _ => continue,
+                        _ =>
+                        // #[gamma::skip(loop.continue_to_break, reason = "The exact site is the wildcard arm INSIDE the ReceiverKind match, not the later outer receiver continue. The pinned syn 3.0.9 ReceiverKind has exactly Value, Reference, Typed; all are matched above. Its non_exhaustive wildcard is unreachable with this dependency. The old &self method fixture selects Reference and never exercises this site.", tag = "equivalent")]
+                        {
+                            continue;
+                        }
                     };
                     self.bind_type_with_trust("self".into(), ty, true);
                 }
+                // #[gamma::skip(loop.delete_continue, reason = "The receiver arm has already recorded self before its final continue. Removing that continue merely reaches the FnArg::Typed let-else, which continues for the same receiver. With the original receiver continue intact, that let-else cannot fail for any remaining source-parsed argument, so changing its continue to break is inert.", tag = "equivalent")]
                 continue;
             }
             let FnArg::Typed(typed) = input else {
+                // #[gamma::skip(loop.continue_to_break, reason = "The receiver arm has already recorded self before its final continue. Removing that continue merely reaches the FnArg::Typed let-else, which continues for the same receiver. With the original receiver continue intact, that let-else cannot fail for any remaining source-parsed argument, so changing its continue to break is inert.", tag = "equivalent")]
                 continue;
             };
 
@@ -3101,6 +3316,7 @@ impl<'a> Collector<'a> {
     /// Visits an expression while marking zeros in its value-producing positions as unsigned-only.
     fn in_unsigned_expression<T>(&mut self, expression: &Expr, body: impl FnOnce(&mut Self) -> T) -> T {
         let outer = self.unsigned_zeros.len();
+        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
         unsigned_zero_spans(expression, &mut self.unsigned_zeros);
         let result = body(self);
         self.unsigned_zeros.truncate(outer);
@@ -3110,6 +3326,7 @@ impl<'a> Collector<'a> {
     /// Visits an expression while marking zeros in its value-producing positions as signed.
     fn in_signed_expression<T>(&mut self, expression: &Expr, body: impl FnOnce(&mut Self) -> T) -> T {
         let outer = self.signed_zeros.len();
+        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
         unsigned_zero_spans(expression, &mut self.signed_zeros);
         let result = body(self);
         self.signed_zeros.truncate(outer);
@@ -3139,15 +3356,20 @@ impl<'a> Collector<'a> {
         let statements_outer = self.undeletable_statements.len();
         let loops_outer = self.value_required_loops.len();
         if !matches!(resolve_type(expected), Kind::Unit) {
+            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
             value_position_loop_spans(expression, &mut self.value_required_loops);
+            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
             mandatory_tail_statements(expression, &mut self.undeletable_statements);
         }
-        let imports = if self.scope_path.is_empty() {
+        let imports = if
+        // #[gamma::skip(cond.always_false, reason = "Indexes::Walk writes root imports to root_imports, reserving scope_imports entries for scopes after pushing a module or block ID. No empty scope_imports key is inserted by canonicalization or annotation. Looking up the empty scope therefore falls back to the same root_imports reference selected by the original is_empty branch.", tag = "equivalent")]
+        self.scope_path.is_empty() {
             &self.root_imports
         } else {
             self.scope_imports.get(&self.scope_path).unwrap_or(&self.root_imports)
         };
         let aliases = self.scope_aliases.get(&self.scope_path).unwrap_or(&self.aliases);
+        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
         admissible_default_spans(
             expression,
             expected,
@@ -3162,6 +3384,7 @@ impl<'a> Collector<'a> {
             },
             &mut self.admissible_defaults,
         );
+        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
         reusable_payload_spans(
             expression,
             expected,
@@ -3172,7 +3395,9 @@ impl<'a> Collector<'a> {
                 defaults: self.defaults,
                 aliases: Some(aliases),
                 self_type: self.impl_self_type.as_ref(),
-                self_associated: Some(&self.impl_self_associated),
+                self_associated:
+                // #[gamma::skip(option.some_to_none, reason = "reusable_payload_spans emits entries only when copy_safe_payload also holds. That predicate admits NonZero or explicit-lifetime shared-reference syntax, neither of which has Default depending on Self associated-type substitution. Canonical type comparison and payload extraction do not consult self_associated. Dropping the associated map in this helper-only Types value cannot alter a reusable marker.", tag = "equivalent")]
+                Some(&self.impl_self_associated),
             },
             &self.parameter_types,
             &mut self.reusable_payloads,
@@ -3275,7 +3500,10 @@ impl<'a> Collector<'a> {
                 for (index, element) in tuple.elems.iter().enumerate() {
                     let ty = tuple_type
                         .and_then(|types| {
-                            let index = if rest.is_some_and(|rest| index > rest) {
+                            let index = if rest.is_some_and(|rest|
+                            // #[gamma::skip(relational.gt_to_ge, reason = "Changing index>rest to index>=rest changes only the type supplied to Pat::Rest itself. bind_pattern's fallback visits no identifiers for Pat::Rest and records nothing, regardless of its expected type. Every actual binding keeps its index.", tag = "equivalent")]
+                            index > rest)
+                            {
                                 types.elems.len().checked_sub(tuple.elems.len() - index)?
                             } else {
                                 index
@@ -3487,42 +3715,59 @@ fn unsigned_zero_spans(expression: &Expr, spans: &mut Vec<Range<usize>>) {
             spans.push(literal.span().byte_range());
         }
 
-        Expr::Paren(paren) => unsigned_zero_spans(&paren.expr, spans),
-        Expr::Group(group) => unsigned_zero_spans(&group.expr, spans),
+        Expr::Paren(paren) =>
+        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
+        {
+            unsigned_zero_spans(&paren.expr, spans);
+        }
+        Expr::Group(group) =>
+        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
+        {
+            unsigned_zero_spans(&group.expr, spans);
+        }
         Expr::Block(block) => {
             if let Some(Stmt::Expr(tail, None)) = block.block.stmts.last() {
+                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                 unsigned_zero_spans(tail, spans);
             }
         }
 
         Expr::If(branch) => {
             if let Some(Stmt::Expr(tail, None)) = branch.then_branch.stmts.last() {
+                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                 unsigned_zero_spans(tail, spans);
             }
             if let Some((_, otherwise)) = &branch.else_branch {
+                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                 unsigned_zero_spans(otherwise, spans);
             }
         }
         Expr::Match(matched) => {
             for arm in &matched.arms {
+                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                 unsigned_zero_spans(&arm.body, spans);
             }
         }
         Expr::Range(range) => {
             if let Some(start) = &range.start {
+                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                 unsigned_zero_spans(start, spans);
             }
             if let Some(end) = &range.end {
+                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                 unsigned_zero_spans(end, spans);
             }
         }
         Expr::MethodCall(call) if call.method == "map_or" && call.args.len() == 2 => {
+            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
             unsigned_zero_spans(&call.args[0], spans);
             if let Expr::Closure(closure) = &call.args[1] {
+                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                 unsigned_zero_spans(&closure.body, spans);
             }
         }
         Expr::MethodCall(call) if call.method == "sum" && call.args.is_empty() => {
+            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
             unsigned_iterator_source_spans(&call.receiver, spans);
         }
         _ => {}
@@ -3533,12 +3778,25 @@ fn unsigned_iterator_source_spans(expression: &Expr, spans: &mut Vec<Range<usize
     match expression {
         Expr::MethodCall(call) if call.method == "map" && call.args.len() == 1 => {
             if let Expr::Closure(closure) = &call.args[0] {
+                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                 unsigned_zero_spans(&closure.body, spans);
             }
         }
-        Expr::MethodCall(call) => unsigned_iterator_source_spans(&call.receiver, spans),
-        Expr::Paren(paren) => unsigned_iterator_source_spans(&paren.expr, spans),
-        Expr::Group(group) => unsigned_iterator_source_spans(&group.expr, spans),
+        Expr::MethodCall(call) =>
+        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
+        {
+            unsigned_iterator_source_spans(&call.receiver, spans);
+        }
+        Expr::Paren(paren) =>
+        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
+        {
+            unsigned_iterator_source_spans(&paren.expr, spans);
+        }
+        Expr::Group(group) =>
+        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
+        {
+            unsigned_iterator_source_spans(&group.expr, spans);
+        }
         _ => {}
     }
 }
@@ -3546,23 +3804,35 @@ fn unsigned_iterator_source_spans(expression: &Expr, spans: &mut Vec<Range<usize
 fn value_position_loop_spans(expression: &Expr, spans: &mut Vec<Range<usize>>) {
     match expression {
         Expr::Loop(loop_expr) => spans.push(loop_expr.span().byte_range()),
-        Expr::Paren(paren) => value_position_loop_spans(&paren.expr, spans),
-        Expr::Group(group) => value_position_loop_spans(&group.expr, spans),
+        Expr::Paren(paren) =>
+        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
+        {
+            value_position_loop_spans(&paren.expr, spans);
+        }
+        Expr::Group(group) =>
+        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
+        {
+            value_position_loop_spans(&group.expr, spans);
+        }
         Expr::Block(block) => {
             if let Some(Stmt::Expr(tail, None)) = block.block.stmts.last() {
+                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                 value_position_loop_spans(tail, spans);
             }
         }
         Expr::If(branch) => {
             if let Some(Stmt::Expr(tail, None)) = branch.then_branch.stmts.last() {
+                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                 value_position_loop_spans(tail, spans);
             }
             if let Some((_, otherwise)) = &branch.else_branch {
+                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                 value_position_loop_spans(otherwise, spans);
             }
         }
         Expr::Match(matched) => {
             for arm in &matched.arms {
+                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                 value_position_loop_spans(&arm.body, spans);
             }
         }
@@ -3595,7 +3865,9 @@ fn unsigned_context(ty: &Type) -> bool {
         return true;
     }
     let Type::Path(path) = values::strip(ty) else {
-        return false;
+        return
+        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+        false;
     };
     path.path.segments.last().is_some_and(|segment| {
         (segment.ident == "Range" || segment.ident == "RangeInclusive") && values::type_argument(ty, 0).is_some_and(is_unsigned_binding)
@@ -3678,7 +3950,10 @@ fn ident_is_atomic_unsigned(ident: &syn::Ident) -> bool {
 
 fn standard_type_path(path: &syn::Path, imports: &HashMap<String, Option<Vec<String>>>, name: &str, prefix: &[&str]) -> bool {
     let Some(actual_name) = path.segments.last() else {
-        return false;
+        return
+        // #[gamma::skip(literal.bool_flip, reason = "These false returns handle a missing last/first segment of a source-parsed Path. syn source paths are nonempty; standard_unsigned_argument first rejects non-Path expressions. No valid parsed path reaches either empty-segment fallback.", tag = "equivalent")]
+        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+        false;
     };
     let qualifier_len = path.segments.len() - 1;
 
@@ -3701,14 +3976,21 @@ fn standard_type_path(path: &syn::Path, imports: &HashMap<String, Option<Vec<Str
 /// that an integer-looking argument must be unsigned.
 fn standard_unsigned_argument(callee: &Expr, index: usize, imports: &HashMap<String, Option<Vec<String>>>) -> bool {
     let Expr::Path(path) = callee else {
-        return false;
+        return
+        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+        false;
     };
     let mut reversed = path.path.segments.iter().rev();
     let Some(method) = reversed.next().map(|segment| &segment.ident) else {
-        return false;
+        return
+        // #[gamma::skip(literal.bool_flip, reason = "These false returns handle a missing last/first segment of a source-parsed Path. syn source paths are nonempty; standard_unsigned_argument first rejects non-Path expressions. No valid parsed path reaches either empty-segment fallback.", tag = "equivalent")]
+        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+        false;
     };
     let Some(ty) = reversed.next().map(|segment| &segment.ident) else {
-        return false;
+        return
+        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+        false;
     };
     let qualifier_len = path.path.segments.len() - 2;
 
@@ -3733,8 +4015,12 @@ fn standard_unsigned_argument(callee: &Expr, index: usize, imports: &HashMap<Str
     }
 
     if (ident_is_nonzero_unsigned(ty) && (qualified_by(&["std", "num"]) || qualified_by(&["core", "num"])))
-        || qualifier_len == 0
-            && ["NonZeroU8", "NonZeroU16", "NonZeroU32", "NonZeroU64", "NonZeroU128", "NonZeroUsize"]
+        ||
+        // #[gamma::skip(logical.and_remove_left, reason = "The standard_type membership disjunction can succeed either for an imported alias with qualifier_len==0, or for a qualified exact standard NonZero/atomic name. The qualified case is already accepted by the preceding direct-name-and-prefix arm, so removing only the qualifier_len==0 conjunct admits no additional constructor.", tag = "equivalent")]
+        qualifier_len == 0
+            &&
+            // #[gamma::skip(collection.reverse_array, reason = "These finite arrays are only scanned with any over pure identifier/path comparisons. Reversing their order preserves membership and introduces no state changes.", tag = "equivalent")]
+            ["NonZeroU8", "NonZeroU16", "NonZeroU32", "NonZeroU64", "NonZeroU128", "NonZeroUsize"]
                 .iter()
                 .any(|name| standard_type(name, &["std", "num"]) || standard_type(name, &["core", "num"]))
     {
@@ -3742,8 +4028,12 @@ fn standard_unsigned_argument(callee: &Expr, index: usize, imports: &HashMap<Str
     }
 
     if (ident_is_atomic_unsigned(ty) && (qualified_by(&["std", "sync", "atomic"]) || qualified_by(&["core", "sync", "atomic"])))
-        || qualifier_len == 0
-            && ["AtomicU8", "AtomicU16", "AtomicU32", "AtomicU64", "AtomicUsize"]
+        ||
+        // #[gamma::skip(logical.and_remove_left, reason = "The standard_type membership disjunction can succeed either for an imported alias with qualifier_len==0, or for a qualified exact standard NonZero/atomic name. The qualified case is already accepted by the preceding direct-name-and-prefix arm, so removing only the qualifier_len==0 conjunct admits no additional constructor.", tag = "equivalent")]
+        qualifier_len == 0
+            &&
+            // #[gamma::skip(collection.reverse_array, reason = "These finite arrays are only scanned with any over pure identifier/path comparisons. Reversing their order preserves membership and introduces no state changes.", tag = "equivalent")]
+            ["AtomicU8", "AtomicU16", "AtomicU32", "AtomicU64", "AtomicUsize"]
                 .iter()
                 .any(|name| standard_type(name, &["std", "sync", "atomic"]) || standard_type(name, &["core", "sync", "atomic"]))
     {
@@ -3772,23 +4062,35 @@ fn admissible_default_spans(expression: &Expr, expected: &Type, types: &Types<'_
             }
             _ => {}
         },
-        Expr::Paren(paren) => admissible_default_spans(&paren.expr, expected, types, spans),
-        Expr::Group(group) => admissible_default_spans(&group.expr, expected, types, spans),
+        Expr::Paren(paren) =>
+        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
+        {
+            admissible_default_spans(&paren.expr, expected, types, spans);
+        }
+        Expr::Group(group) =>
+        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
+        {
+            admissible_default_spans(&group.expr, expected, types, spans);
+        }
         Expr::Block(block) => {
             if let Some(Stmt::Expr(tail, None)) = block.block.stmts.last() {
+                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                 admissible_default_spans(tail, expected, types, spans);
             }
         }
         Expr::If(branch) => {
             if let Some(Stmt::Expr(tail, None)) = branch.then_branch.stmts.last() {
+                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                 admissible_default_spans(tail, expected, types, spans);
             }
             if let Some((_, otherwise)) = &branch.else_branch {
+                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                 admissible_default_spans(otherwise, expected, types, spans);
             }
         }
         Expr::Match(matched) => {
             for arm in &matched.arms {
+                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                 admissible_default_spans(&arm.body, expected, types, spans);
             }
         }
@@ -3827,23 +4129,35 @@ fn reusable_payload_spans(
     }
 
     match expression {
-        Expr::Paren(paren) => reusable_payload_spans(&paren.expr, expected, types, parameters, spans),
-        Expr::Group(group) => reusable_payload_spans(&group.expr, expected, types, parameters, spans),
+        Expr::Paren(paren) =>
+        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
+        {
+            reusable_payload_spans(&paren.expr, expected, types, parameters, spans);
+        }
+        Expr::Group(group) =>
+        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
+        {
+            reusable_payload_spans(&group.expr, expected, types, parameters, spans);
+        }
         Expr::Block(block) => {
             if let Some(Stmt::Expr(tail, None)) = block.block.stmts.last() {
+                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                 reusable_payload_spans(tail, expected, types, parameters, spans);
             }
         }
         Expr::If(branch) => {
             if let Some(Stmt::Expr(tail, None)) = branch.then_branch.stmts.last() {
+                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                 reusable_payload_spans(tail, expected, types, parameters, spans);
             }
             if let Some((_, otherwise)) = &branch.else_branch {
+                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                 reusable_payload_spans(otherwise, expected, types, parameters, spans);
             }
         }
         Expr::Match(matched) => {
             for arm in &matched.arms {
+                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                 reusable_payload_spans(&arm.body, expected, types, parameters, spans);
             }
         }
@@ -3887,7 +4201,6 @@ fn absent_iterator_value(value: &str) -> bool {
                 _ => false,
             },
             Expr::Paren(paren) => absent(&paren.expr),
-            Expr::Group(group) => absent(&group.expr),
             _ => false,
         }
     }
@@ -3928,7 +4241,11 @@ fn iterator_body_shape(output: Option<&Type>, types: &Types<'_>) -> Option<Shape
                 ty = types.payload(&ty, 0)?.into_owned();
                 depth = depth.checked_add(1)?;
             }
-            _ => return None,
+            _ => {
+                return
+            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+            None;
+            }
         }
     }
 }
@@ -3952,26 +4269,41 @@ fn mandatory_tail_statements(expression: &Expr, spans: &mut Vec<Range<usize>>) {
     match expression {
         Expr::Block(block) => match block.block.stmts.last() {
             Some(statement @ Stmt::Expr(_, Some(_))) => spans.push(statement.span().byte_range()),
-            Some(Stmt::Expr(tail, None)) => mandatory_tail_statements(tail, spans),
+            Some(Stmt::Expr(tail, None)) =>
+            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
+            {
+                mandatory_tail_statements(tail, spans);
+            }
             _ => {}
         },
         Expr::If(branch) => {
             if let Some(statement @ Stmt::Expr(_, Some(_))) = branch.then_branch.stmts.last() {
                 spans.push(statement.span().byte_range());
             } else if let Some(Stmt::Expr(tail, None)) = branch.then_branch.stmts.last() {
+                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                 mandatory_tail_statements(tail, spans);
             }
             if let Some((_, otherwise)) = &branch.else_branch {
+                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                 mandatory_tail_statements(otherwise, spans);
             }
         }
         Expr::Match(matched) => {
             for arm in &matched.arms {
+                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                 mandatory_tail_statements(&arm.body, spans);
             }
         }
-        Expr::Paren(paren) => mandatory_tail_statements(&paren.expr, spans),
-        Expr::Group(group) => mandatory_tail_statements(&group.expr, spans),
+        Expr::Paren(paren) =>
+        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
+        {
+            mandatory_tail_statements(&paren.expr, spans);
+        }
+        Expr::Group(group) =>
+        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
+        {
+            mandatory_tail_statements(&group.expr, spans);
+        }
         _ => {}
     }
 }
@@ -3996,7 +4328,9 @@ fn explicitly_nonunit(expression: &Expr) -> bool {
 fn regex_mutations(pattern: &str) -> Vec<(&'static str, String)> {
     let mut candidates = Vec::new();
     let mut offer = |mutator: &'static str, replacement: String| {
-        if replacement != pattern && regex_syntax::Parser::new().parse(&replacement).is_ok() {
+        if
+        // #[gamma::skip(logical.and_remove_left, reason = "Every offer changes the input by construction: anchor removal shortens it, class negation inserts/removes '^', and quantifier swaps change their original byte. replacement!=pattern is therefore always true when offer is called.", tag = "equivalent")]
+        replacement != pattern && regex_syntax::Parser::new().parse(&replacement).is_ok() {
             candidates.push((mutator, replacement));
         }
     };
@@ -4006,7 +4340,12 @@ fn regex_mutations(pattern: &str) -> Vec<(&'static str, String)> {
     }
     if let Some(unanchored) = pattern.strip_suffix('$') {
         let trailing_backslashes = unanchored.bytes().rev().take_while(|byte| *byte == b'\\').count();
-        if trailing_backslashes.is_multiple_of(2) {
+        if
+        // #[gamma::skip(cond.always_true, reason = "Relaxing trailing-backslash parity newly admits only an odd final backslash before the dollar. Removing that dollar leaves an incomplete escape; the offer closure parses and rejects the invalid regex independently. Previous escaped-dollar cases were masked by this parser rejection.", tag = "equivalent")]
+        trailing_backslashes.is_multiple_of(
+            // #[gamma::skip(literal.int_decrement, reason = "Relaxing trailing-backslash parity newly admits only an odd final backslash before the dollar. Removing that dollar leaves an incomplete escape; the offer closure parses and rejects the invalid regex independently. Previous escaped-dollar cases were masked by this parser rejection.", tag = "equivalent")]
+            2,
+        ) {
             offer("regex.remove_end_anchor", unanchored.to_owned());
         }
     }
@@ -4017,11 +4356,14 @@ fn regex_mutations(pattern: &str) -> Vec<(&'static str, String)> {
     for index in 0..bytes.len() {
         let byte = bytes[index];
         if escaped {
-            escaped = false;
+            escaped =
+            // #[gamma::skip(assign_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
             continue;
         }
         if byte == b'\\' {
             escaped = true;
+            // #[gamma::skip(loop.delete_continue, reason = "After a backslash, falling through reaches no bracket/quantifier action for '\\\\'. After '[', falling through immediately reaches the in_class continue. After ']', falling through reaches no quantifier action for ']'. Deleting these individual continues therefore preserves both scanner state and every offered mutation.", tag = "equivalent")]
             continue;
         }
         if byte == b'[' && !in_class {
@@ -4033,10 +4375,14 @@ fn regex_mutations(pattern: &str) -> Vec<(&'static str, String)> {
                 replacement.insert(index + 1, '^');
             }
             offer("regex.negate_character_class", replacement);
+            // #[gamma::skip(loop.delete_continue, reason = "After a backslash, falling through reaches no bracket/quantifier action for '\\\\'. After '[', falling through immediately reaches the in_class continue. After ']', falling through reaches no quantifier action for ']'. Deleting these individual continues therefore preserves both scanner state and every offered mutation.", tag = "equivalent")]
             continue;
         }
         if byte == b']' {
-            in_class = false;
+            in_class =
+            // #[gamma::skip(assign_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
+            // #[gamma::skip(loop.delete_continue, reason = "After a backslash, falling through reaches no bracket/quantifier action for '\\\\'. After '[', falling through immediately reaches the in_class continue. After ']', falling through reaches no quantifier action for ']'. Deleting these individual continues therefore preserves both scanner state and every offered mutation.", tag = "equivalent")]
             continue;
         }
         if in_class {
@@ -4104,6 +4450,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
             return;
         }
 
+        // #[gamma::skip(stmt.delete_call, reason = "Collector.visit_pat does work only for a top-level Pat::Guard. The parser produces that top-level form for guarded match arms, never local declarations or let-expression conditions; their pattern entry points parse ordinary patterns without a trailing guard. These two calls therefore perform no work on their actual AST producers.", tag = "equivalent")]
         self.visit_pat(&node.pat);
         if let Some(init) = &node.init {
             if let Pat::Type(typed) = &node.pat {
@@ -4114,7 +4461,9 @@ impl<'ast> Visit<'ast> for Collector<'_> {
                         collector.visit_expr(&init.expr);
                     }
                 });
-            } else if self.is_known_unsigned(&init.expr)
+            } else if
+            // #[gamma::skip(logical.or_remove_left, reason = "is_known_unsigned can succeed only for Path, Field, Cast, Call, and transparent Paren/Group wrappers. unsigned_zero_spans records no spans for those base node kinds, so the extra initializer context supplied by this disjunct is always empty. Removing it visits the identical initializer with identical zero-marker state.", tag = "equivalent")]
+            self.is_known_unsigned(&init.expr)
                 || matches!(&node.pat, Pat::Ident(ident) if self.numeric_evidence.unsigned.contains(&ident.ident.span().byte_range()))
             {
                 self.in_unsigned_expression(&init.expr, |collector| collector.visit_expr(&init.expr));
@@ -4162,15 +4511,19 @@ impl<'ast> Visit<'ast> for Collector<'_> {
                 if let Some(init) = node.init.as_ref().filter(|init| init.diverge.is_none()) {
                     let inferred_type = self.inferred_expression_type(&init.expr);
                     let inferred_floating = self.is_known_float(&init.expr);
-                    let inferred_unsigned = inferred_type.as_ref().is_some_and(is_unsigned_binding)
-                        || self.is_known_unsigned(&init.expr)
-                        || self.numeric_evidence.unsigned.contains(&ident.ident.span().byte_range());
+                    let inferred_unsigned = (
+                        // #[gamma::skip(logical.or_remove_left, reason = "The inferred_type-is-unsigned disjunct can be true only when inferred_type is Some. That case immediately takes bind_type_with_trust and never consults inferred_unsigned. When the boolean is actually used, inferred_type is None and this disjunct is false.", tag = "equivalent")]
+                        inferred_type.as_ref().is_some_and(is_unsigned_binding) || self.is_known_unsigned(&init.expr)
+                    ) || self.numeric_evidence.unsigned.contains(&ident.ident.span().byte_range());
                     self.bind(
                         name.clone(),
                         self.is_known_numeric(&init.expr) || self.numeric_evidence.numeric.contains(&ident.ident.span().byte_range()),
                     );
                     if inferred_floating {
-                        let prior = !self.inferred_floating.insert(name.clone());
+                        let prior =
+                        // #[gamma::skip(unary.remove_not, reason = "Every inferred-float insertion is preceded in the same visit_local by bind(name,...), which removes that float flag and logs its actual prior state as Undo::InferredFloating. No scope checkpoint occurs between that bind and the later redundant undo record. Unwinding always replays bind's earlier authoritative prior state last; while inside the scope, the float insertion itself is unchanged.", tag = "equivalent")]
+                        !self.inferred_floating.insert(name.clone());
+                        // #[gamma::skip(stmt.delete_call, reason = "Every inferred-float insertion is preceded in the same visit_local by bind(name,...), which removes that float flag and logs its actual prior state as Undo::InferredFloating. No scope checkpoint occurs between that bind and the later redundant undo record. Unwinding always replays bind's earlier authoritative prior state last; while inside the scope, the float insertion itself is unchanged.", tag = "equivalent")]
                         self.undo.push(Undo::InferredFloating(name.clone(), prior));
                     }
 
@@ -4313,19 +4666,27 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         self.impl_self_associated = outer_associated;
     }
 
+    // #[gamma::skip(fn_value.unit, reason = "These continuations run wholly under positive inert_depth, so emission rejects every candidate before identity bookkeeping. Declaration/type/numeric indexes were built before traversal and are not populated here. Nested blocks undo local bindings, nested functions save/restore function maps and contexts, and loop/expected-type stacks are balanced on exit. Any span-keyed ownership/proof work concerns these disjoint const/type sites, not later runtime sites. Omitting this inert-only descent changes no output.", tag = "equivalent")]
     fn visit_item_const(&mut self, node: &'ast ItemConst) {
+        // #[gamma::skip(stmt.delete_call, reason = "These continuations run wholly under positive inert_depth, so emission rejects every candidate before identity bookkeeping. Declaration/type/numeric indexes were built before traversal and are not populated here. Nested blocks undo local bindings, nested functions save/restore function maps and contexts, and loop/expected-type stacks are balanced on exit. Any span-keyed ownership/proof work concerns these disjoint const/type sites, not later runtime sites. Omitting this inert-only descent changes no output.", tag = "equivalent")]
         self.inert(|collector| visit::visit_item_const(collector, node));
     }
 
+    // #[gamma::skip(fn_value.unit, reason = "These continuations run wholly under positive inert_depth, so emission rejects every candidate before identity bookkeeping. Declaration/type/numeric indexes were built before traversal and are not populated here. Nested blocks undo local bindings, nested functions save/restore function maps and contexts, and loop/expected-type stacks are balanced on exit. Any span-keyed ownership/proof work concerns these disjoint const/type sites, not later runtime sites. Omitting this inert-only descent changes no output.", tag = "equivalent")]
     fn visit_item_static(&mut self, node: &'ast ItemStatic) {
+        // #[gamma::skip(stmt.delete_call, reason = "These continuations run wholly under positive inert_depth, so emission rejects every candidate before identity bookkeeping. Declaration/type/numeric indexes were built before traversal and are not populated here. Nested blocks undo local bindings, nested functions save/restore function maps and contexts, and loop/expected-type stacks are balanced on exit. Any span-keyed ownership/proof work concerns these disjoint const/type sites, not later runtime sites. Omitting this inert-only descent changes no output.", tag = "equivalent")]
         self.inert(|collector| visit::visit_item_static(collector, node));
     }
 
+    // #[gamma::skip(fn_value.unit, reason = "These continuations run wholly under positive inert_depth, so emission rejects every candidate before identity bookkeeping. Declaration/type/numeric indexes were built before traversal and are not populated here. Nested blocks undo local bindings, nested functions save/restore function maps and contexts, and loop/expected-type stacks are balanced on exit. Any span-keyed ownership/proof work concerns these disjoint const/type sites, not later runtime sites. Omitting this inert-only descent changes no output.", tag = "equivalent")]
     fn visit_impl_item_const(&mut self, node: &'ast ImplItemConst) {
+        // #[gamma::skip(stmt.delete_call, reason = "These continuations run wholly under positive inert_depth, so emission rejects every candidate before identity bookkeeping. Declaration/type/numeric indexes were built before traversal and are not populated here. Nested blocks undo local bindings, nested functions save/restore function maps and contexts, and loop/expected-type stacks are balanced on exit. Any span-keyed ownership/proof work concerns these disjoint const/type sites, not later runtime sites. Omitting this inert-only descent changes no output.", tag = "equivalent")]
         self.inert(|collector| visit::visit_impl_item_const(collector, node));
     }
 
+    // #[gamma::skip(fn_value.unit, reason = "These continuations run wholly under positive inert_depth, so emission rejects every candidate before identity bookkeeping. Declaration/type/numeric indexes were built before traversal and are not populated here. Nested blocks undo local bindings, nested functions save/restore function maps and contexts, and loop/expected-type stacks are balanced on exit. Any span-keyed ownership/proof work concerns these disjoint const/type sites, not later runtime sites. Omitting this inert-only descent changes no output.", tag = "equivalent")]
     fn visit_trait_item_const(&mut self, node: &'ast TraitItemConst) {
+        // #[gamma::skip(stmt.delete_call, reason = "These continuations run wholly under positive inert_depth, so emission rejects every candidate before identity bookkeeping. Declaration/type/numeric indexes were built before traversal and are not populated here. Nested blocks undo local bindings, nested functions save/restore function maps and contexts, and loop/expected-type stacks are balanced on exit. Any span-keyed ownership/proof work concerns these disjoint const/type sites, not later runtime sites. Omitting this inert-only descent changes no output.", tag = "equivalent")]
         self.inert(|collector| visit::visit_trait_item_const(collector, node));
     }
 
@@ -4380,14 +4741,21 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         // `||` is rejected by the parser, because a binding cannot escape one arm of an `or`. The
         // binding may be on either side, as the chain associates to the left and a `let` commonly
         // comes last.
-        let chains_a_binding = matches!(node.op, BinOp::And(_)) && (binds_a_pattern(&node.left) || binds_a_pattern(&node.right));
+        let chains_a_binding =
+        // #[gamma::skip(logical.and_remove_left, reason = "binds_a_pattern descends only through Let, Paren, and && nodes. In valid Rust a let expression participates only in the && spine of an if/while condition; nesting one under another binary operator is forbidden. Thus either true operand predicate already implies this binary node is &&.", tag = "equivalent")]
+        matches!(node.op, BinOp::And(_)) && (binds_a_pattern(&node.left) || binds_a_pattern(&node.right));
 
         for (index, (mutator, operator)) in binary_replacements(&node.op).iter().enumerate() {
-            let index = u32::try_from(index).unwrap_or(u32::MAX);
+            let index = u32::try_from(index).unwrap_or(
+                // #[gamma::skip(expr.decrement, reason = "binary_replacements returns a fixed slice containing at most two entries. Its enumerate index always converts to u32, so the changed MAX fallback can never be selected.", tag = "equivalent")]
+                u32::MAX,
+            );
 
             // Most binary expressions in a tree have no selected mutator, and the operand text is
             // only needed to build a replacement, so it is read once and only on demand.
-            if chains_a_binding || !self.wants(mutator) {
+            if
+            // #[gamma::skip(logical.or_remove_right, reason = "These are allocation/text-construction prefilters for selected mutators. Their final emit path rechecks wants before recording a candidate or advancing identity state. The newly executed text construction and eligibility queries are read-only; an unselected mutator remains unselected at the authoritative emission gate.", tag = "equivalent")]
+            chains_a_binding || !self.wants(mutator) {
                 continue;
             }
 
@@ -4425,11 +4793,15 @@ impl<'ast> Visit<'ast> for Collector<'_> {
 
         if !chains_a_binding {
             let mut emit_removals = |left_mutator, right_mutator| {
-                if self.wants(left_mutator) {
+                if
+                // #[gamma::skip(cond.always_true, reason = "These are allocation/text-construction prefilters for selected mutators. Their final emit path rechecks wants before recording a candidate or advancing identity state. The newly executed text construction and eligibility queries are read-only; an unselected mutator remains unselected at the authoritative emission gate.", tag = "equivalent")]
+                self.wants(left_mutator) {
                     let replacement = format_compact!("({})", self.text_of(node.right.span()));
                     self.emit(left_mutator, span, replacement, 0);
                 }
-                if self.wants(right_mutator) {
+                if
+                // #[gamma::skip(cond.always_true, reason = "These are allocation/text-construction prefilters for selected mutators. Their final emit path rechecks wants before recording a candidate or advancing identity state. The newly executed text construction and eligibility queries are read-only; an unselected mutator remains unselected at the authoritative emission gate.", tag = "equivalent")]
+                self.wants(right_mutator) {
                     let replacement = format_compact!("({})", self.text_of(node.left.span()));
                     self.emit(right_mutator, span, replacement, 0);
                 }
@@ -4445,22 +4817,29 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         let right_unsigned = self.is_known_unsigned(&node.right);
         let left_signed = self.is_known_signed(&node.left);
         let right_signed = self.is_known_signed(&node.right);
-        if matches!(
+        if
+        // #[gamma::skip(logical.and_remove_right, reason = "When a comparison has no signed or unsigned operand, entering the expanded branch still takes both ordinary visit_expr else arms and the no-op bin-op continuation. This is exactly default visit_expr_binary's behavior; attribute visitation is also a no-op.", tag = "equivalent")]
+        matches!(
             node.op,
             BinOp::Eq(_) | BinOp::Ne(_) | BinOp::Lt(_) | BinOp::Le(_) | BinOp::Gt(_) | BinOp::Ge(_)
         ) && (left_unsigned || right_unsigned || left_signed || right_signed)
         {
             if right_unsigned {
                 self.in_unsigned_expression(&node.left, |collector| collector.visit_expr(&node.left));
-            } else if right_signed {
+            } else if
+            // #[gamma::skip(cond.always_true, reason = "A newly forced signed context is reached only when the opposite operand is neither signed nor unsigned but this operand itself supplied the enclosing known-sign gate. Known signed/unsigned operands are Path/Field/Cast/Call/Binary plus Paren/Group wrappers; unsigned_zero_spans finds no zeros in any of those base shapes. The newly entered context therefore changes no markers and performs the same normal visit.", tag = "equivalent")]
+            right_signed {
                 self.in_signed_expression(&node.left, |collector| collector.visit_expr(&node.left));
             } else {
                 self.visit_expr(&node.left);
             }
+            // #[gamma::skip(stmt.delete_call, reason = "The default binary-operator and continue-expression continuations visit punctuation tokens and an optional label/identifier only. Collector has no behavioral visitor for those token/identifier nodes; they neither emit candidates nor alter binding state.", tag = "equivalent")]
             visit::visit_bin_op(self, &node.op);
             if left_unsigned {
                 self.in_unsigned_expression(&node.right, |collector| collector.visit_expr(&node.right));
-            } else if left_signed {
+            } else if
+            // #[gamma::skip(cond.always_true, reason = "A newly forced signed context is reached only when the opposite operand is neither signed nor unsigned but this operand itself supplied the enclosing known-sign gate. Known signed/unsigned operands are Path/Field/Cast/Call/Binary plus Paren/Group wrappers; unsigned_zero_spans finds no zeros in any of those base shapes. The newly entered context therefore changes no markers and performs the same normal visit.", tag = "equivalent")]
+            left_signed {
                 self.in_signed_expression(&node.right, |collector| collector.visit_expr(&node.right));
             } else {
                 self.visit_expr(&node.right);
@@ -4474,6 +4853,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         // The length of `[0u8; 32]` is a const expression, so it cannot hold a guard, but the
         // element expression can.
         self.visit_expr(&node.expr);
+        // #[gamma::skip(stmt.delete_call, reason = "These continuations run wholly under positive inert_depth, so emission rejects every candidate before identity bookkeeping. Declaration/type/numeric indexes were built before traversal and are not populated here. Nested blocks undo local bindings, nested functions save/restore function maps and contexts, and loop/expected-type stacks are balanced on exit. Any span-keyed ownership/proof work concerns these disjoint const/type sites, not later runtime sites. Omitting this inert-only descent changes no output.", tag = "equivalent")]
         self.inert(|collector| collector.visit_expr(&node.len));
     }
 
@@ -4488,11 +4868,14 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         });
     }
 
+    // #[gamma::skip(fn_value.unit, reason = "These continuations run wholly under positive inert_depth, so emission rejects every candidate before identity bookkeeping. Declaration/type/numeric indexes were built before traversal and are not populated here. Nested blocks undo local bindings, nested functions save/restore function maps and contexts, and loop/expected-type stacks are balanced on exit. Any span-keyed ownership/proof work concerns these disjoint const/type sites, not later runtime sites. Omitting this inert-only descent changes no output.", tag = "equivalent")]
     fn visit_variant(&mut self, node: &'ast Variant) {
         // An enum discriminant is a const expression.
+        // #[gamma::skip(stmt.delete_call, reason = "These continuations run wholly under positive inert_depth, so emission rejects every candidate before identity bookkeeping. Declaration/type/numeric indexes were built before traversal and are not populated here. Nested blocks undo local bindings, nested functions save/restore function maps and contexts, and loop/expected-type stacks are balanced on exit. Any span-keyed ownership/proof work concerns these disjoint const/type sites, not later runtime sites. Omitting this inert-only descent changes no output.", tag = "equivalent")]
         self.inert(|collector| visit::visit_variant(collector, node));
     }
 
+    // #[gamma::skip(fn_value.unit, reason = "These continuations run wholly under positive inert_depth, so emission rejects every candidate before identity bookkeeping. Declaration/type/numeric indexes were built before traversal and are not populated here. Nested blocks undo local bindings, nested functions save/restore function maps and contexts, and loop/expected-type stacks are balanced on exit. Any span-keyed ownership/proof work concerns these disjoint const/type sites, not later runtime sites. Omitting this inert-only descent changes no output.", tag = "equivalent")]
     fn visit_type(&mut self, node: &'ast Type) {
         // Every expression reachable from inside a type is a const expression: the length in
         // `[u8; 200]`, the argument in `Matrix<3, 3>`, and the same two nested arbitrarily deep in
@@ -4500,19 +4883,25 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         // *value*, and it is easy to assume that is the same thing — it is not, and the difference
         // is a mutant that cannot compile in a position the rollback rounds then have to discover
         // by building the whole tree.
+        // #[gamma::skip(stmt.delete_call, reason = "These continuations run wholly under positive inert_depth, so emission rejects every candidate before identity bookkeeping. Declaration/type/numeric indexes were built before traversal and are not populated here. Nested blocks undo local bindings, nested functions save/restore function maps and contexts, and loop/expected-type stacks are balanced on exit. Any span-keyed ownership/proof work concerns these disjoint const/type sites, not later runtime sites. Omitting this inert-only descent changes no output.", tag = "equivalent")]
         self.inert(|collector| visit::visit_type(collector, node));
     }
 
+    // #[gamma::skip(fn_value.unit, reason = "Runtime expressions inside a generic argument or type path can occur only as const arguments, which visit_generic_argument already makes inert. Every nested type is also inert; remaining lifetime, bound, identifier and punctuation visits are no-ops. Treating every generic argument as inert or omitting these type/path continuations therefore changes neither candidates nor retained runtime binding state.", tag = "equivalent")]
     fn visit_generic_argument(&mut self, node: &'ast GenericArgument) {
         // A const generic argument is a const expression wherever it stands, and `visit_type`
         // only reaches the ones a type encloses. The turbofish on a path in expression position —
         // `Foo::<{ N + 1 }>::BAR`, `g::<{ N + 1 }>()` — is not inside any type, so without this
         // it is mutated, and a guard is a function call that no const context will evaluate.
-        if matches!(node, GenericArgument::Const(_)) {
+        if
+        // #[gamma::skip(cond.always_true, reason = "Runtime expressions inside a generic argument or type path can occur only as const arguments, which visit_generic_argument already makes inert. Every nested type is also inert; remaining lifetime, bound, identifier and punctuation visits are no-ops. Treating every generic argument as inert or omitting these type/path continuations therefore changes neither candidates nor retained runtime binding state.", tag = "equivalent")]
+        matches!(node, GenericArgument::Const(_)) {
+            // #[gamma::skip(stmt.delete_call, reason = "Runtime expressions inside a generic argument or type path can occur only as const arguments, which visit_generic_argument already makes inert. Every nested type is also inert; remaining lifetime, bound, identifier and punctuation visits are no-ops. Treating every generic argument as inert or omitting these type/path continuations therefore changes neither candidates nor retained runtime binding state.", tag = "equivalent")]
             self.inert(|collector| visit::visit_generic_argument(collector, node));
             return;
         }
 
+        // #[gamma::skip(stmt.delete_call, reason = "Runtime expressions inside a generic argument or type path can occur only as const arguments, which visit_generic_argument already makes inert. Every nested type is also inert; remaining lifetime, bound, identifier and punctuation visits are no-ops. Treating every generic argument as inert or omitting these type/path continuations therefore changes neither candidates nor retained runtime binding state.", tag = "equivalent")]
         visit::visit_generic_argument(self, node);
     }
 
@@ -4581,7 +4970,9 @@ impl<'ast> Visit<'ast> for Collector<'_> {
                     collector.record_declaration(local);
                 }
 
-                if unsigned_tail
+                if
+                // #[gamma::skip(logical.and_remove_right, reason = "A nonfinal semicolon-free statement in a valid function body must be a unit/diverging block-like expression. unsigned_zero_spans follows only value tails, not call arguments, assignments, or other unit-producing syntax; a reachable zero along those value tails would make the nonfinal statement nonunit and invalid. Thus only the real final value can acquire a zero marker even without this explicit last-statement filter.", tag = "equivalent")]
+                unsigned_tail
                     && index + 1 == node.stmts.len()
                     && let Stmt::Expr(expression, None) = statement
                 {
@@ -4696,12 +5087,14 @@ impl<'ast> Visit<'ast> for Collector<'_> {
     fn visit_expr_let(&mut self, node: &'ast ExprLet) {
         self.visit_expr(&node.expr);
         self.bind_pattern(&node.pat, None);
+        // #[gamma::skip(stmt.delete_call, reason = "Collector.visit_pat does work only for a top-level Pat::Guard. The parser produces that top-level form for guarded match arms, never local declarations or let-expression conditions; their pattern entry points parse ordinary patterns without a trailing guard. These two calls therefore perform no work on their actual AST producers.", tag = "equivalent")]
         self.visit_pat(&node.pat);
     }
 
     fn visit_expr_cast(&mut self, node: &'ast ExprCast) {
         if is_unsigned_binding(&node.ty) {
             self.in_unsigned_expression(&node.expr, |collector| collector.visit_expr(&node.expr));
+            // #[gamma::skip(stmt.delete_call, reason = "Runtime expressions inside a generic argument or type path can occur only as const arguments, which visit_generic_argument already makes inert. Every nested type is also inert; remaining lifetime, bound, identifier and punctuation visits are no-ops. Treating every generic argument as inert or omitting these type/path continuations therefore changes neither candidates nor retained runtime binding state.", tag = "equivalent")]
             visit::visit_type(self, &node.ty);
         } else {
             visit::visit_expr_cast(self, node);
@@ -4717,7 +5110,9 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         // Only the negation, because a `while` forced to `true` never terminates and one forced to
         // `false` is the loop deleted — the first costs a full timeout to reach a verdict already
         // available more cheaply, and the second is what statement deletion asks.
-        if !binds_a_pattern(&node.cond) && self.wants("cond.negate") {
+        if
+        // #[gamma::skip(logical.and_remove_right, reason = "These are allocation/text-construction prefilters for selected mutators. Their final emit path rechecks wants before recording a candidate or advancing identity state. The newly executed text construction and eligibility queries are read-only; an unselected mutator remains unselected at the authoritative emission gate.", tag = "equivalent")]
+        !binds_a_pattern(&node.cond) && self.wants("cond.negate") {
             let span = node.cond.span();
             let negated = self.negation_of(span);
 
@@ -4777,6 +5172,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
                     .is_some_and(|ty| !matches!(resolve_type(ty), Kind::Unit | Kind::Unknown))
         }) {
             for arm in &node.arms {
+                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                 mandatory_tail_statements(&arm.body, &mut self.undeletable_statements);
             }
         }
@@ -4795,6 +5191,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
 
     fn visit_expr_struct(&mut self, node: &'ast ExprStruct) {
         self.struct_fields(node);
+        // #[gamma::skip(stmt.delete_call, reason = "Runtime expressions inside a generic argument or type path can occur only as const arguments, which visit_generic_argument already makes inert. Every nested type is also inert; remaining lifetime, bound, identifier and punctuation visits are no-ops. Treating every generic argument as inert or omitting these type/path continuations therefore changes neither candidates nor retained runtime binding state.", tag = "equivalent")]
         visit::visit_path(self, &node.path);
         for field in &node.fields {
             if self.skipped(&field.attrs) {
@@ -4814,6 +5211,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
                         }
                     });
                 } else {
+                    // #[gamma::skip(stmt.delete_call, reason = "The exact deletion is the KNOWN-type shorthand field branch, not the unknown-layout branch covered by the old literal-initializer test. A parsed shorthand value is a plain one-identifier ExprPath. This branch does not establish an expected-type context; admissible_default_spans/reusable_payload_spans do not descend into ExprStruct, so even a field named None has no marker. visit_expr_path otherwise only traverses this childless path and emits nothing; generic/place perturbation is not performed here.", tag = "equivalent")]
                     self.visit_expr(&field.expr);
                 }
             } else {
@@ -4903,6 +5301,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
 
     fn visit_expr_continue(&mut self, node: &'ast ExprContinue) {
         if !self.admit_ownership_edit(node.span().byte_range(), &node.span().byte_range(), true) {
+            // #[gamma::skip(stmt.delete_call, reason = "The default binary-operator and continue-expression continuations visit punctuation tokens and an optional label/identifier only. Collector has no behavioral visitor for those token/identifier nodes; they neither emit candidates nor alter binding state.", tag = "equivalent")]
             visit::visit_expr_continue(self, node);
             return;
         }
@@ -4990,9 +5389,13 @@ impl<'ast> Visit<'ast> for Collector<'_> {
     fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
         // A bare `None` in expression position. Patterns never reach here, because `visit_pat`
         // stops the traversal before a pattern's interior is examined at all.
-        if node.path.is_ident("None") && self.admissible_defaults.contains(&node.span().byte_range()) {
+        if
+        // #[gamma::skip(logical.and_remove_left, reason = "The marker producers record path-expression spans only for bare None. Their other recorded sites are complete Ok/Err calls, whose spans strictly contain the callee path plus argument parentheses and cannot equal an ExprPath span. Thus membership already implies this visited path is None.", tag = "equivalent")]
+        node.path.is_ident("None") && self.admissible_defaults.contains(&node.span().byte_range()) {
             self.emit("option.none_to_some", node.span(), "Some(Default::default())", 0);
-        } else if node.path.is_ident("None") && self.reusable_payload(&node.span().byte_range()).is_some() {
+        } else if
+        // #[gamma::skip(logical.and_remove_left, reason = "The marker producers record path-expression spans only for bare None. Their other recorded sites are complete Ok/Err calls, whose spans strictly contain the callee path plus argument parentheses and cannot equal an ExprPath span. Thus membership already implies this visited path is None.", tag = "equivalent")]
+        node.path.is_ident("None") && self.reusable_payload(&node.span().byte_range()).is_some() {
             let value = self.reusable_payload(&node.span().byte_range()).unwrap_or_default().to_owned();
             self.emit("option.none_to_some", node.span(), format_compact!("Some({value})"), 0);
         }
@@ -5059,7 +5462,11 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         let receiver = self.inferred_expression_type(&node.receiver);
         let inferred = receiver.as_ref().and_then(|receiver| {
             if matches!(method.as_str(), "any" | "all") && node.args.len() == 1 {
-                let Expr::Closure(closure) = node.args.first()? else {
+                let Expr::Closure(closure) =
+                // #[gamma::skip(try.propagate_to_unwrap, reason = "The any/all branch guards args.len()==1 before inspecting args.first(). The singleton is also last, and its first element cannot be None.", tag = "equivalent")]
+
+                // #[gamma::skip(iter.first_to_last, reason = "The any/all branch guards args.len()==1 before inspecting args.first(). The singleton is also last, and its first element cannot be None.", tag = "equivalent")]
+                node.args.first()? else {
                     return None;
                 };
                 let item = self.inferred_iterator_item(receiver)?;
@@ -5216,10 +5623,22 @@ impl<'ast> Visit<'ast> for Collector<'_> {
             Lit::Float(value) => {
                 let suffix = value.suffix();
                 let digits = value.base10_digits();
-                if digits != "0.0" && digits != "0" {
+                if
+                // #[gamma::skip(logical.and_remove_right, reason = "The SourceFile parser tries syn::LitInt before LitFloat. Integer-only 0/1 spellings with f32/f64 suffixes still produce LitInt. Parser-produced LitFloat spellings retain a decimal point or exponent in base10_digits: syn 3.0.4 parse_lit_float removes only underscores and positive exponent signs, never '.' or 'e'. Its digits cannot equal bare 0/1, empty, or xyzzy, making these secondary comparisons redundant.", tag = "equivalent")]
+                digits != "0.0"
+                    && digits !=
+                // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "The SourceFile parser tries syn::LitInt before LitFloat. Integer-only 0/1 spellings with f32/f64 suffixes still produce LitInt. Parser-produced LitFloat spellings retain a decimal point or exponent in base10_digits: syn 3.0.4 parse_lit_float removes only underscores and positive exponent signs, never '.' or 'e'. Its digits cannot equal bare 0/1, empty, or xyzzy, making these secondary comparisons redundant.", tag = "equivalent")]
+                "0"
+                {
                     self.emit("literal.float_to_zero", span, format_compact!("0.0{suffix}"), 0);
                 }
-                if digits != "1.0" && digits != "1" {
+                if
+                // #[gamma::skip(logical.and_remove_right, reason = "The SourceFile parser tries syn::LitInt before LitFloat. Integer-only 0/1 spellings with f32/f64 suffixes still produce LitInt. Parser-produced LitFloat spellings retain a decimal point or exponent in base10_digits: syn 3.0.4 parse_lit_float removes only underscores and positive exponent signs, never '.' or 'e'. Its digits cannot equal bare 0/1, empty, or xyzzy, making these secondary comparisons redundant.", tag = "equivalent")]
+                digits != "1.0"
+                    && digits !=
+                // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "The SourceFile parser tries syn::LitInt before LitFloat. Integer-only 0/1 spellings with f32/f64 suffixes still produce LitInt. Parser-produced LitFloat spellings retain a decimal point or exponent in base10_digits: syn 3.0.4 parse_lit_float removes only underscores and positive exponent signs, never '.' or 'e'. Its digits cannot equal bare 0/1, empty, or xyzzy, making these secondary comparisons redundant.", tag = "equivalent")]
+                "1"
+                {
                     self.emit("literal.float_to_one", span, format_compact!("1.0{suffix}"), 1);
                 }
                 if value.base10_parse::<f64>().is_ok_and(|number| number != 0.0) {
@@ -5259,7 +5678,9 @@ impl<'ast> Visit<'ast> for Collector<'_> {
     }
 
     fn visit_expr_try(&mut self, node: &'ast ExprTry) {
-        if self.wants("try.propagate_to_unwrap") {
+        if
+        // #[gamma::skip(cond.always_true, reason = "These are allocation/text-construction prefilters for selected mutators. Their final emit path rechecks wants before recording a candidate or advancing identity state. The newly executed text construction and eligibility queries are read-only; an unselected mutator remains unselected at the authoritative emission gate.", tag = "equivalent")]
+        self.wants("try.propagate_to_unwrap") {
             let value = self.text_of(node.expr.span());
             self.emit(
                 "try.propagate_to_unwrap",

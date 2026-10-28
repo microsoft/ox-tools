@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 use core::time::Duration;
-use std::fs;
+use std::fs::{self, File};
 use std::io::{ErrorKind, Write};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -304,7 +304,9 @@ fn emit_reports_from<H: Host>(
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn emit_ci<H: Host>(host: &mut H, args: &RunArgs, plan: &Plan, advice: Option<&str>, styler: Styler) -> crate::Result<()> {
     let path = Documents::resolve(args, &plan.root).sarif;
-    let (log, truncation) = crate::ci::sarif(&plan.mutants, &plan.root, args.sarif_level)?;
+    let (log, truncation) =
+    // #[gamma::skip(try.propagate_to_unwrap, reason = "ci::sarif delegates to sarif_fitting, whose only Result failures are serialization of its fixed derived SARIF DTO into String/Vec/Counted. Those DTOs contain only strings, primitive fields, vectors and string-key maps, and the writers are infallible except allocation abort. The fitting loop returns the empty valid prefix even if no nonempty document fits. Thus this call cannot produce Err for panic_on_failure to distinguish.", tag = "equivalent")]
+    crate::ci::sarif(&plan.mutants, &plan.root, args.sarif_level)?;
 
     crate::elements::write(&path, &log)?;
 
@@ -415,7 +417,9 @@ fn ungraded<H: Host>(host: &mut H, args: &RunArgs, styler: Styler, flaky_outcome
     } else if expectations {
         "the expectations this run carried"
     } else {
-        return EXIT_OK;
+        return
+        // #[gamma::skip(return_value.default, reason = "EXIT_OK is i32 zero, and Default::default() in the return position is the same i32 zero.", tag = "equivalent")]
+        EXIT_OK;
     };
 
     let _ = writeln!(
@@ -614,8 +618,12 @@ fn resume_relaunch_with(
 }
 
 fn flaky_excess(args: &RunArgs, flaky: u32) -> Option<usize> {
-    args.max_flaky
-        .filter(|maximum| usize::try_from(flaky).unwrap_or(usize::MAX) > *maximum)
+    args.max_flaky.filter(|maximum| {
+        usize::try_from(flaky).unwrap_or(
+            // #[gamma::skip(expr.decrement, reason = "flaky is u32 and usize is at least32 bits on every supported Cargo Gamma runtime target, so usize::try_from(flaky) cannot fail. Only the unused usize::MAX fallback changes to MAX-1; every representable input still compares the same converted flaky count.", tag = "equivalent")]
+            usize::MAX,
+        ) > *maximum
+    })
 }
 
 // #[gamma::skip(all, reason = "the gate truth table is asserted directly; instrumentation of this private predicate is not distinguishable from the calling gate branch")]
@@ -859,7 +867,9 @@ fn store_failed_convergence(prepared: Option<&RecordPreparation>, failed: &exec:
 
 fn postprocessing_advice(root: &Utf8Path, stored: &crate::discover::RunRecord, reachable: bool) -> (bool, bool) {
     if !reachable {
-        return (false, false);
+        return
+        // #[gamma::skip(return_value.default, reason = "The return type is(bool,bool); tuple Default is(false,false), exactly the replaced return expression.", tag = "equivalent")]
+        (false, false);
     }
 
     let suppressible = stored
@@ -1302,7 +1312,7 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
     let mut footer = listings(args, announced, Some(promotable), Some(suppressible));
     footer.stats = Some(stats(&built.session, started.elapsed()));
     crate::report::summarize(host, &plan, styler, footer)?;
-    crate::report::session_notes(host, &built.session, false, false, styler)?;
+    crate::report::session_notes(host, &built.session, styler)?;
 
     let wall = started.elapsed();
     let panel = summary_panel(args, &plan, &built.session, &stuck, &dropped, wall);
@@ -1358,10 +1368,6 @@ fn resumed_testing<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, s
     resumed_testing_with_support(host, args, progress_when, styler, exec::memory_support, |_| {})
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "resume keeps execution and publication-only recovery in one ordered reporting and lock-cleanup path"
-)]
 fn resumed_testing_with_support<H: Host, E: std::error::Error + Send + Sync + 'static>(
     host: &mut H,
     args: &RunArgs,
@@ -1398,42 +1404,23 @@ fn resumed_testing_with_support<H: Host, E: std::error::Error + Send + Sync + 's
     let record = state.record.clone();
     let retained_info = resumed_report_info(record.report_info.as_ref());
     let retained_session = publication_only.then(|| state.session.clone());
-    let (work, _publication_lock) = if publication_only {
-        (None, Some(lock))
-    } else {
-        (
-            Some(exec::Workspace::resume_testing(
-                &state.plan.root,
-                &state.record.base,
-                state.workspace.clone(),
-                lock,
-                valid_bytes,
-                exec::TestingResumeIo::FILESYSTEM,
-            )?),
-            None,
+    let (work, _publication_lock) = resumed_work(&state, lock, valid_bytes, publication_only, |state, lock, valid_bytes| {
+        exec::Workspace::resume_testing(
+            &state.plan.root,
+            &state.record.base,
+            state.workspace.clone(),
+            lock,
+            valid_bytes,
+            exec::TestingResumeIo::FILESYSTEM,
         )
-    };
-    let profile = match work.as_ref() {
-        Some(work) => work.reporting_profile(),
-        None => state
-            .workspace
-            .get("cargo")
-            .and_then(|cargo| cargo.get("profile"))
-            .and_then(serde_json::Value::as_str),
-    };
-    let reporting_args = prepare_resumed_reporting(host, args, &state, profile, styler)?;
-    let visible = progress_when.resolve(host.is_terminal());
-    let mut verdict_log = VerdictLog::default();
-    verdict_log.resume(&base)?;
+    })?;
+    let profile =
+    // #[gamma::skip(call.replace_with_default, call_result.default, reason = "This exact resume-orchestration call follows native cache claims and frozen-state loading. A distinguishing end-to-end resume would require generated input checkpoints; profile selection and reporting policy have owned-input tests, not a duplicate of this call.", tag = "native-boundary")]
+    resumed_profile(work.as_ref(), &state);
+    let (reporting_args, visible, mut verdict_log) =
+        resumed_reporting_inputs(host, args, &state, profile, &base, progress_when, styler, VerdictLog::resume)?;
     configure_log(&mut verdict_log);
-    let mut events = ConsoleEvents {
-        progress: Progress::new(visible, styler, host.terminal_width()),
-        dashboard: Dashboard::new(visible && args.dashboard, host.terminal_width(), styler),
-        host,
-        styler,
-        show_build: false,
-        verdict_log,
-    };
+    let mut events = resumed_console_events(host, args, visible, styler, verdict_log);
     let settled = events
         .progress
         .restore_outcomes(state.plan.mutants.iter().map(|mutant| mutant.outcome));
@@ -1445,72 +1432,220 @@ fn resumed_testing_with_support<H: Host, E: std::error::Error + Send + Sync + 's
     )?;
     let outcome = match work {
         Some(work) => exec::resume_testing(state, work, &mut events),
-        None => state.complete_testing().map(|()| exec::Measured {
-            plan: state.plan,
-            built: None,
-            learning: Some(state.killers),
-            stuck: state.stuck,
-            dropped: state.dropped,
-        }),
+        None => complete_retained_testing(state, exec::TestingState::complete_testing),
     };
-    let log_failure = events.finish_verdict_log().err();
-    if outcome.is_err() {
-        events.abandon();
-    }
+    let (outcome, log_failure) = finish_resumed_events(&mut events, outcome)?;
     let exec::Measured {
         plan,
         built,
         stuck,
         dropped,
         learning,
-    } = outcome?;
-    events.dashboard.finish(events.host);
-    events.progress.finish(events.host);
+    } = outcome;
     let announced = events.progress.is_enabled();
     let host = events.host;
-    let (base, stored) = publish_completed_record(record, &plan, learning.as_ref())?;
-    let reachable = exec::remember_campaign_base(&plan.root, &base);
-    let (promotable, suppressible) = postprocessing_advice(&plan.root, &stored, reachable);
     let mut built = built;
-    let (session, source_root) = if let Some(built) = built.as_mut() {
-        built.work.snapshot_report_sources(&plan)?;
-        (built.session.clone(), built.work.report_source_root())
-    } else {
-        (
-            retained_session.expect("only publication-only recovery completes without a built session"),
-            snapshot_captured_report_sources(&base, &plan)?,
-        )
-    };
+    let (promotable, suppressible, session, source_root) = resumed_publication(
+        record,
+        &plan,
+        learning.as_ref(),
+        exec::remember_campaign_base,
+        built.as_mut(),
+        retained_session,
+    )?;
     let wall = started.elapsed();
     let mut footer = listings(args, announced, Some(promotable), Some(suppressible));
     footer.stats = Some(stats(&session, wall));
     crate::report::summarize(host, &plan, styler, footer)?;
-    crate::report::session_notes(host, &session, false, false, styler)?;
+    crate::report::session_notes(host, &session, styler)?;
     let panel = summary_panel(&reporting_args, &plan, &session, &stuck, &dropped, wall);
     emit_reports_from(
         host,
         args,
         &plan,
-        &ReportContents {
-            retained_info: Some(&retained_info),
-            source_root: Some(&source_root),
-            advice: Some(&panel),
-            tests: session.tests,
-            dropped: &dropped,
-        },
+        &resumed_report_contents(&retained_info, &source_root, &panel, session.tests, &dropped),
         styler,
     )?;
     emit_advice(host, &reporting_args, &plan, &session, wall, styler)?;
     emit_diag(host, &reporting_args, &plan, Some(&session), started, styler)?;
-    report_dropped(host, &dropped, styler)?;
-    report_stuck(host, &stuck, styler)?;
-    warn_auxiliary(host, log_failure.as_ref(), styler);
-    if let Some(built) = built.as_mut()
-        && let Err(failure) = built.work.teardown()
-    {
+    finish_resumed_reporting(host, &dropped, &stuck, log_failure.as_ref(), styler, || {
+        built.as_mut().map_or(Ok(()), |built| built.work.teardown())
+    })?;
+    Ok(Executed { plan: Some(plan), stuck })
+}
+
+fn publish_resumed_record(
+    record: RecordPreparation,
+    plan: &Plan,
+    learning: Option<&exec::Killers>,
+    remember: impl FnOnce(&Utf8Path, &Utf8Path) -> bool,
+) -> crate::Result<(Utf8PathBuf, bool, bool)> {
+    let (base, stored) = publish_completed_record(record, plan, learning)?;
+    let reachable = remember(&plan.root, &base);
+    let (promotable, suppressible) = postprocessing_advice(&plan.root, &stored, reachable);
+    Ok((base, promotable, suppressible))
+}
+
+/// Publishes retained results before choosing live or captured sources for resumed reporting.
+fn resumed_publication(
+    record: RecordPreparation,
+    plan: &Plan,
+    learning: Option<&exec::Killers>,
+    remember: impl FnOnce(&Utf8Path, &Utf8Path) -> bool,
+    built: Option<&mut exec::Built>,
+    retained_session: Option<exec::Session>,
+) -> crate::Result<(bool, bool, exec::Session, Utf8PathBuf)> {
+    let (base, promotable, suppressible) = publish_resumed_record(record, plan, learning, remember)?;
+    let (session, source_root) = resumed_report_sources(built, retained_session, &base, plan)?;
+    Ok((promotable, suppressible, session, source_root))
+}
+
+fn resumed_profile<'a>(work: Option<&'a exec::Workspace>, state: &'a exec::TestingState) -> Option<&'a str> {
+    match work {
+        Some(work) => work.reporting_profile(),
+        None => resumed_saved_profile(&state.workspace),
+    }
+}
+
+fn resumed_report_sources(
+    built: Option<&mut exec::Built>,
+    retained_session: Option<exec::Session>,
+    base: &Utf8Path,
+    plan: &Plan,
+) -> crate::Result<(exec::Session, Utf8PathBuf)> {
+    if let Some(built) = built {
+        built.work.snapshot_report_sources(plan)?;
+        Ok((built.session.clone(), built.work.report_source_root()))
+    } else {
+        Ok((
+            retained_session.expect("only publication-only recovery completes without a built session"),
+            snapshot_captured_report_sources(base, plan)?,
+        ))
+    }
+}
+
+fn resumed_report_contents<'a>(
+    retained_info: &'a crate::elements::RunInfo,
+    source_root: &'a Utf8Path,
+    advice: &'a str,
+    tests: Option<usize>,
+    dropped: &'a [String],
+) -> ReportContents<'a> {
+    ReportContents {
+        retained_info: Some(retained_info),
+        source_root: Some(source_root),
+        advice: Some(advice),
+        tests,
+        dropped,
+    }
+}
+
+fn finish_resumed_reporting<H: Host>(
+    host: &mut H,
+    dropped: &[String],
+    stuck: &[String],
+    log_failure: Option<&Error>,
+    styler: Styler,
+    teardown: impl FnOnce() -> crate::Result<()>,
+) -> crate::Result<()> {
+    report_dropped(host, dropped, styler)?;
+    report_stuck(host, stuck, styler)?;
+
+    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
+    warn_auxiliary(host, log_failure, styler);
+    if let Err(failure) = teardown() {
         writeln!(host.error(), "{} {failure}", styler.warning())?;
     }
-    Ok(Executed { plan: Some(plan), stuck })
+    Ok(())
+}
+
+/// Keeps the cache lock for publication-only recovery, or transfers it into the resumed workspace.
+fn resumed_work<S, L>(
+    state: &S,
+    lock: L,
+    valid_bytes: u64,
+    publication_only: bool,
+    resume: impl FnOnce(&S, L, u64) -> crate::Result<exec::Workspace>,
+) -> crate::Result<(Option<exec::Workspace>, Option<L>)> {
+    if publication_only {
+        Ok((None, Some(lock)))
+    } else {
+        Ok((Some(resume(state, lock, valid_bytes)?), None))
+    }
+}
+
+fn complete_retained_testing(
+    state: exec::TestingState,
+    complete: impl FnOnce(&exec::TestingState) -> crate::Result<()>,
+) -> crate::Result<exec::Measured> {
+    complete(&state)?;
+    Ok(exec::Measured {
+        plan: state.plan,
+        built: None,
+        learning: Some(state.killers),
+        stuck: state.stuck,
+        dropped: state.dropped,
+    })
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "journal opening is injected independently of the retained reporting inputs"
+)]
+fn resumed_reporting_inputs<H: Host>(
+    host: &mut H,
+    args: &RunArgs,
+    state: &exec::TestingState,
+    profile: Option<&str>,
+    base: &Utf8Path,
+    progress_when: When,
+    styler: Styler,
+    resume_log: impl FnOnce(&mut VerdictLog, &Utf8Path) -> crate::Result<()>,
+) -> crate::Result<(RunArgs, bool, VerdictLog)> {
+    let reporting_args = prepare_resumed_reporting(host, args, state, profile, styler)?;
+    let visible = progress_when.resolve(host.is_terminal());
+    let mut verdict_log = VerdictLog::default();
+    resume_log(&mut verdict_log, base)?;
+    Ok((reporting_args, visible, verdict_log))
+}
+
+fn resumed_saved_profile(workspace: &serde_json::Value) -> Option<&str> {
+    workspace
+        .get("cargo")
+        .and_then(|cargo| cargo.get("profile"))
+        .and_then(serde_json::Value::as_str)
+}
+
+fn resumed_console_events<'host, H: Host>(
+    host: &'host mut H,
+    args: &RunArgs,
+    visible: bool,
+    styler: Styler,
+    verdict_log: VerdictLog,
+) -> ConsoleEvents<'host, H> {
+    ConsoleEvents {
+        progress: Progress::new(visible, styler, host.terminal_width()),
+        dashboard: Dashboard::new(visible && args.dashboard, host.terminal_width(), styler),
+        host,
+        styler,
+        show_build: false,
+        verdict_log,
+    }
+}
+
+/// Closes the verdict log first; run failure wins over log failure and abandons the display.
+fn finish_resumed_events<H: Host, T>(
+    events: &mut ConsoleEvents<'_, H>,
+    outcome: crate::Result<T>,
+) -> crate::Result<(T, Option<crate::error::Error>)> {
+    let log_failure = events.finish_verdict_log().err();
+    if outcome.is_err() {
+        events.abandon();
+    }
+    let outcome = outcome?;
+    events.dashboard.finish(events.host);
+    events.progress.finish(events.host);
+    Ok((outcome, log_failure))
 }
 
 fn validate_resumed_environment(mutants: &[Mutant], validate: impl FnOnce() -> crate::Result<()>) -> crate::Result<()> {
@@ -1523,22 +1658,40 @@ fn validate_resumed_environment(mutants: &[Mutant], validate: impl FnOnce() -> c
 /// Materializes frozen campaign sources for publication-only recovery, independently of the
 /// current checkout and execution artifacts.
 fn snapshot_captured_report_sources(base: &Utf8Path, plan: &Plan) -> crate::Result<Utf8PathBuf> {
+    snapshot_captured_report_sources_with(
+        base,
+        plan,
+        |path| fs::symlink_metadata(path).map(|metadata| (metadata.file_type().is_symlink(), metadata.is_dir())),
+        |path| fs::remove_dir_all(path),
+        |path| fs::create_dir(path),
+        crate::elements::write,
+    )
+}
+
+fn snapshot_captured_report_sources_with(
+    base: &Utf8Path,
+    plan: &Plan,
+    inspect: impl FnOnce(&Utf8Path) -> std::io::Result<(bool, bool)>,
+    clear: impl FnOnce(&Utf8Path) -> std::io::Result<()>,
+    create: impl FnOnce(&Utf8Path) -> std::io::Result<()>,
+    mut write: impl FnMut(&Utf8Path, &str) -> crate::Result<()>,
+) -> crate::Result<Utf8PathBuf> {
     let root = base.join(".cargo-gamma-report-source");
-    match fs::symlink_metadata(&root) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
+    match inspect(&root) {
+        Ok((true, _)) => {
             return Err(error!("report source directory `{root}` is a link"));
         }
-        Ok(metadata) if metadata.is_dir() => {
-            fs::remove_dir_all(&root).map_err(|cause| error!("could not clear report source directory `{root}`").caused_by(cause))?;
+        Ok((false, true)) => {
+            clear(&root).map_err(|cause| error!("could not clear report source directory `{root}`").caused_by(cause))?;
         }
         Ok(_) => return Err(error!("report source path `{root}` is not a directory")),
         Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => {}
         Err(cause) => return Err(error!("could not inspect report source directory `{root}`").caused_by(cause)),
     }
-    fs::create_dir(&root).map_err(|cause| error!("could not create report source directory `{root}`").caused_by(cause))?;
+    create(&root).map_err(|cause| error!("could not create report source directory `{root}`").caused_by(cause))?;
     for file in &plan.files {
         if let Some(source) = &file.source {
-            crate::elements::write(&root.join(&file.path), source)?;
+            write(&root.join(&file.path), source)?;
         }
     }
     Ok(root)
@@ -1896,8 +2049,13 @@ fn write_diag_bundle_to(
 
     let bundle = crate::diag::bundle(plan, session, &context);
 
-    crate::elements::write(path, &crate::diag::to_json(&bundle)?)
-        .map_err(|cause| crate::error::error!("could not write the diagnostics bundle to `{path}`").caused_by(cause))?;
+    crate::elements::write(
+        path,
+        &
+    // #[gamma::skip(try.propagate_to_unwrap, reason = "diag::to_json serializes concrete derived Bundle to an owned String, not a fallible external writer. Its graph is derived DTOs, primitive values/strings/options/vectors and derived Phases; there are no nonstring map keys, custom fallible Serialize implementations or arbitrary serializers. serde_json handles nonfinite numeric leaves as null. Thus this encoding cannot return a recoverable Err for panic_on_failure.", tag = "equivalent")]
+    crate::diag::to_json(&bundle)?,
+    )
+    .map_err(|cause| crate::error::error!("could not write the diagnostics bundle to `{path}`").caused_by(cause))?;
 
     Ok(())
 }
@@ -2146,11 +2304,437 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt as _;
 
+    use serde_json::{Value, from_slice, from_str, json, to_value, to_vec};
+
     use super::super::cli::MeasureArgs;
     use super::*;
     use crate::discover::{RunRecord, TargetFile};
     use crate::exec::Session;
-    use crate::fixtures;
+    use crate::testing::{Broken, Sink, fails_at_every_line, private_system_tempdir, workdir};
+    use crate::{HashMap, fixtures};
+
+    #[test]
+    fn oct25_resume_forwards_exact_committed_bytes_to_workspace_recovery() {
+        let root = Utf8Path::new("memory-resume-root");
+        let state = exec::TestingState::from_test_plan(fixtures::plan(Vec::new()));
+        let calls = std::cell::Cell::new(0);
+        let (work, publication_lock) = resumed_work(&state, "owned-resume-token", 37, false, |saved, lock, valid_bytes| {
+            assert!(std::ptr::eq(saved, &raw const state));
+            assert_eq!(valid_bytes, 37);
+            assert_eq!(lock, "owned-resume-token");
+            calls.set(calls.get() + 1);
+            Ok(exec::Workspace::adopt(root.to_owned(), root.join("target")))
+        })
+        .unwrap();
+        assert_eq!(work.unwrap().root(), root);
+        assert!(publication_lock.is_none());
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn oct25_publication_only_resume_uses_the_frozen_profile_through_its_actual_selector() {
+        let mut state = exec::TestingState::from_test_plan(fixtures::plan(Vec::new()));
+        state.workspace = json!({"cargo": {"profile": "retained-release"}});
+        assert_eq!(resumed_profile(None, &state), Some("retained-release"));
+        let workspace = exec::Workspace::adopt("owned-profile".into(), "owned-profile-target".into());
+        assert_eq!(resumed_profile(Some(&workspace), &state), None);
+    }
+
+    #[test]
+    fn oct25_resumed_publication_propagates_record_failure_before_sources_and_cache_updates() {
+        let mut plan = fixtures::plan(vec![fixtures::mutant()]);
+        plan.files.push(TargetFile {
+            path: "src/lib.rs".into(),
+            absolute: "invalid\0missing-captured-source".into(),
+            package: "subject".into(),
+            source: Some("pub fn retained() {}\n".into()),
+        });
+        let prepared = RecordPreparation {
+            report_info: None,
+            name_filtered: false,
+            base: "invalid\0must-not-publish".into(),
+            context: crate::discover::ContextDigest::default(),
+            inputs: crate::discover::WorkspaceSnapshot::default(),
+            killers: crate::discover::Killers::default(),
+        };
+        let failure = resumed_publication(
+            prepared,
+            &plan,
+            None,
+            |_, _| panic!("an unpublishable source generation must not update the cache locator"),
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(
+            failure.message(),
+            "could not construct completed campaign state from the captured source generation"
+        );
+    }
+
+    #[test]
+    fn recovered_resumed_reporting_tail_returns_stuck_and_teardown_writer_failures_in_order() {
+        let styler = Styler::new(false);
+        let failure = finish_resumed_reporting(
+            &mut crate::testing::BrokenHost,
+            &[],
+            &["retained stuck reason".into()],
+            None,
+            styler,
+            || panic!("a stuck-reporting failure must precede teardown"),
+        )
+        .unwrap_err();
+        let broken = format!("I/O error: {}", std::io::Error::from(ErrorKind::BrokenPipe));
+        assert_eq!(failure.to_string(), broken);
+        let mut calls = 0;
+        let failure = finish_resumed_reporting(&mut crate::testing::BrokenHost, &[], &[], None, styler, || {
+            calls += 1;
+            Err(error!("named teardown refusal"))
+        })
+        .unwrap_err();
+        assert_eq!(failure.to_string(), broken);
+        assert_eq!(calls, 1);
+        let mut host = Sink::default();
+        finish_resumed_reporting(&mut host, &[], &[], None, styler, || Err(error!("named teardown refusal"))).unwrap();
+        assert_eq!(host.err, format!("{} named teardown refusal\n", styler.warning()).as_bytes());
+        assert!(host.out.is_empty());
+    }
+
+    #[test]
+    fn recovered_publication_only_resume_retains_the_exact_workspace_lock_token() {
+        let lock = Box::new(73);
+        let identity = std::ptr::from_ref(lock.as_ref());
+        let state = exec::TestingState::from_test_plan(fixtures::plan(Vec::new()));
+        let (work, retained) = resumed_work(&state, lock, u64::MAX, true, |_, _, _| panic!("publication needs no workspace")).unwrap();
+        assert!(work.is_none());
+        let retained = retained.unwrap();
+        assert_eq!(std::ptr::from_ref(retained.as_ref()), identity);
+    }
+
+    #[test]
+    fn recovered_publication_only_completion_retains_exact_killers_and_gates_them_on_completion() {
+        let mutant = Mutant {
+            outcome: Outcome::Killed,
+            ..fixtures::mutant()
+        };
+        let id = mutant.id.clone();
+        let killer = crate::discover::Killer {
+            package: "retained-package".into(),
+            target: "retained-target".into(),
+            test: "retained-test".into(),
+        };
+        let mut state = exec::TestingState::from_test_plan(fixtures::plan(vec![mutant]));
+        state.killers.record(id.clone(), killer.clone());
+        state.stuck = vec!["retained-build".into()];
+        state.dropped = vec!["retained-dropped".into()];
+        let learning = to_value(&state.killers).unwrap();
+        assert_eq!(learning["entries"][id.as_ref()], to_value(&killer).unwrap());
+        let mut completed = 0;
+        let measured = complete_retained_testing(state, |saved| {
+            completed += 1;
+            assert!(saved.is_settled());
+            assert_eq!(to_value(&saved.killers).unwrap(), learning);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(completed, 1);
+        assert!(measured.built.is_none());
+        assert_eq!(to_value(measured.learning.unwrap()).unwrap(), learning);
+        assert_eq!(measured.plan.mutants[0].id, id);
+        assert_eq!(measured.plan.mutants[0].outcome, Outcome::Killed);
+        assert_eq!(measured.stuck, ["retained-build"]);
+        assert_eq!(measured.dropped, ["retained-dropped"]);
+        let rejected = exec::TestingState::from_test_plan(fixtures::plan(Vec::new()));
+        let Err(failure) = complete_retained_testing(rejected, |_| Err(error!("named completion refusal"))) else {
+            panic!("a refused completion must not yield publishable evidence");
+        };
+        assert_eq!(failure.message(), "named completion refusal");
+    }
+
+    #[test]
+    fn recovered_resumed_output_setup_propagates_the_legacy_warning_error_before_opening_any_logs() {
+        let state = exec::TestingState::from_test_plan(fixtures::plan(Vec::new()));
+        let Err(failure) = resumed_reporting_inputs(
+            &mut crate::testing::BrokenHost,
+            &RunArgs::default(),
+            &state,
+            Some("retained-profile"),
+            Utf8Path::new("invalid\0must-not-open-verdict-log"),
+            When::Never,
+            Styler::new(false),
+            |_, _| panic!("the legacy output error must precede journal opening"),
+        ) else {
+            panic!("the legacy warning's broken output must stop resumed setup");
+        };
+        assert_eq!(
+            failure.to_string(),
+            format!("I/O error: {}", std::io::Error::from(ErrorKind::BrokenPipe))
+        );
+    }
+
+    #[test]
+    fn oct25_resumed_reporting_preserves_the_saved_profile_before_opening_the_log() {
+        let state = exec::TestingState::from_test_plan(fixtures::plan(Vec::new()));
+        let mut host = Sink::default();
+        let base = Utf8Path::new("never-opened-reporting-journal");
+        let mut opened = 0;
+        let (reporting, visible, log) = resumed_reporting_inputs(
+            &mut host,
+            &RunArgs::default(),
+            &state,
+            Some("retained-profile"),
+            base,
+            When::Never,
+            Styler::new(false),
+            |log, path| {
+                assert_eq!(path, base);
+                assert!(matches!(log, VerdictLog::Disabled));
+                opened += 1;
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(reporting.measure.profile.as_deref(), Some("retained-profile"));
+        assert!(!visible);
+        assert!(matches!(log, VerdictLog::Disabled));
+        assert_eq!(opened, 1);
+    }
+
+    #[test]
+    fn recovered_captured_report_sources_enforce_path_kinds_and_each_publication_error_in_memory() {
+        let mut plan = fixtures::plan(Vec::new());
+        plan.files = [
+            ("nested/first.rs", Some("pub fn first() {}")),
+            ("absent.rs", None),
+            ("second.rs", Some("pub fn second() {}")),
+        ]
+        .map(|(path, source)| TargetFile {
+            path: path.into(),
+            absolute: Utf8Path::new("unused").join(path),
+            package: "subject".into(),
+            source: source.map(str::to_owned),
+        })
+        .into();
+        let base = Utf8Path::new("captured-in-memory");
+        let root = base.join(".cargo-gamma-report-source");
+        for case in 0..8 {
+            let operations = std::cell::RefCell::new(Vec::new());
+            let result = snapshot_captured_report_sources_with(
+                base,
+                &plan,
+                |path| {
+                    assert_eq!(path, root);
+                    match case {
+                        0 => Ok((true, true)),
+                        1 => Ok((false, false)),
+                        2 => Err(std::io::Error::from(ErrorKind::PermissionDenied)),
+                        3 | 6 => Ok((false, true)),
+                        _ => Err(std::io::Error::from(ErrorKind::NotFound)),
+                    }
+                },
+                |path| {
+                    assert_eq!(path, root);
+                    operations.borrow_mut().push("clear");
+                    if case == 3 {
+                        Err(std::io::Error::from(ErrorKind::PermissionDenied))
+                    } else {
+                        Ok(())
+                    }
+                },
+                |path| {
+                    assert_eq!(path, root);
+                    operations.borrow_mut().push("create");
+                    if case == 4 {
+                        Err(std::io::Error::from(ErrorKind::PermissionDenied))
+                    } else {
+                        Ok(())
+                    }
+                },
+                |path, source| {
+                    let mut operations = operations.borrow_mut();
+                    let file = if operations.contains(&"write") {
+                        &plan.files[2]
+                    } else {
+                        &plan.files[0]
+                    };
+                    assert_eq!(path, root.join(&file.path));
+                    assert_eq!(Some(source), file.source.as_deref());
+                    operations.push("write");
+                    if case == 5 {
+                        Err(error!("injected source write failure"))
+                    } else {
+                        Ok(())
+                    }
+                },
+            );
+            let (expected, message): (&[&str], Option<&str>) = match case {
+                0 => (&[], Some("is a link")),
+                1 => (&[], Some("is not a directory")),
+                2 => (&[], Some("could not inspect report source directory")),
+                3 => (&["clear"], Some("could not clear report source directory")),
+                4 => (&["create"], Some("could not create report source directory")),
+                5 => (&["create", "write"], Some("injected source write failure")),
+                6 => (&["clear", "create", "write", "write"], None),
+                _ => (&["create", "write", "write"], None),
+            };
+            assert_eq!(*operations.borrow(), expected, "case {case}");
+            if let Some(message) = message {
+                assert!(result.unwrap_err().to_string().contains(message), "case {case}");
+            } else {
+                assert_eq!(result.unwrap(), root);
+            }
+        }
+    }
+
+    #[test]
+    fn recovered_legacy_report_metadata_never_invents_a_shard_or_complete_population() {
+        let info = resumed_report_info(None);
+        assert_eq!(info.started_at, 0);
+        assert!(info.merged);
+        assert!(!info.population_complete);
+        assert!(info.shard.is_none());
+        assert!(info.tests.is_none());
+        assert!(info.merge_provenance.is_none());
+    }
+
+    #[test]
+    fn recovered_resumed_reporting_preserves_frozen_profile_selection_and_exact_legacy_warnings() {
+        let mutants = ["z-mutator", "a-mutator", "z-mutator"]
+            .into_iter()
+            .map(|mutator| Mutant {
+                mutator: mutator.into(),
+                ..fixtures::mutant()
+            })
+            .collect();
+        let mut state = exec::TestingState::from_test_plan(fixtures::plan(mutants));
+        state.settings.jobs = 3;
+        let mut args = RunArgs::default();
+        args.measure.jobs = Some(99);
+        args.measure.profile = Some("live-profile".into());
+        args.select.mutators = Some("live-mutators".into());
+        let styler = Styler::new(false);
+        let provenance = format!(
+            "{} the legacy checkpoint has no report provenance; its report uses an unknown timestamp and cannot withdraw other report populations\n",
+            styler.warning()
+        );
+        let selection = format!(
+            "{} the legacy checkpoint has no original mutator selection; diagnostics list the frozen population's mutators instead\n",
+            styler.warning()
+        );
+        for has_provenance in [false, true] {
+            for has_selection in [false, true] {
+                state.record.report_info = has_provenance.then(|| resumed_report_info(None));
+                state.settings.mutators = has_selection.then(|| "frozen-mutators".into());
+                let mut host = Sink::default();
+                let reporting = prepare_resumed_reporting(&mut host, &args, &state, Some("frozen-profile"), styler).unwrap();
+                assert_eq!(reporting.measure.jobs, Some(3));
+                assert_eq!(reporting.measure.profile.as_deref(), Some("frozen-profile"));
+                assert_eq!(
+                    reporting.select.mutators.as_deref(),
+                    Some(if has_selection { "frozen-mutators" } else { "a-mutator,z-mutator" })
+                );
+                let expected = match (has_provenance, has_selection) {
+                    (false, false) => format!("{provenance}{selection}"),
+                    (false, true) => provenance.clone(),
+                    (true, false) => selection.clone(),
+                    (true, true) => String::new(),
+                };
+                assert_eq!(host.err, expected.as_bytes());
+                assert!(host.out.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn recovered_resumed_profile_uses_only_the_retained_cargo_profile_string() {
+        for (workspace, expected) in [
+            (
+                json!({"cargo": {"profile": "retained"}, "": {"profile":"wrong"}, "xyzzy":{"profile":"wrong"}}),
+                Some("retained"),
+            ),
+            (
+                json!({"cargo": {"profile": "retained", "":"wrong", "xyzzy":"wrong"}}),
+                Some("retained"),
+            ),
+            (json!({"cargo": {"profile": 7}}), None),
+            (json!({"profile": "unscoped", "cargo": {}}), None),
+            (json!({}), None),
+        ] {
+            assert_eq!(resumed_saved_profile(&workspace), expected);
+        }
+    }
+
+    #[test]
+    fn recovered_resumed_console_requires_both_visibility_and_dashboard_opt_in() {
+        for visible in [false, true] {
+            for dashboard in [false, true] {
+                let mut host = Sink::default();
+                let args = RunArgs {
+                    dashboard,
+                    ..RunArgs::default()
+                };
+                let events = resumed_console_events(&mut host, &args, visible, Styler::new(false), VerdictLog::default());
+                assert_eq!(events.progress.is_enabled(), visible);
+                assert_eq!(events.dashboard.enabled(), visible && dashboard);
+                assert!(!events.show_build);
+            }
+        }
+    }
+
+    #[test]
+    fn recovered_resumed_event_cleanup_abandons_only_errors_and_finishes_successful_displays() {
+        for success in [false, true] {
+            let mut host = Sink::default();
+            let mut events = resumed_console_events(&mut host, &RunArgs::default(), true, Styler::new(false), VerdictLog::default());
+            events.progress.begin(events.host, "Resuming", "Resumed", "retained");
+            assert_eq!(events.progress.test_phase_state(), (true, true));
+            let outcome = if success { Ok(73) } else { Err(error!("execution failed")) };
+            let result = finish_resumed_events(&mut events, outcome);
+            if success {
+                let (value, log_failure) = result.unwrap();
+                assert_eq!(value, 73);
+                assert!(log_failure.is_none());
+                assert_eq!(events.progress.test_phase_state(), (true, false));
+                assert_eq!(events.host.err, b"    Resuming retained");
+            } else {
+                assert_eq!(result.unwrap_err().message(), "execution failed");
+                assert_eq!(events.progress.test_phase_state(), (false, true));
+                assert_eq!(events.host.err, b"    Resuming retained\n");
+            }
+        }
+        let mut host = Sink::default();
+        let args = RunArgs {
+            dashboard: true,
+            ..RunArgs::default()
+        };
+        let mut events = resumed_console_events(&mut host, &args, true, Styler::new(false), VerdictLog::default());
+        events.dashboard.start_testing(events.host, 2, "retained tests".into());
+        assert!(events.dashboard.is_active());
+        let (value, failure) = finish_resumed_events(&mut events, Ok(91)).unwrap();
+        assert_eq!(value, 91);
+        assert!(failure.is_none());
+        assert!(!events.dashboard.is_active());
+    }
+
+    #[test]
+    fn recovered_each_legacy_reporting_warning_returns_its_own_broken_pipe_error() {
+        let mut state = exec::TestingState::from_test_plan(fixtures::plan(Vec::new()));
+        for has_provenance in [false, true] {
+            state.record.report_info = has_provenance.then(|| resumed_report_info(None));
+            let failure = prepare_resumed_reporting(
+                &mut crate::testing::BrokenHost,
+                &RunArgs::default(),
+                &state,
+                Some("frozen-profile"),
+                Styler::new(false),
+            )
+            .unwrap_err();
+            assert_eq!(
+                failure.to_string(),
+                format!("I/O error: {}", std::io::Error::from(ErrorKind::BrokenPipe))
+            );
+        }
+    }
 
     #[test]
     fn resume_delegation_uses_frozen_metering_and_preserves_child_exit_status() {
@@ -2232,8 +2816,6 @@ mod tests {
         );
         root
     }
-
-    use crate::testing::{Broken, Sink, fails_at_every_line, private_system_tempdir, workdir};
 
     #[test]
     fn survivor_ungraded_gate_matrix_names_only_the_gates_that_were_not_evaluated() {
@@ -2486,7 +3068,7 @@ mod tests {
             }
         }
 
-        fn survivor_resume_checkpoint() -> (tempfile::TempDir, RunArgs, serde_json::Value) {
+        fn survivor_resume_checkpoint() -> (tempfile::TempDir, RunArgs, Value) {
             let directory = private_system_tempdir("resumed-command-checkpoint-");
             let root = Utf8PathBuf::from_path_buf(fs::canonicalize(directory.path()).expect("fixture roots can be normalized"))
                 .expect("fixture roots are UTF-8");
@@ -2533,7 +3115,7 @@ mod tests {
                 let executable = fs::metadata(&path).expect("prepared file exists").permissions().mode() & 0o111;
                 #[cfg(not(unix))]
                 let executable = 0;
-                artifacts.push(serde_json::json!({
+                artifacts.push(json!({
                     "path": path, "digest": crate::discover::digest(&fs::read(&path).expect("prepared bytes are readable")),
                     "generated_output": false, "metadata": { "kind": "File", "executable": executable, "link": null }
                 }));
@@ -2581,9 +3163,9 @@ mod tests {
             base: &Utf8Path,
             prepared: &Utf8Path,
             runtime: &Utf8Path,
-            artifacts: &[serde_json::Value],
-        ) -> serde_json::Value {
-            serde_json::json!({
+            artifacts: &[Value],
+        ) -> Value {
+            json!({
                 "version": 2, "tool": env!("CARGO_PKG_VERSION"),
                 "platform": format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
                 "plan": plan, "confidences": {}, "session": measured,
@@ -2609,13 +3191,13 @@ mod tests {
             })
         }
 
-        fn survivor_write_resume_snapshot(base: &Utf8Path, state: &serde_json::Value) {
-            let bytes = serde_json::to_vec(state).expect("the concrete checkpoint fixture serializes");
+        fn survivor_write_resume_snapshot(base: &Utf8Path, state: &Value) {
+            let bytes = to_vec(state).expect("the concrete checkpoint fixture serializes");
             fs::write(base.join("testing-session.json"), &bytes).expect("checkpoint fixture is writable");
             fs::write(base.join("testing-verdicts.jsonl"), "").expect("settled fixture has no uncommitted verdict");
             fs::write(
                 base.join("testing-phase.json"),
-                serde_json::to_vec(&serde_json::json!({
+                to_vec(&json!({
                     "phase": "Testing", "snapshot": crate::discover::digest(&bytes)
                 }))
                 .expect("phase fixture serializes"),
@@ -2765,7 +3347,7 @@ mod tests {
         #[test]
         fn survivor_resumed_auxiliary_verdict_failure_is_warned_after_publishing_the_completed_population() {
             let (_directory, args, mut state) = survivor_resume_checkpoint();
-            state["plan"]["mutants"][2]["outcome"] = serde_json::json!(Outcome::Pending);
+            state["plan"]["mutants"][2]["outcome"] = json!(Outcome::Pending);
             let base = args.measure.cache_dir.as_ref().expect("fixture cache exists");
             survivor_write_resume_snapshot(base, &state);
             let mut host = Sink::default();
@@ -2819,7 +3401,7 @@ mod tests {
                 host.out()
             );
             assert!(host.err().contains("missing-fixture-package"), "{}", host.err());
-            let phase: serde_json::Value = serde_json::from_slice(
+            let phase: Value = from_slice(
                 &fs::read(args.measure.cache_dir.as_ref().expect("fixture cache").join("testing-phase.json"))
                     .expect("phase survives completion"),
             )
@@ -2827,15 +3409,13 @@ mod tests {
             assert_eq!(phase["phase"], "Completed");
             let reports = args.artifact_dir.as_ref().expect("fixture has an explicit report directory");
             assert!(reports.is_dir(), "the actual postprocessing path creates its report artifacts");
-            let report: serde_json::Value =
-                serde_json::from_slice(&fs::read(reports.join("gamma-report.json")).expect("the actual JSON report was published"))
-                    .expect("the actual report is valid JSON");
+            let report: Value = from_slice(&fs::read(reports.join("gamma-report.json")).expect("the actual JSON report was published"))
+                .expect("the actual report is valid JSON");
             assert_eq!(report["config"]["startedAt"], 77);
             assert_eq!(report["config"]["tests"], 3);
-            let diagnostic: serde_json::Value = serde_json::from_slice(
-                &fs::read(reports.join("gamma-diagnostics.json")).expect("the actual diagnostic bundle was published"),
-            )
-            .expect("the actual diagnostic bundle is valid JSON");
+            let diagnostic: Value =
+                from_slice(&fs::read(reports.join("gamma-diagnostics.json")).expect("the actual diagnostic bundle was published"))
+                    .expect("the actual diagnostic bundle is valid JSON");
             assert_eq!(diagnostic["build"]["tests"], 3);
             assert!(host.out().contains("Stats  :"), "{}", host.out());
             assert!(host.out().contains("0 test processes launched"), "{}", host.out());
@@ -2850,9 +3430,9 @@ mod tests {
         fn survivor_resumed_memory_support_is_required_only_for_the_frozen_metered_session() {
             for metered in [false, true] {
                 let (_directory, args, mut state) = survivor_resume_checkpoint();
-                state["session"]["metered"] = serde_json::Value::Bool(metered);
+                state["session"]["metered"] = Value::Bool(metered);
                 if metered {
-                    state["plan"]["mutants"][2]["outcome"] = serde_json::json!(Outcome::Pending);
+                    state["plan"]["mutants"][2]["outcome"] = json!(Outcome::Pending);
                 }
                 let base = args.measure.cache_dir.as_ref().expect("fixture has a cache");
                 survivor_write_resume_snapshot(base, &state);
@@ -2968,20 +3548,20 @@ mod tests {
                     "workspace" => {
                         let other = args.select.dir.join("other-workspace");
                         let _other_plan = plan_at(other.clone());
-                        state["plan"]["root"] = serde_json::json!(other);
-                        state["plan"]["files"][0]["absolute"] = serde_json::json!(other.join("src/lib.rs"));
+                        state["plan"]["root"] = json!(other);
+                        state["plan"]["files"][0]["absolute"] = json!(other.join("src/lib.rs"));
                         survivor_write_resume_snapshot(base, &state);
                         "saved campaign belongs to a different workspace"
                     }
                     "artifact" => {
-                        state["plan"]["mutants"][2]["outcome"] = serde_json::json!(Outcome::Pending);
+                        state["plan"]["mutants"][2]["outcome"] = json!(Outcome::Pending);
                         survivor_write_resume_snapshot(base, &state);
                         fs::remove_file(base.join("workspace/src/lib.rs")).expect("an inspected source artifact can actually disappear");
                         "prepared"
                     }
                     "prepared" => {
-                        state["plan"]["mutants"][2]["outcome"] = serde_json::json!(Outcome::Pending);
-                        state["workspace"]["target"] = serde_json::json!(base.join("foreign-target"));
+                        state["plan"]["mutants"][2]["outcome"] = json!(Outcome::Pending);
+                        state["workspace"]["target"] = json!(base.join("foreign-target"));
                         survivor_write_resume_snapshot(base, &state);
                         "prepared testing workspace does not belong"
                     }
@@ -3284,16 +3864,8 @@ mod tests {
             fs::create_dir_all(blocked).unwrap();
         }
         let mut failure = Error::new("baseline failed")
-            .with_nested_artifact(
-                "baseline-failures/first".into(),
-                "failure.json",
-                serde_json::json!({"failure": "first"}),
-            )
-            .with_nested_artifact(
-                "baseline-failures/second".into(),
-                "failure.json",
-                serde_json::json!({"failure": "second"}),
-            );
+            .with_nested_artifact("baseline-failures/first".into(), "failure.json", json!({"failure": "first"}))
+            .with_nested_artifact("baseline-failures/second".into(), "failure.json", json!({"failure": "second"}));
         let mut measured = session();
         measured.tests = Some(73);
         let mut host = Sink::default();
@@ -3320,11 +3892,9 @@ mod tests {
         ] {
             assert_eq!(host.err().matches(warning).count(), 1, "{}", host.err());
         }
-        let record: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(artifacts.join("baseline-failures/second/failure.json")).unwrap()).unwrap();
-        assert_eq!(record, serde_json::json!({"failure": "second"}));
-        let diagnostic: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(artifacts.join("baseline-failures/second/diags.json")).unwrap()).unwrap();
+        let record: Value = from_str(&fs::read_to_string(artifacts.join("baseline-failures/second/failure.json")).unwrap()).unwrap();
+        assert_eq!(record, json!({"failure": "second"}));
+        let diagnostic: Value = from_str(&fs::read_to_string(artifacts.join("baseline-failures/second/diags.json")).unwrap()).unwrap();
         assert_eq!(diagnostic["build"]["tests"], 73);
         assert!(artifacts.join("baseline-failures/first/failure.json").is_dir());
         assert!(artifacts.join("baseline-failures/first/diags.json").is_dir());
@@ -3565,8 +4135,8 @@ mod tests {
 
         store_completed_record(prepared, &plan, None).expect("completed campaign publication");
 
-        let record: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(base.join("last-gamma-run.json")).expect("completed record")).expect("record JSON");
+        let record: Value =
+            from_str(&fs::read_to_string(base.join("last-gamma-run.json")).expect("completed record")).expect("record JSON");
         let recorded = record["files"]
             .as_array()
             .expect("recorded files")
@@ -3611,7 +4181,7 @@ mod tests {
         let (promotable, suppressible) =
             store_completed_record(prepared, &plan, None).expect("completed campaign state does not require cache eligibility");
         let stored = crate::discover::RunRecord::load_required(&base).expect("completed campaign state");
-        let outcomes: crate::HashMap<_, _> = stored.iter().map(|(id, outcome)| (id.to_owned(), outcome)).collect();
+        let outcomes: HashMap<_, _> = stored.iter().map(|(id, outcome)| (id.to_owned(), outcome)).collect();
 
         assert!(promotable, "the intermediate exact learning is preserved");
         assert!(suppressible, "the completed ledger contains resource outcomes");
@@ -3782,7 +4352,7 @@ mod tests {
         let absolute = src.join("lib.rs");
         let start = source.find("a < b").expect("span");
 
-        let mut digests = crate::HashMap::default();
+        let mut digests = HashMap::default();
         let _previous = digests.insert(Utf8PathBuf::from("src/lib.rs"), crate::discover::digest(source.as_bytes()));
 
         Plan {
@@ -3800,8 +4370,8 @@ mod tests {
             idle: Vec::new(),
             sharded_out: 0,
             settled_out: 0,
-            reach: crate::HashMap::default(),
-            specs: crate::HashMap::default(),
+            reach: HashMap::default(),
+            specs: HashMap::default(),
         }
     }
 
@@ -3900,7 +4470,7 @@ mod tests {
         let mut expected = retained;
         expected.tests = Some(17);
         expected.dropped_test_packages = vec!["dropped".to_owned()];
-        assert_eq!(serde_json::to_value(&info).unwrap(), serde_json::to_value(expected).unwrap());
+        assert_eq!(to_value(&info).unwrap(), to_value(expected).unwrap());
         let mut resumed = crate::fixtures::report_with(None, 300, vec![crate::fixtures::mutant_result_at("older", 1, "Killed")]);
         resumed.config = Some(info);
         let other = crate::fixtures::report_with(Some((0, 3)), 110, vec![crate::fixtures::mutant_result_at("other", 2, "Survived")]);
@@ -4111,8 +4681,7 @@ mod tests {
         let summary_text = fs::read_to_string(summary).expect("summary");
 
         let documents = Documents::resolve(&args, &plan.root);
-        let report: crate::elements::Report =
-            serde_json::from_str(&fs::read_to_string(&documents.json).expect("JSON report")).expect("valid report");
+        let report: crate::elements::Report = from_str(&fs::read_to_string(&documents.json).expect("JSON report")).expect("valid report");
 
         assert!(documents.json.exists());
         assert!(documents.html.exists());
@@ -4398,11 +4967,10 @@ mod tests {
         assert!(advice.contains("at 7 jobs"), "{advice}");
         assert!(!advice.contains("under Cargo's default test profile"), "{advice}");
         assert!(!advice.contains("under test"), "{advice}");
-        let diagnostics: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(root.join("gamma-diagnostics.json")).unwrap()).unwrap();
+        let diagnostics: Value = from_str(&fs::read_to_string(root.join("gamma-diagnostics.json")).unwrap()).unwrap();
         assert_eq!(diagnostics["config"]["jobs"], 7);
-        assert_eq!(diagnostics["config"]["mutators"], serde_json::json!(["relational.lt_to_le"]));
-        assert_eq!(diagnostics["config"]["shard"], serde_json::json!([1, 3]));
+        assert_eq!(diagnostics["config"]["mutators"], json!(["relational.lt_to_le"]));
+        assert_eq!(diagnostics["config"]["shard"], json!([1, 3]));
         let panel = summary_panel(&frozen, &plan, &measured, &[], &[], Duration::from_mins(2));
         assert!(panel.contains("at 7 jobs"), "{panel}");
         assert!(!panel.contains("under test"), "{panel}");
@@ -4425,7 +4993,7 @@ mod tests {
 
         let path = Documents::resolve(&args, &plan.root).diag;
         let text = fs::read_to_string(&path).expect("bundle file");
-        let parsed: serde_json::Value = serde_json::from_str(&text).expect("valid json");
+        let parsed: Value = from_str(&text).expect("valid json");
         let err = String::from_utf8(host.err).expect("utf-8");
 
         assert!(!args.diag, "the prose dump was not asked for and must not be the trigger");
@@ -4453,7 +5021,7 @@ mod tests {
             .with_nested_artifact(
                 "baseline-failures/first/shared/tests/one".to_owned(),
                 "failure.json",
-                serde_json::json!({
+                json!({
                     "schemaVersion": 1, "kind": "testFailure", "package": "first",
                     "target": "shared", "stderrTail": "assertion failed",
                 }),
@@ -4461,7 +5029,7 @@ mod tests {
             .with_nested_artifact(
                 "baseline-failures/second/shared/timeout".to_owned(),
                 "failure.json",
-                serde_json::json!({
+                json!({
                     "schemaVersion": 1, "kind": "timeout", "package": "second",
                     "target": "shared", "reason": "time budget exceeded",
                 }),

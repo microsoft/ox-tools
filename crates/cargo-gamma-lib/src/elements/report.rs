@@ -590,7 +590,9 @@ pub(crate) fn build_from(plan: &Plan, source_root: Option<&Utf8Path>, thresholds
 pub(crate) fn supported_schema_version(version: &str) -> bool {
     let mut parts = version.split('.');
     let Some(major) = parts.next() else {
-        return false;
+        return
+        // #[gamma::skip(literal.bool_flip, reason = "str::split('.') always yields at least one substring, including empty input. parts.next() therefore always returns Some; this mutated let-else return is unreachable for every &str.", tag = "equivalent")]
+        false;
     };
 
     if !matches!(major, "1" | "2") {
@@ -736,6 +738,8 @@ fn validate_mutants(value: &Value, path: &str) -> SchemaResult<()> {
     for (index, mutant) in mutants.iter().enumerate() {
         let path = format!("{path}[{index}]");
         encoded.clear();
+
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "Serialized mutant here is serde_json::Value, not user Serialize: finite tree of Null/Bool/finite Number/String/Array/string-keyed Object. Every variant is representable in JSON; keys are always strings and Vec<u8> Write cannot return an I/O error. Thus this exact to_writer call has no Err for panic_on_failure to change.", tag = "equivalent")]
         serde_json::to_writer(&mut encoded, mutant).map_err(|cause| format!("{path} could not be compared: {cause}"))?;
 
         if !unique.insert(blake3::hash(&encoded)) {
@@ -1125,6 +1129,7 @@ mod tests {
     use std::borrow::Cow;
 
     use camino::Utf8PathBuf;
+    use serde_json::{from_str, json, to_string, to_value};
 
     use super::super::digest::{Digest, settled_mutants, settled_verdict, surviving_mutants};
     use super::*;
@@ -1216,6 +1221,40 @@ mod tests {
         plan.digests.insert("a-empty.rs".into(), crate::discover::digest(b"evidence only"));
         let evidence_only = build_from(&plan, None, Thresholds::default(), None).unwrap();
         assert!(!evidence_only.files.contains_key("a-empty.rs"));
+    }
+
+    #[test]
+    fn recovered_retained_source_without_an_analysis_digest_has_no_report_authority() {
+        let mut plan = survivor_retained_report_plan(Utf8Path::new("synthetic-report-root"));
+        plan.mutants.clear();
+        plan.digests.clear();
+        let report = build_from(&plan, None, Thresholds::default(), None).unwrap();
+        assert!(report.files.is_empty());
+    }
+
+    #[test]
+    fn recovered_schema_container_and_optional_system_fields_preserve_exact_errors() {
+        assert_eq!(
+            validate_thresholds(&Value::Null, "report.thresholds"),
+            Err("report.thresholds must be an object".to_owned())
+        );
+        assert_eq!(
+            validate_file(&Value::Bool(false), "report.files[\"a.rs\"]"),
+            Err("report.files[\"a.rs\"] must be an object".to_owned())
+        );
+        assert_eq!(
+            validate_system(&json!({"ci":false,"cpu":{}}), "report.system"),
+            Err("report.system.cpu is missing required field `logicalCores`".to_owned())
+        );
+        for version in [Value::Bool(true), Value::Null, Value::Array(Vec::new())] {
+            assert_eq!(
+                validate_system(&json!({"ci":false,"os":{"platform":"windows","version":version}}), "report.system",),
+                Err("report.system.os.version must be a string".to_owned())
+            );
+        }
+        assert!(!is_uri("x:\0"));
+        assert!(!is_uri("x: "));
+        assert!(is_uri("x:%00"));
     }
 
     #[test]
@@ -1329,7 +1368,7 @@ mod tests {
     }
 
     fn complete_schema_document() -> Value {
-        serde_json::json!({
+        json!({
             "schemaVersion": "2.1.0",
             "thresholds": { "high": 80, "low": 60 },
             "projectRoot": "/workspace",
@@ -1490,9 +1529,9 @@ mod tests {
     #[test]
     fn survivor_validation_order_and_optional_endpoints_are_observable() {
         let mut document = complete_schema_document();
-        document["thresholds"] = serde_json::json!({"high": 100, "low": 100});
+        document["thresholds"] = json!({"high": 100, "low": 100});
         assert_eq!(validate_schema(&document), Ok(()));
-        document["thresholds"] = serde_json::json!({"high": 101, "low": 102});
+        document["thresholds"] = json!({"high": 101, "low": 102});
         assert_eq!(
             validate_schema(&document),
             Err("report.thresholds.high must be at most 100".to_owned())
@@ -1500,13 +1539,13 @@ mod tests {
         for (pointer, value, expected) in [
             (
                 "/schemaVersion",
-                serde_json::json!("3"),
+                json!("3"),
                 "schema version `3` at report.schemaVersion must match the supported pattern",
             ),
             ("/schemaVersion", Value::Null, "report.schemaVersion must be a string"),
             (
                 "/files/src~1lib.rs/mutants/0",
-                serde_json::json!({
+                json!({
                     "id":"abc", "mutatorName":"m", "location":{"start":{"line":1,"column":1}, "end":{"line":1,"column":2}},
                     "status":"Unknown"
                 }),
@@ -1514,19 +1553,15 @@ mod tests {
             ),
             (
                 "/files/src~1lib.rs/mutants/0/location/start",
-                serde_json::json!({"line":0,"column":0}),
+                json!({"line":0,"column":0}),
                 "report.files[\"src/lib.rs\"].mutants[0].location.start.line must be at least 1",
             ),
             (
                 "/testFiles/tests~1unit.rs/tests/0/location",
-                serde_json::json!({"start":{"line":1,"column":1},"end":{"line":0,"column":1}}),
+                json!({"start":{"line":1,"column":1},"end":{"line":0,"column":1}}),
                 "report.testFiles[\"tests/unit.rs\"].tests[0].location.end.line must be at least 1",
             ),
-            (
-                "/performance",
-                serde_json::json!({}),
-                "report.performance is missing required field `setup`",
-            ),
+            ("/performance", json!({}), "report.performance is missing required field `setup`"),
         ] {
             let mut document = complete_schema_document();
             *document.pointer_mut(pointer).expect("fixture pointer") = value;
@@ -1583,12 +1618,12 @@ mod tests {
             ),
             (
                 "/files/src~1lib.rs/mutants/0/location/start",
-                serde_json::json!({}),
+                json!({}),
                 "report.files[\"src/lib.rs\"].mutants[0].location.start is missing required field `line`",
             ),
             (
                 "/files/src~1lib.rs/mutants/0/location/start",
-                serde_json::json!({"line":false,"column":1}),
+                json!({"line":false,"column":1}),
                 "report.files[\"src/lib.rs\"].mutants[0].location.start.line must be a non-negative integer",
             ),
         ] {
@@ -1632,7 +1667,7 @@ mod tests {
             "report.system.os.description must be a string"
         );
         let mut document = complete_schema_document();
-        document["testFiles"]["tests/unit.rs"]["tests"][0]["location"] = serde_json::json!({"start":{"line":1,"column":1}});
+        document["testFiles"]["tests/unit.rs"]["tests"][0]["location"] = json!({"start":{"line":1,"column":1}});
         assert_eq!(validate_schema(&document), Ok(()));
         let mut report = fixtures::report_with(None, 0, vec![fixtures::mutant_result()]);
         report.thresholds = Thresholds { high: 101, low: 102 };
@@ -1676,7 +1711,7 @@ mod tests {
             ),
             (
                 "report.thresholds.high must be a non-negative integer",
-                Box::new(|value| value["thresholds"]["high"] = serde_json::json!(-1)),
+                Box::new(|value| value["thresholds"]["high"] = json!(-1)),
             ),
             (
                 "report.files[\"src/lib.rs\"].language must be a string",
@@ -1879,7 +1914,7 @@ mod tests {
     fn compact_report_fields_remain_json_strings() {
         let source = SourceFile::parse("src/lib.rs", "fn f() { a < b; }".to_owned()).expect("parses");
         let rendered = render(&mutant(Outcome::Survived, 9..14), &source);
-        let json = serde_json::to_value(rendered).expect("serializes");
+        let json = to_value(rendered).expect("serializes");
 
         assert_eq!(json["id"], "abc123abc123");
         assert_eq!(json["mutatorName"], "relational.lt_to_le");
@@ -2174,7 +2209,7 @@ mod tests {
             }
         }"#;
 
-        let digest: Digest<'_> = serde_json::from_str(text).expect("parses");
+        let digest: Digest<'_> = from_str(text).expect("parses");
         let file = digest.files.get("src/lib.rs").expect("the file");
         let mutant = file.mutants.first().expect("the mutant");
 
@@ -2195,8 +2230,8 @@ mod tests {
         starved.note = Some("`unit-abc` reached 300.0 MB, past the 256.0 MB this run allowed it".to_owned());
 
         let rendered = render(&starved, &source);
-        let json = serde_json::to_string(&rendered).expect("serializes");
-        let read: MutantResult = serde_json::from_str(&json).expect("round-trips");
+        let json = to_string(&rendered).expect("serializes");
+        let read: MutantResult = from_str(&json).expect("round-trips");
         let reason = read.status_reason.clone().expect("a reason");
 
         assert_eq!(read.status, "Survived");
@@ -2222,8 +2257,8 @@ mod tests {
         flake.note = Some("test `a::b` in `unit-abc` fails with no mutant active as well as with one".to_owned());
 
         let rendered = render(&flake, &source);
-        let json = serde_json::to_string(&rendered).expect("serializes");
-        let read: MutantResult = serde_json::from_str(&json).expect("round-trips");
+        let json = to_string(&rendered).expect("serializes");
+        let read: MutantResult = from_str(&json).expect("round-trips");
         let reason = read.status_reason.clone().expect("a reason");
 
         assert_eq!(read.status, "Ignored");
@@ -2248,8 +2283,7 @@ mod tests {
 
         flake.note = Some("test `a::b` in `unit-abc` fails with no mutant active as well as with one".to_owned());
 
-        let read: MutantResult =
-            serde_json::from_str(&serde_json::to_string(&render(&flake, &source)).expect("serializes")).expect("round-trips");
+        let read: MutantResult = from_str(&to_string(&render(&flake, &source)).expect("serializes")).expect("round-trips");
 
         assert_eq!(
             settled_verdict(&read.status, read.status_reason.as_deref()),
@@ -2284,7 +2318,7 @@ mod tests {
 
         assert_eq!(rendered.status, "Ignored", "the status must stay in the schema's denominator");
 
-        let read: MutantResult = serde_json::from_str(&serde_json::to_string(&rendered).expect("serializes")).expect("round-trips");
+        let read: MutantResult = from_str(&to_string(&rendered).expect("serializes")).expect("round-trips");
 
         assert!(
             read.status_reason
@@ -2335,7 +2369,7 @@ mod tests {
             let expected = include_not_built.then_some(1);
             let report = build_from(&plan, None, Thresholds::default(), info.clone()).unwrap();
             assert_eq!(report.config.as_ref().unwrap().not_built, expected);
-            let decoded: Report = serde_json::from_str(&to_json(&report).unwrap()).unwrap();
+            let decoded: Report = from_str(&to_json(&report).unwrap()).unwrap();
             let compiler_excluded = decoded.files["z-kept.rs"]
                 .mutants
                 .iter()
@@ -2349,7 +2383,7 @@ mod tests {
                 .report
                 .unwrap();
             assert_eq!(merged.config.as_ref().unwrap().not_built, expected);
-            let stage: Report = serde_json::from_str(&to_json(&merged).unwrap()).unwrap();
+            let stage: Report = from_str(&to_json(&merged).unwrap()).unwrap();
             let staged = crate::merge::merge(&[("stage".into(), stage)], 300, None).report.unwrap();
             assert_eq!(staged.config.as_ref().unwrap().not_built, expected);
             assert_eq!(staged.files["z-kept.rs"].mutants.len(), plan.mutants.len());

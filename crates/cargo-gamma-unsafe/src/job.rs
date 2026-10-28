@@ -46,8 +46,8 @@ mod test_child;
 
 /// The fallible Win32 operations used by the release and job algorithms.
 ///
-/// Production and tests run the same algorithms. Tests replace only this dependency with a backend
-/// that can return one requested native failure before delegating every other call to Windows.
+/// Production and tests run the same algorithms. Tests replace only this dependency with scripted
+/// calls or individual injected native failures.
 trait NativeCalls {
     fn thread_snapshot(&self) -> HANDLE;
     fn first_thread(&self, snapshot: HANDLE, entry: &mut THREADENTRY32) -> bool;
@@ -63,6 +63,7 @@ trait NativeCalls {
     fn completion_status(&self, completion: HANDLE, message: &mut u32, key: &mut usize, overlapped: &mut *mut OVERLAPPED) -> bool;
     fn terminate_job(&self, job: HANDLE) -> bool;
     fn close_job(&self, job: HANDLE);
+    fn close_completion_port(&self, completion: HANDLE);
 }
 
 struct SystemCalls;
@@ -183,6 +184,11 @@ impl NativeCalls for SystemCalls {
         // SAFETY: the job owner relinquishes this live handle exactly once and never uses it again.
         let _closed = unsafe { CloseHandle(job) };
     }
+
+    fn close_completion_port(&self, completion: HANDLE) {
+        // SAFETY: the completion-port owner relinquishes this live handle exactly once.
+        let _closed = unsafe { CloseHandle(completion) };
+    }
 }
 
 const fn win32_succeeded(result: i32) -> bool {
@@ -195,6 +201,10 @@ const fn win32_succeeded(result: i32) -> bool {
 /// supported CI targets are 64-bit, so that platform-width adapter cannot be driven there.
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn native_limit(limit: u64) -> Option<usize> {
+    #[cfg(test)]
+    if let Some(convert) = NATIVE_LIMIT_CONVERSION.get() {
+        return convert(limit);
+    }
     usize::try_from(limit).ok()
 }
 
@@ -215,7 +225,12 @@ fn install_memory_limit(limits: &mut JOBOBJECT_EXTENDED_LIMIT_INFORMATION, limit
 struct FaultInjectingCalls;
 
 #[cfg(test)]
+type NativeLimitConversion = fn(u64) -> Option<usize>;
+
+#[cfg(test)]
 thread_local! {
+    static NATIVE_LIMIT_CONVERSION: Cell<Option<NativeLimitConversion>> = const { Cell::new(None) };
+    static NATIVE_LIMIT_CONVERSION_CALLS: Cell<usize> = const { Cell::new(0) };
     static LAST_OPEN_THREAD_REQUEST: Cell<Option<u32>> = const { Cell::new(None) };
     static TERMINATED_JOBS: RefCell<Vec<HANDLE>> = const { RefCell::new(Vec::new()) };
     static CLOSED_JOBS: RefCell<Vec<HANDLE>> = const { RefCell::new(Vec::new()) };
@@ -257,6 +272,9 @@ impl NativeCalls for FaultInjectingCalls {
     }
 
     fn create_job(&self) -> HANDLE {
+        if job_creation_script::call(job_creation_script::Call::CreateJob) {
+            return job_creation_script::JOB;
+        }
         if native_faults::fired(NativeCall::CreateJob) {
             core::ptr::null_mut()
         } else {
@@ -265,6 +283,9 @@ impl NativeCalls for FaultInjectingCalls {
     }
 
     fn create_completion_port(&self) -> HANDLE {
+        if job_creation_script::call(job_creation_script::Call::CreateCompletionPort) {
+            return job_creation_script::COMPLETION;
+        }
         if native_faults::fired(NativeCall::CompletionPort) {
             core::ptr::null_mut()
         } else {
@@ -273,10 +294,24 @@ impl NativeCalls for FaultInjectingCalls {
     }
 
     fn associate_completion_port(&self, job: HANDLE, association: &mut JOBOBJECT_ASSOCIATE_COMPLETION_PORT) -> bool {
+        if job_creation_script::call(job_creation_script::Call::Associate(
+            job,
+            association.CompletionPort,
+            association.CompletionKey as usize,
+        )) {
+            return true;
+        }
         !native_faults::fired(NativeCall::AssociatePort) && SystemCalls.associate_completion_port(job, association)
     }
 
     fn configure_job(&self, job: HANDLE, limits: &mut JOBOBJECT_EXTENDED_LIMIT_INFORMATION) -> bool {
+        if job_creation_script::call(job_creation_script::Call::Configure(
+            job,
+            limits.BasicLimitInformation.LimitFlags,
+            limits.JobMemoryLimit,
+        )) {
+            return true;
+        }
         !native_faults::fired(NativeCall::ConfigureJob) && SystemCalls.configure_job(job, limits)
     }
 
@@ -303,8 +338,17 @@ impl NativeCalls for FaultInjectingCalls {
     }
 
     fn close_job(&self, job: HANDLE) {
+        if job_creation_script::call(job_creation_script::Call::CloseJob(job)) {
+            return;
+        }
         CLOSED_JOBS.with_borrow_mut(|calls| calls.push(job));
         SystemCalls.close_job(job);
+    }
+
+    fn close_completion_port(&self, completion: HANDLE) {
+        if !job_creation_script::call(job_creation_script::Call::CloseCompletionPort(completion)) {
+            SystemCalls.close_completion_port(completion);
+        }
     }
 }
 
@@ -452,7 +496,7 @@ pub struct Job {
     handle: HANDLE,
 
     /// The completion port that reports a rejected job-memory commit, when a limit needs one.
-    completion: Option<OwnedHandle>,
+    completion: Option<CompletionPort>,
 
     /// The aggregate committed memory the job was limited to, when it was limited at all.
     limit: Option<u64>,
@@ -498,15 +542,12 @@ impl Job {
             let completion = create_completion_port();
 
             if !valid_handle(completion) {
-                // SAFETY: `handle` was just created above and has no other owner.
-                let _closed = unsafe { CloseHandle(handle) };
+                NATIVE_CALLS.close_job(handle);
 
                 return None;
             }
 
-            // SAFETY: `completion` was just returned by `CreateIoCompletionPort` and is not null,
-            // so this wrapper owns and closes it exactly once.
-            Some(unsafe { OwnedHandle::from_raw_handle(completion) })
+            Some(CompletionPort(completion))
         } else {
             None
         };
@@ -591,7 +632,7 @@ impl Job {
     /// Drains job messages until none is immediately available, retaining a memory-limit hit.
     fn memory_limit_was_hit(&self) -> bool {
         memory_limit_was_hit_with(
-            self.completion.as_ref().map(OwnedHandle::as_raw_handle),
+            self.completion.as_ref().map(CompletionPort::as_raw_handle),
             &self.memory_limit_hit,
             |completion, message, key, overlapped| NATIVE_CALLS.completion_status(completion, message, key, overlapped),
         )
@@ -646,6 +687,28 @@ impl Drop for Job {
     }
 }
 
+/// Owns completion-port cleanup through the backend, including scripted synthetic handles.
+#[derive(Debug)]
+struct CompletionPort(HANDLE);
+
+// SAFETY: the owned kernel handle has no thread affinity and can be closed on another thread.
+unsafe impl Send for CompletionPort {}
+
+// SAFETY: completion-port operations are kernel-synchronized and do not mutate this owned handle.
+unsafe impl Sync for CompletionPort {}
+
+impl std::os::windows::io::AsRawHandle for CompletionPort {
+    fn as_raw_handle(&self) -> HANDLE {
+        self.0
+    }
+}
+
+impl Drop for CompletionPort {
+    fn drop(&mut self) {
+        NATIVE_CALLS.close_completion_port(self.0);
+    }
+}
+
 /// Creates the job object itself.
 ///
 /// Each native step of creation is a function of its own so that the arm taken when it fails can be
@@ -684,6 +747,7 @@ const fn usage_from(limit: Option<u64>, peak: Option<u64>, memory_limit_hit: boo
 /// answer as no. Exposed for containment diagnostics and tests; assignment itself is performed
 /// through [`Job`].
 #[must_use]
+// #[gamma::skip(fn_value.none, reason = "this thin Child adapter needs a spawned process; owned query-result tests cover the None versus false contract", tag = "native")]
 pub fn in_any_job(child: &Child) -> Option<bool> {
     use windows_sys::Win32::System::JobObjects::IsProcessInJob;
 
@@ -695,6 +759,7 @@ pub fn in_any_job(child: &Child) -> Option<bool> {
     // one, and the final argument is a live `i32` the call writes through.
     let queried = unsafe { IsProcessInJob(handle, core::ptr::null_mut(), &raw mut inside) };
 
+    // #[gamma::skip(call.replace_with_default, call_result.default, reason = "This thin native Child adapter requires a spawned process; deterministic tests cover the owned query-result policy.", tag = "native")]
     in_job_answer(&JobMembershipQuery { queried, inside })
 }
 
@@ -711,6 +776,10 @@ const fn in_job_answer(answer: &JobMembershipQuery) -> Option<bool> {
     }
 }
 
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod job_creation_script;
+
 #[cfg(all(test, not(miri)))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
@@ -721,9 +790,17 @@ mod tests {
     use windows_sys::Win32::System::IO::PostQueuedCompletionStatus;
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetCurrentThreadId, GetProcessHandleCount, TerminateThread};
 
+    use super::job_creation_script::{COMPLETION, Call, JOB};
     use super::job_watchdog::{Watchdog, native_smoke_enabled};
     use super::test_child::TestChild;
     use super::*;
+
+    #[test]
+    fn survivor_snapshot_failure_refuses_release_without_a_child_process() {
+        let _fault = native_faults::arm(NativeCall::Snapshot);
+        assert!(!release(1));
+        assert!(!native_faults::fired(NativeCall::Snapshot));
+    }
 
     /// Allocation increment used by the job-memory-limit regression child.
     const JOB_LIMIT_REGRESSION_BLOCK: usize = 16 * 1024 * 1024;
@@ -792,6 +869,51 @@ mod tests {
         CLOSED_JOBS.with_borrow_mut(Vec::clear);
         drop(job);
         CLOSED_JOBS.with_borrow(|calls| assert_eq!(*calls, [handle]));
+    }
+
+    #[test]
+    fn survivor_native_word_width_refusals_propagate_through_job_creation() {
+        struct Restore(Option<fn(u64) -> Option<usize>>, usize);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                NATIVE_LIMIT_CONVERSION.set(self.0);
+                NATIVE_LIMIT_CONVERSION_CALLS.set(self.1);
+            }
+        }
+        fn native_32_bit_limit(limit: u64) -> Option<usize> {
+            NATIVE_LIMIT_CONVERSION_CALLS.set(NATIVE_LIMIT_CONVERSION_CALLS.get() + 1);
+            u32::try_from(limit).ok().and_then(|value| usize::try_from(value).ok())
+        }
+        let _restore = Restore(
+            NATIVE_LIMIT_CONVERSION.replace(Some(native_32_bit_limit)),
+            NATIVE_LIMIT_CONVERSION_CALLS.replace(0),
+        );
+        job_creation_script::run(
+            [
+                Call::CreateJob,
+                Call::CreateCompletionPort,
+                Call::Associate(JOB, COMPLETION, 0),
+                Call::Configure(
+                    JOB,
+                    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION | JOB_OBJECT_LIMIT_JOB_MEMORY,
+                    64 * 1024 * 1024,
+                ),
+                Call::CloseJob(JOB),
+                Call::CloseCompletionPort(COMPLETION),
+                Call::CreateJob,
+                Call::CreateCompletionPort,
+                Call::Associate(JOB, COMPLETION, 0),
+                Call::CloseJob(JOB),
+                Call::CloseCompletionPort(COMPLETION),
+            ],
+            || {
+                let supported = Job::create(Some(64 * 1024 * 1024)).unwrap();
+                assert_eq!(NATIVE_LIMIT_CONVERSION_CALLS.get(), 1);
+                drop(supported);
+                assert!(Job::create(Some(u64::MAX)).is_none());
+                assert_eq!(NATIVE_LIMIT_CONVERSION_CALLS.get(), 2);
+            },
+        );
     }
 
     #[test]

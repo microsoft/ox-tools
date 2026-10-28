@@ -9,6 +9,7 @@ mod cli;
 mod collect;
 #[path = "../../package_glob.rs"]
 mod package_glob;
+mod report_file;
 mod run;
 
 use std::process::ExitCode;

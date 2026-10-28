@@ -313,6 +313,65 @@ mod tests {
     use super::*;
 
     #[test]
+    fn method_annotations_are_claimed_as_valid_function_values_not_reported_as_misplaced() {
+        for source in [
+            "struct S; impl S { #[gamma::value(0)] fn value(&self) -> u8 { 1 } }",
+            "trait S { #[gamma::value(0)] fn value(&self) -> u8 { 1 } }",
+        ] {
+            assert!(run_source(source, "all", &CfgSet::unconditional()).is_ok(), "{source}");
+        }
+        let file = SourceFile::parse("fixture.rs", "trait S { #[gamma::value(0)] fn value(&self) -> u8; }".into()).unwrap();
+        let error = run(&file, &Selection::everything(), &CfgSet::unconditional()).err().unwrap();
+        assert!(error.to_string().contains("a declaration has none"), "{error}");
+    }
+
+    #[test]
+    fn recursive_macro_and_extern_crate_visits_audit_their_own_misplaced_annotations() {
+        for source in [
+            "#[gamma::value(0)] macro_rules! empty { () => {} }",
+            "#[gamma::value(0)] extern crate dependency;",
+            "fn f() { #[gamma::value(0)] emit!(); }",
+        ] {
+            let file = SourceFile::parse("fixture.rs", source.into()).unwrap();
+            let error = run(&file, &Selection::everything(), &CfgSet::unconditional()).err().unwrap();
+            assert!(error.to_string().contains("it goes on a function or a method"), "{source}: {error}");
+        }
+    }
+
+    #[test]
+    fn expression_attributes_close_only_the_containing_block_local_call_proof() {
+        for (attribute, transparent) in [("allow(dead_code)", true), ("transform", false)] {
+            let source = format!("fn outer() {{ consume(#[{attribute}] value); }}");
+            let file = SourceFile::parse("fixture.rs", source).unwrap();
+            let Item::Fn(function) = &file.ast.items[0] else { unreachable!() };
+            let scope = vec![super::super::indexes::block_id(&function.block)];
+            let indexes = run(&file, &Selection::everything(), &CfgSet::unconditional()).unwrap();
+            assert_eq!(indexes.local_calls.scope_is_transparent(&scope), transparent, "{attribute}");
+            assert!(indexes.local_calls.scope_is_transparent(&Vec::new()));
+        }
+    }
+
+    #[test]
+    fn recursive_enum_union_and_binary_children_contribute_their_own_numeric_names() {
+        for (source, names) in [
+            ("enum E { A([u8; enum_left - enum_right]) }", &["enum_left", "enum_right"][..]),
+            (
+                "union U { bytes: [u8; union_left - union_right] }",
+                &["union_left", "union_right"][..],
+            ),
+            (
+                "fn f() { outer_left - (inner_left - inner_right); }",
+                &["outer_left", "inner_left", "inner_right"][..],
+            ),
+        ] {
+            let indexes = run_source(source, "all", &CfgSet::unconditional()).unwrap();
+            for name in names {
+                assert!(indexes.numeric_uses.names.contains(*name), "{source}: {name}");
+            }
+        }
+    }
+
+    #[test]
     fn fused_recursive_children_and_method_receiver_evidence_are_independent() {
         let file = SourceFile::parse(
             "fixture.rs",

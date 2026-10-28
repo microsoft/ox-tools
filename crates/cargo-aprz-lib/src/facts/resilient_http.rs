@@ -118,7 +118,9 @@ async fn get_following_redirects(client: &HttpClient, mut url: Url, authorizatio
         }
         let next = url.join(location.to_str()?)?;
         if next.origin() != url.origin() {
-            authorization = None;
+            authorization =
+            // #[gamma::skip(assign_value.default, reason = "Default produces the same concrete false or None value as this assignment.", tag = "equivalent")]
+            None;
         }
         url = next;
         redirects += 1;
@@ -190,7 +192,8 @@ fn should_retry_response(result: &fetch::Result<HttpResponse>) -> RecoveryInfo {
 
         // Secondary rate limit (403 with Retry-After) – wait the requested duration and retry.
         Ok(resp) if resp.status() == StatusCode::FORBIDDEN => parse_retry_after(resp.headers())
-            .map_or_else(RecoveryInfo::never, |delay| RecoveryInfo::retry().delay(Duration::from_secs(delay))),
+            .map(Duration::from_secs)
+            .map_or_else(RecoveryInfo::never, |delay| RecoveryInfo::retry().delay(delay)),
 
         // Everything else (success, 4xx client errors) is not retried.
         _ => RecoveryInfo::never(),
@@ -326,11 +329,213 @@ where
 #[cfg(not(miri))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use core::sync::atomic::{AtomicU32, Ordering};
+
     use chrono::{TimeZone as _, Utc};
     use seatbelt::RecoveryKind;
+    use tracing::Subscriber;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
 
+    #[derive(Clone, Default)]
+    struct CapturedResilienceEvents(Arc<std::sync::Mutex<Vec<(&'static str, String)>>>);
+
+    impl Subscriber for CapturedResilienceEvents {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _attributes: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+        fn enter(&self, _span: &tracing::span::Id) {}
+        fn exit(&self, _span: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            struct StrategyName(Option<String>);
+
+            impl tracing::field::Visit for StrategyName {
+                fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn core::fmt::Debug) {
+                    if field.name() == "strategy.name" {
+                        self.0 = Some(format!("{value:?}"));
+                    }
+                }
+            }
+
+            let mut strategy = StrategyName(None);
+            event.record(&mut strategy);
+            if let Some(strategy) = strategy.0 {
+                self.0.lock().unwrap().push((event.metadata().name(), strategy));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn survivor_request_middleware_events_preserve_exact_strategy_names() {
+        let events = CapturedResilienceEvents::default();
+        let _subscriber = tracing::subscriber::set_default(events.clone());
+        let control = tick::ClockControl::new();
+        let clock = control.to_clock();
+        let handler = fetch::fake::FakeHandler::from_async_fn(move |_| core::future::pending::<fetch::Result<HttpResponse>>());
+        let client = configure_request_resilience(HttpClient::builder_fake(handler, &clock)).build();
+        let request = resilient_get(&client, "https://example.test/stalled-headers");
+        let mut request = std::pin::pin!(request);
+        assert!(futures_util::poll!(&mut request).is_pending());
+        control.advance(DEFAULT_REQUEST_TIMEOUT);
+        assert!(futures_util::poll!(&mut request).is_pending());
+        let recorded = events
+            .0
+            .lock()
+            .expect("event recorder only appends plain values; assertions run after unlocking")
+            .clone();
+        assert_eq!(
+            recorded,
+            vec![("seatbelt.timeout", "timeout".to_owned()), ("seatbelt.retry", "retry".to_owned())]
+        );
+    }
+
+    #[test]
+    fn survivor_content_lengths_with_nontext_headers_are_absent_not_panics() {
+        let response = fetch::HttpResponseBuilder::new_fake()
+            .header(CONTENT_LENGTH, HeaderValue::from_bytes(&[0xff]).unwrap())
+            .build()
+            .unwrap();
+        assert_eq!(content_length(&response), None);
+    }
+
+    // Redirect-handler counters in this module record only their own values.
+    // Awaiting the request completes its calls; neither ordering publishes other state.
+    #[tokio::test]
+    async fn survivor_redirect_errors_and_terminal_statuses_preserve_the_response_contract() {
+        for (status, location, expected_requests) in [(StatusCode::OK, "/ignored", 1), (StatusCode::FOUND, "http://[invalid", 1)] {
+            let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+            let handler = fetch::fake::FakeHandler::from_fn({
+                let calls = Arc::clone(&calls);
+                move |_| {
+                    let call = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let mut response = fetch::HttpResponseBuilder::new_fake().status(status);
+                    if call == 0 {
+                        response = response.header(LOCATION, location);
+                    }
+                    response.build()
+                }
+            });
+            let client = HttpClient::new_fake(handler);
+            let result = resilient_get(&client, "https://example.test/start").await;
+            if status == StatusCode::OK {
+                assert_eq!(result.unwrap().status(), StatusCode::OK);
+            } else {
+                result.unwrap_err();
+            }
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), expected_requests);
+        }
+        let handler = fetch::fake::FakeHandler::from_fn(|_| {
+            fetch::HttpResponseBuilder::new_fake()
+                .status(StatusCode::FOUND)
+                .header(LOCATION, HeaderValue::from_bytes(&[0xff]).unwrap())
+                .build()
+        });
+        resilient_get(&HttpClient::new_fake(handler), "https://example.test/start")
+            .await
+            .unwrap_err();
+    }
+
+    #[tokio::test]
+    async fn survivor_redirect_budget_stops_before_a_finite_eleventh_hop() {
+        let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let handler = fetch::fake::FakeHandler::from_fn({
+            let calls = Arc::clone(&calls);
+            move |_| {
+                let call = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if call < 11 {
+                    fetch::HttpResponseBuilder::new_fake()
+                        .status(StatusCode::FOUND)
+                        .header(LOCATION, "/next")
+                        .build()
+                } else {
+                    fetch::HttpResponseBuilder::new_fake().status(StatusCode::OK).build()
+                }
+            }
+        });
+        let error = get_following_redirects(
+            &HttpClient::new_fake(handler),
+            Url::parse("https://example.test/start").unwrap(),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "HTTP redirect limit exceeded (maximum 10); check the endpoint's redirect configuration"
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 11);
+    }
+
+    #[tokio::test]
+    async fn get_following_redirects_applies_one_budget_to_mixed_redirect_statuses() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let handler = fetch::fake::FakeHandler::from_fn({
+            let calls = Arc::clone(&calls);
+            move |_| {
+                let call = calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                assert!(call < 11, "the redirect budget must reject an unscripted twelfth request");
+                let statuses = [
+                    StatusCode::MOVED_PERMANENTLY,
+                    StatusCode::FOUND,
+                    StatusCode::SEE_OTHER,
+                    StatusCode::TEMPORARY_REDIRECT,
+                    StatusCode::PERMANENT_REDIRECT,
+                ];
+                fetch::HttpResponseBuilder::new_fake()
+                    .status(statuses[call % statuses.len()])
+                    .header(LOCATION, format!("/hop-{}", call + 1))
+                    .build()
+            }
+        });
+        let error = get_following_redirects(
+            &HttpClient::new_fake(handler),
+            Url::parse("https://example.test/start").unwrap(),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "HTTP redirect limit exceeded (maximum 10); check the endpoint's redirect configuration"
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 11);
+    }
+
+    #[test]
+    fn should_retry_response_preserves_the_largest_forbidden_retry_after_delta() {
+        let response = fetch::HttpResponseBuilder::new_fake()
+            .status(StatusCode::FORBIDDEN)
+            .header(RETRY_AFTER, u64::MAX.to_string())
+            .build()
+            .unwrap();
+        let recovery = should_retry_response(&Ok(response));
+        assert_eq!(recovery.kind(), RecoveryKind::Retry);
+        assert_eq!(recovery.get_delay(), Some(Duration::from_secs(u64::MAX)));
+    }
+
+    #[test]
+    fn survivor_forbidden_retry_after_preserves_the_exact_delay() {
+        for seconds in [0_u64, 1, 7] {
+            let response = fetch::HttpResponseBuilder::new_fake()
+                .status(StatusCode::FORBIDDEN)
+                .header(RETRY_AFTER, seconds.to_string())
+                .build()
+                .unwrap();
+            let recovery = should_retry_response(&Ok(response));
+            assert_eq!(recovery.kind(), RecoveryKind::Retry);
+            assert_eq!(recovery.get_delay(), Some(Duration::from_secs(seconds)));
+        }
+    }
     #[test]
     fn parses_delta_seconds() {
         let now = Utc.with_ymd_and_hms(1994, 11, 6, 8, 49, 37).unwrap();
@@ -389,11 +594,6 @@ mod tests {
     // -----------------------------------------------------------------------
     // Retry behaviour
     // -----------------------------------------------------------------------
-
-    use core::sync::atomic::{AtomicU32, Ordering};
-
-    use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn lazy_client_construction_and_cloning_do_not_need_a_runtime() {
@@ -574,18 +774,32 @@ mod tests {
 
     #[tokio::test]
     async fn redirect_loops_stop_after_ten_hops() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .respond_with(ResponseTemplate::new(301).insert_header("location", "/loop"))
-            .expect(11)
-            .mount(&server)
-            .await;
-
-        let error = get_following_redirects(&new_client(), Url::parse(&server.uri()).unwrap(), None)
-            .await
-            .expect_err("a redirect loop must be bounded");
-
-        assert!(error.to_string().contains("redirect limit exceeded"), "{error}");
+        // The awaited redirect loop finishes every fake call before this count is
+        // read. Relaxed records only the count, not publication of other memory.
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let handler = fetch::fake::FakeHandler::from_fn({
+            let calls = Arc::clone(&calls);
+            move |_| {
+                let call = calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                assert!(call < 11, "the redirect budget must reject an unscripted twelfth request");
+                fetch::HttpResponseBuilder::new_fake()
+                    .status(StatusCode::MOVED_PERMANENTLY)
+                    .header(LOCATION, "/loop")
+                    .build()
+            }
+        });
+        let error = get_following_redirects(
+            &HttpClient::new_fake(handler),
+            Url::parse("https://example.test/loop").unwrap(),
+            None,
+        )
+        .await
+        .expect_err("a redirect loop must be bounded");
+        assert_eq!(
+            error.to_string(),
+            "HTTP redirect limit exceeded (maximum 10); check the endpoint's redirect configuration"
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 11);
     }
 
     #[tokio::test]

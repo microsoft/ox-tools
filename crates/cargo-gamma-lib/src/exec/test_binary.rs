@@ -2,8 +2,8 @@
 // Licensed under the MIT License.
 
 use core::time::Duration;
-use std::fs;
 use std::sync::Arc;
+use std::{fs, io};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use serde_json::Value;
@@ -172,7 +172,10 @@ pub(super) fn apportion(binaries: &mut [TestBinary], multiplier: f64, floor: Dur
 pub(super) fn calibrate(binaries: &mut [TestBinary], config: &Config, memory: &MemoryPolicy) {
     binaries.sort_by_key(|binary| binary.baseline);
 
+    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
     apportion(binaries, config.test_timeout_multiplier, config.timeout_floor, config.baseline);
+
+    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
     bound(binaries, memory, config.baseline);
 }
 
@@ -301,6 +304,7 @@ pub(super) fn test_binaries_with_linkage(stdout: &str, root: &Utf8Path, capture_
         }
     }
 
+    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
     normalize_binaries(&mut binaries);
     binaries
 }
@@ -361,9 +365,13 @@ fn artifact_origins(stdout: &str, root: &Utf8Path) -> crate::HashMap<Utf8PathBuf
 }
 
 fn read_captures(directory: &Utf8Path) -> Option<Vec<RustcInvocation>> {
-    let mut captures: Vec<RustcInvocation> = Vec::new();
     let entries = fs::read_dir(directory.as_std_path()).ok()?;
+    read_capture_entries(entries)
+}
 
+/// Reads a complete normalized capture inventory or returns unavailable; only enumeration is injected.
+fn read_capture_entries(entries: impl IntoIterator<Item = io::Result<fs::DirEntry>>) -> Option<Vec<RustcInvocation>> {
+    let mut captures: Vec<RustcInvocation> = Vec::new();
     for entry in entries {
         let entry = entry.ok()?;
         if entry.path().extension() != Some(std::ffi::OsStr::new("json")) {
@@ -373,6 +381,7 @@ fn read_captures(directory: &Utf8Path) -> Option<Vec<RustcInvocation>> {
         captures.push(serde_json::from_slice(&bytes).ok()?);
     }
 
+    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
     normalize_captures(&mut captures);
 
     (!captures.is_empty()).then_some(captures)
@@ -480,13 +489,18 @@ fn dep_sources(invocation: &RustcInvocation, root: &Utf8Path) -> Option<Vec<Utf8
         .join(format!("{}{}.d", invocation.crate_name, invocation.extra_filename));
     let text = fs::read_to_string(dep_file.as_std_path()).ok()?;
     let mut sources = Vec::new();
-    let mut dependency_lines = 0_usize;
+    let mut dependency_lines =
+    // #[gamma::skip(literal.int_increment, reason = "dep_sources uses dependency_lines only in dep_sources_complete(lines,sources,primary), whose condition is lines!=0 && sources contains primary. Every source is pushed only after a parsed dependency line increments the count, so a primary source implies lines>0 under initial0 or1 and increment1 or2 (saturating addition never wraps). With no parsed lines sources is empty and both variants return false.", tag = "equivalent")]
+    0_usize;
 
     for line in text.lines() {
         let Some((_artifact, dependencies)) = line.split_once(": ") else {
             continue;
         };
-        dependency_lines = dependency_lines.saturating_add(1);
+        dependency_lines = dependency_lines.saturating_add(
+            // #[gamma::skip(literal.int_increment, reason = "dep_sources uses dependency_lines only in dep_sources_complete(lines,sources,primary), whose condition is lines!=0 && sources contains primary. Every source is pushed only after a parsed dependency line increments the count, so a primary source implies lines>0 under initial0 or1 and increment1 or2 (saturating addition never wraps). With no parsed lines sources is empty and both variants return false.", tag = "equivalent")]
+            1,
+        );
 
         for dependency in super::build::messages::dependencies(dependencies) {
             if let Some(relative) = workspace_relative(Utf8Path::new(&dependency), root) {
@@ -546,8 +560,11 @@ fn visit_capture(visited: &mut crate::HashSet<usize>, index: usize) -> bool {
 }
 
 fn external_package_id(package_id: &str) -> bool {
+    // #[gamma::skip(collection.reverse_array, reason = "Array is consumed only by any() over pure string membership predicates; reversing evaluation order changes neither existential result nor state.", tag = "equivalent")]
     ["registry+", "git+"].iter().any(|marker| package_id.starts_with(marker))
-        || ["(registry+", "(git+"].iter().any(|marker| package_id.contains(marker))
+        ||
+        // #[gamma::skip(collection.reverse_array, reason = "Array is consumed only by any() over pure string membership predicates; reversing evaluation order changes neither existential result nor state.", tag = "equivalent")]
+        ["(registry+", "(git+"].iter().any(|marker| package_id.contains(marker))
 }
 
 // #[gamma::skip(all, reason = "the mutation affects internal orchestration state with no safely deterministic observation at this layer")]
@@ -575,7 +592,9 @@ fn workspace_relative(path: &Utf8Path, root: &Utf8Path) -> Option<Utf8PathBuf> {
             camino::Utf8Component::ParentDir | camino::Utf8Component::RootDir | camino::Utf8Component::Prefix(_)
         )
     }) {
-        return no_target_selection();
+        return
+        // #[gamma::skip(return_value.default, reason = "no_target_selection<T>() returns None; in this Option-valued return position Default is also None.", tag = "equivalent")]
+        no_target_selection();
     }
 
     Some(Utf8PathBuf::from(super::build::messages::normalize_separators(relative.as_str())))
@@ -799,6 +818,7 @@ impl<'binaries> Reachability<'binaries> {
                 .filter(|binary| reaches_mutant(binary, mutant, plan, scope))
                 .collect();
 
+            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
             order_reachable(&mut found, &mutant.package);
 
             let _fresh = by_source.insert(key, found);
@@ -976,7 +996,13 @@ fn package_name(id: &str) -> String {
 /// since those are made of the same letters a name is.
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn is_version(fragment: &str) -> bool {
-    let release = fragment.split(['-', '+']).next().unwrap_or(fragment);
+    let release = fragment
+        .split(
+            // #[gamma::skip(collection.reverse_array, reason = "The character array is a pattern membership set; reversing its order leaves every match unchanged.", tag = "equivalent")]
+            ['-', '+'],
+        )
+        .next()
+        .unwrap_or(fragment);
     let mut characters = release.chars();
     let Some(first) = characters.next() else {
         return false;
@@ -988,7 +1014,52 @@ fn is_version(fragment: &str) -> bool {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use serde_json::{from_str, json, to_vec};
+
     use super::*;
+    use crate::HashMap;
+
+    #[test]
+    fn recovered_capture_inventory_returns_none_at_the_first_native_entry_error_without_consuming_later_entries() {
+        let entries = core::iter::once(Err(io::Error::new(io::ErrorKind::PermissionDenied, "unreadable capture entry"))).chain(
+            core::iter::once_with(|| panic!("capture inventory must stop at the first entry error")),
+        );
+        assert!(read_capture_entries(entries).is_none());
+    }
+
+    #[test]
+    fn recovered_target_identity_never_crosses_a_package_boundary_even_for_the_same_target() {
+        let binary = TestBinary {
+            package: "expected-package".into(),
+            target: "same-name".into(),
+            target_kind: "test".into(),
+            ..crate::testing::test_binary("unused")
+        };
+        for target in ["same-name", "test:same-name"] {
+            assert!(binary.matches_target("expected-package", target));
+            assert!(!binary.matches_target("other-package", target));
+        }
+    }
+
+    #[test]
+    fn recovered_capture_visitation_records_the_exact_zero_and_nonzero_indices_once() {
+        let mut visited = crate::HashSet::default();
+        for index in [0, 7, 2] {
+            assert!(visit_capture(&mut visited, index));
+            assert!(visited.contains(&index));
+            assert!(!visit_capture(&mut visited, index));
+        }
+        assert_eq!(visited, crate::HashSet::from_iter([0, 2, 7]));
+    }
+
+    #[test]
+    fn recovered_partial_source_overlap_is_enough_but_empty_populations_do_not_intersect() {
+        let pending = crate::HashSet::from_iter([Utf8Path::new("one.rs"), Utf8Path::new("two.rs")]);
+        let linked = crate::HashSet::from_iter([Utf8PathBuf::from("two.rs")]);
+        assert!(populations_intersect(&pending, &linked));
+        assert!(!populations_intersect(&crate::HashSet::default(), &linked));
+        assert!(!populations_intersect(&pending, &crate::HashSet::default()));
+    }
 
     fn survivor_capture(source: &str, output: &str, test: bool) -> RustcInvocation {
         RustcInvocation {
@@ -1051,7 +1122,7 @@ mod tests {
         let captures = root.join("captures");
         fs::create_dir(&output).unwrap();
         fs::create_dir(&captures).unwrap();
-        let mut messages = vec!["not JSON".to_owned(), serde_json::json!({"reason":"compiler-message"}).to_string()];
+        let mut messages = vec!["not JSON".to_owned(), json!({"reason":"compiler-message"}).to_string()];
         for name in ["unlinked", "zulu", "alpha"] {
             let mut capture = survivor_capture(root.join(format!("tests/{name}.rs")).as_str(), output.as_str(), true);
             capture.crate_name = name.into();
@@ -1062,8 +1133,8 @@ mod tests {
             write_dep(&capture, &sources);
             write_capture(&captures, name, &capture);
             let executable = output.join(format!("{name}-123{}", std::env::consts::EXE_SUFFIX));
-            let mut message: Value = serde_json::from_str(&artifact_stream(&[(name, &capture.source, &executable)])).unwrap();
-            message["target"]["kind"] = serde_json::json!(["test", "bin"]);
+            let mut message: Value = from_str(&artifact_stream(&[(name, &capture.source, &executable)])).unwrap();
+            message["target"]["kind"] = json!(["test", "bin"]);
             messages.push(message.to_string());
         }
         let stream = messages.join("\n");
@@ -1129,7 +1200,7 @@ mod tests {
         let executable = output.join(format!("subject-123{}", std::env::consts::EXE_SUFFIX));
         let dependency = output.join("liblater-123.rlib");
         let registry = output.join("libregistry.rlib");
-        let origins = crate::HashMap::from_iter([(registry.clone(), ArtifactOrigin::Registry)]);
+        let origins = HashMap::from_iter([(registry.clone(), ArtifactOrigin::Registry)]);
         let expected = crate::HashSet::from_iter([Utf8PathBuf::from("tests/subject.rs"), Utf8PathBuf::from("src/later.rs")]);
         for cycle in [false, true] {
             primary.externs = if cycle {
@@ -1163,8 +1234,8 @@ mod tests {
         let artifact = root.join("out/subject");
         let stream = format!(
             "not JSON\n{}\n{}",
-            serde_json::json!({"reason":"compiler-message"}),
-            serde_json::json!({
+            json!({"reason":"compiler-message"}),
+            json!({
                 "reason":"compiler-artifact",
                 "package_id":"path+file:///workspace#subject@0.0.0",
                 "manifest_path":root.join("Cargo.toml"),
@@ -1173,7 +1244,7 @@ mod tests {
         );
         assert_eq!(
             artifact_origins(&stream, root),
-            crate::HashMap::from_iter([(artifact, ArtifactOrigin::Workspace)])
+            HashMap::from_iter([(artifact, ArtifactOrigin::Workspace)])
         );
     }
 
@@ -1202,9 +1273,9 @@ mod tests {
         let root = Utf8Path::from_path(directory.path()).unwrap();
         let first = survivor_capture("a.rs", "out", true);
         let last = survivor_capture("z.rs", "out", true);
-        fs::write(root.join("c.json"), serde_json::to_vec(&first).unwrap()).unwrap();
-        fs::write(root.join("b.json"), serde_json::to_vec(&last).unwrap()).unwrap();
-        fs::write(root.join("a.json"), serde_json::to_vec(&first).unwrap()).unwrap();
+        fs::write(root.join("c.json"), to_vec(&first).unwrap()).unwrap();
+        fs::write(root.join("b.json"), to_vec(&last).unwrap()).unwrap();
+        fs::write(root.join("a.json"), to_vec(&first).unwrap()).unwrap();
         fs::write(root.join("incomplete.tmp"), "invalid JSON is not a capture").unwrap();
         assert_eq!(read_captures(root), Some(vec![first, last]));
         fs::write(root.join("bad.json"), "invalid JSON").unwrap();
@@ -1328,7 +1399,7 @@ mod tests {
         // `reason` before consulting artifact-only fields.
         let stdout = format!(
             "{stdout}\n{}",
-            serde_json::json!({
+            json!({
                 "reason": "build-script-executed",
                 "profile": {"test": true},
                 "target": {"name": "not-a-test", "src_path": root.join("build.rs"), "kind": ["custom-build"]},
@@ -1426,14 +1497,14 @@ mod tests {
         let path_artifact = Utf8PathBuf::from("/target/libpath_dep.rlib");
         let registry_artifact = Utf8PathBuf::from("/target/libregistry_dep.rlib");
         let stdout = [
-            serde_json::json!({
+            json!({
                 "reason": "compiler-artifact",
                 "package_id": "path+file:///outside/path-dep#0.0.0",
                 "manifest_path": outside_manifest,
                 "filenames": [path_artifact],
             })
             .to_string(),
-            serde_json::json!({
+            json!({
                 "reason": "compiler-artifact",
                 "package_id": "registry+https://github.com/rust-lang/crates.io-index#dep@1.0.0",
                 "manifest_path": "/cargo/registry/src/dep/Cargo.toml",
@@ -1530,7 +1601,7 @@ mod tests {
                 executable.as_str(),
                 &capture.source,
                 &[capture.clone(), duplicate.clone(), duplicate],
-                &crate::HashMap::default(),
+                &HashMap::default(),
                 &root,
             )
             .is_none(),
@@ -1569,7 +1640,7 @@ mod tests {
     fn write_capture(directory: &Utf8Path, name: &str, capture: &RustcInvocation) {
         fs::write(
             directory.join(format!("{name}.json")).as_std_path(),
-            serde_json::to_vec(capture).expect("capture serializes"),
+            to_vec(capture).expect("capture serializes"),
         )
         .expect("capture writes");
     }
@@ -1606,7 +1677,7 @@ mod tests {
         targets
             .iter()
             .map(|(target, source, executable)| {
-                serde_json::json!({
+                json!({
                     "reason": "compiler-artifact",
                     "profile": {"test": true},
                     "package_id": "path+file:///workspace#subject@0.0.0",
@@ -1880,7 +1951,7 @@ mod tests {
     }
 
     fn plan_reaching(edges: &[(&str, &[&str])]) -> Plan {
-        let mut reach = crate::HashMap::default();
+        let mut reach = HashMap::default();
 
         for (from, to) in edges {
             let _previous = reach.insert((*from).to_owned(), to.iter().map(|name| (*name).to_owned()).collect());
@@ -1888,7 +1959,7 @@ mod tests {
 
         Plan {
             skipped: Vec::new(),
-            digests: crate::HashMap::default(),
+            digests: HashMap::default(),
             root: Utf8PathBuf::from("/w"),
             files: Vec::new(),
             mutants: Vec::new(),
@@ -1897,7 +1968,7 @@ mod tests {
             sharded_out: 0,
             settled_out: 0,
             reach,
-            specs: crate::HashMap::default(),
+            specs: HashMap::default(),
         }
     }
 
@@ -2376,8 +2447,8 @@ mod tests {
 
     #[test]
     fn artifact_and_reachability_predicates_cover_positive_and_negative_rows() {
-        let artifact = serde_json::json!({"reason":"compiler-artifact","profile":{"test":true}});
-        let message = serde_json::json!({"reason":"compiler-message","profile":{"test":false}});
+        let artifact = json!({"reason":"compiler-artifact","profile":{"test":true}});
+        let message = json!({"reason":"compiler-message","profile":{"test":false}});
         assert!(is_compiler_artifact(&artifact));
         assert!(!is_compiler_artifact(&message));
         assert!(is_test_profile(&artifact));
@@ -2385,7 +2456,7 @@ mod tests {
         assert!(!is_non_test_profile(true));
         assert!(is_non_test_profile(false));
 
-        let rooted = serde_json::json!({
+        let rooted = json!({
             "manifest_path": "/workspace/crate/Cargo.toml",
             "filenames": ["/target/a", "/target/b"],
             "executable": "/target/test"
@@ -2427,7 +2498,7 @@ mod tests {
         let different = crate::HashSet::from_iter([Utf8PathBuf::from("src/other.rs")]);
         assert!(populations_intersect(&pending, &matching));
         assert!(!populations_intersect(&pending, &different));
-        assert!(no_reachability(&crate::HashMap::default()));
+        assert!(no_reachability(&HashMap::default()));
         let mut visited = crate::HashSet::default();
         assert!(visit_capture(&mut visited, 3));
         assert!(!visit_capture(&mut visited, 3));

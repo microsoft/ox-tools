@@ -228,6 +228,8 @@ fn parse_configured_test_attributes(raw: Option<&serde_json::Value>) -> Result<B
 fn parse_configured_test_attribute(value: &str) -> Option<String> {
     let expected_attribute = format!("#[{value}]");
     let source = format!("{expected_attribute}\nfn __coverage_gate_test_attribute() {{}}\n");
+
+    // #[gamma::skip(collection.reverse_array, reason = "Every accepted edition yields the same normalized path; reversing edition order preserves the acceptance union.", tag = "equivalent")]
     [
         Edition::Edition2024,
         Edition::Edition2021,
@@ -249,7 +251,9 @@ fn parse_configured_test_attribute_for_edition(source: &str, expected_attribute:
     if attribute.syntax().text() != expected_attribute {
         return None;
     }
-    let ast::Meta::PathMeta(meta) = attribute.meta()? else {
+    let ast::Meta::PathMeta(meta) =
+    // #[gamma::skip(try.propagate_to_unwrap, reason = "An error-free complete attribute matching the expected text necessarily contains its Meta node.", tag = "equivalent")]
+    attribute.meta()? else {
         return None;
     };
     meta.path().map(|path| normalize_attribute_path(&path))
@@ -265,6 +269,14 @@ impl SourceIndex {
         metadata: &Metadata,
         resolve_source: &mut impl FnMut(&Path) -> Result<PathBuf, CoverageGateError>,
     ) -> Result<Self, CoverageGateError> {
+        Self::from_metadata_with_source_reader(metadata, resolve_source, &mut |path| fs::read_to_string(path))
+    }
+
+    fn from_metadata_with_source_reader(
+        metadata: &Metadata,
+        resolve_source: &mut impl FnMut(&Path) -> Result<PathBuf, CoverageGateError>,
+        read_source: &mut impl FnMut(&Path) -> std::io::Result<String>,
+    ) -> Result<Self, CoverageGateError> {
         let test_attributes = configured_test_attributes(metadata)?;
         let workspace_root = resolve_source(metadata.workspace_root.as_std_path())?;
         let (member_dirs, mut queue) = source_roots(metadata, resolve_source)?;
@@ -272,7 +284,9 @@ impl SourceIndex {
         let mut files: BTreeMap<PathBuf, IndexedSource> = BTreeMap::new();
         while let Some(pending) = queue.pop_front() {
             if let Some(indexed) = files.get_mut(&pending.canonical_path) {
-                let Some(declarations) = Self::revisit_indexed_source(indexed, &pending, &member_dirs, &test_attributes)? else {
+                let Some(declarations) =
+                    Self::revisit_indexed_source_with_reader(indexed, &pending, &member_dirs, &test_attributes, read_source)?
+                else {
                     continue;
                 };
                 enqueue_declarations_with_source_resolver(
@@ -287,9 +301,9 @@ impl SourceIndex {
             }
 
             let analysis = if pending.role == SourceRole::IncludedSource {
-                analyze_included_source(&pending.canonical_path)?
+                analyze_included_source_with_reader(&pending.canonical_path, read_source)?
             } else {
-                analyze_source(&pending.canonical_path, pending.edition, &test_attributes)?
+                analyze_source_with_reader(&pending.canonical_path, pending.edition, &test_attributes, read_source)?
             };
             let declarations = source_declarations(&pending.resolution_path, &analysis, pending.role, &pending.guard, &test_attributes)?;
             let released_path = released_source_attributed_path(&member_dirs, &pending)?;
@@ -305,6 +319,8 @@ impl SourceIndex {
                 test_only_lines,
                 visit_contexts: BTreeSet::new(),
             };
+
+            // #[gamma::skip(try.propagate_to_unwrap, reason = "The initial visit has no released path; conflicts require two distinct Some paths.", tag = "equivalent")]
             indexed.add_visit(&pending, released_path)?;
             let _ = files.insert(pending.canonical_path.clone(), indexed);
             enqueue_declarations_with_source_resolver(
@@ -379,11 +395,22 @@ impl SourceIndex {
         Ok(())
     }
 
+    #[cfg(test)]
     fn revisit_indexed_source(
         indexed: &mut IndexedSource,
         pending: &PendingSource,
         member_dirs: &MemberDirectories,
         test_attributes: &BTreeSet<String>,
+    ) -> Result<Option<Vec<ModuleDeclaration>>, CoverageGateError> {
+        Self::revisit_indexed_source_with_reader(indexed, pending, member_dirs, test_attributes, &mut |path| fs::read_to_string(path))
+    }
+
+    fn revisit_indexed_source_with_reader(
+        indexed: &mut IndexedSource,
+        pending: &PendingSource,
+        member_dirs: &MemberDirectories,
+        test_attributes: &BTreeSet<String>,
+        read_source: &mut impl FnMut(&Path) -> std::io::Result<String>,
     ) -> Result<Option<Vec<ModuleDeclaration>>, CoverageGateError> {
         if indexed.edition != pending.edition {
             return Err(ConflictingSourceEditionError::new(
@@ -397,7 +424,7 @@ impl SourceIndex {
             return Ok(None);
         }
         if pending.role != SourceRole::IncludedSource && indexed.analysis.syntax.is_none() {
-            indexed.analysis = analyze_source(&pending.canonical_path, pending.edition, test_attributes)?;
+            indexed.analysis = analyze_source_with_reader(&pending.canonical_path, pending.edition, test_attributes, read_source)?;
         }
         let released_path = released_source_attributed_path(member_dirs, pending)?;
         if released_path.is_some() {
@@ -416,12 +443,16 @@ impl SourceIndex {
     }
 
     fn source_for_lcov(&self, path: &Path) -> Result<(PathBuf, Option<&IndexedSource>), CoverageGateError> {
-        let candidate = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            self.workspace_root.join(path)
-        };
-        let resolved = resolve_source_path(&candidate)?;
+        self.source_for_lcov_with_resolver(path, resolve_source_path)
+    }
+
+    fn source_for_lcov_with_resolver(
+        &self,
+        path: &Path,
+        resolve_source: impl FnOnce(&Path) -> Result<PathBuf, CoverageGateError>,
+    ) -> Result<(PathBuf, Option<&IndexedSource>), CoverageGateError> {
+        let candidate = self.workspace_root.join(path);
+        let resolved = resolve_source(&candidate)?;
         let source = self.files.get(&resolved);
         Ok((resolved, source))
     }
@@ -510,9 +541,11 @@ fn source_roots(
     let mut queue = VecDeque::new();
     for (package, owning_member) in workspace_packages.into_iter().zip(owning_members) {
         for target in &package.targets {
-            let edition = syntax_edition(target.edition, target.src_path.as_std_path())?;
+            let edition =
+            // #[gamma::skip(try.propagate_to_unwrap, reason = "Every constructible cargo_metadata edition is handled; this fallback is reserved for future dependency variants.", tag = "equivalent")]
+            syntax_edition(target.edition, target.src_path.as_std_path())?;
             let canonical_path = resolve_source(target.src_path.as_std_path())?;
-            let resolution_path = resolve_module_resolution_path(target.src_path.as_std_path())?;
+            let resolution_path = resolve_module_resolution_path_with_resolver(target.src_path.as_std_path(), resolve_source)?;
             queue.push_back(PendingSource {
                 canonical_path,
                 resolution_path,
@@ -553,10 +586,7 @@ fn relative_path(from: &Path, to: &Path) -> Option<PathBuf> {
     let from = from.components().collect::<Vec<_>>();
     let to = to.components().collect::<Vec<_>>();
     let common = from.iter().zip(&to).take_while(|(left, right)| left == right).count();
-    if common == 0
-        || matches!(from.first(), Some(Component::Prefix(_) | Component::RootDir))
-            != matches!(to.first(), Some(Component::Prefix(_) | Component::RootDir))
-    {
+    if common == 0 {
         return None;
     }
 
@@ -598,7 +628,7 @@ fn enqueue_declarations_with_source_resolver(
 ) -> Result<(), CoverageGateError> {
     for declaration in declarations {
         let canonical_path = resolve_source(&declaration.path)?;
-        let resolution_path = resolve_module_resolution_path(&declaration.path)?;
+        let resolution_path = resolve_module_resolution_path_with_resolver(&declaration.path, resolve_source)?;
         queue.push_back(PendingSource {
             canonical_path,
             resolution_path,
@@ -616,7 +646,15 @@ fn enqueue_declarations_with_source_resolver(
     Ok(())
 }
 
+#[cfg(test)]
 fn resolve_module_resolution_path(path: &Path) -> Result<PathBuf, CoverageGateError> {
+    resolve_module_resolution_path_with_resolver(path, &mut resolve_source_path)
+}
+
+fn resolve_module_resolution_path_with_resolver(
+    path: &Path,
+    resolve_source: &mut impl FnMut(&Path) -> Result<PathBuf, CoverageGateError>,
+) -> Result<PathBuf, CoverageGateError> {
     // Preserve a file symlink's declared name while collapsing directory aliases so visit contexts remain bounded.
     let parent = path
         .parent()
@@ -624,7 +662,7 @@ fn resolve_module_resolution_path(path: &Path) -> Result<PathBuf, CoverageGateEr
     let file_name = path
         .file_name()
         .expect("Cargo target and resolved module source paths always name a source file");
-    resolve_source_path(parent).map(|canonical_parent| canonical_parent.join(file_name))
+    resolve_source(parent).map(|canonical_parent| canonical_parent.join(file_name))
 }
 
 fn source_declarations(
@@ -678,7 +716,12 @@ fn syntax_edition(edition: CargoEdition, path: &Path) -> Result<Edition, Coverag
         CargoEdition::E2018 => Ok(Edition::Edition2018),
         CargoEdition::E2021 => Ok(Edition::Edition2021),
         CargoEdition::E2024 => Ok(Edition::Edition2024),
-        _ => Err(UnsupportedSourceEditionError::new(diagnostic_path(path), format!("{edition:?}")).into()),
+        _ => Err(UnsupportedSourceEditionError::new(
+            // #[gamma::skip(call.replace_with_default, call_result.default, reason = "Every constructible cargo_metadata edition is handled; this fallback is reserved for future dependency variants.", tag = "equivalent")]
+            diagnostic_path(path),
+            format!("{edition:?}"),
+        )
+        .into()),
     }
 }
 
@@ -691,12 +734,24 @@ fn resolve_source_path(path: &Path) -> Result<PathBuf, CoverageGateError> {
 }
 
 fn analyze_source(path: &Path, edition: Edition, test_attributes: &BTreeSet<String>) -> Result<SourceAnalysis, CoverageGateError> {
-    let source = fs::read_to_string(path).map_err(|error| ReadCoverageSourceError::caused_by(diagnostic_path(path), error))?;
+    analyze_source_with_reader(path, edition, test_attributes, &mut |path| fs::read_to_string(path))
+}
+
+fn analyze_source_with_reader(
+    path: &Path,
+    edition: Edition,
+    test_attributes: &BTreeSet<String>,
+    read_source: &mut impl FnMut(&Path) -> std::io::Result<String>,
+) -> Result<SourceAnalysis, CoverageGateError> {
+    let source = read_source(path).map_err(|error| ReadCoverageSourceError::caused_by(diagnostic_path(path), error))?;
     analyze_source_text(path, &source, edition, test_attributes)
 }
 
-fn analyze_included_source(path: &Path) -> Result<SourceAnalysis, CoverageGateError> {
-    let source = fs::read_to_string(path).map_err(|error| ReadCoverageSourceError::caused_by(diagnostic_path(path), error))?;
+fn analyze_included_source_with_reader(
+    path: &Path,
+    read_source: &mut impl FnMut(&Path) -> std::io::Result<String>,
+) -> Result<SourceAnalysis, CoverageGateError> {
+    let source = read_source(path).map_err(|error| ReadCoverageSourceError::caused_by(diagnostic_path(path), error))?;
     Ok(SourceAnalysis {
         syntax: None,
         line_count: source.lines().count(),
@@ -712,7 +767,10 @@ fn analyze_source_text(
     test_attributes: &BTreeSet<String>,
 ) -> Result<SourceAnalysis, CoverageGateError> {
     // rust-analyzer attaches leading comments differently around CRLF blank lines.
-    let source = if source.contains("\r\n") {
+    // #[gamma::skip(literal.str_to_empty, reason = "Always replacing CRLF preserves the same bytes; only the no-CRLF borrowed fast path changes.", tag = "perf")]
+    let has_crlf = source.contains("\r\n");
+    // #[gamma::skip(cond.always_true, reason = "Always replacing CRLF preserves the same bytes; only the no-CRLF borrowed fast path changes.", tag = "perf")]
+    let source = if has_crlf {
         Cow::Owned(source.replace("\r\n", "\n"))
     } else {
         Cow::Borrowed(source)
@@ -767,6 +825,7 @@ fn classify_test_only_lines(
     let test_ranges = merge_text_ranges(test_ranges);
     let mut line_flags = vec![0_u8; line_starts.len()];
     for range in &test_ranges {
+        // #[gamma::skip(call_result.default, reason = "This call returns unit; default_after preserves the call and its side effects, then returns the identical unit value.", tag = "equivalent")]
         mark_range_lines(&mut line_flags, line_starts, *range, LINE_TEST_ONLY);
     }
     let mut test_range_cursor = test_ranges.iter().peekable();
@@ -775,10 +834,15 @@ fn classify_test_only_lines(
             continue;
         }
         let token_range = token.text_range();
-        while test_range_cursor.peek().is_some_and(|range| range.end() <= token_range.start()) {
-            let _ = test_range_cursor.next();
+        while test_range_cursor.peek().is_some_and(|range|
+        // #[gamma::skip(relational.le_to_lt, reason = "At equality the previous half-open range cannot contain the token; either cursor position marks it released.", tag = "equivalent")]
+        range.end() <= token_range.start())
+        {
+            // #[gamma::skip(stmt.delete_call, reason = "removing the cursor advance deliberately stalls this loop; classification and cursor boundaries are tested directly", tag = "timeout")]
+            test_range_cursor.next().expect("the while guard guarantees a remaining test range");
         }
         if !test_range_cursor.peek().is_some_and(|range| range.contains_range(token_range)) {
+            // #[gamma::skip(call_result.default, reason = "This call returns unit; default_after preserves the call and its side effects, then returns the identical unit value.", tag = "equivalent")]
             mark_range_lines(&mut line_flags, line_starts, token.text_range(), LINE_RELEASED);
         }
     }
@@ -817,11 +881,14 @@ fn collect_test_ranges(root: &SyntaxNode, test_attributes: &BTreeSet<String>, in
             return;
         }
         for child in node.children() {
+            // #[gamma::skip(call_result.default, reason = "This call returns unit; default_after preserves the call and its side effects, then returns the identical unit value.", tag = "equivalent")]
             collect(&child, test_attributes, &guard, possibilities, ranges);
         }
     }
 
     let mut ranges = Vec::new();
+
+    // #[gamma::skip(call_result.default, reason = "This call returns unit; default_after preserves the call and its side effects, then returns the identical unit value.", tag = "equivalent")]
     collect(
         root,
         test_attributes,
@@ -884,7 +951,11 @@ fn line_starts(source: &str) -> Vec<usize> {
 fn mark_range_lines(flags: &mut [u8], starts: &[usize], range: TextRange, flag: u8) {
     let start: usize = range.start().into();
     let end: usize = range.end().into();
-    let first = offset_to_line(starts, start);
+    let first = offset_to_line(
+        starts,
+        // #[gamma::skip(expr.increment, reason = "Owner and nontrivia token ranges never start on LF, so advancing their first byte cannot change the line.", tag = "equivalent")]
+        start,
+    );
     let last = offset_to_line(
         starts,
         end.checked_sub(1).expect("syntax owner ranges are guaranteed to be non-empty"),
@@ -931,7 +1002,10 @@ fn meta_guard(meta: &ast::Meta, test_attributes: &BTreeSet<String>) -> CfgFormul
                 .expect("source parsing succeeds before cfg_attr attributes are classified");
             let predicate = cfg_formula_from_predicate_or_unknown(&predicate);
             let inner = CfgFormula::all(cfg_attr.metas().map(|inner| meta_guard(&inner, test_attributes)));
-            CfgFormula::any([CfgFormula::not(predicate), inner])
+            CfgFormula::any(
+                // #[gamma::skip(collection.reverse_array, reason = "CfgFormula canonicalizes operand order, so reversing this conjunction or disjunction changes nothing.", tag = "equivalent")]
+                [CfgFormula::not(predicate), inner],
+            )
         }
         ast::Meta::KeyValueMeta(_) | ast::Meta::UnsafeMeta(_) => CfgFormula::Value(true),
     }
@@ -1072,11 +1146,18 @@ fn extend_cfg_guard(
     inherited_possibilities: CfgPossibilities,
     own_guard: CfgFormula,
 ) -> (CfgFormula, CfgPossibilities) {
-    if own_guard == CfgFormula::Value(true) {
+    if
+    // #[gamma::skip(cond.always_false, reason = "This only avoids recomputing the same pure guard possibilities; either path returns identical evidence.", tag = "perf")]
+    own_guard == CfgFormula::Value(true) {
         return (inherited_guard.clone(), inherited_possibilities);
     }
-    let guard = CfgFormula::all([inherited_guard.clone(), own_guard]);
-    let possibilities = if guard == *inherited_guard {
+    let guard = CfgFormula::all(
+        // #[gamma::skip(collection.reverse_array, reason = "CfgFormula canonicalizes operand order, so reversing this conjunction or disjunction changes nothing.", tag = "equivalent")]
+        [inherited_guard.clone(), own_guard],
+    );
+    let possibilities = if
+    // #[gamma::skip(cond.always_false, reason = "This only avoids recomputing the same pure guard possibilities; either path returns identical evidence.", tag = "perf")]
+    guard == *inherited_guard {
         inherited_possibilities
     } else {
         cfg_formula_possibilities_without_test(&guard)
@@ -1093,6 +1174,8 @@ fn cfg_formula_possibilities_without_test(formula: &CfgFormula) -> CfgPossibilit
     const MAX_EXACT_CFG_ATOMS: usize = 12;
 
     let mut atom_indexes = BTreeMap::new();
+
+    // #[gamma::skip(call_result.default, reason = "This call returns unit; default_after preserves the call and its side effects, then returns the identical unit value.", tag = "equivalent")]
     collect_cfg_atoms(formula, &mut atom_indexes);
     if atom_indexes.len() > MAX_EXACT_CFG_ATOMS {
         return approximate_cfg_possibilities_without_test(formula);
@@ -1107,14 +1190,26 @@ fn cfg_formula_possibilities_without_test(formula: &CfgFormula) -> CfgPossibilit
         can_be_false: false,
     };
     let mut assignment = vec![false; atom_indexes.len()];
-    let assignment_count = 2_usize.pow(u32::try_from(atom_indexes.len()).expect("exact cfg atom limit fits u32"));
-    for _ in 0..assignment_count {
+    let assignment_count =
+    // #[gamma::skip(literal.int_increment, reason = "All binary assignments are already covered; additional iterations only revisit assignments.", tag = "equivalent")]
+    2_usize.pow(u32::try_from(atom_indexes.len()).expect("exact cfg atom limit fits u32"));
+    for _ in
+        // #[gamma::skip(range.exclusive_to_inclusive, reason = "All binary assignments are already covered; additional iterations only revisit assignments.", tag = "equivalent")]
+        0..assignment_count
+    {
         let value = expression.evaluate(&assignment);
         possibilities.can_be_true |= value;
         possibilities.can_be_false |= !value;
-        if possibilities == CfgPossibilities::EITHER {
+        if
+        // #[gamma::skip(cond.always_false, reason = "EITHER is absorbing; scanning additional assignments cannot add another possibility.", tag = "perf")]
+        possibilities == CfgPossibilities::EITHER {
+            // #[gamma::skip(loop.break_to_continue, reason = "EITHER is absorbing; scanning additional assignments cannot add another possibility.", tag = "perf")]
+
+            // #[gamma::skip(loop.delete_break, reason = "EITHER is absorbing; scanning additional assignments cannot add another possibility.", tag = "perf")]
             break;
         }
+
+        // #[gamma::skip(call_result.default, reason = "This call returns unit; default_after preserves the call and its side effects, then returns the identical unit value.", tag = "equivalent")]
         advance_cfg_assignment(&mut assignment);
     }
     possibilities
@@ -1137,17 +1232,22 @@ fn collect_cfg_atoms(formula: &CfgFormula, atoms: &mut BTreeMap<String, usize>) 
         }
         CfgFormula::All(parts) | CfgFormula::Any(parts) => {
             for part in parts {
+                // #[gamma::skip(call_result.default, reason = "This call returns unit; default_after preserves the call and its side effects, then returns the identical unit value.", tag = "equivalent")]
                 collect_cfg_atoms(part, atoms);
             }
         }
-        CfgFormula::Not(part) => collect_cfg_atoms(part, atoms),
+        CfgFormula::Not(part) => {
+            // #[gamma::skip(call_result.default, reason = "This call returns unit; default_after preserves the call and its side effects, then returns the identical unit value.", tag = "equivalent")]
+            collect_cfg_atoms(part, atoms);
+        }
     }
 }
 
 fn cfg_atom_key(atom: &ast::CfgAtom) -> Option<String> {
     let ident = atom.ident_token()?.text().trim_start_matches("r#").to_owned();
     if atom.eq_token().is_some() {
-        let string = ast::String::cast(atom.string_token()?)?;
+        let token = atom.string_token()?;
+        let string = ast::String::cast(token).expect("string_token returns only STRING tokens, which ast::String::cast accepts");
         let value = string.value().ok()?;
         Some(format!("{ident}={value}"))
     } else {
@@ -1174,7 +1274,9 @@ fn cfg_formula_from_predicate(predicate: &ast::CfgPredicate) -> Option<CfgFormul
             Some(CfgFormula::Atom(cfg_atom_key(atom)?))
         }
         ast::CfgPredicate::CfgComposite(composite) => {
-            let keyword = composite.keyword()?.text().to_owned();
+            let keyword =
+            // #[gamma::skip(try.propagate_to_unwrap, reason = "The parser creates a composite only after consuming its all/any/not keyword.", tag = "equivalent")]
+            composite.keyword()?.text().to_owned();
             let parts = composite
                 .cfg_predicates()
                 .map(|part| cfg_formula_from_predicate(&part))
@@ -1304,10 +1406,13 @@ fn module_declarations(
         .parent()
         .expect("owned_directory returns Some only after confirming that the declaring path has a parent");
     let mut declarations = Vec::new();
-    let source_guard = CfgFormula::all([
-        inherited_guard.clone(),
-        attributes_guard(ast::attrs_including_inner(source), test_attributes),
-    ]);
+    let source_guard = CfgFormula::all(
+        // #[gamma::skip(collection.reverse_array, reason = "CfgFormula canonicalizes operand order, so reversing this conjunction or disjunction changes nothing.", tag = "equivalent")]
+        [
+            inherited_guard.clone(),
+            attributes_guard(ast::attrs_including_inner(source), test_attributes),
+        ],
+    );
     ModuleWalker {
         declaring_file: path,
         test_attributes,
@@ -1351,6 +1456,7 @@ impl<F: FnMut(&Path) -> Result<bool, CoverageGateError>> ModuleWalker<'_, F> {
     ) -> Result<(), CoverageGateError> {
         for child in node.children() {
             let own_guard = syntax_cfg_guard(&child, self.test_attributes);
+            // #[gamma::skip(collection.reverse_array, reason = "CfgFormula canonicalizes conjunction operand order")]
             let guard = CfgFormula::all([inherited_guard.clone(), own_guard]);
             if let Some(macro_call) = ast::MacroCall::cast(child.clone())
                 && macro_call.path().is_some_and(|path| path_is_builtin_include(&path))
@@ -1439,35 +1545,32 @@ fn module_path_attribute(module: &ast::Module, declaring_file: &Path, module_nam
             )
             .into());
         }
-        let ast::Meta::KeyValueMeta(meta) = attribute_meta else {
-            continue;
-        };
-        let is_path = meta.path().is_some_and(|path| normalize_attribute_path(&path) == "path");
-        if !is_path {
-            continue;
-        }
-        let value = match meta.expr() {
-            Some(ast::Expr::Literal(literal)) => match literal.kind() {
-                LiteralKind::String(text) => text.value().ok().map(|value| PathBuf::from(value.as_ref())),
+        if let ast::Meta::KeyValueMeta(meta) = attribute_meta
+            && meta.path().is_some_and(|path| normalize_attribute_path(&path) == "path")
+        {
+            let value = match meta.expr() {
+                Some(ast::Expr::Literal(literal)) => match literal.kind() {
+                    LiteralKind::String(text) => text.value().ok().map(|value| PathBuf::from(value.as_ref())),
+                    _ => None,
+                },
                 _ => None,
-            },
-            _ => None,
-        };
-        let Some(value) = value else {
-            return Err(InvalidModulePathAttributeError::new(
-                diagnostic_path(declaring_file),
-                module_name.to_owned(),
-                crate::package_glob::diagnostic(&attribute.syntax().text().to_string()),
-            )
-            .into());
-        };
-        if found.replace(value).is_some() {
-            return Err(InvalidModulePathAttributeError::new(
-                diagnostic_path(declaring_file),
-                module_name.to_owned(),
-                "multiple #[path] attributes".to_owned(),
-            )
-            .into());
+            };
+            let Some(value) = value else {
+                return Err(InvalidModulePathAttributeError::new(
+                    diagnostic_path(declaring_file),
+                    module_name.to_owned(),
+                    crate::package_glob::diagnostic(&attribute.syntax().text().to_string()),
+                )
+                .into());
+            };
+            if found.replace(value).is_some() {
+                return Err(InvalidModulePathAttributeError::new(
+                    diagnostic_path(declaring_file),
+                    module_name.to_owned(),
+                    "multiple #[path] attributes".to_owned(),
+                )
+                .into());
+            }
         }
     }
     Ok(found)
@@ -4820,6 +4923,139 @@ mod tests {
     }
 
     #[test]
+    fn normalized_sections_preserve_and_fill_optional_checksums_and_saturate_counts() {
+        for (first, second, expected) in [
+            ("", "", None),
+            (",digest", "", Some("digest")),
+            ("", ",digest", Some("digest")),
+            (",digest", ",digest", Some("digest")),
+        ] {
+            let input = format!(
+                "TN:same\nSF:first.rs\nDA:1,18446744073709551615{first}\nend_of_record\n\
+                 TN:same\nSF:second.rs\nDA:1,2{second}\nend_of_record\n"
+            );
+            let excluded = BTreeSet::new();
+            let filtered = filter_report_with(parse_lcov(&input), None, |_| {
+                Ok(SourceDisposition::Include {
+                    source_file: PathBuf::from("normalized.rs"),
+                    line_count: 1,
+                    test_only_lines: &excluded,
+                })
+            })
+            .unwrap();
+            let report = parse_lcov(&filtered);
+            assert_eq!(report.sections.len(), 1);
+            let (key, section) = report.sections.iter().next().unwrap();
+            assert_eq!(key.source_file, Path::new("normalized.rs"));
+            assert_eq!(key.test_name, "same");
+            assert_eq!(section.lines.len(), 1);
+            let line = section.lines.values().next().unwrap();
+            assert_eq!(line.count, u64::MAX);
+            assert_eq!(line.checksum.as_deref(), expected, "{first} / {second}");
+        }
+    }
+
+    #[test]
+    fn cfg_assignment_carries_across_every_bit_and_wraps_only_after_all_assignments() {
+        let mut assignment = [false; 3];
+        for expected in [
+            [true, false, false],
+            [false, true, false],
+            [true, true, false],
+            [false, false, true],
+            [true, false, true],
+            [false, true, true],
+            [true, true, true],
+            [false, false, false],
+        ] {
+            advance_cfg_assignment(&mut assignment);
+            assert_eq!(assignment, expected);
+        }
+        advance_cfg_assignment(&mut []);
+    }
+
+    #[test]
+    fn compiled_cfg_formulas_preserve_three_variable_truth_tables() {
+        let indexes = BTreeMap::from([("a".to_owned(), 2), ("b".to_owned(), 0), ("c".to_owned(), 1)]);
+        let a = CfgFormula::Atom("a".into());
+        let b = CfgFormula::Atom("b".into());
+        let c = CfgFormula::Atom("c".into());
+        let formula = CfgFormula::Any(vec![
+            CfgFormula::All(vec![a.clone(), CfgFormula::Not(Box::new(b.clone()))]),
+            CfgFormula::All(vec![CfgFormula::Not(Box::new(a)), c]),
+        ]);
+        let expression = compile_cfg_expression(&formula, &indexes);
+        for (assignment, expected) in [
+            ([false, false, false], false),
+            ([true, false, false], false),
+            ([false, true, false], true),
+            ([true, true, false], true),
+            ([false, false, true], true),
+            ([true, false, true], false),
+            ([false, true, true], true),
+            ([true, true, true], false),
+        ] {
+            assert_eq!(expression.evaluate(&assignment), expected, "{assignment:?}");
+        }
+        assert_eq!(cfg_formula_possibilities_without_test(&formula), CfgPossibilities::EITHER);
+        let contradiction = CfgFormula::All(vec![b.clone(), CfgFormula::Not(Box::new(b.clone()))]);
+        let tautology = CfgFormula::Any(vec![b.clone(), CfgFormula::Not(Box::new(b))]);
+        assert_eq!(cfg_formula_possibilities_without_test(&contradiction), CfgPossibilities::FALSE);
+        assert_eq!(cfg_formula_possibilities_without_test(&tautology), CfgPossibilities::TRUE);
+    }
+
+    #[test]
+    fn approximate_cfg_combinations_keep_mixed_true_false_and_unknown_possibilities() {
+        let unknown = CfgFormula::Atom("feature=optional".into());
+        for (formula, expected) in [
+            (
+                CfgFormula::All(vec![CfgFormula::Value(false), unknown.clone()]),
+                CfgPossibilities::FALSE,
+            ),
+            (
+                CfgFormula::All(vec![CfgFormula::Value(true), unknown.clone()]),
+                CfgPossibilities::EITHER,
+            ),
+            (
+                CfgFormula::Any(vec![CfgFormula::Value(true), unknown.clone()]),
+                CfgPossibilities::TRUE,
+            ),
+            (
+                CfgFormula::Any(vec![CfgFormula::Value(false), unknown.clone()]),
+                CfgPossibilities::EITHER,
+            ),
+            (CfgFormula::Not(Box::new(unknown)), CfgPossibilities::EITHER),
+        ] {
+            assert_eq!(approximate_cfg_possibilities_without_test(&formula), expected, "{formula:?}");
+        }
+    }
+
+    #[test]
+    fn cfg_canonicalization_retains_distinct_nested_terms_in_sorted_order() {
+        let a = CfgFormula::Atom("a".into());
+        let b = CfgFormula::Atom("b".into());
+        let c = CfgFormula::Atom("c".into());
+        assert_eq!(
+            CfgFormula::all([
+                b.clone(),
+                CfgFormula::All(vec![c.clone(), a.clone()]),
+                a.clone(),
+                CfgFormula::Value(true)
+            ]),
+            CfgFormula::All(vec![a.clone(), b.clone(), c.clone()])
+        );
+        assert_eq!(
+            CfgFormula::any([
+                b.clone(),
+                CfgFormula::Any(vec![c.clone(), a.clone()]),
+                a.clone(),
+                CfgFormula::Value(false)
+            ]),
+            CfgFormula::Any(vec![a, b, c])
+        );
+    }
+
+    #[test]
     fn sections_with_only_test_lines_are_removed() {
         let normalized = PathBuf::from("/workspace/surface/src/lib.rs");
         let test_only = BTreeSet::from([1]);
@@ -4882,5 +5118,696 @@ mod tests {
             .to_string();
         assert!(error.contains(r"bad\u{1b}[2J"), "{error:?}");
         assert!(!error.contains('\u{1b}'), "{error:?}");
+    }
+
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "rowan 0.15.18 triggers rust-analyzer/rowan#192 under Miri while parsing Rust syntax"
+    )]
+    fn survivor_policy_errors_identify_the_workspace_and_rejected_value() {
+        for value in [json!("not-an-array"), json!([17])] {
+            let error = parse_configured_test_attributes(Some(&value)).unwrap_err().to_string();
+            let rejected = if value.is_array() { json!(17) } else { value };
+            assert!(
+                error.contains(&format!(
+                    "workspace: `coverage-gate.test-attributes` must be an array of Rust attribute paths, got {rejected}"
+                )),
+                "{error}"
+            );
+        }
+        assert_eq!(
+            parse_configured_test_attribute_for_edition("fn without_attributes() {}", "#[test]", Edition::Edition2024),
+            None
+        );
+    }
+
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "rowan 0.15.18 triggers rust-analyzer/rowan#192 under Miri while parsing Rust syntax"
+    )]
+    fn survivor_source_diagnostics_preserve_all_paths_and_line_bounds() {
+        let path = Path::new("survivor-source.rs");
+        for line in [0, 4] {
+            let error = validate_line(path, line, 3).unwrap_err().to_string();
+            assert!(error.contains("`survivor-source.rs`"), "{error}");
+            assert!(error.contains(&format!("references line {line}")), "{error}");
+            assert!(error.contains("source has 3 lines"), "{error}");
+        }
+        validate_line(path, 1, 3).unwrap();
+        validate_line(path, 3, 3).unwrap();
+        let error = analyze_source_text(
+            path,
+            "pub fn valid() {}\npub fn broken( {\n",
+            Edition::Edition2024,
+            &BTreeSet::new(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("`survivor-source.rs`"), "{error}");
+        assert!(error.contains("; "), "{error}");
+        assert!(!error.contains("xyzzy"), "{error}");
+
+        let pending = pending_source(Surface::Released, SourceRole::CrateRoot, path, CfgFormula::Value(true));
+        let mut indexed = IndexedSource {
+            analysis: analyze(path, "fn released() {}\n"),
+            edition: Edition::Edition2024,
+            released_path: Some(PathBuf::from("first-owner.rs")),
+            test_only_lines: BTreeSet::new(),
+            visit_contexts: BTreeSet::new(),
+        };
+        let error = indexed
+            .add_visit(&pending, Some(PathBuf::from("second-owner.rs")))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("`survivor-source.rs` is shared by workspace packages as both `first-owner.rs` and `second-owner.rs`"),
+            "{error}"
+        );
+        let mut conflicting = pending.clone();
+        conflicting.edition = Edition::Edition2021;
+        let directories = MemberDirectories {
+            reported_by_canonical: BTreeMap::new(),
+        };
+        let error = SourceIndex::revisit_indexed_source(&mut indexed, &conflicting, &directories, &BTreeSet::new())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("`survivor-source.rs`"), "{error}");
+        assert!(error.contains("`Edition2024` and `Edition2021`"), "{error}");
+
+        indexed.add_visit(&pending, None).unwrap();
+        assert!(
+            SourceIndex::revisit_indexed_source(&mut indexed, &pending, &directories, &BTreeSet::new())
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "rowan 0.15.18 triggers rust-analyzer/rowan#192 under Miri while parsing Rust syntax"
+    )]
+    fn survivor_module_diagnostics_preserve_ordered_candidates_and_attribute_details() {
+        let root = Path::new("survivor/lib.rs");
+        let analysis = analyze(root, "mod child;\n");
+        let error = declarations(
+            root,
+            &analysis,
+            SourceRole::CrateRoot,
+            &BTreeSet::from([PathBuf::from("survivor/child.rs"), PathBuf::from("survivor/child/mod.rs")]),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains(&format!(
+                "declared in `survivor/lib.rs` is ambiguous: both `{}` and `{}` exist",
+                root.parent().unwrap().join("child.rs").display(),
+                root.parent().unwrap().join("child").join("mod.rs").display()
+            )),
+            "{error}"
+        );
+        for (source, detail) in [
+            (
+                "#[cfg_attr(test, path = \"x.rs\", allow(dead_code))] mod child;",
+                "conditional path attribute",
+            ),
+            ("#[path = 42] mod child;", "unsupported `#[path]` attribute"),
+            ("#[path = \"a.rs\"] #[path = \"b.rs\"] mod child;", "multiple #[path] attributes"),
+        ] {
+            let analysis = analyze(root, source);
+            let error = declarations(root, &analysis, SourceRole::CrateRoot, &BTreeSet::new())
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("declared in `survivor/lib.rs`"), "{error}");
+            assert!(error.contains(detail), "{error}");
+        }
+        let analysis = analyze(root, "#[allow(dead_code)] #[path = \"renamed.rs\"] mod child;\nmod r#type;\n");
+        let found = declarations(
+            root,
+            &analysis,
+            SourceRole::CrateRoot,
+            &BTreeSet::from([PathBuf::from("survivor/renamed.rs"), PathBuf::from("survivor/type.rs")]),
+        )
+        .unwrap();
+        assert_eq!(
+            found
+                .iter()
+                .map(|declaration| lexical_normalize(&declaration.path))
+                .collect::<Vec<_>>(),
+            [PathBuf::from("survivor/renamed.rs"), PathBuf::from("survivor/type.rs")]
+        );
+    }
+
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "rowan 0.15.18 triggers rust-analyzer/rowan#192 under Miri while parsing Rust syntax"
+    )]
+    fn survivor_cfg_atoms_preserve_raw_names_values_and_invalid_literals() {
+        for (text, expected) in [
+            ("r#feature = \"yes\"", Some(CfgFormula::Atom("feature=yes".into()))),
+            ("test = \"yes\"", Some(CfgFormula::Atom("test=yes".into()))),
+            ("r#test", Some(CfgFormula::Value(false))),
+            ("feature = \"\\q\"", None),
+        ] {
+            let parse = SourceFile::parse(&format!("#[cfg({text})] fn item() {{}}"), Edition::Edition2024);
+            let predicate = parse.tree().syntax().descendants().find_map(ast::CfgPredicate::cast).unwrap();
+            assert_eq!(cfg_formula_from_predicate(&predicate), expected, "{text}");
+        }
+        let parse = SourceFile::parse("#[cfg(feature =)] fn item() {}", Edition::Edition2024);
+        let predicate = parse.tree().syntax().descendants().find_map(ast::CfgPredicate::cast).unwrap();
+        assert_eq!(cfg_formula_from_predicate(&predicate), None);
+        let ast::CfgPredicate::CfgAtom(atom) = predicate else {
+            panic!("a key without a value remains an atom")
+        };
+        assert_eq!(cfg_atom_key(&atom), None);
+        let parse = SourceFile::parse("#[cfg(true)] fn item() {}", Edition::Edition2024);
+        let atom = parse.tree().syntax().descendants().find_map(ast::CfgAtom::cast).unwrap();
+        assert_eq!(cfg_atom_key(&atom), None);
+    }
+
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "rowan 0.15.18 triggers rust-analyzer/rowan#192 under Miri while parsing Rust syntax"
+    )]
+    fn survivor_include_tokens_distinguish_builtin_paths_and_static_arguments() {
+        for (path, expected) in [
+            ("include", true),
+            ("::include", true),
+            ("std::include", true),
+            ("core::nested::include", true),
+            ("my::include", false),
+            ("xyzzy::include", false),
+            ("stdx::include", false),
+            ("std::other", false),
+            ("core::nested::other", false),
+        ] {
+            let parse = SourceFile::parse(&format!("{path}!(\"fragment.rs\");"), Edition::Edition2024);
+            let call = parse.tree().syntax().descendants().find_map(ast::MacroCall::cast).unwrap();
+            assert_eq!(path_is_builtin_include(&call.path().unwrap()), expected, "{path}");
+        }
+        for (arguments, expected) in [
+            ("", None),
+            ("42", None),
+            ("\"fragment.rs\"", Some("fragment.rs")),
+            ("\"fragment.rs\",", Some("fragment.rs")),
+            ("\"fragment.rs\" other", None),
+            ("\"fragment.rs\", other", None),
+        ] {
+            let parse = SourceFile::parse(&format!("include!({arguments});"), Edition::Edition2024);
+            let call = parse.tree().syntax().descendants().find_map(ast::MacroCall::cast).unwrap();
+            assert_eq!(static_include_path(&call), expected.map(PathBuf::from), "{arguments}");
+        }
+        let parse = SourceFile::parse("include!;", Edition::Edition2024);
+        let call = parse.tree().syntax().descendants().find_map(ast::MacroCall::cast).unwrap();
+        assert_eq!(static_include_path(&call), None);
+        let analysis = analyze(Path::new("root.rs"), "fn outer() { if true { include!(\"fragment.rs\"); } }\n");
+        assert!(syntax_contains_opaque_source_macro(
+            analysis.syntax().syntax(),
+            &BTreeSet::new(),
+            &CfgFormula::Value(true),
+            CfgPossibilities::TRUE
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "rowan 0.15.18 triggers rust-analyzer/rowan#192 under Miri while parsing Rust syntax"
+    )]
+    fn survivor_cached_guard_lines_and_range_boundaries_are_exact() {
+        let mut analysis = analyze(Path::new("root.rs"), "#[test]\nfn example() {}\nfn released() {}\n");
+        analysis.test_only_lines = BTreeSet::from([91]);
+        assert_eq!(
+            test_only_lines_for_guard(&analysis, &CfgFormula::Value(true), &BTreeSet::new()),
+            BTreeSet::from([91])
+        );
+        let mut flags = [0; 3];
+        mark_range_lines(&mut flags, &[0, 4, 8], TextRange::new(4.into(), 8.into()), LINE_TEST_ONLY);
+        assert_eq!(flags, [0, LINE_TEST_ONLY, 0]);
+        let analysis = analyze(Path::new("root.rs"), "#[test]\nfn example() {}fn released() {}\n");
+        assert_eq!(analysis.test_only_lines, BTreeSet::from([1]));
+        let parse = SourceFile::parse("#[test]\nfn example() {}\n\n// outside\nfn released() {}", Edition::Edition2024);
+        let item = parse.tree().items().next().unwrap();
+        let range = syntax_owner_range(item.syntax());
+        assert_eq!(
+            &parse.tree().syntax().text().to_string()[std::ops::Range::<usize>::from(range)],
+            "#[test]\nfn example() {}"
+        );
+    }
+
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "rowan 0.15.18 triggers rust-analyzer/rowan#192 under Miri while parsing Rust syntax"
+    )]
+    fn classify_test_only_lines_advances_across_disjoint_test_ranges_and_released_tokens() {
+        let analysis = analyze(
+            Path::new("root.rs"),
+            "#[test]\nfn first() {\n    assert!(true);\n}\nfn released() {}\n#[test]\nfn second() {}\nfn tail() {}\n",
+        );
+        assert_eq!(analysis.test_only_lines, BTreeSet::from([1, 2, 3, 4, 6, 7]));
+    }
+
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "rowan 0.15.18 triggers rust-analyzer/rowan#192 under Miri while parsing Rust syntax"
+    )]
+    fn module_path_attribute_keeps_searching_after_non_key_value_metadata() {
+        for attribute in ["#[allow(dead_code)]", "#[cold]", "#[doc = \"another attribute\"]"] {
+            let source = format!("{attribute}\n#[path = \"actual.rs\"] mod child;");
+            let parse = SourceFile::parse(&source, Edition::Edition2024);
+            let module = parse.tree().syntax().descendants().find_map(ast::Module::cast).unwrap();
+            assert_eq!(
+                module_path_attribute(&module, Path::new("root.rs"), "child").unwrap(),
+                Some(PathBuf::from("actual.rs"))
+            );
+        }
+    }
+
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "rowan 0.15.18 triggers rust-analyzer/rowan#192 under Miri while parsing Rust syntax"
+    )]
+    fn module_walker_preserves_inherited_guards_through_unattributed_syntax() {
+        let root = Path::new("root.rs");
+        let analysis = analyze(root, "#[cfg(feature = \"outer\")]\nfn outer() { { mod child; } }\n");
+        let child = PathBuf::from("child.rs");
+        let found = declarations(root, &analysis, SourceRole::CrateRoot, &BTreeSet::from([child.clone()])).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(lexical_normalize(&found[0].path), child);
+        assert_eq!(found[0].guard, CfgFormula::Atom("feature=outer".to_owned()));
+    }
+
+    #[test]
+    fn survivor_missing_sources_return_errors_without_panicking() {
+        let missing = missing_source_path();
+        let mut read = |path: &Path| {
+            assert_eq!(path, missing);
+            Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+        };
+        for error in [
+            analyze_source_with_reader(&missing, Edition::Edition2024, &BTreeSet::new(), &mut read).unwrap_err(),
+            analyze_included_source_with_reader(&missing, &mut read).unwrap_err(),
+        ] {
+            let message = error.to_string();
+            assert!(message.contains(&diagnostic_path(&missing)), "{message}");
+            assert!(message.contains("failed to read Rust source"), "{message}");
+        }
+        let index = SourceIndex {
+            workspace_root: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+            files: BTreeMap::new(),
+            member_dirs: MemberDirectories {
+                reported_by_canonical: BTreeMap::new(),
+            },
+            uncertain_sources: BTreeSet::new(),
+        };
+        let error = index
+            .source_for_lcov_with_resolver(&missing, |path| {
+                Err(ResolveCoverageSourceError::caused_by(diagnostic_path(path), std::io::Error::from(std::io::ErrorKind::NotFound)).into())
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("failed to resolve Rust source path"), "{error}");
+        let present = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs");
+        let canonical = PathBuf::from("canonical/lib.rs");
+        let (resolved, source) = index.source_for_lcov_with_resolver(&present, |_| Ok(canonical.clone())).unwrap();
+        assert_eq!(resolved, canonical);
+        assert!(source.is_none());
+        let text = "fn released() {}\nfn another() {}\n";
+        let analysis = analyze_included_source_with_reader(&present, &mut |_| Ok(text.to_owned())).unwrap();
+        assert_eq!(analysis.line_starts, line_starts(text));
+        assert!(analysis.line_starts.len() > 1);
+    }
+
+    #[test]
+    fn survivor_metadata_resolution_failures_are_returned_and_empty_reports_do_not_resolve() {
+        let root = source_index_fixture_root();
+        let metadata = source_index_fixture_metadata(&root);
+        let error = SourceIndex::from_metadata_with_source_resolver(&metadata, &mut |path| {
+            Err(ResolveCoverageSourceError::caused_by(
+                diagnostic_path(path),
+                std::io::Error::other("injected workspace resolution failure"),
+            )
+            .into())
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("injected workspace resolution failure"), "{error}");
+        let target = metadata.packages[0].targets[0].src_path.as_std_path();
+        let error = source_roots(&metadata, &mut |path| {
+            if path == target {
+                Err(ResolveCoverageSourceError::caused_by(
+                    diagnostic_path(path),
+                    std::io::Error::other("injected target resolution failure"),
+                )
+                .into())
+            } else {
+                Ok(path.to_path_buf())
+            }
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("injected target resolution failure"), "{error}");
+        let mut absent = source_index_fixture_metadata(&root.join("absent"));
+        assert!(filter_reports_with_metadata(Vec::new(), &absent).unwrap().is_empty());
+        absent.packages[0].targets[0].src_path = missing_source_path().try_into().unwrap();
+        let parent = absent.packages[0].targets[0].src_path.parent().unwrap().to_path_buf();
+        let error = SourceIndex::from_metadata_with_source_reader(
+            &absent,
+            &mut |path| {
+                if path == parent.as_std_path() {
+                    Err(
+                        ResolveCoverageSourceError::caused_by(diagnostic_path(path), std::io::Error::from(std::io::ErrorKind::NotFound))
+                            .into(),
+                    )
+                } else {
+                    Ok(path.to_path_buf())
+                }
+            },
+            &mut |_| panic!("resolution failure must precede reading"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("failed to resolve Rust source path"), "{error}");
+    }
+
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "rowan 0.15.18 triggers rust-analyzer/rowan#192 under Miri while parsing Rust syntax"
+    )]
+    fn survivor_index_read_and_promotion_errors_preserve_the_missing_source() {
+        let root = source_index_fixture_root();
+        let missing = missing_source_path();
+        for (entry, failed) in [("lib.rs", "lib.rs"), ("test-include-root.rs", "included-test.rs")] {
+            let mut metadata = source_index_fixture_metadata(&root);
+            metadata.packages[0].targets.truncate(1);
+            metadata.packages[0].targets[0].src_path = root.join("member/src").join(entry).try_into().unwrap();
+            let error = SourceIndex::from_metadata_with_source_reader(
+                &metadata,
+                &mut |path| {
+                    if path.file_name().is_some_and(|name| name == failed) {
+                        Ok(missing.clone())
+                    } else {
+                        Ok(path.to_path_buf())
+                    }
+                },
+                &mut |path| {
+                    if path == missing {
+                        Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+                    } else {
+                        assert_eq!(path.file_name().unwrap(), "test-include-root.rs");
+                        Ok("#[cfg(test)]\ninclude!(\"included-test.rs\");".to_owned())
+                    }
+                },
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains("failed to read Rust source"), "{entry}: {error}");
+            assert!(error.contains(&diagnostic_path(&missing)), "{entry}: {error}");
+        }
+        let mut indexed = IndexedSource {
+            analysis: SourceAnalysis {
+                syntax: None,
+                line_count: 1,
+                line_starts: vec![0],
+                test_only_lines: BTreeSet::new(),
+            },
+            edition: Edition::Edition2024,
+            released_path: None,
+            test_only_lines: BTreeSet::new(),
+            visit_contexts: BTreeSet::new(),
+        };
+        let pending = pending_source(Surface::Released, SourceRole::PlainModule, &missing, CfgFormula::Value(true));
+        let directories = MemberDirectories {
+            reported_by_canonical: BTreeMap::new(),
+        };
+        let error = SourceIndex::revisit_indexed_source_with_reader(&mut indexed, &pending, &directories, &BTreeSet::new(), &mut |path| {
+            assert_eq!(path, missing);
+            Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains(&diagnostic_path(&missing)), "{error}");
+        assert!(error.contains("failed to read Rust source"), "{error}");
+
+        indexed.analysis = analyze(Path::new("isolated.rs"), "fn released() {}");
+        let pending = pending_source(
+            Surface::Released,
+            SourceRole::CrateRoot,
+            Path::new("isolated.rs"),
+            CfgFormula::Value(true),
+        );
+        let error = released_source_attributed_path(&directories, &pending).unwrap_err().to_string();
+        assert!(error.contains("`isolated.rs` cannot be attributed"), "{error}");
+        let error = SourceIndex::revisit_indexed_source(&mut indexed, &pending, &directories, &BTreeSet::new())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("`isolated.rs` cannot be attributed"), "{error}");
+        let directories = MemberDirectories {
+            reported_by_canonical: BTreeMap::from([(PathBuf::from("isolated.rs"), PathBuf::from("new-owner.rs"))]),
+        };
+        indexed.released_path = Some(PathBuf::from("old-owner.rs"));
+        let error = SourceIndex::revisit_indexed_source(&mut indexed, &pending, &directories, &BTreeSet::new())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(&format!(
+                "both `old-owner.rs` and `{}`",
+                Path::new("new-owner.rs").join("").display()
+            )),
+            "{error}"
+        );
+    }
+
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "rowan 0.15.18 triggers rust-analyzer/rowan#192 under Miri while parsing Rust syntax"
+    )]
+    fn survivor_nested_module_walks_propagate_inspection_errors() {
+        assert_eq!(owned_directory(Path::new("."), SourceRole::PlainModule), None);
+        for source in ["fn outer() { mod child; }", "mod inline { fn outer() { mod child; } }"] {
+            let parse = SourceFile::parse(source, Edition::Edition2024);
+            let error = module_declarations(
+                Path::new("root.rs"),
+                &parse.tree(),
+                SourceRole::CrateRoot,
+                &CfgFormula::Value(true),
+                &BTreeSet::new(),
+                &mut |_| Err(InspectCoverageSourceError::caused_by("child.rs", std::io::Error::other("nested inspection failed")).into()),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains("nested inspection failed"), "{source}: {error}");
+        }
+    }
+
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "rowan 0.15.18 triggers rust-analyzer/rowan#192 under Miri while parsing Rust syntax"
+    )]
+    fn survivor_revisits_reuse_parsed_analysis_and_canonical_member_attribution() {
+        let path = missing_source_path();
+        let mut indexed = IndexedSource {
+            analysis: analyze(&path, "fn released() {}"),
+            edition: Edition::Edition2024,
+            released_path: None,
+            test_only_lines: BTreeSet::new(),
+            visit_contexts: BTreeSet::new(),
+        };
+        let pending = pending_source(Surface::NonReleased, SourceRole::CrateRoot, &path, CfgFormula::Value(true));
+        let directories = MemberDirectories {
+            reported_by_canonical: BTreeMap::new(),
+        };
+        assert!(
+            SourceIndex::revisit_indexed_source(&mut indexed, &pending, &directories, &BTreeSet::new())
+                .unwrap()
+                .unwrap()
+                .is_empty()
+        );
+        let mut pending = pending_source(
+            Surface::Released,
+            SourceRole::CrateRoot,
+            Path::new("canonical/source.rs"),
+            CfgFormula::Value(true),
+        );
+        pending.owning_member = MemberDirectory {
+            canonical: PathBuf::from("canonical"),
+            reported: PathBuf::from("owning-member"),
+        };
+        let directories = MemberDirectories {
+            reported_by_canonical: BTreeMap::from([(PathBuf::from("canonical"), PathBuf::from("canonical-member"))]),
+        };
+        assert_eq!(
+            released_source_attributed_path(&directories, &pending).unwrap(),
+            Some(Path::new("canonical-member").join("source.rs"))
+        );
+    }
+
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "rowan 0.15.18 triggers rust-analyzer/rowan#192 under Miri while parsing Rust syntax"
+    )]
+    fn survivor_owner_ranges_include_commas_after_trivia_and_nested_guards_remain_released() {
+        let text = "enum E { #[cfg(test)] A /* trivia */ , B }";
+        let parse = SourceFile::parse(text, Edition::Edition2024);
+        let variant = parse.tree().syntax().descendants().find_map(ast::Variant::cast).unwrap();
+        let range = syntax_owner_range(variant.syntax());
+        assert_eq!(usize::from(range.end()), text.find(',').unwrap() + 1);
+        let path = Path::new("root.rs");
+        let analysis = analyze(path, "fn outer() { mod inner { mod child; } }");
+        let child = Path::new("inner").join("child.rs");
+        let found = declarations(path, &analysis, SourceRole::CrateRoot, &BTreeSet::from([child.clone()])).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(lexical_normalize(&found[0].path), child);
+        assert_eq!(found[0].guard, CfgFormula::Value(true));
+    }
+
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "rowan 0.15.18 triggers rust-analyzer/rowan#192 under Miri while parsing Rust syntax"
+    )]
+    fn survivor_parser_diagnostics_preserve_start_of_line_offsets() {
+        for (source, coordinate) in [("}", "1:1"), ("\n}", "2:1")] {
+            let error = analyze_source_text(Path::new("broken.rs"), source, Edition::Edition2024, &BTreeSet::new())
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(coordinate), "{error}");
+            assert!(error.contains("broken.rs"), "{error}");
+        }
+    }
+
+    #[test]
+    fn survivor_cfg_constructors_canonicalize_boolean_and_double_negation_operands() {
+        let atom = CfgFormula::Atom("feature=example".to_owned());
+        assert_eq!(CfgFormula::any([CfgFormula::Value(true), atom.clone()]), CfgFormula::Value(true));
+        assert_eq!(CfgFormula::any([CfgFormula::Value(false), atom.clone()]), atom);
+        assert_eq!(CfgFormula::not(CfgFormula::Value(true)), CfgFormula::Value(false));
+        assert_eq!(CfgFormula::not(CfgFormula::Not(Box::new(atom.clone()))), atom);
+    }
+
+    #[test]
+    fn survivor_normalized_checksum_errors_name_the_exact_source_not_only_the_test() {
+        let path = PathBuf::from("canonical-source.rs");
+        let empty = BTreeSet::new();
+        let input = "TN:named-test\nSF:first.rs\nDA:1,1,first\nend_of_record\n\
+                     TN:named-test\nSF:second.rs\nDA:1,2,second\nend_of_record\n";
+        let error = filter_report_with(parse_lcov(input), None, |_| {
+            Ok(SourceDisposition::Include {
+                source_file: path.clone(),
+                line_count: 1,
+                test_only_lines: &empty,
+            })
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("canonical-source.rs"), "{error}");
+        assert!(error.contains("named-test"), "{error}");
+        assert!(error.contains("conflicting checksums"), "{error}");
+    }
+
+    #[test]
+    fn survivor_enqueuing_declarations_preserves_parent_resolution_errors() {
+        let missing = missing_source_path().join("child.rs");
+        let mut queue = VecDeque::new();
+        let declaration = ModuleDeclaration {
+            path: missing.clone(),
+            role: SourceRole::PlainModule,
+            guard: CfgFormula::Value(true),
+        };
+        let member = MemberDirectory {
+            canonical: PathBuf::from("member"),
+            reported: PathBuf::from("member"),
+        };
+        let error = enqueue_declarations_with_source_resolver(
+            &mut queue,
+            vec![declaration],
+            Edition::Edition2024,
+            Surface::Released,
+            &member,
+            &mut |path| {
+                if path == missing.parent().unwrap() {
+                    Err(
+                        ResolveCoverageSourceError::caused_by(diagnostic_path(path), std::io::Error::from(std::io::ErrorKind::NotFound))
+                            .into(),
+                    )
+                } else {
+                    Ok(path.to_path_buf())
+                }
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("failed to resolve Rust source path"), "{error}");
+        assert!(error.contains(&diagnostic_path(missing.parent().unwrap())), "{error}");
+        assert!(queue.is_empty());
+    }
+
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "rowan 0.15.18 triggers rust-analyzer/rowan#192 under Miri while parsing Rust syntax"
+    )]
+    fn survivor_metadata_reports_attribution_failures_before_indexing() {
+        let root = source_index_fixture_root();
+        let mut metadata = source_index_fixture_metadata(&root);
+        metadata.packages[0].targets.truncate(1);
+        let member = root.join("member");
+        let error = SourceIndex::from_metadata_with_source_reader(
+            &metadata,
+            &mut |path| {
+                if path == member {
+                    Ok(PathBuf::from("unrelated-relative-member"))
+                } else {
+                    Ok(path.to_path_buf())
+                }
+            },
+            &mut |_| Ok("fn released() {}".to_owned()),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("cannot be attributed to its owning workspace package"), "{error}");
+        assert!(error.contains("lib.rs"), "{error}");
+    }
+
+    #[test]
+    fn survivor_cfg_negation_swaps_both_possibility_fields_without_collapsing_unknown() {
+        for (input, expected) in [
+            (CfgPossibilities::TRUE, CfgPossibilities::FALSE),
+            (CfgPossibilities::FALSE, CfgPossibilities::TRUE),
+            (CfgPossibilities::EITHER, CfgPossibilities::EITHER),
+        ] {
+            assert_eq!(input.not(), expected);
+            assert_eq!(input.not().not(), input);
+        }
+    }
+
+    #[test]
+    fn survivor_target_kind_subsets_reject_empty_and_mixed_nonreleased_sets() {
+        let kinds = [TargetKind::Lib, TargetKind::Bin, TargetKind::ProcMacro, TargetKind::Test];
+        for subset in 0..16 {
+            let selected: Vec<_> = kinds
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| subset & (1 << index) != 0)
+                .map(|(_, kind)| kind.clone())
+                .collect();
+            assert_eq!(target_is_released(&selected), subset != 0 && subset & 8 == 0, "{selected:?}");
+        }
+    }
+
+    fn missing_source_path() -> PathBuf {
+        // Impossible beneath an immutable regular file, not just absent by convention.
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml/survivor-absent-parent/lib.rs")
     }
 }

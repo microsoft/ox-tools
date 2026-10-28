@@ -76,6 +76,7 @@ fn rustc_wrapper_chain_in(root: &Utf8Path, outer: Option<std::ffi::OsString>, en
 }
 
 fn has_configured_wrapper(config: &CargoConfig) -> bool {
+    // #[gamma::skip(collection.reverse_array, reason = "Array is consumed only by any() over pure string membership predicates; reversing evaluation order changes neither existential result nor state.", tag = "equivalent")]
     ["rustc-wrapper", "rustc-workspace-wrapper"]
         .into_iter()
         .any(|key| config.string(&["build", key]).is_some())
@@ -330,6 +331,25 @@ struct Environment {
     cargo_home: Option<Utf8PathBuf>,
 }
 
+#[cfg(any(test, feature = "internals"))]
+thread_local! {
+    static AMBIENT_ENVIRONMENT: core::cell::RefCell<Option<Environment>> = const { core::cell::RefCell::new(None) };
+}
+
+#[cfg(feature = "internals")]
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub fn with_empty_environment<T>(operation: impl FnOnce() -> T) -> T {
+    struct Reset(Option<Environment>);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            AMBIENT_ENVIRONMENT.with_borrow_mut(|slot| *slot = self.0.take());
+        }
+    }
+    let previous = AMBIENT_ENVIRONMENT.with_borrow_mut(|slot| slot.replace(Environment::default()));
+    let _reset = Reset(previous);
+    operation()
+}
+
 impl Environment {
     /// The variable-spelled rustflags for a triple, if the environment sets them.
     fn target_flags(&self, triple: &str) -> Option<&str> {
@@ -339,6 +359,10 @@ impl Environment {
     // #[gamma::skip(fn_value.default, reason = "this adapter reads process-wide variables that parallel tests cannot safely replace; Environment::read is tested with an injected lookup")]
     /// Reads the variables this process was launched with.
     fn ambient() -> Self {
+        #[cfg(any(test, feature = "internals"))]
+        if let Some(environment) = AMBIENT_ENVIRONMENT.with_borrow_mut(Option::take) {
+            return environment;
+        }
         Self::read(
             |name| env::var(name),
             env::vars_os().filter_map(|(name, _value)| name.into_string().ok()),
@@ -613,7 +637,7 @@ fn rustflags(environment: &Environment, config: &CargoConfig, target: Option<&st
 fn target_tables(config: &CargoConfig, target: Option<&str>, environment: &Environment) -> Vec<(Verdict, Vec<String>)> {
     let names = config.keys(&["target"]);
     let asked_about = names.first().or_else(|| environment.target_rustflags.keys().next()).is_some();
-    let triple = || target.or_else(|| host_triple(config, asked_about));
+    let triple = || target.or_else(|| host_triple(config, asked_about, host_cache(), read_host_output));
     let mut cfgs: Option<Option<CfgSet>> = None;
 
     let mut tables: Vec<(Verdict, Vec<String>)> = names
@@ -659,7 +683,11 @@ fn target_tables(config: &CargoConfig, target: Option<&str>, environment: &Envir
 /// Cargo's rule for spelling any configuration key as a variable: uppercase it, and replace `-` and
 /// `.` with `_`.
 fn variable_component(triple: &str) -> String {
-    triple.to_uppercase().replace(['-', '.'], "_")
+    triple.to_uppercase().replace(
+        // #[gamma::skip(collection.reverse_array, reason = "The character array is a pattern membership set; reversing its order leaves every match unchanged.", tag = "equivalent")]
+        ['-', '.'],
+        "_",
+    )
 }
 
 /// The predicate inside a `cfg(…)` table name, or nothing for a table named by a triple.
@@ -720,31 +748,55 @@ fn decided_names(flags: &[String]) -> Vec<String> {
     names
 }
 
+/// Process-wide storage for the compiler's stable host-triple answer.
+fn host_cache() -> &'static std::sync::OnceLock<Option<String>> {
+    static HOST: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    &HOST
+}
+
 /// The compiler's own triple, asked for only when a target table might apply to it.
 ///
 /// A `target.<triple>.rustflags` table is in force for a build with no `--target` when the triple
 /// is the host's, so answering that needs the host's name — and nothing else here does, which is
 /// why it is not asked for up front. `asked_about` is the caller's statement that something —
 /// a configuration table or a `CARGO_TARGET_<TRIPLE>_RUSTFLAGS` variable — names a triple at all.
-fn host_triple(config: &CargoConfig, asked_about: bool) -> Option<&'static str> {
-    use std::sync::OnceLock;
-
-    /// One `rustc -vV` per process, since the answer cannot change under a running run.
-    static HOST: OnceLock<Option<String>> = OnceLock::new();
-
+fn host_triple<'a>(
+    config: &CargoConfig,
+    asked_about: bool,
+    cache: &'a std::sync::OnceLock<Option<String>>,
+    read_output: impl FnOnce() -> Option<String>,
+) -> Option<&'a str> {
     if !asked_about && config.keys(&["target"]).is_empty() {
         return None;
     }
 
-    HOST.get_or_init(|| {
-        host_triple_using(config, asked_about, || {
-            // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "the process-wide compiler override cannot be mutated safely by parallel tests; host parsing and command behavior are exercised independently")]
-            let program = env::var("RUSTC").unwrap_or_else(|_absent| "rustc".to_owned());
-            let output = Command::new(program).arg("-vV").output().ok()?;
-            Some(String::from_utf8_lossy(&output.stdout).into_owned())
-        })
+    cache.get_or_init(|| host_triple_using(config, asked_about, read_output)).as_deref()
+}
+
+// #[gamma::skip(fn_value.none, reason = "This thin native host-query adapter reads RUSTC and spawns rustc -vV; its exact behavior cannot be observed without forbidden process/environment dependencies. The output conversion and host policy are tested through owned runners.", tag = "native-boundary")]
+fn read_host_output() -> Option<String> {
+    let program = env::var(
+        // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "This thin native host-query adapter reads RUSTC and spawns rustc -vV; its exact behavior cannot be observed without forbidden process/environment dependencies. The output conversion and host policy are tested through owned runners.", tag = "native-boundary")]
+        "RUSTC",
+    )
+    .unwrap_or_else(|_absent|
+    // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "This thin native host-query adapter reads RUSTC and spawns rustc -vV; its exact behavior cannot be observed without forbidden process/environment dependencies. The output conversion and host policy are tested through owned runners.", tag = "native-boundary")]
+    "rustc".to_owned());
+
+    // #[gamma::skip(call.replace_with_default, call_result.default, reason = "This thin native host-query adapter reads RUSTC and spawns rustc -vV; its exact behavior cannot be observed without forbidden process/environment dependencies. The output conversion and host policy are tested through owned runners.", tag = "native-boundary")]
+    read_host_output_using(|| {
+        Command::new(program)
+            .arg(
+                // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "This thin native host-query adapter reads RUSTC and spawns rustc -vV; its exact behavior cannot be observed without forbidden process/environment dependencies. The output conversion and host policy are tested through owned runners.", tag = "native-boundary")]
+                "-vV",
+            )
+            .output()
     })
-    .as_deref()
+}
+
+fn read_host_output_using(run: impl FnOnce() -> std::io::Result<std::process::Output>) -> Option<String> {
+    let output = run().ok()?;
+    Some(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 fn host_triple_using(config: &CargoConfig, asked_about: bool, read_output: impl FnOnce() -> Option<String>) -> Option<String> {
@@ -785,7 +837,9 @@ fn valued(args: &[String], flag: &str) -> Vec<String> {
     for argument in args {
         if expecting {
             found.push(argument.clone());
-            expecting = false;
+            expecting =
+            // #[gamma::skip(assign_value.default, reason = "The assigned false is exactly the inferred primitive type's Default value.", tag = "equivalent")]
+            false;
 
             continue;
         }
@@ -847,7 +901,9 @@ fn options(flags: &[String]) -> impl Iterator<Item = &str> {
 
     flags.iter().filter_map(move |flag| {
         if expecting {
-            expecting = false;
+            expecting =
+            // #[gamma::skip(assign_value.default, reason = "The assigned false is exactly the inferred primitive type's Default value.", tag = "equivalent")]
+            false;
 
             return Some(flag.as_str());
         }
@@ -881,10 +937,13 @@ fn named_profile(extra: &[String]) -> Option<String> {
 /// compiled code from the population.
 fn profile_assertions(root: &Utf8Path, config: &CargoConfig, profile: Option<&str>) -> Option<bool> {
     let manifest = read_table(&root.join("Cargo.toml"));
+    profile_assertions_with_manifest(config, profile, manifest.as_ref())
+}
+
+fn profile_assertions_with_manifest(config: &CargoConfig, profile: Option<&str>, manifest: Option<&Table>) -> Option<bool> {
     let declared = |name: &str, key: &str| {
         config.string(&["profile", name, key]).map(ToOwned::to_owned).or_else(|| {
             manifest
-                .as_ref()
                 .and_then(|table| lookup(table, &["profile", name, key]))?
                 .as_str()
                 .map(ToOwned::to_owned)
@@ -893,7 +952,7 @@ fn profile_assertions(root: &Utf8Path, config: &CargoConfig, profile: Option<&st
     let switched = |name: &str| {
         ["debug-assertions", "debug_assertions"]
             .into_iter()
-            .find_map(|key| lookup_bool(config, manifest.as_ref(), name, key))
+            .find_map(|key| lookup_bool(config, manifest, name, key))
     };
 
     let mut current = profile.unwrap_or("test").to_owned();
@@ -939,10 +998,29 @@ fn lookup_bool(config: &CargoConfig, manifest: Option<&Table>, profile: &str, ke
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use core::cell::Cell;
+    #[cfg(unix)]
+    use std::os::unix::process::ExitStatusExt as _;
+    #[cfg(windows)]
+    use std::os::windows::process::ExitStatusExt as _;
 
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn recovered_hyphenated_debug_assertions_take_precedence_over_the_legacy_alias() {
+        for (preferred, legacy) in [(true, false), (false, true)] {
+            let config = CargoConfig {
+                tables: vec![
+                    format!("[profile.survivor]\ndebug-assertions = {preferred}\ndebug_assertions = {legacy}\n")
+                        .parse()
+                        .unwrap(),
+                ],
+                ..CargoConfig::default()
+            };
+            assert_eq!(profile_assertions_with_manifest(&config, Some("survivor"), None), Some(preferred));
+        }
+    }
 
     #[test]
     fn survivor_wrapper_lookup_is_forwarded_and_non_unicode_or_disappeared_target_flags_are_ignored() {
@@ -1963,16 +2041,49 @@ mod tests {
     }
 
     #[test]
-    fn host_lookup_is_skipped_without_target_tables_and_answers_with_them() {
+    fn oct25_host_lookup_owns_cache_and_preserves_outer_asked_about_policy() {
         let with_target = CargoConfig {
             tables: vec![toml::from_str("[target.host]\nrustflags=[]\n").expect("the fixture parses")],
             sources: Vec::new(),
         };
-        let host = host_triple(&with_target, false).expect("the compiler that built the tests reports its host");
+        for (config, asked) in [(&with_target, false), (&CargoConfig::default(), true)] {
+            let cache = std::sync::OnceLock::new();
+            assert_eq!(
+                host_triple(config, asked, &cache, || Some("host: owned-triple\n".into())),
+                Some("owned-triple")
+            );
+            assert_eq!(
+                host_triple(config, asked, &cache, || panic!("a populated cache must not query again")),
+                Some("owned-triple")
+            );
+        }
+        let cache = std::sync::OnceLock::new();
+        assert_eq!(
+            host_triple(&CargoConfig::default(), false, &cache, || panic!("no target was requested")),
+            None
+        );
+        assert!(
+            cache.get().is_none(),
+            "skipping an unrequested query must not poison the owned cache"
+        );
+    }
 
-        assert!(!host.is_empty());
-        assert_ne!(host, "xyzzy");
-        assert_eq!(host_triple(&CargoConfig::default(), false), None);
+    #[test]
+    fn oct25_native_host_output_preserves_runner_failure_as_none() {
+        assert_eq!(read_host_output_using(|| Err(std::io::ErrorKind::PermissionDenied.into())), None);
+    }
+
+    #[test]
+    fn oct26_host_output_preserves_successful_stdout_before_host_parsing() {
+        let output = std::process::Output {
+            status: std::process::ExitStatus::from_raw(0),
+            stdout: b"host: scripted-target\ninvalid: \xff\n".to_vec(),
+            stderr: b"not the host output".to_vec(),
+        };
+        assert_eq!(
+            read_host_output_using(|| Ok(output)),
+            Some("host: scripted-target\ninvalid: \u{fffd}\n".to_owned())
+        );
     }
 
     /// A run that names no profile builds with `cargo test`, whose profile inherits `dev`.

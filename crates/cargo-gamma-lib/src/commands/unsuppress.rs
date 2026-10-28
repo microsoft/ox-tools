@@ -392,6 +392,21 @@ mod tests {
     #[cfg(unix)]
     use crate::testing::workdir;
 
+    #[test]
+    fn recovered_unparseable_directive_removal_returns_an_error_before_preview_or_publication() {
+        let root = Utf8PathBuf::from("in-memory-unparseable-removal");
+        let plan = crate::fixtures::plan(Vec::new());
+        let removable = Removals::from_iter([("lib.rs".into(), removal("// remove me\npub fn broken("))]);
+        let mut host = Sink::default();
+        let mut written = Written::default();
+        let failure = remove_directives(&mut host, &args(&root, false), &plan, &removable, &mut written).unwrap_err();
+        assert!(failure.message().contains("removing the directives would leave"));
+        assert!(failure.message().ends_with("lib.rs unparseable"));
+        assert!(written.is_empty());
+        assert!(host.out.is_empty());
+        assert!(host.err.is_empty());
+    }
+
     /// The first line of `source` marked for removal, as `sort_out` would have decided it.
     fn removal(source: &str) -> Removal {
         Removal {
