@@ -2,11 +2,16 @@
 
 ## [Unreleased]
 
-## [0.20.1] - 2026-10-27
+## [0.20.1] - 2026-10-28
 
 - 🐛 Bug Fixes
 
+  - cargo-anvil: update GitHub action pins
   - cargo-anvil: pin coverage-gate 0.7.2
+
+- ✔️ Tasks
+
+  - cargo-anvil: prepare 0.20.1 catalog release
 
 ## [0.20.0] - 2026-10-26
 
