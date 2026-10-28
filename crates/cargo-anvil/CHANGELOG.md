@@ -10,6 +10,7 @@
 
 - 🐛 Bug Fixes
 
+  - cargo-anvil: preserve complete aliased Dependabot exclusions
   - cargo-anvil: preserve Dependabot configuration edge cases
   - cargo-anvil: install APRZ 1.2.1 from crates.io ([#313](https://github.com/microsoft/ox-tools/pull/313))
 
