@@ -442,6 +442,7 @@ dependencies = [
  "mutants",
  "ohno",
  "predicates",
+ "saphyr-parser",
  "serde_json",
  "serial_test",
  "sha2",

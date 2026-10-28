@@ -1079,7 +1079,42 @@ Pin changes belong in the source templates. Regenerate the workflows and `.anvil
 with that updated catalog; editing only generated workflows leaves their recorded
 checksums stale and takes them off the automatic update path.
 
+### Dependabot ownership
+
+When the GitHub backend is selected, `cargo anvil` adds the catalog's generated
+workflow and composite-action YAML paths to `exclude-paths` in existing
+`github-actions` Dependabot update entries. Paths are exact repository-relative
+file names, not action-name ignores or `anvil-*` globs: a repository-owned workflow
+such as `codeql.yml` remains eligible even when it uses the same actions.
+GitHub Actions entries must scan `/`, as required by Dependabot.
+
+Anvil patches `.github/dependabot.yml` or `.github/dependabot.yaml` without taking
+ownership of the file. Existing exclusions, schedules, groups, cooldowns, other
+settings, comments, and unrelated ecosystem entries are preserved. Missing paths
+are added once; existing exclusions are never removed. Anvil does not create a
+Dependabot configuration or enable a missing update job. Rerun `cargo anvil` after
+adding Dependabot configuration. Malformed or ambiguous configuration, including
+aliases or shared YAML containers that would need editing, is left unchanged with
+an actionable refusal; unrelated YAML anchors remain supported.
+
+The source repository deliberately continues receiving generated-action update
+PRs so maintainers can update the templates/catalog and regenerate the deployed
+pipelines. Its repository-owned Dependabot configuration starts with:
+
+```yaml
+# anvil: keep-generated-action-updates
+```
+
+This exact leading comment opts out of automatic exclusions, without depending on
+the checkout's remote or enabling a second update policy. It does not remove any
+existing exclusions. The same opt-out is available to catalog source forks.
+
+Dependabot's `exclude-paths` applies to **version updates only**, not security
+updates. Security-update PRs can therefore still require reconciliation with the
+source catalog. See the [Dependabot options reference][dependabot-exclude-paths].
+
 [immutable]: https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases
+[dependabot-exclude-paths]: https://docs.github.com/en/code-security/reference/supply-chain-security/dependabot-options-reference#exclude-paths
 
 ## 10. Coverage upload
 
