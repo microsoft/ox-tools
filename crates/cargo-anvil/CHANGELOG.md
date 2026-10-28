@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.20.3] - 2026-10-29
+
+- ✔️ Tasks
+
+  - cargo-anvil: pin cargo-delta 0.5.0 ([#311](https://github.com/microsoft/ox-tools/pull/311))
+
+- 🧩 Miscellaneous
+
+  - Kill a bunch of mutants ([#315](https://github.com/microsoft/ox-tools/pull/315))
+
 ## [0.20.2] - 2026-10-28
 
 - 🐛 Bug Fixes

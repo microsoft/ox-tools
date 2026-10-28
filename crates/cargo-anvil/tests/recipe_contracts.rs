@@ -472,6 +472,7 @@ fn fixture(imports: &[(&str, &str)], dependency_recipes: &[&str]) -> TempDir {
         justfile.push_str("rust_nightly_external_types := \"nightly-test\"\n\n");
         // A visibly synthetic placeholder used only for recipe interpolation.
         justfile.push_str("cargo_check_external_types_version := \"0.0.0-test\"\n\n");
+        justfile.push_str("cargo_delta_version := \"0.0.0-test\"\n\n");
         justfile.push_str("_anvil_stable_toolchain_args := \"@()\"\n\n");
     }
     for (name, contents) in imports {
@@ -1982,7 +1983,7 @@ fn validation_disables_auto_install_and_preserves_cargo_failures() {
 }
 
 #[test]
-fn impact_format_resolves_directory_aliases_and_fails_hard() {
+fn impact_format_rejects_unknown_packages_and_metadata_errors() {
     if !tools_available() {
         return;
     }
@@ -2012,62 +2013,6 @@ fn impact_format_resolves_directory_aliases_and_fails_hard() {
         "impact metadata discovery must always be locked"
     );
 
-    write(
-        &tmp.path().join("impact.json"),
-        r#"{"Modified":[],"Affected":["workspace-leaf"],"Required":[]}"#,
-    );
-    let directory_alias = run_just(
-        tmp.path(),
-        &["_anvil-impact-format", "affected", "impact.json"],
-        &[
-            ("FAKE_PACKAGE_NAME", OsStr::new("fixture-package")),
-            ("FAKE_LIB_NAME", OsStr::new("fixture_lib")),
-            ("FAKE_PACKAGE_DIR_LEAF", OsStr::new("workspace-leaf")),
-        ],
-    );
-    assert!(
-        directory_alias.status.success(),
-        "unique manifest directory alias should resolve:\n{}",
-        String::from_utf8_lossy(&directory_alias.stderr)
-    );
-    assert_eq!(
-        String::from_utf8_lossy(&directory_alias.stdout).trim(),
-        "--package fixture-package@0.1.0"
-    );
-
-    let ambiguous_alias = run_just(
-        tmp.path(),
-        &["_anvil-impact-format", "affected", "impact.json"],
-        &[
-            ("FAKE_PACKAGE_NAME", OsStr::new("fixture-package")),
-            ("FAKE_LIB_NAME", OsStr::new("fixture_lib")),
-            ("FAKE_PACKAGE_DIR_LEAF", OsStr::new("workspace-leaf")),
-            ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("other-package")),
-        ],
-    );
-    assert_failed(&ambiguous_alias, "ambiguous cargo-delta directory alias");
-    assert!(
-        String::from_utf8_lossy(&ambiguous_alias.stderr).contains("ambiguous package identifier"),
-        "ambiguous alias should be diagnosed directly:\n{}",
-        String::from_utf8_lossy(&ambiguous_alias.stderr)
-    );
-
-    let cross_namespace_alias = run_just(
-        tmp.path(),
-        &["_anvil-impact-format", "affected", "impact.json"],
-        &[
-            ("FAKE_PACKAGE_NAME", OsStr::new("workspace-leaf")),
-            ("FAKE_LIB_NAME", OsStr::new("fixture_lib")),
-            ("FAKE_PACKAGE_DIR_LEAF", OsStr::new("first-package")),
-            ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("other-package")),
-            ("FAKE_SECOND_PACKAGE_DIR_LEAF", OsStr::new("workspace-leaf")),
-        ],
-    );
-    assert_failed(
-        &cross_namespace_alias,
-        "cargo-delta alias that collides across identifier namespaces",
-    );
-
     let metadata_error = run_just(
         tmp.path(),
         &["_anvil-impact-format", "affected", "impact.json"],
@@ -2089,6 +2034,71 @@ fn impact_format_resolves_directory_aliases_and_fails_hard() {
         "malformed metadata should be diagnosed directly:\n{}",
         String::from_utf8_lossy(&malformed_metadata.stderr)
     );
+}
+
+#[test]
+fn impact_format_rejects_library_and_directory_aliases() {
+    assert!(
+        tools_available(),
+        "recipe execution requires `just` and `pwsh` on PATH; install Just and PowerShell before running these tests"
+    );
+    let tmp = fixture(&[("impact.just", IMPACT)], &[]);
+    for alias in ["workspace-leaf", "fixture_lib"] {
+        write(
+            &tmp.path().join("impact.json"),
+            &format!(r#"{{"Modified":[],"Affected":["{alias}"],"Required":[]}}"#),
+        );
+        let alias_only = run_just(
+            tmp.path(),
+            &["_anvil-impact-format", "affected", "impact.json"],
+            &[
+                ("FAKE_PACKAGE_NAME", OsStr::new("fixture-package")),
+                ("FAKE_LIB_NAME", OsStr::new("fixture_lib")),
+                ("FAKE_PACKAGE_DIR_LEAF", OsStr::new("workspace-leaf")),
+            ],
+        );
+        assert_failed(&alias_only, "library or directory name without a matching package");
+        assert!(
+            String::from_utf8_lossy(&alias_only.stderr).contains(&format!("unknown package '{alias}'")),
+            "library and directory aliases must not resolve as package names:\n{}",
+            String::from_utf8_lossy(&alias_only.stderr)
+        );
+    }
+}
+
+#[test]
+fn impact_format_resolves_packages_despite_name_collisions() {
+    assert!(
+        tools_available(),
+        "recipe execution requires `just` and `pwsh` on PATH; install Just and PowerShell before running these tests"
+    );
+    let tmp = fixture(&[("impact.just", IMPACT)], &[]);
+    write(
+        &tmp.path().join("impact.json"),
+        r#"{"Modified":[],"Affected":["workspace_leaf"],"Required":[]}"#,
+    );
+    for (package_name, lib_name, second_package_name, second_package_dir) in [
+        ("workspace_leaf", "fixture_lib", "other_package", "workspace_leaf"),
+        ("other_package", "workspace_leaf", "workspace_leaf", "second-package"),
+    ] {
+        let resolved = run_just(
+            tmp.path(),
+            &["_anvil-impact-format", "affected", "impact.json"],
+            &[
+                ("FAKE_PACKAGE_NAME", OsStr::new(package_name)),
+                ("FAKE_LIB_NAME", OsStr::new(lib_name)),
+                ("FAKE_PACKAGE_DIR_LEAF", OsStr::new("first-package")),
+                ("FAKE_SECOND_PACKAGE_NAME", OsStr::new(second_package_name)),
+                ("FAKE_SECOND_PACKAGE_DIR_LEAF", OsStr::new(second_package_dir)),
+            ],
+        );
+        assert!(
+            resolved.status.success(),
+            "an exact package name must resolve despite library or directory collisions:\n{}",
+            String::from_utf8_lossy(&resolved.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&resolved.stdout).trim(), "--package workspace_leaf@0.1.0");
+    }
 }
 
 #[cfg(target_os = "linux")]
