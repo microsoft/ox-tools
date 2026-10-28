@@ -6,6 +6,7 @@
 
 - 🐛 Bug Fixes
 
+  - cargo-anvil: ship github-script 9.0.0, download-artifact 8.0.2 and SHA-pinned sticky comments
   - cargo-anvil: update GitHub action pins
   - cargo-anvil: pin coverage-gate 0.7.2
 
