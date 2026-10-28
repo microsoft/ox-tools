@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-27
+
+- ⚠️ Breaking
+
+  - replace `--target-required-feature <FEATURE>` with
+    `--target-filter required-feature:<FEATURE>` as part of target filtering
+    ([#259](https://github.com/microsoft/ox-tools/pull/259))
+
 ## [0.6.0] - 2026-10-20
 
 - ✨ Features
