@@ -75,6 +75,9 @@ pub(crate) fn update(text: &str, paths: &[&str]) -> Result<Option<String>, AppEr
         if ecosystem != "github-actions" {
             continue;
         }
+        if fields.contains_key("<<") {
+            bail!("expand YAML merge keys in the GitHub Actions Dependabot job before adding exclusions");
+        }
         job.require_unshared()?;
         require_root_directory(&fields)?;
         let exclusions = fields.get("exclude-paths");
@@ -85,8 +88,8 @@ pub(crate) fn update(text: &str, paths: &[&str]) -> Result<Option<String>, AppEr
             continue;
         }
         insertions.push(match exclusions {
-            Some(sequence) => sequence_insertion(text, sequence, &missing)?,
-            None => job_insertion(text, job, &missing)?,
+            Some(sequence) => sequence_insertion(text, sequence, &missing),
+            None => job_insertion(text, job, &missing),
         });
     }
     if insertions.is_empty() {
@@ -124,32 +127,29 @@ fn quoted_paths(paths: &[&str]) -> String {
         .join(", ")
 }
 
-fn sequence_insertion(text: &str, sequence: &Node, paths: &[&str]) -> Result<(usize, String), AppError> {
+fn sequence_insertion(text: &str, sequence: &Node, paths: &[&str]) -> (usize, String) {
     if text[sequence.span.start..].starts_with('[') {
         let separator = if sequence.children.is_empty() { "" } else { ", " };
-        return Ok((sequence.span.start + 1, format!("{}{separator}", quoted_paths(paths))));
+        return (sequence.span.start + 1, format!("{}{separator}", quoted_paths(paths)));
     }
     let start = line_start(text, sequence.span.start);
     let indent = &text[start..sequence.span.start];
-    if !indent.bytes().all(|byte| byte == b' ') {
-        bail!("cannot locate a complete-line `exclude-paths` sequence; use a block list or an inline YAML list");
-    }
-    Ok((start, block_entries(paths, indent, crate::region::text_newline(text))))
+    (start, block_entries(paths, indent, crate::region::text_newline(text)))
 }
 
-fn job_insertion(text: &str, job: &Node, paths: &[&str]) -> Result<(usize, String), AppError> {
+fn job_insertion(text: &str, job: &Node, paths: &[&str]) -> (usize, String) {
     if text[job.span.start..].starts_with('{') {
-        return Ok((job.span.start + 1, format!("exclude-paths: [{}], ", quoted_paths(paths))));
+        return (job.span.start + 1, format!("exclude-paths: [{}], ", quoted_paths(paths)));
     }
     let key = job
         .children
         .first()
-        .ok_or_else(|| app_err!("GitHub Actions update job has no mapping keys"))?;
+        .expect("the matched GitHub Actions job has a package-ecosystem mapping key");
     let start = line_start(text, key.span.start);
     let indent = " ".repeat(key.span.start - start);
     let newline = crate::region::text_newline(text);
     let entries = block_entries(paths, &format!("{indent}  "), newline);
-    Ok((key.span.start, format!("exclude-paths:{newline}{entries}{indent}")))
+    (key.span.start, format!("exclude-paths:{newline}{entries}{indent}"))
 }
 
 fn block_entries(paths: &[&str], indent: &str, newline: &str) -> String {
@@ -211,9 +211,6 @@ impl Node {
         let mut fields = BTreeMap::new();
         for pair in self.children.chunks_exact(2) {
             let key = pair[0].scalar()?;
-            if key == "<<" {
-                bail!("expand YAML merge keys in the Dependabot configuration or update job before adding exclusions");
-            }
             if fields.insert(key, &pair[1]).is_some() {
                 bail!("duplicate Dependabot mapping key `{key}`; remove the duplicate before adding exclusions");
             }
@@ -380,6 +377,22 @@ mod tests {
         assert!(update(&cargo, PATHS).unwrap().is_none());
         let source = format!("{JOB}    cooldown: &cooldown {{default-days: 7}}\n    labels: []\n");
         assert!(update(&source, PATHS).unwrap().unwrap().contains("&cooldown {default-days: 7}"));
+        let unrelated = concat!(
+            "version: 2\n",
+            "updates:\n",
+            "  - &cargo\n",
+            "    package-ecosystem: cargo\n",
+            "    directory: /\n",
+            "    schedule: {interval: daily}\n",
+            "  - <<: *cargo\n",
+            "    package-ecosystem: cargo\n",
+            "    directory: /tools\n",
+        );
+        assert!(update(unrelated, PATHS).unwrap().is_none());
+        let source = format!("{unrelated}{}", JOB.split_once("updates:\n").unwrap().1);
+        let updated = update(&source, PATHS).unwrap().unwrap();
+        assert!(updated.starts_with(unrelated));
+        assert!(updated.contains(".github/workflows/anvil-pr-impl.yml"));
         assert!(update(JOB, &[]).unwrap().is_none());
     }
 
@@ -410,6 +423,8 @@ mod tests {
             "version: 2\nupdates: [github-actions]\n".to_owned(),
             "version: 2\nupdates: [{package-ecosystem: []}]\n".to_owned(),
             format!("{JOB}    directory: /\n"),
+            JOB.replace("    directory: /\n", ""),
+            format!("{JOB}    directories: ['/']\n"),
             JOB.replace("directory: /", "directory: /other"),
             JOB.replace("directory: /", "directories: [/, /other]"),
             JOB.replace("directory: /", "directories: []"),

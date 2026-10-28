@@ -366,6 +366,11 @@ fn plan_dependabot_exclusions(
     let Some((path, text)) = configurations.pop() else {
         return Ok(());
     };
+    let resolved_paths = paths
+        .iter()
+        .map(|path| (hosts.resolve)(repo_root, path))
+        .collect::<Result<Vec<_>, _>>()?;
+    let paths: Vec<_> = resolved_paths.iter().map(String::as_str).collect();
     match crate::dependabot::update(&text, &paths) {
         Ok(Some(updated)) => {
             if catalog.artifacts().iter().any(|artifact| match artifact {
@@ -2776,6 +2781,51 @@ mod tests {
             };
             assert_eq!(dependabot_plan(rerun, &[Backend::GitHub]).0.dry_run_exit_code(), 0);
         }
+    }
+
+    #[test]
+    fn dependabot_exclusions_follow_the_owned_files_resolved_casing() {
+        let source = "version: 2\nupdates:\n- package-ecosystem: github-actions\n  directory: /\n";
+        let catalog = Catalog::builder(test_cli())
+            .with_artifact(artifacts::github::pr_impl_workflow())
+            .build()
+            .unwrap();
+        let mut hosts = memory_hosts();
+        hosts.resolve = |_, path| {
+            Ok(if path == ".github/workflows/anvil-pr-impl.yml" {
+                ".github/workflows/Anvil-PR-Impl.yml".to_owned()
+            } else {
+                path.to_owned()
+            })
+        };
+        hosts.set(".github/dependabot.yml", source.to_owned());
+        hosts.texts.insert(".github/dependabot.yaml".to_owned(), None);
+        let mut plan = Plan::default();
+        plan_dependabot_exclusions(Path::new("memory"), &[Backend::GitHub], &catalog, &mut plan, &mut hosts).unwrap();
+        let updated = hosts.cached(".github/dependabot.yml").unwrap();
+        assert!(updated.contains(".github/workflows/Anvil-PR-Impl.yml"));
+        assert!(!updated.contains(".github/workflows/anvil-pr-impl.yml"));
+    }
+
+    #[test]
+    fn dependabot_path_resolution_errors_do_not_plan_partial_patches() {
+        let catalog = Catalog::builder(test_cli())
+            .with_artifact(artifacts::github::pr_impl_workflow())
+            .build()
+            .unwrap();
+        let mut hosts = memory_hosts();
+        hosts.resolve = |_, path| {
+            if path.starts_with(".github/workflows/") {
+                bail!("ambiguous owned-file casing");
+            }
+            Ok(path.to_owned())
+        };
+        hosts.set(".github/dependabot.yml", "version: 2\nupdates: []\n".to_owned());
+        hosts.texts.insert(".github/dependabot.yaml".to_owned(), None);
+        let mut plan = Plan::default();
+        let error = plan_dependabot_exclusions(Path::new("memory"), &[Backend::GitHub], &catalog, &mut plan, &mut hosts).unwrap_err();
+        assert!(error.to_string().contains("ambiguous owned-file casing"));
+        assert!(plan.items().is_empty());
     }
 
     #[test]

@@ -73,10 +73,10 @@ pub struct PlanItem {
     /// The full host-file body after a region write or removal.
     /// `None` for owned files; only owned files can produce proposals.
     pub spliced_host: Option<String>,
-    /// Checksum of [`Self::rendered`], populated when `rendered` is
-    /// `Some`. The manifest records it for `Write`, `Propose` and `InSync`
-    /// whenever it is present, so a decision that leaves it `None` leaves
-    /// the previously recorded checksum untouched.
+    /// Checksum of catalog-owned content. Repository-file patches and
+    /// marker-only repairs do not record a checksum. The manifest records
+    /// it for `Write`, `Propose` and `InSync` whenever it is present, so a
+    /// decision that leaves it `None` leaves the previous checksum untouched.
     pub rendered_checksum: Option<String>,
     /// Structural JSON array selector whose provenance must be retained in
     /// the manifest. `None` for every other plan item.
@@ -483,7 +483,7 @@ impl Plan {
         Ok(self.projected_manifest(previous_manifest))
     }
 
-    /// Apply only the owned-file and managed-region changes.
+    /// Apply owned-file changes, managed-region changes, and repository-file patches.
     ///
     /// Manifest projection is deliberately separate so dry-run and real
     /// application calculate the same next `.anvil.lock`.
