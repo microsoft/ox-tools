@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.20.2] - 2026-10-28
+
+- 🐛 Bug Fixes
+
+  - cargo-anvil: use published APRZ 1.2.1
+  - cargo-anvil: install APRZ from the fixed parser revision
+
 ## [0.20.1] - 2026-10-28
 
 - 🐛 Bug Fixes
