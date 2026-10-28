@@ -38,7 +38,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! cargo-gamma-attrs = "0.3"
+//! cargo-gamma-attrs = "0.4"
 //! ```
 //!
 //! The package is `cargo-gamma-attrs` but its library is named `gamma`, which is what lets the
@@ -62,7 +62,7 @@
 //!
 //! ```toml
 //! [dev-dependencies]
-//! cargo-gamma-attrs = "0.3"
+//! cargo-gamma-attrs = "0.4"
 //! ```
 //!
 //! # The vocabulary
