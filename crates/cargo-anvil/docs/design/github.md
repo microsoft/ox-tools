@@ -1107,6 +1107,9 @@ scheduled for whole-file retirement are not patched or recreated. Malformed or
 ambiguous configuration, including aliases or shared YAML containers that would
 need editing, is left unchanged with an actionable refusal; anchors on untouched
 containers do not cause refusals, and unrelated YAML anchors remain supported.
+Aliases are followed by reference for read-only comparisons, without expanding
+their graphs. Already-complete shared exclusion lists remain byte-for-byte no-ops;
+an insertion that would change a shared target is still refused.
 
 The source repository deliberately continues receiving generated-action update
 PRs so maintainers can update the templates/catalog and regenerate the deployed

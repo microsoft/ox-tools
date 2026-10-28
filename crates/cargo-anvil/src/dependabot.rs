@@ -61,24 +61,32 @@ pub(crate) fn update(text: &str, paths: &[&str]) -> Result<Option<String>, AppEr
 
     let root = parse(text)?;
     let fields = root.fields()?;
-    if fields.get("version").map(|node| node.scalar()).transpose()? != Some("2") {
+    if fields.get("version").map(|node| node.resolve(&root).scalar()).transpose()? != Some("2") {
         bail!("expected Dependabot configuration version 2");
     }
-    let updates = fields.get("updates").ok_or_else(|| app_err!("missing Dependabot `updates` list"))?;
+    let updates = fields
+        .get("updates")
+        .ok_or_else(|| app_err!("missing Dependabot `updates` list"))?
+        .resolve(&root);
     let paths: Vec<_> = paths.iter().map(|path| literal_glob_path(path)).collect();
     let mut insertions = Vec::new();
     for job in updates.sequence()? {
+        let job = job.resolve(&root);
         let fields = job.fields()?;
         let ecosystem = fields
             .get("package-ecosystem")
             .ok_or_else(|| app_err!("Dependabot update job is missing `package-ecosystem`"))?
+            .resolve(&root)
             .scalar()?;
         if ecosystem != "github-actions" {
             continue;
         }
-        let exclusions = fields.get("exclude-paths");
+        let exclusions = fields.get("exclude-paths").map(|node| node.resolve(&root));
         let existing = exclusions.map(|node| node.sequence()).transpose()?.unwrap_or_default();
-        let existing = existing.iter().map(Node::scalar).collect::<Result<Vec<_>, _>>()?;
+        let existing = existing
+            .iter()
+            .map(|node| node.resolve(&root).scalar())
+            .collect::<Result<Vec<_>, _>>()?;
         let missing: Vec<_> = paths.iter().map(String::as_str).filter(|path| !existing.contains(path)).collect();
         if missing.is_empty() {
             continue;
@@ -172,18 +180,36 @@ enum Kind {
     Scalar(String),
     Sequence,
     Mapping,
-    Alias,
+    Alias(usize),
 }
 
 #[derive(Debug)]
 struct Node {
     kind: Kind,
     span: Range<usize>,
+    anchor: usize,
     shared: bool,
     children: Vec<Self>,
 }
 
 impl Node {
+    fn resolve<'a>(&'a self, root: &'a Self) -> &'a Self {
+        match self.kind {
+            Kind::Alias(anchor) => root
+                .find_anchor(anchor)
+                .expect("the YAML parser emits aliases only for declared anchors retained in this tree"),
+            _ => self,
+        }
+    }
+
+    fn find_anchor(&self, anchor: usize) -> Option<&Self> {
+        if self.anchor == anchor {
+            Some(self)
+        } else {
+            self.children.iter().find_map(|child| child.find_anchor(anchor))
+        }
+    }
+
     fn require_unshared(&self) -> Result<(), AppError> {
         if self.shared {
             bail!("expand YAML aliases, anchors, or tags on the Dependabot containers that need editing");
@@ -234,11 +260,11 @@ fn parse(text: &str) -> Result<Node, AppError> {
     for event in Parser::new_from_str(source) {
         let (event, span) = event.into_app_err("Dependabot configuration is not valid YAML")?;
         let span = offsets[span.start.index()]..offsets[span.end.index()];
-        let (kind, shared, opening) = match event {
-            Event::Scalar(value, _, _, _) => (Kind::Scalar(value.into_owned()), false, false),
-            Event::SequenceStart(anchor, tag) => (Kind::Sequence, anchor != 0 || tag.is_some(), true),
-            Event::MappingStart(anchor, tag) => (Kind::Mapping, anchor != 0 || tag.is_some(), true),
-            Event::Alias(_) => (Kind::Alias, false, false),
+        let (kind, anchor, shared, opening) = match event {
+            Event::Scalar(value, _, anchor, _) => (Kind::Scalar(value.into_owned()), anchor, false, false),
+            Event::SequenceStart(anchor, tag) => (Kind::Sequence, anchor, anchor != 0 || tag.is_some(), true),
+            Event::MappingStart(anchor, tag) => (Kind::Mapping, anchor, anchor != 0 || tag.is_some(), true),
+            Event::Alias(anchor) => (Kind::Alias(anchor), 0, false, false),
             Event::SequenceEnd | Event::MappingEnd => {
                 let mut node = stack.pop().expect("YAML parser balances collection start and end events");
                 node.span.end = span.end;
@@ -250,6 +276,7 @@ fn parse(text: &str) -> Result<Node, AppError> {
         let node = Node {
             kind,
             span,
+            anchor,
             shared,
             children: Vec::new(),
         };
@@ -398,6 +425,50 @@ mod tests {
             complete.replace("exclude-paths:", "exclude-paths: !paths"),
         ] {
             assert!(update(&source, PATHS).unwrap().is_none(), "{source}");
+        }
+    }
+
+    #[test]
+    fn aliased_exclusions_are_read_only_when_every_generated_path_is_present() {
+        let source = format!(
+            "{JOB}    target-branch: main\n    exclude-paths: &generated [{}]\n\
+             \x20 - package-ecosystem: github-actions\n    directory: /\n\
+             \x20   target-branch: release\n    exclude-paths: *generated\n",
+            quoted_paths(PATHS),
+        );
+        assert!(update(&source, PATHS).unwrap().is_none());
+        let scalar_aliases = source
+            .replacen(
+                "package-ecosystem: github-actions",
+                "package-ecosystem: &ecosystem github-actions",
+                1,
+            )
+            .replace("package-ecosystem: github-actions", "package-ecosystem: *ecosystem")
+            .replacen(&format!("\"{}\"", PATHS[0]), &format!("&setup \"{}\", *setup", PATHS[0]), 1);
+        assert!(update(&scalar_aliases, PATHS).unwrap().is_none());
+        let rebound = format!(
+            "{}    exclude-paths: &generated [vendor/**]\n{}",
+            JOB.replace("github-actions", "cargo"),
+            source.split_once("updates:\n").unwrap().1,
+        );
+        assert!(update(&rebound, PATHS).unwrap().is_none());
+    }
+
+    #[test]
+    fn aliased_exclusions_that_need_changes_or_contain_cycles_are_refused() {
+        let source = format!(
+            "{}    exclude-paths: &generated [vendor/**]\n\
+             \x20 - package-ecosystem: github-actions\n    directory: /\n\
+             \x20   exclude-paths: *generated\n",
+            JOB.replace("github-actions", "cargo"),
+        );
+        let error = update(&source, PATHS).unwrap_err();
+        assert!(error.to_string().contains("containers that need editing"));
+        for source in [
+            format!("{JOB}    exclude-paths: &generated [*generated]\n"),
+            "version: 2\nupdates: &updates [*updates]\n".to_owned(),
+        ] {
+            update(&source, PATHS).expect_err("cyclic alias containers are not string exclusion lists");
         }
     }
 
