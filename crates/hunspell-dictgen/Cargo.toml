@@ -1,0 +1,42 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+name = "hunspell-dictgen"
+description = "Generate deterministic Hunspell dictionaries from human-maintained word lists"
+version = "0.1.0"
+readme = "README.md"
+keywords = ["oxidizer", "hunspell", "dictionary", "wordlist", "spellcheck"]
+categories = ["command-line-utilities", "development-tools"]
+
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository = "https://github.com/microsoft/ox-tools/tree/main/crates/hunspell-dictgen"
+
+[package.metadata.docs.rs]
+all-features = true
+
+[package.metadata.cargo_check_external_types]
+# The `#[ohno::error]` attribute on `GenerateError` implements traits in
+# `ohno` that transitively appear in the public API.
+allowed_external_types = ["ohno::*"]
+
+[[bin]]
+name = "hunspell-dictgen"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true, features = ["derive", "std", "help", "usage", "error-context"] }
+mutants = { workspace = true }
+ohno = { workspace = true, features = ["app-err"] }
+tempfile = { workspace = true }
+
+[dev-dependencies]
+
+# >>> anvil-managed: anvil-lints
+[lints]
+workspace = true
+# <<< anvil-managed: anvil-lints

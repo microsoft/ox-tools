@@ -115,6 +115,13 @@ pub struct RunInfo {
     #[serde(default)]
     pub population_complete: bool,
 
+    /// Whether a name regex narrowed the mutants within a file.
+    ///
+    /// Such a report contributes verdicts to a merge but cannot establish that an absent mutant
+    /// was removed from the source. Older reports omit this field and retain their prior meaning.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub name_filtered: bool,
+
     /// The shard this run covered, when it was sharded.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shard: Option<ShardInfo>,
@@ -173,12 +180,19 @@ pub struct MergeProvenance {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub sources: BTreeMap<String, SourceProvenance>,
 
+    /// The latest source generation in which each retained mutant was seen.
+    ///
+    /// This can be newer than the rendered file source when a name-filtered run contributes a
+    /// verdict but an older complete run supplies the file's presentation.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sightings: BTreeMap<String, SourceProvenance>,
+
     /// The run that established each retained verdict.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub verdicts: BTreeMap<String, VerdictProvenance>,
 }
 
-/// The source generation a merged file renders.
+/// A source generation recorded for a rendered file or a mutant sighting.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceProvenance {
@@ -194,6 +208,10 @@ pub struct SourceProvenance {
     /// from their rendered source so they remain readable.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub lineage: String,
+
+    /// Whether this source came from a name-filtered report and lacks other presentations.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub name_filtered: bool,
 }
 
 /// The run generation that established a merged mutant's status.
@@ -212,6 +230,10 @@ pub struct VerdictProvenance {
     /// from their retained mutant result so they remain readable.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub lineage: String,
+
+    /// Whether the verdict source was name-filtered; older merged reports omit it and were unfiltered.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub name_filtered: bool,
 }
 
 /// Identifies one shard of a rotation.
@@ -2377,6 +2399,7 @@ mod tests {
             mutant_id_version: None,
             merged: false,
             population_complete: true,
+            name_filtered: false,
             shard: None,
             tests: None,
             not_built: None,
@@ -2405,6 +2428,7 @@ mod tests {
                 mutant_id_version: None,
                 merged: false,
                 population_complete: true,
+                name_filtered: false,
                 shard: None,
                 tests: None,
                 not_built: None,

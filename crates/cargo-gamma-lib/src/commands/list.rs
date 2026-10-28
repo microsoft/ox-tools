@@ -4,7 +4,7 @@
 use std::io::Write;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use camino::Utf8PathBuf;
+use camino::{Utf8Path, Utf8PathBuf};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -172,21 +172,39 @@ fn list_files<H: Host>(
 
     crate::report::skipped(host, &plan, styler)?;
 
+    let files = selected_files(&plan, !select.name_patterns.is_empty());
+
     let mut stream = host.results();
 
     if json {
-        let paths: Vec<&Utf8PathBuf> = plan.files.iter().map(|file| &file.path).collect();
+        let paths: Vec<&Utf8PathBuf> = files.map(|file| &file.path).collect();
 
         write_pretty_json(&mut stream, &paths, "the file list")?;
 
         return Ok(EXIT_OK);
     }
 
-    for file in &plan.files {
+    for file in files {
         writeln!(stream, "{}", encode_controls(file.path.as_str()))?;
     }
 
     Ok(EXIT_OK)
+}
+
+/// Projects a file listing from the selected mutant population.
+fn selected_files(plan: &crate::discover::Plan, name_filtered: bool) -> impl Iterator<Item = &crate::discover::TargetFile> {
+    // A name filter selects mutants, so a file listing under that filter names only files that
+    // actually contain one of the selected mutants.
+    let selected_paths = name_filtered.then(|| {
+        plan.mutants
+            .iter()
+            .map(|mutant| mutant.file.as_ref())
+            .collect::<std::collections::HashSet<&Utf8Path>>()
+    });
+
+    plan.files
+        .iter()
+        .filter(move |file| selected_paths.as_ref().is_none_or(|paths| paths.contains(file.path.as_path())))
 }
 
 /// Lists the mutants that would be generated.
@@ -205,7 +223,14 @@ fn list_mutants<H: Host>(
     crate::report::skipped(host, &plan, styler)?;
 
     if let Some(path) = json_report {
-        write_population(host, &plan, shard, population_complete(select), path)?;
+        write_population(
+            host,
+            &plan,
+            shard,
+            population_complete(select),
+            !select.name_patterns.is_empty(),
+            path,
+        )?;
     }
 
     let mut stream = host.results();
@@ -217,7 +242,7 @@ fn list_mutants<H: Host>(
     }
 
     for mutant in &plan.mutants {
-        writeln!(stream, "{}", encode_controls(&describe_for_listing(mutant)))?;
+        writeln!(stream, "{}", encode_controls(&mutant.selection_name()))?;
     }
 
     let suppressed = plan
@@ -237,41 +262,25 @@ fn list_mutants<H: Host>(
 /// Grants authority to withdraw absent older identities only for complete per-file populations.
 ///
 /// Whole-file/package selection preserves that authority; any explicit mutator selector (even an
-/// exhaustive spelling) or diff filter conservatively withholds it.
+/// exhaustive spelling), name regex, or diff filter conservatively withholds it.
 fn population_complete(select: &super::cli::SelectArgs) -> bool {
-    select.in_diff.is_none() && select.mutators.is_none()
-}
-
-/// Describes one mutant for the plain listing, marking the ones a run will not test.
-///
-/// A suppressed mutant stays in the population so reports can show what was skipped and why, so
-/// without the mark the listing would read as a promise to test every line it prints.
-fn describe_for_listing(mutant: &crate::model::Mutant) -> String {
-    let Some(channel) = mutant
-        .suppression
-        .as_ref()
-        .filter(|_| mutant.outcome == crate::model::Outcome::Ignored)
-        .map(|suppression| suppression.channel.as_str())
-    else {
-        return mutant.describe();
-    };
-
-    format!("{} [suppressed: {channel}]", mutant.describe())
+    select.in_diff.is_none() && select.mutators.is_none() && select.name_patterns.is_empty()
 }
 
 /// Writes the listing as a report document.
 ///
-/// `merge` withdraws a mutant only when a newer unsharded input states the whole population of its
-/// file, and producing that from a run means paying for a run. Listing is the cheap way to say what
-/// exists now, so it is the one a nightly rotation can afford beside its shard.
+/// `merge` withdraws a mutant only when a newer unsharded, unfiltered input states the whole
+/// population of its file, and producing that from a run means paying for a run. Listing is the
+/// cheap way to say what exists now, so it is the one a nightly rotation can afford beside its shard.
 fn write_population<H: Host>(
     host: &mut H,
     plan: &crate::discover::Plan,
     shard: Option<(u32, u32)>,
     population_complete: bool,
+    name_filtered: bool,
     path: &Utf8PathBuf,
 ) -> crate::Result<()> {
-    write_population_at(host, plan, shard, population_complete, path, SystemTime::now())
+    write_population_at(host, plan, shard, population_complete, name_filtered, path, SystemTime::now())
 }
 
 fn write_population_at<H: Host>(
@@ -279,6 +288,7 @@ fn write_population_at<H: Host>(
     plan: &crate::discover::Plan,
     shard: Option<(u32, u32)>,
     population_complete: bool,
+    name_filtered: bool,
     path: &Utf8PathBuf,
     now: SystemTime,
 ) -> crate::Result<()> {
@@ -287,6 +297,7 @@ fn write_population_at<H: Host>(
         mutant_id_version: Some(crate::model::MUTANT_ID_VERSION),
         merged: false,
         population_complete: population_complete && shard.is_none(),
+        name_filtered,
         shard: shard.map(|(count, index)| crate::elements::ShardInfo { index, count }),
         tests: None,
         // Filled in by `build` from the plan it is given, so that it cannot disagree with the
@@ -500,12 +511,12 @@ mod tests {
         let blocker = root.join("not-a-directory");
         fs::write(&blocker, "fixture").unwrap();
         let report = blocker.join("population.json");
-        write_population(&mut Sink::default(), &plan, None, true, &report).expect_err("a report below a file cannot be published");
+        write_population(&mut Sink::default(), &plan, None, true, false, &report).expect_err("a report below a file cannot be published");
         list_mutants(&mut Sink::default(), &select, false, Some(&report), Styler::new(false), &cargo)
             .expect_err("the listing must return the population publication failure");
 
         let report = root.join("population.json");
-        write_population(&mut BrokenHost, &plan, Some((5, 2)), true, &report)
+        write_population(&mut BrokenHost, &plan, Some((5, 2)), true, false, &report)
             .expect_err("a failed publication diagnostic must be returned");
         let report: Value = serde_json::from_slice(&fs::read(&report).unwrap()).unwrap();
         assert_eq!(report["config"]["shard"], serde_json::json!({ "index": 2, "count": 5 }));
@@ -513,7 +524,7 @@ mod tests {
 
         let path = root.join("unknown-start-time.json");
         let before_epoch = UNIX_EPOCH.checked_sub(core::time::Duration::from_secs(1)).unwrap();
-        write_population_at(&mut Sink::default(), &plan, None, true, &path, before_epoch).unwrap();
+        write_population_at(&mut Sink::default(), &plan, None, true, false, &path, before_epoch).unwrap();
         let report: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(report["config"]["startedAt"], 0);
         write_population_at(
@@ -521,6 +532,7 @@ mod tests {
             &plan,
             None,
             true,
+            false,
             &path,
             UNIX_EPOCH + core::time::Duration::from_secs(1_234_567),
         )
@@ -528,7 +540,7 @@ mod tests {
         let report: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(report["config"]["startedAt"], 1_234_567);
         assert_eq!(report["config"]["populationComplete"], true);
-        write_population_at(&mut Sink::default(), &plan, None, false, &path, before_epoch).unwrap();
+        write_population_at(&mut Sink::default(), &plan, None, false, false, &path, before_epoch).unwrap();
         let report: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(report["config"]["populationComplete"], false);
     }
@@ -1003,6 +1015,15 @@ mod tests {
             "the population is empty: {text}"
         );
         assert_eq!(String::from_utf8(host.err).unwrap(), format!("Wrote {path}\n"));
+
+        let ListCommand::Mutants(args) = &mut listing.command else {
+            panic!("expected mutant listing");
+        };
+        args.select.name_patterns.push(": less: ".to_owned());
+        list(&mut Sink::default(), &listing, Styler::new(false)).expect("write a filtered population");
+        let filtered: crate::elements::Report =
+            serde_json::from_str(&fs::read_to_string(&path).expect("filtered report")).expect("filtered JSON");
+        assert!(filtered.config.as_ref().is_some_and(|run| run.name_filtered));
     }
 
     #[test]
@@ -1030,5 +1051,49 @@ mod tests {
 
         assert_eq!(code, EXIT_OK);
         assert_eq!((shard.index, shard.count), (2, 4));
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod name_filter_tests {
+    use super::selected_files;
+    use crate::discover::{Plan, TargetFile};
+
+    #[test]
+    fn listed_name_and_selected_files_follow_the_filtered_population() {
+        let mutant = crate::model::Mutant {
+            item_path: "less".to_owned().into(),
+            ..crate::fixtures::mutant()
+        };
+        let name = mutant.selection_name();
+        assert!(name.contains(": less: "), "{name}");
+
+        let files = ["src/lib.rs", "src/other.rs"].map(|path| TargetFile {
+            path: path.into(),
+            absolute: format!("/fixture/{path}").into(),
+            package: "subject".to_owned(),
+            source: None,
+        });
+        let mut plan = Plan {
+            root: "/fixture".into(),
+            files: files.into(),
+            mutants: vec![mutant],
+            suppressed: 0,
+            idle: Vec::new(),
+            sharded_out: 0,
+            settled_out: 0,
+            digests: crate::HashMap::default(),
+            skipped: Vec::new(),
+            reach: crate::HashMap::default(),
+            specs: crate::HashMap::default(),
+        };
+
+        let selected: Vec<_> = selected_files(&plan, true).map(|file| file.path.as_str()).collect();
+        assert_eq!(selected, ["src/lib.rs"]);
+        assert_eq!(selected_files(&plan, false).count(), 2);
+
+        plan.mutants.clear();
+        assert!(selected_files(&plan, true).next().is_none());
     }
 }

@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+## [0.20.2] - 2026-10-28
+
+- 🐛 Bug Fixes
+
+  - cargo-anvil: use published APRZ 1.2.1
+  - cargo-anvil: install APRZ from the fixed parser revision
+
+## [0.20.1] - 2026-10-28
+
+- 🐛 Bug Fixes
+
+  - cargo-anvil: ship github-script 9.0.0, download-artifact 8.0.2 and SHA-pinned sticky comments
+  - cargo-anvil: update GitHub action pins
+  - cargo-anvil: pin coverage-gate 0.7.2
+
+- ✔️ Tasks
+
+  - cargo-anvil: prepare 0.20.1 catalog release
+
 ## [0.20.0] - 2026-10-26
 
 - ✨ Features

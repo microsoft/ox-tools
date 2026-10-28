@@ -931,6 +931,7 @@ mod tests {
             "cargo_deny_version",
             "cargo_each_version",
             "cargo_mutants_version",
+            "cargo_aprz_version",
         ] {
             assert!(VERSIONS_JUST.contains(needle), "versions.just missing variable '{needle}'");
         }

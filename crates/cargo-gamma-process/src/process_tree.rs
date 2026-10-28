@@ -23,6 +23,8 @@ use cargo_gamma_unsafe::{PlatformError, Situation};
 
 #[cfg(any(test, feature = "fault-injection"))]
 use crate::faults;
+#[cfg(target_os = "macos")]
+use crate::sampled_memory::Sampler;
 use crate::{MemoryRequest, MemoryUsage};
 
 /// How many concurrent child subtrees can be watched for terminal interruption.
@@ -149,6 +151,10 @@ pub fn containment() -> Result<(), PlatformError> {
 #[cfg_attr(not(unix), derive(Default))]
 #[derive(Debug)]
 pub(crate) struct SpawnGuard {
+    /// The sampled accounting to start once the launch owns its process group.
+    #[cfg(target_os = "macos")]
+    memory: MemoryRequest,
+
     /// The interrupt handler's promise not to finish this process until the child is watched.
     ///
     /// Held across the spawn. A signal arriving in that window would otherwise kill this process and
@@ -247,12 +253,20 @@ impl SpawnGuard {
 
         #[cfg(all(unix, not(target_os = "linux")))]
         {
-            let Self { spawning } = self;
+            let Self {
+                spawning,
+                #[cfg(target_os = "macos")]
+                memory,
+            } = self;
 
             drop(spawning);
             std::thread::sleep(duration);
 
-            Ok(Self { spawning: window()? })
+            Ok(Self {
+                spawning: window()?,
+                #[cfg(target_os = "macos")]
+                memory,
+            })
         }
 
         #[cfg(not(unix))]
@@ -366,7 +380,8 @@ impl PreparedCommand {
 /// This is the post-spawn state of [`PreparedCommand`]. It owns both the live child and the
 /// containment prepared for that exact launch, so safe code cannot reuse the preparation or pair
 /// the child with another boundary. [`ProcessTree::adopt`] consumes the bundle; dropping it before
-/// adoption terminates the contained subtree and reaps its leader.
+/// adoption terminates the contained subtree and reaps its leader. Do not independently reap the
+/// child's numeric PID while this value owns the child.
 #[must_use = "a spawned child must be adopted so its process tree remains contained"]
 #[derive(Debug)]
 pub struct SpawnedCommand {
@@ -726,26 +741,18 @@ pub fn prepare(command: Command, request: MemoryRequest) -> Result<PreparedComma
     #[cfg(not(any(target_os = "linux", windows)))]
     {
         if request.wanted() {
-            // `support` cannot say yes on this platform, but its signature is shared with the two
-            // that can, so the success case still needs an answer. Saying it plainly beats
-            // `unwrap_or_else`, which reads as if it handled the error and in fact discards the
-            // reason and yields `()` — this line did not compile at all until a macOS build was
-            // first attempted.
-            let Err(reason) = crate::support() else {
-                return Err(PlatformError::new_static(
-                    Situation::Unsupported,
-                    "this platform cannot bound a test subtree's memory",
-                ));
-            };
-
-            return Err(reason);
+            crate::support()?;
         }
 
         #[cfg(unix)]
         {
             Ok(PreparedCommand {
                 command,
-                guard: SpawnGuard { spawning: window()? },
+                guard: SpawnGuard {
+                    spawning: window()?,
+                    #[cfg(target_os = "macos")]
+                    memory: request,
+                },
             })
         }
 
@@ -794,8 +801,15 @@ fn interrupted() -> PlatformError {
 /// A handle on a spawned child's whole subtree.
 ///
 /// Created from an already-spawned child, and used once when the run decides the mutant has hung.
+/// This handle owns the child's wait right. Callers must not independently reap its numeric PID
+/// concurrently with observation or termination. A completed external reap is detected by the next
+/// observation.
 #[derive(Debug)]
 pub struct ProcessTree {
+    /// Stopped and joined before releasing or reaping the numeric group identity.
+    #[cfg(target_os = "macos")]
+    sampler: Option<Sampler>,
+
     /// The leader retained until this subtree is observed or terminated.
     child: Option<Child>,
 
@@ -944,11 +958,16 @@ impl ProcessTree {
 
             #[cfg(not(target_os = "linux"))]
             {
+                #[cfg(target_os = "macos")]
+                let sampler = start_sampler(&mut child, &guard, group, slot)?;
+
                 Ok(Self {
                     child: Some(child),
                     output_cleanup_unproven: false,
                     group: Some(group),
                     slot: Some(slot),
+                    #[cfg(target_os = "macos")]
+                    sampler,
                 })
             }
         }
@@ -1104,7 +1123,7 @@ impl ProcessTree {
     /// measurement.
     #[must_use]
     #[cfg_attr(
-        not(any(target_os = "linux", windows)),
+        not(any(target_os = "linux", target_os = "macos", windows)),
         expect(
             clippy::unused_self,
             reason = "only the cgroup and job paths have anything to read, and the signature is shared"
@@ -1125,7 +1144,12 @@ impl ProcessTree {
             })
         }
 
-        #[cfg(not(any(target_os = "linux", windows)))]
+        #[cfg(target_os = "macos")]
+        {
+            self.sampler.as_ref().map_or_else(MemoryUsage::default, Sampler::usage)
+        }
+
+        #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
         {
             MemoryUsage::default()
         }
@@ -1152,6 +1176,13 @@ impl ProcessTree {
     )]
     // #[gamma::skip(fn_value.unit, reason = "the shared method is necessarily empty on non-Unix targets; Unix tests assert that it removes the exact watched slot")]
     fn release(&mut self) {
+        #[cfg(target_os = "macos")]
+        if let Some(sampler) = self.sampler.as_mut() {
+            // Normal observation/termination already collected any sampler error. Revocation
+            // and drop still have to join before a group id can be reused.
+            let _stopped = sampler.finish(false);
+        }
+
         #[cfg(unix)]
         if let Some((slot, group)) = self.slot.take().zip(self.group) {
             // Named as well as numbered, so that a slot an interrupt already emptied and some
@@ -1170,6 +1201,13 @@ impl ProcessTree {
     /// only capability that can still reach a descendant of the subtree that really was this run's
     /// — and this is the last moment at which that remains true.
     #[cfg(unix)]
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(
+            clippy::unnecessary_wraps,
+            reason = "Linux can fail boundary cleanup, and all Unix call sites share this result"
+        )
+    )]
     fn revoke_group(&mut self) -> io::Result<()> {
         #[cfg(target_os = "linux")]
         let boundary_killed = self.cgroup.as_ref().map_or(Ok(()), Cgroup::kill);
@@ -1204,6 +1242,11 @@ impl ProcessTree {
     // #[gamma::skip(fn_value.ok, reason = "returning without observing and cleaning the process tree leaves descendants running and their output readers blocked")]
     #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn observe(&mut self) -> io::Result<Option<ExitStatus>> {
+        #[cfg(target_os = "macos")]
+        if let Some(sampler) = self.sampler.as_mut() {
+            sampler.check().map_err(|cause| sampler_failure(&cause))?;
+        }
+
         let mut child = self
             .child
             .take()
@@ -1233,10 +1276,19 @@ impl ProcessTree {
                 }
             };
 
+            #[cfg(target_os = "macos")]
+            if observed
+                && let Some(sampler) = self.sampler.as_mut()
+                && let Err(cause) = sampler.finish(true)
+            {
+                self.child = Some(child);
+                return Err(sampler_failure(&cause));
+            }
+
             match cleanup_after_observation(
                 observed,
                 || {
-                    let swept = self.sweep();
+                    let swept = self.sweep(true);
                     self.release();
 
                     swept
@@ -1288,7 +1340,7 @@ impl ProcessTree {
             if status.is_some() {
                 // Windows jobs retain object handles rather than numeric process identifiers, and
                 // platforms without groups have no identifier that a sweep could reuse.
-                let swept = self.sweep();
+                let swept = self.sweep(true);
 
                 if let Err(cause) = swept {
                     self.output_cleanup_unproven = true;
@@ -1332,35 +1384,100 @@ impl ProcessTree {
     /// The child is still killed when sweeping the surrounding subtree fails. A direct child-kill
     /// failure takes precedence over the sweep failure after both cleanup attempts complete.
     fn kill(&self, child: &mut Child) -> io::Result<()> {
+        #[cfg(target_os = "macos")]
+        {
+            let pid = child.id();
+            kill_with_observation(
+                || group::exited(pid),
+                |leader_exited| self.sweep(leader_exited),
+                || kill_if_running(child),
+            )
+        }
+
         // The group or job may not have covered the child — the id could not be converted, the job
         // could not be created — and in any case this is what makes `wait` return.
-        kill_with(child, || self.sweep(), kill_if_running)
+        #[cfg(not(target_os = "macos"))]
+        kill_with(child, || self.sweep(false), kill_if_running)
     }
 
     /// Ends the subtree and reaps its leader without exposing its group id to reuse.
     ///
+    /// Returns the leader's exit status when this call reaps it. On macOS, a repeated call after
+    /// proven cleanup succeeds with `None` because the leader's status has already been consumed.
+    ///
     /// # Errors
     ///
-    /// Returns [`io::ErrorKind::Other`] when this subtree's leader has already been reaped —
-    /// through an earlier [`Self::terminate`], or because [`Self::observe`] found it consumed
-    /// elsewhere — and the operating system's reason when cleanup or reaping fails. A reap
-    /// failure takes precedence when both operations fail.
-    pub fn terminate(&mut self) -> io::Result<ExitStatus> {
-        let mut child = self
-            .child
-            .take()
-            .ok_or_else(|| io::Error::other("the subtree leader was already reaped"))?;
+    /// Returns [`io::ErrorKind::Other`] when the leader has already been reaped, except for a
+    /// repeated macOS call after proven cleanup. An external reap leaves cleanup unproven and
+    /// still returns an error. Other errors report the operating system's reason when cleanup or
+    /// reaping fails. A reap failure takes precedence when both operations fail.
+    /// On macOS, a memory sampler failure is reported after successful cleanup and reaping,
+    /// preserving its error kind without marking cleanup as unproven.
+    pub fn terminate(&mut self) -> io::Result<Option<ExitStatus>> {
+        #[cfg(target_os = "macos")]
+        let sampled = self.sampler.as_mut().map_or(Ok(()), |sampler| sampler.finish(true));
 
-        terminate_leader_with(
-            &mut child,
-            |child| {
-                let killed = self.kill(child);
+        let Some(mut child) = self.child.take() else {
+            #[cfg(target_os = "macos")]
+            if !self.output_cleanup_unproven {
+                return Ok(None);
+            }
+
+            return Err(io::Error::other("the subtree leader was already reaped"));
+        };
+
+        let killed = self.kill(&mut child);
+        #[cfg(target_os = "macos")]
+        if killed.as_ref().is_err_and(group::is_no_child_to_wait_for) {
+            self.output_cleanup_unproven = true;
+            let revoked = self.revoke_group();
+            drop(child);
+            return Err(with_cleanup_failure(
+                killed.expect_err("the preceding ECHILD guard established that cleanup failed"),
+                revoked,
+            ));
+        }
+        #[cfg(target_os = "macos")]
+        let reaped = self.finish_sampled_termination(killed, sampled, || child.wait())?;
+        #[cfg(not(target_os = "macos"))]
+        let reaped = self.finish_termination(killed, || child.wait())?;
+
+        Ok(Some(reaped))
+    }
+
+    /// Reports accounting failure only after termination has proved cleanup and reaped the leader.
+    #[cfg(target_os = "macos")]
+    fn finish_sampled_termination<T>(
+        &mut self,
+        killed: io::Result<()>,
+        sampled: io::Result<()>,
+        reap: impl FnOnce() -> io::Result<T>,
+    ) -> io::Result<T> {
+        let reaped = self.finish_termination(killed, reap)?;
+        sampled.map_err(|cause| sampler_failure(&cause))?;
+        Ok(reaped)
+    }
+
+    /// Releases the watch before reaping and records whether termination proved cleanup.
+    fn finish_termination<T>(&mut self, killed: io::Result<()>, reap: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+        let mut proven = killed.is_ok();
+        let reaped = terminate_leader_with(
+            self,
+            |subtree| {
                 // #[gamma::skip(stmt.delete_call, reason = "release has no effect on non-Unix mutation hosts; Unix tests assert termination frees the watched slot before reaping")]
-                self.release();
+                subtree.release();
                 killed
             },
-            Child::wait,
-        )
+            |_subtree| {
+                let reaped = reap();
+                proven &= reaped.is_ok();
+                reaped
+            },
+        );
+        if !proven {
+            self.output_cleanup_unproven = true;
+        }
+        reaped
     }
 
     /// Ends descendants while their leader's process-group id is still reserved.
@@ -1368,7 +1485,18 @@ impl ProcessTree {
     /// An exited leader can leave servers and inherited pipe handles behind. This private
     /// primitive is reachable only from [`Self::observe`] and [`Self::terminate`], which signal
     /// before reaping that leader, so `killpg` cannot name a replacement group.
-    fn sweep(&self) -> io::Result<()> {
+    #[cfg_attr(
+        not(unix),
+        expect(unused_variables, reason = "only Unix process groups use the leader's observed exit")
+    )]
+    fn sweep(&self, leader_exited: bool) -> io::Result<()> {
+        #[cfg(target_os = "macos")]
+        if self.sampler.as_ref().is_some_and(Sampler::swept) {
+            // A successful sampler sweep already signalled every member. Repeating it can
+            // encounter only zombies, which macOS reports as EPERM, obscuring the breach.
+            return Ok(());
+        }
+
         #[cfg(any(test, feature = "fault-injection"))]
         if faults::fired(faults::Fault::Sweep) {
             return Err(io::Error::other("subtree sweep failed as requested by a test"));
@@ -1383,7 +1511,7 @@ impl ProcessTree {
         // Signalling the group has to come first: killing the leader on its own leaves the group
         // without one, and the descendants are then reparented and unreachable.
         #[cfg(unix)]
-        let killed = self.group.map_or(Ok(()), group::kill);
+        let killed = sweep_group(self.group, leader_exited);
 
         #[cfg(windows)]
         let boundary_killed = self.job.as_ref().map_or(Ok(()), Job::terminate);
@@ -1599,6 +1727,110 @@ fn abandon(child: &mut Child, guard: &SpawnGuard) -> io::Result<()> {
     }
 }
 
+/// Starts requested sampling while the spawn guard still protects a failed adoption's cleanup.
+#[cfg(target_os = "macos")]
+fn start_sampler(child: &mut Child, guard: &SpawnGuard, group: i32, slot: usize) -> Result<Option<Sampler>, PlatformError> {
+    if !guard.memory.wanted() {
+        return Ok(None);
+    }
+    let pid = child.id();
+    Sampler::start(group, guard.memory, move || {
+        kill_with_observation(|| group::exited(pid), |exited| sweep_group(Some(group), exited), || Ok(()))
+    })
+    .map(Some)
+    .map_err(|refusal| {
+        // No worker exists on failure. Revoke the watch before abandonment can reap the leader;
+        // the spawn window is still held, so an interrupt cannot leave this child behind.
+        interrupt::forget(slot, group);
+        abandoning(refusal, child, guard)
+    })
+}
+
+/// Signals the retained group using the existing exited-leader handling.
+#[cfg(unix)]
+fn sweep_group(group: Option<i32>, leader_exited: bool) -> io::Result<()> {
+    group.map_or(Ok(()), |group| {
+        if leader_exited {
+            group::kill_after_exit(group)
+        } else {
+            group::kill(group)
+        }
+    })
+}
+
+/// Selects the macOS group sweep while the leader remains unreaped.
+///
+/// A pending first observation can race with the leader's exit before `killpg`. When that sweep
+/// reports `EPERM`, briefly re-observe a bounded number of times and retry the exited-leader path
+/// only if an observation proves the exit. An `ECHILD` means another waiter released the numeric
+/// identifier, so no further signal is sent through it. The caller must be the sole waiter during this sequence;
+/// a concurrent external reap could free the identifier after observation and before the sweep.
+#[cfg(target_os = "macos")]
+fn kill_with_observation(
+    observe_exit: impl FnMut() -> io::Result<bool>,
+    sweep: impl FnMut(bool) -> io::Result<()>,
+    kill_child: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
+    kill_with_observation_and_pause(observe_exit, sweep, kill_child, || thread::sleep(EXIT_OBSERVATION_PAUSE))
+}
+
+// An exiting leader can disappear from killpg before waitid reports its exit.
+// Allow that brief transition to settle, with at most about 50 ms of pauses.
+#[cfg(target_os = "macos")]
+const EXIT_OBSERVATION_ATTEMPTS: usize = 50;
+#[cfg(target_os = "macos")]
+const EXIT_OBSERVATION_PAUSE: Duration = Duration::from_millis(1);
+
+#[cfg(target_os = "macos")]
+fn kill_with_observation_and_pause(
+    mut observe_exit: impl FnMut() -> io::Result<bool>,
+    mut sweep: impl FnMut(bool) -> io::Result<()>,
+    kill_child: impl FnOnce() -> io::Result<()>,
+    mut pause: impl FnMut(),
+) -> io::Result<()> {
+    let swept = match observe_exit() {
+        Ok(leader_exited) => {
+            let first = sweep(leader_exited);
+            if !leader_exited && first.as_ref().is_err_and(|cause| cause.raw_os_error() == Some(libc::EPERM)) {
+                let mut retry = first;
+                for _ in 0..EXIT_OBSERVATION_ATTEMPTS {
+                    pause();
+                    match observe_exit() {
+                        Ok(true) => {
+                            retry = sweep(true);
+                            break;
+                        }
+                        Err(cause) if group::is_no_child_to_wait_for(&cause) => {
+                            retry = Err(cause);
+                            break;
+                        }
+                        Err(_) => break,
+                        Ok(false) => {}
+                    }
+                }
+                retry
+            } else {
+                first
+            }
+        }
+        Err(cause) if group::is_no_child_to_wait_for(&cause) => Err(cause),
+        Err(cause) => {
+            // The unreaped leader still reserves the group identifier. A failed observation does
+            // not prove the group is gone, so descendants still need a best-effort running sweep.
+            let _group_sweep = sweep(false);
+            Err(cause)
+        }
+    };
+
+    if swept.as_ref().is_err_and(group::is_no_child_to_wait_for) {
+        return swept;
+    }
+
+    // A group sweep can fail while direct child termination remains possible, and an uncontained
+    // child still needs this fallback. A direct kill failure takes precedence over the sweep error.
+    kill_child().and(swept)
+}
+
 /// Kills a child unless the failed kill proves to have raced with its exit.
 fn kill_if_running(child: &mut Child) -> io::Result<()> {
     #[cfg(any(test, feature = "fault-injection"))]
@@ -1616,17 +1848,18 @@ fn kill_if_running(child: &mut Child) -> io::Result<()> {
     }
 }
 
+#[cfg(any(test, not(target_os = "macos")))]
 fn kill_with<C>(child: &mut C, sweep: impl FnOnce() -> io::Result<()>, kill: impl FnOnce(&mut C) -> io::Result<()>) -> io::Result<()> {
     let swept = sweep();
     let killed = kill(child);
     killed.and(swept)
 }
 
-fn terminate_leader_with<C>(
+fn terminate_leader_with<C, T>(
     child: &mut C,
     cleanup: impl FnOnce(&mut C) -> io::Result<()>,
-    wait: impl FnOnce(&mut C) -> io::Result<ExitStatus>,
-) -> io::Result<ExitStatus> {
+    wait: impl FnOnce(&mut C) -> io::Result<T>,
+) -> io::Result<T> {
     let killed = cleanup(child);
     let reaped = reaped_after_cleanup(wait(child), killed)?;
 
@@ -1638,7 +1871,13 @@ fn terminate_leader_with<C>(
     Ok(reaped)
 }
 
-fn reaped_after_cleanup(reaped: io::Result<ExitStatus>, killed: io::Result<()>) -> io::Result<ExitStatus> {
+/// Names the memory sampler as the source of an accounting failure, preserving its error kind.
+#[cfg(target_os = "macos")]
+fn sampler_failure(cause: &io::Error) -> io::Error {
+    io::Error::new(cause.kind(), format!("the memory sampler failed: {cause}"))
+}
+
+fn reaped_after_cleanup<T>(reaped: io::Result<T>, killed: io::Result<()>) -> io::Result<T> {
     let reaped = reaped?;
     killed?;
     Ok(reaped)
@@ -1697,6 +1936,10 @@ fn cleanup_after_observation<T>(
 
 impl Drop for ProcessTree {
     fn drop(&mut self) {
+        #[cfg(target_os = "macos")]
+        if let Some(sampler) = self.sampler.as_mut() {
+            let _stopped = sampler.finish(false);
+        }
         let mut child = self.child.take();
 
         if let Some(child) = child.as_mut() {
@@ -1872,6 +2115,7 @@ mod tests {
         assert_ne!(STDOUT_STREAM, STDERR_STREAM);
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn terminating_an_already_reaped_subtree_reports_the_exact_reason() {
         let mut subtree = ProcessTree {
@@ -1928,8 +2172,362 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_group_kill_marks_termination_cleanup_as_unproven() {
+        let mut subtree = ProcessTree {
+            #[cfg(target_os = "macos")]
+            sampler: None,
+            child: None,
+            output_cleanup_unproven: false,
+            #[cfg(unix)]
+            group: None,
+            #[cfg(unix)]
+            slot: None,
+            #[cfg(target_os = "linux")]
+            cgroup: None,
+            #[cfg(target_os = "linux")]
+            metered: false,
+            #[cfg(windows)]
+            job: None,
+            #[cfg(windows)]
+            metered: false,
+        };
+
+        let reason = subtree
+            .finish_termination(Err(io::Error::other("group kill failed")), || Ok(()))
+            .expect_err("a failed group kill cannot prove cleanup");
+
+        assert_eq!(reason.to_string(), "group kill failed");
+        assert!(subtree.output_cleanup_unproven, "failed cleanup was recorded as proven");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_sampler_read_failure_does_not_mark_successful_termination_cleanup_as_unproven() {
+        let mut subtree = ProcessTree {
+            sampler: None,
+            child: None,
+            output_cleanup_unproven: false,
+            group: None,
+            slot: None,
+        };
+        let cause = io::Error::from_raw_os_error(libc::EIO);
+        let kind = cause.kind();
+        let message = format!("the memory sampler failed: {cause}");
+        let error = subtree
+            .finish_sampled_termination(Ok(()), Err(cause), || Ok(42))
+            .expect_err("the sampler failure must be reported after successful cleanup");
+        assert_eq!(error.kind(), kind);
+        assert_eq!(error.to_string(), message);
+        assert!(
+            !subtree.output_cleanup_unproven,
+            "an accounting failure was recorded as failed cleanup"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_kill_failure_takes_precedence_over_a_sampler_failure() {
+        let mut subtree = ProcessTree {
+            sampler: None,
+            child: None,
+            output_cleanup_unproven: false,
+            group: None,
+            slot: None,
+        };
+        let error = subtree
+            .finish_sampled_termination(
+                Err(io::Error::new(io::ErrorKind::PermissionDenied, "group kill failed")),
+                Err(io::Error::from_raw_os_error(libc::EIO)),
+                || Ok(42),
+            )
+            .expect_err("a failed kill must win over an accounting failure");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(error.to_string(), "group kill failed");
+        assert!(subtree.output_cleanup_unproven, "failed cleanup was recorded as proven");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn successful_sampled_termination_returns_the_reaped_value() {
+        let mut subtree = ProcessTree {
+            sampler: None,
+            child: None,
+            output_cleanup_unproven: false,
+            group: None,
+            slot: None,
+        };
+        let reaped = subtree
+            .finish_sampled_termination(Ok(()), Ok(()), || Ok(42))
+            .expect("successful cleanup and accounting must return the reaped value");
+        assert_eq!(reaped, 42);
+        assert!(!subtree.output_cleanup_unproven, "proven cleanup was recorded as unproven");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn terminating_an_already_cleaned_subtree_is_idempotent() {
+        let mut subtree = ProcessTree {
+            #[cfg(target_os = "macos")]
+            sampler: None,
+            child: None,
+            output_cleanup_unproven: false,
+            group: None,
+            slot: None,
+        };
+
+        assert_eq!(subtree.terminate().expect("cleanup already completed"), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn termination_observes_an_exited_leader_before_sweeping() {
+        let actions = RefCell::new(Vec::new());
+
+        kill_with_observation(
+            || {
+                actions.borrow_mut().push("observe");
+                Ok(true)
+            },
+            |exited| {
+                actions.borrow_mut().push(if exited { "sweep exited" } else { "sweep running" });
+                Ok(())
+            },
+            || {
+                actions.borrow_mut().push("kill child");
+                Ok(())
+            },
+        )
+        .expect("an exited leader with proven cleanup terminates successfully");
+
+        assert_eq!(actions.into_inner(), ["observe", "sweep exited", "kill child"]);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn termination_rechecks_an_exit_that_races_with_a_permission_error() {
+        let actions = RefCell::new(Vec::new());
+        let mut observations = [false, true].into_iter();
+
+        kill_with_observation_and_pause(
+            || {
+                actions.borrow_mut().push("observe");
+                Ok(observations.next().expect("only two exit observations are needed"))
+            },
+            |exited| {
+                actions.borrow_mut().push(if exited { "sweep exited" } else { "sweep running" });
+                if exited {
+                    Ok(())
+                } else {
+                    Err(io::Error::from_raw_os_error(libc::EPERM))
+                }
+            },
+            || {
+                actions.borrow_mut().push("kill child");
+                Ok(())
+            },
+            || {},
+        )
+        .expect("the second observation allows the exited-leader cleanup path");
+
+        assert_eq!(
+            actions.into_inner(),
+            ["observe", "sweep running", "observe", "sweep exited", "kill child"]
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn termination_preserves_permission_denial_while_the_leader_is_running() {
+        let error = kill_with_observation_and_pause(
+            || Ok(false),
+            |exited| {
+                assert!(!exited, "the leader never exited");
+                Err(io::Error::from_raw_os_error(libc::EPERM))
+            },
+            || Ok(()),
+            || {},
+        )
+        .expect_err("a live group's permission error cannot be accepted as cleanup");
+
+        assert_eq!(error.raw_os_error(), Some(libc::EPERM));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn termination_waits_for_an_exiting_leader() {
+        let mut observations = [Ok(false), Ok(false), Ok(false), Ok(true)].into_iter();
+        let mut observation_count = 0;
+        let mut sweeps = Vec::new();
+        let mut pauses = 0;
+        let mut child_kills = 0;
+        let result = kill_with_observation_and_pause(
+            || {
+                observation_count += 1;
+                observations
+                    .next()
+                    .expect("the scripted sequence covers every expected observation")
+            },
+            |exited| {
+                sweeps.push(exited);
+                if exited {
+                    Ok(())
+                } else {
+                    Err(io::Error::from_raw_os_error(libc::EPERM))
+                }
+            },
+            || {
+                child_kills += 1;
+                Ok(())
+            },
+            || pauses += 1,
+        );
+        result.expect("the observed exit allows the exited-leader sweep to prove cleanup");
+        assert_eq!(sweeps, [false, true]);
+        assert_eq!(observation_count, 4);
+        assert_eq!(pauses, 3);
+        assert_eq!(child_kills, 1);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn termination_bounds_exit_reobservation() {
+        let mut observation_count = 0;
+        let mut sweeps = Vec::new();
+        let mut pauses = 0;
+        let mut child_kills = 0;
+        let result = kill_with_observation_and_pause(
+            || {
+                observation_count += 1;
+                Ok(false)
+            },
+            |exited| {
+                sweeps.push(exited);
+                if exited {
+                    Ok(())
+                } else {
+                    Err(io::Error::from_raw_os_error(libc::EPERM))
+                }
+            },
+            || {
+                child_kills += 1;
+                Ok(())
+            },
+            || pauses += 1,
+        );
+        let error = result.expect_err("the bounded observations never prove the leader exited");
+        assert_eq!(error.raw_os_error(), Some(libc::EPERM));
+        assert_eq!(sweeps, [false]);
+        assert_eq!(observation_count, EXIT_OBSERVATION_ATTEMPTS + 1);
+        assert_eq!(pauses, EXIT_OBSERVATION_ATTEMPTS);
+        assert_eq!(child_kills, 1);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn termination_stops_reobservation_after_external_reap() {
+        let mut observations = [Ok(false), Ok(false), Err(io::Error::from_raw_os_error(libc::ECHILD))].into_iter();
+        let mut observation_count = 0;
+        let mut sweeps = Vec::new();
+        let mut pauses = 0;
+        let mut child_kills = 0;
+        let result = kill_with_observation_and_pause(
+            || {
+                observation_count += 1;
+                observations
+                    .next()
+                    .expect("the scripted sequence covers every expected observation")
+            },
+            |exited| {
+                sweeps.push(exited);
+                if exited {
+                    Ok(())
+                } else {
+                    Err(io::Error::from_raw_os_error(libc::EPERM))
+                }
+            },
+            || {
+                child_kills += 1;
+                Ok(())
+            },
+            || pauses += 1,
+        );
+        let error = result.expect_err("an external reap revokes the identifiers");
+        assert_eq!(error.raw_os_error(), Some(libc::ECHILD));
+        assert_eq!(sweeps, [false]);
+        assert_eq!(observation_count, 3);
+        assert_eq!(pauses, 2);
+        assert_eq!(child_kills, 0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn termination_never_signals_a_group_after_an_external_reap() {
+        let error = kill_with_observation(
+            || Err(io::Error::from_raw_os_error(libc::ECHILD)),
+            |_exited| panic!("the externally reaped group identifier may have been reused"),
+            || panic!("the externally reaped child identifier may have been reused"),
+        )
+        .expect_err("an external reap revokes numeric cleanup capabilities");
+
+        assert_eq!(error.raw_os_error(), Some(libc::ECHILD));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn termination_kills_the_child_and_preserves_an_observation_error() {
+        let actions = RefCell::new(Vec::new());
+        let error = kill_with_observation(
+            || {
+                actions.borrow_mut().push("observe");
+                Err(io::Error::from_raw_os_error(libc::EIO))
+            },
+            |exited| {
+                assert!(!exited, "an observation error cannot prove that the leader exited");
+                actions.borrow_mut().push("sweep group");
+                Err(io::Error::from_raw_os_error(libc::EPERM))
+            },
+            || {
+                actions.borrow_mut().push("kill child");
+                Ok(())
+            },
+        )
+        .expect_err("the observation failed even though direct child termination succeeded");
+
+        assert_eq!(actions.into_inner(), ["observe", "sweep group", "kill child"]);
+        assert_eq!(error.raw_os_error(), Some(libc::EIO));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn termination_stops_signalling_when_a_retry_finds_an_external_reap() {
+        let mut calls = 0;
+        let error = kill_with_observation_and_pause(
+            || {
+                calls += 1;
+                if calls == 1 {
+                    Ok(false)
+                } else {
+                    Err(io::Error::from_raw_os_error(libc::ECHILD))
+                }
+            },
+            |exited| {
+                assert!(!exited, "the group is swept only before the external reap");
+                Err(io::Error::from_raw_os_error(libc::EPERM))
+            },
+            || panic!("the externally reaped child identifier may have been reused"),
+            || {},
+        )
+        .expect_err("an external reap prevents a direct child signal");
+
+        assert_eq!(calls, 2);
+        assert_eq!(error.raw_os_error(), Some(libc::ECHILD));
+    }
+
+    #[test]
     fn observing_an_already_reaped_subtree_reports_the_exact_reason() {
         let mut subtree = ProcessTree {
+            #[cfg(target_os = "macos")]
+            sampler: None,
             child: None,
             output_cleanup_unproven: false,
             #[cfg(unix)]
@@ -2220,9 +2818,17 @@ mod tests {
     #[test]
     fn a_request_that_asks_for_nothing_is_recognized_as_such() {
         assert!(!MemoryRequest::default().wanted());
-        assert!(MemoryRequest { meter: true, limit: None }.wanted());
         assert!(
             MemoryRequest {
+                calibrating: false,
+                meter: true,
+                limit: None
+            }
+            .wanted()
+        );
+        assert!(
+            MemoryRequest {
+                calibrating: false,
                 meter: false,
                 limit: Some(1)
             }
@@ -2240,10 +2846,25 @@ mod tests {
         // and finds out when the machine runs out of memory.
         #[cfg(windows)]
         {
-            prepare(command, MemoryRequest { meter: true, limit: None }).expect("Windows always supplies job-object accounting");
+            prepare(
+                command,
+                MemoryRequest {
+                    calibrating: false,
+                    meter: true,
+                    limit: None,
+                },
+            )
+            .expect("Windows always supplies job-object accounting");
         }
         #[cfg(not(windows))]
-        match prepare(command, MemoryRequest { meter: true, limit: None }) {
+        match prepare(
+            command,
+            MemoryRequest {
+                calibrating: false,
+                meter: true,
+                limit: None,
+            },
+        ) {
             Ok(_guard) => crate::support().expect("metering succeeded, so it is supported"),
             Err(reason) => assert!(!reason.to_string().is_empty(), "a refusal has to say why"),
         }
@@ -2298,7 +2919,15 @@ mod tests {
         let mut command = Command::new(testing::helper_binary_path().as_std_path());
         let _ = command.args([testing::directive("eat:32"), testing::directive("exit:0")]);
 
-        let prepared = prepare(command, MemoryRequest { meter: true, limit: None }).expect("containment");
+        let prepared = prepare(
+            command,
+            MemoryRequest {
+                calibrating: false,
+                meter: true,
+                limit: None,
+            },
+        )
+        .expect("containment");
         let spawned = prepared.spawn().expect("spawn");
         let mut subtree = ProcessTree::adopt(spawned).expect("adoption");
 
@@ -2328,6 +2957,8 @@ mod tests {
         let mut child = command.spawn().expect("spawn");
 
         let subtree = ProcessTree {
+            #[cfg(target_os = "macos")]
+            sampler: None,
             child: None,
             output_cleanup_unproven: false,
             group: None,
@@ -2488,6 +3119,8 @@ mod tests {
         let slot = owner.slot.expect("the owned group has a watch slot");
         let group = owner.group.expect("the unreaped leader pins its group");
         let subtree = ProcessTree {
+            #[cfg(target_os = "macos")]
+            sampler: None,
             child: None,
             output_cleanup_unproven: false,
             group: None,
@@ -2514,6 +3147,8 @@ mod tests {
         let spawning = interrupt::spawning();
         let slot = spawning.watch(group).expect("a free slot");
         let subtree = ProcessTree {
+            #[cfg(target_os = "macos")]
+            sampler: None,
             child: None,
             output_cleanup_unproven: false,
             group: Some(group),
@@ -2543,6 +3178,8 @@ mod tests {
         let slot = spawning.watch(group).expect("a free slot");
 
         let mut subtree = ProcessTree {
+            #[cfg(target_os = "macos")]
+            sampler: None,
             child: None,
             output_cleanup_unproven: false,
             group: Some(group),
@@ -2587,6 +3224,8 @@ mod tests {
         let spawning = interrupt::spawning();
         let slot = spawning.watch(group).expect("a free slot");
         let mut subtree = ProcessTree {
+            #[cfg(target_os = "macos")]
+            sampler: None,
             child: None,
             output_cleanup_unproven: false,
             group: Some(group),
@@ -3246,8 +3885,15 @@ mod tests {
         let window = faults::arm(faults::Fault::Window);
 
         let command = Command::new("true");
-        let reason = prepare(command, MemoryRequest { meter: true, limit: None })
-            .expect_err("both steps were asked to fail, so containment cannot have succeeded");
+        let reason = prepare(
+            command,
+            MemoryRequest {
+                calibrating: false,
+                meter: true,
+                limit: None,
+            },
+        )
+        .expect_err("both steps were asked to fail, so containment cannot have succeeded");
 
         assert!(
             reason.to_string().contains("accounting boundary"),
@@ -3510,6 +4156,7 @@ mod tests {
         let request = MemoryRequest {
             meter: true,
             limit: Some(1234),
+            calibrating: false,
         };
         let reason = output_with(no_op_command(), request, |command, forwarded| {
             drop(command);
@@ -3529,6 +4176,7 @@ mod tests {
     #[test]
     fn public_output_does_not_discard_an_explicit_memory_ceiling() {
         let request = MemoryRequest {
+            calibrating: false,
             meter: true,
             limit: Some(1),
         };
@@ -3818,7 +4466,7 @@ mod tests {
         let mut subtree = captured_no_op_subtree();
         let sweep = faults::arm(faults::Fault::Sweep);
 
-        let reason = subtree.sweep().expect_err("the sweep fault is reported");
+        let reason = subtree.sweep(false).expect_err("the sweep fault is reported");
 
         assert!(reason.to_string().contains("subtree sweep failed"), "{reason}");
         drop(sweep);
@@ -3846,7 +4494,10 @@ mod tests {
         let spawned = prepared.spawn().expect("spawn");
         let mut subtree = ProcessTree::adopt(spawned).expect("adoption");
 
-        let status = subtree.terminate().expect("an unarmed termination succeeds");
+        let status = subtree
+            .terminate()
+            .expect("an unarmed termination succeeds")
+            .expect("this call reaps the leader");
 
         assert!(!status.success(), "the sleeping child exited before termination reached it");
         assert!(subtree.released(), "termination retained its interrupt registration");
@@ -3862,12 +4513,64 @@ mod tests {
 
         assert!(reason.to_string().contains("failed as requested"), "{reason}");
         assert!(subtree.released(), "fault reporting retained the interrupt registration");
-        assert!(
-            subtree.terminate().is_err(),
-            "fault reporting left a supposedly terminated child in the lifecycle"
+        let repeated = subtree.terminate();
+        #[cfg(target_os = "macos")]
+        assert_eq!(repeated.expect("cleanup already completed"), None);
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(
+            repeated.expect_err("the leader was already reaped").to_string(),
+            "the subtree leader was already reaped"
         );
 
         drop(armed);
+    }
+
+    /// The childless fixture stands for the state after the leader is reaped. The scripted callbacks
+    /// drive the production failed-cleanup transition, and the repeated `terminate` call checks that
+    /// unproven cleanup is not later reported as success.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn termination_marks_a_failed_sweep_as_unproven_after_reaping() {
+        let mut subtree = ProcessTree {
+            #[cfg(target_os = "macos")]
+            sampler: None,
+            child: None,
+            output_cleanup_unproven: false,
+            group: None,
+            slot: None,
+        };
+        let actions = RefCell::new(Vec::new());
+        let killed = kill_with_observation(
+            || {
+                actions.borrow_mut().push("observe");
+                Ok(true)
+            },
+            |exited| {
+                assert!(exited, "the scripted leader has exited but remains unreaped");
+                actions.borrow_mut().push("sweep");
+                Err(io::Error::other("subtree sweep failed as requested by a test"))
+            },
+            || {
+                actions.borrow_mut().push("kill child");
+                Ok(())
+            },
+        );
+
+        let reason = subtree
+            .finish_termination(killed, || {
+                actions.borrow_mut().push("reap");
+                Ok(())
+            })
+            .expect_err("a failed sweep must be reported after reaping");
+
+        assert_eq!(reason.to_string(), "subtree sweep failed as requested by a test");
+        assert!(subtree.released(), "the failed sweep retained its interrupt registration");
+        assert!(subtree.output_cleanup_unproven, "the failed sweep was marked as complete");
+        assert_eq!(actions.into_inner(), ["observe", "sweep", "kill child", "reap"]);
+        assert_eq!(
+            subtree.terminate().expect_err("cleanup remains unproven").to_string(),
+            "the subtree leader was already reaped"
+        );
     }
 
     /// Registration refusal must clean up the real child, not leave it unwatched.
@@ -4139,6 +4842,8 @@ mod tests {
         let spawning = interrupt::spawning();
         let slot = spawning.watch(group).expect("a free slot");
         let mut subtree = ProcessTree {
+            #[cfg(target_os = "macos")]
+            sampler: None,
             child: Some(child),
             output_cleanup_unproven: false,
             group: Some(group),

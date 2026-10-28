@@ -13,3 +13,4 @@ Please see each crate's change log below:
 - [`cargo-heather`](./crates/cargo-heather/CHANGELOG.md)
 - [`cargo-unique-target-names`](./crates/cargo-unique-target-names/CHANGELOG.md)
 - [`cargo-unused-deps`](./crates/cargo-unused-deps/CHANGELOG.md)
+- [`hunspell-dictgen`](./crates/hunspell-dictgen/CHANGELOG.md)

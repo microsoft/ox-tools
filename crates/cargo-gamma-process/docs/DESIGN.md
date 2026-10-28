@@ -64,6 +64,24 @@ therefore covers the complete descendant tree.
   handles were closed. Before detachment, capture is disabled and retained
   bytes are released; a surviving descendant may keep the bounded drain
   blocked, but it cannot keep growing an ownerless output buffer.
+- On macOS, both observation and direct termination check the leader's exit
+  without reaping it before sweeping the group. If a running leader exits during
+  a failed sweep, termination briefly rechecks the exit a bounded number of
+  times before retrying the exited-leader path. That path accepts `EPERM` only
+  after checking that the observed, unreaped leader is the group's sole
+  remaining member. The kernel can return this error for that zombie-only group,
+  but an inaccessible live member or an inconclusive group query leaves cleanup
+  unproven. A sweep of a running leader still reports the error. If observation
+  finds that the leader was already reaped elsewhere, numeric group and child
+  capabilities are revoked before direct termination can signal them. The owner
+  must not reap the leader concurrently through its numeric PID: doing so can
+  free that ID between observation and sweep, and no process-group signal can
+  then prove it still names this subtree. A non-`ECHILD` observation error still
+  attempts a running-leader group sweep and direct child termination, then
+  reports the observation error if the direct kill succeeded. `terminate`
+  returns the leader's exit status when it reaps the child. On macOS, repeating
+  it after proven cleanup succeeds without a status; an external reap or failed
+  cleanup still reports an error because descendants may remain.
 - On Windows, each child receives a dedicated job. If an enclosing job refuses
   nested assignment, the spawn is rejected: an inherited job does not provide a
   handle through which this process can later terminate the child's descendants.
@@ -109,6 +127,16 @@ dedicated job, and resumes it only after assignment succeeds. This boundary
 also owns memory accounting because it observes the complete tree rather than
 only its leader; kernel-enforced cgroup or job limits cannot be reconstructed
 reliably from a post-exit peak.
+
+macOS offers no kernel boundary for a process tree's memory. There, a measuring
+launch is accounted by sampling: every 10 ms the boundary sums the physical
+footprint of every process in the launch's process group, records the peak,
+and, when enforcing, sweeps the group as soon as the sum passes the ceiling.
+This bound is soft. A runaway can overshoot by its growth rate times the
+interval, and a descendant that leaves the group is not counted. Support is
+therefore reported as sampled rather than kernel-enforced. The motivating
+incident, the alternatives measured, and the overshoot figures are recorded in
+the [macOS memory design](MACOS_MEMORY.md).
 
 ## Stability
 

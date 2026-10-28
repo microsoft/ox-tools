@@ -1045,7 +1045,7 @@ impl From<&Hints> for GroupedHints {
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn merge_generalized(existing: &GeneralizedHints, incoming: &GeneralizedHints) -> Result<GeneralizedHints> {
+pub(super) fn merge_generalized(existing: &GeneralizedHints, incoming: &GeneralizedHints) -> Result<GeneralizedHints> {
     let existing_supported = existing.supported();
     if existing_supported.is_none() && (existing.version != 0 || !existing.is_empty()) {
         return Err(error!("the existing generalized hints version cannot be merged"));

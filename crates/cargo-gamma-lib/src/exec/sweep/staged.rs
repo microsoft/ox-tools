@@ -126,6 +126,7 @@ impl Execution<'_> {
                 timeout: binary.budget_for(self.timeout_multiplier, self.sweep.timeout_floor),
                 stall: self.sweep.stall,
                 request: MemoryRequest {
+                    calibrating: false,
                     meter: self.sweep.meter,
                     limit: binary.memory,
                 },
