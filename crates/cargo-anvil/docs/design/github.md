@@ -389,14 +389,14 @@ jobs:
       # Download the impact cache computed on this leg's OS into
       # target/anvil/impact/ (arm reuses its OS-family artifact). pr-test /
       # pr-runtime-analysis / pr-mutants do the identical download.
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: anvil-impact-${{ startsWith(matrix.os, 'linux') && 'Linux' || 'Windows' }}
           path: target/anvil/impact
       - name: Resolve current PR title
         id: pr_title
         if: github.event_name == 'pull_request'
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           retries: 3
           script: |
@@ -429,7 +429,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # preceded by the same per-OS download-artifact step as pr-fast
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: anvil-impact-${{ startsWith(matrix.os, 'linux') && 'Linux' || 'Windows' }}
           path: target/anvil/impact
@@ -452,7 +452,7 @@ jobs:
       || inputs.windows_arm_runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: anvil-impact-${{ startsWith(matrix.os, 'linux') && 'Linux' || 'Windows' }}
           path: target/anvil/impact
@@ -1043,9 +1043,9 @@ Recommended root workflow shape:
 Third-party actions are pinned in one of two ways, and the split is deliberate rather
 than inconsistent.
 
-Actions whose publisher has enabled GitHub [immutable releases][immutable] are pinned
+Actions whose publisher has enabled GitHub [immutable releases][immutable] may be pinned
 by tag. In the generated workflows that is, at the time of writing,
-`codecov/codecov-action@v7.1.1`, `marocchino/sticky-pull-request-comment@v3.0.5` and
+`codecov/codecov-action@v7.1.1` and
 `cargo-bins/cargo-binstall@v1.21.0`; a repository's own hand-maintained workflows apply
 the same rule to the actions they use, so the list a reader sees there may be longer.
 An immutable release locks its Git tag to one commit: the tag cannot be moved, and
@@ -1060,6 +1060,9 @@ expected is visible at the use site.
 
 Every other action is pinned by commit SHA with the version in a trailing comment, for
 example `actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1`.
+The sticky PR-comment action also uses this form even though its v3.0.5 release is
+immutable, so downstream SHA-pinning automation does not repeatedly propose converting
+the same release tag to a commit SHA.
 
 Immutability is a property of one published release, not a standing guarantee about
 the publisher. When bumping a tag-pinned action, confirm the new release still reports
@@ -1202,7 +1205,7 @@ recipes emit comments today). Two steps run after the composite that executes th
   if: always() && github.event_name == 'pull_request' && matrix.os == 'linux'
       && github.event.pull_request.head.repo.full_name == github.repository
       && hashFiles('target/anvil/comments/semver.md') != ''
-  uses: marocchino/sticky-pull-request-comment@v3.0.5 # pinned by tag: this release is an immutable release (GitHub locks the tag to a commit)
+  uses: marocchino/sticky-pull-request-comment@5770ad5eb8f42dd2c4f34da00c94c5381e49af88 # v3.0.5
   with:
     header: anvil-semver
     path: target/anvil/comments/semver.md
@@ -1210,7 +1213,7 @@ recipes emit comments today). Two steps run after the composite that executes th
   if: always() && github.event_name == 'pull_request' && matrix.os == 'linux'
       && github.event.pull_request.head.repo.full_name == github.repository
       && hashFiles('target/anvil/comments/semver.md') == ''
-  uses: marocchino/sticky-pull-request-comment@v3.0.5 # pinned by tag: this release is an immutable release (GitHub locks the tag to a commit)
+  uses: marocchino/sticky-pull-request-comment@5770ad5eb8f42dd2c4f34da00c94c5381e49af88 # v3.0.5
   with:
     header: anvil-semver
     delete: true

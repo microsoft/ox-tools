@@ -2421,7 +2421,11 @@ mod final_survivor_tests {
         for meter in [false, true] {
             let cause = io::Error::from(io::ErrorKind::NotFound);
             let detail = cause.to_string();
-            let request = MemoryRequest { meter, limit: None };
+            let request = MemoryRequest {
+                calibrating: false,
+                meter,
+                limit: None,
+            };
             let result = start_or_verdict_with(Command::new("not-started"), &binary, request, |_, actual| {
                 assert_eq!(actual.meter, meter);
                 Err(StartError::Spawn(cause))
@@ -2479,12 +2483,20 @@ mod final_survivor_tests {
                     .spawn()
                     .unwrap_or_else(|_| panic!("the contained helper must spawn before accounting is observed"));
                 let mut subtree = ProcessTree::adopt(spawned).unwrap();
-                let (usage, ceiling) = cut_short_with_usage(&mut subtree, MemoryRequest { meter: true, limit }, &binary, false, |_| {
-                    MemoryUsage {
+                let (usage, ceiling) = cut_short_with_usage(
+                    &mut subtree,
+                    MemoryRequest {
+                        calibrating: false,
+                        meter: true,
+                        limit,
+                    },
+                    &binary,
+                    false,
+                    |_| MemoryUsage {
                         peak: Some(123),
                         exhausted,
-                    }
-                })
+                    },
+                )
                 .unwrap();
                 assert_eq!(usage.peak, Some(123));
                 assert_eq!(usage.exhausted, exhausted);
@@ -3416,7 +3428,11 @@ mod tests {
         ));
         assert!(!reach_hint_is_final(
             Attempt {
-                request: MemoryRequest { meter: true, limit: None },
+                request: MemoryRequest {
+                    calibrating: false,
+                    meter: true,
+                    limit: None
+                },
                 ..base
             },
             false
@@ -3620,6 +3636,7 @@ mod tests {
                 budget: Some(Duration::from_secs(3)),
             },
             request: MemoryRequest {
+                calibrating: false,
                 meter: true,
                 limit: Some(100),
             },
@@ -4195,7 +4212,11 @@ mod tests {
                 active: None,
                 timeout: Some(Duration::from_secs(1)),
                 stall: Stall::NONE,
-                request: MemoryRequest { meter: false, limit: None },
+                request: MemoryRequest {
+                    calibrating: false,
+                    meter: false,
+                    limit: None,
+                },
                 only: Only::All,
             },
             true,
@@ -4229,7 +4250,11 @@ mod tests {
                 active: None,
                 timeout: Some(Duration::from_secs(1)),
                 stall: Stall::NONE,
-                request: MemoryRequest { meter: true, limit: None },
+                request: MemoryRequest {
+                    calibrating: false,
+                    meter: true,
+                    limit: None,
+                },
                 only: Only::All,
             },
             true,
@@ -4331,7 +4356,11 @@ mod tests {
             active: None,
             timeout: Some(Duration::from_secs(30)),
             stall: Stall::NONE,
-            request: MemoryRequest { meter: false, limit: None },
+            request: MemoryRequest {
+                calibrating: false,
+                meter: false,
+                limit: None,
+            },
             only: Only::All,
         }
     }
@@ -4359,7 +4388,11 @@ mod tests {
                 active: None,
                 timeout: Some(Duration::from_secs(1)),
                 stall: Stall::NONE,
-                request: MemoryRequest { meter: true, limit: None },
+                request: MemoryRequest {
+                    calibrating: false,
+                    meter: true,
+                    limit: None,
+                },
                 only: Only::All,
             },
             true,
@@ -4592,7 +4625,11 @@ mod tests {
                 active: Some(1),
                 timeout: Some(Duration::from_millis(50)),
                 stall: Stall::NONE,
-                request: MemoryRequest { meter: false, limit: None },
+                request: MemoryRequest {
+                    calibrating: false,
+                    meter: false,
+                    limit: None,
+                },
                 only: Only::All,
             },
             &Arc::new(Mutex::new(Progress::new(Watch::Off))),
@@ -5000,6 +5037,7 @@ mod tests {
                 timeout: Some(Duration::from_mins(1)),
                 stall: Stall::NONE,
                 request: MemoryRequest {
+                    calibrating: false,
                     meter: true,
                     limit: Some(limit),
                 },
@@ -5045,6 +5083,7 @@ mod tests {
                     budget: Some(Duration::from_secs(10)),
                 },
                 request: MemoryRequest {
+                    calibrating: false,
                     meter: true,
                     limit: Some(limit),
                 },
@@ -5080,6 +5119,7 @@ mod tests {
                     timeout: Some(Duration::from_secs(30)),
                     stall: Stall::NONE,
                     request: MemoryRequest {
+                        calibrating: false,
                         meter: true,
                         limit: Some(512 * 1024 * 1024)
                     },
@@ -5235,6 +5275,7 @@ mod tests {
                 timeout: Some(Duration::from_mins(1)),
                 stall: Stall::NONE,
                 request: MemoryRequest {
+                    calibrating: false,
                     meter: true,
                     limit: Some(limit),
                 },
@@ -5772,7 +5813,11 @@ mod tests {
                 active: None,
                 timeout: Some(Duration::from_mins(1)),
                 stall: Stall { budget: None },
-                request: MemoryRequest { meter: false, limit: None },
+                request: MemoryRequest {
+                    calibrating: false,
+                    meter: false,
+                    limit: None,
+                },
                 only: Only::All,
             },
             &Arc::new(Mutex::new(Progress::new(Watch::Nextest))),

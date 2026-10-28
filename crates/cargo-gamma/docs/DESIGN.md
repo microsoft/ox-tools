@@ -224,12 +224,25 @@ implementation choice.
 Selection narrows the population before expensive work:
 
 - package, file, mutator, and diff selection decide what may become a mutant;
+- `--re` selects mutants by a regular expression over the full name shown by `list mutants`:
+  workspace-relative location, qualified function path, change description, and any suppression
+  marker. Repeated patterns
+  match any one of them; control characters are encoded as in the plain listing before matching.
+  The filter is applied before sharding and compilation. With `list files`,
+  it leaves only files containing a selected mutant. Run and listing JSON reports mark this
+  population as name-filtered, so `merge` retains historical verdicts absent only because of
+  the regex. See [Sharding and merging](#sharding-and-merging) for source presentations
+  and staged reports;
 - conditional-compilation evidence excludes code absent from this build;
 - explicitly tagged project policy can mark every implementation whose final written trait-path
   segment is a named unqualified Rust identifier as ignored, without coupling selection to path
   qualification or human-readable report text;
 - suppressions withdraw explicitly accepted sites;
 - sharding assigns stable portions of the population to separate campaigns.
+
+`unsuppress` audits whether each directive still governs any mutant in its source file, regardless
+of a run's name filter. It rejects `--re` instead of treating a partial match as evidence that a
+directive has become idle.
 
 Trait-name policy is deliberately lexical. `impl Debug`, `impl fmt::Debug`, and
 `impl core::fmt::Debug` share the final written identifier `Debug`, while an imported alias retains
@@ -1008,7 +1021,9 @@ Platform containment uses the strongest suitable primitive:
 - Unix process groups provide descendant-directed signaling;
 - Linux cgroup v2 provides a boundary a descendant cannot leave, plus process-tree memory
   accounting and enforcement;
-- Windows job objects provide descendant lifetime and memory control.
+- Windows job objects provide descendant lifetime and memory control;
+- on macOS, which has no process-tree memory boundary, memory is accounted and enforced by sampling
+  the process group's physical footprint.
 
 A process group is escapable: one unprivileged `setsid` or `setpgid` call removes a descendant from
 it, and every later signal to the group misses that descendant. Containment is therefore not
@@ -1069,6 +1084,14 @@ Exceeding the ceiling is distinct from a test failure or timeout because the rem
 When the host cannot provide trustworthy process-tree enforcement, inherited defaults degrade
 explicitly, while a user-requested guarantee fails rather than pretending to be active.
 
+Enforcement is either kernel-enforced (a Linux cgroup or a Windows job) or sampled (macOS). A time
+budget cannot stand in for either. A mutant that breaks a loop's termination while the loop
+allocates can grow by gigabytes per second and exhaust a workstation long before any reasonable
+timeout. Sampled enforcement on macOS checks the process group's footprint every 10 ms and stops
+the group past its ceiling. It reports the same `outofmem` outcome, and the run says once that its
+bound is soft. The incident that motivated it and the measured overshoot are recorded in the
+[macOS memory design](../../cargo-gamma-process/docs/MACOS_MEMORY.md).
+
 ### Flakiness
 
 A failing mutant run is confirmed where policy requires it. A failure that disappears without any
@@ -1122,6 +1145,9 @@ The target-resident campaign cache stores facts and hints learned by an earlier 
 Test verdicts are never reused. A kill is one observation of a potentially nondeterministic test
 suite; unchanged source, configuration, toolchain, and environment cannot prove that the next
 observation will agree. Each run therefore re-establishes every score-bearing outcome.
+When `--re` selects only part of a file, the completed campaign record retains valid earlier
+outcomes and killer hints for unselected mutant IDs in that unchanged file. Its latest campaign
+population still names only the selected mutants, so post-run hint promotion stays scoped to them.
 
 Compiler convergence is the semantic type-and-trait oracle for facts syntax cannot establish. It
 checks the active target, feature set, compiler, configuration, and dependency graph rather than
@@ -1226,6 +1252,17 @@ the selected population.
 
 A shard describes only its slice and cannot prove that a missing mutant was withdrawn. Only an
 unsharded, complete population can withdraw identities from an accumulated report.
+
+The source used to render a mutant can differ from the latest source generation in which it was
+seen. An unfiltered source presentation takes precedence over a filtered one even when older,
+keeping unmatched historical verdicts renderable; a current unfiltered listing provides current
+presentations. If a filtered source introduces a mutant absent from that presentation, merge
+requires a complete listing for the current source before producing a staged report; otherwise
+the new verdict would be lost in a later merge. Merged reports retain each mutant's latest source
+sighting separately from the rendered file source, so a later complete report withdraws it only
+when that report is at least as recent as the sighting. A merged report's timestamp includes that
+sighting even when its mutant was only pending. An unfiltered, unsharded report can still establish
+withdrawals.
 
 ## Verdicts and scoring
 

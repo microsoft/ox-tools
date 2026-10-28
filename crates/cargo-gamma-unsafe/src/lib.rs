@@ -10,8 +10,8 @@
 //!
 //! Two things the tool does have no safe expression in `std`: killing a whole process subtree (a
 //! process group on Unix, a job object on Windows) and bounding what that subtree allocates (a
-//! cgroup leaf on Linux, the same job object on Windows). Neither is a case of reaching for
-//! `unsafe` to go faster — there is no safe version to prefer.
+//! cgroup leaf on Linux, the same job object on Windows, physical-footprint readings on macOS).
+//! Neither is a case of reaching for `unsafe` to go faster — there is no safe version to prefer.
 //!
 //! Concentrating those calls here is what lets every other crate in the workspace carry
 //! `#![forbid(unsafe_code)]`, which turns "we reviewed the unsafe code" into a property the
@@ -26,6 +26,8 @@
 
 #[cfg(target_os = "linux")]
 pub mod cgroup;
+#[cfg(target_os = "macos")]
+pub mod footprint;
 #[cfg(unix)]
 pub mod group;
 #[cfg(unix)]

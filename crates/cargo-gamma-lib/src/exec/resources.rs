@@ -439,6 +439,7 @@ mod tests {
                     core::slice::from_ref(&binary),
                     &[],
                     MemoryRequest {
+                        calibrating: false,
                         meter: true,
                         limit: Some(37),
                     },

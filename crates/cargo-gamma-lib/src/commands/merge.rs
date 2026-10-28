@@ -54,6 +54,14 @@ fn merge_reports_at<H: Host>(
     let window = (args.window > 0).then(|| args.window.saturating_mul(86_400));
     let mut merged = crate::merge::merge(inputs, now.unwrap_or(0), window);
 
+    if merged.unpresentable_filtered > 0 {
+        return Err(error!(
+            "{} name-filtered {} cannot be rendered in the selected source; include an unfiltered listing from the current source before merging so the verdicts are preserved",
+            merged.unpresentable_filtered,
+            if merged.unpresentable_filtered == 1 { "mutant" } else { "mutants" }
+        ));
+    }
+
     if now.is_none() {
         merged.fresh = 0;
         merged.stale = 0;
@@ -470,6 +478,7 @@ mod tests {
                 mutant_id_version: Some(crate::model::MUTANT_ID_VERSION),
                 merged: false,
                 population_complete: false,
+                name_filtered: false,
                 shard: Some(ShardInfo { index, count }),
                 tests: None,
                 not_built: None,
@@ -501,6 +510,7 @@ mod tests {
                 mutant_id_version: Some(crate::model::MUTANT_ID_VERSION),
                 merged: false,
                 population_complete: true,
+                name_filtered: false,
                 shard: None,
                 tests: None,
                 not_built: None,
@@ -1245,6 +1255,7 @@ mod tests {
                 mutant_id_version: Some(crate::model::MUTANT_ID_VERSION),
                 merged: false,
                 population_complete: true,
+                name_filtered: false,
                 shard: None,
                 tests: None,
                 not_built: None,
