@@ -10,6 +10,7 @@
 
 - 🐛 Bug Fixes
 
+  - cargo-anvil: honor inherited Dependabot exclusions
   - cargo-anvil: preserve YAML job boundaries and refusal ownership
   - cargo-anvil: preserve complete aliased Dependabot exclusions
   - cargo-anvil: preserve Dependabot configuration edge cases
@@ -17,6 +18,7 @@
 
 - ✔️ Tasks
 
+  - cargo-anvil: keep the pending feature release at 0.21.0
   - cargo-anvil: prepare 0.21.1 review fixes release
   - cargo-anvil: prepare 0.21.0 Dependabot integration
   - cargo-anvil: pin cargo-delta 0.5.0 ([#311](https://github.com/microsoft/ox-tools/pull/311))
