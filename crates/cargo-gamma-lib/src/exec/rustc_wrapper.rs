@@ -37,11 +37,38 @@ pub(crate) struct RustcInvocation {
 pub fn run_if_requested(args: impl IntoIterator<Item = OsString>) -> Option<ExitCode> {
     run_if_requested_with(
         args,
-        |name| std::env::var_os(name),
+        wrapper_environment,
         || std::env::vars_os().map(|(name, _value)| name),
-        |command| command.status().map(|status| status.code()),
+        compiler_status,
         publish_capture,
     )
+}
+
+/// Replaces compiler execution and supplies its exit status without starting a child.
+#[cfg(test)]
+type CompilerObserver = Box<dyn FnMut(&Command) -> std::io::Result<Option<i32>>>;
+
+#[cfg(test)]
+thread_local! {
+    static WRAPPER_ENVIRONMENT: std::cell::RefCell<Option<crate::HashMap<String, OsString>>> = const { std::cell::RefCell::new(None) };
+    static COMPILER_OBSERVER: std::cell::RefCell<Option<CompilerObserver>> = const { std::cell::RefCell::new(None) };
+}
+
+/// An installed map completely replaces named lookups, but not environment-name enumeration.
+fn wrapper_environment(name: &str) -> Option<OsString> {
+    #[cfg(test)]
+    if let Some(value) = WRAPPER_ENVIRONMENT.with_borrow(|slot| slot.as_ref().map(|environment| environment.get(name).cloned())) {
+        return value;
+    }
+    std::env::var_os(name)
+}
+
+fn compiler_status(command: &mut Command) -> std::io::Result<Option<i32>> {
+    #[cfg(test)]
+    if let Some(status) = COMPILER_OBSERVER.with_borrow_mut(|slot| slot.as_mut().map(|observer| observer(command))) {
+        return status;
+    }
+    command.status().map(|status| status.code())
 }
 
 fn run_if_requested_with<I: IntoIterator<Item = OsString>>(
@@ -221,10 +248,12 @@ pub(crate) fn parse_invocation(args: &[OsString]) -> Option<RustcInvocation> {
             // #[gamma::skip(all, reason = "not consuming the joined option retries the same argument forever and is observed only as a timeout")]
             index += 1;
         } else if separate("--extern") {
+            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
             parse_extern(&args[index + 1], &mut externs, &mut opaque_extern);
             // #[gamma::skip(all, reason = "moving backward or not consuming the split option makes the parser intrinsically nonterminating and is observed only as a timeout")]
             index += 2;
         } else if let Some(value) = argument.strip_prefix("--extern=") {
+            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
             parse_extern(OsStr::new(value), &mut externs, &mut opaque_extern);
             // #[gamma::skip(all, reason = "moving backward or not consuming the joined option makes the parser intrinsically nonterminating and is observed only as a timeout")]
             index += 1;
@@ -285,6 +314,40 @@ mod tests {
     use camino::Utf8Path;
 
     use super::*;
+
+    #[test]
+    fn recovered_native_wrapper_returns_the_exact_nonzero_compiler_code_and_forwards_its_command_without_spawning() {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                WRAPPER_ENVIRONMENT.with_borrow_mut(|slot| *slot = None);
+                COMPILER_OBSERVER.with_borrow_mut(|slot| *slot = None);
+            }
+        }
+        WRAPPER_ENVIRONMENT.with_borrow_mut(|slot| {
+            assert!(slot.is_none());
+            *slot = Some(core::iter::once((CAPTURE_DIR_VAR.to_owned(), OsString::from("never-written-capture"))).collect());
+        });
+        let _reset = Reset;
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+        COMPILER_OBSERVER.with_borrow_mut(|slot| {
+            assert!(slot.is_none());
+            *slot = Some(Box::new({
+                let calls = std::rc::Rc::clone(&calls);
+                move |command| {
+                    calls.set(calls.get() + 1);
+                    assert_eq!(command.get_program(), OsStr::new("never-launched-rustc"));
+                    assert_eq!(command.get_args().collect::<Vec<_>>(), [OsStr::new("--version")]);
+                    Ok(Some(7))
+                }
+            }));
+        });
+        assert_eq!(
+            run_if_requested(["gamma", "never-launched-rustc", "--version"].map(OsString::from)),
+            Some(ExitCode::from(7))
+        );
+        assert_eq!(calls.get(), 1);
+    }
 
     fn args(values: &[&str]) -> Vec<OsString> {
         values.iter().map(OsString::from).collect()

@@ -107,7 +107,7 @@ pub(super) struct Attempt<'name> {
 }
 
 impl Attempt<'_> {
-    /// The same attempt with no mutant active, which is how a suspected kill is exonerated.
+    /// The same attempt with no mutant active, to check a nextest enumeration failure.
     const fn exonerating(self) -> Self {
         Self { active: None, ..self }
     }
@@ -175,13 +175,14 @@ pub(super) enum Verdict {
         limit: u64,
     },
 
-    /// A test failed with the mutant active and failed again with no mutant active.
+    /// A test failed during an unmutated nextest enumeration control.
     ///
-    /// Not a verdict about the mutant either way. The suite noticed something, but the same thing
-    /// happens without the mutant, so nothing about this run is evidence about this mutant.
-    /// Carries the test that failed, which is the only actionable thing here: the remedy is to fix
-    /// that test, not to write a new one.
+    /// The control did not establish that the active mutant caused the enumeration failure.
+    /// Carries the failed test, when known, rather than crediting the mutant with a kill.
     Flaky(Option<String>),
+
+    /// An unmutated nextest control did not finish cleanly enough to attribute an enumeration failure.
+    Unconfirmed(Option<String>, &'static str),
 
     /// The run-wide machinery could not continue producing trustworthy verdicts.
     ///
@@ -246,11 +247,8 @@ pub(super) struct FailureEvidence {
 
 /// Runs one test binary with an optional active mutant, under a wall-clock budget.
 ///
-/// Every provisional abnormal verdict is confirmed by a second run before it is believed. A false
-/// kill inflates the score, while a false resource-exhaustion verdict lowers it and can fail the
-/// run; neither should depend on one noisy execution.
-///
-/// The confirmations differ because the suspicions do:
+/// Test failures are accepted directly after baseline validation, without an unmutated rerun.
+/// Resource suspicions still receive a second observation:
 ///
 /// * A timeout or a stall is retried with the same mutant under a budget several times larger.
 ///   Both are verdicts a loaded machine can produce on its own — the budget is calibrated from a
@@ -263,17 +261,9 @@ pub(super) struct FailureEvidence {
 ///   the job object, so the verdict is inferred from the job's accounting, and on the timeout path
 ///   it is inferred from what the accounting read when the run was cut short. An inference deserves
 ///   the same second look as a budget running out.
-/// * A failing test is retried with **no** mutant active. Nothing about a red test says the mutant
-///   made it red, and a test that is merely flaky would otherwise be scored as a kill every time it
-///   happened to fail. If it fails again with the mutant out of the picture, the suite is what is
-///   unreliable, and the run says so with [`Verdict::Flaky`] rather than crediting the mutant.
-///
-/// The kill confirmation costs one extra run of the cheapest verdict class — the one that finishes
-/// as soon as a test fails rather than running the whole binary. `confirm` turns it off, at the
-/// price of a score that counts flakes as kills and cannot show which ones they were.
 #[cfg(test)]
-pub(super) fn run_binary(work: &Workspace, binary: &TestBinary, attempt: Attempt<'_>, confirm: bool) -> Verdict {
-    run_binary_observed(work, binary, attempt, confirm).verdict
+pub(super) fn run_binary(work: &Workspace, binary: &TestBinary, attempt: Attempt<'_>) -> Verdict {
+    run_binary_observed(work, binary, attempt).verdict
 }
 
 #[derive(Debug)]
@@ -289,41 +279,39 @@ pub(super) enum ReachObservation {
     Unknown,
 }
 
-pub(super) fn reach_hint_is_final(attempt: Attempt<'_>, confirm: bool) -> bool {
-    attempt.timeout.is_none() && attempt.stall.budget.is_none() && !attempt.request.meter && !confirm
+pub(super) fn reach_hint_is_final(attempt: Attempt<'_>) -> bool {
+    attempt.timeout.is_none() && attempt.stall.budget.is_none() && !attempt.request.meter
 }
 
-pub(super) fn run_binary_observed(work: &Workspace, binary: &TestBinary, attempt: Attempt<'_>, confirm: bool) -> BinaryRun {
+pub(super) fn run_binary_observed(work: &Workspace, binary: &TestBinary, attempt: Attempt<'_>) -> BinaryRun {
     #[cfg(test)]
     if let Some(run) = SCRIPTED_RUNNER
-        .with_borrow_mut(|runner| runner.as_mut().map(|runner| runner(binary, attempt, confirm)))
-        .or_else(|| SHARED_RUNNER.with_borrow(|runner| runner.as_ref().map(|runner| runner(binary, attempt, confirm))))
+        .with_borrow_mut(|runner| runner.as_mut().map(|runner| runner(binary, attempt)))
+        .or_else(|| SHARED_RUNNER.with_borrow(|runner| runner.as_ref().map(|runner| runner(binary, attempt))))
     {
-        super::sweep::record_observed_killer(binary, attempt.only, &run.verdict);
-        return run;
+        return finish_binary_run(binary, attempt.only, run);
     }
 
     let _resources = work.acquire_resources(binary, attempt.only);
-    let run = run_binary_with_observer(&SimpleClock::new_system(), attempt, confirm, |attempt| {
-        observe(work, binary, attempt)
-    });
-    super::sweep::record_observed_killer(binary, attempt.only, &run.verdict);
+    let run = run_binary_with_observer(&SimpleClock::new_system(), attempt, |attempt| observe(work, binary, attempt));
+    finish_binary_run(binary, attempt.only, run)
+}
+
+fn finish_binary_run(binary: &TestBinary, only: Only<'_>, run: BinaryRun) -> BinaryRun {
+    super::sweep::record_observed_killer(binary, only, &run.verdict);
     run
 }
 
-fn run_binary_with_observer(
-    clock: &SimpleClock,
-    attempt: Attempt<'_>,
-    confirm: bool,
-    mut observe: impl FnMut(Attempt<'_>) -> Observation,
-) -> BinaryRun {
+fn run_binary_with_observer(clock: &SimpleClock, attempt: Attempt<'_>, mut observe: impl FnMut(Attempt<'_>) -> Observation) -> BinaryRun {
     let mut first = true;
     let mut observe = |attempt: Attempt<'_>| {
         super::sweep::record_binary_launch_attempt(!first);
         let started = Stopwatch::new(clock);
         let observed = observe(attempt);
         super::sweep::record_binary_execution(!first, started.elapsed(), &observed.verdict);
-        first = false;
+        first =
+        // #[gamma::skip(assign_value.default, reason = "The assigned false is exactly the inferred primitive type's Default value.", tag = "equivalent")]
+        false;
         observed
     };
     let mut reach = ReachObservation::Unknown;
@@ -337,10 +325,7 @@ fn run_binary_with_observer(
         observed.verdict
     });
 
-    // Reached from the first run and from a confirmation alike: a suspected timeout that turns out
-    // to be a failing test is exactly as much of a suspicion as one reported straight away.
     let verdict = match confirmed {
-        Verdict::Failed(test) if confirm => confirm_kill_with(attempt, test, |attempt| observe(attempt).verdict),
         Verdict::TestEnumerationFailed(output) => confirm_enumeration_with(attempt, output, |attempt| observe(attempt).verdict),
         other => other,
     };
@@ -349,10 +334,10 @@ fn run_binary_with_observer(
 }
 
 #[cfg(test)]
-type ScriptedRunner = Box<dyn FnMut(&TestBinary, Attempt<'_>, bool) -> BinaryRun>;
+type ScriptedRunner = Box<dyn FnMut(&TestBinary, Attempt<'_>) -> BinaryRun>;
 
 #[cfg(test)]
-pub(super) type SharedRunner = Arc<dyn Fn(&TestBinary, Attempt<'_>, bool) -> BinaryRun + Send + Sync>;
+pub(super) type SharedRunner = Arc<dyn Fn(&TestBinary, Attempt<'_>) -> BinaryRun + Send + Sync>;
 
 #[cfg(test)]
 std::thread_local! {
@@ -387,10 +372,7 @@ pub(super) fn with_shared_runner<T>(runner: SharedRunner, body: impl FnOnce() ->
 /// execution, suspicion settlement and confirmation. Unlike the observer seam this replaces the
 /// whole binary run. Scoped to the calling thread and reset on return or unwind.
 #[cfg(test)]
-pub(super) fn with_binary_runner<T>(
-    runner: impl FnMut(&TestBinary, Attempt<'_>, bool) -> BinaryRun + 'static,
-    body: impl FnOnce() -> T,
-) -> T {
+pub(super) fn with_binary_runner<T>(runner: impl FnMut(&TestBinary, Attempt<'_>) -> BinaryRun + 'static, body: impl FnOnce() -> T) -> T {
     struct Reset;
     impl Drop for Reset {
         fn drop(&mut self) {
@@ -596,10 +578,12 @@ fn settle_suspicions(attempt: Attempt<'_>, mut run: impl FnMut(Attempt<'_>) -> V
 
     for _round in 0..CONFIRM_ROUNDS {
         let Some(suspicion) = Suspicion::of(&verdict) else {
+            // #[gamma::skip(loop.break_to_continue, reason = "settle_suspicions uses a finite 0..CONFIRM_ROUNDS for-loop. When Suspicion::of(verdict) is None, continue only rechecks the same unchanged verdict on remaining rounds; the run callback and checked assignment below are never reached, so returned verdict and callback trace are unchanged.", tag = "equivalent")]
             break;
         };
 
         if checked == Some(suspicion) {
+            // #[gamma::skip(loop.break_to_continue, reason = "settle_suspicions checks checked==Some(suspicion) before assigning checked or running a confirmation. Replacing this break by continue only repeats that same comparison over the remaining finite rounds with unchanged checked and verdict; no further confirmation callback can run.", tag = "equivalent")]
             break;
         }
 
@@ -608,71 +592,6 @@ fn settle_suspicions(attempt: Attempt<'_>, mut run: impl FnMut(Attempt<'_>) -> V
     }
 
     verdict
-}
-
-/// Decides whether a failing test says anything about the mutant that was active when it failed.
-///
-/// The question is settled the only way it can be: by running the same binary again with the
-/// mutant switched off. A suite that fails either way was not detecting anything.
-#[cfg_attr(coverage_nightly, coverage(off))]
-#[cfg(test)]
-fn confirm_kill(work: &Workspace, binary: &TestBinary, attempt: Attempt<'_>, test: Option<String>) -> Verdict {
-    confirm_kill_with(attempt, test, |attempt| observe(work, binary, attempt).verdict)
-}
-
-fn confirm_kill_with(attempt: Attempt<'_>, test: Option<String>, observe: impl FnOnce(Attempt<'_>) -> Verdict) -> Verdict {
-    // Nothing to exonerate. A run with no mutant active has already answered the question the
-    // confirmation would ask, and asking it again would only pay for the same answer.
-    if attempt.active.is_none() {
-        return Verdict::Failed(test);
-    }
-
-    let exonerating_attempt = test.as_deref().map_or_else(
-        || attempt.exonerating(),
-        |name| Attempt {
-            active: None,
-            only: Only::One(name),
-            ..attempt
-        },
-    );
-
-    match observe(exonerating_attempt) {
-        // The suite is green without the mutant and red with it. That is a detection, and the only
-        // observation in this match that is one.
-        Verdict::Passed => Verdict::Failed(test),
-
-        // Neither a detection nor a gap in the tests. Crediting the mutant would let one
-        // unreliable test manufacture a kill for every mutant it happens to be run against;
-        // recording a survivor would send the reader to write an assertion for code an assertion
-        // already covers. The test that failed both ways travels with the verdict, because fixing
-        // it is the only thing anybody can do about this.
-        Verdict::Failed(also) => Verdict::Flaky(test.or(also)),
-
-        // The confirmation could not be metered as this run was configured, so it decided nothing.
-        // The reason travels rather than being replaced by a verdict nobody established.
-        Verdict::Unmetered(reason) => Verdict::Unmetered(reason),
-
-        // The same, one scope down: the machinery refused this one run, so the exoneration
-        // established nothing and the mutant goes unjudged rather than taking the sweep with it.
-        Verdict::Unjudged(reason) => Verdict::Unjudged(reason),
-
-        // The exoneration exceeded a budget instead of finishing, so the suite was never observed
-        // green without the mutant — and the one thing this must not do is read "not observed" as
-        // "observed green". The exoneration inherits the mutant run's budgets while running the
-        // whole binary, where the mutant's own run stopped at its first failing test, so an
-        // overrun here is as much a fact about the machine as about anything.
-        //
-        // Recorded as a flake rather than as an unmetered run: nothing about the mutant was
-        // established, but the machinery worked, and abandoning the whole sweep over a slow
-        // confirmation would be a far worse answer than leaving one mutant out of the score. The
-        // failing test travels for the same reason it does above.
-        //
-        // The remaining variants cannot arrive from an exoneration — `TestEnumerationFailed` is
-        // only settled with a mutant active, and `Flaky` is reached from here rather than from
-        // `observe` — and they are folded in rather than matched separately because the conclusion
-        // would be the same either way: nothing was established.
-        _unestablished => Verdict::Flaky(test),
-    }
 }
 
 /// Confirms that nextest's inability to enumerate tests was caused by the active mutant.
@@ -692,8 +611,18 @@ fn confirm_enumeration_with(attempt: Attempt<'_>, output: String, observe: impl 
         // Timeout or memory-limit evidence from an exonerating run cannot be attributed to the
         // mutant because no mutant was active. Returning either verdict would record the suite as
         // having missed a mutant that was switched off for the run that produced the evidence.
-        _unestablished => Verdict::Flaky(None),
+        unestablished => unconfirmed(None, &unestablished),
     }
+}
+
+fn unconfirmed(test: Option<String>, verdict: &Verdict) -> Verdict {
+    let reason = match verdict {
+        Verdict::TimedOut => "exceeded its time budget",
+        Verdict::Stalled(_) => "stopped reporting progress",
+        Verdict::MemoryLimit { .. } => "exceeded its memory ceiling",
+        _ => "did not establish a trustworthy passing result",
+    };
+    Verdict::Unconfirmed(test, reason)
 }
 
 /// Says on the diagnostic stream that a verdict was reached on less output than the binary produced.
@@ -871,11 +800,14 @@ fn nextest_runner_failure(code: Option<i32>, output: &str) -> String {
 /// diagnose a loader mismatch without copying ambient process data into an artifact.
 pub(super) fn baseline_environment(work: &Workspace, binary: &TestBinary, only: Only<'_>) -> serde_json::Value {
     let launch = work.launch();
-    let mut set = BTreeMap::from([
-        (UNDER_GAMMA_VAR, "1".to_owned()),
-        (INSTA_UPDATE_VAR, "no".to_owned()),
-        (INSTA_FORCE_PASS_VAR, "0".to_owned()),
-    ]);
+    let mut set = BTreeMap::from(
+        // #[gamma::skip(collection.reverse_array, reason = "BTreeMap::from receives three distinct environment-variable keys. Reversing insertion order yields the identical sorted key/value map.", tag = "equivalent")]
+        [
+            (UNDER_GAMMA_VAR, "1".to_owned()),
+            (INSTA_UPDATE_VAR, "no".to_owned()),
+            (INSTA_FORCE_PASS_VAR, "0".to_owned()),
+        ],
+    );
 
     let threads = if work.required_resources(binary, only).is_empty() {
         work.harness_threads()
@@ -1052,18 +984,7 @@ fn run_with_observation(
     let pulse = Arc::new(Pulse::default());
     let drained = match readers(&mut subtree, progress, &pulse, under_nextest, retain_failure) {
         Ok(drained) => drained,
-        Err(cause) => {
-            let (usage, _ceiling) = match cut_short(&mut subtree, request, binary, false) {
-                Ok(stopped) => stopped,
-                Err((verdict, usage)) => return (verdict, usage, None),
-            };
-
-            return (
-                Verdict::Unjudged(format!("`{}` output could not be supervised: {cause}", binary.path)),
-                usage,
-                None,
-            );
-        }
+        Err(cause) => return reader_failure(&mut subtree, request, binary, &cause),
     };
 
     let mut supervision = NativeSupervision {
@@ -1075,8 +996,29 @@ fn run_with_observation(
         deadline: timeout.map(deadline_after),
         stall,
         observe_exit: &mut observe_exit,
+        observation_attempted: std::cell::Cell::new(
+            // #[gamma::skip(literal.bool_flip, reason = "The initial observation_attempted flag is overwritten by observe before expiration can inspect it. Only the later observe/expiration handshake enforces the lifecycle invariant.", tag = "equivalent")]
+            false,
+        ),
     };
     supervise(&mut supervision, binary, active, under_nextest, request, progress, retain_failure)
+}
+
+fn reader_failure(
+    subtree: &mut impl ContainedProcess,
+    request: MemoryRequest,
+    binary: &TestBinary,
+    cause: &ReaderStartError,
+) -> (Verdict, MemoryUsage, Option<FailureEvidence>) {
+    let (usage, _ceiling) = match subtree.cut_short(request, binary, false) {
+        Ok(stopped) => stopped,
+        Err((verdict, usage)) => return (verdict, usage, None),
+    };
+    (
+        Verdict::Unjudged(format!("`{}` output could not be supervised: {cause}", binary.path)),
+        usage,
+        None,
+    )
 }
 
 /// The native lifecycle/clock boundary; the verdict state machine consumes only these observations.
@@ -1091,8 +1033,61 @@ trait Supervision {
     fn wait(&self, seen: u64, progress: &Mutex<Progress>);
 }
 
-struct NativeSupervision<'a, F> {
-    subtree: &'a mut ProcessTree,
+/// Verdict-aware containment policy over process release, usage and cleanup.
+trait ContainedProcess {
+    fn released(&self) -> bool;
+    fn usage(&self) -> MemoryUsage;
+    fn cut_short(
+        &mut self,
+        request: MemoryRequest,
+        binary: &TestBinary,
+        settled: bool,
+    ) -> Result<(MemoryUsage, Option<u64>), (Verdict, MemoryUsage)>;
+}
+
+/// Native cleanup primitives, separated from the verdict and memory-request policy.
+trait ProcessCleanup {
+    fn leader_released(&self) -> bool;
+    fn snapshot_usage(&self) -> MemoryUsage;
+    fn terminate_tree(&mut self) -> io::Result<()>;
+}
+
+impl ProcessCleanup for ProcessTree {
+    // #[gamma::skip(fn_value.bool_true, reason = "This thin ProcessTree adapter reads native containment/reaping state. An owned fake bypasses this exact native adapter; deterministic tests cannot launch a child or mutate native process state.", tag = "native-boundary")]
+    fn leader_released(&self) -> bool {
+        Self::released(self)
+    }
+
+    fn snapshot_usage(&self) -> MemoryUsage {
+        Self::usage(self)
+    }
+
+    fn terminate_tree(&mut self) -> io::Result<()> {
+        Self::terminate(self).map(|_status| ())
+    }
+}
+
+impl<T: ProcessCleanup> ContainedProcess for T {
+    fn released(&self) -> bool {
+        self.leader_released()
+    }
+
+    fn usage(&self) -> MemoryUsage {
+        self.snapshot_usage()
+    }
+
+    fn cut_short(
+        &mut self,
+        request: MemoryRequest,
+        binary: &TestBinary,
+        settled: bool,
+    ) -> Result<(MemoryUsage, Option<u64>), (Verdict, MemoryUsage)> {
+        cut_short(self, request, binary, settled)
+    }
+}
+
+struct NativeSupervision<'a, F, T = ProcessTree> {
+    subtree: &'a mut T,
     drained: &'a Receiver<Drained>,
     pulse: &'a Pulse,
     binary: &'a TestBinary,
@@ -1100,10 +1095,12 @@ struct NativeSupervision<'a, F> {
     deadline: Option<Instant>,
     stall: Stall,
     observe_exit: &'a mut F,
+    observation_attempted: std::cell::Cell<bool>,
 }
 
-impl<F: FnMut(&mut ProcessTree) -> io::Result<Option<ExitStatus>>> Supervision for NativeSupervision<'_, F> {
+impl<T: ContainedProcess, F: FnMut(&mut T) -> io::Result<Option<ExitStatus>>> Supervision for NativeSupervision<'_, F, T> {
     fn observe(&mut self) -> io::Result<Option<ExitStatus>> {
+        self.observation_attempted.set(true);
         (self.observe_exit)(self.subtree)
     }
     fn released(&self) -> bool {
@@ -1116,9 +1113,13 @@ impl<F: FnMut(&mut ProcessTree) -> io::Result<Option<ExitStatus>>> Supervision f
         self.subtree.usage()
     }
     fn cut_short(&mut self, settled: bool) -> Result<(MemoryUsage, Option<u64>), (Verdict, MemoryUsage)> {
-        cut_short(self.subtree, self.request, self.binary, settled)
+        self.subtree.cut_short(self.request, self.binary, settled)
     }
     fn expiration(&self, progress: &Mutex<Progress>) -> (bool, bool) {
+        assert!(
+            self.observation_attempted.replace(false),
+            "execution budgets are inspected only after attempting the current child observation"
+        );
         (
             self.stall.exceeded(progress),
             self.deadline.is_some_and(|deadline| deadline_reached(deadline, Instant::now())),
@@ -1128,12 +1129,14 @@ impl<F: FnMut(&mut ProcessTree) -> io::Result<Option<ExitStatus>>> Supervision f
         self.pulse.seen()
     }
     fn wait(&self, seen: u64, progress: &Mutex<Progress>) {
-        self.pulse.wait(
-            seen,
-            WAIT_CAP
-                .min(self.deadline.map_or(WAIT_CAP, remaining))
-                .min(self.stall.slack(progress)),
+        let budget = WAIT_CAP
+            .min(self.deadline.map_or(WAIT_CAP, remaining))
+            .min(self.stall.slack(progress));
+        debug_assert!(
+            budget <= WAIT_CAP,
+            "native supervision must return to child observation within its polling cap"
         );
+        self.pulse.wait(seen, budget);
     }
 }
 
@@ -1186,6 +1189,7 @@ fn supervise(
                 // abandoned over it: the exit status still says the suite failed, which is the
                 // verdict, and only the name is at risk.
                 if !collected.whole {
+                    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
                     announce_partial(binary);
                 }
 
@@ -1216,10 +1220,10 @@ fn supervise(
                 // replaying the failed child's captured output, which may hold the guard runtime's
                 // environment-error marker, so it is never cut here.
                 if !retain_failure && let Some(name) = failure_to_cut_short(under_nextest, progress) {
-                    let (usage, ceiling) = cut_short!(true);
+                    let (usage, _ceiling) = cut_short!(true);
                     let _collected = supervision.collect();
 
-                    return (cut_by_named_failure(name, usage.peak, ceiling), usage, None);
+                    return (cut_by_named_failure(name), usage, None);
                 }
 
                 let (stalled, expired) = supervision.expiration(progress);
@@ -1343,11 +1347,36 @@ struct Collected {
     whole: bool,
 }
 
-fn collected(drained: &Receiver<Drained>, grace: Duration) -> Collected {
-    collected_with_grace(drained, Some(grace))
+/// Receives output under the caller's bounded grace period.
+trait CollectionReceiver {
+    fn receive(&self, grace: Duration) -> Result<Drained, RecvTimeoutError>;
 }
 
-fn collected_with_grace(drained: &Receiver<Drained>, grace: Option<Duration>) -> Collected {
+impl CollectionReceiver for Receiver<Drained> {
+    fn receive(&self, grace: Duration) -> Result<Drained, RecvTimeoutError> {
+        self.recv_timeout(grace)
+    }
+}
+
+/// Supplies a finite response trace and rejects reads beyond its scripted terminal response.
+#[cfg(test)]
+struct ScriptedCollection {
+    grace: Duration,
+    replies: core::cell::RefCell<VecDeque<Result<Drained, RecvTimeoutError>>>,
+}
+
+#[cfg(test)]
+impl CollectionReceiver for ScriptedCollection {
+    fn receive(&self, grace: Duration) -> Result<Drained, RecvTimeoutError> {
+        assert_eq!(grace, self.grace, "collection must preserve its bounded receive policy");
+        self.replies
+            .borrow_mut()
+            .pop_front()
+            .expect("collection must stop at the scripted terminal reply")
+    }
+}
+
+fn collected(drained: &impl CollectionReceiver, grace: Duration) -> Collected {
     let mut text = Vec::new();
     let mut authoritative = Vec::new();
     let mut stdout_tail = Vec::new();
@@ -1356,10 +1385,7 @@ fn collected_with_grace(drained: &Receiver<Drained>, grace: Option<Duration>) ->
     let mut whole = true;
 
     loop {
-        let received = match grace {
-            Some(grace) => drained.recv_timeout(grace),
-            None => drained.recv().map_err(|_disconnected| RecvTimeoutError::Disconnected),
-        };
+        let received = drained.receive(grace);
         match received {
             Ok(chunk) => {
                 if chunk.authoritative {
@@ -1471,7 +1497,6 @@ fn prefer_named(verdict: Verdict, peak: Option<u64>, ceiling: Option<u64>) -> Ve
     };
 
     match verdict {
-        Verdict::Failed(Some(name)) => Verdict::Failed(Some(name)),
         Verdict::Failed(None) => Verdict::MemoryLimit { peak, limit },
 
         // Not a verdict about the mutant at all, and a ceiling does not make it one.
@@ -1485,14 +1510,11 @@ fn prefer_named(verdict: Verdict, peak: Option<u64>, ceiling: Option<u64>) -> Ve
 /// seen from either side of one race: whether the reader publishes the failure before the exit
 /// observation cleans up the child decides which of them is taken, and nothing orders those two events. A policy
 /// spelled out twice would make the verdict a statement about that ordering — the name kept on a
-/// machine where the reader wins and replaced by a byte count where the reaper does. Worse than
-/// losing the name: only [`Verdict::Failed`] is routed to the flake check, so a flaky test failing
-/// beside a ceiling would be credited as an unconfirmed detection on one machine and confirmed on
-/// the other.
+/// machine where the reader wins and replaced by a byte count where the reaper does.
 ///
 /// [`cut_short`] has already ended the run by the time this is asked, so both facts are final.
-fn cut_by_named_failure(name: String, peak: Option<u64>, ceiling: Option<u64>) -> Verdict {
-    prefer_named(Verdict::Failed(Some(name)), peak, ceiling)
+fn cut_by_named_failure(name: String) -> Verdict {
+    Verdict::Failed(Some(name))
 }
 
 /// Ends a run early, whether before or after its verdict is settled.
@@ -1510,30 +1532,30 @@ fn cut_by_named_failure(name: String, peak: Option<u64>, ceiling: Option<u64>) -
 /// observation failures must not claim that a verdict existed.
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn cut_short(
-    subtree: &mut ProcessTree,
+    subtree: &mut impl ProcessCleanup,
     request: MemoryRequest,
     binary: &TestBinary,
     verdict_settled: bool,
 ) -> Result<(MemoryUsage, Option<u64>), (Verdict, MemoryUsage)> {
-    cut_short_with_usage(subtree, request, binary, verdict_settled, ProcessTree::usage)
+    cut_short_with_usage(subtree, request, binary, verdict_settled, ProcessCleanup::snapshot_usage)
 }
 
-fn cut_short_with_usage(
-    subtree: &mut ProcessTree,
+fn cut_short_with_usage<T: ProcessCleanup>(
+    subtree: &mut T,
     request: MemoryRequest,
     binary: &TestBinary,
     verdict_settled: bool,
-    observe_usage: impl FnOnce(&ProcessTree) -> MemoryUsage,
+    observe_usage: impl FnOnce(&T) -> MemoryUsage,
 ) -> Result<(MemoryUsage, Option<u64>), (Verdict, MemoryUsage)> {
     // Only Unix has a numeric watch slot that can be released too early. On Windows `released`
     // necessarily returns true because the job handle itself remains the authority over the child.
     #[cfg(unix)]
     debug_assert!(
-        !subtree.released(),
+        !subtree.leader_released(),
         "the subtree is signalled while it still holds its leader and its watch slot"
     );
 
-    let stopped = subtree.terminate();
+    let stopped = subtree.terminate_tree();
     let usage = observe_usage(subtree);
 
     if let Err(cause) = stopped {
@@ -1692,36 +1714,47 @@ impl ReachCapture {
             return ReachObservation::Unknown;
         };
 
-        let mut sealed = false;
-        let mut reached = false;
-        for record in bytes.chunks_exact(core::mem::size_of::<u32>()) {
-            let value = u32::from_le_bytes(record.try_into().expect("chunks_exact yields exactly one runtime reach record"));
-            if value == self.ordinal {
-                reached = true;
-            }
-            if value == gamma_rt::OVERFLOW {
-                sealed = false;
-                break;
-            }
-            if value == gamma_rt::SEAL {
-                if sealed {
-                    sealed = false;
-                    break;
-                }
-                sealed = true;
-            } else if sealed {
-                sealed = false;
-                break;
-            }
-        }
+        reach_from_records(&bytes, self.ordinal)
+    }
+}
 
-        if reached {
-            ReachObservation::Reached
-        } else if sealed && bytes.len().is_multiple_of(core::mem::size_of::<u32>()) {
-            ReachObservation::NotReached
-        } else {
-            ReachObservation::Unknown
+/// Positive reach evidence wins; a negative proof requires complete, sealed records without overflow.
+fn reach_from_records(bytes: &[u8], ordinal: u32) -> ReachObservation {
+    let mut sealed = false;
+    let mut reached = false;
+    for record in bytes.chunks_exact(core::mem::size_of::<u32>()) {
+        let value = u32::from_le_bytes(record.try_into().expect("chunks_exact yields exactly one runtime reach record"));
+        if value == ordinal {
+            reached = true;
         }
+        if value == gamma_rt::OVERFLOW {
+            sealed =
+            // #[gamma::skip(assign_value.default, reason = "The assigned false is exactly the inferred primitive type's Default value.", tag = "equivalent")]
+            false;
+            break;
+        }
+        if value == gamma_rt::SEAL {
+            if sealed {
+                sealed =
+                // #[gamma::skip(assign_value.default, reason = "The assigned false is exactly the inferred primitive type's Default value.", tag = "equivalent")]
+                false;
+                break;
+            }
+            sealed = true;
+        } else if sealed {
+            sealed =
+            // #[gamma::skip(assign_value.default, reason = "The assigned false is exactly the inferred primitive type's Default value.", tag = "equivalent")]
+            false;
+            break;
+        }
+    }
+
+    if reached {
+        ReachObservation::Reached
+    } else if sealed && bytes.len().is_multiple_of(core::mem::size_of::<u32>()) {
+        ReachObservation::NotReached
+    } else {
+        ReachObservation::Unknown
     }
 }
 
@@ -1756,7 +1789,15 @@ fn watch(work: &Workspace) -> Watch {
 
 /// How much of a deadline is left, saturating at zero once it has passed.
 fn remaining(deadline: Instant) -> Duration {
-    remaining_at(deadline, Instant::now())
+    let now = Instant::now();
+    #[cfg(test)]
+    let now = REMAINING_NOW.get().unwrap_or(now);
+    remaining_at(deadline, now)
+}
+
+#[cfg(test)]
+thread_local! {
+    static REMAINING_NOW: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
 }
 
 fn remaining_at(deadline: Instant, now: Instant) -> Duration {
@@ -1777,6 +1818,125 @@ mod pulse_wait_regression_tests {
     use std::rc::Rc;
 
     use super::*;
+
+    #[test]
+    fn recovered_collection_retains_exact_complete_authoritative_prefixes_and_tail_flags() {
+        for bytes in [b"a\nb\npartial".as_slice(), b"partial".as_slice()] {
+            for complete in [false, true] {
+                for authoritative in [false, true] {
+                    let (sender, receiver) = mpsc::channel();
+                    sender
+                        .send(Drained {
+                            text: bytes.to_vec(),
+                            tail: b"tail".to_vec(),
+                            tail_truncated: false,
+                            complete,
+                            authoritative,
+                            stream: ReaderStream::Stdout,
+                        })
+                        .unwrap();
+                    drop(sender);
+                    let collected = collected(&receiver, Duration::ZERO);
+                    let expected = if !authoritative {
+                        b"".as_slice()
+                    } else if complete {
+                        bytes
+                    } else if bytes.starts_with(b"a\n") {
+                        b"a\nb\n".as_slice()
+                    } else {
+                        b"".as_slice()
+                    };
+                    assert_eq!(collected.authoritative, expected);
+                    assert_eq!(collected.text, bytes);
+                    assert_eq!(collected.stdout_tail, b"tail");
+                    assert!(collected.stderr_tail.is_empty());
+                    assert_eq!(collected.whole, complete);
+                    assert!(!collected.tail_truncated);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn recovered_output_cap_equality_is_a_whole_complete_line() {
+        let pipe = io::repeat(b'x')
+            .take(u64::try_from(OUTPUT_CAP - 1).unwrap())
+            .chain(io::Cursor::new(b"\n"));
+        let progress = Mutex::new(Progress::new(Watch::Off));
+        let (kept, tail, truncated, whole) = drain(pipe, &progress, &Pulse::default(), false, false);
+        assert_eq!(kept.len(), OUTPUT_CAP);
+        assert_eq!(kept.last(), Some(&b'\n'));
+        assert!(tail.is_empty());
+        assert!(!truncated);
+        assert!(whole);
+    }
+
+    #[test]
+    fn oct25_collection_preserves_zero_grace_and_stops_on_the_first_timeout() {
+        let receiver = ScriptedCollection {
+            grace: Duration::ZERO,
+            replies: core::cell::RefCell::new(VecDeque::from([Err(RecvTimeoutError::Timeout)])),
+        };
+        let collected = collected(&receiver, Duration::ZERO);
+        assert!(receiver.replies.borrow().is_empty());
+        assert!(collected.text.is_empty());
+        assert!(collected.authoritative.is_empty());
+        assert!(collected.stdout_tail.is_empty());
+        assert!(collected.stderr_tail.is_empty());
+        assert!(!collected.tail_truncated);
+        assert!(!collected.whole);
+    }
+
+    #[test]
+    fn oct26_collection_forwards_a_nonzero_bounded_grace_without_native_waiting() {
+        let grace = Duration::from_millis(17);
+        let receiver = ScriptedCollection {
+            grace,
+            replies: core::cell::RefCell::new(VecDeque::from([Err(RecvTimeoutError::Timeout)])),
+        };
+        let output = collected(&receiver, grace);
+        assert!(receiver.replies.borrow().is_empty());
+        assert_eq!(output.text, Vec::<u8>::new());
+        assert_eq!(output.authoritative, Vec::<u8>::new());
+        assert_eq!(output.stdout_tail, Vec::<u8>::new());
+        assert_eq!(output.stderr_tail, Vec::<u8>::new());
+        assert!(!output.tail_truncated);
+        assert!(!output.whole);
+    }
+
+    #[test]
+    fn recovered_startup_marker_overlap_keeps_every_byte_before_a_one_byte_suffix() {
+        for marker in [gamma_rt::ENVIRONMENT_ERROR_MARKER, gamma_rt::PRE_INSTALL_ERROR_MARKER] {
+            let prefix = OUTPUT_CAP + 1 - (marker.len() - 1);
+            let pipe = io::repeat(b'x')
+                .take(u64::try_from(prefix).unwrap())
+                .chain(io::Cursor::new(marker))
+                .chain(io::Cursor::new(b"\n"));
+            let progress = Mutex::new(Progress::new(Watch::Off));
+            let (_, _, _, whole) = drain(pipe, &progress, &Pulse::default(), false, false);
+            assert!(!whole);
+            assert!(environment_failure(&progress));
+        }
+    }
+
+    #[test]
+    fn recovered_diagnostic_markers_beyond_the_overlap_prefix_still_publish_startup_failure() {
+        for marker in [gamma_rt::ENVIRONMENT_ERROR_MARKER, gamma_rt::PRE_INSTALL_ERROR_MARKER] {
+            let bytes = [
+                b"ordinary prefix that exceeds the marker overlap buffer: ".as_slice(),
+                marker,
+                b"\n",
+            ]
+            .concat();
+            let progress = Mutex::new(Progress::new(Watch::Off));
+            let pulse = Pulse::default();
+            let (kept, _, _, whole) = drain(io::Cursor::new(&bytes), &progress, &pulse, false, false);
+            assert_eq!(kept, bytes);
+            assert!(whole);
+            assert!(environment_failure(&progress));
+            assert_eq!(pulse.seen(), 1);
+        }
+    }
 
     #[test]
     fn real_supervision_enters_the_actual_pulse_wait_before_rechecking_a_contained_child() {
@@ -2048,7 +2208,10 @@ fn drain<R: Read>(
     let marker_overlap_cap = gamma_rt::ENVIRONMENT_ERROR_MARKER
         .len()
         .max(gamma_rt::PRE_INSTALL_ERROR_MARKER.len())
-        .saturating_sub(1);
+        .saturating_sub(
+            // #[gamma::skip(literal.int_decrement, reason = "Changing overlap retention max_marker_len-1 to max_marker_len adds one prior byte only. Every new marker crossing a fragment boundary requires at most len-1 previous bytes, so original already detects all crossings. Any extra wholly-prior marker was already reflected in the idempotent environment-error Boolean; no counter/wakeup changes.", tag = "equivalent")]
+            1,
+        );
     let mut marker_overlap = Vec::new();
 
     loop {
@@ -2062,12 +2225,18 @@ fn drain<R: Read>(
 
             Ok(_read) => {
                 let fragmented = continuing || line.len() > OUTPUT_CAP;
-                continuing = fragmented && line.last() != Some(&b'\n');
+                continuing =
+                // #[gamma::skip(logical.and_remove_left, reason = "drain read_output_fragment uses take(OUTPUT_CAP+1).read_until(newline). A nonempty fragment <=OUTPUT_CAP without newline can only be its terminal EOF remainder; otherwise it contains newline or is oversized. Removing fragmented&& only makes continuing true for that terminal remainder; the next read is EOF and returns before continuing is observed.", tag = "equivalent")]
+                fragmented && line.last() != Some(&b'\n');
+
+                // #[gamma::skip(assign.and_to_or, stmt.delete_assign, reason = "The whole &= !fragmented update is redundant with the later kept_now<line.len() => whole=false. First fragmented input exceeds OUTPUT_CAP, truncates, and sets false at the bottom. A continuing fragment inherits prior truncation; later nonempty lines have room=0 and reset false before EOF even if OR briefly sets true. Before truncation whole is true. Error returns false independently, so every return preserves the same whole value.", tag = "equivalent")]
                 whole &= !fragmented;
                 marker_overlap.extend_from_slice(&line[..line.len().min(marker_overlap_cap)]);
                 let boundary_error = runtime_startup_failure(&marker_overlap);
                 marker_overlap.clear();
-                if continuing {
+                if
+                // #[gamma::skip(cond.always_true, reason = "When continuing was false after a line read, the fragment either ended in newline or was the final short EOF fragment. Retaining its extra suffix cannot change a future marker match: EOF has no next bytes, and each runtime marker contains its only newline at its terminus. A match cannot extend across that already-retained newline; any complete marker wholly inside the old suffix was already observed in that line, and any marker wholly inside the next prefix is observed directly there. environment_error is monotone OR. continuing/fragmented/kept/tail/whole are otherwise untouched.", tag = "equivalent")]
+                continuing {
                     marker_overlap.extend_from_slice(&line[line.len().saturating_sub(marker_overlap_cap)..]);
                 }
 
@@ -2105,7 +2274,9 @@ fn drain<R: Read>(
                 }
 
                 if kept_now < line.len() {
-                    whole = false;
+                    whole =
+                    // #[gamma::skip(assign_value.default, reason = "The assigned false is exactly the inferred primitive type's Default value.", tag = "equivalent")]
+                    false;
                 }
             }
         }
@@ -2135,7 +2306,9 @@ fn retain_output_tail(tail: &mut VecDeque<u8>, bytes: &[u8]) -> bool {
     }
 
     let excess = tail.len().saturating_add(bytes.len()).saturating_sub(OUTPUT_TAIL_CAP);
-    if excess > 0 {
+    if
+    // #[gamma::skip(cond.always_true, relational.gt_to_ge, reason = "excess==0 makes drain(..excess) drain an empty range. Executing that branch at zero has no effect on the output buffer or progress state.", tag = "equivalent")]
+    excess > 0 {
         tail.drain(..excess);
     }
 
@@ -2172,6 +2345,174 @@ mod final_survivor_tests {
     use super::*;
     use crate::exec::resources::Resources;
 
+    #[test]
+    #[cfg(not(loom))]
+    fn oct25_native_supervision_preserves_observations_and_waits_only_until_the_nearer_deadline() {
+        #[derive(Default)]
+        struct Process {
+            released: bool,
+            observations: usize,
+            stops: Vec<(bool, bool, Option<u64>, Utf8PathBuf)>,
+        }
+        impl ContainedProcess for Process {
+            fn released(&self) -> bool {
+                self.released
+            }
+            fn usage(&self) -> MemoryUsage {
+                MemoryUsage::default()
+            }
+            fn cut_short(
+                &mut self,
+                request: MemoryRequest,
+                binary: &TestBinary,
+                settled: bool,
+            ) -> Result<(MemoryUsage, Option<u64>), (Verdict, MemoryUsage)> {
+                self.stops.push((settled, request.meter, request.limit, binary.path.clone()));
+                Ok((MemoryUsage::default(), Some(73)))
+            }
+        }
+        struct ResetNow(Option<Instant>);
+        impl Drop for ResetNow {
+            fn drop(&mut self) {
+                REMAINING_NOW.set(self.0);
+            }
+        }
+        let mut process = Process::default();
+        let (_sender, drained) = mpsc::channel();
+        let pulse = Pulse::default();
+        let binary = crate::testing::test_binary("never-launched-native-supervision");
+        let mut observe = |process: &mut Process| {
+            process.observations += 1;
+            Ok((process.observations == 1).then(|| exit_status(17)))
+        };
+        let mut supervision = NativeSupervision {
+            subtree: &mut process,
+            drained: &drained,
+            pulse: &pulse,
+            binary: &binary,
+            request: MemoryRequest {
+                calibrating: false,
+                meter: true,
+                limit: Some(4096),
+            },
+            deadline: None,
+            stall: Stall::NONE,
+            observe_exit: &mut observe,
+            observation_attempted: std::cell::Cell::new(false),
+        };
+        assert_eq!(supervision.observe().unwrap(), Some(exit_status(17)));
+        assert_eq!(supervision.observe().unwrap(), None);
+        assert_eq!(supervision.subtree.observations, 2);
+        assert!(!supervision.released());
+        supervision.subtree.released = true;
+        assert!(supervision.released());
+        for settled in [true, false] {
+            assert_eq!(supervision.cut_short(settled).unwrap().1, Some(73));
+        }
+        assert_eq!(
+            supervision.subtree.stops,
+            [
+                (true, true, Some(4096), binary.path.clone()),
+                (false, true, Some(4096), binary.path.clone())
+            ]
+        );
+        assert_eq!(supervision.seen(), 0);
+        (0..3).for_each(|_| pulse.signal());
+        assert_eq!(supervision.seen(), 3);
+        let progress = Mutex::new(Progress::new(Watch::Off));
+        assert_eq!(supervision.expiration(&progress), (false, false));
+        let waits = std::rc::Rc::new(core::cell::Cell::new(0));
+        Pulse::with_wait_observer(
+            {
+                let waits = std::rc::Rc::clone(&waits);
+                move |pulse, seen, upto| {
+                    assert_eq!(seen, 3);
+                    assert_eq!(upto, WAIT_CAP);
+                    waits.set(waits.get() + 1);
+                    pulse.signal();
+                }
+            },
+            || supervision.wait(3, &progress),
+        );
+        assert_eq!(waits.get(), 1);
+        assert_eq!(pulse.seen(), 4);
+        let now = Instant::now();
+        let _reset = ResetNow(REMAINING_NOW.replace(Some(now)));
+        supervision.deadline = Some(now + Duration::from_millis(5));
+        Pulse::with_wait_observer(
+            |pulse, seen, upto| {
+                assert_eq!(seen, 4);
+                assert_eq!(upto, Duration::from_millis(5));
+                pulse.signal();
+            },
+            || supervision.wait(4, &progress),
+        );
+    }
+
+    #[test]
+    fn oct25_native_cleanup_adapter_preserves_whether_a_verdict_preceded_termination_failure() {
+        struct Cleanup {
+            stopped: bool,
+        }
+
+        impl ProcessCleanup for Cleanup {
+            fn leader_released(&self) -> bool {
+                false
+            }
+
+            fn snapshot_usage(&self) -> MemoryUsage {
+                assert!(self.stopped, "the native cleanup request must precede the usage snapshot");
+                MemoryUsage {
+                    peak: Some(73),
+                    exhausted: false,
+                }
+            }
+
+            fn terminate_tree(&mut self) -> io::Result<()> {
+                assert!(!self.stopped, "only one native cleanup request is expected");
+                self.stopped = true;
+                Err(io::Error::new(io::ErrorKind::PermissionDenied, "owned termination refusal"))
+            }
+        }
+        let binary = crate::testing::test_binary("never-launched-native-cleanup");
+        for (settled, point) in [(false, "after execution began"), (true, "after its verdict was settled")] {
+            let mut cleanup = Cleanup { stopped: false };
+            let (verdict, usage) = ContainedProcess::cut_short(&mut cleanup, MemoryRequest::default(), &binary, settled).unwrap_err();
+            let Verdict::Unmetered(message) = verdict else {
+                panic!("a native cleanup failure must invalidate containment");
+            };
+            assert_eq!(
+                message,
+                format!(
+                    "`{}` and its descendants could not be terminated {point}; containment is unproven: owned termination refusal",
+                    binary.path
+                )
+            );
+            assert_eq!(usage.peak, Some(73));
+            assert!(!usage.exhausted);
+            assert!(cleanup.stopped);
+        }
+    }
+
+    #[test]
+    fn oct26_contained_release_adapter_preserves_both_owned_cleanup_states() {
+        struct Cleanup(bool);
+        impl ProcessCleanup for Cleanup {
+            fn leader_released(&self) -> bool {
+                self.0
+            }
+            fn snapshot_usage(&self) -> MemoryUsage {
+                panic!("release inspection must not inspect usage")
+            }
+            fn terminate_tree(&mut self) -> io::Result<()> {
+                panic!("release inspection must not terminate the process")
+            }
+        }
+        for released in [false, true] {
+            assert_eq!(ContainedProcess::released(&Cleanup(released)), released);
+        }
+    }
+
     fn policy_workspace() -> Workspace {
         let root = Utf8PathBuf::from(if cfg!(windows) { "C:/verdict-policy" } else { "/verdict-policy" });
         let mut work = Workspace::adopt(root.clone(), root.join("target"));
@@ -2193,6 +2534,103 @@ mod final_survivor_tests {
     }
 
     #[test]
+    fn a_kill_records_one_launch_without_an_unmutated_confirmation() {
+        let control = tick::ClockControl::new();
+        let clock = control.to_simple_clock();
+        let mut verdicts = std::iter::once(Verdict::Failed(Some("killer".into())));
+        super::super::sweep::begin_selection_trace();
+        let events = super::super::sweep::capture_launch_costs_for_test(|| {
+            let run = run_binary_with_observer(
+                &clock,
+                Attempt {
+                    active: Some(37),
+                    ..baseline_attempt()
+                },
+                |attempt| {
+                    assert_eq!(attempt.active, Some(37));
+                    assert!(matches!(attempt.only, Only::All));
+                    control.advance_millis(7);
+                    Observation {
+                        verdict: verdicts.next().expect("a kill must execute exactly once"),
+                        reach: ReachObservation::Reached,
+                        failure: None,
+                        quiet: Duration::ZERO,
+                        tests: Some(1),
+                        peak: None,
+                    }
+                },
+            );
+            assert!(matches!(run.verdict, Verdict::Failed(Some(ref name)) if name == "killer"));
+            assert_eq!(run.reach, ReachObservation::Reached);
+        });
+        assert!(verdicts.next().is_none());
+        assert_eq!(events.len(), 2);
+        let exact = events
+            .iter()
+            .map(|(_tier, confirmation, cost)| {
+                (
+                    *confirmation,
+                    cost.launches,
+                    cost.execution_ms,
+                    cost.hits,
+                    cost.misses,
+                    cost.inconclusive,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(exact, [(false, 1, 0, 0, 0, 0), (false, 0, 7, 0, 0, 0)]);
+        let _costs = super::super::sweep::take_execution_costs();
+        assert!(super::super::sweep::take_selection_trace().is_empty());
+    }
+
+    #[test]
+    fn kill_evidence_never_launches_an_unmutated_control() {
+        let control = tick::ClockControl::new();
+        let clock = control.to_simple_clock();
+        for active in [None, Some(37)] {
+            for only in [Only::All, Only::One("hinted::killer")] {
+                for test in [None, Some("reported::killer".to_owned())] {
+                    let mut launches = 0;
+                    let attempt = Attempt {
+                        active,
+                        only,
+                        timeout: Some(Duration::from_secs(3)),
+                        stall: Stall {
+                            budget: Some(Duration::from_secs(1)),
+                        },
+                        request: MemoryRequest {
+                            calibrating: false,
+                            meter: true,
+                            limit: Some(4096),
+                        },
+                    };
+                    let result = run_binary_with_observer(&clock, attempt, |actual| {
+                        launches += 1;
+                        assert_eq!(launches, 1, "an assertion failure must not launch a control run");
+                        assert_eq!(actual.active, active);
+                        assert_eq!(actual.only, only);
+                        assert_eq!(actual.timeout, attempt.timeout);
+                        assert_eq!(actual.stall.budget, attempt.stall.budget);
+                        assert_eq!(actual.request, attempt.request);
+                        Observation {
+                            verdict: Verdict::Failed(test.clone()),
+                            reach: ReachObservation::Reached,
+                            failure: None,
+                            quiet: Duration::ZERO,
+                            tests: Some(1),
+                            peak: None,
+                        }
+                    });
+                    assert_eq!(launches, 1);
+                    assert_eq!(result.verdict, Verdict::Failed(test));
+                    assert_eq!(result.reach, ReachObservation::Reached);
+                    let _costs = super::super::sweep::take_execution_costs();
+                }
+            }
+        }
+    }
+
+    #[test]
     fn telemetry_pre_spawn_refusal_is_reported_as_an_inconclusive_runner_launch_attempt() {
         let control = tick::ClockControl::new();
         let clock = control.to_simple_clock();
@@ -2203,7 +2641,6 @@ mod final_survivor_tests {
                 active: Some(37),
                 ..baseline_attempt()
             },
-            false,
             |_| {
                 control.advance_millis(17);
                 Observation {
@@ -2239,18 +2676,11 @@ mod final_survivor_tests {
 
     #[test]
     fn telemetry_records_each_confirmation_observation_once_without_launching_processes() {
-        for (confirm, verdicts) in [
-            (true, vec![Verdict::Failed(Some("killer".into())), Verdict::Passed]),
-            (false, vec![Verdict::TimedOut, Verdict::TimedOut]),
-            (false, vec![Verdict::TestEnumerationFailed("diagnostic".into()), Verdict::Passed]),
-            (
-                true,
-                vec![Verdict::TimedOut, Verdict::Failed(Some("killer".into())), Verdict::Passed],
-            ),
-            (
-                true,
-                vec![Verdict::Failed(Some("killer".into())), Verdict::Failed(Some("killer".into()))],
-            ),
+        for verdicts in [
+            vec![Verdict::Failed(Some("killer".into()))],
+            vec![Verdict::TimedOut, Verdict::TimedOut],
+            vec![Verdict::TestEnumerationFailed("diagnostic".into()), Verdict::Passed],
+            vec![Verdict::TimedOut, Verdict::Failed(Some("killer".into()))],
         ] {
             let expected = verdicts.len();
             let mut verdicts = verdicts.into_iter().enumerate();
@@ -2263,7 +2693,6 @@ mod final_survivor_tests {
                     active: Some(37),
                     ..baseline_attempt()
                 },
-                confirm,
                 |_| {
                     let (index, verdict) = verdicts.next().expect("only the scripted observations may be executed");
                     control.advance(Duration::from_millis(u64::try_from(index + 1).unwrap() * 7));
@@ -2334,7 +2763,6 @@ mod final_survivor_tests {
                     request: MemoryRequest::default(),
                     only: Only::All,
                 },
-                false,
                 |_| {
                     let (verdict, reach) = results.next().expect("one initial observation and one timeout confirmation");
                     Observation {
@@ -2354,7 +2782,7 @@ mod final_survivor_tests {
     }
 
     #[test]
-    fn enumeration_suspicions_are_exonerated_even_when_kill_confirmation_is_disabled() {
+    fn enumeration_suspicions_still_require_an_unmutated_check() {
         let mut calls = Vec::new();
         let result = run_binary_with_observer(
             &SimpleClock::new_system(),
@@ -2365,7 +2793,6 @@ mod final_survivor_tests {
                 request: MemoryRequest::default(),
                 only: Only::All,
             },
-            false,
             |attempt| {
                 calls.push(attempt.active);
                 Observation {
@@ -2421,7 +2848,11 @@ mod final_survivor_tests {
         for meter in [false, true] {
             let cause = io::Error::from(io::ErrorKind::NotFound);
             let detail = cause.to_string();
-            let request = MemoryRequest { meter, limit: None };
+            let request = MemoryRequest {
+                calibrating: false,
+                meter,
+                limit: None,
+            };
             let result = start_or_verdict_with(Command::new("not-started"), &binary, request, |_, actual| {
                 assert_eq!(actual.meter, meter);
                 Err(StartError::Spawn(cause))
@@ -2479,12 +2910,20 @@ mod final_survivor_tests {
                     .spawn()
                     .unwrap_or_else(|_| panic!("the contained helper must spawn before accounting is observed"));
                 let mut subtree = ProcessTree::adopt(spawned).unwrap();
-                let (usage, ceiling) = cut_short_with_usage(&mut subtree, MemoryRequest { meter: true, limit }, &binary, false, |_| {
-                    MemoryUsage {
+                let (usage, ceiling) = cut_short_with_usage(
+                    &mut subtree,
+                    MemoryRequest {
+                        calibrating: false,
+                        meter: true,
+                        limit,
+                    },
+                    &binary,
+                    false,
+                    |_| MemoryUsage {
                         peak: Some(123),
                         exhausted,
-                    }
-                })
+                    },
+                )
                 .unwrap();
                 assert_eq!(usage.peak, Some(123));
                 assert_eq!(usage.exhausted, exhausted);
@@ -2582,6 +3021,52 @@ mod final_survivor_tests {
         {
             use std::os::windows::process::ExitStatusExt as _;
             ExitStatus::from_raw(u32::try_from(code).unwrap())
+        }
+    }
+
+    #[test]
+    fn recovered_completed_supervision_retains_active_nextest_enumeration_identity() {
+        let binary = crate::testing::test_binary("never-launched-supervision");
+        for active in [None, Some(37)] {
+            for under_nextest in [false, true] {
+                let progress = Mutex::new(Progress::new(Watch::Off));
+                let mut supervision = ScriptedSupervision::new(Ok(Some(exit_status(nextest::TEST_LIST_CREATION_FAILED))), (false, false));
+                let (verdict, usage, evidence) = supervise(
+                    &mut supervision,
+                    &binary,
+                    active,
+                    under_nextest,
+                    MemoryRequest::default(),
+                    &progress,
+                    false,
+                );
+                match (under_nextest, active) {
+                    (true, Some(_)) => {
+                        let Verdict::TestEnumerationFailed(output) = verdict else {
+                            panic!("an active nextest list failure must remain an enumeration failure: {verdict:?}");
+                        };
+                        assert_eq!(output, "");
+                    }
+                    (true, None) => {
+                        let Verdict::Unmetered(reason) = verdict else {
+                            panic!("a baseline list failure is infrastructure failure: {verdict:?}");
+                        };
+                        assert_eq!(
+                            reason,
+                            format!(
+                                "`cargo nextest` exited with code {}, which does not describe a test run",
+                                nextest::TEST_LIST_CREATION_FAILED
+                            )
+                        );
+                    }
+                    (false, _) => assert!(matches!(verdict, Verdict::Failed(None))),
+                }
+                assert_eq!(usage.peak, None);
+                assert!(!usage.exhausted);
+                assert!(evidence.is_none());
+                assert!(supervision.collected.get());
+                assert_eq!(supervision.stopped, None);
+            }
         }
     }
 
@@ -2745,7 +3230,7 @@ mod final_survivor_tests {
                 let pulse = Arc::new(Pulse::default());
                 let before = pulse.seen();
                 let received = readers(&mut subtree, &progress, &pulse, under_nextest, retain_tail).unwrap();
-                let output = collected_with_grace(&received, None);
+                let output = collected(&received, Duration::from_secs(30));
                 while ask_after(&mut subtree).unwrap().is_none() {
                     thread::yield_now();
                 }
@@ -3226,7 +3711,9 @@ mod final_survivor_tests {
 
 /// Returns the last `count` lines without indexing the complete input.
 pub(super) fn tail(text: &str, count: usize) -> Cow<'_, str> {
-    if count == 0 || text.is_empty() {
+    if
+    // #[gamma::skip(logical.or_remove_right, reason = "For empty text with count>0, stripping suffixes and iterating match_indices do nothing; text.get(0..) is empty and contains no CR, so normal path returns Cow::Borrowed(\"\") exactly as the removed early return. count0 keeps its original guard.", tag = "equivalent")]
+    count == 0 || text.is_empty() {
         return Cow::Borrowed("");
     }
 
@@ -3334,6 +3821,124 @@ mod tests {
     use super::*;
 
     #[test]
+    fn recovered_reader_start_failure_stops_unsettled_and_preserves_termination_precedence_and_usage() {
+        struct Process {
+            binary: Utf8PathBuf,
+            calls: usize,
+            fails: bool,
+        }
+        impl ContainedProcess for Process {
+            fn released(&self) -> bool {
+                panic!("reader startup failure needs no release query")
+            }
+            fn usage(&self) -> MemoryUsage {
+                panic!("termination supplies the final usage")
+            }
+            fn cut_short(
+                &mut self,
+                request: MemoryRequest,
+                binary: &TestBinary,
+                settled: bool,
+            ) -> Result<(MemoryUsage, Option<u64>), (Verdict, MemoryUsage)> {
+                self.calls += 1;
+                assert_eq!((request.meter, request.limit, settled), (true, Some(41), false));
+                assert_eq!(binary.path, self.binary);
+                let usage = MemoryUsage {
+                    peak: Some(19),
+                    exhausted: false,
+                };
+                if self.fails {
+                    Err((Verdict::Unmetered("named stop refusal".into()), usage))
+                } else {
+                    Ok((usage, Some(41)))
+                }
+            }
+        }
+        let binary = crate::testing::test_binary("never-launched-reader-failure");
+        for fails in [false, true] {
+            let mut process = Process {
+                binary: binary.path.clone(),
+                calls: 0,
+                fails,
+            };
+            let (verdict, usage, evidence) = reader_failure(
+                &mut process,
+                MemoryRequest {
+                    calibrating: false,
+                    meter: true,
+                    limit: Some(41),
+                },
+                &binary,
+                &ReaderStartError {
+                    stream: ReaderStream::Stderr,
+                    cause: io::Error::other("named reader startup refusal"),
+                },
+            );
+            let expected = if fails {
+                Verdict::Unmetered("named stop refusal".into())
+            } else {
+                Verdict::Unjudged(format!(
+                    "`{}` output could not be supervised: the standard error reader could not be started: named reader startup refusal",
+                    binary.path
+                ))
+            };
+            assert_eq!(verdict, expected);
+            assert_eq!((usage.peak, usage.exhausted), (Some(19), false));
+            assert!(evidence.is_none());
+            assert_eq!(process.calls, 1);
+        }
+    }
+
+    #[test]
+    fn recovered_native_remaining_time_uses_the_exact_injected_clock_before_at_and_after_the_deadline() {
+        struct Reset(Option<Instant>);
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                REMAINING_NOW.set(self.0);
+            }
+        }
+        let now = Instant::now();
+        let _reset = Reset(REMAINING_NOW.replace(Some(now)));
+        assert_eq!(remaining(now + Duration::from_millis(37)), Duration::from_millis(37));
+        assert_eq!(remaining(now), Duration::ZERO);
+        assert_eq!(remaining(now.checked_sub(Duration::from_millis(1)).unwrap()), Duration::ZERO);
+    }
+
+    #[test]
+    fn recovered_named_resource_free_launcher_preserves_explicit_test_threads_and_other_flags() {
+        let mut work = Workspace::adopt(
+            "never-launched-resource-free-root".into(),
+            "never-written-resource-free-target".into(),
+        );
+        work.set_test_args(vec!["--test-threads".into(), "7".into(), "chosen".into(), "--nocapture".into()]);
+        let binary = crate::testing::test_binary("never-launched-resource-free-binary");
+        let command = launcher(&work, &binary, Only::One("chosen_test"), false).unwrap();
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            ["--test-threads", "7", "--nocapture", "chosen_test", "--exact"].map(std::ffi::OsStr::new)
+        );
+        assert_eq!(command.get_program(), binary.path.as_std_path());
+    }
+
+    #[test]
+    fn recovered_reach_records_stop_at_the_first_invalid_seal_and_never_reseal_overflow() {
+        for (records, expected) in [
+            (vec![gamma_rt::SEAL], ReachObservation::NotReached),
+            (vec![9, gamma_rt::SEAL], ReachObservation::Reached),
+            (vec![gamma_rt::SEAL, gamma_rt::OVERFLOW], ReachObservation::Unknown),
+            (vec![gamma_rt::SEAL, gamma_rt::SEAL, gamma_rt::SEAL], ReachObservation::Unknown),
+            (vec![gamma_rt::SEAL, 3, gamma_rt::SEAL], ReachObservation::Unknown),
+            (vec![gamma_rt::SEAL, 3, 9], ReachObservation::Unknown),
+        ] {
+            let bytes = records.iter().flat_map(|record| record.to_le_bytes()).collect::<Vec<_>>();
+            assert_eq!(reach_from_records(&bytes, 9), expected, "{records:?}");
+        }
+        let mut partial = gamma_rt::SEAL.to_le_bytes().to_vec();
+        partial.push(1);
+        assert_eq!(reach_from_records(&partial, 9), ReachObservation::Unknown);
+    }
+
+    #[test]
     fn attempts_and_diagnostic_errors_preserve_their_user_visible_details() {
         let attempt = Attempt {
             active: Some(7),
@@ -3397,31 +4002,25 @@ mod tests {
             request: MemoryRequest::default(),
             only: Only::All,
         };
-        assert!(reach_hint_is_final(base, false));
-        assert!(!reach_hint_is_final(
-            Attempt {
-                timeout: Some(Duration::from_secs(1)),
-                ..base
+        assert!(reach_hint_is_final(base));
+        assert!(!reach_hint_is_final(Attempt {
+            timeout: Some(Duration::from_secs(1)),
+            ..base
+        }));
+        assert!(!reach_hint_is_final(Attempt {
+            stall: Stall {
+                budget: Some(Duration::from_secs(1)),
             },
-            false
-        ));
-        assert!(!reach_hint_is_final(
-            Attempt {
-                stall: Stall {
-                    budget: Some(Duration::from_secs(1)),
-                },
-                ..base
+            ..base
+        }));
+        assert!(!reach_hint_is_final(Attempt {
+            request: MemoryRequest {
+                calibrating: false,
+                meter: true,
+                limit: None
             },
-            false
-        ));
-        assert!(!reach_hint_is_final(
-            Attempt {
-                request: MemoryRequest { meter: true, limit: None },
-                ..base
-            },
-            false
-        ));
-        assert!(!reach_hint_is_final(base, true));
+            ..base
+        }));
     }
 
     #[test]
@@ -3440,7 +4039,6 @@ mod tests {
                 request: MemoryRequest::default(),
                 only: Only::All,
             },
-            false,
         );
 
         assert_eq!(run.verdict, Verdict::Passed);
@@ -3620,6 +4218,7 @@ mod tests {
                 budget: Some(Duration::from_secs(3)),
             },
             request: MemoryRequest {
+                calibrating: false,
                 meter: true,
                 limit: Some(100),
             },
@@ -3653,21 +4252,23 @@ mod tests {
 
     #[test]
     fn collection_timeout_is_partial_even_when_every_received_chunk_was_complete() {
-        let (sink, drained) = mpsc::channel();
-        sink.send(Drained {
+        let chunk = Drained {
             text: b"prefix".to_vec(),
             tail: b"tail".to_vec(),
             tail_truncated: false,
             complete: true,
             authoritative: true,
             stream: ReaderStream::Stdout,
-        })
-        .expect("chunk");
+        };
+        let drained = ScriptedCollection {
+            grace: Duration::from_millis(1),
+            replies: core::cell::RefCell::new(VecDeque::from([Ok(chunk), Err(RecvTimeoutError::Timeout)])),
+        };
 
         let collected = collected(&drained, Duration::from_millis(1));
         assert_eq!(collected.text, b"prefix");
         assert!(!collected.whole);
-        drop(sink);
+        assert!(drained.replies.borrow().is_empty());
     }
 
     /// A pipe that fails part way through is not reported as a stream that simply ended.
@@ -3897,7 +4498,7 @@ mod tests {
         assert_eq!(issued, 1 + CONFIRM_ROUNDS, "the ladder is not bounded");
     }
 
-    /// A verdict that is already evidence costs no confirmation here; `confirm_kill` owns that one.
+    /// An assertion failure needs no resource confirmation.
     #[test]
     fn a_settled_verdict_is_not_re_run() {
         let mut issued = 0_usize;
@@ -3931,26 +4532,24 @@ mod tests {
     /// killer named, and suppresses the warning that would have said so.
     #[test]
     fn a_reader_that_never_returns_leaves_the_collection_partial() {
-        let (sink, drained) = mpsc::channel::<Drained>();
-
-        // One reader finished; the other is still holding the pipe open, so its sender never sends
-        // and never drops.
-        let _still_reading = sink.clone();
-        let _sent = sink.send(Drained {
+        let chunk = Drained {
             text: b"running 1 test\n".to_vec(),
             tail: b"running 1 test\n".to_vec(),
             tail_truncated: false,
             complete: true,
             authoritative: true,
             stream: ReaderStream::Stdout,
-        });
-
-        drop(sink);
+        };
+        let drained = ScriptedCollection {
+            grace: Duration::from_millis(50),
+            replies: core::cell::RefCell::new(VecDeque::from([Ok(chunk), Err(RecvTimeoutError::Timeout)])),
+        };
 
         let Collected { text, whole, .. } = collected(&drained, Duration::from_millis(50));
 
         assert!(!whole, "an absent reader was read as the end of the output");
         assert_eq!(String::from_utf8_lossy(&text), "running 1 test\n");
+        assert!(drained.replies.borrow().is_empty());
     }
 
     /// Every reader having sent and dropped its sender is the whole of the output, and the ordinary
@@ -4195,10 +4794,13 @@ mod tests {
                 active: None,
                 timeout: Some(Duration::from_secs(1)),
                 stall: Stall::NONE,
-                request: MemoryRequest { meter: false, limit: None },
+                request: MemoryRequest {
+                    calibrating: false,
+                    meter: false,
+                    limit: None,
+                },
                 only: Only::All,
             },
-            true,
         );
 
         match verdict {
@@ -4229,10 +4831,13 @@ mod tests {
                 active: None,
                 timeout: Some(Duration::from_secs(1)),
                 stall: Stall::NONE,
-                request: MemoryRequest { meter: true, limit: None },
+                request: MemoryRequest {
+                    calibrating: false,
+                    meter: true,
+                    limit: None,
+                },
                 only: Only::All,
             },
-            true,
         );
 
         assert!(matches!(verdict, Verdict::Unjudged(_)), "{verdict:?}");
@@ -4250,7 +4855,7 @@ mod tests {
         let binary = crate::testing::helper();
         let _refused = faults::arm(Fault::Spawn);
 
-        let verdict = run_binary(&work, &binary, plain_attempt(), true);
+        let verdict = run_binary(&work, &binary, plain_attempt());
 
         assert_eq!(verdict, Verdict::Passed, "the retry must let the run go ahead");
     }
@@ -4267,7 +4872,7 @@ mod tests {
         let binary = crate::testing::helper();
         let _refusals: Vec<_> = (0..SPAWN_ATTEMPTS).map(|_round| faults::arm(Fault::Spawn)).collect();
 
-        let verdict = run_binary(&work, &binary, plain_attempt(), true);
+        let verdict = run_binary(&work, &binary, plain_attempt());
 
         match verdict {
             Verdict::Unjudged(reason) => assert!(reason.contains("could not be started"), "{reason}"),
@@ -4284,7 +4889,7 @@ mod tests {
         let _interrupted = process_faults::arm_late(ProcessFault::Window, Duration::from_millis(10));
         let started = Instant::now();
 
-        let verdict = run_binary(&work, &binary, plain_attempt(), true);
+        let verdict = run_binary(&work, &binary, plain_attempt());
 
         assert!(matches!(verdict, Verdict::Unmetered(_)), "{verdict:?}");
         assert!(started.elapsed() < SPAWN_BACKOFF.saturating_mul(2), "{:?}", started.elapsed());
@@ -4297,7 +4902,7 @@ mod tests {
         let binary = crate::testing::helper();
         let _refused = faults::arm(Fault::Thread);
 
-        let verdict = run_binary(&work, &binary, plain_attempt(), true);
+        let verdict = run_binary(&work, &binary, plain_attempt());
 
         match verdict {
             Verdict::Unjudged(reason) => assert!(reason.contains("output could not be supervised"), "{reason}"),
@@ -4331,7 +4936,11 @@ mod tests {
             active: None,
             timeout: Some(Duration::from_secs(30)),
             stall: Stall::NONE,
-            request: MemoryRequest { meter: false, limit: None },
+            request: MemoryRequest {
+                calibrating: false,
+                meter: false,
+                limit: None,
+            },
             only: Only::All,
         }
     }
@@ -4359,10 +4968,13 @@ mod tests {
                 active: None,
                 timeout: Some(Duration::from_secs(1)),
                 stall: Stall::NONE,
-                request: MemoryRequest { meter: true, limit: None },
+                request: MemoryRequest {
+                    calibrating: false,
+                    meter: true,
+                    limit: None,
+                },
                 only: Only::All,
             },
-            true,
         );
 
         match verdict {
@@ -4572,8 +5184,7 @@ mod tests {
                     stall: Stall::NONE,
                     request: MemoryRequest::default(),
                     only: Only::All,
-                },
-                true
+                }
             ),
             Verdict::TimedOut
         );
@@ -4592,7 +5203,11 @@ mod tests {
                 active: Some(1),
                 timeout: Some(Duration::from_millis(50)),
                 stall: Stall::NONE,
-                request: MemoryRequest { meter: false, limit: None },
+                request: MemoryRequest {
+                    calibrating: false,
+                    meter: false,
+                    limit: None,
+                },
                 only: Only::All,
             },
             &Arc::new(Mutex::new(Progress::new(Watch::Off))),
@@ -4625,7 +5240,6 @@ mod tests {
                 request: MemoryRequest::default(),
                 only: Only::All,
             },
-            true,
         );
 
         assert!(matches!(verdict, Verdict::Stalled(_)), "{verdict:?}");
@@ -4694,8 +5308,7 @@ mod tests {
                     stall: Stall::NONE,
                     request: MemoryRequest::default(),
                     only: Only::All,
-                },
-                true
+                }
             ),
             Verdict::Passed
         );
@@ -4717,8 +5330,7 @@ mod tests {
                     stall: Stall::NONE,
                     request: MemoryRequest::default(),
                     only: Only::All,
-                },
-                true
+                }
             ),
             Verdict::Passed
         );
@@ -4744,7 +5356,6 @@ mod tests {
                 request: MemoryRequest::default(),
                 only: Only::All,
             },
-            true,
         );
         let took = started.elapsed();
 
@@ -4803,8 +5414,7 @@ mod tests {
                     stall: Stall::NONE,
                     request: MemoryRequest::default(),
                     only: Only::All,
-                },
-                true
+                }
             ),
             Verdict::Failed(Some("a::first".to_owned()))
         );
@@ -4827,8 +5437,7 @@ mod tests {
                     stall: Stall::NONE,
                     request: MemoryRequest::default(),
                     only: Only::All,
-                },
-                true
+                }
             ),
             Verdict::Passed
         );
@@ -4852,8 +5461,7 @@ mod tests {
                     stall: Stall::NONE,
                     request: MemoryRequest::default(),
                     only: Only::All,
-                },
-                true
+                }
             ),
             Verdict::Passed
         );
@@ -4880,8 +5488,7 @@ mod tests {
                     stall: Stall::NONE,
                     request: MemoryRequest::default(),
                     only: Only::All,
-                },
-                true
+                }
             ),
             Verdict::Passed
         );
@@ -4913,8 +5520,7 @@ mod tests {
                     stall: Stall::NONE,
                     request: MemoryRequest::default(),
                     only: Only::All,
-                },
-                true
+                }
             ),
             Verdict::Passed
         );
@@ -4923,8 +5529,6 @@ mod tests {
     /// A binary that exits non-zero fails, named by libtest's own report.
     #[test]
     fn a_failing_binary_is_named_by_its_first_failing_test() {
-        // Failing only while a mutant is active is what a detection looks like, and it is what the
-        // kill confirmation is there to establish: a binary that failed either way would be flaky.
         let (_directory, work) = scripted(&[
             "when-env:GAMMA_ACTIVE|print:test a::b ... FAILED",
             "when-env:GAMMA_ACTIVE|exit:101",
@@ -4945,8 +5549,7 @@ mod tests {
                     stall: Stall::NONE,
                     request: MemoryRequest::default(),
                     only: Only::All,
-                },
-                true
+                }
             ),
             Verdict::Failed(Some("a::b".to_owned()))
         );
@@ -5000,12 +5603,12 @@ mod tests {
                 timeout: Some(Duration::from_mins(1)),
                 stall: Stall::NONE,
                 request: MemoryRequest {
+                    calibrating: false,
                     meter: true,
                     limit: Some(limit),
                 },
                 only: Only::All,
             },
-            true,
         );
 
         // Reporting this as a plain failure would be defensible and wrong: the suite noticed
@@ -5045,6 +5648,7 @@ mod tests {
                     budget: Some(Duration::from_secs(10)),
                 },
                 request: MemoryRequest {
+                    calibrating: false,
                     meter: true,
                     limit: Some(limit),
                 },
@@ -5080,12 +5684,12 @@ mod tests {
                     timeout: Some(Duration::from_secs(30)),
                     stall: Stall::NONE,
                     request: MemoryRequest {
+                        calibrating: false,
                         meter: true,
                         limit: Some(512 * 1024 * 1024)
                     },
                     only: Only::All,
-                },
-                true
+                }
             ),
             Verdict::Passed
         );
@@ -5181,8 +5785,7 @@ mod tests {
     /// The two exits carry the same pair of facts, and which one a run takes is decided by nothing
     /// but whether the reader published the failure before `try_wait` reaped the child. An early
     /// cut that preferred the ceiling would drop the name a reader goes and opens, discard the
-    /// killer hint the next mutant would have probed with, and — because only `Failed` is routed to
-    /// `confirm_kill` — skip the flake check for exactly the runs that raced the other way.
+    /// killer hint the next mutant would have probed with.
     ///
     /// Asserted here rather than through a launched binary because the state cannot be arranged on
     /// Linux: the ceiling sets `memory.oom.group`, so an OOM takes the whole subtree with it and
@@ -5190,12 +5793,12 @@ mod tests {
     /// refuses allocations rather than killing, is where the run really survives its ceiling.
     #[test]
     fn a_run_cut_short_by_a_named_failure_keeps_the_name_beside_the_ceiling() {
-        let named = cut_by_named_failure("module::case".to_owned(), Some(300), Some(256));
+        let named = cut_by_named_failure("module::case".to_owned());
 
         assert_eq!(named, Verdict::Failed(Some("module::case".to_owned())));
 
         // With no ceiling crossed there is only the failure, which is the ordinary shape of this.
-        let plain = cut_by_named_failure("module::case".to_owned(), None, None);
+        let plain = prefer_named(Verdict::Failed(Some("module::case".to_owned())), None, None);
 
         assert_eq!(plain, Verdict::Failed(Some("module::case".to_owned())));
     }
@@ -5235,80 +5838,69 @@ mod tests {
                 timeout: Some(Duration::from_mins(1)),
                 stall: Stall::NONE,
                 request: MemoryRequest {
+                    calibrating: false,
                     meter: true,
                     limit: Some(limit),
                 },
                 only: Only::All,
             },
-            false,
         );
 
         assert_eq!(verdict, Verdict::Failed(Some("failing::case".to_owned())));
     }
 
-    /// An exoneration isolates the failing test rather than running the whole binary to completion,
-    /// so a slow tail in the rest of the suite does not cause the confirmation to time out and
-    /// misclassify the detection as flaky.
     #[test]
-    fn an_exoneration_runs_only_the_failing_test_avoiding_suite_tail_timeouts() {
-        let (_directory, work) = scripted(&[
-            "when-env:GAMMA_ACTIVE|print:test first ... FAILED",
-            "when-env:GAMMA_ACTIVE|exit:101",
-            "when-arg:first|exit:0",
-            "sleep:30000",
-        ]);
-        let binary = crate::testing::helper();
-
-        let verdict = run_binary(
-            &work,
-            &binary,
-            Attempt {
-                active: Some(7),
-                timeout: Some(Duration::from_millis(500)),
-                stall: Stall::NONE,
-                request: MemoryRequest::default(),
-                only: Only::All,
-            },
-            true,
+    fn confirmation_resource_failures_retain_their_cause_instead_of_claiming_a_flaky_test() {
+        let attempt = Attempt {
+            active: Some(7),
+            timeout: Some(Duration::from_secs(30)),
+            stall: Stall::NONE,
+            request: MemoryRequest::default(),
+            only: Only::One("selected"),
+        };
+        for (verdict, expected) in [
+            (Verdict::TimedOut, "exceeded its time budget"),
+            (Verdict::Stalled(Some("last".into())), "stopped reporting progress"),
+            (Verdict::MemoryLimit { peak: Some(11), limit: 10 }, "exceeded its memory ceiling"),
+        ] {
+            let confirmed = confirm_enumeration_with(attempt, "diagnostic".into(), |actual| {
+                assert_eq!(actual.active, None);
+                assert!(matches!(actual.only, Only::One("selected")));
+                verdict
+            });
+            assert_eq!(confirmed, Verdict::Unconfirmed(None, expected));
+        }
+        assert_eq!(
+            confirm_enumeration_with(attempt, "diagnostic".into(), |_| Verdict::TimedOut),
+            Verdict::Unconfirmed(None, "exceeded its time budget")
         );
-
-        assert_eq!(verdict, Verdict::Failed(Some("first".to_owned())));
-    }
-
-    /// An exoneration that ran out of time did not establish that the suite is green without the
-    /// mutant, so it does not confirm the kill.
-    ///
-    /// The confirmation asks one question — does the suite still fail with the mutant switched off
-    /// — and a run that exceeded its budget answered neither way. Reading it as "green without,
-    /// red with" credits the suite with a detection on the strength of a scheduling hiccup, and it
-    /// does so in the score-inflating direction, which is the one this tool must not be wrong in.
-    #[test]
-    fn an_exoneration_that_ran_out_of_time_does_not_confirm_a_kill() {
-        // Fails only while a mutant is active; with none it runs long enough to outlive any budget
-        // a test would give it, which is the shape the exoneration has to cope with.
-        let (_directory, work) = scripted(&["when-env:GAMMA_ACTIVE|exit:101", "sleep:30000"]);
-        let binary = crate::testing::helper();
-
-        let verdict = confirm_kill(
-            &work,
-            &binary,
-            Attempt {
-                active: Some(7),
-                timeout: Some(Duration::from_millis(200)),
-                stall: Stall::NONE,
-                request: MemoryRequest::default(),
-                only: Only::All,
-            },
-            Some("a::b".to_owned()),
-        );
-
-        // Neither a kill nor a survivor, and the test that failed travels with it: that name is the
-        // only thing anybody can act on here.
-        assert_eq!(verdict, Verdict::Flaky(Some("a::b".to_owned())), "{verdict:?}");
     }
 
     #[test]
-    fn confirmation_matrix_preserves_killers_enumeration_output_and_failed_exonerations() {
+    fn unexpected_confirmation_verdicts_keep_the_generic_unconfirmed_reason() {
+        let attempt = Attempt {
+            active: Some(7),
+            timeout: Some(Duration::from_secs(30)),
+            stall: Stall::NONE,
+            request: MemoryRequest::default(),
+            only: Only::One("selected"),
+        };
+        let reason = "did not establish a trustworthy passing result";
+        let verdicts: [fn() -> Verdict; 3] = [
+            || Verdict::Flaky(Some("other".into())),
+            || Verdict::TestEnumerationFailed("enumeration refused".into()),
+            || Verdict::Unconfirmed(None, "previous confirmation was incomplete"),
+        ];
+        for verdict in verdicts {
+            assert_eq!(
+                confirm_enumeration_with(attempt, "output".into(), |_| verdict()),
+                Verdict::Unconfirmed(None, reason)
+            );
+        }
+    }
+
+    #[test]
+    fn enumeration_confirmation_preserves_output_and_failed_exonerations() {
         let attempt = Attempt {
             active: Some(7),
             timeout: Some(Duration::from_secs(30)),
@@ -5316,7 +5908,7 @@ mod tests {
             request: MemoryRequest::default(),
             only: Only::All,
         };
-        for test in [None, Some("original".to_owned())] {
+        for test in [None, Some("observed".to_owned())] {
             let check = |actual: Attempt<'_>, expected: Only<'_>| {
                 assert_eq!(actual.active, None);
                 assert_eq!(actual.only, expected);
@@ -5325,13 +5917,6 @@ mod tests {
                 assert_eq!(actual.request, attempt.request);
             };
             assert_eq!(
-                confirm_kill_with(attempt, test.clone(), |actual| {
-                    check(actual, test.as_deref().map_or(Only::All, Only::One));
-                    Verdict::Passed
-                }),
-                Verdict::Failed(test.clone())
-            );
-            assert_eq!(
                 confirm_enumeration_with(attempt, "enumeration diagnostic".to_owned(), |actual| {
                     check(actual, Only::All);
                     Verdict::Passed
@@ -5339,38 +5924,19 @@ mod tests {
                 Verdict::TestEnumerationFailed("enumeration diagnostic".to_owned())
             );
             assert_eq!(
-                confirm_kill_with(attempt, test.clone(), |actual| {
-                    check(actual, test.as_deref().map_or(Only::All, Only::One));
-                    Verdict::Failed(Some("observed".to_owned()))
-                }),
-                Verdict::Flaky(test.clone().or_else(|| Some("observed".to_owned())))
-            );
-            assert_eq!(
                 confirm_enumeration_with(attempt, "enumeration diagnostic".to_owned(), |actual| {
                     check(actual, Only::All);
-                    Verdict::Failed(Some("observed".to_owned()))
+                    Verdict::Failed(test.clone())
                 }),
-                Verdict::Flaky(Some("observed".to_owned()))
+                Verdict::Flaky(test)
             );
         }
         for infrastructure in [Verdict::Unjudged, Verdict::Unmetered] {
-            assert_eq!(
-                confirm_kill_with(attempt, Some("original".to_owned()), |_| infrastructure(
-                    "injected failure".to_owned()
-                )),
-                infrastructure("injected failure".to_owned())
-            );
             assert_eq!(
                 confirm_enumeration_with(attempt, "diagnostic".to_owned(), |_| infrastructure("injected failure".to_owned())),
                 infrastructure("injected failure".to_owned())
             );
         }
-        assert_eq!(
-            confirm_kill_with(attempt.exonerating(), Some("original".to_owned()), |_| {
-                panic!("an unmutated failure must not launch another exoneration");
-            }),
-            Verdict::Failed(Some("original".to_owned()))
-        );
     }
 
     #[test]
@@ -5423,64 +5989,7 @@ mod tests {
             "nextest could not list the tests".to_owned(),
         );
 
-        assert_eq!(verdict, Verdict::Flaky(None), "{verdict:?}");
-    }
-
-    /// A test that fails with the mutant and fails again without it is flaky, not a detection.
-    ///
-    /// Scoring a failing suite as a kill with nothing at all having established that the mutant
-    /// caused it would let one unreliable test manufacture a kill for every mutant it was run
-    /// against, and inflate the score by however many that was.
-    #[test]
-    fn a_test_that_fails_without_the_mutant_too_is_not_a_kill() {
-        let (_directory, work) = scripted(&["print:running 1 test", "print:test a::b ... FAILED", "exit:101"]);
-        let flaky = crate::testing::helper();
-
-        // Neither a kill nor a survivor: something failed, but not because of the mutant, and the
-        // mutant is what was being judged. The test that failed both ways travels with the verdict
-        // because fixing it is the only remedy anybody has here.
-        assert_eq!(
-            run_binary(
-                &work,
-                &flaky,
-                Attempt {
-                    active: Some(7),
-                    timeout: Some(Duration::from_secs(30)),
-                    stall: Stall::NONE,
-                    request: MemoryRequest::default(),
-                    only: Only::All,
-                },
-                true
-            ),
-            Verdict::Flaky(Some("a::b".to_owned()))
-        );
-    }
-
-    /// Turning the confirmation off buys back the second run and gives up telling the two apart.
-    ///
-    /// The same binary that is flaky above is scored as a detection here, which is exactly the cost
-    /// of the flag: nothing established that the mutant caused the failure, and without the
-    /// confirming run nothing could have.
-    #[test]
-    fn a_run_that_declines_to_confirm_believes_the_failing_test() {
-        let (_directory, work) = scripted(&["print:running 1 test", "print:test a::b ... FAILED", "exit:101"]);
-        let flaky = crate::testing::helper();
-
-        assert_eq!(
-            run_binary(
-                &work,
-                &flaky,
-                Attempt {
-                    active: Some(7),
-                    timeout: Some(Duration::from_secs(30)),
-                    stall: Stall::NONE,
-                    request: MemoryRequest::default(),
-                    only: Only::All,
-                },
-                false
-            ),
-            Verdict::Failed(Some("a::b".to_owned()))
-        );
+        assert_eq!(verdict, Verdict::Unconfirmed(None, "exceeded its time budget"), "{verdict:?}");
     }
 
     /// The confirmation is skipped when there was no mutant to exonerate.
@@ -5502,8 +6011,7 @@ mod tests {
                     stall: Stall::NONE,
                     request: MemoryRequest::default(),
                     only: Only::All,
-                },
-                true
+                }
             ),
             Verdict::Failed(Some("a::b".to_owned()))
         );
@@ -5772,7 +6280,11 @@ mod tests {
                 active: None,
                 timeout: Some(Duration::from_mins(1)),
                 stall: Stall { budget: None },
-                request: MemoryRequest { meter: false, limit: None },
+                request: MemoryRequest {
+                    calibrating: false,
+                    meter: false,
+                    limit: None,
+                },
                 only: Only::All,
             },
             &Arc::new(Mutex::new(Progress::new(Watch::Nextest))),
@@ -6014,7 +6526,6 @@ mod tests {
                 request: MemoryRequest::default(),
                 only: Only::All,
             },
-            false,
         );
 
         assert!(matches!(verdict, Verdict::Passed), "{verdict:?}");

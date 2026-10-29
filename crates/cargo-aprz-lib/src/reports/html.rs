@@ -735,7 +735,9 @@ fn write_summary<W: Write>(
             expanded,
             &mut first_pill_emitted,
         )?;
-        expanded = false;
+        expanded =
+        // #[gamma::skip(assign_value.default, reason = "Default produces the same concrete false or None value as this assignment.", tag = "equivalent")]
+        false;
     }
     Ok(())
 }

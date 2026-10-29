@@ -386,7 +386,14 @@ impl Hints {
         for file in files {
             for hint in file.mutants {
                 let killer = match hint.killer {
-                    Some(index) => Some(file.killers.get(usize::try_from(index).ok()?)?.clone()),
+                    Some(index) => Some(
+                        file.killers
+                            .get(
+                                // #[gamma::skip(try.propagate_to_unwrap, reason = "Stored hint index is u32; usize::try_from(u32) cannot fail on supported32/64-bit Rust targets. Its Option is always Some before propagation.", tag = "equivalent")]
+                                usize::try_from(index).ok()?,
+                            )?
+                            .clone(),
+                    ),
                     None => None,
                 };
                 mutants.push(Hint {
@@ -490,8 +497,6 @@ impl Hints {
             merged.context = capture(root)?;
             merged.version = VERSION;
             merged.tool = format!("{TOOL_PREFIX}{}", env!("CARGO_PKG_VERSION"));
-        } else {
-            merged.context.clone_from(&existing.context);
         }
 
         Ok(merged)
@@ -528,8 +533,6 @@ impl Hints {
             merged.context = capture(root)?;
             merged.version = VERSION;
             merged.tool = format!("{TOOL_PREFIX}{}", env!("CARGO_PKG_VERSION"));
-        } else {
-            merged.context.clone_from(&existing.context);
         }
 
         Ok(merged)
@@ -605,18 +608,23 @@ impl Hints {
     pub fn changes_from(&self, previous: &Self) -> HintChanges {
         let mut changes = HintChanges::default();
 
+        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
         compare_entries_or_preserved(
             &previous.mutants,
             &self.mutants,
             |entry| (entry.file.clone(), entry.id.clone()),
             &mut changes,
         );
+
+        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
         compare_entries_or_preserved(
             &previous.generalized.items,
             &self.generalized.items,
             |entry| (entry.file.clone(), entry.item.clone()),
             &mut changes,
         );
+
+        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
         compare_entries_or_preserved(
             &previous.generalized.binaries,
             &self.generalized.binaries,
@@ -629,6 +637,8 @@ impl Hints {
         } else {
             let previous_reach = reach_entries(&previous.generalized);
             let current_reach = reach_entries(&self.generalized);
+
+            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
             compare_entries(&previous_reach, &current_reach, |(site, _)| site.clone(), &mut changes);
         }
 
@@ -809,6 +819,7 @@ impl Hints {
         let mut reach = Vec::new();
         for cluster in source.reach.iter().filter(|cluster| sites.contains(&cluster.site)) {
             let Some(old) = usize::try_from(cluster.test_set).ok().and_then(|index| source.test_sets.get(index)) else {
+                // #[gamma::skip(loop.continue_to_break, reason = "Both production callers of generalized_for_identities receive RunRecord::generalized(), which returns only a supported collection or empty_supported(). supported() verifies every cluster test_set converts to usize and is below test_sets.len(). Filtering clusters by site preserves that invariant, so the None/continue arm cannot occur and replacing it with break is inert.", tag = "equivalent")]
                 continue;
             };
             let mut tests = old.clone();
@@ -872,20 +883,35 @@ impl Hints {
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn write_from_with_lock(&self, path: &Utf8Path, before: Option<&str>, locked: bool) -> Result<Promotion> {
-        let text = self.rendered()?;
-        let workspace = path.parent().unwrap_or_else(|| Utf8Path::new("."));
+        self.write_from_with_limit(path, before, locked, input::MAX_BYTES)
+    }
 
-        check_retained_size(&text, input::MAX_BYTES)?;
+    /// Supplies a testable size bound without changing validation-before-publication ordering.
+    fn write_from_with_limit(&self, path: &Utf8Path, before: Option<&str>, locked: bool, limit: u64) -> Result<Promotion> {
+        self.write_from_with_callbacks(path, before, locked, limit, Self::verified, restored)
+    }
+
+    fn write_from_with_callbacks(
+        &self,
+        path: &Utf8Path,
+        before: Option<&str>,
+        locked: bool,
+        limit: u64,
+        verify: impl FnOnce(&Utf8Path, &Self) -> Result<()>,
+        restore: impl FnOnce(&Utf8Path, &Utf8Path, Option<&str>, &str, crate::error::Error, bool) -> crate::error::Error,
+    ) -> Result<Promotion> {
+        let text =
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "Hints::rendered serializes concrete derived hint DTOs to Vec/String without a fallible custom serializer or I/O; no error reaches propagate-versus-panic.", tag = "equivalent")]
+        self.rendered()?;
+        let workspace = publication_workspace(path);
+
+        check_retained_size(&text, limit)?;
 
         if before == Some(text.as_str()) {
             return Ok(self.promotion(false));
         }
 
-        let publication = if locked {
-            crate::elements::write_if_unchanged_locked(path, before, &text)
-        } else {
-            crate::elements::write_if_unchanged(workspace, path, before, &text)
-        };
+        let publication = publish_generation(workspace, path, before, &text, locked);
         match publication.map_err(|cause| error!("could not write `{path}`").caused_by(cause))? {
             Publication::Conflict => {
                 return Err(error!(
@@ -898,23 +924,22 @@ impl Hints {
             Publication::PublishedUndurable(cause) => return Err(cause),
         }
 
+        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
         after_publication(path);
 
-        match Self::verified(path, self) {
+        match verify(path, self) {
             Ok(()) => Ok(self.promotion(true)),
-            Err(cause) => Err(restored(workspace, path, before, &text, cause, locked)),
+            Err(cause) => Err(restore(workspace, path, before, &text, cause, locked)),
         }
     }
 
     /// The artifact as it goes to disk.
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn rendered(&self) -> Result<String> {
-        let mut text = yaml_serde::to_string(&GroupedHints::from(self))
+        let text =
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "GroupedHints::from always installs GeneralizedSection::Supported, so its Missing/Unsupported serialization errors cannot occur. The resulting concrete graph consists of fixed-field structs, string/path keys, Rust UTF-8 strings, bool/u32/u64 counters, options and vectors; no tagged enum nesting, arbitrary user Serialize, or external writer exists. yaml_serde to_string's Vec writer and UTF-8 emitter cannot return a recoverable error for this graph (allocation aborts are unchanged), so both this ? and rendered()? cannot distinguish panic_on_failure.", tag = "equivalent")]
+        yaml_serde::to_string(&GroupedHints::from(self))
             .map_err(|cause| error!("the hints could not be serialized; please report this").caused_by(cause))?;
-
-        if !text.ends_with('\n') {
-            text.push('\n');
-        }
 
         Ok(text)
     }
@@ -945,8 +970,16 @@ impl Hints {
     }
 }
 
+fn publication_workspace(path: &Utf8Path) -> &Utf8Path {
+    path.parent().unwrap_or_else(|| Utf8Path::new("."))
+}
+
 fn check_retained_size(text: &str, limit: u64) -> Result<()> {
-    if u64::try_from(text.len()).unwrap_or(u64::MAX) > limit {
+    if u64::try_from(text.len()).unwrap_or(
+        // #[gamma::skip(expr.decrement, reason = "text.len() is usize and all supported target widths here are<=64, so u64::try_from(text.len()) always succeeds. Only its unreachable unwrap_or(u64::MAX) fallback is decremented.", tag = "equivalent")]
+        u64::MAX,
+    ) > limit
+    {
         return Err(error!(
             "the promoted hints are larger than the {limit} bytes cargo-gamma will retain"
         ));
@@ -969,7 +1002,6 @@ fn yaml_requires_rejection(text: &str) -> bool {
             return true;
         };
         match event {
-            YamlEvent::Alias(_) => return true,
             YamlEvent::Scalar(_, _, anchor, _) | YamlEvent::SequenceStart(anchor, _) | YamlEvent::MappingStart(anchor, _)
                 if anchor != 0 =>
             {
@@ -1006,12 +1038,14 @@ impl From<&Hints> for GroupedHints {
         let mut start = 0;
 
         while start < hints.mutants.len() {
+            let previous = start;
             let path = hints.mutants[start].file.clone();
             let end = hints.mutants[start..]
                 .iter()
                 // #[gamma::skip(relational.ne_to_eq, tag = "outofmemory", reason = "matching the first equal path produces an empty group and repeatedly allocates without advancing start")]
                 .position(|hint| hint.file != path)
                 .map_or(hints.mutants.len(), |offset| start + offset);
+            assert!(end > start, "a file group always contains the first mutant at its start");
             let group = &hints.mutants[start..end];
             let mut killers: Vec<Killer> = group.iter().filter_map(|hint| hint.killer.clone()).collect();
             killers.sort_by(|left, right| killer_key(left).cmp(&killer_key(right)));
@@ -1032,6 +1066,7 @@ impl From<&Hints> for GroupedHints {
                 .collect();
             files.push(FileHints { path, killers, mutants });
             start = end;
+            assert!(start > previous, "publishing a file group must advance past its mutants");
         }
 
         Self {
@@ -1045,7 +1080,7 @@ impl From<&Hints> for GroupedHints {
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn merge_generalized(existing: &GeneralizedHints, incoming: &GeneralizedHints) -> Result<GeneralizedHints> {
+pub(super) fn merge_generalized(existing: &GeneralizedHints, incoming: &GeneralizedHints) -> Result<GeneralizedHints> {
     let existing_supported = existing.supported();
     if existing_supported.is_none() && (existing.version != 0 || !existing.is_empty()) {
         return Err(error!("the existing generalized hints version cannot be merged"));
@@ -1092,6 +1127,8 @@ fn merge_generalized(existing: &GeneralizedHints, incoming: &GeneralizedHints) -
         let _first = reach.entry(site).or_insert(tests);
     }
     reach.extend(incoming_reach);
+
+    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
     rebuild_reach(&mut output, reach.into_iter().collect());
     Ok(output)
 }
@@ -1150,6 +1187,7 @@ fn compare_entries_or_preserved<T: PartialEq, K: Eq + core::hash::Hash>(
     if previous == current {
         changes.preserved += current.len();
     } else {
+        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
         compare_entries(previous, current, key, changes);
     }
 }
@@ -1204,18 +1242,30 @@ fn restored(
     cause: crate::error::Error,
     locked: bool,
 ) -> crate::error::Error {
+    restored_with(workspace, path, before, published, cause, locked, crate::paths::physical)
+}
+
+fn restored_with(
+    workspace: &Utf8Path,
+    path: &Utf8Path,
+    before: Option<&str>,
+    published: &str,
+    cause: crate::error::Error,
+    locked: bool,
+    physical: impl FnOnce(&Utf8Path) -> Result<Utf8PathBuf>,
+) -> crate::error::Error {
     let restored = if locked {
-        let destination = crate::paths::physical(path);
+        let destination = physical(path);
         destination.and_then(|destination| {
             before.map_or_else(
                 || crate::elements::remove_if_unchanged_locked(&destination, path, published),
-                |text| crate::elements::write_if_unchanged_locked(path, Some(published), text),
+                |text| publish_generation(workspace, path, Some(published), text, true),
             )
         })
     } else {
         before.map_or_else(
             || crate::elements::remove_if_unchanged(workspace, path, published),
-            |text| crate::elements::write_if_unchanged(workspace, path, Some(published), text),
+            |text| publish_generation(workspace, path, Some(published), text, false),
         )
     };
 
@@ -1229,6 +1279,30 @@ fn restored(
                 .caused_by(cause)
         }
         Err(failure) => error!("`{path}` could not be put back after a promotion that could not be verified ({failure})").caused_by(cause),
+    }
+}
+
+/// Replaces native generation publication, including conflict and recovery outcomes.
+#[cfg(test)]
+type HintsPublisher = Box<dyn FnMut(&Utf8Path, &Utf8Path, Option<&str>, &str, bool) -> Result<Publication>>;
+
+#[cfg(test)]
+thread_local! {
+    static HINTS_PUBLISHER: std::cell::RefCell<Option<HintsPublisher>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Publishes under the caller's existing lock when `locked`, otherwise acquiring the normal lock.
+fn publish_generation(workspace: &Utf8Path, path: &Utf8Path, expected: Option<&str>, text: &str, locked: bool) -> Result<Publication> {
+    #[cfg(test)]
+    if let Some(result) =
+        HINTS_PUBLISHER.with_borrow_mut(|slot| slot.as_mut().map(|publish| publish(workspace, path, expected, text, locked)))
+    {
+        return result;
+    }
+    if locked {
+        crate::elements::write_if_unchanged_locked(path, expected, text)
+    } else {
+        crate::elements::write_if_unchanged(workspace, path, expected, text)
     }
 }
 
@@ -1280,6 +1354,222 @@ mod tests {
     use super::*;
     use crate::fixtures;
     use crate::testing::workdir;
+
+    #[test]
+    fn recovered_failed_hint_verification_restores_only_its_exact_published_generation_in_the_same_lock_domain() {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                HINTS_PUBLISHER.with_borrow_mut(|slot| *slot = None);
+            }
+        }
+        let path = Utf8PathBuf::from("in-memory-hints/gamma-hints.yaml");
+        let hints = Hints::default();
+        let published = hints.rendered().unwrap();
+        let before = "retained previous hint generation\n";
+        for locked in [false, true] {
+            let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            HINTS_PUBLISHER.with_borrow_mut(|slot| {
+                assert!(slot.is_none());
+                *slot = Some(Box::new({
+                    let calls = std::rc::Rc::clone(&calls);
+                    move |workspace, path, expected, text, held| {
+                        calls.borrow_mut().push((
+                            workspace.to_owned(),
+                            path.to_owned(),
+                            expected.map(str::to_owned),
+                            text.to_owned(),
+                            held,
+                        ));
+                        Ok(Publication::Published)
+                    }
+                }));
+            });
+            let reset = Reset;
+            let failure = hints
+                .write_from_with_callbacks(
+                    &path,
+                    Some(before),
+                    locked,
+                    u64::MAX,
+                    |actual, intended| {
+                        assert_eq!(actual, path);
+                        assert_eq!(intended, &hints);
+                        Err(error!("`{path}` could not be read back after being written"))
+                    },
+                    |workspace, actual, before, published, cause, held| {
+                        restored_with(workspace, actual, before, published, cause, held, |actual| {
+                            assert!(locked, "only the already-locked path resolves the physical destination");
+                            assert_eq!(actual, path);
+                            Ok("in-memory-physical-hints/gamma-hints.yaml".into())
+                        })
+                    },
+                )
+                .unwrap_err();
+            assert_eq!(failure.message(), format!("`{path}` could not be read back after being written"));
+            assert_eq!(
+                *calls.borrow(),
+                [
+                    (
+                        publication_workspace(&path).to_owned(),
+                        path.clone(),
+                        Some(before.to_owned()),
+                        published.clone(),
+                        locked
+                    ),
+                    (
+                        publication_workspace(&path).to_owned(),
+                        path.clone(),
+                        Some(published.clone()),
+                        before.to_owned(),
+                        locked
+                    ),
+                ]
+            );
+            drop(reset);
+        }
+    }
+
+    #[test]
+    fn recovered_provenance_returns_errors_for_short_dates_and_split_utf8_calendar_prefixes() {
+        for date in ["short", "2026-01-界"] {
+            let failure = HintContext::capture_from(Ok((true, vec![b'a'; 40])), || date.into()).unwrap_err();
+            assert_eq!(
+                failure.message(),
+                "the system clock could not be formatted as an ISO 8601 calendar date"
+            );
+        }
+    }
+
+    #[test]
+    fn recovered_incremental_merge_preserves_the_specific_unsupported_generation_errors() {
+        for nonempty in [false, true] {
+            let mut existing = survivor_hints();
+            existing.generalized = GeneralizedHints::default();
+            if nonempty {
+                existing.generalized.items.push(record::ItemHints {
+                    file: "source.rs".into(),
+                    item: "item".into(),
+                    candidates: Vec::new(),
+                });
+            } else {
+                existing.generalized.version = 999;
+            }
+            let failure = Hints::merged_knowledge(&existing, survivor_hints(), false).unwrap_err();
+            assert_eq!(
+                failure.message(),
+                "the existing artifact contains a generalized hints version this cargo-gamma cannot preserve incrementally; use `--replace` to discard it explicitly"
+            );
+        }
+        let mut incoming = survivor_hints();
+        incoming.generalized.version = 999;
+        let failure = Hints::merged_knowledge(&survivor_hints(), incoming, false).unwrap_err();
+        assert_eq!(failure.message(), "the promoted generalized hints version cannot be merged");
+    }
+
+    #[test]
+    fn recovered_whole_artifact_replacement_still_sorts_and_deduplicates_exact_hints() {
+        let mut promoted = survivor_hints();
+        let first = Hint {
+            file: "a.rs".into(),
+            id: "first".into(),
+            ..promoted.mutants[0].clone()
+        };
+        let second = Hint {
+            file: "b.rs".into(),
+            id: "second".into(),
+            ..first.clone()
+        };
+        promoted.mutants = vec![second.clone(), first.clone(), first.clone()];
+        let merged = Hints::merged_knowledge(&Hints::default(), promoted, true).unwrap();
+        assert_eq!(merged.mutants, [first, second]);
+    }
+
+    #[test]
+    fn recovered_equal_ids_in_distinct_files_remain_distinct_promoted_hints() {
+        let record = promotion_record(&[("a.rs", "same", Outcome::CompileError)]);
+        let promoted = Hints::promoted(&record, &[mutant("same", "a.rs"), mutant("same", "b.rs")]);
+        assert_eq!(promoted.mutants.len(), 2);
+        assert_eq!(promoted.mutants[0].file, Utf8Path::new("a.rs"));
+        assert_eq!(promoted.mutants[1].file, Utf8Path::new("b.rs"));
+        assert!(promoted.mutants.iter().all(|hint| hint.id.as_str() == "same" && hint.unviable));
+    }
+
+    #[test]
+    fn recovered_grouped_hint_pools_sort_killers_and_advance_through_every_file() {
+        let mut hints = survivor_hints();
+        hints.mutants = ["a.rs", "b.rs"]
+            .into_iter()
+            .flat_map(|file| {
+                [("first", "z-last"), ("second", "a-first")].map(|(id, test)| Hint {
+                    file: file.into(),
+                    id: id.into(),
+                    killer: Some(killer(test)),
+                    unviable: false,
+                })
+            })
+            .collect();
+        let grouped = GroupedHints::from(&hints);
+        assert_eq!(grouped.files.len(), 2);
+        for (file, expected_path) in grouped.files.iter().zip(["a.rs", "b.rs"]) {
+            assert_eq!(file.path, Utf8Path::new(expected_path));
+            assert_eq!(file.killers, [killer("a-first"), killer("z-last")]);
+            assert_eq!(file.mutants.iter().map(|hint| hint.killer).collect::<Vec<_>>(), [Some(1), Some(0)]);
+            assert_eq!(
+                file.mutants.iter().map(|hint| hint.id.as_str()).collect::<Vec<_>>(),
+                ["first", "second"]
+            );
+        }
+        assert_eq!(Hints::from_grouped(grouped).unwrap(), hints);
+    }
+
+    #[test]
+    fn recovered_unchanged_opaque_reach_entries_are_counted_without_discarding_their_generation() {
+        let mut hints = survivor_hints();
+        hints.mutants.clear();
+        hints.generalized.version = 999;
+        hints.generalized.reach = vec![record::ReachCluster {
+            site: record::SiteIdentity::from_mutant(&mutant("id", "source.rs")),
+            test_set: 42,
+        }];
+        let retained = Hints::from_grouped(GroupedHints::from(&hints)).unwrap();
+        assert_eq!(retained.changes_from(&hints).preserved, 1);
+        assert_eq!(retained.changes_from(&hints).added, 0);
+        assert_eq!(retained.changes_from(&hints).removed, 0);
+        assert_eq!(retained.changes_from(&hints).updated, 0);
+    }
+
+    #[test]
+    fn recovered_publication_workspace_fallback_is_dot_only_when_there_is_no_parent() {
+        for path in ["", std::path::MAIN_SEPARATOR_STR] {
+            assert_eq!(publication_workspace(Utf8Path::new(path)), Utf8Path::new("."));
+        }
+        assert_eq!(publication_workspace(Utf8Path::new("artifact.yaml")), Utf8Path::new(""));
+        assert_eq!(
+            publication_workspace(Utf8Path::new("workspace").join("artifact.yaml").as_path()),
+            Utf8Path::new("workspace")
+        );
+    }
+
+    #[test]
+    fn recovered_retained_size_errors_precede_noop_publication_at_exact_boundaries() {
+        let hints = survivor_hints();
+        let text = hints.rendered().unwrap();
+        let length = u64::try_from(text.len()).unwrap();
+        for locked in [false, true] {
+            let path = Utf8Path::new("invalid\0artifact");
+            for limit in [0, length - 1] {
+                let failure = hints.write_from_with_limit(path, Some(&text), locked, limit).unwrap_err();
+                assert_eq!(
+                    failure.message(),
+                    format!("the promoted hints are larger than the {limit} bytes cargo-gamma will retain")
+                );
+            }
+            let promotion = hints.write_from_with_limit(path, Some(&text), locked, length).unwrap();
+            assert_eq!(promotion.mutants, 1);
+            assert!(!promotion.changed);
+        }
+    }
 
     fn mutant(id: &str, file: &str) -> Mutant {
         Mutant {

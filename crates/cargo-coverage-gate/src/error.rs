@@ -51,13 +51,13 @@ use serde_json::Value;
     ResolveCoverageSourceError,
     InspectCoverageSourceError,
     ReadCoverageSourceError,
+    CompilerSourceDiscoveryError,
     ParseCoverageSourceError,
     UnsupportedSourceEditionError,
     ConflictingSourceEditionError,
     AmbiguousModuleSourceError,
     InvalidModulePathAttributeError,
     ConditionalModulePathError,
-    UnsupportedSourceInclusionError,
     InvalidTestAttributesValueError,
     InvalidTestAttributePathError,
     PackageScopedTestAttributesError,
@@ -270,6 +270,15 @@ pub(crate) struct ReadCoverageSourceError {
     pub path: String,
 }
 
+/// The selected compiler could not establish its library-source location.
+#[ohno::error]
+#[display("could not verify compiler library sources using `{operation}`: {reason}")]
+#[from(std::io::Error, std::string::FromUtf8Error)]
+pub(crate) struct CompilerSourceDiscoveryError {
+    pub operation: String,
+    pub reason: String,
+}
+
 /// rust-analyzer's parser rejected a source file that contributed to the
 /// Cargo target graph.
 #[ohno::error]
@@ -334,17 +343,6 @@ pub(crate) struct ConditionalModulePathError {
     pub declaring: String,
     pub module: String,
     pub attribute: String,
-}
-
-/// A released source uses `include!`, whose ownership and nested module
-/// resolution cannot be reconstructed from Cargo metadata.
-#[ohno::error]
-#[display(
-    "released Rust source `{declaring}` uses `include!`, which released-surface filtering cannot follow; \
-     replace it with a supported `mod` declaration, or use the explicit unfiltered library API"
-)]
-pub(crate) struct UnsupportedSourceInclusionError {
-    pub declaring: String,
 }
 
 /// `coverage-gate.test-attributes` was not an array of Rust attribute paths.

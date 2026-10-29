@@ -68,7 +68,9 @@ pub trait Table: Sized {
         write_table_contents::<Self>(&mut buf_writer, csv_entry, now)?;
 
         // Return the file handle so the caller can load an immutable snapshot.
-        let file = finish_buffered_writer(buf_writer)?;
+        let file =
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "The preceding successful header write flushed the BufWriter; into_inner has no buffered bytes left to fail.", tag = "equivalent")]
+        finish_buffered_writer(buf_writer)?;
         Ok(file)
     }
 

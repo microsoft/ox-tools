@@ -151,6 +151,10 @@ impl Workspace {
 
 #[ohno::enrich_err("failed to load cargo workspace metadata")]
 pub(crate) fn load_metadata(manifest_path: Option<&Path>) -> Result<Metadata, CoverageGateError> {
+    #[cfg(test)]
+    if let Some(result) = metadata_loader_test_seam::load(manifest_path) {
+        return result;
+    }
     let mut command = MetadataCommand::new();
     command.no_deps();
     if let Some(path) = manifest_path {
@@ -297,10 +301,12 @@ fn unsupported_build_context_options(platform: &Platform) -> Vec<String> {
     fn visit(expression: &CfgExpr, options: &mut Vec<String>) {
         match expression {
             CfgExpr::Not(expression) => {
+                // #[gamma::skip(call_result.default, reason = "This call returns unit; default_after preserves the call and its side effects, then returns the identical unit value.", tag = "equivalent")]
                 visit(expression, options);
             }
             CfgExpr::All(expressions) | CfgExpr::Any(expressions) => {
                 for expression in expressions {
+                    // #[gamma::skip(call_result.default, reason = "This call returns unit; default_after preserves the call and its side effects, then returns the identical unit value.", tag = "equivalent")]
                     visit(expression, options);
                 }
             }
@@ -316,6 +322,7 @@ fn unsupported_build_context_options(platform: &Platform) -> Vec<String> {
 
     let mut options = Vec::new();
     if let Platform::Cfg(expression) = platform {
+        // #[gamma::skip(call_result.default, reason = "This call returns unit; default_after preserves the call and its side effects, then returns the identical unit value.", tag = "equivalent")]
         visit(expression, &mut options);
     }
     options.sort();
@@ -384,6 +391,9 @@ fn extract_expect_no_coverable_lines(gate: &Value, source: &str, scope: Scope) -
     }
     Ok(value)
 }
+
+#[cfg(test)]
+pub(crate) mod metadata_loader_test_seam;
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]

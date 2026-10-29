@@ -9,12 +9,12 @@
 
 #[cfg(test)]
 use core::cell::{Cell, RefCell};
-use core::hash::{BuildHasher as _, Hasher as _};
+use core::hash::BuildHasher as _;
 use core::num::NonZeroU64;
 use core::sync::atomic::{AtomicU64, Ordering};
 use std::collections::hash_map::RandomState;
 use std::fs::{self, File};
-use std::io::{self, ErrorKind, Write as _};
+use std::io::{self, BufWriter, ErrorKind, Write as _};
 
 use camino::{Utf8Path, Utf8PathBuf};
 
@@ -148,6 +148,8 @@ fn write_if_unchanged_with(
     filesystem
         .stage(scratch, contents, destination)
         .map_err(|cause| discard_with(scratch, path, cause, || filesystem.remove_file(scratch)))?;
+
+    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
     before_publication(scratch);
 
     if !filesystem.matches_contents(destination, expected).map_err(|cause| {
@@ -162,6 +164,8 @@ fn write_if_unchanged_with(
         return Ok(Publication::Conflict);
     }
 
+    // #[gamma::skip(call.replace_with_default, stmt.delete_call, reason = "Production cfg(not(test)) after_comparison is an empty const fn returning (). Removing its call cannot change production publication. cfg(test) replaces it with an observer-only hook, so a test-only observation differs, but that is not a missing production behavior oracle.", tag = "equivalent")]
+    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
     after_comparison(destination);
     filesystem
         .rename(scratch, destination)
@@ -190,6 +194,7 @@ pub(crate) fn remove_if_unchanged(workspace: &Utf8Path, path: &Utf8Path, expecte
 /// integration tests; line coverage cannot deterministically force those host boundaries.
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub(crate) fn remove_if_unchanged_locked(destination: &Utf8Path, path: &Utf8Path, expected: &str) -> Result<Publication> {
+    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
     before_publication(destination);
 
     if !matches_contents(destination, Some(expected))
@@ -354,14 +359,13 @@ fn remove_staging(scratch: &Utf8Path, path: &Utf8Path, filesystem: &mut impl Pub
 /// is flushed before the permissions and the durability barrier, so every byte `fill` wrote is on
 /// the file by the time it is synced.
 fn stage(scratch: &Utf8Path, fill: impl FnOnce(&mut dyn io::Write) -> io::Result<()>, mode: Option<&Utf8Path>) -> io::Result<()> {
+    #[cfg(test)]
+    if let Some(refuse) = STAGING_REFUSAL.with_borrow_mut(Option::take) {
+        return Err(refuse(scratch, mode));
+    }
     let mut staging = File::create_new(scratch.as_std_path())?;
 
-    {
-        let mut writer = io::BufWriter::new(&mut staging);
-
-        fill(&mut writer)?;
-        writer.flush()?;
-    }
+    fill_staging(&mut staging, fill)?;
 
     if let Some(permissions) = mode
         .and_then(|path| fs::metadata(path.as_std_path()).ok())
@@ -371,6 +375,14 @@ fn stage(scratch: &Utf8Path, fill: impl FnOnce(&mut dyn io::Write) -> io::Result
     }
 
     staging.sync_all()
+}
+
+/// Flushes buffered content before the caller copies permissions and crosses the durability barrier.
+fn fill_staging(staging: &mut impl io::Write, fill: impl FnOnce(&mut dyn io::Write) -> io::Result<()>) -> io::Result<()> {
+    let mut writer = BufWriter::new(staging);
+    fill(&mut writer)?;
+    writer.flush()?;
+    Ok(())
 }
 
 /// Writes `contents` straight through, the [`stage`] filler for a caller that already holds the
@@ -463,7 +475,6 @@ fn discard_with(
 /// namespaces sharing a filesystem. A pid is unique only within its namespace, and two containers
 /// sharing a bind-mounted workspace can both start their agent at pid 1. The exclusive create in
 /// [`stage`] is a final defence against the astronomically unlikely cross-process collision.
-// #[gamma::skip(stmt.delete_call, reason = "the scratch identity contains the live process id and invocation nonce; parallel tests cannot safely observe another process's transient publication name")]
 pub(crate) fn scratch_path(path: &Utf8Path) -> Utf8PathBuf {
     static NEXT: AtomicU64 = AtomicU64::new(0);
 
@@ -472,17 +483,22 @@ pub(crate) fn scratch_path(path: &Utf8Path) -> Utf8PathBuf {
         return scratch;
     }
 
-    let name = path.file_name().unwrap_or("report");
     let invocation = NEXT.fetch_add(NonZeroU64::MIN.get(), Ordering::Relaxed);
 
     // The counter gives every call in this process a distinct name. The random portion separates
     // pid namespaces sharing a filesystem, where two unrelated processes can both be pid 1 and
     // make the same sequence of calls.
-    let mut hasher = RandomState::new().build_hasher();
+    let hasher = RandomState::new().build_hasher();
 
-    write_scratch_identity(&mut hasher, std::process::id(), invocation);
+    scratch_path_from_identity(path, std::process::id(), invocation, hasher)
+}
 
-    path.with_file_name(format!(".{name}.{}.{invocation}.{:016x}.tmp", std::process::id(), hasher.finish()))
+fn scratch_path_from_identity(path: &Utf8Path, process_id: u32, invocation: u64, mut hasher: impl core::hash::Hasher) -> Utf8PathBuf {
+    let name = path.file_name().unwrap_or("report");
+
+    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
+    write_scratch_identity(&mut hasher, process_id, invocation);
+    path.with_file_name(format!(".{name}.{process_id}.{invocation}.{:016x}.tmp", hasher.finish()))
 }
 
 fn write_scratch_identity(hasher: &mut impl core::hash::Hasher, process_id: u32, invocation: u64) {
@@ -494,7 +510,12 @@ fn write_scratch_identity(hasher: &mut impl core::hash::Hasher, process_id: u32,
 type PublicationHook = Box<dyn FnOnce(&Utf8Path)>;
 
 #[cfg(test)]
+/// One-shot refusal consumed before native staging creation, leaving both paths untouched.
+type StagingRefusal = Box<dyn FnOnce(&Utf8Path, Option<&Utf8Path>) -> io::Error>;
+
+#[cfg(test)]
 thread_local! {
+    static STAGING_REFUSAL: RefCell<Option<StagingRefusal>> = const { RefCell::new(None) };
     static BEFORE_PUBLICATION: RefCell<Option<PublicationHook>> = const { RefCell::new(None) };
     static AFTER_COMPARISON: RefCell<Option<PublicationHook>> = const { RefCell::new(None) };
     static TEST_SCRATCH: RefCell<Option<Utf8PathBuf>> = const { RefCell::new(None) };
@@ -567,12 +588,112 @@ const fn after_comparison(_path: &Utf8Path) {}
 #[cfg(not(miri))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use core::error::Error as _;
     use std::collections::BTreeMap;
     use std::process::Command;
     use std::sync::{Arc, Barrier, Mutex};
     use std::thread;
 
     use super::*;
+
+    #[test]
+    fn oct25_scratch_identity_hashes_exact_process_and_invocation_bytes() {
+        struct ScriptedHasher {
+            writes: Vec<Vec<u8>>,
+        }
+        impl core::hash::Hasher for ScriptedHasher {
+            fn finish(&self) -> u64 {
+                assert_eq!(self.writes, [7_u32.to_ne_bytes().to_vec(), 11_u64.to_ne_bytes().to_vec()]);
+                0x1234
+            }
+            fn write(&mut self, bytes: &[u8]) {
+                self.writes.push(bytes.to_vec());
+            }
+            fn write_u64(&mut self, i: u64) {
+                self.write(&i.to_ne_bytes());
+            }
+        }
+        assert_eq!(
+            scratch_path_from_identity(Utf8Path::new("memory/report.json"), 7, 11, ScriptedHasher { writes: Vec::new() },),
+            Utf8Path::new("memory/.report.json.7.11.0000000000001234.tmp")
+        );
+    }
+
+    #[test]
+    fn recovered_native_conditional_stage_preserves_the_destination_permission_source_before_an_injected_create_failure() {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                STAGING_REFUSAL.with_borrow_mut(|slot| *slot = None);
+            }
+        }
+        let called = std::rc::Rc::new(Cell::new(false));
+        STAGING_REFUSAL.with_borrow_mut(|slot| {
+            assert!(slot.is_none());
+            *slot = Some(Box::new({
+                let called = std::rc::Rc::clone(&called);
+                move |scratch, mode| {
+                    assert_eq!(scratch, Utf8Path::new("invalid\0native-stage"));
+                    assert_eq!(mode, Some(Utf8Path::new("never-opened-permission-source")));
+                    called.set(true);
+                    io::ErrorKind::PermissionDenied.into()
+                }
+            }));
+        });
+        let _reset = Reset;
+        let failure = NativeFilesystem
+            .stage(
+                Utf8Path::new("invalid\0native-stage"),
+                "never-written",
+                Utf8Path::new("never-opened-permission-source"),
+            )
+            .unwrap_err();
+        assert_eq!(failure.kind(), io::ErrorKind::PermissionDenied);
+        assert!(called.get());
+    }
+
+    #[test]
+    fn recovered_staging_returns_the_underlying_flush_error_after_writing_the_buffered_bytes() {
+        #[derive(Default)]
+        struct RefusedFlush {
+            bytes: Vec<u8>,
+            flushes: usize,
+        }
+        impl io::Write for RefusedFlush {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                self.bytes.extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                self.flushes += 1;
+                Err(io::Error::new(io::ErrorKind::PermissionDenied, "in-memory staging flush refusal"))
+            }
+        }
+        let mut output = RefusedFlush::default();
+        let failure = fill_staging(&mut output, |writer| writer.write_all(b"buffered contents")).unwrap_err();
+        assert_eq!(failure.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(failure.to_string(), "in-memory staging flush refusal");
+        assert_eq!(output.bytes, b"buffered contents");
+        assert_eq!(output.flushes, 1);
+    }
+
+    #[test]
+    fn recovered_scratch_path_hashes_its_process_and_invocation_identity_before_formatting_the_destination() {
+        struct CountingHasher(usize);
+        impl core::hash::Hasher for CountingHasher {
+            fn finish(&self) -> u64 {
+                u64::try_from(self.0).unwrap()
+            }
+            fn write(&mut self, bytes: &[u8]) {
+                self.0 += bytes.len();
+            }
+        }
+        let path = Utf8Path::new("memory").join("report.json");
+        assert_eq!(
+            scratch_path_from_identity(&path, 7, 11, CountingHasher(0)),
+            Utf8Path::new("memory").join(".report.json.7.11.000000000000000c.tmp")
+        );
+    }
 
     const EDITOR_PATH: &str = "CARGO_GAMMA_PUBLICATION_EDITOR_PATH";
 
@@ -656,8 +777,6 @@ mod tests {
 
     #[test]
     fn comparison_read_errors_discard_staging_and_preserve_destination_and_cause() {
-        use core::error::Error as _;
-
         let mut filesystem = MemoryFilesystem::new(true);
         let path = Utf8Path::new("requested.rs");
         let destination = filesystem.destination.clone();
@@ -698,6 +817,71 @@ mod tests {
         assert_eq!(filesystem.files[&destination], "replacement");
         assert_eq!(filesystem.files[path], "untouched");
         assert_eq!(filesystem.files.len(), 2);
+    }
+
+    #[test]
+    fn recovered_conditional_publication_propagates_conflict_cleanup_and_rename_failures() {
+        struct FailingFilesystem {
+            conflict: bool,
+            calls: Vec<&'static str>,
+        }
+        impl PublicationFilesystem for FailingFilesystem {
+            fn stage(&mut self, _: &Utf8Path, _: &str, _: &Utf8Path) -> io::Result<()> {
+                self.calls.push("stage");
+                Ok(())
+            }
+            fn matches_contents(&mut self, _: &Utf8Path, _: Option<&str>) -> io::Result<bool> {
+                self.calls.push("compare");
+                Ok(!self.conflict)
+            }
+            fn remove_file(&mut self, _: &Utf8Path) -> io::Result<()> {
+                self.calls.push("remove");
+                if self.conflict {
+                    Err(io::Error::new(ErrorKind::PermissionDenied, "cleanup rejected"))
+                } else {
+                    Ok(())
+                }
+            }
+            fn rename(&mut self, _: &Utf8Path, _: &Utf8Path) -> io::Result<()> {
+                self.calls.push("rename");
+                Err(io::Error::new(ErrorKind::AlreadyExists, "rename rejected"))
+            }
+            fn published(&mut self, _: &Utf8Path) -> io::Result<()> {
+                panic!("a failed rename or conflict cannot reach publication")
+            }
+        }
+        for conflict in [false, true] {
+            let mut filesystem = FailingFilesystem {
+                conflict,
+                calls: Vec::new(),
+            };
+            let error = write_if_unchanged_with(
+                Utf8Path::new("requested.rs"),
+                Utf8Path::new("resolved.rs"),
+                Utf8Path::new("staged"),
+                Some("original"),
+                "replacement",
+                &mut filesystem,
+            )
+            .unwrap_err();
+            let cause = error.source().unwrap().downcast_ref::<io::Error>().unwrap();
+            assert_eq!(
+                cause.kind(),
+                if conflict {
+                    ErrorKind::PermissionDenied
+                } else {
+                    ErrorKind::AlreadyExists
+                }
+            );
+            assert_eq!(
+                filesystem.calls,
+                if conflict {
+                    vec!["stage", "compare", "remove"]
+                } else {
+                    vec!["stage", "compare", "rename", "remove"]
+                }
+            );
+        }
     }
 
     #[test]

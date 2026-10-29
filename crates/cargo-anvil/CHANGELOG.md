@@ -2,46 +2,91 @@
 
 ## [Unreleased]
 
-## [0.21.0] - 2026-10-27
+## [0.21.0] - 2026-10-29
 
 - ✨ Features
 
-  - cargo-anvil: release v0.20.0
-  - cargo-anvil: consolidate generated infrastructure
+  - cargo-anvil: exclude generated actions from downstream Dependabot updates
 
 - 🐛 Bug Fixes
 
-  - cargo-anvil: reconcile consolidation with current main
+  - cargo-anvil: retain protected Dependabot configs in ambiguity checks
+  - cargo-anvil: bound repeated Dependabot merge lookups
+  - cargo-anvil: honor inherited Dependabot exclusions
+  - cargo-anvil: preserve YAML job boundaries and refusal ownership
+  - cargo-anvil: preserve complete aliased Dependabot exclusions
+  - cargo-anvil: preserve Dependabot configuration edge cases
+  - cargo-anvil: install APRZ 1.2.1 from crates.io ([#313](https://github.com/microsoft/ox-tools/pull/313))
 
-- ♻️ Code Refactoring
+- ✔️ Tasks
 
-  - cargo-anvil: make README checks shell-free
-  - cargo-anvil: make mutants diff shell-free
-  - cargo-anvil: make Miri recipes shell-free
-  - cargo-anvil: remove portable recipe PowerShell
+  - cargo-anvil: keep the pending feature release at 0.21.0
+  - cargo-anvil: prepare 0.21.1 review fixes release
+  - cargo-anvil: prepare 0.21.0 Dependabot integration
+  - cargo-anvil: pin cargo-delta 0.5.0 ([#311](https://github.com/microsoft/ox-tools/pull/311))
 
 - 🧩 Miscellaneous
 
-  - Merge current main into cargo-anvil consolidation
+  - Kill a bunch of mutants ([#315](https://github.com/microsoft/ox-tools/pull/315))
+
+## [0.20.3] - 2026-10-29
+
+- ✔️ Tasks
+
+  - cargo-anvil: pin cargo-delta 0.5.0 ([#311](https://github.com/microsoft/ox-tools/pull/311))
+
+- 🧩 Miscellaneous
+
+  - Kill a bunch of mutants ([#315](https://github.com/microsoft/ox-tools/pull/315))
+
+## [0.20.2] - 2026-10-28
+
+- 🐛 Bug Fixes
+
+  - cargo-anvil: use published APRZ 1.2.1
+  - cargo-anvil: install APRZ from the fixed parser revision
+
+## [0.20.1] - 2026-10-28
+
+- 🐛 Bug Fixes
+
+  - cargo-anvil: ship github-script 9.0.0, download-artifact 8.0.2 and SHA-pinned sticky comments
+  - cargo-anvil: update GitHub action pins
+  - cargo-anvil: pin coverage-gate 0.7.2
+
+- ✔️ Tasks
+
+  - cargo-anvil: prepare 0.20.1 catalog release
 
 ## [0.20.0] - 2026-10-26
 
 - ✨ Features
 
-  - cargo-anvil: release v0.20.0
-  - cargo-anvil: consolidate generated infrastructure
+  - cargo-anvil: adopt cargo-each 0.6 package selection
   - cargo-anvil: manage JSON array entries ([#283](https://github.com/microsoft/ox-tools/pull/283))
 
 - 🐛 Bug Fixes
 
-  - cargo-anvil: reconcile consolidation with current main
+  - cargo-anvil: reuse the validated MSRV for package discovery
+  - cargo-anvil: skip package discovery when no MSRV is declared
+  - cargo-anvil: run examples from the canonical workspace root
+  - cargo-anvil: build example specs from manifest paths and fix test shims
+  - cargo-anvil: select examples and Miri opt-outs by exact identity
+  - cargo-anvil: avoid ambiguous package specs in remaining recipes
+
+- 📚 Documentation
+
+  - cargo-anvil: note coverage still passes name@version specs
+  - cargo-anvil: explain shared license allow list
+
+- ✔️ Tasks
+
+  - cargo-anvil: release v0.20.0 after rebasing package selection
 
 - ♻️ Code Refactoring
 
-  - cargo-anvil: make README checks shell-free
-  - cargo-anvil: make mutants diff shell-free
-  - cargo-anvil: make Miri recipes shell-free
-  - cargo-anvil: remove portable recipe PowerShell
+  - cargo-anvil: drop old-Cargo workarounds and document Cargo 1.93 minimum
+  - cargo-anvil: remove obsolete package-name handling
 
 ## [0.19.0] - 2026-10-24
 

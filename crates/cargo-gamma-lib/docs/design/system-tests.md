@@ -146,7 +146,8 @@ hint-selection and verdict-state-machine regressions:
   separate supplied-byte matrix.
 - `exec::verdict::final_survivor_tests` checks real pipe authority, tails,
   reader completion and wakeups. The pipe round trip requires
-  `system-tests`. Startup completion and deadline verdict/evidence decisions
+  `system-tests` and uses a finite thirty-second collection grace, never an
+  unbounded receive. Startup completion and deadline verdict/evidence decisions
   instead consume scripted lifecycle and expiration observations.
 - `exec::copy` and `exec::sync` check native collision preservation and
   timestamp updates on owned output files, using fixed representable

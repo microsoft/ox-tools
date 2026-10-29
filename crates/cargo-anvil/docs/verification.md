@@ -76,6 +76,12 @@ on tool availability. These checks protect the emitted artifact contract, not
 runtime PowerShell semantics; recipe execution is validated by the provisioned
 self-hosting pipeline described above.
 
+The formatter alias-rejection and name-collision tests separately execute Just
+and PowerShell against controlled Cargo metadata. These behavior checks run
+with the `internals` feature enabled and require both executables on `PATH`.
+If either is missing, they fail with an actionable prerequisite message rather
+than silently passing.
+
 Recipe visibility tests likewise inspect the catalog's in-memory definitions:
 they pin the public groups, alias target, and private prerequisite signatures
 without invoking Just or writing input fixtures. Actual recipe listing and

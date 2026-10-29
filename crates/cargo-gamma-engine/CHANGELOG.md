@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-28
+
+- ✨ Features
+
+  - cargo-gamma: add remainder and addition-assignment substitutions ([#245](https://github.com/microsoft/ox-tools/pull/245))
+  - cargo-gamma: improve campaign reliability and mutation detection ([#282](https://github.com/microsoft/ox-tools/pull/282))
+
+- 🐛 Bug Fixes
+
+  - cargo-gamma: mutate comparisons in match guards ([#246](https://github.com/microsoft/ox-tools/pull/246))
+
+- ✔️ Tasks
+
+  - clean up cargo-deny warnings without narrowing license policy ([#287](https://github.com/microsoft/ox-tools/pull/287))
+
+- 🧩 Miscellaneous
+
+  - Kill a bunch of mutants ([#315](https://github.com/microsoft/ox-tools/pull/315))
+
 ## [0.3.0] - 2026-10-12
 
 - ✨ Features

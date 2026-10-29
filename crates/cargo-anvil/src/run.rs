@@ -209,7 +209,11 @@ fn live_region_keys(
         };
         for host in region_host_paths(workspace, spec) {
             let host = (hosts.resolve)(repo_root, host)?;
-            if !identities.insert((host.to_ascii_lowercase(), spec.id.as_str().to_owned())) {
+            if !identities.insert((
+                // #[gamma::skip(string.lower_to_upper, reason = "ASCII lower- and uppercase induce identical equality classes for this private case-insensitive deduplication key.", tag = "equivalent")]
+                host.to_ascii_lowercase(),
+                spec.id.as_str().to_owned(),
+            )) {
                 bail!("duplicate resolved region identity: {host} [{}]", spec.id);
             }
             keys.insert((host, spec.id.as_str().to_owned()));
@@ -283,6 +287,7 @@ fn build_plan_with_hosts(
                 && let Err(error) = scanner.validate_marker_scan(&text)
             {
                 let reason = error.to_string();
+                // #[gamma::skip(call_result.default, reason = "refuse_region still records the refusal in plan; its unit return value already equals Default")]
                 refuse_region(&mut plan, host.clone(), &key.id, &reason, RefusalRemedy::IncompleteJsonScan);
                 composed.states.insert(host, ComposedHostState::Unsafe(reason));
                 continue;
@@ -290,6 +295,7 @@ fn build_plan_with_hosts(
             let Some(syntax) = retirement_syntax_or_refuse(repo_root, &mut plan, hosts, &host, &key.id, recorded_checksum, scanner)? else {
                 continue;
             };
+            // #[gamma::skip(try.propagate_to_unwrap, reason = "The host is already cached, so repair performs no fallible IO at this call.", tag = "equivalent")]
             let _ = repair_host_markers(repo_root, &mut plan, hosts, &host, &key.id, syntax, scanner)?;
         }
     }
@@ -333,8 +339,85 @@ fn build_plan_with_hosts(
 
     validate_array_plan(repo_root, &plan, hosts, &array_hosts, &mut original_hosts)?;
     validate_projected_json_placements(repo_root, manifest, &plan, hosts)?;
+    plan_dependabot_exclusions(repo_root, backends, catalog, &mut plan, hosts)?;
 
     Ok(plan)
+}
+
+fn plan_dependabot_exclusions(
+    repo_root: &Path,
+    backends: &[Backend],
+    catalog: &Catalog,
+    plan: &mut Plan,
+    hosts: &mut HostTextCache,
+) -> Result<(), AppError> {
+    let paths = crate::dependabot::generated_action_paths(catalog, backends);
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let mut retired_files = BTreeSet::new();
+    let mut refused_region_hosts = BTreeSet::new();
+    for item in plan.items() {
+        match (&item.target, item.decision) {
+            (Target::File { path }, Decision::Remove) => {
+                retired_files.insert((hosts.resolve)(repo_root, path)?);
+            }
+            (Target::Region { host, .. }, Decision::LeaveAlone) => {
+                refused_region_hosts.insert((hosts.resolve)(repo_root, host)?);
+            }
+            _ => {}
+        }
+    }
+    let mut configurations = Vec::new();
+    for path in [".github/dependabot.yml", ".github/dependabot.yaml"] {
+        let path = (hosts.resolve)(repo_root, path)?;
+        if retired_files.contains(&path) {
+            continue;
+        }
+        if let Some(text) = hosts.get_or_read(repo_root, &path)? {
+            configurations.push((path, text));
+        }
+    }
+    if configurations.len() > 1 {
+        plan.refusal(
+            "Refused to add Dependabot exclusions: both .github/dependabot.yml and .github/dependabot.yaml exist. \
+             Keep one configuration file and rerun cargo anvil; both files were left unchanged.",
+        );
+        return Ok(());
+    }
+    let Some((path, text)) = configurations.pop() else {
+        return Ok(());
+    };
+    if refused_region_hosts.contains(&path) {
+        return Ok(());
+    }
+    let resolved_paths = paths
+        .iter()
+        .map(|path| (hosts.resolve)(repo_root, path))
+        .collect::<Result<Vec<_>, _>>()?;
+    let paths: Vec<_> = resolved_paths.iter().map(String::as_str).collect();
+    match crate::dependabot::update(&text, &paths) {
+        Ok(Some(updated)) => {
+            if catalog.artifacts().iter().any(|artifact| match artifact {
+                Artifact::OwnedFile(spec) => spec.path.eq_ignore_ascii_case(&path),
+                Artifact::Region(spec) => matches!(&spec.host, HostSelector::Path(host) if host.eq_ignore_ascii_case(&path)),
+            }) {
+                plan.refusal(format!(
+                    "Refused to patch {path}: the catalog already manages this Dependabot configuration. \
+                     Add generated-file exclusions to its catalog source instead; the automatic patch was not applied."
+                ));
+                return Ok(());
+            }
+            hosts.set(&path, updated.clone());
+            plan.push(PlanItem::patch_file(path, updated));
+        }
+        Ok(None) => {}
+        Err(error) => plan.refusal(format!(
+            "Refused to add generated-file exclusions to {path}: {error}. \
+             Repair the configuration and rerun cargo anvil. The Dependabot file was left unchanged."
+        )),
+    }
+    Ok(())
 }
 
 fn validate_projected_json_placements(
@@ -428,21 +511,27 @@ fn validate_array_plan(
         let adopted = (array_host.format == ArrayFormat::Toml)
             .then(|| {
                 item.rendered.as_deref().and_then(|body| {
-                    match crate::region::adopt_unmanaged_toml_tables(before, body, CommentSyntax::Hash) {
-                        crate::region::TomlAdoption::Adopted { text, .. } => Some(text),
+                    match crate::region::adopt_unmanaged_toml_tables_with_deletions(before, body, CommentSyntax::Hash) {
+                        (crate::region::TomlAdoption::Adopted { text, .. }, deletions) => Some((text, deletions)),
                         _ => None,
                     }
                 })
             })
             .flatten();
-        if let Some(adopted) = &adopted {
-            crate::emit::toml_array_region::validate_neighbor_splice(before, adopted, &array_host.paths)
+        if let Some((adopted, deletions)) = &adopted {
+            #[cfg(test)]
+            tests::ADOPTION_CHECKS.set(tests::ADOPTION_CHECKS.get() + 1);
+            crate::emit::toml_array_region::validate_neighbor_deletions(before, adopted, &array_host.paths, deletions)
                 .map_err(|refusal| toml_array_plan_refusal(&host, &refusal))?;
         }
         match array_host.format {
             ArrayFormat::Toml => {
-                crate::emit::toml_array_region::validate_neighbor_splice(adopted.as_deref().unwrap_or(before), after, &array_host.paths)
-                    .map_err(|refusal| toml_array_plan_refusal(&host, &refusal))?;
+                crate::emit::toml_array_region::validate_neighbor_splice(
+                    adopted.as_ref().map_or(before.as_str(), |(text, _)| text),
+                    after,
+                    &array_host.paths,
+                )
+                .map_err(|refusal| toml_array_plan_refusal(&host, &refusal))?;
             }
             ArrayFormat::Json => {
                 crate::emit::json_array_region::validate_neighbor_splice(before, after, &array_host.paths)
@@ -465,6 +554,7 @@ fn validate_array_plan(
         original_hosts.insert(host, after.clone());
     }
     for (host, array_host) in array_hosts {
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "array_host_inputs cached every array host before planning, so this lookup cannot perform new IO")]
         let final_text = hosts.get_or_read(repo_root, host)?.unwrap_or_default();
         for spec in array_host.json_specs.values() {
             crate::emit::json_array_region::validate_required_entries(&final_text, spec)
@@ -525,6 +615,7 @@ fn plan_catalog_artifact(
                 };
                 for host in region_host_paths(workspace, spec) {
                     let host = (hosts.resolve)(repo_root, host)?;
+                    // #[gamma::skip(try.propagate_to_unwrap, reason = "array_host_inputs already cached this exact host; this lookup cannot perform new IO.", tag = "equivalent")]
                     let current = hosts.get_or_read(repo_root, &host)?;
                     let item = crate::emit::toml_array_region::plan_toml_array_region(manifest, current.as_deref(), &host, &array)
                         .map_err(|refusal| toml_array_plan_refusal(&host, &refusal))?;
@@ -583,10 +674,13 @@ fn array_host_inputs(
     let mut paths = ArrayHosts::new();
     for artifact in catalog.artifacts() {
         if let Artifact::Region(spec) = artifact {
-            for (format, path) in [
-                (ArrayFormat::Toml, catalog.toml_array_path(spec)),
-                (ArrayFormat::Json, catalog.json_array_path(spec)),
-            ] {
+            for (format, path) in
+                // #[gamma::skip(collection.reverse_array, reason = "a region can have at most one structural format, so at most one of these alternatives is processed")]
+                [
+                    (ArrayFormat::Toml, catalog.toml_array_path(spec)),
+                    (ArrayFormat::Json, catalog.json_array_path(spec)),
+                ]
+            {
                 if let Some(path) = path {
                     for host in region_host_paths(workspace, spec) {
                         let host = (hosts.resolve)(repo_root, host)?;
@@ -859,6 +953,7 @@ struct HostTextCache {
     texts: HashMap<String, Option<String>>,
     newlines: HashMap<String, &'static str>,
     resolve: fn(&Path, &str) -> Result<String, AppError>,
+    read: fn(&Path) -> Result<Option<String>, AppError>,
 }
 
 impl Default for HostTextCache {
@@ -867,6 +962,7 @@ impl Default for HostTextCache {
             texts: HashMap::new(),
             newlines: HashMap::new(),
             resolve: resolve_existing_case_insensitive,
+            read: read_file_if_present,
         }
     }
 }
@@ -879,7 +975,7 @@ impl HostTextCache {
         if let Some(text) = self.texts.get(host) {
             return Ok(text.clone());
         }
-        let text = read_file_if_present(&repo_root.join(host))?;
+        let text = (self.read)(&repo_root.join(host))?;
         self.newlines.insert(
             host.to_owned(),
             crate::region::text_newline(text.as_deref().unwrap_or(
@@ -962,6 +1058,7 @@ fn push_region(
             HostScanner::for_path(&resolved)
         };
         if scanner == HostScanner::Json && spec.syntax != CommentSyntax::SlashSlash {
+            // #[gamma::skip(call_result.default, reason = "refuse_region still records the refusal in plan; its unit return value already equals Default")]
             refuse_region(
                 plan,
                 resolved,
@@ -1030,6 +1127,7 @@ fn push_region_at_with_scanner(
     if refuse_region_syntax_change(plan, manifest, &host, spec, current.as_deref(), scanner) {
         return Ok(());
     }
+    // #[gamma::skip(try.propagate_to_unwrap, reason = "The host is already cached, so repair performs no fallible IO at this call.", tag = "equivalent")]
     if !repair_or_refuse_with_scanner(repo_root, plan, hosts, &host, spec.id.as_str(), spec.syntax, false, scanner)? {
         return Ok(());
     }
@@ -1190,6 +1288,7 @@ fn region_placement_or_refuse(
     match region_placement(spec.id.as_str(), spec.syntax, current) {
         Ok(placement) => Some(placement),
         Err(reason) => {
+            // #[gamma::skip(call_result.default, reason = "refuse_region still records the refusal in plan; its unit return value already equals Default")]
             refuse_region(plan, host.to_owned(), spec.id.as_str(), &reason, RefusalRemedy::XmlPlacement);
             None
         }
@@ -1210,16 +1309,27 @@ fn refuse_region_syntax_change(
     let current_checksum = checksum_str(&spec.body);
     let recorded_checksum = manifest.region_checksum(host, spec.id.as_str()).unwrap_or(&current_checksum);
     let other_syntaxes = match spec.syntax {
-        CommentSyntax::Hash => [CommentSyntax::SlashSlash, CommentSyntax::Xml],
-        CommentSyntax::SlashSlash => [CommentSyntax::Hash, CommentSyntax::Xml],
-        CommentSyntax::Xml => [CommentSyntax::Hash, CommentSyntax::SlashSlash],
+        CommentSyntax::Hash =>
+        // #[gamma::skip(collection.reverse_array, reason = "These pure scanner alternatives are combined with any; their order cannot change the result.", tag = "equivalent")]
+        {
+            [CommentSyntax::SlashSlash, CommentSyntax::Xml]
+        }
+        CommentSyntax::SlashSlash =>
+        // #[gamma::skip(collection.reverse_array, reason = "These pure scanner alternatives are combined with any; their order cannot change the result.", tag = "equivalent")]
+        {
+            [CommentSyntax::Hash, CommentSyntax::Xml]
+        }
+        CommentSyntax::Xml =>
+        // #[gamma::skip(collection.reverse_array, reason = "These pure scanner alternatives are combined with any; their order cannot change the result.", tag = "equivalent")]
+        {
+            [CommentSyntax::Hash, CommentSyntax::SlashSlash]
+        }
     };
     let has_conflicting_evidence = other_syntaxes.into_iter().any(|syntax| {
+        // #[gamma::skip(logical.and_remove_left, reason = "For line scanners a raw marker already makes find return Some or Err, so this XML predicate is redundant in the surrounding disjunction.", tag = "equivalent")]
+        let xml_line_scanner = syntax == CommentSyntax::Xml && scanner == HostScanner::Lines;
         !matches!(scanner.find(text, spec.id.as_str(), syntax), Ok(None))
-            || (syntax == CommentSyntax::Xml
-                && scanner == HostScanner::Lines
-                && xml_comment_scan_failed(text)
-                && raw_marker_line_present(text, spec.id.as_str(), syntax))
+            || (xml_line_scanner && xml_comment_scan_failed(text) && raw_marker_line_present(text, spec.id.as_str(), syntax))
     });
     if !has_conflicting_evidence {
         return false;
@@ -1924,7 +2034,7 @@ fn plan_removals_with_array_hosts(
         // Read under the resolved casing: a lock entry recorded before a
         // case-only rename would otherwise find nothing on disk, classify a
         // file that is still present as `AlreadyGone`, and delete it.
-        let disk = read_file_if_present(&repo_root.join(&resolved))?;
+        let disk = (hosts.read)(&repo_root.join(&resolved))?;
         let disk_checksum = disk.as_deref().map(checksum_str);
         match decide_removal(last, disk_checksum.as_deref()) {
             // A file still matching its last render is safe to delete; an
@@ -2004,6 +2114,7 @@ fn plan_removals_with_array_hosts(
         let Some(syntax) = retirement_syntax_or_refuse(repo_root, plan, hosts, &resolved_host, &key.id, last, scanner)? else {
             continue;
         };
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "The host is already cached, so repair performs no fallible IO at this call.", tag = "equivalent")]
         if !repair_or_refuse_with_scanner(repo_root, plan, hosts, &resolved_host, &key.id, syntax, true, scanner)? {
             // The lock entry survives with the region, so the next run still
             // knows it is anvil's to retire once the boundary is repaired.
@@ -2102,6 +2213,7 @@ fn retirement_syntax_or_refuse(
     match infer_recorded_region_syntax(text.as_deref(), scanner, host, id, recorded_checksum) {
         Ok(syntax) => Ok(Some(syntax)),
         Err(reason) => {
+            // #[gamma::skip(call_result.default, reason = "refuse_region still records the refusal in plan; its unit return value already equals Default")]
             refuse_region(plan, host.to_owned(), id, &reason.to_string(), RefusalRemedy::RetirementInference);
             Ok(None)
         }
@@ -2130,7 +2242,9 @@ fn infer_recorded_region_syntax(
     let Some(text) = text else {
         return Ok(CommentSyntax::Hash);
     };
-    let syntaxes = [CommentSyntax::Hash, CommentSyntax::SlashSlash, CommentSyntax::Xml];
+    let syntaxes =
+    // #[gamma::skip(collection.reverse_array, reason = "All syntax matches are counted; their order changes neither uniqueness nor the ambiguity error.", tag = "equivalent")]
+    [CommentSyntax::Hash, CommentSyntax::SlashSlash, CommentSyntax::Xml];
     let xml_scan_failed = scanner == HostScanner::Lines && xml_comment_scan_failed(text);
     if xml_scan_failed && raw_marker_line_present(text, id, CommentSyntax::Xml) {
         bail!(
@@ -2144,22 +2258,20 @@ fn infer_recorded_region_syntax(
 
     for syntax in syntaxes {
         let found = scanner.find(text, id, syntax);
-        let complete = match &found {
-            Ok(Some(region)) => {
-                if checksum_str(region.body_str()) == recorded_checksum {
-                    checksum_matches += 1;
-                    checksum_match = Some(syntax);
-                }
-                true
-            }
-            Ok(None) | Err(_) => false,
-        };
+        if let Ok(Some(region)) = &found
+            && checksum_str(region.body_str()) == recorded_checksum
+        {
+            checksum_matches += 1;
+            checksum_match = Some(syntax);
+        }
         let incomplete_xml_evidence = match syntax {
             CommentSyntax::Xml => xml_scan_failed && raw_marker_line_present(text, id, syntax),
             CommentSyntax::Hash | CommentSyntax::SlashSlash => false,
         };
-        let has_evidence = !matches!(found, Ok(None)) || incomplete_xml_evidence;
-        if complete || has_evidence {
+        let has_evidence =
+        // #[gamma::skip(logical.or_remove_right, reason = "An XML scan failure with a raw marker returns before this loop, so this evidence flag is false here.", tag = "equivalent")]
+        !matches!(found, Ok(None)) || incomplete_xml_evidence;
+        if has_evidence {
             evidence_count += 1;
             evidence = Some(syntax);
         }
@@ -2203,8 +2315,377 @@ mod tests {
 
     use super::*;
     use crate::anvil::artifacts::region;
-    use crate::{CliMeta, RegionId};
+    use crate::manifest::RegionKey;
+    use crate::{CliMeta, RegionId, TomlArrayRegionSpec};
 
+    #[test]
+    fn array_preflight_returns_unpaired_json_marker_errors() {
+        let text = "{\"EnlistmentRootPaths\":{\"SourceRootDirs\":[\n// >>> anvil-managed: unmatched\n]}}\n";
+        let mut hosts = memory_hosts();
+        hosts.set("CloudBuild.json", text.to_owned());
+        let error = array_host_inputs(
+            Path::new("in-memory-markers"),
+            &Workspace {
+                members: Vec::new(),
+                has_workspace_table: false,
+            },
+            &Manifest::default(),
+            &json_array_catalog(),
+            &mut hosts,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Refused JSON array host CloudBuild.json: opening sentinel without its matching close. No plan was produced; no files were changed. Without a matching pair of sentinels the boundary of the generated body cannot be established, so anvil will not write this region rather than risk appending a second copy of it. Restore the missing sentinel around the body anvil generated, or delete the stray one together with the body it was meant to enclose."
+        );
+    }
+
+    #[test]
+    fn toml_array_validation_does_not_resolve_json_placement_metadata() {
+        thread_local! {
+            static READING_TOML: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        }
+        let mut hosts = HostTextCache {
+            resolve: |_, path| {
+                if path == "unrelated.json" && READING_TOML.get() {
+                    return Err(app_err!("JSON placement lookup must not run while validating a TOML host"));
+                }
+                Ok(path.to_owned())
+            },
+            read: |path| {
+                if path.ends_with("config.toml") {
+                    READING_TOML.set(true);
+                    Ok(Some("[plugins]\ndefault = []\n".to_owned()))
+                } else {
+                    assert!(path.ends_with("unrelated.json"), "{path:?}");
+                    READING_TOML.set(false);
+                    Ok(Some("{\"old\": []}\n".to_owned()))
+                }
+            },
+            ..HostTextCache::default()
+        };
+        let mut manifest = Manifest::default();
+        manifest.set_region("unrelated.json", "old", "checksum");
+        manifest.json_array_paths.insert(
+            RegionKey {
+                host: "unrelated.json".to_owned(),
+                id: "old".to_owned(),
+            },
+            vec!["old".to_owned()],
+        );
+        let (arrays, originals) = array_host_inputs(
+            Path::new("in-memory-placement"),
+            &Workspace {
+                members: Vec::new(),
+                has_workspace_table: false,
+            },
+            &manifest,
+            &array_catalog(None, true),
+            &mut hosts,
+        )
+        .unwrap();
+        assert_eq!(arrays["config.toml"].format, ArrayFormat::Toml);
+        assert_eq!(arrays["unrelated.json"].format, ArrayFormat::Json);
+        assert_eq!(
+            originals,
+            HashMap::from([
+                ("config.toml".to_owned(), "[plugins]\ndefault = []\n".to_owned()),
+                ("unrelated.json".to_owned(), "{\"old\": []}\n".to_owned()),
+            ])
+        );
+    }
+
+    #[test]
+    fn active_json_validation_requires_both_a_spec_and_a_body() {
+        assert!(is_active_json_write(true, true));
+        assert!(!is_active_json_write(true, false));
+        assert!(!is_active_json_write(false, true));
+        assert!(!is_active_json_write(false, false));
+    }
+
+    #[test]
+    fn structural_history_keeps_hidden_duplicate_sentinels_out_of_retirement_repair() {
+        let text = concat!(
+            "{\"entries\": [],\n/*\n",
+            "// >>> anvil-managed: retired\n\"protected\",\n// <<< anvil-managed: retired\n",
+            "// >>> anvil-managed: retired\n\"protected\",\n// <<< anvil-managed: retired\n",
+            "*/\n\"keep\": true}\n",
+        );
+        let mut manifest = Manifest::default();
+        manifest.set_region("config.json", "retired", checksum_str("\"protected\",\n"));
+        manifest.json_array_paths.insert(
+            RegionKey {
+                host: "config.json".to_owned(),
+                id: "retired".to_owned(),
+            },
+            vec!["entries".to_owned()],
+        );
+        let mut hosts = memory_hosts();
+        hosts.set("config.json", text.to_owned());
+        let plan = build_plan_with_hosts(
+            Path::new("in-memory-retirement"),
+            &Workspace {
+                members: Vec::new(),
+                has_workspace_table: false,
+            },
+            &manifest,
+            &[],
+            &empty_catalog(),
+            &mut hosts,
+        )
+        .unwrap();
+        assert!(plan.refusals().is_empty());
+        assert_eq!(plan.items().len(), 1);
+        assert_eq!(plan.items()[0].decision, Decision::OrphanedKept);
+        assert_eq!(plan.items()[0].spliced_host, None);
+        assert_eq!(hosts.cached("config.json").as_deref(), Some(text));
+        assert!(plan.projected_manifest(&manifest).regions.is_empty());
+    }
+
+    #[test]
+    fn a_later_splice_must_preserve_an_earlier_written_json_regions_required_entry() {
+        let spec = crate::JsonArrayRegionSpec {
+            region: RegionSpec {
+                host: HostSelector::Path("config.json".to_owned()),
+                id: RegionId::new("entries"),
+                body: "\"required\",\n".to_owned(),
+                syntax: CommentSyntax::SlashSlash,
+            },
+            path: vec!["entries".to_owned()],
+        };
+        let before = "{\"entries\": [\n// >>> anvil-managed: entries\n\"required\",\n// <<< anvil-managed: entries\n]}\n";
+        let after = "{\"entries\": [\n// >>> anvil-managed: entries\n// <<< anvil-managed: entries\n]}\n";
+        let arrays = BTreeMap::from([(
+            "config.json".to_owned(),
+            ArrayHost {
+                format: ArrayFormat::Json,
+                paths: vec![spec.path.clone()],
+                json_specs: BTreeMap::from([("entries".to_owned(), spec)]),
+            },
+        )]);
+        let mut plan = Plan::default();
+        plan.push(PlanItem::write_region(
+            "config.json",
+            "entries",
+            "\"required\",\n".to_owned(),
+            before.to_owned(),
+            "checksum".to_owned(),
+        ));
+        plan.push(PlanItem::repair_region("config.json", "ordinary", after.to_owned()));
+        let mut hosts = memory_hosts();
+        hosts.set("config.json", before.to_owned());
+        let error = validate_array_plan(
+            Path::new("in-memory-composition"),
+            &plan,
+            &mut hosts,
+            &arrays,
+            &mut HashMap::from([("config.json".to_owned(), before.to_owned())]),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Refused JSON array host config.json: required JSON array entry \"required\" occurs 0 times after composition. No plan was produced; no files were changed. Keep array scaffolding repository-owned and independent of other regions. Ownership migrations are not supported."
+        );
+    }
+
+    #[test]
+    fn json_preflight_and_scanner_discovery_return_their_errors() {
+        let root = Path::new("scripted-root");
+        let workspace = Workspace {
+            members: Vec::new(),
+            has_workspace_table: false,
+        };
+        let mut hosts = HostTextCache {
+            resolve: |_, host| Ok(host.to_owned()),
+            read: |path| Err(app_err!("scripted host read failure: {}", path.display())),
+            ..HostTextCache::default()
+        };
+        let error = build_plan_with_hosts(root, &workspace, &Manifest::default(), &[], &json_array_catalog(), &mut hosts).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("scripted host read failure: {}", root.join("CloudBuild.json").display())
+        );
+
+        let mut manifest = Manifest::default();
+        manifest.json_scanner_hosts.insert("config.json".to_owned());
+        let mut hosts = HostTextCache {
+            resolve: |_, _| Err(app_err!("scripted scanner resolution error")),
+            ..HostTextCache::default()
+        };
+        let error = build_plan_with_hosts(root, &workspace, &manifest, &[], &empty_catalog(), &mut hosts).unwrap_err();
+        assert_eq!(error.to_string(), "scripted scanner resolution error");
+
+        manifest.set_region("config.json", "retired", "checksum");
+        let mut hosts = HostTextCache {
+            resolve: |_, host| Ok(host.to_owned()),
+            read: |path| Err(app_err!("scripted host read failure: {}", path.display())),
+            ..HostTextCache::default()
+        };
+        let error = build_plan_with_hosts(root, &workspace, &manifest, &[], &empty_catalog(), &mut hosts).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("scripted host read failure: {}", root.join("config.json").display())
+        );
+    }
+
+    #[test]
+    fn every_unsafe_retiring_json_host_is_refused_once_and_other_hosts_still_retire() {
+        let mut manifest = Manifest::default();
+        manifest.set_file("a.json", checksum_str("{\"previously_owned\":true}\n"));
+        for host in ["a.json", "b.json"] {
+            manifest.json_scanner_hosts.insert(host.to_owned());
+            manifest.set_region(host, "old", checksum_str("old\n"));
+        }
+        manifest.set_region("z.json", "old", checksum_str("old\n"));
+        let mut hosts = memory_hosts();
+        hosts.set("a.json", "\"unterminated".to_owned());
+        hosts.set("b.json", "/* unterminated".to_owned());
+        hosts.set("z.json", "// >>> anvil-managed: old\nold\n// <<< anvil-managed: old\n".to_owned());
+        let catalog = Catalog::builder(test_cli())
+            .with_artifact(Artifact::region(RegionSpec {
+                host: HostSelector::Path("a.json".to_owned()),
+                id: RegionId::new("new"),
+                body: "new\n".to_owned(),
+                syntax: CommentSyntax::SlashSlash,
+            }))
+            .build()
+            .unwrap();
+        let plan = build_plan_with_hosts(
+            Path::new("in-memory-retirement"),
+            &Workspace {
+                members: Vec::new(),
+                has_workspace_table: false,
+            },
+            &manifest,
+            &[],
+            &catalog,
+            &mut hosts,
+        )
+        .unwrap();
+        assert_eq!(
+            plan.refusals(),
+            [
+                "Refused to manage a.json [old]: JSON-like host contains an unterminated quoted string; close it before managing regions. This region was left unchanged; other regions in the same file and other artifacts may still be updated. Anvil could not repair this lexical error by restoring a tracked body between intact sentinels. Close the unterminated string or block comment in repository-owned text, repair malformed markers, or correct the generated template, then retry.",
+                "Refused to manage b.json [old]: JSON-like host contains an unterminated block comment; close it before managing regions. This region was left unchanged; other regions in the same file and other artifacts may still be updated. Anvil could not repair this lexical error by restoring a tracked body between intact sentinels. Close the unterminated string or block comment in repository-owned text, repair malformed markers, or correct the generated template, then retry.",
+                "Refused to manage a.json [new]: JSON-like host contains an unterminated quoted string; close it before managing regions. This region was left unchanged; other regions in the same file and other artifacts may still be updated. Anvil could not repair this lexical error by restoring a tracked body between intact sentinels. Close the unterminated string or block comment in repository-owned text, repair malformed markers, or correct the generated template, then retry.",
+            ]
+        );
+        assert_eq!(
+            plan.items()
+                .iter()
+                .map(|item| match &item.target {
+                    Target::Region { host, id } => (host.as_str(), id.as_str(), item.decision, item.spliced_host.as_deref()),
+                    Target::File { .. } => panic!("retiring regions must not plan owned-file changes"),
+                })
+                .collect::<Vec<_>>(),
+            [
+                ("a.json", "old", Decision::LeaveAlone, None),
+                ("b.json", "old", Decision::LeaveAlone, None),
+                ("a.json", "new", Decision::LeaveAlone, None),
+                ("z.json", "old", Decision::Remove, Some("")),
+            ]
+        );
+    }
+
+    #[test]
+    fn array_placement_validation_is_scoped_to_the_recorded_json_host_and_format() {
+        let workspace = Workspace {
+            members: Vec::new(),
+            has_workspace_table: false,
+        };
+        let root = Path::new("in-memory-placement");
+        let catalog = array_catalog(None, true);
+        let mut manifest = Manifest::default();
+        manifest.json_array_paths.insert(
+            RegionKey {
+                host: "unrelated.json".to_owned(),
+                id: "retired".to_owned(),
+            },
+            vec!["old".to_owned()],
+        );
+        let text = concat!(
+            "# \"\n[plugins]\ndefault = []\nvalue = \"\"\"\n",
+            "// >>> anvil-managed: retired\nbody\n// <<< anvil-managed: retired\n\"\"\"\n",
+        );
+        text.parse::<toml_edit::DocumentMut>().unwrap();
+        let mut hosts = memory_hosts();
+        hosts.set("config.toml", text.to_owned());
+        let (_, originals) = array_host_inputs(root, &workspace, &manifest, &catalog, &mut hosts).unwrap();
+        assert_eq!(originals, HashMap::from([("config.toml".to_owned(), text.to_owned())]));
+
+        let text = "{ \"EnlistmentRootPaths\": { \"SourceRootDirs\": [\n// >>> anvil-managed: retired\n\"old\",\n// <<< anvil-managed: retired\n]}}\n";
+        let mut manifest = Manifest::default();
+        manifest.json_array_paths.insert(
+            RegionKey {
+                host: "unrelated.json".to_owned(),
+                id: "retired".to_owned(),
+            },
+            vec!["different".to_owned()],
+        );
+        let mut hosts = memory_hosts();
+        hosts.set("CloudBuild.json", text.to_owned());
+        let (_, originals) = array_host_inputs(root, &workspace, &manifest, &json_array_catalog(), &mut hosts).unwrap();
+        assert_eq!(originals, HashMap::from([("CloudBuild.json".to_owned(), text.to_owned())]));
+    }
+
+    #[test]
+    fn survivor_xml_placement_errors_and_toml_special_cases_are_syntax_specific() {
+        let expected = "the XML document element is self-closing, so it cannot contain a managed region";
+        for text in [
+            "<root />\n",
+            "<!-- >>> anvil-managed: survivor -->\n<!-- <<< anvil-managed: survivor -->\n<root />\n",
+        ] {
+            assert_eq!(region_placement("survivor", CommentSyntax::Xml, Some(text)).unwrap_err(), expected);
+        }
+        let error = region_placement("survivor", CommentSyntax::Xml, Some("<root>\n</other>\n")).unwrap_err();
+        assert_eq!(error, "the XML host closes `other` while `root` is still open");
+        let text = "# >>> anvil-managed: anvil-spellcheck\n[Hunspell.quirks]\n# <<< anvil-managed: anvil-spellcheck\n";
+        for id in ["anvil-spellcheck-hunspell", "anvil-spellcheck-quirks", "other"] {
+            for syntax in [CommentSyntax::Hash, CommentSyntax::SlashSlash] {
+                assert_eq!(
+                    region_placement(id, syntax, Some(text)).unwrap(),
+                    if syntax == CommentSyntax::Hash && id != "other" {
+                        RegionPlacement::At(0)
+                    } else {
+                        RegionPlacement::End
+                    },
+                    "{id} {syntax:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn survivor_marker_text_hidden_in_host_values_does_not_refuse_an_absent_region() {
+        for (host, text) in [
+            (
+                "config.toml",
+                "value = '''\n<!-- >>> anvil-managed: survivor -->\nbody\n<!-- <<< anvil-managed: survivor -->\n'''\n",
+            ),
+            (
+                "host.txt",
+                "<root>\n<![CDATA[\n<!-- >>> anvil-managed: survivor -->\nbody\n<!-- <<< anvil-managed: survivor -->\n]]>\n</root>\n",
+            ),
+        ] {
+            let mut plan = Plan::default();
+            let spec = RegionSpec {
+                host: HostSelector::Path(host.to_owned()),
+                id: RegionId::new("survivor"),
+                body: "managed\n".to_owned(),
+                syntax: CommentSyntax::SlashSlash,
+            };
+            assert!(!refuse_region_syntax_change(
+                &mut plan,
+                &Manifest::default(),
+                host,
+                &spec,
+                Some(text),
+                HostScanner::for_path(host)
+            ));
+            assert!(plan.refusals().is_empty());
+            assert!(plan.items().is_empty());
+        }
+    }
     #[test]
     fn update_returns_a_late_manifest_read_error_before_publishing_any_changes() {
         let root = Path::new("workspace");
@@ -2238,7 +2719,7 @@ mod tests {
     }
 
     fn array_catalog(ordinary: Option<RegionSpec>, array_first: bool) -> Catalog {
-        let array = crate::catalog::TomlArrayRegionSpec {
+        let array = TomlArrayRegionSpec {
             region: RegionSpec {
                 host: HostSelector::Path("config.toml".to_owned()),
                 id: RegionId::new("entries"),
@@ -2362,6 +2843,366 @@ mod tests {
         }
     }
 
+    fn dependabot_plan(configurations: [Option<&str>; 2], backends: &[Backend]) -> (Plan, HostTextCache) {
+        let catalog = Catalog::builder(test_cli())
+            .with_artifact(artifacts::github::setup_action())
+            .with_artifact(artifacts::github::pr_impl_workflow())
+            .build()
+            .unwrap();
+        let mut hosts = memory_hosts();
+        for (path, text) in [".github/dependabot.yml", ".github/dependabot.yaml"]
+            .into_iter()
+            .zip(configurations)
+        {
+            hosts.texts.insert(path.to_owned(), text.map(str::to_owned));
+        }
+        let mut plan = Plan::default();
+        plan_dependabot_exclusions(Path::new("memory"), backends, &catalog, &mut plan, &mut hosts).unwrap();
+        (plan, hosts)
+    }
+
+    #[test]
+    fn github_generation_patches_either_dependabot_spelling_without_tracking_it() {
+        let source = "version: 2\nupdates:\n- package-ecosystem: github-actions\n  directory: /\n  schedule: {interval: weekly}\n";
+        for (configurations, path) in [
+            ([Some(source), None], ".github/dependabot.yml"),
+            ([None, Some(source)], ".github/dependabot.yaml"),
+        ] {
+            let (plan, hosts) = dependabot_plan(configurations, &[Backend::GitHub]);
+            assert_eq!(plan.items().len(), 1);
+            assert_eq!(plan.items()[0].target, Target::File { path: path.to_owned() });
+            let updated = hosts.cached(path).unwrap();
+            assert!(updated.contains(".github/actions/anvil-setup/action.yml"));
+            assert!(updated.contains(".github/workflows/anvil-pr-impl.yml"));
+            assert_eq!(plan.projected_manifest(&Manifest::default()), Manifest::default());
+            let rerun = if path == ".github/dependabot.yml" {
+                [Some(updated.as_str()), None]
+            } else {
+                [None, Some(updated.as_str())]
+            };
+            assert_eq!(dependabot_plan(rerun, &[Backend::GitHub]).0.dry_run_exit_code(), 0);
+        }
+    }
+
+    #[test]
+    fn dependabot_patches_do_not_recreate_retired_configuration() {
+        let source = "version: 2\nupdates:\n- package-ecosystem: github-actions\n  directory: /\n";
+        for (recorded, resolved) in [
+            (".github/dependabot.yml", ".github/dependabot.yml"),
+            (".github/Dependabot.yml", ".github/dependabot.yml"),
+            (".github/dependabot.yaml", ".github/dependabot.yaml"),
+        ] {
+            let catalog = Catalog::builder(test_cli())
+                .with_artifact(artifacts::github::setup_action())
+                .build()
+                .unwrap();
+            let mut hosts = memory_hosts();
+            hosts.resolve = |_, path| Ok(path.to_ascii_lowercase());
+            hosts.texts.insert(".github/dependabot.yml".to_owned(), None);
+            hosts.texts.insert(".github/dependabot.yaml".to_owned(), None);
+            hosts.set(resolved, source.to_owned());
+            let mut plan = Plan::default();
+            plan.push(PlanItem::remove_file(recorded));
+            plan_dependabot_exclusions(Path::new("memory"), &[Backend::GitHub], &catalog, &mut plan, &mut hosts).unwrap();
+            assert_eq!(plan.items().len(), 1);
+            assert_eq!(plan.items()[0].decision, Decision::Remove);
+            assert!(plan.refusals().is_empty());
+        }
+    }
+
+    #[test]
+    fn dependabot_exclusions_follow_the_owned_files_resolved_casing() {
+        let source = "version: 2\nupdates:\n- package-ecosystem: github-actions\n  directory: /\n";
+        let catalog = Catalog::builder(test_cli())
+            .with_artifact(artifacts::github::pr_impl_workflow())
+            .build()
+            .unwrap();
+        let mut hosts = memory_hosts();
+        hosts.resolve = |_, path| {
+            Ok(if path == ".github/workflows/anvil-pr-impl.yml" {
+                ".github/workflows/Anvil-PR-Impl.yml".to_owned()
+            } else {
+                path.to_owned()
+            })
+        };
+        hosts.set(".github/dependabot.yml", source.to_owned());
+        hosts.texts.insert(".github/dependabot.yaml".to_owned(), None);
+        let mut plan = Plan::default();
+        plan_dependabot_exclusions(Path::new("memory"), &[Backend::GitHub], &catalog, &mut plan, &mut hosts).unwrap();
+        let updated = hosts.cached(".github/dependabot.yml").unwrap();
+        assert!(updated.contains(".github/workflows/Anvil-PR-Impl.yml"));
+        assert!(!updated.contains(".github/workflows/anvil-pr-impl.yml"));
+    }
+
+    #[test]
+    fn dependabot_path_resolution_errors_do_not_plan_partial_patches() {
+        let catalog = Catalog::builder(test_cli())
+            .with_artifact(artifacts::github::pr_impl_workflow())
+            .build()
+            .unwrap();
+        let mut hosts = memory_hosts();
+        hosts.resolve = |_, path| {
+            if path.starts_with(".github/workflows/") {
+                bail!("ambiguous owned-file casing");
+            }
+            Ok(path.to_owned())
+        };
+        hosts.set(".github/dependabot.yml", "version: 2\nupdates: []\n".to_owned());
+        hosts.texts.insert(".github/dependabot.yaml".to_owned(), None);
+        let mut plan = Plan::default();
+        let error = plan_dependabot_exclusions(Path::new("memory"), &[Backend::GitHub], &catalog, &mut plan, &mut hosts).unwrap_err();
+        assert!(error.to_string().contains("ambiguous owned-file casing"));
+        assert!(plan.items().is_empty());
+    }
+
+    #[test]
+    fn dependabot_retirement_path_resolution_errors_are_reported() {
+        for item in [
+            PlanItem::remove_file(".github/Dependabot.yml"),
+            PlanItem::noop(
+                Target::Region {
+                    host: ".github/Dependabot.yml".to_owned(),
+                    id: "retired-policy".to_owned(),
+                },
+                Decision::LeaveAlone,
+            ),
+        ] {
+            let catalog = Catalog::builder(test_cli())
+                .with_artifact(artifacts::github::setup_action())
+                .build()
+                .unwrap();
+            let mut hosts = memory_hosts();
+            hosts.resolve = |_, path| {
+                assert_eq!(path, ".github/Dependabot.yml");
+                bail!("cannot resolve retired configuration");
+            };
+            let mut plan = Plan::default();
+            plan.push(item);
+            let error = plan_dependabot_exclusions(Path::new("memory"), &[Backend::GitHub], &catalog, &mut plan, &mut hosts).unwrap_err();
+            assert!(error.to_string().contains("cannot resolve retired configuration"));
+            assert_eq!(plan.items().len(), 1);
+        }
+    }
+
+    #[test]
+    fn dependabot_region_retirement_does_not_skip_the_repository_file_patch() {
+        let source = "version: 2\nupdates:\n- package-ecosystem: github-actions\n  directory: /\n";
+        let catalog = Catalog::builder(test_cli())
+            .with_artifact(artifacts::github::setup_action())
+            .build()
+            .unwrap();
+        let mut hosts = memory_hosts();
+        hosts.set(".github/dependabot.yml", source.to_owned());
+        hosts.texts.insert(".github/dependabot.yaml".to_owned(), None);
+        let mut plan = Plan::default();
+        plan.push(PlanItem::remove_region(".github/dependabot.yml", "old-policy", source.to_owned()));
+        plan_dependabot_exclusions(Path::new("memory"), &[Backend::GitHub], &catalog, &mut plan, &mut hosts).unwrap();
+        assert_eq!(plan.items().len(), 2);
+        assert!(matches!(plan.items()[1].target, Target::File { .. }));
+        assert_eq!(plan.items()[1].decision, Decision::Write);
+    }
+
+    #[test]
+    fn dependabot_patches_preserve_refused_retired_region_bodies() {
+        let original = "version: 2\nupdates:\n- package-ecosystem: github-actions\n  directory: /\n";
+        let edited = format!("{original}  schedule: {{interval: monthly}}\n");
+        let source = upsert_region("", "retired-policy", &edited, CommentSyntax::Hash).unwrap();
+        for host in [".github/Dependabot.yml", ".github/Dependabot.yaml"] {
+            let catalog = Catalog::builder(test_cli())
+                .with_artifact(artifacts::github::setup_action())
+                .build()
+                .unwrap();
+            let mut manifest = Manifest::default();
+            manifest.set_region(host, "retired-policy", checksum_str(original));
+            let mut hosts = memory_hosts();
+            hosts.resolve = |_, path| Ok(path.to_ascii_lowercase());
+            hosts.texts.insert(".github/dependabot.yml".to_owned(), None);
+            hosts.texts.insert(".github/dependabot.yaml".to_owned(), None);
+            let resolved = host.to_ascii_lowercase();
+            hosts.set(&resolved, source.clone());
+            let mut plan = Plan::default();
+            plan_removals_with_array_hosts(
+                Path::new("memory"),
+                &manifest,
+                &mut plan,
+                &mut hosts,
+                &ComposedHosts::default(),
+                &BTreeSet::new(),
+            )
+            .unwrap();
+            assert_eq!(plan.refusals().len(), 1);
+            plan_dependabot_exclusions(Path::new("memory"), &[Backend::GitHub], &catalog, &mut plan, &mut hosts).unwrap();
+            assert_eq!(plan.items().len(), 1);
+            assert_eq!(plan.items()[0].decision, Decision::LeaveAlone);
+            assert_eq!(hosts.cached(&resolved).as_deref(), Some(source.as_str()));
+            assert_eq!(plan.projected_manifest(&manifest).regions, manifest.regions);
+        }
+    }
+
+    #[test]
+    fn dependabot_duplicate_spellings_include_refused_retired_configs() {
+        let source = "version: 2\nupdates:\n- package-ecosystem: github-actions\n  directory: /\n";
+        let edited = format!("{source}  schedule: {{interval: monthly}}\n");
+        let protected_source = upsert_region("", "retired-policy", &edited, CommentSyntax::Hash).unwrap();
+        for (protected, other) in [
+            (".github/Dependabot.yml", ".github/dependabot.yaml"),
+            (".github/Dependabot.yaml", ".github/dependabot.yml"),
+        ] {
+            let catalog = Catalog::builder(test_cli())
+                .with_artifact(artifacts::github::setup_action())
+                .build()
+                .unwrap();
+            let mut manifest = Manifest::default();
+            manifest.set_region(protected, "retired-policy", checksum_str(source));
+            let mut hosts = memory_hosts();
+            hosts.resolve = |_, path| Ok(path.to_ascii_lowercase());
+            let resolved = protected.to_ascii_lowercase();
+            hosts.set(&resolved, protected_source.clone());
+            hosts.set(other, source.to_owned());
+            let mut plan = Plan::default();
+            plan_removals_with_array_hosts(
+                Path::new("memory"),
+                &manifest,
+                &mut plan,
+                &mut hosts,
+                &ComposedHosts::default(),
+                &BTreeSet::new(),
+            )
+            .unwrap();
+            assert_eq!(plan.refusals().len(), 1);
+            plan_dependabot_exclusions(Path::new("memory"), &[Backend::GitHub], &catalog, &mut plan, &mut hosts).unwrap();
+            assert_eq!(plan.items().len(), 1);
+            assert_eq!(plan.items()[0].decision, Decision::LeaveAlone);
+            assert_eq!(plan.refusals().len(), 2);
+            assert_eq!(
+                plan.refusals()[1],
+                "Refused to add Dependabot exclusions: both .github/dependabot.yml and .github/dependabot.yaml exist. \
+                 Keep one configuration file and rerun cargo anvil; both files were left unchanged."
+            );
+            assert_eq!(hosts.cached(&resolved).as_deref(), Some(protected_source.as_str()));
+            assert_eq!(hosts.cached(other).as_deref(), Some(source));
+            assert_eq!(plan.projected_manifest(&manifest).regions, manifest.regions);
+        }
+    }
+
+    #[test]
+    fn dependabot_file_removal_disambiguates_the_remaining_configuration() {
+        let source = "version: 2\nupdates:\n- package-ecosystem: github-actions\n  directory: /\n";
+        for (retired, remaining) in [
+            (".github/Dependabot.yml", ".github/dependabot.yaml"),
+            (".github/Dependabot.yaml", ".github/dependabot.yml"),
+        ] {
+            let catalog = Catalog::builder(test_cli())
+                .with_artifact(artifacts::github::setup_action())
+                .build()
+                .unwrap();
+            let mut hosts = memory_hosts();
+            hosts.resolve = |_, path| Ok(path.to_ascii_lowercase());
+            hosts.set(".github/dependabot.yml", source.to_owned());
+            hosts.set(".github/dependabot.yaml", source.to_owned());
+            let mut plan = Plan::default();
+            plan.push(PlanItem::remove_file(retired));
+            plan_dependabot_exclusions(Path::new("memory"), &[Backend::GitHub], &catalog, &mut plan, &mut hosts).unwrap();
+            let expected = crate::dependabot::update(source, &[".github/actions/anvil-setup/action.yml"])
+                .unwrap()
+                .unwrap();
+            assert_eq!(plan.items().len(), 2);
+            assert_eq!(plan.items()[0].decision, Decision::Remove);
+            assert_eq!(
+                plan.items()[1].target,
+                Target::File {
+                    path: remaining.to_owned()
+                }
+            );
+            assert_eq!(plan.items()[1].decision, Decision::Write);
+            assert_eq!(plan.items()[1].rendered.as_deref(), Some(expected.as_str()));
+            assert!(plan.refusals().is_empty());
+        }
+    }
+
+    #[test]
+    fn dependabot_customized_file_retirement_still_allows_the_unowned_patch() {
+        let source = "version: 2\nupdates:\n- package-ecosystem: github-actions\n  directory: /\n";
+        let catalog = Catalog::builder(test_cli())
+            .with_artifact(artifacts::github::setup_action())
+            .build()
+            .unwrap();
+        let mut hosts = memory_hosts();
+        hosts.set(".github/dependabot.yml", source.to_owned());
+        hosts.texts.insert(".github/dependabot.yaml".to_owned(), None);
+        let mut plan = Plan::default();
+        plan.push(PlanItem::orphaned_kept(Target::File {
+            path: ".github/dependabot.yml".to_owned(),
+        }));
+        plan_dependabot_exclusions(Path::new("memory"), &[Backend::GitHub], &catalog, &mut plan, &mut hosts).unwrap();
+        let expected = crate::dependabot::update(source, &[".github/actions/anvil-setup/action.yml"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(plan.items().len(), 2);
+        assert_eq!(plan.items()[0].decision, Decision::OrphanedKept);
+        assert_eq!(plan.items()[1].decision, Decision::Write);
+        assert_eq!(plan.items()[1].rendered.as_deref(), Some(expected.as_str()));
+        assert_eq!(hosts.cached(".github/dependabot.yml").as_deref(), Some(expected.as_str()));
+    }
+
+    #[test]
+    fn generation_does_not_enable_dependabot_or_modify_source_repository_policy() {
+        for (configurations, backends) in [
+            ([None, None], vec![Backend::GitHub]),
+            ([Some("version: 2\nupdates: []\n"), None], vec![Backend::GitHub]),
+            ([Some("not even YAML: ["), None], vec![Backend::Ado]),
+            ([Some(include_str!("../../../.github/dependabot.yml")), None], vec![Backend::GitHub]),
+        ] {
+            let (plan, _) = dependabot_plan(configurations, &backends);
+            assert_eq!(plan.dry_run_exit_code(), 0);
+            assert!(plan.items().is_empty());
+        }
+    }
+
+    #[test]
+    fn unsafe_dependabot_configuration_fails_drift_checks_without_writing() {
+        for configurations in [
+            [Some("version: 2\nupdates: ["), None],
+            [Some("version: 2\nupdates: []\n"), Some("version: 2\nupdates: []\n")],
+        ] {
+            let (plan, hosts) = dependabot_plan(configurations, &[Backend::GitHub]);
+            assert_eq!(plan.dry_run_exit_code(), 1);
+            assert!(plan.items().is_empty());
+            assert!(plan.refusals()[0].contains("left unchanged"));
+            assert_eq!(hosts.cached(".github/dependabot.yml").as_deref(), configurations[0]);
+            assert_eq!(hosts.cached(".github/dependabot.yaml").as_deref(), configurations[1]);
+        }
+    }
+
+    #[test]
+    fn dependabot_patches_do_not_overwrite_catalog_owned_configuration() {
+        let source = "version: 2\nupdates:\n- package-ecosystem: github-actions\n  directory: /\n";
+        for owner in [
+            Artifact::owned_file(".github/dependabot.yml", source),
+            Artifact::region(RegionSpec {
+                host: HostSelector::Path(".github/dependabot.yml".to_owned()),
+                id: RegionId::new("repository-policy"),
+                body: String::new(),
+                syntax: CommentSyntax::Hash,
+            }),
+        ] {
+            let catalog = Catalog::builder(test_cli())
+                .with_artifact(artifacts::github::setup_action())
+                .with_artifact(owner)
+                .build()
+                .unwrap();
+            let mut hosts = memory_hosts();
+            hosts.set(".github/dependabot.yml", source.to_owned());
+            hosts.texts.insert(".github/dependabot.yaml".to_owned(), None);
+            let mut plan = Plan::default();
+            plan_dependabot_exclusions(Path::new("memory"), &[Backend::GitHub], &catalog, &mut plan, &mut hosts).unwrap();
+            assert_eq!(plan.dry_run_exit_code(), 1);
+            assert!(plan.items().is_empty());
+            assert!(plan.refusals()[0].contains("Add generated-file exclusions to its catalog source instead"));
+            assert_eq!(hosts.cached(".github/dependabot.yml").as_deref(), Some(source));
+        }
+    }
+
     fn case_renamed_json_hosts() -> HostTextCache {
         HostTextCache {
             resolve: |root, path| {
@@ -2371,6 +3212,221 @@ mod tests {
             },
             ..HostTextCache::default()
         }
+    }
+
+    #[test]
+    fn survivor_planning_read_errors_return_without_publication_or_fixture_writes() {
+        let root = Path::new("in-memory-planning-read-failure");
+        let workspace = Workspace {
+            members: Vec::new(),
+            has_workspace_table: false,
+        };
+        let hosts = || HostTextCache {
+            resolve: |_, _| Ok(".".to_owned()),
+            read: |path| {
+                assert_eq!(path, Path::new("in-memory-planning-read-failure").join("."));
+                Err(ohno::app_err!("scripted host read refusal"))
+            },
+            ..HostTextCache::default()
+        };
+        let error = repair_or_refuse(root, &mut Plan::default(), &mut hosts(), ".", "region", CommentSyntax::Hash, false)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "scripted host read refusal");
+        let mut previous = Manifest::default();
+        previous.set_file("bad.txt", "old-checksum");
+        let error = build_plan_with_hosts(root, &workspace, &previous, &[], &empty_catalog(), &mut hosts())
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "scripted host read refusal");
+        let array = TomlArrayRegionSpec {
+            region: campaign_region("bad.toml", "entries", "\"managed\","),
+            path: vec!["items".to_owned()],
+        };
+        let catalog = Catalog::builder(CliMeta::new("anvil"))
+            .with_toml_array_region(array)
+            .build()
+            .unwrap();
+        let error = array_host_inputs(root, &workspace, &Manifest::default(), &catalog, &mut hosts())
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "scripted host read refusal");
+    }
+
+    #[test]
+    fn survivor_array_host_errors_require_either_current_ownership_or_any_retired_owner() {
+        let root = Path::new("in-memory-array-ownership");
+        let workspace = Workspace {
+            members: Vec::new(),
+            has_workspace_table: false,
+        };
+        let array = TomlArrayRegionSpec {
+            region: campaign_region("bad.toml", "entries", "\"managed\","),
+            path: vec!["items".to_owned()],
+        };
+        let catalog = Catalog::builder(test_cli()).with_toml_array_region(array).build().unwrap();
+        let mut hosts = memory_hosts();
+        hosts.set("bad.toml", "items = [".to_owned());
+        let error = array_host_inputs(root, &workspace, &Manifest::default(), &catalog, &mut hosts).unwrap_err();
+        assert!(error.to_string().contains("bad.toml"), "{error}");
+
+        let mut manifest = Manifest::default();
+        manifest.set_region("bad.toml", "retired", "checksum");
+        manifest.set_region("other.txt", "unrelated", "checksum");
+        let error = array_host_inputs(root, &workspace, &manifest, &empty_catalog(), &mut hosts).unwrap_err();
+        assert!(error.to_string().contains("bad.toml"), "{error}");
+    }
+
+    #[test]
+    fn survivor_retirement_continues_after_ambiguity_and_ignores_xml_cdata_evidence() {
+        let text = "<!--\n# >>> anvil-managed: retired\nhash\n# <<< anvil-managed: retired\n-->\n<root>\n\
+                    <![CDATA[\n<!-- >>> anvil-managed: retired -->\nxml\n<!-- <<< anvil-managed: retired -->\n]]>\n</root>\n";
+        assert_eq!(
+            infer_recorded_region_syntax(Some(text), HostScanner::Lines, "host.txt", "retired", "unmatched").unwrap(),
+            CommentSyntax::Hash
+        );
+        let ambiguous = "# >>> anvil-managed: retired\nsame\n# <<< anvil-managed: retired\n\
+                         // >>> anvil-managed: retired\nsame\n// <<< anvil-managed: retired\n";
+        let removable = "# >>> anvil-managed: retired\nowned\n# <<< anvil-managed: retired\n";
+        let mut previous = Manifest::default();
+        previous.set_region("a.txt", "retired", checksum_str("same\n"));
+        previous.set_region("z.txt", "retired", checksum_str("owned\n"));
+        let mut hosts = memory_hosts();
+        hosts.set("a.txt", ambiguous.to_owned());
+        hosts.set("z.txt", removable.to_owned());
+        let mut plan = Plan::default();
+        plan_removals(
+            Path::new("in-memory-retirement"),
+            &previous,
+            &mut plan,
+            &mut hosts,
+            &ComposedHosts::default(),
+        )
+        .unwrap();
+        assert_eq!(plan.refusals().len(), 1);
+        assert!(plan.items().iter().any(|item| item.decision == Decision::Remove
+            && item.target
+                == Target::Region {
+                    host: "z.txt".to_owned(),
+                    id: "retired".to_owned()
+                }));
+    }
+
+    #[test]
+    fn survivor_every_host_resolution_failure_is_returned_before_publication() {
+        thread_local! {
+            static RESOLUTION: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((usize::MAX, 0)) };
+        }
+        fn resolve(_: &Path, host: &str) -> Result<String, AppError> {
+            RESOLUTION.with(|state| {
+                let (fail_at, calls) = state.get();
+                state.set((fail_at, calls + 1));
+                if calls == fail_at {
+                    Err(ohno::app_err!("injected host resolution failure at {calls}: {host}"))
+                } else {
+                    Ok(host.to_owned())
+                }
+            })
+        }
+        let ordinary = RegionSpec {
+            host: HostSelector::Path("config.toml".to_owned()),
+            id: RegionId::new("ordinary"),
+            body: "setting = true\n".to_owned(),
+            syntax: CommentSyntax::Hash,
+        };
+        let array = TomlArrayRegionSpec {
+            region: RegionSpec {
+                host: HostSelector::Path("config.toml".to_owned()),
+                id: RegionId::new("entries"),
+                body: "\"required\",\n".to_owned(),
+                syntax: CommentSyntax::Hash,
+            },
+            path: vec!["plugins".to_owned(), "default".to_owned()],
+        };
+        let catalog = Catalog::builder(test_cli())
+            .with_toml_array_region(array)
+            .with_artifact(Artifact::region(ordinary))
+            .with_artifact(Artifact::region(RegionSpec {
+                host: HostSelector::Path("notes.txt".to_owned()),
+                id: RegionId::new("notes"),
+                body: "notes\n".to_owned(),
+                syntax: CommentSyntax::SlashSlash,
+            }))
+            .build()
+            .unwrap();
+        let mut manifest = Manifest::default();
+        manifest.set_region("config.toml", "ordinary", checksum_str("setting = true\n"));
+        manifest.set_region("config.toml", "retired", checksum_str("\"old\",\n"));
+        let run = || {
+            let mut hosts = HostTextCache {
+                resolve,
+                ..HostTextCache::default()
+            };
+            hosts.set(
+                "config.toml",
+                concat!(
+                    "[plugins]\ndefault = [\n",
+                    "# >>> anvil-managed: retired\n\"old\",\n# <<< anvil-managed: retired\n]\n",
+                    "# >>> anvil-managed: ordinary\nsetting = true\n# <<< anvil-managed: ordinary\n"
+                )
+                .to_owned(),
+            );
+            hosts.set("notes.txt", String::new());
+            build_plan_with_hosts(
+                Path::new("in-memory-survivor-resolution"),
+                &Workspace {
+                    members: Vec::new(),
+                    has_workspace_table: false,
+                },
+                &manifest,
+                &[],
+                &catalog,
+                &mut hosts,
+            )
+        };
+        RESOLUTION.with(|state| state.set((usize::MAX, 0)));
+        let baseline = run().unwrap();
+        assert!(baseline.refusals().is_empty(), "{:?}", baseline.refusals());
+        let calls = RESOLUTION.with(|state| state.get().1);
+        assert!(calls > 10);
+        for fail_at in 0..calls {
+            RESOLUTION.with(|state| state.set((fail_at, 0)));
+            let error = run().unwrap_err().to_string();
+            assert!(
+                error.contains(&format!("injected host resolution failure at {fail_at}:")),
+                "{error}"
+            );
+            assert_eq!(RESOLUTION.with(|state| state.get().1), fail_at + 1);
+        }
+    }
+
+    #[test]
+    fn owned_file_host_resolution_failure_is_returned_before_reading() {
+        let catalog = Catalog::builder(test_cli())
+            .with_artifact(Artifact::owned_file("owned.txt", "generated\n"))
+            .build()
+            .unwrap();
+        let mut hosts = HostTextCache {
+            resolve: |_, host| {
+                assert_eq!(host, "owned.txt");
+                Err(ohno::app_err!("owned host resolution refused"))
+            },
+            read: |_| panic!("failed host resolution must not read any host"),
+            ..HostTextCache::default()
+        };
+        let error = build_plan_with_hosts(
+            Path::new("in-memory-owned-resolution"),
+            &Workspace {
+                members: Vec::new(),
+                has_workspace_table: false,
+            },
+            &Manifest::default(),
+            &[],
+            &catalog,
+            &mut hosts,
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "owned host resolution refused");
     }
 
     #[test]
@@ -4506,6 +5562,80 @@ mod tests {
     }
 
     #[test]
+    fn survivor_table_adoption_preserves_arrays_between_multiple_deletions() {
+        for (source, body) in [
+            (
+                "[first]\nmode = true\n[plugins]\ndefault = [\"user\"]\n[last]\nmode = true\n",
+                "[first]\nmode = true\n[last]\nmode = true\n",
+            ),
+            (
+                "first = true\nplugins.default = [\"user\"]\nlast = true\n",
+                "first = true\nlast = true\n",
+            ),
+        ] {
+            for newline in ["\n", "\r\n"] {
+                let source = format!("# café\n{source}").replace('\n', newline);
+                let neighbor = RegionSpec {
+                    host: HostSelector::Path("config.toml".to_owned()),
+                    id: RegionId::new("settings"),
+                    body: body.to_owned(),
+                    syntax: CommentSyntax::Hash,
+                };
+                for array_first in [false, true] {
+                    let catalog = array_catalog(Some(neighbor.clone()), array_first);
+                    let plan = array_plan(&source, &Manifest::default(), &catalog).unwrap();
+                    assert!(plan.refusals().is_empty());
+                    let final_host = plan
+                        .items()
+                        .iter()
+                        .filter_map(|item| item.spliced_host.as_deref())
+                        .next_back()
+                        .unwrap();
+                    let document = final_host.parse::<toml_edit::DocumentMut>().unwrap();
+                    let entries = document["plugins"]["default"].as_array().unwrap();
+                    assert_eq!(entries.len(), 2);
+                    assert_eq!(entries.get(0).unwrap().as_str(), Some("required"));
+                    assert_eq!(entries.get(1).unwrap().as_str(), Some("user"));
+                    assert!(final_host.starts_with(&format!("# café{newline}")));
+                    let manifest = plan.projected_manifest(&Manifest::default());
+                    assert_eq!(array_plan(final_host, &manifest, &catalog).unwrap().dry_run_exit_code(), 0);
+                }
+            }
+        }
+    }
+
+    thread_local! {
+        pub(super) static ADOPTION_CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    #[test]
+    fn survivor_parent_table_adoption_returns_its_array_dependency_error_before_publication() {
+        struct Restore(usize);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                ADOPTION_CHECKS.set(self.0);
+            }
+        }
+        let _restore = Restore(ADOPTION_CHECKS.replace(0));
+        let source = "[plugins]\ndefault = [\n# >>> anvil-managed: orphan\n\"user\",\n# <<< anvil-managed: orphan\n]\n";
+        let neighbor = RegionSpec {
+            host: HostSelector::Path("config.toml".to_owned()),
+            id: RegionId::new("anvil-spellcheck-root"),
+            body: "[plugins]\nmode = true\n".to_owned(),
+            syntax: CommentSyntax::Hash,
+        };
+        let catalog = Catalog::builder(test_cli())
+            .with_artifact(Artifact::region(neighbor))
+            .build()
+            .unwrap();
+        let mut manifest = Manifest::default();
+        manifest.set_region("config.toml", "orphan", checksum_str("\"user\",\n"));
+        let error = array_plan(source, &manifest, &catalog).unwrap_err();
+        assert_eq!(ADOPTION_CHECKS.get(), 1);
+        assert!(error.to_string().contains("Refused TOML array host config.toml"), "{error}");
+    }
+
+    #[test]
     fn toml_array_neighbor_adoption_preserves_the_array_between_edits() {
         let source = "[settings]\nmode = true\n\n[plugins]\ndefault = [\"user\"]\n";
         let expected = "[plugins]\ndefault = [\n  # >>> anvil-managed: entries\n  \"required\",\n  # <<< anvil-managed: entries\n\"user\"]\n\n# >>> anvil-managed: settings\n[settings]\nmode = true\n# <<< anvil-managed: settings\n";
@@ -4751,7 +5881,7 @@ mod tests {
             literal.host = HostSelector::Path("Cargo.toml".to_owned());
             let catalog = Catalog::builder(test_cli())
                 .with_artifact(Artifact::region(literal))
-                .with_toml_array_region(crate::catalog::TomlArrayRegionSpec {
+                .with_toml_array_region(TomlArrayRegionSpec {
                     region: spec,
                     path: vec!["items".to_owned()],
                 })
@@ -4786,7 +5916,7 @@ mod tests {
             for reverse in [false, true] {
                 for swap in [false, true] {
                     let literal = HostSelector::Path("Cargo.toml".to_owned());
-                    let array = crate::catalog::TomlArrayRegionSpec {
+                    let array = TomlArrayRegionSpec {
                         region: RegionSpec {
                             host: if swap { literal.clone() } else { selector.clone() },
                             id: RegionId::new("entries"),
@@ -4841,7 +5971,7 @@ mod tests {
                 if owned_first {
                     builder = builder.with_artifact(Artifact::owned_file(owned_path, "other = true\n"));
                 }
-                let array = crate::catalog::TomlArrayRegionSpec {
+                let array = TomlArrayRegionSpec {
                     region: RegionSpec {
                         host: HostSelector::Path(array_host.to_owned()),
                         id: RegionId::new("entries"),
@@ -4891,7 +6021,7 @@ mod tests {
     fn toml_array_plan_rejects_absent_case_aliases() {
         let mut builder = Catalog::builder(test_cli());
         for (host, id) in [("config.toml", "one"), ("CONFIG.toml", "two")] {
-            builder = builder.with_toml_array_region(crate::catalog::TomlArrayRegionSpec {
+            builder = builder.with_toml_array_region(TomlArrayRegionSpec {
                 region: RegionSpec {
                     host: HostSelector::Path(host.to_owned()),
                     id: RegionId::new(id),
@@ -6581,6 +7711,78 @@ mod tests {
 
     fn empty_catalog() -> Catalog {
         Catalog::builder(test_cli()).build().unwrap()
+    }
+
+    #[test]
+    fn survivor_live_syntax_refusals_never_publish_a_retirement_marker_repair() {
+        let mut live = campaign_region("host.txt", "live", "new\n");
+        live.syntax = CommentSyntax::SlashSlash;
+        let catalog = Catalog::builder(test_cli()).with_artifact(Artifact::region(live)).build().unwrap();
+        let mut manifest = Manifest::default();
+        manifest.set_region("host.txt", "live", checksum_str("body\n"));
+        let mut hosts = memory_hosts();
+        hosts.set(
+            "host.txt",
+            "# >>> anvil-managed: live\n# >>> anvil-managed: live\nbody\n# <<< anvil-managed: live\n".to_owned(),
+        );
+        let plan = build_plan_with_hosts(
+            Path::new("in-memory-live-syntax"),
+            &Workspace {
+                members: Vec::new(),
+                has_workspace_table: false,
+            },
+            &manifest,
+            &[],
+            &catalog,
+            &mut hosts,
+        )
+        .unwrap();
+        assert_eq!(plan.refusals().len(), 1);
+        assert!(plan.items().iter().all(|item| item.spliced_host.is_none()));
+        assert!(plan.items().iter().all(|item| item.decision != Decision::Write));
+    }
+
+    #[test]
+    fn survivor_retirement_repairs_precede_live_writes_even_after_an_unrelated_refusal() {
+        let catalog = Catalog::builder(test_cli())
+            .with_artifact(Artifact::region(campaign_region("z.txt", "live", "new\n")))
+            .build()
+            .unwrap();
+        let mut manifest = Manifest::default();
+        manifest.set_region("a.txt", "retired", checksum_str("same\n"));
+        manifest.set_region("z.txt", "retired", checksum_str("body\n"));
+        let mut hosts = memory_hosts();
+        hosts.set(
+            "a.txt",
+            "# >>> anvil-managed: retired\nsame\n# <<< anvil-managed: retired\n\
+                    // >>> anvil-managed: retired\nsame\n// <<< anvil-managed: retired\n"
+                .to_owned(),
+        );
+        hosts.set(
+            "z.txt",
+            "# >>> anvil-managed: retired\n# >>> anvil-managed: retired\nbody\n# <<< anvil-managed: retired\n".to_owned(),
+        );
+        let plan = build_plan_with_hosts(
+            Path::new("in-memory-retirement-order"),
+            &Workspace {
+                members: Vec::new(),
+                has_workspace_table: false,
+            },
+            &manifest,
+            &[],
+            &catalog,
+            &mut hosts,
+        )
+        .unwrap();
+        let first_write = plan
+            .items()
+            .iter()
+            .find(|item| item.decision == Decision::Write && matches!(&item.target, Target::Region { host, .. } if host == "z.txt"))
+            .unwrap();
+        assert_eq!(
+            first_write.spliced_host.as_deref(),
+            Some("# >>> anvil-managed: retired\nbody\n# <<< anvil-managed: retired\n")
+        );
     }
 
     fn campaign_region(host: &str, id: &'static str, body: &str) -> RegionSpec {

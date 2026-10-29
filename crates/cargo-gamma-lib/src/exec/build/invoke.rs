@@ -127,6 +127,7 @@ pub(super) fn supervise_with_limits(
     let mut subtree = match ProcessTree::adopt(spawned) {
         Ok(subtree) => subtree,
         Err(reason) => {
+            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
             finish_build(events);
             let raw_reason = reason.to_string();
             let reason = encode_controls(&raw_reason);
@@ -152,7 +153,9 @@ pub(super) fn supervise_with_limits(
     let deadline = budget.map(|budget| Instant::now() + budget);
 
     let outcome = loop {
-        let _narrated = narrate(&lines, events);
+        let _narrated =
+        // #[gamma::skip(call_result.default, reason = "The return value is discarded; default_after still performs the original call and every side effect.", tag = "equivalent")]
+        narrate(&lines, events);
 
         match subtree.observe() {
             Ok(Some(status)) => {
@@ -194,6 +197,7 @@ pub(super) fn supervise_with_limits(
     let grace = Instant::now() + DRAIN_GRACE;
     let (said, printed) = finish_readers(stdout, stderr, &lines, events, grace);
 
+    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
     finish_build(events);
 
     let Some(status) = outcome? else {

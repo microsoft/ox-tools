@@ -303,9 +303,9 @@ Remaining fallback binaries are ordered at entry to fallback:
 5. stable package, target, and path tie-breakers.
 
 Counts are seeded from known exact-killer hints, including historical mutants,
-and updated by confirmed kills from any execution stage. Reconfirming a known
+and updated by observed kills from any execution stage. Rechecking a known
 mutant does not count it twice; a different killer moves that mutant's credit
-to the new binary. Unnamed confirmed kills also count. Passing, flaky, and
+to the new binary. Unnamed kills also count. Passing, flaky, and
 resource-failing probes do not add kills. Each mutant snapshots the latest
 counts when entering fallback; concurrent discoveries affect later snapshots.
 Baseline-sorted reachable order remains the reference for final non-killing
@@ -328,7 +328,7 @@ learning state. A named killer discovered by full-binary execution is published
 before the worker claims another mutant, so queued siblings can immediately
 benefit from named inference.
 
-A confirmed kill settles immediately, regardless of its binary's position.
+A kill settles immediately, regardless of its binary's position.
 Loss of containment aborts the campaign immediately. Without a kill, the first
 non-passing full-binary result in stable reachable order determines the outcome.
 Only passing named probes suppress duplicate cases; inconclusive named probes

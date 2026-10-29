@@ -21,6 +21,7 @@ use super::cache_dir::platform_cache_dir;
 use super::config::Config;
 use super::github_credentials::{GitHubToken, discover};
 use crate::Result;
+use crate::commands::Host;
 use crate::expr::{ExpressionDisposition, ExpressionOutcome, Risk, evaluate};
 use crate::facts::{Collector, CrateFacts, CrateRef, Endpoints, ProviderResult};
 use crate::metrics::flatten;
@@ -230,6 +231,11 @@ pub struct Common<'a, H: super::Host> {
     json: Option<Utf8PathBuf>,
 }
 
+fn diagnostic_is_terminal() -> bool {
+    // #[gamma::skip(bool_expr.negate, reason = "The actual stderr terminal query is host state; deterministic command-policy tests use the owned override.", tag = "native")]
+    stderr().is_terminal()
+}
+
 trait Initialization {
     fn workspace(&mut self, args: &CommonArgs) -> Result<(Metadata, Config)>;
     fn cache_dir(&mut self, path: Option<&Utf8Path>) -> Result<PathBuf>;
@@ -250,12 +256,12 @@ trait Initialization {
 
 struct SystemInitialization<F> {
     configure: Option<F>,
+    diagnostic_terminal: fn() -> bool,
 }
 
 impl<F: FnOnce(&mut MetadataCommand)> Initialization for SystemInitialization<F> {
     fn workspace(&mut self, args: &CommonArgs) -> Result<(Metadata, Config)> {
         let mut command = MetadataCommand::new();
-        // #[gamma::skip(stmt.delete_call, tag = "timeout", reason = "deleting the manifest path turns the deterministic missing-manifest error test into real workspace collector initialization and external cache or download work")]
         let _ = command.manifest_path(&args.manifest_path);
         self.configure.take().expect("initialization loads the workspace exactly once")(&mut command);
         let metadata = command.exec().into_app_err("retrieving workspace metadata")?;
@@ -268,7 +274,7 @@ impl<F: FnOnce(&mut MetadataCommand)> Initialization for SystemInitialization<F>
     }
 
     fn diagnostic_terminal(&mut self) -> bool {
-        stderr().is_terminal()
+        (self.diagnostic_terminal)()
     }
 
     fn progress(&mut self, delay: Duration, use_colors: bool) -> ProgressReporter {
@@ -329,6 +335,7 @@ impl<'a, H: super::Host> Common<'a, H> {
             args,
             &mut SystemInitialization {
                 configure: Some(configure),
+                diagnostic_terminal: diagnostic_is_terminal,
             },
         )
         .await
@@ -409,6 +416,47 @@ impl<'a, H: super::Host> Common<'a, H> {
     }
 
     pub fn report(&mut self, processed_crates: impl IntoIterator<Item = CrateFacts>) -> Result<()> {
+        Reporting {
+            config: &self.config,
+            host: self.host,
+            color: self.color,
+            error_if_high_risk: self.error_if_high_risk,
+            error_if_medium_risk: self.error_if_medium_risk,
+            console: &self.console,
+            html: &self.html,
+            excel: &self.excel,
+            csv: &self.csv,
+            json: &self.json,
+        }
+        .report(processed_crates)
+    }
+}
+
+/// Borrows only report inputs, independently of collector and command initialization.
+struct Reporting<'a, H: Host> {
+    config: &'a Config,
+    host: &'a mut H,
+    color: ColorMode,
+    error_if_high_risk: bool,
+    error_if_medium_risk: bool,
+    console: &'a Option<ConsoleOutputMode>,
+    html: &'a Option<Utf8PathBuf>,
+    excel: &'a Option<Utf8PathBuf>,
+    csv: &'a Option<Utf8PathBuf>,
+    json: &'a Option<Utf8PathBuf>,
+}
+
+impl<H: Host> Reporting<'_, H> {
+    fn report(&mut self, processed_crates: impl IntoIterator<Item = CrateFacts>) -> Result<()> {
+        self.report_with_writers(processed_crates, write_text_report, write_excel_report)
+    }
+
+    fn report_with_writers(
+        &mut self,
+        processed_crates: impl IntoIterator<Item = CrateFacts>,
+        mut write_text: impl FnMut(&Utf8Path, String) -> Result<()>,
+        mut write_excel: impl FnMut(&[ReportableCrate], &Utf8Path) -> Result<()>,
+    ) -> Result<()> {
         // Filter out crates with missing core data (can't be reported)
         let (analyzable_crates, failed_crates): (Vec<_>, Vec<_>) =
             processed_crates.into_iter().partition(|facts| facts.crates_data.is_found());
@@ -420,7 +468,7 @@ impl<'a, H: super::Host> Common<'a, H> {
         }
 
         // Flatten crate facts into metrics and optionally evaluate, creating ReportableCrate instances
-        let has_expressions = has_expressions(&self.config);
+        let has_expressions = has_expressions(self.config);
         let should_eval = has_expressions || risk_error_requested(self.error_if_high_risk, self.error_if_medium_risk);
 
         // A single instant is used for every crate: expressions such as `now - crate.updated_at`
@@ -494,32 +542,32 @@ impl<'a, H: super::Host> Common<'a, H> {
             let mut html = String::new();
             generate_html(&reportable_crates, Local::now(), &mut html)
                 .expect("writing HTML into a String cannot fail because fmt::Write for String is infallible");
-            write_text_report(filename, html)?;
+            write_text(filename, html)?;
         }
 
         if let Some(filename) = &self.excel {
-            write_excel_report(&reportable_crates, filename)?;
+            write_excel(&reportable_crates, filename)?;
         }
 
         if let Some(filename) = &self.csv {
             let mut csv_output = String::new();
             generate_csv(&reportable_crates, &mut csv_output)
                 .expect("writing CSV into a String cannot fail because fmt::Write for String is infallible");
-            write_text_report(filename, csv_output)?;
+            write_text(filename, csv_output)?;
         }
 
         if let Some(filename) = &self.json {
             let mut json_output = String::new();
             generate_json(&reportable_crates, &mut json_output)
                 .expect("writing JSON into a String cannot fail because fmt::Write for String is infallible");
-            write_text_report(filename, json_output)?;
+            write_text(filename, json_output)?;
         }
 
         // If --error-if-medium-risk flag is set, return error if any non-allowed crate is medium or high risk
         // If --error-if-high-risk flag is set, return error if any non-allowed crate is high risk
         check_risk_errors(
             &reportable_crates,
-            &self.config,
+            self.config,
             self.error_if_medium_risk,
             self.error_if_high_risk,
             should_include_rejection_details(console_mode),
@@ -818,6 +866,134 @@ mod tests {
     struct ArgsHarness {
         #[command(flatten)]
         common: CommonArgs,
+    }
+
+    fn survivor_reporting<'a>(config: &'a Config, host: &'a mut TestHost) -> Reporting<'a, TestHost> {
+        Reporting {
+            config,
+            host,
+            color: ColorMode::Never,
+            error_if_high_risk: false,
+            error_if_medium_risk: false,
+            console: &None,
+            html: &None,
+            excel: &None,
+            csv: &None,
+            json: &None,
+        }
+    }
+
+    fn survivor_found_crate(name: &str, version: &str) -> CrateFacts {
+        let data = serde_json::from_value(serde_json::json!({
+            "version_data": {
+                "description": "", "license": "MIT", "rust_version": "", "features": {},
+                "created_at": "2020-01-01T00:00:00Z", "updated_at": "2020-01-01T00:00:00Z",
+                "yanked": false, "downloads": 0, "monthly_downloads": []
+            },
+            "overall_data": {
+                "created_at": "2020-01-01T00:00:00Z", "updated_at": "2020-01-01T00:00:00Z",
+                "categories": [], "keywords": [], "owners": [], "monthly_downloads": [],
+                "downloads": 0, "dependents": 0,
+                "versions_last_90_days": 0, "versions_last_180_days": 0, "versions_last_365_days": 0
+            }
+        }))
+        .unwrap();
+        let mut facts = unanalyzable(name, ProviderResult::Found(data));
+        facts.crate_spec = crate::facts::CrateSpec::from_arcs(Arc::from(name), Arc::new(version.parse().unwrap()));
+        facts
+    }
+
+    #[test]
+    fn survivor_report_orders_actual_console_output_by_name_then_version() {
+        let config = Config {
+            high_risk: Vec::new(),
+            eval: Vec::new(),
+            ..Config::default()
+        };
+        let mut host = TestHost::new();
+        survivor_reporting(&config, &mut host)
+            .report([
+                survivor_found_crate("zeta-survivor", "1.0.0"),
+                survivor_found_crate("alpha-survivor", "2.0.0"),
+                survivor_found_crate("alpha-survivor", "1.0.0"),
+            ])
+            .unwrap();
+        let output = String::from_utf8(host.output_buf).unwrap();
+        let first = output.find("alpha-survivor v1.0.0").unwrap();
+        let second = output.find("alpha-survivor v2.0.0").unwrap();
+        let last = output.find("zeta-survivor v1.0.0").unwrap();
+        assert!(first < second && second < last, "{output}");
+    }
+
+    #[test]
+    fn survivor_medium_risk_flag_alone_disables_implicit_console_output() {
+        let config = Config {
+            high_risk: Vec::new(),
+            eval: Vec::new(),
+            ..Config::default()
+        };
+        let mut host = TestHost::new();
+        let mut reporting = survivor_reporting(&config, &mut host);
+        reporting.error_if_medium_risk = true;
+        reporting.report([survivor_found_crate("quiet-survivor", "1.0.0")]).unwrap();
+        assert!(host.output_buf.is_empty());
+    }
+
+    #[test]
+    fn survivor_report_returns_each_format_write_error_without_panicking() {
+        let config = Config::default();
+        for extension in ["html", "xlsx", "csv", "json"] {
+            let filename = Some(Utf8PathBuf::from(format!("report.{extension}")));
+            let calls = std::cell::Cell::new(0);
+            let mut host = TestHost::new();
+            let mut reporting = survivor_reporting(&config, &mut host);
+            match extension {
+                "html" => reporting.html = &filename,
+                "xlsx" => reporting.excel = &filename,
+                "csv" => reporting.csv = &filename,
+                "json" => reporting.json = &filename,
+                _ => unreachable!(),
+            }
+            let error = reporting
+                .report_with_writers(
+                    [],
+                    |path, contents| {
+                        assert_ne!(extension, "xlsx", "Excel must use its binary writer");
+                        assert_eq!(Some(path), filename.as_deref());
+                        assert!(!contents.is_empty());
+                        calls.set(calls.get() + 1);
+                        Err(Error::new(ErrorKind::PermissionDenied, "scripted report write failure").into())
+                    },
+                    |crates, path| {
+                        assert_eq!(extension, "xlsx");
+                        assert_eq!(Some(path), filename.as_deref());
+                        assert!(crates.is_empty());
+                        calls.set(calls.get() + 1);
+                        Err(Error::new(ErrorKind::PermissionDenied, "scripted report write failure").into())
+                    },
+                )
+                .unwrap_err();
+            let source = error.find_source::<Error>().unwrap();
+            assert_eq!(source.kind(), ErrorKind::PermissionDenied);
+            assert_eq!(source.to_string(), "scripted report write failure");
+            assert_eq!(calls.get(), 1);
+            assert!(host.output_buf.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn survivor_native_initialization_preserves_terminal_and_progress_color_answers() {
+        let mut native = SystemInitialization {
+            configure: Some(|_: &mut MetadataCommand| {}),
+            diagnostic_terminal: || true,
+        };
+        for value in [true, false] {
+            native.diagnostic_terminal = if value { || true } else { || false };
+            assert_eq!(native.diagnostic_terminal(), value);
+            let progress = native.progress(Duration::MAX, value);
+            assert_eq!(crate::facts::Progress::use_colors(&progress), value);
+            crate::facts::Progress::done(&progress);
+        }
     }
 
     #[test]

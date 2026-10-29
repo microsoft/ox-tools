@@ -388,14 +388,14 @@ jobs:
       # Download the impact cache computed on this leg's OS into
       # target/anvil/impact/ (arm reuses its OS-family artifact). pr-test /
       # pr-runtime-analysis / pr-mutants do the identical download.
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: anvil-impact-${{ startsWith(matrix.os, 'linux') && 'Linux' || 'Windows' }}
           path: target/anvil/impact
         - name: Resolve current PR title
         id: pr_title
         if: github.event_name == 'pull_request'
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           retries: 3
           script: |
@@ -428,7 +428,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # preceded by the same per-OS download-artifact step as pr-fast
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: anvil-impact-${{ startsWith(matrix.os, 'linux') && 'Linux' || 'Windows' }}
           path: target/anvil/impact
@@ -451,7 +451,7 @@ jobs:
       || inputs.windows_arm_runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: anvil-impact-${{ startsWith(matrix.os, 'linux') && 'Linux' || 'Windows' }}
           path: target/anvil/impact
@@ -1031,9 +1031,9 @@ Recommended root workflow shape:
 Third-party actions are pinned in one of two ways, and the split is deliberate rather
 than inconsistent.
 
-Actions whose publisher has enabled GitHub [immutable releases][immutable] are pinned
+Actions whose publisher has enabled GitHub [immutable releases][immutable] may be pinned
 by tag. In the generated workflows that is, at the time of writing,
-`codecov/codecov-action@v7.0.0`, `marocchino/sticky-pull-request-comment@v3.0.5` and
+`codecov/codecov-action@v7.1.1` and
 `cargo-bins/cargo-binstall@v1.21.0`; a repository's own hand-maintained workflows apply
 the same rule to the actions they use, so the list a reader sees there may be longer.
 An immutable release locks its Git tag to one commit: the tag cannot be moved, and
@@ -1048,19 +1048,88 @@ expected is visible at the use site.
 
 Every other action is pinned by commit SHA with the version in a trailing comment, for
 example `actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1`.
+The sticky PR-comment action also uses this form even though its v3.0.5 release is
+immutable, so downstream SHA-pinning automation does not repeatedly propose converting
+the same release tag to a commit SHA.
 
 Immutability is a property of one published release, not a standing guarantee about
 the publisher. When bumping a tag-pinned action, confirm the new release still reports
 it:
 
 ```console
-$ gh api repos/codecov/codecov-action/releases/tags/v7.0.0 --jq .immutable
+$ gh api repos/codecov/codecov-action/releases/tags/v7.1.1 --jq .immutable
 true
 ```
 
 If that returns `false`, or the release is missing, pin the commit SHA instead.
 
+Pin changes belong in the source templates. Regenerate the workflows and `.anvil/manifest.toml`
+with that updated catalog; editing only generated workflows leaves their recorded
+checksums stale and takes them off the automatic update path.
+
+### Dependabot ownership
+
+When the GitHub backend is selected, `cargo anvil` adds the catalog's generated
+workflow and action-manifest YAML paths to `exclude-paths` in existing
+`github-actions` Dependabot update entries. Paths are exact repository-relative
+file names with glob metacharacters escaped, not action-name ignores or `anvil-*`
+globs: a repository-owned workflow such as `codeql.yml` remains eligible even when
+it uses the same actions. Catalog-owned `action.yml` and `action.yaml` files are
+included at the root and in other directories.
+
+Root, subdirectory, and multi-directory update jobs retain their existing scan
+settings. Exclusions remain repository-relative because the GitHub Actions
+fetcher's [directory listing filter][dependabot-contents-filter] matches the
+repository-relative `path` from each returned entry. This also avoids a shared
+`directories` list applying a bare `action.yml` exclusion to unrelated action
+directories.
+
+Anvil patches `.github/dependabot.yml` or `.github/dependabot.yaml` without taking
+ownership of the file. Existing exclusions, schedules, groups, cooldowns, other
+settings, comments, and unrelated ecosystem entries are preserved. Missing paths
+are added once; existing exclusions are never removed. Block lists, including
+indentless lists, and inline YAML lists retain flat string entries. Anvil does not
+create a Dependabot configuration or enable a missing update job. Rerun
+`cargo anvil` after adding Dependabot configuration. Configurations already
+scheduled for whole-file retirement are not patched or recreated. Malformed or
+ambiguous configuration, including aliases or shared YAML containers that would
+need editing, is left unchanged with an actionable refusal; anchors on untouched
+containers do not cause refusals, and unrelated YAML anchors remain supported.
+Refused managed-region retirement also blocks automatic patches to that file;
+successful region removal still permits patching the remaining repository content.
+Protected configurations still count when checking for both filename spellings.
+Only configurations scheduled for whole-file removal are excluded from that check;
+if both spellings otherwise exist, neither is patched.
+Explicit YAML keys retain their complete mapping-entry boundaries. Inherited
+ecosystem defaults are used for read-only job classification with explicit values
+taking precedence, so merged defaults for unrelated ecosystems remain no-ops.
+Existing exclusions use the same read-only lookup: complete inherited lists are
+no-ops, explicit lists override defaults, and merge sequences use the first
+matching list rather than combining lists.
+Aliases are followed by reference for read-only comparisons, without expanding
+their graphs. Repeated merge targets reuse completed field lookups, including
+missing values, while cyclic defaults retain their refusal.
+Already-complete shared exclusion lists remain byte-for-byte no-ops;
+an insertion that would change a shared target is still refused.
+
+The source repository deliberately continues receiving generated-action update
+PRs so maintainers can update the templates/catalog and regenerate the deployed
+pipelines. Its repository-owned Dependabot configuration starts with:
+
+```yaml
+# anvil: keep-generated-action-updates
+```
+
+This exact leading comment opts out of automatic exclusions, without depending on
+the checkout's remote or enabling a second update policy. It does not remove any
+existing exclusions. The same opt-out is available to catalog source forks.
+
+Dependabot's `exclude-paths` applies to **version updates only**, not security
+updates. Security-update PRs can therefore still require reconciliation with the
+source catalog. See the [Dependabot options reference][dependabot-exclude-paths].
 [immutable]: https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases
+[dependabot-exclude-paths]: https://docs.github.com/en/code-security/reference/supply-chain-security/dependabot-options-reference#exclude-paths
+[dependabot-contents-filter]: https://github.com/dependabot/dependabot-core/blob/510dd5e861be74ddc533083fe8b9953a66670f2f/common/lib/dependabot/file_fetchers/base.rb
 
 ## 10. Coverage upload
 
@@ -1084,7 +1153,7 @@ The upload step:
 ```yaml
 - name: Upload coverage to Codecov
   if: always() && matrix.os != 'windows-arm' && hashFiles('target/coverage/lcov-all-features.info') != '' && hashFiles('target/coverage/lcov-no-default.info') != ''
-  uses: codecov/codecov-action@v7.0.0 # pinned by tag: this release is an immutable release (GitHub locks the tag to a commit)
+  uses: codecov/codecov-action@v7.1.1 # pinned by tag: this release is an immutable release (GitHub locks the tag to a commit)
   with:
     files: target/coverage/lcov-all-features.info,target/coverage/lcov-no-default.info
     flags: ${{ matrix.os }}
@@ -1167,3 +1236,64 @@ Repositories that do not want issue publication set the
 lives in repository settings instead of an Anvil-owned workflow, so the root workflow
 stays on the automatic update path. The scheduled call retains `issues: write`; the
 publisher's condition prevents use of that permission when publication is disabled.
+
+## 12. Advisory PR comments
+
+Recipes that surface non-blocking findings exit 0 and write a markdown body to
+`target/anvil/comments/<NAME>.md` (see [checks.md §6](./checks.md#6-advisory-pr-comments)
+for the cross-backend convention). The GitHub backend turns presence/absence of those
+files into upserts/deletions of a sticky PR comment via
+[`marocchino/sticky-pull-request-comment`](https://github.com/marocchino/sticky-pull-request-comment).
+
+The wiring lives in the `pr-fast` job of `anvil-pr-impl.yml` (the only group whose
+recipes emit comments today). Two steps run after the composite that executes the
+`pr-fast` group:
+
+```yaml
+- name: Upsert anvil-semver advisory
+  if: always() && github.event_name == 'pull_request' && matrix.os == 'linux'
+      && github.event.pull_request.head.repo.full_name == github.repository
+      && hashFiles('target/anvil/comments/semver.md') != ''
+  uses: marocchino/sticky-pull-request-comment@5770ad5eb8f42dd2c4f34da00c94c5381e49af88 # v3.0.5
+  with:
+    header: anvil-semver
+    path: target/anvil/comments/semver.md
+- name: Clear anvil-semver advisory
+  if: always() && github.event_name == 'pull_request' && matrix.os == 'linux'
+      && github.event.pull_request.head.repo.full_name == github.repository
+      && hashFiles('target/anvil/comments/semver.md') == ''
+  uses: marocchino/sticky-pull-request-comment@5770ad5eb8f42dd2c4f34da00c94c5381e49af88 # v3.0.5
+  with:
+    header: anvil-semver
+    delete: true
+```
+
+Conditions explained:
+
+- `always()` keeps the comment in sync even if an unrelated `pr-fast` check failed; the
+  advisory state is independent of the rest of the job's pass/fail.
+- `github.event_name == 'pull_request'` skips the steps on `merge_group` and other
+  triggers where there's no PR thread to post to.
+- `matrix.os == 'linux'` picks the canonical x86_64 Linux leg so the four-OS matrix
+  doesn't race on the same comment.
+- `head.repo.full_name == github.repository` skips fork PRs. GitHub doesn't grant
+  `pull-requests: write` to fork-PR workflow runs by default, so the action would 403.
+
+Permissions: the reusable workflow's caller (`anvil-pr.yml`) declares
+`pull-requests: write` on the `validation` job that calls
+`anvil-pr-impl.yml`. The called workflow declares no permission overrides, so all
+of its jobs inherit that caller ceiling. `pr-fast` requires at least
+`pull-requests: read` on `pull_request` runs for the live-title lookup; a missing
+permission fails the required group rather than silently skipping title
+validation. The guarded sticky-comment steps additionally require write access.
+Merge-group executions share this caller but cannot reach either
+pull-request-only path. Fork PRs can read their current title, but cannot reach
+the comment steps regardless of whether an administrator has enabled write
+tokens for fork workflows.
+
+Adding a new advisory check is a two-step change: the recipe writes
+`target/anvil/comments/<NEW>.md` (and removes it on a clean run); the workflow gains
+a matching `Upsert anvil-<NEW>` / `Clear anvil-<NEW>` pair with
+`header: anvil-<NEW>`. There's deliberately no auto-discovery loop over the
+convention dir — explicit per-check steps keep stale comments deterministically
+clearable when a check is removed from the catalog.

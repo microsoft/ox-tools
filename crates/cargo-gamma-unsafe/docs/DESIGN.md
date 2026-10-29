@@ -32,6 +32,13 @@ crate's dependency graph and must remain dependency-free.
   group containment remains best-effort
   where descendants can change credentials or leave the group.
 - Linux cgroups and Windows job objects provide process-tree memory limits.
+  macOS has no such boundary. This crate exposes only the readings a
+  supervisor needs to sample one: the members of a process group
+  (`proc_listpids`) and each member's physical footprint
+  (`proc_pid_rusage`). A member that exits between the two calls is reported
+  as gone, not as an error. The sampling policy lives in
+  `cargo-gamma-process`; see its
+  [macOS memory design](../../cargo-gamma-process/docs/MACOS_MEMORY.md).
 - On Linux, terminal interrupts kill both the process group and the cgroup, so
   descendants that create a new session or process group remain reachable.
   This covers accidental process-group/session escape, not hostile same-credential

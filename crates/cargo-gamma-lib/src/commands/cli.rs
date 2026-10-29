@@ -267,6 +267,23 @@ pub struct SelectArgs {
     #[arg(long = "exclude-file", value_name = "GLOB")]
     pub exclude_files: Vec<String>,
 
+    /// Only select mutants whose listed name matches this regular expression. Repeat to match any.
+    ///
+    /// REGEX uses Rust regex syntax. A bare word matches any substring, e.g. `--re accepts`.
+    ///
+    /// To select the top-level `accepts` function in one file:
+    ///
+    /// `--re '^app/src/main\.rs:[0-9]+:[0-9]+: accepts:'`
+    ///
+    /// Here `^` anchors the start, `\.` is a literal dot, and `[0-9]+` matches a number. The
+    /// input is each line of `list mutants`, such as
+    /// `app/src/main.rs:1:34: accepts: replace ... [relational.ge_to_gt]`.
+    /// A suppressed line includes its `[suppressed: channel]` marker in the matched text.
+    /// Control characters are encoded as visible escapes in both the list and matched name;
+    /// use `\\` in REGEX to match a displayed backslash.
+    #[arg(long = "re", value_name = "REGEX")]
+    pub name_patterns: Vec<String>,
+
     /// Unqualified Rust identifiers forming the final written trait-path segment, excluded through
     /// `gamma.toml`.
     #[arg(skip)]
@@ -426,9 +443,11 @@ pub struct MeasureArgs {
     /// mutant. `enforce` also holds each mutant to a ceiling derived from that measurement, and
     /// reports a mutant that breaches it as killed, shown as `OUTOFMEM`.
     ///
-    /// Needs a delegated cgroup v2 on Linux, or a job object on Windows. A run that asked for this
-    /// explicitly says so and stops where the host cannot provide it, rather than pretend to be
-    /// protected; a run that merely inherited the default drops to `off` and says so.
+    /// Needs a delegated cgroup v2 on Linux, or a job object on Windows. On macOS the test process
+    /// group's memory is sampled every 10 ms instead, which is a soft bound and is unavailable with
+    /// `--nextest`. A run that asked for this explicitly says so and stops where the host cannot
+    /// provide it, rather than pretend to be protected; a run that merely inherited the default drops
+    /// to `off` and says so.
     #[arg(long, value_name = "MODE", help_heading = "Memory")]
     pub memory: Option<crate::exec::MemoryControl>,
 
@@ -667,9 +686,9 @@ pub struct RunArgs {
 
     /// Fail if more than this many mutants have an unresolved flaky outcome.
     ///
-    /// Flakes remain outside the mutation score. Set this to zero to require every failing mutant
-    /// execution to receive a reliable confirmation verdict.
-    #[arg(long, value_name = "COUNT", conflicts_with = "no_confirm", help_heading = "Run control")]
+    /// Flakes remain outside the mutation score. Ordinary test failures are not rerun without
+    /// the mutant, so this gate does not detect intermittent assertion failures after baseline.
+    #[arg(long, value_name = "COUNT", help_heading = "Run control")]
     pub max_flaky: Option<usize>,
 
     /// How an incremental run reuses the last run: `no` starts cold; `build` reuses compiler
@@ -702,13 +721,6 @@ pub struct RunArgs {
     /// caused by the mutant rather than by the suite already being red.
     #[arg(long, help_heading = "Run control")]
     pub no_baseline: bool,
-
-    /// Believe a failing test without re-running it with no mutant active.
-    ///
-    /// Saves one run per kill, and gives up the ability to tell a detection from a flaky test: a
-    /// test that fails either way is counted as having caught every mutant it was run against.
-    #[arg(long, help_heading = "Run control")]
-    pub no_confirm: bool,
 
     /// Find and report mutants without building or running anything.
     #[arg(long, help_heading = "Run control")]
@@ -897,6 +909,7 @@ impl Default for SelectArgs {
             mutators: None,
             files: Vec::new(),
             exclude_files: Vec::new(),
+            name_patterns: Vec::new(),
             exclude_trait_impls: Vec::new(),
             shard_count: None,
             shard_index: None,
@@ -1234,6 +1247,25 @@ mod tests {
     }
 
     #[test]
+    fn name_patterns_parse_for_run_and_list_mutants() {
+        let run = Cli::try_parse_from(["cargo-gamma", "run", "--re", "add", "--re", "src/lib.rs"])
+            .expect("repeated name patterns parse for a run");
+        let Command::Run(run) = run.command else {
+            panic!("expected run");
+        };
+        assert_eq!(run.select.name_patterns, ["add", "src/lib.rs"]);
+
+        let list = Cli::try_parse_from(["cargo-gamma", "list", "mutants", "--re", "add"]).expect("name patterns parse for mutant listing");
+        let Command::List(list) = list.command else {
+            panic!("expected list");
+        };
+        let ListCommand::Mutants(list) = list.command else {
+            panic!("expected mutant listing");
+        };
+        assert_eq!(list.select.name_patterns, ["add"]);
+    }
+
+    #[test]
     fn no_ops_argument_selects_the_default_preset() {
         let selection = SelectArgs::default().selection().unwrap();
 
@@ -1414,6 +1446,29 @@ mod tests {
 
         assert_eq!(size("1024"), Ok(1024));
         _ = size("not-a-size").expect_err("not a size");
+    }
+
+    #[test]
+    fn obsolete_no_confirm_is_rejected_and_flaky_gates_remain_available() {
+        let error =
+            Cli::try_parse_from(["cargo gamma", "run", "--no-confirm"]).expect_err("post-kill confirmation is no longer configurable");
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+        assert_eq!(
+            error.to_string(),
+            concat!(
+                "error: unexpected argument '--no-confirm' found\n\n",
+                "  tip: a similar argument exists: '--no-config'\n",
+                "  tip: to pass '--no-confirm' as a value, use '-- --no-confirm'\n\n",
+                "Usage: cargo gamma run --no-config [-- <TEST_ARGS>...]\n\n",
+                "For more information, try '--help'.\n",
+            )
+        );
+        let cli = Cli::try_parse_from(["cargo gamma", "run", "--max-flaky", "0"])
+            .expect("flaky gates still apply to enumeration controls and historical verdicts");
+        let Command::Run(args) = cli.command else {
+            panic!("run arguments must select the run command");
+        };
+        assert_eq!(args.max_flaky, Some(0));
     }
 
     /// `-V` is `--version` everywhere, and `-v` is not bound at all.

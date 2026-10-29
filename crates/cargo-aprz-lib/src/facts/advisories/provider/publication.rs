@@ -6,25 +6,28 @@ use std::path::{Path, PathBuf};
 
 use ohno::IntoAppError;
 
-use super::{LOG_TARGET, archive_identity, snapshot_path};
 use crate::Result;
+use crate::facts::advisories::provider::{
+    LOG_TARGET, SnapshotStage, archive_identity, create_snapshot_marker, persist_snapshot_marker, remove_snapshot, save_snapshot_marker,
+    snapshot_marker, snapshot_path,
+};
 use crate::facts::cache::{Cache, CacheResult};
 
 /// External I/O for publishing one validated staging directory.
 #[cfg_attr(test, fakeable::fakeable(fake_impl = tests::MemoryPublication, fakes_feature = false))]
 pub(crate) struct SnapshotIo {
     cache: Cache,
-    stage: Option<tempfile::TempDir>,
+    stage: Option<SnapshotStage>,
 }
 
 #[cfg_attr(test, fakeable::fakeable(fakes_feature = false))]
 impl SnapshotIo {
-    pub(crate) fn new(cache: Cache, stage: tempfile::TempDir) -> Self {
+    pub(crate) fn new(cache: Cache, stage: SnapshotStage) -> Self {
         Self { cache, stage: Some(stage) }
     }
 
     pub(crate) fn previous_snapshot(&self) -> Result<Option<PathBuf>> {
-        match Cache::new(self.cache.dir(), Duration::MAX, false).load::<(String, String)>("last_synced.bin") {
+        match snapshot_marker(&Cache::new(self.cache.dir(), Duration::MAX, false)) {
             CacheResult::Data((_, directory)) if directory.starts_with(".advisories-") => {
                 Ok(Some(snapshot_path(self.cache.dir(), &directory)?))
             }
@@ -37,21 +40,21 @@ impl SnapshotIo {
             .stage
             .as_ref()
             .expect("publication retains the stage only after publishing its marker");
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "The tempfile builder supplies an ASCII basename; parent encoding is excluded by file_name.", tag = "equivalent")]
         let directory = stage
             .path()
             .file_name()
             .and_then(|name| name.to_str())
             .ok_or_else(|| ohno::app_err!("advisory snapshot directory name is not UTF-8"))?;
-        let marker = tempfile::NamedTempFile::new_in(self.cache.dir())?;
+        let marker = create_snapshot_marker(self.cache.dir())?;
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "The tempfile builder supplies an ASCII basename; parent encoding is excluded by file_name.", tag = "equivalent")]
         let filename = marker
             .path()
             .file_name()
             .and_then(|name| name.to_str())
             .ok_or_else(|| ohno::app_err!("advisory marker filename is not UTF-8"))?;
-        self.cache.save(filename, &(archive_identity(url), directory))?;
-        marker
-            .persist(self.cache.dir().join("last_synced.bin"))
-            .map_err(|error| error.error)
+        save_snapshot_marker(&self.cache, filename, &(archive_identity(url), directory))?;
+        persist_snapshot_marker(marker, &self.cache.dir().join("last_synced.bin"))
             .into_app_err("publishing the advisory cache synchronization marker")?;
         Ok(())
     }
@@ -66,7 +69,7 @@ impl SnapshotIo {
 
     #[expect(clippy::unused_self, reason = "the receiver selects the in-memory I/O adapter in tests")]
     pub(crate) fn remove_snapshot(&self, path: &Path) -> std::io::Result<()> {
-        std::fs::remove_dir_all(path)
+        remove_snapshot(path)
     }
 }
 

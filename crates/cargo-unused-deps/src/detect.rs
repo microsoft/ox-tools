@@ -417,6 +417,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn survivor_implicit_feature_references_do_not_treat_nul_as_a_slash() {
+        let manifest = "[features]\nselected = [\"optional\\u0000name\"]\n".parse().unwrap();
+        let references = feature_references(&manifest);
+        assert!(references.explicit.is_empty());
+        assert_eq!(references.implicit_optional, BTreeSet::from(["optional\0name".to_owned()]));
+    }
+
+    #[test]
     fn extern_names_normalize_every_hyphen_and_non_table_targets_are_ignored() {
         let manifest = "[dependencies]\nmy-hyphen-name = \"1\"\n[target]\ninvalid = 7\n"
             .parse()

@@ -9,7 +9,7 @@
 use core::time::Duration;
 use std::fs;
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Write};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, TimeDelta, Utc};
@@ -81,21 +81,28 @@ impl Cache {
     where
         T: for<'de> Deserialize<'de>,
     {
+        self.load_with(filename, |path| File::open(path).map(BufReader::new))
+    }
+
+    fn load_with<T: for<'de> Deserialize<'de>, R: Read>(
+        &self,
+        filename: &str,
+        open: impl FnOnce(&Path) -> std::io::Result<R>,
+    ) -> CacheResult<T> {
         if self.ignore {
             return CacheResult::Miss;
         }
 
         let path = self.dir.join(filename);
 
-        let file = match File::open(&path) {
-            Ok(file) => file,
+        let reader = match open(&path) {
+            Ok(reader) => reader,
             Err(e) => {
                 log::debug!(target: LOG_TARGET, "Cache miss for {filename}: {e:#}");
                 return CacheResult::Miss;
             }
         };
 
-        let reader = BufReader::new(file);
         let envelope: Envelope<T> = match rmp_serde::from_read(reader) {
             Ok(data) => data,
             Err(e) => {
@@ -105,6 +112,16 @@ impl Cache {
         };
 
         self.fresh_payload(filename, envelope, Utc::now())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn load_data_for_test<T: Serialize + for<'de> Deserialize<'de>>(&self, filename: &str, data: T) -> CacheResult<T> {
+        let bytes = rmp_serde::to_vec(&Envelope {
+            timestamp: DateTime::<Utc>::MAX_UTC,
+            payload: EnvelopePayload::Data(data),
+        })
+        .expect("test cache payloads must have infallible serialization");
+        self.load_with(filename, |_path| Ok(std::io::Cursor::new(bytes)))
     }
 
     fn fresh_payload<T>(&self, filename: &str, envelope: Envelope<T>, now: DateTime<Utc>) -> CacheResult<T> {

@@ -8,6 +8,174 @@ use crate::exec::nextest::Harness;
 use crate::exec::sweep::tests::{NARROW, one_mutant_plan, ranked_binaries, ranked_sweep};
 use crate::exec::verdict::{with_binary_runner, with_shared_runner};
 
+#[test]
+fn oct25_inferred_cases_continue_after_a_negative_reach_exclusion() {
+    let mut binaries = binaries(2);
+    for (index, binary) in binaries.iter_mut().enumerate() {
+        binary.path = Utf8PathBuf::from(format!(r"C:\scripted-negative\binary-{index}.exe"));
+        binary.budget = None;
+        binary.memory = None;
+    }
+    let plan = one_mutant_plan(workspace().root.clone());
+    let site = SiteIdentity::from_mutant(&plan.mutants[0]);
+    let negative = NegativeLearning::default();
+    negative.record(&site, &binaries[0]);
+    let candidates = [
+        Candidate::Exact(killer_for(&binaries[0], "unreached")),
+        Candidate::Exact(killer_for(&binaries[1], "later_killer")),
+    ];
+    let tally = Tally::default();
+    let mut state = ProbeState::default();
+    let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+    let judged = with_binary_runner(
+        {
+            let calls = std::rc::Rc::clone(&calls);
+            move |binary, attempt| {
+                calls.set(calls.get() + 1);
+                assert_eq!(binary.target, "binary-1");
+                assert_eq!(attempt.only, Only::One("later_killer"));
+                BinaryRun {
+                    verdict: Verdict::Failed(Some("later_killer".into())),
+                    reach: ReachObservation::Reached,
+                }
+            }
+        },
+        || {
+            judge(
+                &workspace(),
+                7,
+                &binaries.iter().collect::<Vec<_>>(),
+                None,
+                &candidates,
+                None,
+                Some((&negative, &site, true)),
+                None,
+                Sweep {
+                    meter: false,
+                    stall: Stall { budget: None },
+                    ..ranked_sweep()
+                },
+                &tally,
+                Stage::Inferred,
+                &mut state,
+            )
+        },
+    );
+    let Some(Judgement::Reached(Outcome::Killed, Some(killer), None)) = judged else {
+        panic!("the second candidate must still run after the first is proved unreachable");
+    };
+    assert_eq!(killer, killer_for(&binaries[1], "later_killer"));
+    assert_eq!(calls.get(), 1);
+    assert_eq!(tally.item_probes.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn recovered_inferred_probes_preserve_case_rank_primary_tier_and_only_successful_pass_evidence() {
+    let binaries = binaries(1);
+    let missing = Killer {
+        target: "missing-target".into(),
+        ..killer_for(&binaries[0], "missing")
+    };
+    let candidates = [
+        Candidate::Exact(missing.clone()),
+        Candidate::Exact(killer_for(&binaries[0], "alpha")),
+        Candidate::Exact(killer_for(&binaries[0], "beta")),
+    ];
+    let tally = Tally::default();
+    let mut state = ProbeState::default();
+    begin_selection_trace();
+    EXECUTION_TIER.set((SelectionTier::Whole, true));
+    let judged = with_binary_runner(
+        |_, attempt| {
+            assert_eq!(EXECUTION_TIER.get(), (SelectionTier::Item, false));
+            let verdict = match attempt.only {
+                Only::One("alpha") => Verdict::Passed,
+                Only::One("beta") => Verdict::TestEnumerationFailed("retained enumeration error".into()),
+                other => panic!("unexpected inferred selection: {other:?}"),
+            };
+            BinaryRun {
+                verdict,
+                reach: ReachObservation::Reached,
+            }
+        },
+        || {
+            step(
+                &workspace(),
+                &binaries,
+                Some(&missing),
+                &candidates,
+                Stage::Inferred,
+                &mut state,
+                &tally,
+            )
+        },
+    );
+    let attempts = take_selection_trace();
+    EXECUTION_TIER.set((SelectionTier::Whole, false));
+    assert_eq!(
+        attempts
+            .iter()
+            .map(|attempt| (attempt.rank, attempt.test.as_deref()))
+            .collect::<Vec<_>>(),
+        [(1, Some("alpha")), (2, Some("beta"))]
+    );
+    assert_eq!(state.binary_runs.len(), 1);
+    assert_eq!(state.passed_tests, crate::HashSet::from_iter([(0, "alpha".into())]));
+    assert_eq!(tally.exact_candidates.load(Ordering::Relaxed), 0);
+    let Some(Judgement::Reached(Outcome::Killed, None, Some(note))) = judged else {
+        panic!("enumeration failures must retain their score and explanatory note");
+    };
+    assert_eq!(note, enumeration_note(&binaries[0].path, "retained enumeration error"));
+
+    let tally = Tally::default();
+    assert!(
+        step(
+            &workspace(),
+            &binaries,
+            Some(&missing),
+            &[],
+            Stage::Exact,
+            &mut ProbeState::default(),
+            &tally
+        )
+        .is_none()
+    );
+    assert_eq!(tally.exact_candidates.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn recovered_final_named_credit_uses_the_original_ordinal_to_deduplicate_an_existing_kill() {
+    let binaries = binaries(1);
+    let killer = killer_for(&binaries[0], "z-killer");
+    let tally = Tally::default();
+    {
+        let mut kills = tally.named_kills.lock().unwrap();
+        kills.record(7, &killed_by(killer.clone()));
+        kills.record(99, &killed_by(killer_for(&binaries[0], "a-control")));
+    }
+    let judged = with_binary_runner(
+        |_, _| BinaryRun {
+            verdict: Verdict::Failed(Some("z-killer".into())),
+            reach: ReachObservation::Reached,
+        },
+        || {
+            step(
+                &workspace(),
+                &binaries,
+                Some(&killer),
+                &[],
+                Stage::Exact,
+                &mut ProbeState::default(),
+                &tally,
+            )
+        },
+    );
+    assert!(matches!(judged, Some(Judgement::Reached(Outcome::Killed, Some(_), None))));
+    let mut selections = [(0, "z-killer"), (0, "a-control")];
+    tally.named_kills.lock().unwrap().rank(&mut selections, &[&binaries[0]]);
+    assert_eq!(selections, [(0, "a-control"), (0, "z-killer")]);
+}
+
 fn workspace() -> Workspace {
     Workspace::adopt(r"C:\gamma-stage-fixture".into(), r"C:\gamma-stage-fixture\target".into())
 }
@@ -73,7 +241,7 @@ fn learning_probe(
     let reachable = [binary];
     let tally = Tally::default();
     with_binary_runner(
-        move |_, attempt, _| {
+        move |_, attempt| {
             assert_eq!(attempt.active, Some(7));
             assert_eq!(attempt.only, only);
             scripted.take().expect("one probe must consume exactly one scripted result")
@@ -194,10 +362,9 @@ fn staged_later_exact_kill_settles_without_earlier_binaries() {
     let binaries = ranked_binaries();
     let hint = killer_for(&binaries[1], "killer");
     let judged = with_binary_runner(
-        |binary, attempt, confirm| {
+        |binary, attempt| {
             assert_eq!(binary.target, "later");
             assert_eq!(attempt.only, Only::One("killer"));
-            assert!(confirm);
             BinaryRun {
                 verdict: Verdict::Failed(Some("killer".into())),
                 reach: ReachObservation::Reached,
@@ -239,7 +406,7 @@ fn staged_libtest_runs_six_ranked_cases_individually_and_skips_passing_duplicate
     let mut state = ProbeState::default();
     let tally = Tally::default();
     with_binary_runner(
-        move |binary, attempt, _| {
+        move |binary, attempt| {
             calls.push((binary.target.clone(), format!("{:?}", attempt.only)));
             if calls.len() == 7 {
                 assert_eq!(
@@ -293,7 +460,7 @@ fn staged_case_cap_ignores_unreachable_filtered_duplicate_and_binary_candidates(
         let mut state = ProbeState::default();
         let mut index = 0;
         with_binary_runner(
-            move |_, attempt, _| {
+            move |_, attempt| {
                 assert!(index < 6);
                 assert_eq!(attempt.only, Only::One(&format!("test-{index}")));
                 index += 1;
@@ -320,7 +487,7 @@ fn staged_six_case_cap_keeps_every_candidate_for_full_binary_inference() {
     let mut state = ProbeState::default();
     let mut calls = 0;
     let judged = with_binary_runner(
-        move |binary, attempt, _| {
+        move |binary, attempt| {
             if calls < 6 {
                 assert_eq!(binary.target, format!("binary-{calls}"));
                 assert_eq!(attempt.only, Only::One(&format!("test-{calls}")));
@@ -360,7 +527,7 @@ fn staged_nextest_runs_six_ranked_individual_cases_without_a_binary_group_limit(
     let expected = [(0, 0), (0, 4), (0, 8), (1, 1), (1, 5), (2, 2)];
     let tally = Tally::default();
     with_binary_runner(
-        move |binary, attempt, _| {
+        move |binary, attempt| {
             assert!(index < 6);
             let (target, test) = expected[index];
             assert_eq!(binary.target, format!("binary-{target}"));
@@ -399,7 +566,7 @@ fn staged_inconclusive_exact_case_can_be_retried_but_inferred_kills_settle_immed
     tally.named_kills.lock().unwrap().record(99, &killed_by(hint.clone()));
     let mut first = true;
     let judged = with_binary_runner(
-        move |binary, attempt, _| {
+        move |binary, attempt| {
             assert_eq!(binary.target, "later");
             let verdict = if first {
                 first = false;
@@ -432,7 +599,7 @@ fn staged_inferred_binary_phase_has_no_cap_and_fallback_reuses_every_full_outcom
     let mut state = ProbeState::default();
     let tally = Tally::default();
     let judged = with_binary_runner(
-        move |binary, attempt, _| {
+        move |binary, attempt| {
             assert_eq!(attempt.only, Only::All);
             assert_eq!(binary.target, expected[index]);
             index += 1;
@@ -456,7 +623,7 @@ fn staged_later_full_kill_overrides_an_earlier_timeout_without_repeating_the_tim
     let mut state = ProbeState::default();
     let tally = Tally::default();
     let judged = with_binary_runner(
-        |binary, attempt, _| {
+        |binary, attempt| {
             assert_eq!(attempt.only, Only::All);
             BinaryRun {
                 verdict: if binary.target == "earlier" {
@@ -487,7 +654,7 @@ fn staged_nonpassing_full_results_do_not_become_survivors_and_do_not_block_later
         let mut state = ProbeState::default();
         let tally = Tally::default();
         let judged = with_binary_runner(
-            move |binary, _, _| BinaryRun {
+            move |binary, _| BinaryRun {
                 verdict: if binary.target == "earlier" {
                     Verdict::MemoryLimit { peak: Some(50), limit: 37 }
                 } else if fail_later {
@@ -516,7 +683,7 @@ fn fallback_uses_kill_counts_without_changing_nonpassing_outcome_precedence() {
     tally.binary_kills.lock().unwrap().record(99, &binaries[1]);
     let mut calls = Vec::new();
     let judged = with_binary_runner(
-        move |binary, attempt, _| {
+        move |binary, attempt| {
             assert_eq!(attempt.only, Only::All);
             calls.push(binary.target.clone());
             if calls.len() == 2 {
@@ -564,7 +731,7 @@ fn only_confirmed_kill_verdicts_train_fallback_order_including_unnamed_kills() {
         let tally = Tally::default();
         let mut verdict = Some(verdict);
         with_binary_runner(
-            move |_, _, _| BinaryRun {
+            move |_, _| BinaryRun {
                 verdict: verdict.take().expect("the exact-hint stage launches only its one selected case"),
                 reach: ReachObservation::Reached,
             },
@@ -590,7 +757,7 @@ fn staged_unnamed_individual_failure_identifies_the_selected_case() {
     let binaries = ranked_binaries();
     let candidates = ["one", "two"].map(|test| Candidate::Exact(killer_for(&binaries[1], test)));
     let judged = with_binary_runner(
-        |_, attempt, _| {
+        |_, attempt| {
             assert_eq!(attempt.only, Only::One("one"));
             BinaryRun {
                 verdict: Verdict::Failed(None),
@@ -620,7 +787,7 @@ fn staged_containment_failure_aborts_in_every_phase() {
         let candidates = [Candidate::Exact(hint.clone())];
         let tally = Tally::default();
         let judged = with_binary_runner(
-            |_, _, _| BinaryRun {
+            |_, _| BinaryRun {
                 verdict: Verdict::Unmetered("containment lost".into()),
                 reach: ReachObservation::Unknown,
             },
@@ -669,7 +836,7 @@ fn staged_candidate_ranking_keeps_all_candidates_without_legacy_admission_filter
     tally.item_probes.store(8, Ordering::Relaxed);
     let mut index = 0;
     with_binary_runner(
-        move |binary, attempt, _| {
+        move |binary, attempt| {
             assert_eq!(binary.target, format!("binary-{index}"));
             assert_eq!(attempt.only, Only::One(&format!("test-{index}")));
             index += 1;
@@ -739,7 +906,7 @@ fn inferred_cases_merge_promoted_candidates_and_rank_global_kills_before_the_six
     let promoted = ["z-promoted", "z-high"].map(|name| Candidate::Exact(killer_for(&binaries[0], name)));
     let mut calls = Vec::new();
     with_binary_runner(
-        move |_, attempt, _| {
+        move |_, attempt| {
             let Only::One(name) = attempt.only else {
                 panic!("named inference must run individual cases")
             };
@@ -799,7 +966,7 @@ fn every_stage_credits_only_the_final_named_killer_not_resource_or_enumeration_f
             let mut verdict = Some(verdict);
             let candidates = [Candidate::Exact(hint.clone())];
             with_binary_runner(
-                move |binary, _, _| {
+                move |binary, _| {
                     if binary.target == "earlier" {
                         return passed();
                     }
@@ -847,7 +1014,7 @@ fn global_named_ranking_does_not_reorder_inferred_whole_binaries() {
     let mut calls = Vec::new();
     let mut state = ProbeState::default();
     with_binary_runner(
-        move |binary, attempt, _| {
+        move |binary, attempt| {
             calls.push((binary.target.clone(), format!("{:?}", attempt.only)));
             if calls.len() == 4 {
                 assert_eq!(
@@ -892,7 +1059,7 @@ fn restored_named_kills_train_global_ranking_before_the_next_inferred_selection(
     let reach = Reachability::build(&plan, &binaries, &NARROW);
     let mut events = Recorder::default();
     with_shared_runner(
-        Arc::new(|binary, attempt, _| {
+        Arc::new(|binary, attempt| {
             assert_eq!(attempt.active, Some(2));
             assert_eq!(binary.target, "later");
             assert_eq!(attempt.only, Only::One("z-successful"));
@@ -976,7 +1143,7 @@ fn staged_campaign_publishes_phase_one_kills_before_inference_and_never_revisits
     with_shared_runner(
         Arc::new({
             let exact_done = Arc::clone(&exact_done);
-            move |binary, attempt, _| {
+            move |binary, attempt| {
                 match (attempt.active.unwrap(), attempt.only) {
                     (1, Only::One("killer")) => {
                         assert_eq!(binary.target, "later");
@@ -1046,7 +1213,7 @@ fn full_binary_discovery_teaches_queued_siblings_before_another_function_is_expl
     with_shared_runner(
         Arc::new({
             let calls = Arc::clone(&calls);
-            move |binary, attempt, _| {
+            move |binary, attempt| {
                 let ordinal = attempt.active.unwrap();
                 calls
                     .lock()
@@ -1116,7 +1283,7 @@ fn end_to_end_work_reuses_exact_passes_after_the_global_hint_pass() {
     with_shared_runner(
         Arc::new({
             let calls = Arc::clone(&calls);
-            move |binary, attempt, _| {
+            move |binary, attempt| {
                 let ordinal = attempt.active.unwrap();
                 calls
                     .lock()
@@ -1195,7 +1362,7 @@ fn staged_same_item_admission_and_probe_ownership_allow_independent_progress() {
             let active = Arc::clone(&active);
             let calls = Arc::clone(&calls);
             let tally = Arc::clone(&tally);
-            move |binary, attempt, _| {
+            move |binary, attempt| {
                 let ordinal = attempt.active.unwrap();
                 let index = usize::try_from(ordinal - 1).unwrap();
                 assert!(matches!(states[index].try_lock(), Err(std::sync::TryLockError::WouldBlock)));
@@ -1274,7 +1441,7 @@ fn staged_fallback_uses_linkage_and_never_discards_unknown_links_as_proven_absen
     let (work, mut plan, binaries) = scripted_harness(binaries);
     let reach = Reachability::build(&plan, &binaries, &NARROW);
     let spent = with_shared_runner(
-        Arc::new(|binary, _, _| {
+        Arc::new(|binary, _| {
             assert_ne!(binary.target, "binary-1", "compiler-proven unlinked binaries must not run");
             passed()
         }),
@@ -1311,10 +1478,9 @@ fn sweep_fallback_processes_all_17_mutants_without_hints_or_memory_reservations(
     let reach = Reachability::build(&plan, &binaries, &NARROW);
     let mut events = Recorder::default();
     let spent = with_shared_runner(
-        Arc::new(|_, attempt, confirm| {
+        Arc::new(|_, attempt| {
             assert_eq!(attempt.only, Only::All);
             assert_eq!(attempt.request.limit, Some(1_000));
-            assert!(confirm);
             BinaryRun {
                 verdict: Verdict::Failed(Some("killer".into())),
                 reach: ReachObservation::Reached,
@@ -1376,7 +1542,7 @@ fn all_phases_run_for_17_admitted_mutants_without_aggregate_memory_reservations(
         assert_eq!(admitted, (0..17).collect::<Vec<_>>());
         let runner = Arc::new({
             let scheduler = Arc::clone(&scheduler);
-            move |_: &TestBinary, attempt: Attempt<'_>, confirm: bool| {
+            move |_: &TestBinary, attempt: Attempt<'_>| {
                 assert_eq!(
                     attempt.only,
                     match phase {
@@ -1385,7 +1551,6 @@ fn all_phases_run_for_17_admitted_mutants_without_aggregate_memory_reservations(
                     }
                 );
                 assert_eq!(attempt.request.limit, Some(1_000));
-                assert!(confirm);
                 let state = scheduler.state.lock().unwrap();
                 assert_eq!(state.remaining_count, 0);
                 assert_eq!(state.active_files, [17]);

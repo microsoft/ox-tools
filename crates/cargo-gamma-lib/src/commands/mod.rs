@@ -88,3 +88,6 @@ pub use run::recovery_test_util;
 #[cfg(feature = "internals")]
 #[doc(hidden)]
 pub use suppress::native_test_util as suppression_test_util;
+#[cfg(feature = "internals")]
+#[doc(hidden)]
+pub use verdict_log::native_test_util as journal_test_util;

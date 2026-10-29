@@ -4,7 +4,7 @@
 use std::io::Write;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use camino::Utf8PathBuf;
+use camino::{Utf8Path, Utf8PathBuf};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -99,7 +99,10 @@ fn list_presets<H: Host>(host: &mut H, select: &super::cli::SelectArgs, json: bo
         return Ok(EXIT_OK);
     }
 
-    let width = registry::PRESETS.iter().map(|preset| preset.name.len() + 1).max().unwrap_or(0);
+    let width = registry::PRESETS.iter().map(|preset| preset.name.len() + 1).max().unwrap_or(
+        // #[gamma::skip(literal.int_increment, reason = "Both width computations iterate the immutable nonempty engine PRESETS or REGISTRY tables. Their max() is always Some(width), so changing only unwrap_or's0 fallback to1 is unreachable.", tag = "equivalent")]
+        0,
+    );
 
     for preset in registry::PRESETS {
         let enabled = registry::resolve(&format!("@{}", preset.name))
@@ -140,7 +143,10 @@ fn list_mutators<H: Host>(host: &mut H, select: &super::cli::SelectArgs, json: b
         return Ok(EXIT_OK);
     }
 
-    let width = registry::REGISTRY.iter().map(|m| m.name.len()).max().unwrap_or(0);
+    let width = registry::REGISTRY.iter().map(|m| m.name.len()).max().unwrap_or(
+        // #[gamma::skip(literal.int_increment, reason = "Both width computations iterate the immutable nonempty engine PRESETS or REGISTRY tables. Their max() is always Some(width), so changing only unwrap_or's0 fallback to1 is unreachable.", tag = "equivalent")]
+        0,
+    );
 
     for mutator in registry::REGISTRY {
         let mark = if selection.contains(mutator.name) { "*" } else { " " };
@@ -172,21 +178,39 @@ fn list_files<H: Host>(
 
     crate::report::skipped(host, &plan, styler)?;
 
+    let files = selected_files(&plan, !select.name_patterns.is_empty());
+
     let mut stream = host.results();
 
     if json {
-        let paths: Vec<&Utf8PathBuf> = plan.files.iter().map(|file| &file.path).collect();
+        let paths: Vec<&Utf8PathBuf> = files.map(|file| &file.path).collect();
 
         write_pretty_json(&mut stream, &paths, "the file list")?;
 
         return Ok(EXIT_OK);
     }
 
-    for file in &plan.files {
+    for file in files {
         writeln!(stream, "{}", encode_controls(file.path.as_str()))?;
     }
 
     Ok(EXIT_OK)
+}
+
+/// Projects a file listing from the selected mutant population.
+fn selected_files(plan: &crate::discover::Plan, name_filtered: bool) -> impl Iterator<Item = &crate::discover::TargetFile> {
+    // A name filter selects mutants, so a file listing under that filter names only files that
+    // actually contain one of the selected mutants.
+    let selected_paths = name_filtered.then(|| {
+        plan.mutants
+            .iter()
+            .map(|mutant| mutant.file.as_ref())
+            .collect::<std::collections::HashSet<&Utf8Path>>()
+    });
+
+    plan.files
+        .iter()
+        .filter(move |file| selected_paths.as_ref().is_none_or(|paths| paths.contains(file.path.as_path())))
 }
 
 /// Lists the mutants that would be generated.
@@ -202,10 +226,30 @@ fn list_mutants<H: Host>(
     let shard = select.shard()?;
     let plan = crate::discover::plan_for_build(select, &selection, shard, cargo, &mut |_| {})?;
 
-    crate::report::skipped(host, &plan, styler)?;
+    list_mutant_population(host, select, json, json_report, styler, &plan, shard)
+}
+
+/// Renders the discovered population and publishes any requested report without rediscovery.
+fn list_mutant_population<H: Host>(
+    host: &mut H,
+    select: &super::cli::SelectArgs,
+    json: bool,
+    json_report: Option<&Utf8PathBuf>,
+    styler: Styler,
+    plan: &crate::discover::Plan,
+    shard: Option<(u32, u32)>,
+) -> crate::Result<i32> {
+    crate::report::skipped(host, plan, styler)?;
 
     if let Some(path) = json_report {
-        write_population(host, &plan, shard, population_complete(select), path)?;
+        write_population(
+            host,
+            plan,
+            shard,
+            population_complete(select),
+            !select.name_patterns.is_empty(),
+            path,
+        )?;
     }
 
     let mut stream = host.results();
@@ -217,7 +261,7 @@ fn list_mutants<H: Host>(
     }
 
     for mutant in &plan.mutants {
-        writeln!(stream, "{}", encode_controls(&describe_for_listing(mutant)))?;
+        writeln!(stream, "{}", encode_controls(&mutant.selection_name()))?;
     }
 
     let suppressed = plan
@@ -237,41 +281,25 @@ fn list_mutants<H: Host>(
 /// Grants authority to withdraw absent older identities only for complete per-file populations.
 ///
 /// Whole-file/package selection preserves that authority; any explicit mutator selector (even an
-/// exhaustive spelling) or diff filter conservatively withholds it.
+/// exhaustive spelling), name regex, or diff filter conservatively withholds it.
 fn population_complete(select: &super::cli::SelectArgs) -> bool {
-    select.in_diff.is_none() && select.mutators.is_none()
-}
-
-/// Describes one mutant for the plain listing, marking the ones a run will not test.
-///
-/// A suppressed mutant stays in the population so reports can show what was skipped and why, so
-/// without the mark the listing would read as a promise to test every line it prints.
-fn describe_for_listing(mutant: &crate::model::Mutant) -> String {
-    let Some(channel) = mutant
-        .suppression
-        .as_ref()
-        .filter(|_| mutant.outcome == crate::model::Outcome::Ignored)
-        .map(|suppression| suppression.channel.as_str())
-    else {
-        return mutant.describe();
-    };
-
-    format!("{} [suppressed: {channel}]", mutant.describe())
+    select.in_diff.is_none() && select.mutators.is_none() && select.name_patterns.is_empty()
 }
 
 /// Writes the listing as a report document.
 ///
-/// `merge` withdraws a mutant only when a newer unsharded input states the whole population of its
-/// file, and producing that from a run means paying for a run. Listing is the cheap way to say what
-/// exists now, so it is the one a nightly rotation can afford beside its shard.
+/// `merge` withdraws a mutant only when a newer unsharded, unfiltered input states the whole
+/// population of its file, and producing that from a run means paying for a run. Listing is the
+/// cheap way to say what exists now, so it is the one a nightly rotation can afford beside its shard.
 fn write_population<H: Host>(
     host: &mut H,
     plan: &crate::discover::Plan,
     shard: Option<(u32, u32)>,
     population_complete: bool,
+    name_filtered: bool,
     path: &Utf8PathBuf,
 ) -> crate::Result<()> {
-    write_population_at(host, plan, shard, population_complete, path, SystemTime::now())
+    write_population_at(host, plan, shard, population_complete, name_filtered, path, SystemTime::now())
 }
 
 fn write_population_at<H: Host>(
@@ -279,14 +307,18 @@ fn write_population_at<H: Host>(
     plan: &crate::discover::Plan,
     shard: Option<(u32, u32)>,
     population_complete: bool,
+    name_filtered: bool,
     path: &Utf8PathBuf,
     now: SystemTime,
 ) -> crate::Result<()> {
     let info = crate::elements::RunInfo {
         started_at: now.duration_since(UNIX_EPOCH).map_or(0, |since| since.as_secs()),
-        mutant_id_version: Some(crate::model::MUTANT_ID_VERSION),
+        mutant_id_version:
+        // #[gamma::skip(option.some_to_none, reason = "write_population_at passes its RunInfo straight to elements::build. build_from always constructs returned config using mutant_id_version: Some(MUTANT_ID_VERSION), ..run, overwriting the supplied field regardless of Some/None. The local RunInfo is not retained elsewhere; replacing this input field with None cannot alter report fields, errors, bytes, or publication.", tag = "equivalent")]
+        Some(crate::model::MUTANT_ID_VERSION),
         merged: false,
         population_complete: population_complete && shard.is_none(),
+        name_filtered,
         shard: shard.map(|(count, index)| crate::elements::ShardInfo { index, count }),
         tests: None,
         // Filled in by `build` from the plan it is given, so that it cannot disagree with the
@@ -298,10 +330,28 @@ fn write_population_at<H: Host>(
 
     let report = crate::elements::build(plan, crate::elements::Thresholds::default(), Some(info))?;
 
-    crate::elements::write_json(&report, path)?;
+    publish_population(&report, path)?;
     writeln!(host.error(), "Wrote {}", encode_controls(path.as_str()))?;
 
     Ok(())
+}
+
+/// Replaces report publication on the installing test thread, including its error result.
+#[cfg(test)]
+type PopulationPublisher = Box<dyn FnMut(&crate::elements::Report, &Utf8PathBuf) -> crate::Result<()>>;
+
+#[cfg(test)]
+std::thread_local! {
+    static POPULATION_PUBLISHER: std::cell::RefCell<Option<PopulationPublisher>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Uses the installed publisher instead of touching the filesystem.
+fn publish_population(report: &crate::elements::Report, path: &Utf8PathBuf) -> crate::Result<()> {
+    #[cfg(test)]
+    if let Some(result) = POPULATION_PUBLISHER.with_borrow_mut(|publisher| publisher.as_mut().map(|publish| publish(report, path))) {
+        return result;
+    }
+    crate::elements::write_json(report, path)
 }
 
 #[cfg(test)]
@@ -311,9 +361,128 @@ mod tests {
     use core::fmt::Write as _;
     use std::fs;
 
+    use serde_json::{from_slice, from_str, json, to_value};
+
     use super::*;
     use crate::commands::{ListFilesArgs, ListKind, ListMutantsArgs, ListRegistryArgs};
     use crate::testing::{Broken, BrokenHost, Sink};
+
+    /// Installs a current-thread publisher and restores the previous one, including on unwind.
+    fn with_population_publisher<T>(publisher: PopulationPublisher, body: impl FnOnce() -> T) -> T {
+        struct Restore(Option<PopulationPublisher>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                POPULATION_PUBLISHER.with_borrow_mut(|publisher| *publisher = self.0.take());
+            }
+        }
+        let _restore = Restore(POPULATION_PUBLISHER.with_borrow_mut(|slot| slot.replace(publisher)));
+        body()
+    }
+
+    #[test]
+    fn recovered_mutant_listing_passes_the_actual_selection_completeness_into_the_published_population() {
+        let plan = crate::discover::Survey::from_test_root("never-read-listing-root".into()).skeleton();
+        let path = Utf8PathBuf::from("never-written-listing-population.json");
+        for (mutators, name_patterns, complete) in [
+            (None, Vec::new(), true),
+            (Some("arith.add_to_sub".to_owned()), Vec::new(), false),
+            (None, vec!["needle".to_owned()], false),
+        ] {
+            let name_filtered = !name_patterns.is_empty();
+            let select = super::super::cli::SelectArgs {
+                mutators,
+                name_patterns,
+                ..super::super::cli::SelectArgs::default()
+            };
+            let published = std::rc::Rc::new(std::cell::Cell::new(0));
+            let mut host = Sink::default();
+            let exit = with_population_publisher(
+                Box::new({
+                    let published = std::rc::Rc::clone(&published);
+                    move |report, _path| {
+                        assert_eq!(report.config.as_ref().unwrap().population_complete, complete);
+                        assert_eq!(report.config.as_ref().unwrap().name_filtered, name_filtered);
+                        published.set(published.get() + 1);
+                        Ok(())
+                    }
+                }),
+                || list_mutant_population(&mut host, &select, true, Some(&path), Styler::new(false), &plan, None),
+            )
+            .unwrap();
+            assert_eq!(exit, EXIT_OK);
+            assert_eq!(published.get(), 1);
+            assert_eq!(from_str::<Value>(&host.out()).unwrap(), json!([]));
+            assert_eq!(host.err(), format!("Wrote {path}\n"));
+        }
+    }
+
+    #[test]
+    fn recovered_native_population_writer_preserves_completeness_identity_and_shard_metadata_before_in_memory_publication() {
+        let plan = crate::discover::Survey::from_test_root("never-read-population-root".into()).skeleton();
+        let path = Utf8PathBuf::from("never-written-population.json");
+        for complete in [false, true] {
+            for shard in [None, Some((5, 2))] {
+                let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+                let mut host = Sink::default();
+                with_population_publisher(
+                    Box::new({
+                        let seen = std::rc::Rc::clone(&seen);
+                        move |report, path| {
+                            assert!(!report.config.as_ref().unwrap().merged);
+                            seen.borrow_mut().push((path.clone(), to_value(report).unwrap()));
+                            Ok(())
+                        }
+                    }),
+                    || write_population(&mut host, &plan, shard, complete, false, &path),
+                )
+                .unwrap();
+                let seen = seen.borrow();
+                assert_eq!(seen.len(), 1);
+                assert_eq!(seen[0].0, path);
+                let config = &seen[0].1["config"];
+                assert_eq!(config["populationComplete"], complete && shard.is_none());
+                assert_eq!(config["mutantIdVersion"], crate::model::MUTANT_ID_VERSION);
+                assert!(config.get("merged").is_none());
+                assert_eq!(
+                    config.get("shard"),
+                    shard.map(|(count, index)| json!({"count": count, "index": index})).as_ref()
+                );
+                assert!(host.out().is_empty());
+                assert_eq!(host.err(), format!("Wrote {path}\n"));
+            }
+        }
+    }
+
+    #[test]
+    fn recovered_population_writer_returns_inline_source_parse_errors_before_publishing_or_announcing_success() {
+        let mut plan = crate::discover::Survey::from_test_root("never-read-population-root".into()).skeleton();
+        let path = Utf8PathBuf::from("broken.rs");
+        plan.files.push(crate::discover::TargetFile {
+            path: path.clone(),
+            absolute: "never-read-inline-source".into(),
+            package: "alpha".into(),
+            source: Some("pub fn broken(".into()),
+        });
+        plan.digests.insert(path, "retained-generation".into());
+        let mut host = Sink::default();
+        let result = with_population_publisher(
+            Box::new(|_report, _path| panic!("unparseable inline sources cannot be published")),
+            || {
+                write_population(
+                    &mut host,
+                    &plan,
+                    None,
+                    true,
+                    false,
+                    &Utf8PathBuf::from("never-written-population.json"),
+                )
+            },
+        );
+        let failure = result.expect_err("the retained inline source is syntactically incomplete");
+        assert!(failure.to_string().contains("broken.rs"), "{failure}");
+        assert!(host.out().is_empty());
+        assert!(host.err().is_empty());
+    }
 
     fn crate_dir(name: &str) -> tempfile::TempDir {
         crate::fixtures::crate_dir(name, "pub fn less(a: i32, b: i32) -> bool { a < b }\n").0
@@ -328,7 +497,7 @@ mod tests {
         let mut host = Sink::default();
         assert_eq!(list_mutators(&mut host, &select, true).unwrap(), EXIT_OK);
         assert!(host.out().ends_with('\n'));
-        let entries: Value = serde_json::from_str(&host.out()).unwrap();
+        let entries: Value = from_str(&host.out()).unwrap();
         let entries = entries.as_array().unwrap();
         let selected = entries.iter().find(|entry| entry["name"] == "relational.lt_to_le").unwrap();
         assert_eq!(selected["enabled"], true);
@@ -500,36 +669,37 @@ mod tests {
         let blocker = root.join("not-a-directory");
         fs::write(&blocker, "fixture").unwrap();
         let report = blocker.join("population.json");
-        write_population(&mut Sink::default(), &plan, None, true, &report).expect_err("a report below a file cannot be published");
+        write_population(&mut Sink::default(), &plan, None, true, false, &report).expect_err("a report below a file cannot be published");
         list_mutants(&mut Sink::default(), &select, false, Some(&report), Styler::new(false), &cargo)
             .expect_err("the listing must return the population publication failure");
 
         let report = root.join("population.json");
-        write_population(&mut BrokenHost, &plan, Some((5, 2)), true, &report)
+        write_population(&mut BrokenHost, &plan, Some((5, 2)), true, false, &report)
             .expect_err("a failed publication diagnostic must be returned");
-        let report: Value = serde_json::from_slice(&fs::read(&report).unwrap()).unwrap();
-        assert_eq!(report["config"]["shard"], serde_json::json!({ "index": 2, "count": 5 }));
+        let report: Value = from_slice(&fs::read(&report).unwrap()).unwrap();
+        assert_eq!(report["config"]["shard"], json!({ "index": 2, "count": 5 }));
         assert_eq!(report["config"]["populationComplete"], false);
 
         let path = root.join("unknown-start-time.json");
         let before_epoch = UNIX_EPOCH.checked_sub(core::time::Duration::from_secs(1)).unwrap();
-        write_population_at(&mut Sink::default(), &plan, None, true, &path, before_epoch).unwrap();
-        let report: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        write_population_at(&mut Sink::default(), &plan, None, true, false, &path, before_epoch).unwrap();
+        let report: Value = from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(report["config"]["startedAt"], 0);
         write_population_at(
             &mut Sink::default(),
             &plan,
             None,
             true,
+            false,
             &path,
             UNIX_EPOCH + core::time::Duration::from_secs(1_234_567),
         )
         .unwrap();
-        let report: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let report: Value = from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(report["config"]["startedAt"], 1_234_567);
         assert_eq!(report["config"]["populationComplete"], true);
-        write_population_at(&mut Sink::default(), &plan, None, false, &path, before_epoch).unwrap();
-        let report: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        write_population_at(&mut Sink::default(), &plan, None, false, false, &path, before_epoch).unwrap();
+        let report: Value = from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(report["config"]["populationComplete"], false);
     }
 
@@ -706,7 +876,7 @@ mod tests {
         )
         .expect("list");
         let text = String::from_utf8(host.out).expect("utf-8");
-        let value: Value = serde_json::from_str(&text).expect("json");
+        let value: Value = from_str(&text).expect("json");
 
         assert_eq!(code, EXIT_OK);
         let entries = value.as_array().expect("a registry array");
@@ -728,7 +898,7 @@ mod tests {
 
         let code = list(&mut host, &args(root, ListKind::Files, true), Styler::new(false)).expect("list files");
         let text = String::from_utf8(host.out).expect("utf-8");
-        let value: Value = serde_json::from_str(&text).expect("the --json file listing must be JSON");
+        let value: Value = from_str(&text).expect("the --json file listing must be JSON");
 
         assert_eq!(code, EXIT_OK);
 
@@ -746,7 +916,7 @@ mod tests {
 
         let code = list(&mut host, &args(root, ListKind::Mutants, true), Styler::new(false)).expect("list mutants");
         let text = String::from_utf8(host.out).expect("utf-8");
-        let value: Value = serde_json::from_str(&text).expect("the --json mutant listing must be JSON");
+        let value: Value = from_str(&text).expect("the --json mutant listing must be JSON");
 
         assert_eq!(code, EXIT_OK);
 
@@ -881,7 +1051,7 @@ mod tests {
 
         let code = list(&mut host, &listing, Styler::new(false)).expect("list presets");
         let text = String::from_utf8(host.out).expect("utf-8");
-        let value: Value = serde_json::from_str(&text).expect("json");
+        let value: Value = from_str(&text).expect("json");
         let entries = value.as_array().expect("an array");
         let enabled = |name: &str| {
             entries
@@ -991,7 +1161,7 @@ mod tests {
 
         let code = list(&mut host, &listing, Styler::new(false)).expect("list");
         let text = fs::read_to_string(&path).expect("report");
-        let report: crate::elements::Report = serde_json::from_str(&text).expect("json");
+        let report: crate::elements::Report = from_str(&text).expect("json");
 
         assert_eq!(code, EXIT_OK);
         let run = report.config.as_ref().unwrap();
@@ -1003,6 +1173,14 @@ mod tests {
             "the population is empty: {text}"
         );
         assert_eq!(String::from_utf8(host.err).unwrap(), format!("Wrote {path}\n"));
+
+        let ListCommand::Mutants(args) = &mut listing.command else {
+            panic!("expected mutant listing");
+        };
+        args.select.name_patterns.push(": less: ".to_owned());
+        list(&mut Sink::default(), &listing, Styler::new(false)).expect("write a filtered population");
+        let filtered: crate::elements::Report = from_str(&fs::read_to_string(&path).expect("filtered report")).expect("filtered JSON");
+        assert!(filtered.config.as_ref().is_some_and(|run| run.name_filtered));
     }
 
     #[test]
@@ -1025,10 +1203,54 @@ mod tests {
 
         let code = list(&mut host, &listing, Styler::new(false)).expect("list");
         let text = fs::read_to_string(&path).expect("report");
-        let report: crate::elements::Report = serde_json::from_str(&text).expect("json");
+        let report: crate::elements::Report = from_str(&text).expect("json");
         let shard = report.config.as_ref().and_then(|run| run.shard.as_ref()).expect("shard");
 
         assert_eq!(code, EXIT_OK);
         assert_eq!((shard.index, shard.count), (2, 4));
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod name_filter_tests {
+    use super::selected_files;
+    use crate::discover::{Plan, TargetFile};
+
+    #[test]
+    fn listed_name_and_selected_files_follow_the_filtered_population() {
+        let mutant = crate::model::Mutant {
+            item_path: "less".to_owned().into(),
+            ..crate::fixtures::mutant()
+        };
+        let name = mutant.selection_name();
+        assert!(name.contains(": less: "), "{name}");
+
+        let files = ["src/lib.rs", "src/other.rs"].map(|path| TargetFile {
+            path: path.into(),
+            absolute: format!("/fixture/{path}").into(),
+            package: "subject".to_owned(),
+            source: None,
+        });
+        let mut plan = Plan {
+            root: "/fixture".into(),
+            files: files.into(),
+            mutants: vec![mutant],
+            suppressed: 0,
+            idle: Vec::new(),
+            sharded_out: 0,
+            settled_out: 0,
+            digests: crate::HashMap::default(),
+            skipped: Vec::new(),
+            reach: crate::HashMap::default(),
+            specs: crate::HashMap::default(),
+        };
+
+        let selected: Vec<_> = selected_files(&plan, true).map(|file| file.path.as_str()).collect();
+        assert_eq!(selected, ["src/lib.rs"]);
+        assert_eq!(selected_files(&plan, false).count(), 2);
+
+        plan.mutants.clear();
+        assert!(selected_files(&plan, true).next().is_none());
     }
 }

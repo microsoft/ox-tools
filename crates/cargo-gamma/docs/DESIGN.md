@@ -72,7 +72,7 @@ The design therefore optimizes each component of campaign cost:
 
 1. **Fixed campaign cost:** discovery, copying, instrumentation, and one build.
 2. **Per-mutant cost:** process launch plus the tests capable of observing that mutant.
-3. **Failure cost:** extra time needed to classify compilation failures, hangs, flaky behavior,
+3. **Failure cost:** extra time needed to classify compilation failures, hangs, enumeration failures,
    and excessive memory use without turning them into false detections.
 
 ## System boundaries
@@ -224,12 +224,25 @@ implementation choice.
 Selection narrows the population before expensive work:
 
 - package, file, mutator, and diff selection decide what may become a mutant;
+- `--re` selects mutants by a regular expression over the full name shown by `list mutants`:
+  workspace-relative location, qualified function path, change description, and any suppression
+  marker. Repeated patterns
+  match any one of them; control characters are encoded as in the plain listing before matching.
+  The filter is applied before sharding and compilation. With `list files`,
+  it leaves only files containing a selected mutant. Run and listing JSON reports mark this
+  population as name-filtered, so `merge` retains historical verdicts absent only because of
+  the regex. See [Sharding and merging](#sharding-and-merging) for source presentations
+  and staged reports;
 - conditional-compilation evidence excludes code absent from this build;
 - explicitly tagged project policy can mark every implementation whose final written trait-path
   segment is a named unqualified Rust identifier as ignored, without coupling selection to path
   qualification or human-readable report text;
 - suppressions withdraw explicitly accepted sites;
 - sharding assigns stable portions of the population to separate campaigns.
+
+`unsuppress` audits whether each directive still governs any mutant in its source file, regardless
+of a run's name filter. It rejects `--re` instead of treating a partial match as evidence that a
+directive has become idle.
 
 Trait-name policy is deliberately lexical. `impl Debug`, `impl fmt::Debug`, and
 `impl core::fmt::Debug` share the final written identifier `Debug`, while an imported alias retains
@@ -438,6 +451,23 @@ File and diff filters narrow the mutation population, not the package's declarat
 evidence. Excluded sources still contribute module declarations and `Default`
 implementations before candidate collection. Only an unanalyzable source makes its
 package's negative evidence incomplete; exclusions alone do not.
+
+`--in-diff` is changed-lines selection, not test-impact analysis. Changes or deletions in tests do
+not select mutants in unchanged production code, even when those edits remove all test protection.
+A test-only diff can therefore select no mutants and succeed. Passing this narrower check makes no
+claim about code outside the selected mutation sites. Full mutation runs remain necessary to detect
+such regressions; CI can omit `--in-diff` when tests or test configuration change, alongside periodic
+full runs.
+
+Diff path validation also recognizes selected packages' nonmutation targets,
+including integration tests, examples, and their source-directory helpers.
+These paths validate ordinary workspace diffs without becoming mutation targets
+or declaration evidence. Each additional directory is inventoried once per
+survey; build-script roots are recognized directly without recursively walking
+the package root and its build artifacts. Validation-only walks prune Cargo's
+resolved target directory and conventional `target` and `.git` directories at
+the workspace and package roots, including for root-level tests and examples.
+Ordinary mutation-source walks remain unpruned. Missing Rust paths remain errors.
 
 Each compiler-blamed unviable mutant retains a bounded reason: rustc's primary error code when
 present, a normalized and length-capped primary-message category, and whether a primary span
@@ -824,14 +854,14 @@ Nextest preserves process-per-test isolation and runs one test process at a time
 for a given mutant. Control confirmations and nextest retries do not consume
 the phase-2 candidate budget.
 
-Confirmed kills settle immediately and publish learning without waiting for
+Kills settle immediately and publish learning without waiting for
 canonical predecessors. Passing named probes are not repeated during inference;
 full-binary outcomes are reused between the final two phases. All required
 full-binary checks must pass before survival is reported. Timeouts, resource
 failures, and incomplete linkage are never treated as passing evidence.
 Fallback keeps own-package binaries first, then prefers the binaries credited
 with the most distinct mutant kills. Known exact hints seed this history, and
-confirmed kills update it live without double-counting reconfirmations. Baseline
+observed kills update it live without crediting the same mutant twice. Baseline
 runtime and stable identity break ties. Each mutant reads the counts when it
 enters fallback. Final non-killing outcome precedence retains the original
 baseline-sorted reachable order.
@@ -839,7 +869,7 @@ Package dependency reachability is refined by exact compiler linkage when
 available, without discarding unknown links as though they were proven absent.
 Every phase admits up to the configured job count, without an additional CPU-count
 cap or aggregate memory reservation. Users reduce the job count if concurrent
-runs exhaust system memory. Named resources, per-binary ceilings, confirmation,
+runs exhaust system memory. Named resources, per-binary ceilings, resource retries and enumeration controls,
 and baseline harness-thread settings remain in force.
 
 The scheduler version is frozen for testing resume; unfinished
@@ -911,7 +941,7 @@ reachable binary in the oracle.
 ### Cheapest evidence first
 
 An eligible exact killer hint is probed before inferred tests, even when its binary is later in
-canonical order. A previous killer is only a hint: its test must convict again. A confirmed kill
+canonical order. A previous killer is only a hint: its test must convict again. A kill
 settles immediately, including one from a later binary, and suppresses subsequent
 inferred probes and fallback for that mutant. If the hint cannot be used or does
 not convict, the mutant advances to inferred selection and whole-binary fallback.
@@ -1008,7 +1038,9 @@ Platform containment uses the strongest suitable primitive:
 - Unix process groups provide descendant-directed signaling;
 - Linux cgroup v2 provides a boundary a descendant cannot leave, plus process-tree memory
   accounting and enforcement;
-- Windows job objects provide descendant lifetime and memory control.
+- Windows job objects provide descendant lifetime and memory control;
+- on macOS, which has no process-tree memory boundary, memory is accounted and enforced by sampling
+  the process group's physical footprint.
 
 A process group is escapable: one unprivileged `setsid` or `setpgid` call removes a descendant from
 it, and every later signal to the group misses that descendant. Containment is therefore not
@@ -1069,11 +1101,29 @@ Exceeding the ceiling is distinct from a test failure or timeout because the rem
 When the host cannot provide trustworthy process-tree enforcement, inherited defaults degrade
 explicitly, while a user-requested guarantee fails rather than pretending to be active.
 
-### Flakiness
+Enforcement is either kernel-enforced (a Linux cgroup or a Windows job) or sampled (macOS). A time
+budget cannot stand in for either. A mutant that breaks a loop's termination while the loop
+allocates can grow by gigabytes per second and exhaust a workstation long before any reasonable
+timeout. Sampled enforcement on macOS checks the process group's footprint every 10 ms and stops
+the group past its ceiling. It reports the same `outofmem` outcome, and the run says once that its
+bound is soft. The incident that motivated it and the measured overshoot are recorded in the
+[macOS memory design](../../cargo-gamma-process/docs/MACOS_MEMORY.md).
 
-A failing mutant run is confirmed where policy requires it. A failure that disappears without any
-source change is reported as flaky rather than credited as a kill. Flaky evidence must not improve
-the score or become durable campaign knowledge.
+### Baseline and failure attribution
+
+Baseline validates the selected healthy tests before mutation testing. An ordinary failing mutant
+execution is then accepted as a kill immediately, including exact hinted tests and failures reached
+during resource retries. No unmutated kill confirmation is launched. The `--no-confirm` flag and
+`no-confirm` configuration key are unsupported, not inert controls.
+
+A passing baseline does not establish determinism: an intermittent assertion failure after baseline
+can count as a kill. Timeout, stall and memory suspicions retain their resource-specific retries.
+Nextest enumeration failures retain an unmutated control run; if that run fails a test, the verdict
+is flaky rather than a kill. An enumeration control that times out, stalls or exceeds its memory
+ceiling also occupies the score-neutral flaky bucket, with the resource cause retained rather than
+a claim that the test failed twice. Enumeration controls are the only remaining producer of new
+flaky verdicts; they are not general flaky-test detection. Historical flaky verdicts remain readable
+and mergeable. All stay outside the score and durable killer knowledge.
 
 ## Identity and knowledge across campaigns
 
@@ -1122,6 +1172,9 @@ The target-resident campaign cache stores facts and hints learned by an earlier 
 Test verdicts are never reused. A kill is one observation of a potentially nondeterministic test
 suite; unchanged source, configuration, toolchain, and environment cannot prove that the next
 observation will agree. Each run therefore re-establishes every score-bearing outcome.
+When `--re` selects only part of a file, the completed campaign record retains valid earlier
+outcomes and killer hints for unselected mutant IDs in that unchanged file. Its latest campaign
+population still names only the selected mutants, so post-run hint promotion stays scoped to them.
 
 Compiler convergence is the semantic type-and-trait oracle for facts syntax cannot establish. It
 checks the active target, feature set, compiler, configuration, and dependency graph rather than
@@ -1227,6 +1280,17 @@ the selected population.
 A shard describes only its slice and cannot prove that a missing mutant was withdrawn. Only an
 unsharded, complete population can withdraw identities from an accumulated report.
 
+The source used to render a mutant can differ from the latest source generation in which it was
+seen. An unfiltered source presentation takes precedence over a filtered one even when older,
+keeping unmatched historical verdicts renderable; a current unfiltered listing provides current
+presentations. If a filtered source introduces a mutant absent from that presentation, merge
+requires a complete listing for the current source before producing a staged report; otherwise
+the new verdict would be lost in a later merge. Merged reports retain each mutant's latest source
+sighting separately from the rendered file source, so a later complete report withdraws it only
+when that report is at least as recent as the sighting. A merged report's timestamp includes that
+sighting even when its mutant was only pending. An unfiltered, unsharded report can still establish
+withdrawals.
+
 ## Verdicts and scoring
 
 A verdict states what evidence the campaign obtained:
@@ -1241,7 +1305,7 @@ A verdict states what evidence the campaign obtained:
 | `unviable` | The mutation could not compile | Excluded |
 | `ignored` | Explicit policy suppressed the mutant | Excluded |
 | `notbuilt` | The selected build did not compile that source | Excluded |
-| `flaky` | The observed failure was not repeatable | Excluded and retried |
+| `flaky` | An unmutated nextest enumeration control failed or was inconclusive, or a historical report recorded a flaky verdict | Excluded; retried in later campaigns |
 | `pending` | The run ended without judging the mutant | Excluded; makes a requested score or flaky gate incomplete |
 
 The mutation score is:
@@ -1256,15 +1320,23 @@ change. Consequently, `--min-score 100` fails closed on either outcome.
 
 Flaky outcomes remain outside that percentage because they are inconclusive, but `--max-flaky`
 provides an independent run and merge gate. The default has no flaky budget; a configured value
-fails when the current result contains more flaky findings than allowed. Because confirmation is
-what distinguishes a flaky failure from a reliable kill, this gate conflicts with `--no-confirm`.
+fails when the current result contains more flaky findings than allowed. Ordinary kills do not
+perform a flakiness check, so this gate does not detect intermittent assertion failures after
+baseline. Nextest enumeration controls and historical reports can still supply flaky outcomes.
 
 Excluded mutants remain visible but make no claim about test quality because they were never
 validly judged.
 
-An empty denominator is printable but not gradeable. A requested score or flaky gate must fail
-structurally when no mutant was judged; it must never pass by interpreting an empty campaign as a
-perfect score or zero flaky outcomes. Likewise, either gate fails when any mutant remains pending:
+An `--in-diff` run that selects no mutants is a successful no-op, even with score or flaky gates
+enabled. This applies to the final selection after combining diff scope with other filters,
+including name filters and sharding; the reason that selection is empty does not affect success.
+The exception applies to an empty final selection, not to a nonempty population whose mutants
+were all suppressed, unviable, or otherwise ungradeable. Selection errors and builds that got stuck
+remain failures.
+
+Otherwise, an empty denominator is printable but not gradeable. A requested score or flaky gate
+fails structurally when no mutant was judged rather than treating it as a perfect score or zero
+flaky outcomes. Likewise, either gate fails when any mutant remains pending:
 neither a score nor a flaky count over only the completed subset describes the selected population.
 
 The distinctions between `survived`, `uncovered`, `unviable`, and `notbuilt` are architectural:
@@ -1283,8 +1355,8 @@ interruptions are supported. Missing, pre-testing, completed, incompatible, or
 corrupt state cause an error instead of a fresh run. Pending execution additionally
 requires unchanged prepared artifacts. Live checkout edits do not alter the frozen campaign. Live shard flags are
 not validated on resume; the saved campaign's validated shard selection is used.
-Prepared snapshot schema version 2 rejects earlier reachability-policy snapshots because their
-settled no-coverage verdicts cannot be safely reused. Start a fresh campaign for those snapshots.
+Prepared snapshot schema version 3 rejects older snapshots, whose reachability or kill-confirmation
+policies differ. Start a fresh campaign rather than mixing verdict policies on resume.
 
 If interruption occurs after the last verdict is recorded but before the
 completed ledger is durably published, resume still closes the planning phase and displays the
@@ -1384,7 +1456,7 @@ finishes. Reporting flags and gates remain configurable; live
 
 One verdict model feeds every output surface:
 
-- the console emphasizes actionable survivors, exceptional resource outcomes, and flaky tests;
+- the console emphasizes actionable survivors and exceptional resource or enumeration-control outcomes;
 - the mutation-testing-elements JSON report is the interchange artifact;
 - the HTML report provides a browsable, self-contained view;
 - SARIF and CI annotations place survivors on changed source;
@@ -1507,9 +1579,10 @@ score gate must agree because they consume the same outcomes and scoring rules.
 Process exit status is another projection of that model: `0` means the command and every requested
 gate or expectation passed, `1` is invalid usage or configuration, `2` is a completed command whose
 correctness, score, or flaky gate failed, `3` means the requested answer could not be completed, and
-`70` marks an internal cargo-gamma panic. A score or flaky gate also fails with `2` when no mutant
-was judged or selected mutants remain pending; without either gate those states are reportable
-results rather than implicit grading policy.
+`70` marks an internal cargo-gamma panic. An empty final `--in-diff` selection is a successful
+no-op even with score or flaky gates enabled. Outside that exception, a score or flaky gate
+also fails with `2` when no mutant was judged or selected mutants remain pending; without
+either gate those states are reportable results rather than implicit grading policy.
 
 Limits imposed by CI platforms are explicit. Truncating annotations or SARIF silently would make a
 successful upload look like the complete result.

@@ -69,6 +69,39 @@ mod tests {
     use crate::exec::claim_workspace;
     use crate::testing::Sink;
 
+    #[test]
+    fn recovered_native_clean_returns_metadata_execution_errors_before_any_cache_removal_or_success_message() {
+        let args = CleanArgs {
+            dir: "scripted-clean-metadata-root".into(),
+        };
+        let calls = std::rc::Rc::new(Cell::new(0));
+        let mut host = Sink::default();
+        let failure = crate::discover::with_metadata_reader(
+            Box::new({
+                let calls = std::rc::Rc::clone(&calls);
+                move |metadata| {
+                    let command = metadata.cargo_command();
+                    assert_eq!(
+                        command.get_current_dir(),
+                        Some(std::path::Path::new("scripted-clean-metadata-root"))
+                    );
+                    assert!(command.get_args().any(|argument| argument == "--no-deps"));
+                    calls.set(calls.get() + 1);
+                    Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied).into())
+                }
+            }),
+            || clean(&mut host, &args, Styler::new(false)),
+        )
+        .unwrap_err();
+        assert_eq!(
+            failure.message(),
+            "could not read cargo metadata for `scripted-clean-metadata-root`"
+        );
+        assert_eq!(calls.get(), 1);
+        assert!(host.out().is_empty());
+        assert!(host.err().is_empty());
+    }
+
     fn clean_fixture<H: Host>(host: &mut H, args: &CleanArgs, styler: Styler) -> crate::Result<i32> {
         clean_with(host, args, styler, |dir| Ok((dir.to_owned(), dir.join("target"))), clean_cache)
     }

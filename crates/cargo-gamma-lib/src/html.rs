@@ -43,6 +43,8 @@ pub fn render(report: &Report) -> Result<String> {
     // The page is built by the same streaming path that writes it to disk, so the two cannot drift:
     // writing to a `Vec` cannot fail for I/O, and the report serializes infallibly, so the only way
     // this errors is the case handled below.
+
+    // #[gamma::skip(try.propagate_to_unwrap, reason = "render calls stream with a private Vec<u8>, so prefix/suffix writes and EscapeScript's delegated writes cannot return I/O errors. Report is derived serialization with String-keyed BTreeMap files, fixed-field derived DTOs and JSON-compatible primitive/options/vectors; even nonfinite f64 serializes null. stream's only other failure is that concrete JSON serializer, so this ? cannot produce Err for panic_on_failure (allocation aborts remain unchanged).", tag = "equivalent")]
     stream(report, &mut page).map_err(|cause| error!("could not serialize the report").caused_by(cause))?;
 
     String::from_utf8(page).map_err(|cause| error!("could not serialize the report").caused_by(cause))

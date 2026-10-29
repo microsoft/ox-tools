@@ -340,13 +340,7 @@ pub fn summarize<H: Host>(host: &mut H, plan: &Plan, styler: Styler, listings: L
 /// # Errors
 ///
 /// Returns an error if the stream cannot be written.
-pub fn session_notes<H: Host>(
-    host: &mut H,
-    session: &Session,
-    _hints_missing: bool,
-    _has_suppressible_mutants: bool,
-    styler: Styler,
-) -> Result<()> {
+pub fn session_notes<H: Host>(host: &mut H, session: &Session, styler: Styler) -> Result<()> {
     let mut stream = host.error();
 
     if session.widened {
@@ -446,7 +440,7 @@ mod tests {
                 let mut session = session(widened);
                 session.filtered = filtered;
                 let mut host = Sink::default();
-                session_notes(&mut host, &session, false, false, Styler::new(true)).expect("notes render");
+                session_notes(&mut host, &session, Styler::new(true)).expect("notes render");
                 assert_eq!(host.err().contains("Oracle"), filtered > 0);
                 assert_eq!(host.err().contains("Scope"), widened);
                 if filtered > 0 {
@@ -679,7 +673,7 @@ mod tests {
             ..session(false)
         };
 
-        session_notes(&mut host, &narrowed, false, false, Styler::new(false)).expect("notes");
+        session_notes(&mut host, &narrowed, Styler::new(false)).expect("notes");
 
         let printed = String::from_utf8(host.err).expect("utf-8");
 
@@ -694,7 +688,7 @@ mod tests {
     fn notes(widened: bool) -> String {
         let mut host = Sink::default();
 
-        session_notes(&mut host, &session(widened), false, false, Styler::new(false)).expect("notes");
+        session_notes(&mut host, &session(widened), Styler::new(false)).expect("notes");
 
         String::from_utf8(host.err).expect("utf-8")
     }
@@ -1008,7 +1002,7 @@ mod tests {
 
         settled.unbounded = Some("no cgroup delegation".to_owned());
 
-        session_notes(&mut host, &settled, false, false, Styler::new(false)).expect("notes");
+        session_notes(&mut host, &settled, Styler::new(false)).expect("notes");
 
         let text = String::from_utf8(host.err).expect("utf-8");
 
@@ -1250,7 +1244,7 @@ mod tests {
     /// And on the diagnostic stream carrying the session notes.
     #[test]
     fn a_closed_diagnostic_stream_fails_the_session_notes() {
-        fails_at_every_line(1, |host| session_notes(host, &session(true), false, false, Styler::new(false)));
+        fails_at_every_line(1, |host| session_notes(host, &session(true), Styler::new(false)));
     }
 
     /// `session_notes` writes separate lines for each exceptional session condition
@@ -1282,6 +1276,6 @@ mod tests {
             phases: Phases::default(),
         };
 
-        fails_at_every_line(2, |host| session_notes(host, &session, true, true, Styler::new(false)));
+        fails_at_every_line(2, |host| session_notes(host, &session, Styler::new(false)));
     }
 }

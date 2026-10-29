@@ -356,6 +356,7 @@ pub fn instrument_with_guards(text: &str, mutants: &[AssignedMutant<'_>]) -> Res
 
     for root in &roots {
         out.push_str(copy(text, cursor..root.span.start));
+        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
         render(text, root, &mut out, &mut spans, None);
         cursor = root.span.end;
     }
@@ -413,6 +414,7 @@ fn build_tree<'a>(sites: &[&'a AssignedMutant<'a>]) -> Result<Vec<Node<'a>>> {
             // #[gamma::skip(loop.break_to_continue, reason = "the while condition observed a nonempty stack and no intervening operation changes it, so pop cannot enter this else branch")]
             let Some(finished) = stack.pop() else { break };
 
+            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
             attach(finished, &mut stack, &mut roots);
         }
 
@@ -444,6 +446,7 @@ fn build_tree<'a>(sites: &[&'a AssignedMutant<'a>]) -> Result<Vec<Node<'a>>> {
     }
 
     while let Some(finished) = stack.pop() {
+        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
         attach(finished, &mut stack, &mut roots);
     }
 
@@ -496,6 +499,7 @@ fn render(
 
                 let from = out.len();
 
+                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                 render_replacement(replacement, node, own_returns.as_ref(), returns, out);
                 mutated.push((*ordinal, from..out.len()));
 
@@ -503,6 +507,7 @@ fn render(
                     out.push(')');
                 } else if let Shape::IterWrappedBlock { depth } = node.shape {
                     out.push(')');
+                    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                     iterator_maps(out, depth, "L");
                 }
 
@@ -541,11 +546,14 @@ fn render(
     let mut cursor = node.span.start;
 
     for child in &node.children {
+        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
         write_return_text(text, cursor..child.span.start, out, returns);
+        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
         render(text, child, out, spans, returns);
         cursor = child.span.end;
     }
 
+    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
     write_return_text(text, cursor..node.span.end, out, returns);
     if own_returns.is_some() {
         out.push_str(" }");
@@ -571,6 +579,7 @@ fn render(
         Shape::IterBlock => ") } }",
         Shape::IterWrappedBlock { depth } => {
             let mut closing = String::from(")");
+            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
             iterator_maps(&mut closing, depth, "R");
             closing.push_str(" } }");
             wrapped_close = closing;
@@ -627,6 +636,7 @@ fn render_replacement(replacement: &str, node: &Node<'_>, own: Option<&Returns>,
     {
         let _ = write!(out, "'{}: {{ ", returns.label);
     }
+    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
     write_return_text(replacement, 0..replacement.len(), out, returns.as_ref());
     if own.is_some() && returns.is_some() {
         out.push_str(" }");
@@ -640,7 +650,9 @@ struct Returns {
 
 fn iterator_returns(text: &str, node: &Node<'_>) -> Option<Returns> {
     if !matches!(node.shape, Shape::IterBlock | Shape::IterWrappedBlock { .. }) {
-        return None;
+        return
+        // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+        None;
     }
     let sites = return_sites(copy(text, node.span.clone()));
     (!sites.is_empty()).then(|| Returns {
@@ -669,7 +681,9 @@ fn return_sites(source: &str) -> Vec<Range<usize>> {
         fn visit_trait_item_fn(&mut self, _i: &'ast syn::TraitItemFn) {}
     }
     let Ok(expression) = syn::parse_str::<syn::Expr>(source) else {
-        return Vec::new();
+        return
+        // #[gamma::skip(return_value.default, reason = "The original Vec::new() already constructs the default value of its inferred return type.", tag = "equivalent")]
+        Vec::new();
     };
     let mut walk = Walk::default();
     walk.visit_expr(&expression);
@@ -696,8 +710,85 @@ mod tests {
     use core::num::NonZeroU8;
     use core::ops::Range;
 
-    use super::{AssignedMutant, Guard, Ordinal, Position, Shape};
+    use super::{
+        AssignedMutant, Guard, Node, Ordinal, Position, Returns, Shape, iterator_returns, render_replacement, return_sites,
+        write_return_text,
+    };
     use crate::{HashMap, Result};
+
+    #[test]
+    fn replacement_return_context_requires_at_least_one_fully_contained_original_site() {
+        let node = Node {
+            span: 10..20,
+            shape: Shape::Expr,
+            mutants: vec![(1, "unused")],
+            children: Vec::new(),
+        };
+        for (sites, expected) in [
+            (vec![], "return 1"),
+            (core::iter::once(0..6).collect(), "return 1"),
+            (core::iter::once(20..26).collect(), "return 1"),
+            (core::iter::once(5..25).collect(), "return 1"),
+            (core::iter::once(10..16).collect(), "break 'context 1"),
+            (core::iter::once(14..20).collect(), "break 'context 1"),
+            (vec![0..6, 10..16], "break 'context 1"),
+        ] {
+            let inherited = Returns {
+                label: "context".into(),
+                sites,
+            };
+            let mut actual = String::new();
+            render_replacement("return 1", &node, None, Some(&inherited), &mut actual);
+            assert_eq!(actual, expected);
+        }
+        let own = Returns {
+            label: "owned".into(),
+            sites: core::iter::once(10..16).collect(),
+        };
+        let mut actual = String::new();
+        render_replacement("return 1", &node, Some(&own), None, &mut actual);
+        assert_eq!(actual, "'owned: { break 'owned 1 }");
+        actual.clear();
+        render_replacement("1", &node, Some(&own), None, &mut actual);
+        assert_eq!(actual, "1");
+    }
+
+    #[test]
+    fn nested_return_sites_are_all_shifted_to_absolute_iterator_block_offsets() {
+        let text = "prefix { return return 1; } suffix";
+        let mut node = Node {
+            span: 7..27,
+            shape: Shape::IterBlock,
+            mutants: vec![(19, "unused")],
+            children: Vec::new(),
+        };
+        let actual = iterator_returns(text, &node).unwrap();
+        assert_eq!(actual.label, "__gamma_return_19");
+        assert_eq!(actual.sites, [9..15, 16..22]);
+        assert_eq!(return_sites("{ return return 1; }"), [2..8, 9..15]);
+        node.shape = Shape::Expr;
+        assert!(iterator_returns(text, &node).is_none());
+    }
+
+    #[test]
+    fn return_text_rewriting_accepts_an_exact_end_boundary_and_skips_sites_outside_the_copy() {
+        let returns = Returns {
+            label: "target".into(),
+            sites: vec![0..6, 7..13],
+        };
+        let mut actual = String::new();
+        write_return_text("return return", 7..13, &mut actual, Some(&returns));
+        assert_eq!(actual, "break 'target");
+        actual.clear();
+        write_return_text("return return", 0..6, &mut actual, Some(&returns));
+        assert_eq!(actual, "break 'target");
+        actual.clear();
+        write_return_text("return return", 0..5, &mut actual, Some(&returns));
+        assert_eq!(actual, "retur");
+        actual.clear();
+        write_return_text("return return", 7..13, &mut actual, None);
+        assert_eq!(actual, "return");
+    }
 
     #[test]
     fn nested_wrapped_iterator_returns_leave_inner_function_boundaries_intact() {
@@ -746,7 +837,7 @@ mod tests {
                 usize::from(replacement.contains("return")) + 1
             );
         }
-        assert!(super::return_sites("not valid rust !").is_empty());
+        assert!(return_sites("not valid rust !").is_empty());
         let text = "{ Some(1..3) }";
         let site = mutant(
             0..text.len(),

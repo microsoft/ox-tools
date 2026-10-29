@@ -441,6 +441,9 @@ Impact package files use three outcomes: a nonempty file means work was found,
 an empty file is a proven successful no-op, and a missing/malformed file is a
 failure. cargo-each consumes the canonical `name@version` lines directly, so
 recipes do not parse or reverse-map cargo-delta output.
+Advisory checks may report policy findings without failing, but failure to execute
+the advisory tool is still an operational error unless the baseline itself has become
+unusable because one of its dependency versions was subsequently yanked.
 
 The recipe-side mechanics are in
 [local.md §4](./local.md#4-impact-scoping-via-the-anvil-impact-recipe). The cloud workflow-side wiring (the

@@ -111,6 +111,7 @@ const CHECK_FILES: &[(&str, &str)] = split_recipe_files!(
         "mutants-full",
         "pr-title",
         "readme-check",
+        "semver-check",
         "spellcheck",
         "udeps",
     ]
@@ -431,6 +432,7 @@ mod tests {
             // cargo-delta does not map to a package, so scoping them would
             // silently skip a changed template/dictionary.
             ("readme-check", Unscoped),
+            ("semver-check", Affected),
             ("spellcheck", Unscoped),
             ("udeps", Required),
         ]

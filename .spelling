@@ -33,6 +33,7 @@ api
 APIs
 appender
 AppError
+Dependabot
 aprz
 args
 argv
@@ -957,3 +958,5 @@ reparsing
 multiline
 precomputed
 subspan
+substrings
+unselected

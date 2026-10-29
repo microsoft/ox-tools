@@ -38,7 +38,7 @@ Fast mutation testing for Rust.
     * [Taking suppressions back out](#taking-suppressions-back-out)
   * [Hangs](#hangs)
     * [Bounding what a mutant allocates](#bounding-what-a-mutant-allocates)
-    * [Telling a detection from a flaky test](#telling-a-detection-from-a-flaky-test)
+    * [Baseline and intermittent test failures](#baseline-and-intermittent-test-failures)
 * [Suppressing mutations](#suppressing-mutations)
   * [Choosing a channel](#choosing-a-channel)
   * [In-source directives](#in-source-directives)
@@ -302,7 +302,16 @@ cargo gamma run --test-package ledger      # let this package's tests judge a mu
 cargo gamma run --exclude-test conformance # keep a test target out of the oracle
 cargo gamma run --test-workspace           # let every package's tests judge a mutant
 cargo gamma run --test-lib                 # use only library unit-test harnesses
+cargo gamma list mutants --re one_line    # preview mutants in this function
+cargo gamma run --re one_line             # test only matching mutants
 ```
+
+`--re` matches the full name shown by `cargo gamma list mutants`: workspace-relative file,
+line and column, qualified function path, change description, and any suppression marker. It uses a Rust regular
+expression, matches substrings by default, and may be repeated to include matches from any
+pattern. Control characters use the visible escapes printed by the listing; a regular expression
+needs `\\` to match a displayed backslash. Use `list mutants --re ...` to preview the exact
+population before a run.
 
 By default, each mutant is judged by tests from its own package. That applies both to a run inside
 `ledger-core` and to a whole-workspace run containing it: crates that depend on `ledger-core` are
@@ -384,7 +393,7 @@ cargo gamma run --test-timeout-multiplier 2.0 # multiple of each test binary's b
 cargo gamma run --minimum-test-timeout 5      # floor under the computed budget
 cargo gamma run --build-timeout 600           # bound each compiler invocation
 cargo gamma run --min-score 80                # fail the run below a score
-cargo gamma run --max-flaky 0                 # fail if any unresolved flaky outcomes remain
+cargo gamma run --max-flaky 0                 # reject flaky nextest enumeration-control outcomes
 cargo gamma run --dry-run                     # report the plan without building anything
 cargo gamma run --show-killed                 # list what the suite killed, not just what survived
 cargo gamma run --show-unviable               # list the mutants that could not compile
@@ -613,7 +622,7 @@ flowchart TD
 |Unviable|`unviable`|The mutation does not compile|excluded|
 |Ignored|`ignored`|Withdrawn by a directive, attribute or config rule|excluded|
 |Not built|`notbuilt`|Conditional compilation kept this file out of the build|excluded|
-|Flaky|`flaky`|The suite failed with no mutant active too, so nothing was established|excluded|
+|Flaky|`flaky`|An unmutated nextest enumeration control failed or was inconclusive,<br>or a historical report recorded a flaky outcome|excluded|
 |Not run|`pending`|Never judged — outside shard, settled by<br>earlier report, run ended first, or the machine<br>refused to start the test binary|excluded|
 
 The middle column is the name a JSON report carries and a log can be grepped for; the console uses
@@ -637,8 +646,9 @@ Only a failing assertion increases the numerator. Timeout, out-of-memory, surviv
 uncovered verdicts increase only the denominator. An excluded verdict changes neither. If
 there are no scored mutants at all, the displayed ratio is 100%, but `--min-score` treats the
 run as ungraded rather than allowing an empty population to pass a quality gate.
-`--max-flaky` is a separate gate for inconclusive flaky outcomes; `--max-flaky 0` requires every
-selected result to be conclusive and therefore cannot be combined with `--no-confirm`.
+An `--in-diff` run that selects no mutants is a successful no-op, even with score and flaky gates.
+`--max-flaky` separately gates recorded flaky outcomes. Ordinary test failures are not rerun
+without the mutant, so this gate does not detect intermittent assertion failures after baseline.
 
 Uncovered mutants are in the denominator and never in the numerator, so they cost you exactly what
 a survivor costs you. That is deliberate. *Which* mutants went undetected is a diagnosis, and “no
@@ -818,33 +828,36 @@ genuinely allowed to allocate this much can be taken out of the run for good wit
 `cargo gamma suppress --apply`, which treats `outofmem` as eligible by default alongside
 `timeout`.
 
-##### Telling a detection from a flaky test
+On Linux and Windows the kernel enforces the ceiling for the whole process tree. macOS has no
+equivalent, so there cargo-gamma samples the test process group’s memory every 10 ms and stops it
+once it passes the ceiling. That bound is soft. A mutant growing very fast can overshoot by roughly
+its growth rate times 10 ms. A process that leaves the test’s process group is not counted. The run
+says so once at the start. With `--nextest` on macOS, each test runs in a process group of its own,
+outside what this sampling can see, so memory control is unavailable. When it was only the default,
+it is switched off with a note. When you asked for it, the run stops and tells you to drop `--nextest`
+or pass `--memory off`.
 
-Nothing about a red test says the mutant made it red. A test that fails now and then would otherwise
-be scored as a kill every time it happened to fail while a mutant was active — inflating the score
-by however many mutants it was run against, invisibly, because the report has no way to show it.
+##### Baseline and intermittent test failures
 
-So every failing test is re-run with no mutant active before the kill is believed. If it fails that
-time too, the suite is what is unreliable, and the mutant is reported as `FLAKY`:
+Baseline runs the selected tests with no mutant active before mutation testing. After that,
+a failing mutant execution is accepted as a kill immediately, including when a hinted test
+catches it. There is no additional unmutated run per kill.
 
-```text
-FLAKY src/ledger.rs:41:9: delete self.audit.push(entry); [stmt.delete_call]:
-      test `audit::retries` in `unit-2181f69f` fails with no mutant active as well as with one,
-      so this mutant was never judged
+A passing baseline does not prove that tests are deterministic. An intermittent assertion
+failure after baseline can therefore be counted as a kill; cargo-gamma does not distinguish it
+from a mutation-induced failure by rerunning that test. Fix flaky tests before relying on the
+score. `--no-baseline` also removes the initial healthy-suite check.
 
-Summary 2 mutants (2 killed, 0 survived, 0 timed out, 0 out of memory, 0 uncovered => 100.0%),
-        1 flaky mutant never judged
-```
+Nextest enumeration failures still receive an unmutated control run to distinguish a broken
+test runner from a mutation-induced enumeration failure. If that control run fails a test,
+the mutant is reported as `FLAKY`, excluded from the score, and retried in later campaigns.
+A control that times out, stalls or exceeds its memory ceiling also occupies this score-neutral
+bucket, with its resource failure recorded rather than a claim that the test failed twice.
+Enumeration controls are the only remaining source of new flaky verdicts, not a general flaky-test detector.
+Historical flaky verdicts remain readable in reports and can be gated during merging.
+Timeout, stall and memory suspicions retain their resource-specific retries.
 
-It is deliberately neither a kill nor a survivor. Crediting the mutant would let one unreliable test
-manufacture detections; calling it a survivor would claim the tests have a gap and send you to write
-an assertion for code an assertion already covers. Nothing was established, so it stays out of the
-score entirely — the way an unviable mutant does — and the report names the test to fix, which is the
-only thing anybody can act on here. Incremental runs retry flakes rather than carrying them forward.
-
-The confirmation costs one extra run per kill, of the cheapest kind: it stops at the first failing
-test rather than running the whole binary. `--no-confirm` turns it off, which buys that time back at
-the price of a score that counts flakes as kills and cannot show you which ones they were.
+`--no-confirm` and `no-confirm` are unsupported; omit them from commands and configuration.
 
 ### Suppressing mutations
 
@@ -1324,10 +1337,11 @@ identifies the previous killer for the same mutant. Three kinds of information a
 the hints file, and none can change an answer:
 
 * **Killer hints** — which test caught each mutant. The named test is tried before inferred tests,
-  regardless of its binary’s position. A confirmed kill settles immediately without running
+  regardless of its binary’s position. A kill settles immediately without running
   earlier binaries. It is run rather than believed, so a stale hint falls
   back to inferred selection and the standard whole-binary sweep. Duplicate targeted attempts
-  are skipped without removing confirmations or necessary whole-binary fallback.
+  are skipped without removing resource retries, nextest enumeration controls, or necessary
+  whole-binary fallback.
 * **Test-selection hints** — ranked candidate tests for an item, candidate binaries for
   a source file, and test sets observed reaching a stable source site. Every candidate is run
   again as inferred tests and falls back conservatively when stale; no prior verdict is carried
@@ -1363,8 +1377,8 @@ CPU-count cap or aggregate memory reservation. Reduce `--jobs` if concurrent run
 memory; per-process memory limits and named-resource constraints remain enforced.
 
 Remaining full binaries run own-package first, then by descending distinct-mutant kill count
-within each package tier. Known exact hints seed the counts and confirmed kills update them
-live without counting reconfirmations twice. Baseline runtime and stable identity break ties.
+within each package tier. Known exact hints seed the counts and observed kills update them
+live without crediting the same mutant twice. Baseline runtime and stable identity break ties.
 
 Each ordinary mutant launch records whether its active guard was reached,
 without a separate build or sampling subprocess. Positive observations improve later test ordering.
@@ -1695,10 +1709,15 @@ predecessor earned — it reappears as never tested, which is also how it stays 
 denominator.
 
 Removing the *old* identity needs one more thing, because a union by itself never drops anything: at
-least one input has to be an unsharded run or listing, which states the complete population of every
-file it covers. An identity absent from the newest such input has been withdrawn, and the summary
-counts it under `Withdrawn`. A sharded report describes only its own slice, so it never withdraws
-anything — merge a full `list mutants --json` alongside the rotation to keep the denominator honest:
+least one input has to be an unsharded, unfiltered run or listing, which states the complete
+population of every file it covers. An identity absent from the newest complete input has been
+withdrawn, and the summary counts it under `Withdrawn`.
+
+A report narrowed by `--re` is partial even without sharding, so it cannot establish a withdrawal.
+If its source text changed, an available unfiltered source stays the presentation for unmatched
+historical mutants; include a current unfiltered listing for current presentations. A sharded
+report describes only its own slice, so it never withdraws anything — merge a full
+`list mutants --json` alongside the rotation to keep the denominator honest:
 
 ```bash
 cargo gamma list mutants --json-report reports/current.json

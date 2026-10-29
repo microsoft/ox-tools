@@ -322,6 +322,31 @@ mod tests {
     use crate::model::Mutant;
     use crate::testing::Sink;
 
+    #[test]
+    fn recovered_testing_status_only_changes_an_active_dashboard_even_when_an_inactive_one_is_enabled() {
+        for active in [false, true] {
+            let mut host = Sink::default();
+            let mut events = ConsoleEvents {
+                host: &mut host,
+                progress: Progress::new(true, Styler::new(false), Some(80)),
+                dashboard: Dashboard::new(true, Some(80), Styler::new(false)),
+                styler: Styler::new(false),
+                show_build: false,
+                verdict_log: VerdictLog::default(),
+            };
+            events.progress.set_total(7);
+            events.progress.record(Outcome::Killed);
+            if active {
+                events.dashboard.start_testing(events.host, 2, "retained".into());
+            }
+            let expected = if active { events.progress.render() } else { String::new() };
+            events.host.err.clear();
+            events.sync_testing_status();
+            assert_eq!(events.dashboard.testing_status_for_test(), expected);
+            assert!(events.host.err.is_empty());
+        }
+    }
+
     fn mutant(outcome: Outcome, note: Option<&str>) -> Mutant {
         timed(outcome, note, 0)
     }

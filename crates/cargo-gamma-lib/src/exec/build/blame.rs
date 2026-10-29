@@ -176,7 +176,9 @@ pub fn blame(stdout: &str, root: &Utf8Path, guards: &Guards) -> HashMap<u32, Com
                         Some((best, ordinals)) if *best == width => {
                             let _ = ordinals.insert(ordinal);
                         }
-                        Some((best, _ordinals)) if *best < width => {}
+                        Some((best, _ordinals)) if
+                        // #[gamma::skip(relational.lt_to_le, reason = "Both ordered match expressions first handle best==width by inserting ordinal. The mutated next guard is therefore evaluated only with best!=width; best<width and best<=width are identical on that reachable domain.", tag = "equivalent")]
+                        *best < width => {}
                         _ => enclosing = Some((width, HashSet::from_iter([ordinal]))),
                     }
                 } else if guard.mutated.is_none() && covers(&reported, &guard.site) {
@@ -188,7 +190,9 @@ pub fn blame(stdout: &str, root: &Utf8Path, guards: &Guards) -> HashMap<u32, Com
                         Some((best, ordinals)) if *best == width => {
                             let _ = ordinals.insert(ordinal);
                         }
-                        Some((best, _ordinals)) if *best < width => {}
+                        Some((best, _ordinals)) if
+                        // #[gamma::skip(relational.lt_to_le, reason = "Both ordered match expressions first handle best==width by inserting ordinal. The mutated next guard is therefore evaluated only with best!=width; best<width and best<=width are identical on that reachable domain.", tag = "equivalent")]
+                        *best < width => {}
                         _ => contained = Some((width, HashSet::from_iter([ordinal]))),
                     }
                 }
@@ -209,7 +213,10 @@ pub fn blame(stdout: &str, root: &Utf8Path, guards: &Guards) -> HashMap<u32, Com
         };
 
         if let Some(ordinals) = ordinals {
-            if ordinals.iter().all(|ordinal| blamed.contains_key(ordinal)) {
+            if
+            // #[gamma::skip(cond.always_false, reason = "When all ordinals already occur in blamed, the original skip avoids only pure code/category normalization. Without skip, the following per-ordinal loop checks blamed.contains_key and continues for every ordinal, so the same map/first causes are preserved and no side-effecting callback runs.", tag = "equivalent")]
+            ordinals.iter().all(|ordinal| blamed.contains_key(ordinal)) {
+                // #[gamma::skip(loop.delete_continue, reason = "When all ordinals already occur in blamed, the original skip avoids only pure code/category normalization. Without skip, the following per-ordinal loop checks blamed.contains_key and continues for every ordinal, so the same map/first causes are preserved and no side-effecting callback runs.", tag = "equivalent")]
                 continue;
             }
 
@@ -290,12 +297,16 @@ fn normalize_category(message: &str) -> String {
         loop {
             // #[gamma::skip(unary.remove_not, tag = "timeout", reason = "the whitespace predicate must become false at the end of the path tail")]
             while characters.peek().is_some_and(|next| !next.is_whitespace()) {
-                let _ = characters.next();
+                let _ = characters
+                    .next()
+                    .expect("the loop's peek guard established an unconsumed path character");
             }
 
             let mut lookahead = characters.clone();
             while lookahead.peek().is_some_and(|next| next.is_whitespace()) {
-                let _ = lookahead.next();
+                let _ = lookahead
+                    .next()
+                    .expect("the loop's peek guard established an unconsumed whitespace character");
             }
             let next_component: String = lookahead.take_while(|next| !next.is_whitespace()).collect();
             // #[gamma::skip(cond.always_false, cond.negate, unary.remove_not, tag = "timeout", reason = "without the component stop condition an exhausted path iterator is scanned forever")]
@@ -305,7 +316,9 @@ fn normalize_category(message: &str) -> String {
             }
 
             while characters.peek().is_some_and(|next| next.is_whitespace()) {
-                let _ = characters.next();
+                let _ = characters
+                    .next()
+                    .expect("the loop's peek guard established an unconsumed whitespace character");
             }
         }
     }
@@ -343,8 +356,14 @@ fn normalize_category(message: &str) -> String {
 
         if character == '/' || character == '\\' {
             consume_path_tail(&mut characters);
-            for _ in 0..normalized.len() {
+            for _ in
+                // #[gamma::skip(range.exclusive_to_inclusive, reason = "Path-token pop loop stops changing the string once the final character is whitespace or the string is empty. One extra bounded iteration,or continuing rather than breaking at that state, cannot pop past the same boundary.", tag = "equivalent")]
+                0..
+            // #[gamma::skip(expr.increment, reason = "Path-token pop loop stops changing the string once the final character is whitespace or the string is empty. One extra bounded iteration,or continuing rather than breaking at that state, cannot pop past the same boundary.", tag = "equivalent")]
+            normalized.len()
+            {
                 if normalized.chars().next_back().is_none_or(char::is_whitespace) {
+                    // #[gamma::skip(loop.break_to_continue, reason = "Path-token pop loop stops changing the string once the final character is whitespace or the string is empty. One extra bounded iteration,or continuing rather than breaking at that state, cannot pop past the same boundary.", tag = "equivalent")]
                     break;
                 }
                 let _last = normalized.pop();
@@ -358,7 +377,13 @@ fn normalize_category(message: &str) -> String {
         }
     }
 
-    let normalized = normalized.trim().trim_end_matches([':', ';', ',', '.']).trim();
+    let normalized = normalized
+        .trim()
+        .trim_end_matches(
+            // #[gamma::skip(collection.reverse_array, reason = "The character array is a pattern membership set; reversing its order leaves every match unchanged.", tag = "equivalent")]
+            [':', ';', ',', '.'],
+        )
+        .trim();
 
     if normalized.is_empty() {
         "uncategorized compiler error".to_owned()
@@ -427,9 +452,100 @@ mod final_survivor_tests {
     use super::*;
 
     #[test]
+    fn recovered_category_leading_whitespace_does_not_spend_the_content_budget() {
+        let content = "a".repeat(96);
+        assert_eq!(normalize_category(&format!(" \t{content}")), content);
+    }
+
+    #[test]
+    fn recovered_category_redacts_entire_path_tokens_and_space_separated_path_components() {
+        for (message, expected) in [
+            ("secret/path.rs", "<path>"),
+            ("cannot read /secret/path.rs after", "cannot read <path> after"),
+            ("cannot read C:\\Secret Folder\\module.rs after", "cannot read <path> after"),
+            ("λ/secret.rs", "<path>"),
+        ] {
+            assert_eq!(normalize_category(message), expected, "{message}");
+        }
+    }
+
+    #[test]
     fn diagnostic_categories_collapse_each_interior_whitespace_run() {
         for message in ["alpha   beta", "alpha \t\n beta", "\talpha  beta\n"] {
             assert_eq!(normalize_category(message), "alpha beta");
+        }
+    }
+
+    #[test]
+    fn recovered_full_category_budget_does_not_preserve_a_space_before_path_redaction() {
+        assert_eq!(normalize_category(&format!("{} /private/source.rs", "x".repeat(96))), "<path>");
+    }
+
+    #[test]
+    fn recovered_exact_diagnostic_paths_precede_suffix_aliases_and_later_narrower_deletions_win() {
+        let shared = Guard {
+            site: range(NonZeroU32::new(1).unwrap(), NonZeroU32::new(20).unwrap()),
+            mutated: Some(range(NonZeroU32::new(6).unwrap(), NonZeroU32::new(8).unwrap())),
+        };
+        let guards = Guards::from_iter([(1, ("nested/a.rs".into(), shared.clone())), (2, ("a.rs".into(), shared))]);
+        let message = diagnostic("error", "E0308", &[span(Some("nested/a.rs"), 6, 7, true)]);
+        let blamed = blame(&message, Utf8Path::new("workspace"), &guards);
+        assert_eq!(blamed.keys().copied().collect::<HashSet<_>>(), HashSet::from_iter([1]));
+
+        let mut guards = guards;
+        let last = *guards.keys().last().unwrap();
+        for (ordinal, (path, guard)) in &mut guards {
+            *path = "a.rs".into();
+            guard.mutated = None;
+            if *ordinal == last {
+                guard.site = range(NonZeroU32::new(5).unwrap(), NonZeroU32::new(10).unwrap());
+            }
+        }
+        let message = diagnostic("error", "E0308", &[span(Some("a.rs"), 6, 7, true)]);
+        let blamed = blame(&message, Utf8Path::new("workspace"), &guards);
+        assert_eq!(blamed.keys().copied().collect::<HashSet<_>>(), HashSet::from_iter([last]));
+    }
+
+    #[test]
+    fn recovered_flow_sensitive_and_repeated_diagnostics_do_not_hide_later_independent_errors() {
+        let guard = Guard {
+            site: range(NonZeroU32::new(5).unwrap(), NonZeroU32::new(10).unwrap()),
+            mutated: Some(range(NonZeroU32::new(6).unwrap(), NonZeroU32::new(8).unwrap())),
+        };
+        let guards = Guards::from_iter([(1, ("a.rs".into(), guard.clone())), (2, ("b.rs".into(), guard))]);
+        let stream = [
+            diagnostic("error", "E0382", &[span(Some("a.rs"), 6, 7, true)]),
+            diagnostic("error", "E0308", &[span(Some("a.rs"), 6, 7, true)]),
+            diagnostic("error", "E0999", &[span(Some("a.rs"), 6, 7, true)]),
+            diagnostic("error", "E0277", &[span(Some("b.rs"), 6, 7, true)]),
+        ]
+        .join("\n");
+        let blamed = blame(&stream, Utf8Path::new("workspace"), &guards);
+        assert_eq!(blamed.len(), 2);
+        assert_eq!(blamed[&1].code, "E0308");
+        assert_eq!(blamed[&2].code, "E0277");
+    }
+
+    #[test]
+    fn recovered_secondary_attribution_checks_the_exact_global_guard_budget() {
+        let guard = Guard {
+            site: range(NonZeroU32::new(5).unwrap(), NonZeroU32::new(10).unwrap()),
+            mutated: Some(range(NonZeroU32::new(6).unwrap(), NonZeroU32::new(8).unwrap())),
+        };
+        let diagnostic = diagnostic(
+            "error",
+            "E0308",
+            &[span(Some("missing.rs"), 100, 101, true), span(Some("a.rs"), 6, 7, false)],
+        );
+        for count in [65_535, 65_536, 65_537] {
+            let guards = (1..=count).map(|ordinal| (ordinal, ("a.rs".into(), guard.clone()))).collect();
+            let blamed = blame(&diagnostic, Utf8Path::new("workspace"), &guards);
+            assert_eq!(blamed.len(), if count <= 65_536 { count as usize } else { 0 }, "{count}");
+            assert!(
+                blamed
+                    .values()
+                    .all(|reason| { reason.code == "E0308" && reason.evidence == AttributionEvidence::OtherDiagnostic })
+            );
         }
     }
 

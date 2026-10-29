@@ -31,6 +31,65 @@ struct PackageEnvironment {
     binary_executables: BTreeMap<OsString, OsString>,
 }
 
+/// Replaces native query execution while preserving command construction and output interpretation.
+#[cfg(test)]
+type NativeQueryObserver = Box<dyn FnMut(&Command) -> std::io::Result<(bool, Vec<u8>)>>;
+
+#[cfg(test)]
+thread_local! {
+    static NATIVE_QUERY_OBSERVER: std::cell::RefCell<Option<NativeQueryObserver>> = const { std::cell::RefCell::new(None) };
+    static NATIVE_ENVIRONMENT: std::cell::RefCell<Option<BTreeMap<String, OsString>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Installs current-thread command and complete environment replacements, clearing both on unwind.
+#[cfg(test)]
+fn with_native_queries<T>(
+    environment: BTreeMap<String, OsString>,
+    observer: impl FnMut(&Command) -> std::io::Result<(bool, Vec<u8>)> + 'static,
+    body: impl FnOnce() -> T,
+) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            NATIVE_QUERY_OBSERVER.with_borrow_mut(|slot| *slot = None);
+            NATIVE_ENVIRONMENT.with_borrow_mut(|slot| *slot = None);
+        }
+    }
+    NATIVE_ENVIRONMENT.with_borrow_mut(|slot| {
+        assert!(
+            slot.is_none(),
+            "a thread cannot install two native environment observers simultaneously"
+        );
+        *slot = Some(environment);
+    });
+    let _reset = Reset;
+    NATIVE_QUERY_OBSERVER.with_borrow_mut(|slot| {
+        assert!(
+            slot.is_none(),
+            "a thread cannot install two native command observers simultaneously"
+        );
+        *slot = Some(Box::new(observer));
+    });
+    body()
+}
+
+/// Missing keys in an installed map stay absent rather than falling back to the host environment.
+fn native_environment(name: &str) -> Option<OsString> {
+    #[cfg(test)]
+    if let Some(value) = NATIVE_ENVIRONMENT.with_borrow(|slot| slot.as_ref().map(|environment| environment.get(name).cloned())) {
+        return value;
+    }
+    env::var_os(name)
+}
+
+fn native_query_output(command: &mut Command) -> std::io::Result<(bool, Vec<u8>)> {
+    #[cfg(test)]
+    if let Some(output) = NATIVE_QUERY_OBSERVER.with_borrow_mut(|slot| slot.as_mut().map(|observer| observer(command))) {
+        return output;
+    }
+    command.output().map(|output| (output.status.success(), output.stdout))
+}
+
 mod environment_pairs {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -67,6 +126,63 @@ impl TestEnvironment {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod final_survivor_tests {
     use super::*;
+
+    #[test]
+    fn recovered_native_cargo_environment_preserves_the_platform_home_convention_and_complete_common_values() {
+        let environment = [
+            ("CARGO".to_owned(), OsString::from("explicit-memory-cargo")),
+            ("HOME".to_owned(), OsString::from("distinct-unix-home")),
+            ("USERPROFILE".to_owned(), OsString::from("distinct-windows-home")),
+        ]
+        .into();
+        let root = Utf8Path::new("never-read-native-environment-root");
+        let found = with_native_queries(
+            environment,
+            |command| {
+                assert_eq!(command.get_program(), OsStr::new("rustup"));
+                assert_eq!(
+                    command.get_args().collect::<Vec<_>>(),
+                    [OsStr::new("show"), OsStr::new("active-toolchain")]
+                );
+                assert_eq!(command.get_current_dir(), Some(Path::new("never-read-native-environment-root")));
+                Err(std::io::Error::other("the in-memory tool query is deliberately unavailable"))
+            },
+            || TestEnvironment::from_cargo(r#"{"packages":[]}"#, "", &[], root, OsStr::new("unused-fallback")).unwrap(),
+        );
+        let home = if cfg!(windows) {
+            "distinct-windows-home"
+        } else {
+            "distinct-unix-home"
+        };
+        assert_eq!(
+            found.common,
+            BTreeMap::from([
+                (OsString::from("CARGO"), OsString::from("explicit-memory-cargo")),
+                (OsString::from("CARGO_HOME"), PathBuf::from(home).join(".cargo").into_os_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn recovered_native_quiet_query_returns_exact_successful_output_without_starting_a_process() {
+        let actual = with_native_queries(
+            BTreeMap::new(),
+            |command| {
+                assert_eq!(command.get_program(), OsStr::new("never-launched-native-query"));
+                assert_eq!(command.get_args().collect::<Vec<_>>(), [OsStr::new("--exact-query")]);
+                assert_eq!(command.get_current_dir(), Some(Path::new("never-read-query-root")));
+                Ok((true, b"  exact native value \r\n".to_vec()))
+            },
+            || {
+                quiet(
+                    "never-launched-native-query",
+                    &["--exact-query"],
+                    Utf8Path::new("never-read-query-root"),
+                )
+            },
+        );
+        assert_eq!(actual.as_deref(), Some("exact native value"));
+    }
 
     #[test]
     fn the_cargo_environment_uses_both_home_conventions_with_scripted_tool_failures() {
@@ -195,7 +311,7 @@ impl TestEnvironment {
                 root,
                 cargo,
                 cfg!(windows),
-                |name| env::var_os(name),
+                native_environment,
                 quiet,
                 || env::current_dir().ok(),
                 Path::is_file,
@@ -277,6 +393,8 @@ fn package_environments(metadata: &Value) -> HashMap<String, PackageEnvironment>
             insert(&mut variables, "CARGO_PKG_VERSION_PATCH", patch);
             // #[gamma::skip(call_result.default, reason = "insert returns unit and this mutator still inserts the same variable before replacing unit with unit")]
             insert(&mut variables, "CARGO_PKG_VERSION_PRE", pre);
+
+            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
             insert(
                 &mut variables,
                 "CARGO_PKG_AUTHORS",
@@ -414,15 +532,24 @@ fn common_environment(
         .or_else(|| rustup.as_ref().map(|environment| environment.cargo.clone()))
         .unwrap_or_else(|| resolve_executable(cargo, windows, &mut lookup, current_dir, is_file).unwrap_or_else(|| cargo.to_owned()));
 
+    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
     insert(&mut variables, "CARGO", cargo);
     if let Some(home) = lookup("CARGO_HOME").or_else(|| default_cargo_home(windows, &mut lookup)) {
+        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
         insert(&mut variables, "CARGO_HOME", home);
     }
 
     if let Some(rustup) = rustup {
+        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
         insert(&mut variables, "RUSTUP_TOOLCHAIN", rustup.toolchain);
+
+        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
         insert(&mut variables, "RUSTUP_TOOLCHAIN_SOURCE", rustup.source);
+
+        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
         insert(&mut variables, "RUSTUP_HOME", rustup.home);
+
+        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
         insert(
             &mut variables,
             "RUST_RECURSION_COUNT",
@@ -430,6 +557,7 @@ fn common_environment(
         );
         #[cfg(windows)]
         if lookup("LD_LIBRARY_PATH").is_none() {
+            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
             insert(&mut variables, "LD_LIBRARY_PATH", rustup.sysroot.join("lib"));
         }
     }
@@ -483,9 +611,7 @@ fn rustup_environment(
 
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn quiet(program: &str, arguments: &[&str], root: &Utf8Path) -> Option<String> {
-    quiet_with(program, arguments, root, |command| {
-        command.output().map(|output| (output.status.success(), output.stdout))
-    })
+    quiet_with(program, arguments, root, native_query_output)
 }
 
 fn quiet_with(
@@ -559,12 +685,14 @@ fn insert(map: &mut BTreeMap<OsString, OsString>, name: impl Into<OsString>, val
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use serde_json::{from_str, json};
+
     use super::*;
 
     const PACKAGE_ID: &str = "path+file:///workspace#subject@1.2.3-alpha.1";
 
     fn metadata() -> Value {
-        serde_json::from_str(
+        from_str(
             r#"{
                 "packages":[{
                     "name":"subject",
@@ -932,15 +1060,15 @@ mod tests {
     fn cargo_environment_filters_unknown_packages_and_keeps_build_messages() {
         let mut document = metadata();
         let mut unknown = document["packages"][0].clone();
-        unknown["id"] = serde_json::json!("unknown");
+        unknown["id"] = json!("unknown");
         document["packages"].as_array_mut().expect("fixture packages array").push(unknown);
         let binary = TestBinary {
             package_id: PACKAGE_ID.to_owned(),
             ..crate::testing::test_binary("target/unit")
         };
         let messages = [
-            serde_json::json!({"reason": "build-script-executed", "package_id": PACKAGE_ID, "env": [["FIXTURE_VALUE", "ready"]]}),
-            serde_json::json!({"reason": "compiler-artifact", "package_id": PACKAGE_ID, "target": {"kind": ["test"]}, "executable": "target/integration"}),
+            json!({"reason": "build-script-executed", "package_id": PACKAGE_ID, "env": [["FIXTURE_VALUE", "ready"]]}),
+            json!({"reason": "compiler-artifact", "package_id": PACKAGE_ID, "target": {"kind": ["test"]}, "executable": "target/integration"}),
         ].into_iter().map(|value| value.to_string()).collect::<Vec<_>>().join("\n");
         let common = BTreeMap::from([(OsString::from("CARGO"), OsString::from("scripted-cargo"))]);
         let found = TestEnvironment::from_cargo_with(&document.to_string(), &messages, &[binary], || common.clone())
@@ -1000,12 +1128,12 @@ mod tests {
     fn malformed_required_package_fields_are_ignored_without_panicking() {
         for (field, replacement) in [
             ("id", None),
-            ("id", Some(serde_json::json!(42))),
+            ("id", Some(json!(42))),
             ("version", None),
-            ("version", Some(serde_json::json!(42))),
-            ("version", Some(serde_json::json!("not-semver"))),
+            ("version", Some(json!(42))),
+            ("version", Some(json!("not-semver"))),
             ("manifest_path", None),
-            ("manifest_path", Some(serde_json::json!(42))),
+            ("manifest_path", Some(json!(42))),
         ] {
             let mut document = metadata();
             let package = document["packages"][0].as_object_mut().expect("the fixture has a package object");
@@ -1025,7 +1153,7 @@ mod tests {
     fn bare_manifests_and_missing_names_have_empty_not_placeholder_values() {
         for manifest in ["Cargo.toml", ""] {
             let mut document = metadata();
-            document["packages"][0]["manifest_path"] = serde_json::json!(manifest);
+            document["packages"][0]["manifest_path"] = json!(manifest);
             let _ = document["packages"][0]
                 .as_object_mut()
                 .expect("fixture package object")
@@ -1053,9 +1181,9 @@ mod tests {
         let mut integration = crate::HashSet::default();
         let messages = [
             "not-json".to_owned(),
-            serde_json::json!({"reason": "build-script-executed"}).to_string(),
-            serde_json::json!({"reason": "build-script-executed", "package_id": "unknown"}).to_string(),
-            serde_json::json!({
+            json!({"reason": "build-script-executed"}).to_string(),
+            json!({"reason": "build-script-executed", "package_id": "unknown"}).to_string(),
+            json!({
                 "reason": "build-script-executed",
                 "package_id": PACKAGE_ID,
                 "out_dir": "/target/out",
@@ -1075,54 +1203,18 @@ mod tests {
     #[test]
     fn artifact_kind_and_test_profile_independently_control_runtime_variables() {
         for (kinds, profile, executable, is_integration, is_binary) in [
-            (
-                serde_json::json!(["lib"]),
-                serde_json::json!({"test": false}),
-                Some("/target/a"),
-                false,
-                false,
-            ),
-            (
-                serde_json::json!([]),
-                serde_json::json!({"test": false}),
-                Some("/target/a"),
-                false,
-                false,
-            ),
-            (
-                serde_json::json!(["bin", "example"]),
-                serde_json::json!({"test": false}),
-                Some("/target/a"),
-                false,
-                true,
-            ),
-            (
-                serde_json::json!(["bin"]),
-                serde_json::json!({"test": true}),
-                Some("/target/a"),
-                false,
-                false,
-            ),
-            (serde_json::json!(["bin"]), Value::Null, Some("/target/a"), false, true),
-            (
-                serde_json::json!(["test", "lib"]),
-                serde_json::json!({"test": true}),
-                Some("/target/a"),
-                true,
-                false,
-            ),
-            (
-                serde_json::json!(["bench", "lib"]),
-                serde_json::json!({"test": true}),
-                Some("/target/a"),
-                true,
-                false,
-            ),
-            (serde_json::json!(["bin"]), serde_json::json!({"test": false}), None, false, false),
+            (json!(["lib"]), json!({"test": false}), Some("/target/a"), false, false),
+            (json!([]), json!({"test": false}), Some("/target/a"), false, false),
+            (json!(["bin", "example"]), json!({"test": false}), Some("/target/a"), false, true),
+            (json!(["bin"]), json!({"test": true}), Some("/target/a"), false, false),
+            (json!(["bin"]), Value::Null, Some("/target/a"), false, true),
+            (json!(["test", "lib"]), json!({"test": true}), Some("/target/a"), true, false),
+            (json!(["bench", "lib"]), json!({"test": true}), Some("/target/a"), true, false),
+            (json!(["bin"]), json!({"test": false}), None, false, false),
         ] {
             let mut package = PackageEnvironment::default();
             let mut integration = crate::HashSet::default();
-            let message = serde_json::json!({
+            let message = json!({
                 "target": {"kind": kinds, "name": "tool"},
                 "profile": profile,
                 "executable": executable,

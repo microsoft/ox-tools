@@ -23,15 +23,31 @@ const SUMMARY_FILES: usize = 10;
 /// placing its panel between those retries.
 pub(crate) fn append(path: &Utf8Path, panel: &str) -> io::Result<()> {
     let lock = OpenOptions::new().append(true).create(true).read(true).open(path)?;
-    let mut writer = lock.try_clone()?;
+    append_with_lock(&lock, panel, File::try_clone, |lock, writer, panel| {
+        append_locked(lock, writer, panel, File::lock, File::unlock)
+    })
+}
 
-    append_locked(&lock, &mut writer, panel)
+fn append_with_lock<L, W: io::Write>(
+    lock: &L,
+    panel: &str,
+    clone: impl FnOnce(&L) -> io::Result<W>,
+    append: impl FnOnce(&L, &mut W, &str) -> io::Result<()>,
+) -> io::Result<()> {
+    let mut writer = clone(lock)?;
+    append(lock, &mut writer, panel)
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn append_locked(lock: &File, writer: &mut impl io::Write, panel: &str) -> io::Result<()> {
-    lock.lock()?;
-    append_unlocking(writer, panel, || lock.unlock())
+fn append_locked<L>(
+    lock: &L,
+    writer: &mut impl io::Write,
+    panel: &str,
+    acquire: impl FnOnce(&L) -> io::Result<()>,
+    unlock: impl FnOnce(&L) -> io::Result<()>,
+) -> io::Result<()> {
+    acquire(lock)?;
+    append_unlocking(writer, panel, || unlock(lock))
 }
 
 fn append_unlocking(writer: &mut impl io::Write, panel: &str, unlock: impl FnOnce() -> io::Result<()>) -> io::Result<()> {
@@ -49,6 +65,46 @@ fn append_unlocking(writer: &mut impl io::Write, panel: &str, unlock: impl FnOnc
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod writer_tests {
     use super::*;
+
+    #[test]
+    fn recovered_summary_clone_refusal_returns_its_exact_error_before_locking_or_appending() {
+        let lock = ();
+        let mut calls = 0;
+        let failure = append_with_lock(
+            &lock,
+            "must not append",
+            |original| {
+                calls += 1;
+                assert!(std::ptr::eq(std::ptr::from_ref(original), std::ptr::from_ref(&lock)));
+                Err::<Vec<u8>, _>(io::Error::new(io::ErrorKind::PermissionDenied, "named handle-duplication refusal"))
+            },
+            |(), _, _| panic!("clone failure must precede locking or appending"),
+        )
+        .unwrap_err();
+        assert_eq!(failure.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(failure.to_string(), "named handle-duplication refusal");
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn recovered_native_summary_lock_errors_return_before_the_panel_writer_is_touched() {
+        let lock = ();
+        let mut output = Vec::new();
+        let failure = append_locked(
+            &lock,
+            &mut output,
+            "must not be written",
+            |original| {
+                assert!(std::ptr::eq(std::ptr::from_ref(original), std::ptr::from_ref(&lock)));
+                Err(io::Error::new(io::ErrorKind::PermissionDenied, "summary lock refused"))
+            },
+            |()| panic!("failed lock acquisition must not unlock"),
+        )
+        .unwrap_err();
+        assert_eq!(failure.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(failure.to_string(), "summary lock refused");
+        assert!(output.is_empty());
+    }
 
     pub(super) struct Broken;
     impl io::Write for Broken {
@@ -173,7 +229,15 @@ fn cell(path: &str) -> String {
     // A code span drops one space from each end when it has one at both, and cannot be empty at
     // all, so anything that starts or ends with a space or a backtick is given a pair of its own to
     // lose. Without it `` ` a ` `` and `` `a` `` are the same cell for two different files.
-    let padding = if escaped.is_empty() || escaped.starts_with(['`', ' ']) || escaped.ends_with(['`', ' ']) {
+    let padding = if escaped.is_empty()
+        || escaped.starts_with(
+            // #[gamma::skip(collection.reverse_array, reason = "The character array is a pattern membership set; reversing its order leaves every match unchanged.", tag = "equivalent")]
+            ['`', ' '],
+        )
+        || escaped.ends_with(
+            // #[gamma::skip(collection.reverse_array, reason = "The character array is a pattern membership set; reversing its order leaves every match unchanged.", tag = "equivalent")]
+            ['`', ' '],
+        ) {
         " "
     } else {
         ""
@@ -301,7 +365,7 @@ mod tests {
         let directory = crate::testing::workdir("summary-writer-error-");
         let path = directory.path().join("summary");
         let lock = OpenOptions::new().create(true).append(true).read(true).open(&path).unwrap();
-        let cause = append_locked(&lock, &mut Broken, "panel").unwrap_err();
+        let cause = append_locked(&lock, &mut Broken, "panel", File::lock, File::unlock).unwrap_err();
         assert_eq!(cause.kind(), io::ErrorKind::BrokenPipe);
         assert_eq!(cause.to_string(), "summary sink closed");
         let other = OpenOptions::new().append(true).read(true).open(&path).unwrap();
@@ -352,7 +416,7 @@ mod tests {
             let writer = lock.try_clone().expect("clone summary handle");
             let mut writer = ShortWriter { file: writer };
 
-            append_locked(&lock, &mut writer, &panel).expect("append one panel");
+            append_locked(&lock, &mut writer, &panel, File::lock, File::unlock).expect("append one panel");
 
             return;
         }

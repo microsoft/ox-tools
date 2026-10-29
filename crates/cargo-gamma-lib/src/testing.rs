@@ -36,6 +36,7 @@ use std::{fs, panic, thread};
 
 use camino::{Utf8Path, Utf8PathBuf};
 
+use crate::HashMap;
 use crate::commands::Host;
 use crate::exec::Workspace;
 
@@ -227,7 +228,7 @@ fn hold_at(pauses: &'static Pauses, root: Utf8PathBuf) -> CommandPause {
     let (reached_sender, reached) = mpsc::sync_channel(0);
     let (release, release_receiver) = mpsc::sync_channel(0);
     let prior = pauses
-        .get_or_init(|| Mutex::new(crate::HashMap::default()))
+        .get_or_init(|| Mutex::new(HashMap::default()))
         .lock()
         .expect("a prior command-pause test panicked while registering its pause")
         .insert(root, (reached_sender, release_receiver));
@@ -249,6 +250,37 @@ pub fn hold_after_cache_adoption(root: Utf8PathBuf) -> CommandPause {
 /// Registers a workspace-preparation pause for one workspace root.
 pub fn hold_during_workspace_preparation(root: Utf8PathBuf) -> CommandPause {
     hold_at(&WORKSPACE_PREPARATION_PAUSES, root)
+}
+
+/// Registers an exclusive root-keyed, pre-released pause and returns any observation without waiting.
+/// Registration is removed on return or unwind, even when preparation never reaches the pause.
+#[cfg(any(test, feature = "internals"))]
+pub(crate) fn observe_workspace_preparation<T>(root: &Utf8Path, operation: impl FnOnce() -> T) -> (T, Option<usize>) {
+    struct Remove(Utf8PathBuf);
+    impl Drop for Remove {
+        fn drop(&mut self) {
+            let _removed = WORKSPACE_PREPARATION_PAUSES
+                .get()
+                .expect("registering the observer initialized the registry")
+                .lock()
+                .expect("workspace-preparation callbacks do not run while the registry is locked")
+                .remove(&self.0);
+        }
+    }
+    let (reached, observed) = mpsc::sync_channel(1);
+    let (release, released) = mpsc::sync_channel(1);
+    release
+        .send(())
+        .expect("the new release channel has capacity and its receiver is alive");
+    let previous = WORKSPACE_PREPARATION_PAUSES
+        .get_or_init(|| Mutex::new(HashMap::default()))
+        .lock()
+        .expect("workspace-preparation callbacks do not run while the registry is locked")
+        .insert(root.to_owned(), (reached, released));
+    assert!(previous.is_none(), "a workspace cannot have two preparation observers");
+    let _remove = Remove(root.to_owned());
+    let output = operation();
+    (output, observed.try_recv().ok())
 }
 
 fn pause_at(pauses: &Pauses, root: &Utf8Path, observation: usize) {

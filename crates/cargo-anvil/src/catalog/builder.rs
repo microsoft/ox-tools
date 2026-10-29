@@ -523,6 +523,31 @@ mod tests {
     use crate::anvil::artifacts;
 
     #[test]
+    fn json_validation_does_not_apply_to_a_same_id_on_another_host() {
+        let ordinary = RegionSpec {
+            host: HostSelector::Path("settings.toml".to_owned()),
+            id: RegionId::new("entries"),
+            body: "enabled = true\n".to_owned(),
+            syntax: CommentSyntax::Hash,
+        };
+        let catalog = Catalog::builder(CliMeta::new("anvil"))
+            .with_json_array_region(JsonArrayRegionSpec {
+                region: RegionSpec {
+                    host: HostSelector::Path("settings.json".to_owned()),
+                    id: ordinary.id,
+                    body: "\"managed\",\n".to_owned(),
+                    syntax: CommentSyntax::SlashSlash,
+                },
+                path: vec!["entries".to_owned()],
+            })
+            .with_artifact(Artifact::region(ordinary.clone()))
+            .build()
+            .unwrap();
+        assert_eq!(catalog.json_array_path(&ordinary), None);
+        assert_eq!(catalog.artifacts().len(), 2);
+    }
+
+    #[test]
     fn rejects_conflicting_array_host_comment_syntax() {
         let array = TomlArrayRegionSpec {
             region: RegionSpec {
@@ -1104,6 +1129,21 @@ mod tests {
                     "invalid catalog for 'anvil':\n  - region '{id}' cannot use XML comments because its id contains '--', CR, LF, or a character XML 1.0 forbids"
                 )
             );
+        }
+    }
+
+    #[test]
+    fn survivor_non_xml_region_ids_may_contain_xml_comment_delimiters() {
+        for syntax in [CommentSyntax::Hash, CommentSyntax::SlashSlash] {
+            let catalog = Catalog::builder(CliMeta::new("anvil"))
+                .with_artifact(Artifact::region(RegionSpec {
+                    host: HostSelector::Path("host.txt".to_owned()),
+                    id: RegionId::new("not--xml"),
+                    body: "managed\n".to_owned(),
+                    syntax,
+                }))
+                .build();
+            assert!(catalog.is_ok(), "{catalog:?}");
         }
     }
 

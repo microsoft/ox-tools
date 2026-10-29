@@ -44,6 +44,12 @@ pub(super) fn unsuppress_with_cargo<H: Host>(
     styler: Styler,
     cargo: &CargoOptions,
 ) -> crate::Result<i32> {
+    if !args.select.name_patterns.is_empty() {
+        return Err(
+            error!("`--re` cannot narrow `unsuppress`: it checks whether directives suppress any mutant in their source file").usage(),
+        );
+    }
+
     unsuppress_with_discovery(host, args, styler, cargo, |selection, shard| {
         crate::discover::plan_for_build(&args.select, selection, shard, cargo, &mut |_| {})
     })
@@ -385,6 +391,21 @@ mod tests {
     use crate::testing::Sink;
     #[cfg(unix)]
     use crate::testing::workdir;
+
+    #[test]
+    fn recovered_unparseable_directive_removal_returns_an_error_before_preview_or_publication() {
+        let root = Utf8PathBuf::from("in-memory-unparseable-removal");
+        let plan = crate::fixtures::plan(Vec::new());
+        let removable = Removals::from_iter([("lib.rs".into(), removal("// remove me\npub fn broken("))]);
+        let mut host = Sink::default();
+        let mut written = Written::default();
+        let failure = remove_directives(&mut host, &args(&root, false), &plan, &removable, &mut written).unwrap_err();
+        assert!(failure.message().contains("removing the directives would leave"));
+        assert!(failure.message().ends_with("lib.rs unparseable"));
+        assert!(written.is_empty());
+        assert!(host.out.is_empty());
+        assert!(host.err.is_empty());
+    }
 
     /// The first line of `source` marked for removal, as `sort_out` would have decided it.
     fn removal(source: &str) -> Removal {
@@ -754,6 +775,19 @@ mod tests {
             assert!(host.err().contains("\u{1b}["));
             assert!(host.err().contains("0 skip directives from 0 files"), "{}", host.err());
         }
+    }
+
+    #[test]
+    fn a_name_filter_is_rejected_for_unsuppress() {
+        let root = Utf8PathBuf::from("a-workspace-that-need-not-exist");
+        let mut args = args(&root, false);
+        args.select.name_patterns.push(": less: ".to_owned());
+
+        let error = unsuppress_with_cargo(&mut Sink::default(), &args, Styler::new(false), &CargoOptions::default())
+            .expect_err("a name filter must not silently change directive cleanup");
+
+        assert!(error.is_usage(), "{error}");
+        assert!(error.to_string().contains("--re"), "{error}");
     }
 
     /// The default has to be the preview, because deleting a directive that was in fact

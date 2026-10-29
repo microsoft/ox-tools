@@ -240,6 +240,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn recovered_new_errors_are_not_skippable_until_explicitly_marked() {
+        let error = Error::new("must not skip");
+        assert!(!error.is_skippable());
+        assert!(error.skippable().is_skippable());
+    }
+
+    #[test]
     fn survivor_display_preserves_formatting_errors_before_and_inside_the_cause() {
         struct Limited {
             remaining: usize,

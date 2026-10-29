@@ -26,6 +26,9 @@ const SETUP_STEP: &str = include_str!("../../../templates/ado/steps/setup.yml");
 /// Embedded body of the cargo-delta impact step template.
 const IMPACT_STEP: &str = include_str!("../../../templates/ado/steps/impact.yml");
 
+/// Embedded body of the advisory-comments step template.
+const ADVISORY_COMMENTS_STEP: &str = include_str!("../../../templates/ado/steps/advisory-comments.yml");
+
 /// Embedded body of the dirty-file job wrapper.
 const JOB_WRAPPER: &str = include_str!("../../../templates/ado/steps/job.yml");
 
@@ -124,6 +127,16 @@ pub fn setup_step() -> Artifact {
 #[must_use]
 pub fn impact_step() -> Artifact {
     Artifact::backend_file(Backend::Ado, ".anvil/ado/steps/impact.yml", IMPACT_STEP)
+}
+
+/// `.anvil/ado/steps/advisory-comments.yml`.
+#[must_use]
+pub fn advisory_comments() -> Artifact {
+    Artifact::backend_file(
+        Backend::Ado,
+        ".anvil/ado/steps/advisory-comments.yml",
+        ADVISORY_COMMENTS_STEP,
+    )
 }
 
 /// `.anvil/ado/steps/job.yml` — the dirty-file job wrapper.
@@ -235,7 +248,14 @@ pub(crate) const GROUP_STEPS: &[(&str, &str)] = &[
 /// All ADO backend artifacts in emission order.
 #[must_use]
 pub(crate) fn all() -> Vec<Artifact> {
-    let mut out = vec![setup_step(), impact_step(), job_wrapper(), before_checks(), after_checks()];
+    let mut out = vec![
+        setup_step(),
+        impact_step(),
+        advisory_comments(),
+        job_wrapper(),
+        before_checks(),
+        after_checks(),
+    ];
     for (group, path) in GROUP_STEPS {
         out.push(Artifact::backend_file(Backend::Ado, path, render_group_step(group)));
     }
@@ -268,6 +288,7 @@ mod tests {
             [
                 ".anvil/ado/steps/setup.yml",
                 ".anvil/ado/steps/impact.yml",
+                ".anvil/ado/steps/advisory-comments.yml",
                 ".anvil/ado/steps/job.yml",
                 ".anvil/ado/hooks/before-checks.yml",
                 ".anvil/ado/hooks/after-checks.yml",

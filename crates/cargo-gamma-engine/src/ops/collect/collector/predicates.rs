@@ -459,13 +459,17 @@ fn callee_path(callee: &Expr) -> Option<&Path> {
 /// Returns whether a `default` method path selects the standard trait.
 fn is_standard_default_callee(path: &Path, defaults: &DefaultPaths, defaulted_types: &[String]) -> bool {
     let Some(method) = path.segments.last() else {
-        return false;
+        return
+        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+        false;
     };
 
     // Inputs rejected by this guard are also rejected by both recognition branches below, so
     // weakening the guard cannot change the answer.
     if method.ident != "default" {
-        return false;
+        return
+        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+        false;
     }
 
     if defaults.is_standard_default_callee(path) {
@@ -498,7 +502,9 @@ pub(super) fn is_capacity_result(expression: &Expr) -> bool {
 /// Returns whether a signature promises a number, which is the only thing worth perturbing by one.
 pub(super) fn is_numeric_return(output: &ReturnType) -> bool {
     let ReturnType::Type(_arrow, ty) = output else {
-        return false;
+        return
+        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+        false;
     };
 
     matches!(resolve_type(ty), Kind::Signed | Kind::Unsigned | Kind::Float)
@@ -587,11 +593,15 @@ impl<'ast> Visit<'ast> for BreakFinder {
 /// Returns a type's `index`th generic argument, so `Result<T, E>` can be asked for either side.
 pub(super) fn payload(ty: &Type, index: usize) -> Option<&Type> {
     let Type::Path(path) = strip(ty) else {
-        return None;
+        return
+        // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+        None;
     };
 
     let PathArguments::AngleBracketed(args) = &path.path.segments.last()?.arguments else {
-        return None;
+        return
+        // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+        None;
     };
 
     args.args
@@ -648,10 +658,14 @@ fn primitive_type_name(ty: &Type) -> Option<String> {
         return primitive_type_name(&group.elem);
     }
     let Type::Path(path) = ty else {
-        return None;
+        return
+        // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+        None;
     };
     if path.qself.is_some() {
-        return None;
+        return
+        // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+        None;
     }
     let segments = path
         .path
@@ -760,16 +774,32 @@ pub(super) fn stmt_attrs(statement: &Stmt) -> &[Attribute] {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use syn::parse_quote;
+    use syn::{parse_quote, parse_str};
 
     use super::*;
+
+    #[test]
+    fn parenthesized_callees_preserve_both_the_function_and_the_penultimate_type_name() {
+        for text in ["(Vec::new)", "((std::vec::Vec::with_capacity))", "(((build)))"] {
+            let callee: Expr = parse_str(text).unwrap();
+            let expected = if text.contains("with_capacity") {
+                "with_capacity"
+            } else if text.contains("new") {
+                "new"
+            } else {
+                "build"
+            };
+            assert_eq!(callee_name(&callee).as_deref(), Some(expected), "{text}");
+            assert_eq!(callee_type(&callee).as_deref(), text.contains("Vec").then_some("Vec"), "{text}");
+        }
+    }
 
     #[test]
     fn qualified_self_and_nonprimitive_syntax_do_not_invent_bare_type_or_callee_names() {
         assert_eq!(callee_path(&parse_quote!(<T>::run)), None);
         assert_eq!(callee_path(&parse_quote!((module::run))), Some(&parse_quote!(module::run)));
         for text in ["<T>::u8", "<T as Trait>::u8", "foreign::u8", "&u8", "(u8, bool)"] {
-            assert_eq!(primitive_type_name(&syn::parse_str(text).unwrap()), None, "{text}");
+            assert_eq!(primitive_type_name(&parse_str(text).unwrap()), None, "{text}");
         }
         assert_eq!(primitive_type_name(&parse_quote!((core::primitive::u8))), Some("u8".into()));
     }
@@ -807,7 +837,7 @@ mod tests {
             "loop { for x in xs {} break 9; }",
             "'outer: loop { 'outer: loop { break; } break 9; }",
         ] {
-            let node: ExprLoop = syn::parse_str(text).unwrap();
+            let node: ExprLoop = parse_str(text).unwrap();
             assert!(loop_produces_value(&node), "{text}");
         }
         for text in [
@@ -816,7 +846,7 @@ mod tests {
             "'outer: loop { break 'outer; }",
             "loop { loop { break 9; } }",
         ] {
-            let node: ExprLoop = syn::parse_str(text).unwrap();
+            let node: ExprLoop = parse_str(text).unwrap();
             assert!(!loop_produces_value(&node), "{text}");
         }
     }
@@ -832,7 +862,7 @@ mod tests {
             ("value - \"text\"", false),
             ("\"text\".min(value)", true),
         ] {
-            let expression = syn::parse_str::<Expr>(text).unwrap();
+            let expression = parse_str::<Expr>(text).unwrap();
             if text.starts_with('-') {
                 assert_eq!(is_promotable(&expression), expected, "{text}");
             } else {
@@ -857,12 +887,12 @@ mod tests {
             ("<T as Trait>::u16", false, false),
             ("()", false, false),
         ] {
-            let ty = syn::parse_str::<Type>(text).unwrap();
+            let ty = parse_str::<Type>(text).unwrap();
             assert_eq!(is_numeric_binding(&ty), numeric, "{text}");
             assert_eq!(is_unsigned_binding(&ty), unsigned, "{text}");
         }
         for text in ["panic!()", "todo!()", "unreachable!()", "unimplemented!()"] {
-            assert!(diverges(&syn::parse_str::<Expr>(text).unwrap()));
+            assert!(diverges(&parse_str::<Expr>(text).unwrap()));
         }
         assert!(!diverges(&syn::parse_quote!(ordinary!())));
     }

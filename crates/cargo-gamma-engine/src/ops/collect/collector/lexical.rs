@@ -61,7 +61,9 @@ pub(super) fn evidence(file: &syn::File, cfg: &CfgSet) -> Evidence {
             let _inserted = evidence.unsigned.insert(site.clone());
         }
     }
+    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
     reinitializations(&walk, &mut evidence);
+    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
     exits(&walk, &mut evidence);
     evidence.structures = walk.structures;
     evidence.reborrowable = walk.reborrowable;
@@ -243,7 +245,9 @@ impl Walk<'_> {
             .any(|region| region.start <= span.start && span.end <= region.end)
             || self.move_blocks.get(&expression.span().byte_range()) != Some(&context.block)
         {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         }
         if let Some(following) = self.following.get(span) {
             if self.place_sites.iter().any(|(site, used)| {
@@ -518,6 +522,7 @@ impl<'ast> Visit<'ast> for Walk<'_> {
         if let Some((_, otherwise)) = &node.else_branch {
             self.visit_expr(otherwise);
         }
+        // #[gamma::skip(stmt.delete_call, reason = "The then branch is restored before visiting else. A source-parsed if else is a block or another if; visit_block restores its checkpoint, and nested visit_expr_if restores its then checkpoint before its own else. Induction over the finite else-if chain therefore leaves no binding undo entries for the final duplicate restore to remove.", tag = "equivalent")]
         self.restore_bindings(checkpoint);
     }
 
@@ -642,7 +647,9 @@ impl<'ast> Visit<'ast> for Walk<'_> {
 
     fn visit_expr_assign(&mut self, node: &'ast syn::ExprAssign) {
         let assigned = self.place(&node.left);
-        if assigned.is_some() {
+        if
+        // #[gamma::skip(cond.always_true, reason = "writes is consulted only for exact spans in place_sites. A non-place assignment LHS has no place_sites entry for its complete span; only any smaller place children are recorded. Inserting the non-place LHS span cannot exclude any recorded place use. The binding/place analysis, restoration recording and traversal are unchanged.", tag = "equivalent")]
+        assigned.is_some() {
             let _prior = self.writes.insert(node.left.span().byte_range());
         }
         // Moving and restoring within this assignment is safe; only earlier moves make it load-bearing.
@@ -699,7 +706,318 @@ impl<'ast> Visit<'ast> for Walk<'_> {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use syn::{Block, ExprGroup, parse_file, parse_quote};
+
     use super::*;
+
+    fn empty_walk(cfg: &CfgSet) -> Walk<'_> {
+        Walk {
+            cfg,
+            bindings: HashMap::default(),
+            binding_undo: Vec::new(),
+            sites: Vec::new(),
+            place_sites: Vec::new(),
+            numeric: HashSet::default(),
+            unsigned: HashSet::default(),
+            moved: HashMap::default(),
+            reinitializations: HashMap::default(),
+            exits: Vec::new(),
+            loops: Vec::new(),
+            structures: HashMap::default(),
+            blocks: Vec::new(),
+            contexts: HashMap::default(),
+            following: HashMap::default(),
+            move_blocks: HashMap::default(),
+            loop_bodies: HashMap::default(),
+            unreachable: Vec::new(),
+            restorations: Vec::new(),
+            writes: HashSet::default(),
+            reborrowable: HashSet::default(),
+        }
+    }
+
+    #[test]
+    fn fresh_context_grouped_places_and_numeric_notes_preserve_optional_state() {
+        let cfg = CfgSet::parse("");
+        let mut walk = empty_walk(&cfg);
+        assert!(walk.context().is_none());
+        walk.bind(&parse_quote!(whole @ Some(inner)));
+        assert!(walk.bindings.contains_key("whole"));
+        assert!(walk.bindings.contains_key("inner"));
+        walk.bind(&parse_quote!(start));
+        walk.bind(&parse_quote!(end));
+        walk.note(&parse_quote!(start..end), false);
+        assert!(walk.numeric.is_empty());
+        assert!(walk.unsigned.is_empty());
+        let group = Expr::Group(ExprGroup {
+            attrs: Vec::new(),
+            group_token: syn::token::Group::default(),
+            expr: Box::new(parse_quote!(inner)),
+        });
+        walk.note(&group, false);
+        assert!(walk.numeric.contains(&walk.bindings["inner"]));
+        assert!(walk.unsigned.is_empty());
+        let place = walk.place(&group).unwrap();
+        assert_eq!(place.root, "inner");
+        assert_eq!(place.binding, walk.bindings["inner"]);
+    }
+
+    #[test]
+    fn nested_function_traversal_restores_the_outer_binding_undo_log() {
+        let cfg = CfgSet::parse("");
+        let mut walk = empty_walk(&cfg);
+        walk.bind(&parse_quote!(outer));
+        let undo = walk.binding_undo.clone();
+        let bindings = walk.bindings.clone();
+        walk.function(
+            &parse_quote!(fn nested(parameter: u8)),
+            Some(&parse_quote!({
+                let local = parameter;
+            })),
+        );
+        assert_eq!(walk.binding_undo, undo);
+        assert_eq!(walk.bindings, bindings);
+    }
+
+    #[test]
+    fn unreachable_prescan_skips_inactive_statements_without_stopping_the_active_tail() {
+        let cfg = CfgSet::parse("");
+        let mut walk = empty_walk(&cfg);
+        let block: Block = parse_quote!({
+            return;
+            #[cfg(any())]
+            hidden();
+            live();
+        });
+        walk.visit_block(&block);
+        assert_eq!(walk.unreachable, [block.stmts.last().unwrap().span().byte_range()]);
+    }
+
+    fn place(binding: usize, fields: &[&str]) -> Place {
+        Place {
+            binding,
+            root: "value".into(),
+            fields: fields.iter().map(|field| (*field).into()).collect(),
+        }
+    }
+
+    #[test]
+    fn place_containment_uses_binding_identity_and_overlap_is_symmetric_for_ancestor_fields() {
+        let root = place(1, &[]);
+        let child = place(1, &["left"]);
+        let nested = place(1, &["left", "count"]);
+        let sibling = place(1, &["right"]);
+        let shadow = place(2, &["left"]);
+        assert!(root.contains(&child));
+        assert!(!child.contains(&root));
+        assert!(child.contains(&nested));
+        assert!(!child.contains(&sibling));
+        assert!(!child.contains(&shadow));
+        for (left, right) in [(&root, &child), (&child, &nested)] {
+            assert!(left.overlaps(right));
+            assert!(right.overlaps(left));
+        }
+        assert!(!child.overlaps(&sibling));
+        assert!(!child.overlaps(&shadow));
+    }
+
+    #[test]
+    fn later_uses_stop_at_the_earliest_matching_restoration_and_ignore_writes_and_shadows() {
+        let cfg = CfgSet::unconditional();
+        let mut walk = empty_walk(&cfg);
+        let field = place(1, &["left"]);
+        walk.place_sites.push((15..16, field.clone()));
+        assert!(walk.used_after(10, &field));
+        assert!(!walk.used_after(15, &field));
+        assert!(!walk.used_after(10, &place(2, &["left"])));
+        assert!(!walk.used_after(10, &place(1, &["right"])));
+        walk.writes.insert(15..16);
+        assert!(!walk.used_after(10, &field));
+        walk.writes.clear();
+        walk.restorations.push((20..21, field.clone()));
+        assert!(walk.used_after(10, &field));
+        walk.restorations.push((12..13, place(2, &["left"])));
+        assert!(walk.used_after(10, &field));
+        walk.restorations.push((12..13, field.clone()));
+        assert!(!walk.used_after(10, &field));
+        walk.restorations.clear();
+        walk.restorations.push((15..16, field.clone()));
+        assert!(!walk.used_after(10, &field));
+        walk.restorations.clear();
+        walk.restorations.push((10..11, field.clone()));
+        assert!(walk.used_after(10, &field));
+    }
+
+    #[test]
+    fn loop_restoration_checks_both_endpoints_exclusions_and_the_before_cutoff() {
+        let cfg = CfgSet::unconditional();
+        let mut walk = empty_walk(&cfg);
+        let field = place(1, &["left"]);
+        let context = Context {
+            block: 0..40,
+            loop_region: Some(10..30),
+        };
+        for (span, binding, before, expected) in [
+            (10..30, 1, None, true),
+            (9..29, 1, None, false),
+            (11..31, 1, None, false),
+            (11..29, 2, None, false),
+            (11..29, 1, Some(28), false),
+            (11..29, 1, Some(29), true),
+            (11..29, 1, Some(30), true),
+        ] {
+            walk.restorations = vec![(span.clone(), place(binding, &["left"]))];
+            assert_eq!(
+                walk.restored_in_loop(&context, &field, None, before),
+                expected,
+                "{span:?}: {before:?}"
+            );
+            assert!(!walk.restored_in_loop(&context, &field, Some(&span), before));
+        }
+        let context = Context {
+            block: 0..40,
+            loop_region: None,
+        };
+        assert!(!walk.restored_in_loop(&context, &field, None, None));
+    }
+
+    #[test]
+    fn reinitialization_requires_same_move_block_reachability_and_an_unrestored_loop_backedge() {
+        let cfg = CfgSet::unconditional();
+        let mut walk = empty_walk(&cfg);
+        let expression: Expr = parse_quote!(consume(value));
+        let context = Context {
+            block: 0..100,
+            loop_region: Some(10..90),
+        };
+        let field = place(1, &["left"]);
+        let span = 30..40;
+        walk.move_blocks.insert(expression.span().byte_range(), context.block.clone());
+        walk.loop_bodies.insert(10..90, context.block.clone());
+        assert!(walk.invalid_reinitialization(&span, &context, &field, &expression));
+        assert!(!walk.invalid_reinitialization(&span, &context, &place(10, &["left"]), &expression));
+        walk.restorations.push((40..50, field.clone()));
+        assert!(!walk.invalid_reinitialization(&span, &context, &field, &expression));
+        walk.restorations.clear();
+        walk.loop_bodies.clear();
+        assert!(!walk.invalid_reinitialization(&span, &context, &field, &expression));
+        walk.loop_bodies.insert(10..90, context.block.clone());
+        for (unreachable, invalid) in [(0..40, false), (35..50, true), (20..35, true)] {
+            walk.unreachable = vec![unreachable.clone()];
+            assert_eq!(
+                walk.invalid_reinitialization(&span, &context, &field, &expression),
+                invalid,
+                "{unreachable:?}"
+            );
+        }
+        walk.unreachable.clear();
+        walk.move_blocks.clear();
+        assert!(!walk.invalid_reinitialization(&span, &context, &field, &expression));
+    }
+
+    #[test]
+    fn following_control_flow_distinguishes_reads_writes_and_exposed_uses_after_break() {
+        let cfg = CfgSet::unconditional();
+        let mut walk = empty_walk(&cfg);
+        let expression: Expr = parse_quote!(consume(value));
+        let context = Context {
+            block: 0..100,
+            loop_region: Some(10..90),
+        };
+        let field = place(1, &["left"]);
+        let span = 30..40;
+        walk.move_blocks.insert(expression.span().byte_range(), context.block.clone());
+        walk.following.insert(
+            span.clone(),
+            Following {
+                span: 40..60,
+                breaks: false,
+            },
+        );
+        assert!(!walk.invalid_reinitialization(&span, &context, &field, &expression));
+        walk.place_sites.push((45..46, field.clone()));
+        assert!(walk.invalid_reinitialization(&span, &context, &field, &expression));
+        walk.writes.insert(45..46);
+        assert!(!walk.invalid_reinitialization(&span, &context, &field, &expression));
+        walk.place_sites = vec![(95..96, field.clone())];
+        assert!(!walk.invalid_reinitialization(&span, &context, &field, &expression));
+        walk.following.get_mut(&span).unwrap().breaks = true;
+        assert!(walk.invalid_reinitialization(&span, &context, &field, &expression));
+    }
+
+    #[test]
+    fn exits_without_any_relevant_later_use_do_not_publish_empty_ownership_regions() {
+        let cfg = CfgSet::unconditional();
+        let mut walk = empty_walk(&cfg);
+        walk.exits.push(Exit {
+            span: 30..40,
+            moved: vec![(place(1, &[]), parse_quote!(value))],
+            loop_start: None,
+            context: Context {
+                block: 0..100,
+                loop_region: None,
+            },
+            plain: true,
+            continuing: false,
+        });
+        let mut actual = Evidence::default();
+        exits(&walk, &mut actual);
+        assert!(actual.exits.is_empty());
+        assert!(actual.ownership_regions.is_empty());
+        assert!(actual.invalid_ownership.is_empty());
+        assert!(actual.invalid_transitions.is_empty());
+    }
+
+    #[test]
+    fn exit_evidence_separates_loop_carried_moves_restorations_and_break_continue_transitions() {
+        let cfg = CfgSet::unconditional();
+        // Binding IDs are declaration offsets: only declarations before the loop start are
+        // loop-carried. Reads straddle the loop start, exit end, and loop end; restorations lie
+        // before the exit, later within the loop, or beyond it to separate ownership from reentry.
+        for (binding, looped, read, restoration, continuing, ownership, transition) in [
+            (1, false, 41..42, None, false, Some(true), false),
+            (1, false, 40..41, None, false, None, false),
+            (1, false, 39..40, None, false, None, false),
+            (1, true, 10..11, None, false, Some(true), true),
+            (1, true, 9..10, None, false, None, false),
+            (10, true, 15..16, None, false, None, false),
+            (10, true, 41..42, None, false, Some(true), false),
+            (11, true, 15..16, None, false, None, false),
+            (1, true, 15..16, Some(20..25), false, Some(false), false),
+            (1, true, 15..16, Some(50..60), false, Some(false), true),
+            (1, true, 15..16, Some(50..60), true, Some(false), false),
+            (1, true, 95..96, Some(50..60), true, Some(false), true),
+            (11, true, 95..96, Some(91..92), false, Some(false), false),
+        ] {
+            let mut walk = empty_walk(&cfg);
+            let moved = place(binding, &["left"]);
+            let expression: Expr = parse_quote!(value.left);
+            let context = Context {
+                block: 0..100,
+                loop_region: looped.then_some(10..90),
+            };
+            walk.move_blocks.insert(expression.span().byte_range(), context.block.clone());
+            walk.place_sites = vec![(read.clone(), moved.clone()), (99..100, place(999, &["left"]))];
+            if let Some(span) = restoration.clone() {
+                walk.restorations.push((span, moved.clone()));
+            }
+            walk.exits.push(Exit {
+                span: 30..40,
+                moved: vec![(moved, expression)],
+                loop_start: looped.then_some(10),
+                context,
+                plain: true,
+                continuing,
+            });
+            let mut actual = Evidence::default();
+            exits(&walk, &mut actual);
+            let case = format!("binding={binding} loop={looped} read={read:?} restoration={restoration:?} continuing={continuing}");
+            assert_eq!(actual.exits.contains_key(&(30..40)), ownership.is_some(), "{case}");
+            assert_eq!(actual.ownership_regions.contains_key(&(30..40)), ownership.is_some(), "{case}");
+            assert_eq!(actual.invalid_ownership.contains_key(&(30..40)), ownership == Some(true), "{case}");
+            assert_eq!(actual.invalid_transitions.contains_key(&(30..40)), transition, "{case}");
+        }
+    }
 
     #[test]
     fn lexical_scope_rollback_preserves_shadowed_and_branch_local_binding_identities() {
@@ -729,7 +1047,7 @@ mod tests {
             ),
             ("fn f(value: Unknown) { { let value = other; } value - 1; }", &[0, 2][..]),
         ] {
-            let file = syn::parse_file(source).unwrap();
+            let file = parse_file(source).unwrap();
             let evidence = evidence(&file, &CfgSet::unconditional());
             for (index, (start, name)) in source.match_indices("value").enumerate() {
                 assert_eq!(

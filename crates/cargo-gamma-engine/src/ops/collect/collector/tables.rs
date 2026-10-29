@@ -40,7 +40,11 @@ pub(super) fn method_renames(method: &str, arity: usize) -> Option<&'static [(&'
         ("trim_start", 0) => &[("string.trim_start_to_trim_end", "trim_end")],
         ("trim_end", 0) => &[("string.trim_end_to_trim_start", "trim_start")],
 
-        _ => return None,
+        _ => {
+            return
+        // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+        None;
+        }
     };
 
     Some(swaps)
@@ -54,7 +58,9 @@ pub(super) fn method_renames(method: &str, arity: usize) -> Option<&'static [(&'
 /// into generic statement deletion.
 pub(super) fn in_place_reorder(expression: &Expr) -> Option<&'static str> {
     let Expr::MethodCall(call) = expression else {
-        return None;
+        return
+        // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+        None;
     };
 
     match call.method.to_string().as_str() {
