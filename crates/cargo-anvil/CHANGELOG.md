@@ -10,6 +10,7 @@
 
 - 🐛 Bug Fixes
 
+  - cargo-anvil: retain protected Dependabot configs in ambiguity checks
   - cargo-anvil: bound repeated Dependabot merge lookups
   - cargo-anvil: honor inherited Dependabot exclusions
   - cargo-anvil: preserve YAML job boundaries and refusal ownership
