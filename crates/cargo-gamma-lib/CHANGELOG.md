@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-28
+
+- ✨ Features
+
+  - cargo-gamma: enforce memory ceilings on macOS by sampling ([#249](https://github.com/microsoft/ox-tools/pull/249))
+  - cargo-gamma: filter mutants by regex ([#242](https://github.com/microsoft/ox-tools/pull/242))
+  - cargo-anvil: roll out released-surface coverage
+  - cargo-gamma: improve campaign reliability and mutation detection ([#282](https://github.com/microsoft/ox-tools/pull/282))
+
+- 🐛 Bug Fixes
+
+  - cargo-gamma: support binary-only package selections ([#241](https://github.com/microsoft/ox-tools/pull/241))
+
+- 🧩 Miscellaneous
+
+  - Kill a bunch of mutants ([#315](https://github.com/microsoft/ox-tools/pull/315))
+
 ## [0.3.0] - 2026-10-12
 
 - ✨ Features
