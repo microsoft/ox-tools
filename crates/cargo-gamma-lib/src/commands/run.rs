@@ -394,16 +394,8 @@ fn broken_expectations(mutants: &[Mutant]) -> Vec<(&Mutant, &'static str)> {
 
 /// Fails a run whose gate never got a population to judge.
 ///
-/// A gate that cannot fail is worse than no gate. Every route to an empty population — an exclude
-/// pattern or name regex that matched nothing, a shard that held nothing but suppressions, a diff that named
-/// no code, an incremental run that had already settled the lot — would otherwise end in a
-/// summary that said nothing was tested and an exit code that said everything was fine. A job that
-/// asked for `--min-score 100` or `--max-flaky 0` would then pass on the strength of having tested
-/// nothing at all, indefinitely, which is the exact failure these flags exist to prevent.
-///
-/// A run that asked for no gate is left alone: an empty population is a perfectly ordinary answer
-/// to a narrow selection, and turning it into a failure would break every run that never made a
-/// claim about its score.
+/// Empty diff selections succeed before reaching this check. Other empty or entirely
+/// ungradeable populations cannot establish a requested score or flaky gate.
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn ungraded<H: Host>(host: &mut H, args: &RunArgs, styler: Styler, flaky_outcomes: bool, expectations: bool) -> i32 {
     let score_unevaluated = args.min_score.is_some();
@@ -463,7 +455,12 @@ pub(super) fn run_session<H: Host>(host: &mut H, args: &RunArgs, progress_when: 
     {
         return Ok(code);
     }
-    let Executed { plan, stuck } = measured(host, args, progress_when, styler)?;
+    let executed = measured(host, args, progress_when, styler)?;
+    Ok(finish_run(host, args, styler, executed))
+}
+
+fn finish_run<H: Host>(host: &mut H, args: &RunArgs, styler: Styler, executed: Executed) -> i32 {
+    let Executed { plan, stuck } = executed;
 
     // A build the tool could not make compile is not a run that passed, whatever the mutants it did
     // get to say. It is reported first and it wins: the population the gate would judge is missing
@@ -471,13 +468,16 @@ pub(super) fn run_session<H: Host>(host: &mut H, args: &RunArgs, progress_when: 
     // written for, and letting it decide the exit code would turn a run that got stuck into a green
     // tick. The report has already been written by this point, so nothing is lost by refusing.
     if !stuck.is_empty() {
-        return Ok(EXIT_CANNOT_PROCEED);
+        return EXIT_CANNOT_PROCEED;
     }
 
     let Some(plan) = plan else {
+        if args.select.in_diff.is_some() {
+            return EXIT_OK;
+        }
         // Nothing was generated at all, so no mutant carries an expectation either: whether a gate
         // exists is entirely what the command line asked for.
-        return Ok(ungraded(host, args, styler, false, false));
+        return ungraded(host, args, styler, false, false);
     };
 
     let summary = crate::model::Summary::of(&plan.mutants);
@@ -506,7 +506,7 @@ pub(super) fn run_session<H: Host>(host: &mut H, args: &RunArgs, progress_when: 
             if count == 1 { "expectation did" } else { "expectations did" }
         );
 
-        return Ok(EXIT_GATE_FAILED);
+        return EXIT_GATE_FAILED;
     }
 
     if pending_fails_gate(args, summary.pending) {
@@ -525,7 +525,7 @@ pub(super) fn run_session<H: Host>(host: &mut H, args: &RunArgs, progress_when: 
             if summary.pending == 1 { "mutant is" } else { "mutants are" }
         );
 
-        return Ok(EXIT_GATE_FAILED);
+        return EXIT_GATE_FAILED;
     }
 
     if let Some(maximum) = flaky_excess(args, summary.flaky) {
@@ -544,20 +544,20 @@ pub(super) fn run_session<H: Host>(host: &mut H, args: &RunArgs, progress_when: 
             if summary.flaky == 1 { "outcome" } else { "outcomes" }
         );
 
-        return Ok(EXIT_GATE_FAILED);
+        return EXIT_GATE_FAILED;
     }
 
     // Every mutant was suppressed, unviable, or never built, so the score is a ratio with nothing
     // in its denominator. That prints as 100%, which is the right answer to "how much of what ran
     // was caught" and the wrong one to hand a threshold.
     let Some(score) = summary.scored() else {
-        return Ok(ungraded(
+        return ungraded(
             host,
             args,
             styler,
             summary.flaky > 0,
             plan.mutants.iter().any(|mutant| mutant.expectation.is_some()),
-        ));
+        );
     };
 
     if let Some(minimum) = args.min_score
@@ -571,10 +571,10 @@ pub(super) fn run_session<H: Host>(host: &mut H, args: &RunArgs, progress_when: 
             styler.error("error:")
         );
 
-        return Ok(EXIT_GATE_FAILED);
+        return EXIT_GATE_FAILED;
     }
 
-    Ok(EXIT_OK)
+    EXIT_OK
 }
 
 #[cfg(target_os = "linux")]
@@ -744,7 +744,6 @@ fn cache_context(args: &RunArgs) -> Option<crate::discover::ContextDigest> {
         cargo_test_args: &args.measure.cargo_test_args,
         test_args: &args.measure.test_args,
         baseline: !args.no_baseline,
-        confirm: !args.no_confirm,
         stall: !args.no_stall_detection,
         test_timeout_multiplier: args.measure.test_timeout_multiplier,
         minimum_test_timeout: args.measure.minimum_test_timeout,
@@ -899,7 +898,6 @@ pub(super) fn run_config(args: &RunArgs, styler: Styler) -> exec::Config {
         jobs: exec::resolve_jobs(args.measure.jobs),
         test_timeout_multiplier: args.measure.test_timeout_multiplier.unwrap_or(DEFAULT_TEST_TIMEOUT_MULTIPLIER),
         baseline: !args.no_baseline,
-        confirm: !args.no_confirm,
         stall: !args.no_stall_detection,
         cargo: exec::CargoOptions {
             features: args.select.features.to_cargo_args(),
@@ -2846,6 +2844,124 @@ mod tests {
     }
 
     #[test]
+    fn empty_diff_selections_succeed_with_any_gate_combination() {
+        for in_diff in [false, true] {
+            for min_score in [None, Some(100.0)] {
+                for max_flaky in [None, Some(0)] {
+                    let mut args = RunArgs {
+                        min_score,
+                        max_flaky,
+                        ..RunArgs::default()
+                    };
+                    args.select.in_diff = in_diff.then(|| "changes.patch".into());
+                    let mut host = Sink::default();
+                    let code = finish_run(
+                        &mut host,
+                        &args,
+                        Styler::new(false),
+                        Executed {
+                            plan: None,
+                            stuck: Vec::new(),
+                        },
+                    );
+                    let succeeds = in_diff || (min_score.is_none() && max_flaky.is_none());
+                    assert_eq!(code, if succeeds { EXIT_OK } else { EXIT_GATE_FAILED });
+                    let gate = match (in_diff, min_score, max_flaky) {
+                        (false, Some(_), Some(_)) => Some("the `--min-score` and `--max-flaky` gates"),
+                        (false, Some(_), None) => Some("the `--min-score` gate"),
+                        (false, None, Some(_)) => Some("the `--max-flaky` gate"),
+                        _ => None,
+                    };
+                    assert_eq!(host.err(), gate.map_or_else(String::new, |gate| format!(
+                        "error: no mutant counted toward {gate}, so it was never evaluated; check that the selection — `--in-diff`, `--exclude-file`, `--re`, `--shard-count`/`--shard-index`, `--incremental` — leaves something to test\n"
+                    )));
+                    assert_eq!(host.out(), "");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn empty_diff_selections_do_not_hide_build_failures() {
+        let mut args = RunArgs {
+            min_score: Some(100.0),
+            max_flaky: Some(0),
+            ..RunArgs::default()
+        };
+        args.select.in_diff = Some("changes.patch".into());
+        let mut host = Sink::default();
+        assert_eq!(
+            finish_run(
+                &mut host,
+                &args,
+                Styler::new(false),
+                Executed {
+                    plan: None,
+                    stuck: vec!["instrumented build failed".into()],
+                },
+            ),
+            EXIT_CANNOT_PROCEED
+        );
+    }
+
+    #[test]
+    fn nonempty_diff_selections_still_enforce_gates_and_expectations() {
+        const UNGRADED: &str = "error: no mutant counted toward the `--min-score` and `--max-flaky` gates, so it was never evaluated; check that the selection — `--in-diff`, `--exclude-file`, `--re`, `--shard-count`/`--shard-index`, `--incremental` — leaves something to test\n";
+        let mut args = RunArgs {
+            min_score: Some(100.0),
+            max_flaky: Some(0),
+            ..RunArgs::default()
+        };
+        args.select.in_diff = Some("changes.patch".into());
+        for (mutant, expected, diagnostic) in [
+            (mutant(0, Outcome::Killed, 1), EXIT_OK, ""),
+            (
+                mutant(0, Outcome::Survived, 1),
+                EXIT_GATE_FAILED,
+                "error: mutation score 0.0% is below the required 100.0%\n",
+            ),
+            (
+                mutant(0, Outcome::Pending, 1),
+                EXIT_GATE_FAILED,
+                "error: 1 mutant is still pending, so the `--min-score` and `--max-flaky` gates cannot evaluate the complete population\n",
+            ),
+            (
+                mutant(0, Outcome::Flaky, 1),
+                EXIT_GATE_FAILED,
+                concat!(
+                    "error: src/lib.rs:1:1: replace a < b with a <= b [relational.lt_to_le] [m1]: a test failed with and without the mutant active\n",
+                    "error: 1 unresolved flaky outcome exceed the configured maximum of 0\n",
+                ),
+            ),
+            (mutant(0, Outcome::Ignored, 1), EXIT_GATE_FAILED, UNGRADED),
+            (mutant(0, Outcome::CompileError, 1), EXIT_GATE_FAILED, UNGRADED),
+            (mutant(0, Outcome::NotBuilt, 1), EXIT_GATE_FAILED, UNGRADED),
+            (
+                expecting(Outcome::Killed, false),
+                EXIT_GATE_FAILED,
+                concat!(
+                    "error: src/lib.rs:3: `relational.lt_to_le` expected survived, but this mutant was killed\n",
+                    "error: 1 expectation did not hold\n",
+                ),
+            ),
+        ] {
+            let mut host = Sink::default();
+            let code = finish_run(
+                &mut host,
+                &args,
+                Styler::new(false),
+                Executed {
+                    plan: Some(fixtures::plan(vec![mutant])),
+                    stuck: Vec::new(),
+                },
+            );
+            assert_eq!(code, expected, "{}", host.err());
+            assert_eq!(host.err(), diagnostic);
+            assert_eq!(host.out(), "");
+        }
+    }
+
+    #[test]
     fn survivor_expectation_scan_continues_past_unexpected_and_pending_entries() {
         let mutants = [
             mutant(0, Outcome::Survived, 0),
@@ -3166,7 +3282,7 @@ mod tests {
             artifacts: &[Value],
         ) -> Value {
             json!({
-                "version": 2, "tool": env!("CARGO_PKG_VERSION"),
+                "version": 3, "tool": env!("CARGO_PKG_VERSION"),
                 "platform": format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
                 "plan": plan, "confidences": {}, "session": measured,
                 "oracle": { "packages": ["subject"], "package_local": true, "whole_workspace": false },
@@ -3178,7 +3294,7 @@ mod tests {
                     "resources": { "capacities": {}, "binaries": {} }
                 },
                 "settings": { "jobs": 1, "mutators": "all", "timeout_floor": Duration::from_secs(1),
-                    "confirm": false, "narrowed": false, "incremental": false },
+                    "narrowed": false, "incremental": false },
                 "killers": exec::Killers::default(),
                 "record": {
                     "report_info": fixtures::report_with(None, 77, Vec::new()).config,
@@ -5235,11 +5351,7 @@ mod tests {
     fn resume_configuration_loads_only_reporting_gates() {
         let dir = workdir("run-resume-gates-");
         let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
-        fs::write(
-            root.join("gamma.toml"),
-            "min-score = 80.0\nmax-flaky = 2\njobs = 12\nno-confirm = true\n",
-        )
-        .unwrap();
+        fs::write(root.join("gamma.toml"), "min-score = 80.0\nmax-flaky = 2\njobs = 12\n").unwrap();
         for disabled in [false, true] {
             let mut args = RunArgs {
                 resume_testing: true,
@@ -5254,7 +5366,6 @@ mod tests {
             assert_eq!(args.min_score, if disabled { None } else { Some(80.0) });
             assert_eq!(args.max_flaky, if disabled { None } else { Some(2) });
             assert_eq!(args.measure.jobs, None);
-            assert!(!args.no_confirm);
         }
     }
 
@@ -5404,7 +5515,6 @@ mod tests {
         args.limits.rollback_rounds = 7;
         args.leak_dirs = true;
         args.no_baseline = true;
-        args.no_confirm = true;
         args.no_stall_detection = true;
         args.incremental = Some(exec::IncrementalMode::No);
 
@@ -5416,7 +5526,6 @@ mod tests {
         assert_eq!(config.test_timeout_multiplier.to_bits(), 2.25_f64.to_bits());
         assert_eq!(config.timeout_floor, Duration::from_secs_f64(13.5));
         assert!(!config.baseline);
-        assert!(!config.confirm);
         assert!(!config.stall);
         assert_eq!(config.stall_factor.to_bits(), defaults.stall_factor.to_bits());
         assert_eq!(config.stall_floor, defaults.stall_floor);
@@ -5747,8 +5856,8 @@ mod tests {
         let root = subject_root(&dir);
         fs::write(root.join("src/lib.rs"), "pub fn less(a: i32, b: i32) -> bool { a < b }\n").expect("lib");
 
-        // Every file is excluded, so discovery finds nothing at all: the shape an over-eager
-        // `--exclude-file`, an empty shard and a diff that named no code all arrive in.
+        // Every file is excluded, so discovery finds nothing at all, as with an
+        // over-eager `--exclude-file` or an empty shard without `--in-diff`.
         for (min_score, max_flaky, gate) in [(Some(100.0), None, "--min-score"), (None, Some(0), "--max-flaky")] {
             let args = RunArgs {
                 select: crate::commands::SelectArgs {

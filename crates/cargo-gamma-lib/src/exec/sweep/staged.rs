@@ -134,7 +134,6 @@ impl Execution<'_> {
                 },
                 only,
             },
-            self.sweep.confirm,
         );
         let elapsed = started.elapsed();
         if matches!(run.verdict, Verdict::Failed(_) | Verdict::TestEnumerationFailed(_)) {

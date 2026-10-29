@@ -2330,9 +2330,6 @@ pub struct Context<'a> {
     /// Whether the healthy baseline was measured.
     pub baseline: bool,
 
-    /// Whether a failing test was confirmed without a mutant.
-    pub confirm: bool,
-
     /// Whether silence can produce a stall verdict.
     pub stall: bool,
 
@@ -2462,12 +2459,11 @@ fn context_in(of: &Context<'_>, build_target: Option<&str>, environment: &[(Vec<
         .collect();
     resource_concurrency.sort_unstable();
     let policy = format!(
-        "baseline={};confirm={};stall={};timeout_multiplier={:?};timeout_floor={:?};memory={:?};\
+        "baseline={};kill_confirmation=false;stall={};timeout_multiplier={:?};timeout_floor={:?};memory={:?};\
          memory_multiplier={:?};memory_headroom={:?};memory_limit={:?};baseline_memory_limit={:?};\
          no_relaunch={};copy_ignored={};jobs={:?};build_timeout={:?};build_timeout_multiplier={:?};\
          rollback_rounds={};resource_concurrency={:?}",
         of.baseline,
-        of.confirm,
         of.stall,
         of.test_timeout_multiplier,
         of.minimum_test_timeout,
@@ -4733,7 +4729,6 @@ mod tests {
         Context {
             toolchain: Some("1.90.0"),
             baseline: true,
-            confirm: true,
             stall: true,
             ..Context::default()
         }
@@ -4879,7 +4874,6 @@ mod tests {
             cargo_test_args: _cta,
             test_args: _ta,
             baseline: _b,
-            confirm: _c,
             stall: _s,
             test_timeout_multiplier: _ttm,
             minimum_test_timeout: _mtt,
@@ -5003,7 +4997,6 @@ mod tests {
                     ..plain()
                 },
             ),
-            ("confirmation mode", Context { confirm: false, ..plain() }),
             ("stall detection", Context { stall: false, ..plain() }),
             (
                 "test timeout multiplier",

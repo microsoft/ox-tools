@@ -1344,7 +1344,10 @@ impl ProcessTree {
             if status.is_some() {
                 // Windows jobs retain object handles rather than numeric process identifiers, and
                 // platforms without groups have no identifier that a sweep could reuse.
-                let swept = self.sweep(true);
+                let swept = self.sweep(
+                    // #[gamma::skip(literal.bool_flip, reason = "This non-Unix observation branch sweeps a Windows job or an identifier-free platform; sweep consults leader_exited only for Unix process groups, so this argument has no effect here.", tag = "equivalent")]
+                    true,
+                );
 
                 if let Err(cause) = swept {
                     self.output_cleanup_unproven = true;
@@ -1401,7 +1404,16 @@ impl ProcessTree {
         // The group or job may not have covered the child — the id could not be converted, the job
         // could not be created — and in any case this is what makes `wait` return.
         #[cfg(not(target_os = "macos"))]
-        kill_with(child, || self.sweep(false), kill_if_running)
+        kill_with(
+            child,
+            || {
+                self.sweep(
+                    // #[gamma::skip(literal.bool_flip, reason = "This call forwards the running-leader state into native containment. Windows jobs ignore the flag; exercising the Unix kill adapter at this exact call requires a real child, which deterministic unit tests cannot spawn.", tag = "native-boundary")]
+                    false,
+                )
+            },
+            kill_if_running,
+        )
     }
 
     /// Ends the subtree and reaps its leader without exposing its group id to reuse.
@@ -1493,6 +1505,7 @@ impl ProcessTree {
         not(unix),
         expect(unused_variables, reason = "only Unix process groups use the leader's observed exit")
     )]
+    // #[gamma::skip(parameter.default_shadow, reason = "The sole sweep argument selects native Unix group signalling and is unused by Windows jobs. The exact native adapter requires operating-system process state; scripted policy tests cannot distinguish this argument on the Windows mutation host.", tag = "native-boundary")]
     fn sweep(&self, leader_exited: bool) -> io::Result<()> {
         #[cfg(target_os = "macos")]
         if self.sampler.as_ref().is_some_and(Sampler::swept) {
@@ -1962,7 +1975,7 @@ impl Drop for ProcessTree {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use core::cell::RefCell;
+    use core::cell::{Cell, RefCell};
     #[cfg(unix)]
     use core::mem;
     #[cfg(unix)]
@@ -2203,32 +2216,57 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_group_kill_marks_termination_cleanup_as_unproven() {
-        let mut subtree = ProcessTree {
-            #[cfg(target_os = "macos")]
-            sampler: None,
-            child: None,
-            output_cleanup_unproven: false,
-            #[cfg(unix)]
-            group: None,
-            #[cfg(unix)]
-            slot: None,
-            #[cfg(target_os = "linux")]
-            cgroup: None,
-            #[cfg(target_os = "linux")]
-            metered: false,
-            #[cfg(windows)]
-            job: None,
-            #[cfg(windows)]
-            metered: false,
-        };
-
-        let reason = subtree
-            .finish_termination(Err(io::Error::other("group kill failed")), || Ok(()))
-            .expect_err("a failed group kill cannot prove cleanup");
-
-        assert_eq!(reason.to_string(), "group kill failed");
-        assert!(subtree.output_cleanup_unproven, "failed cleanup was recorded as proven");
+    fn termination_requires_successful_sweep_and_reap_to_prove_cleanup() {
+        for (kill_ok, reap_ok, cleanup_failed, expected_error) in [
+            (true, true, false, None),
+            (false, true, true, Some("group kill failed")),
+            (true, false, true, Some("leader reap failed")),
+            (false, false, true, Some("leader reap failed")),
+        ] {
+            for already_unproven in [false, true] {
+                let mut subtree = ProcessTree {
+                    #[cfg(target_os = "macos")]
+                    sampler: None,
+                    child: None,
+                    output_cleanup_unproven: already_unproven,
+                    #[cfg(unix)]
+                    group: None,
+                    #[cfg(unix)]
+                    slot: None,
+                    #[cfg(target_os = "linux")]
+                    cgroup: None,
+                    #[cfg(target_os = "linux")]
+                    metered: false,
+                    #[cfg(windows)]
+                    job: None,
+                    #[cfg(windows)]
+                    metered: false,
+                };
+                let calls = Cell::new(0);
+                let killed = if kill_ok {
+                    Ok(())
+                } else {
+                    Err(io::Error::other("group kill failed"))
+                };
+                let result = subtree.finish_termination(killed, || {
+                    calls.set(calls.get() + 1);
+                    if reap_ok {
+                        Ok(42)
+                    } else {
+                        Err(io::Error::other("leader reap failed"))
+                    }
+                });
+                if let Some(expected) = expected_error {
+                    let result = result.unwrap_err();
+                    assert_eq!(result.kind(), io::ErrorKind::Other);
+                    assert_eq!(result.to_string(), expected);
+                } else {
+                    assert_eq!(result.unwrap(), 42);
+                }
+                assert_eq!(calls.get(), 1);
+                assert_eq!(subtree.output_cleanup_unproven, already_unproven || cleanup_failed);
+            }
+        }
     }
 
     #[cfg(target_os = "macos")]

@@ -142,7 +142,6 @@ pub(crate) fn run_with_locks(
                 jobs: config.jobs,
                 mutators: Some(selection.sorted().join(",")),
                 timeout_floor: config.timeout_floor,
-                confirm: config.confirm,
                 narrowed,
                 incremental,
             },
@@ -162,7 +161,6 @@ pub(crate) fn run_with_locks(
         stall,
         jobs: config.jobs,
         meter: built.session.metered,
-        confirm: config.confirm,
     };
 
     let sweep_started = Instant::now();
@@ -219,7 +217,6 @@ pub(crate) fn resume_testing(
         },
         jobs: state.settings.jobs,
         meter: state.session.metered,
-        confirm: state.settings.confirm,
     };
     let swept = test_all(
         &workspace,
@@ -2375,7 +2372,6 @@ mod tests {
                 jobs: config.jobs,
                 mutators: Some(selection.sorted().join(",")),
                 timeout_floor: config.timeout_floor,
-                confirm: config.confirm,
                 narrowed: true,
                 incremental: config.incremental.is_enabled(),
             },

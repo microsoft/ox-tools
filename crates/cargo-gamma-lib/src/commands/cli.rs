@@ -686,9 +686,9 @@ pub struct RunArgs {
 
     /// Fail if more than this many mutants have an unresolved flaky outcome.
     ///
-    /// Flakes remain outside the mutation score. Set this to zero to require every failing mutant
-    /// execution to receive a reliable confirmation verdict.
-    #[arg(long, value_name = "COUNT", conflicts_with = "no_confirm", help_heading = "Run control")]
+    /// Flakes remain outside the mutation score. Ordinary test failures are not rerun without
+    /// the mutant, so this gate does not detect intermittent assertion failures after baseline.
+    #[arg(long, value_name = "COUNT", help_heading = "Run control")]
     pub max_flaky: Option<usize>,
 
     /// How an incremental run reuses the last run: `no` starts cold; `build` reuses compiler
@@ -721,13 +721,6 @@ pub struct RunArgs {
     /// caused by the mutant rather than by the suite already being red.
     #[arg(long, help_heading = "Run control")]
     pub no_baseline: bool,
-
-    /// Believe a failing test without re-running it with no mutant active.
-    ///
-    /// Saves one run per kill, and gives up the ability to tell a detection from a flaky test: a
-    /// test that fails either way is counted as having caught every mutant it was run against.
-    #[arg(long, help_heading = "Run control")]
-    pub no_confirm: bool,
 
     /// Find and report mutants without building or running anything.
     #[arg(long, help_heading = "Run control")]
@@ -1453,6 +1446,29 @@ mod tests {
 
         assert_eq!(size("1024"), Ok(1024));
         _ = size("not-a-size").expect_err("not a size");
+    }
+
+    #[test]
+    fn obsolete_no_confirm_is_rejected_and_flaky_gates_remain_available() {
+        let error =
+            Cli::try_parse_from(["cargo gamma", "run", "--no-confirm"]).expect_err("post-kill confirmation is no longer configurable");
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+        assert_eq!(
+            error.to_string(),
+            concat!(
+                "error: unexpected argument '--no-confirm' found\n\n",
+                "  tip: a similar argument exists: '--no-config'\n",
+                "  tip: to pass '--no-confirm' as a value, use '-- --no-confirm'\n\n",
+                "Usage: cargo gamma run --no-config [-- <TEST_ARGS>...]\n\n",
+                "For more information, try '--help'.\n",
+            )
+        );
+        let cli = Cli::try_parse_from(["cargo gamma", "run", "--max-flaky", "0"])
+            .expect("flaky gates still apply to enumeration controls and historical verdicts");
+        let Command::Run(args) = cli.command else {
+            panic!("run arguments must select the run command");
+        };
+        assert_eq!(args.max_flaky, Some(0));
     }
 
     /// `-V` is `--version` everywhere, and `-v` is not bound at all.

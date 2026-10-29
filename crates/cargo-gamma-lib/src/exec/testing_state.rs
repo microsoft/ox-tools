@@ -20,7 +20,7 @@ use crate::error::error;
 use crate::model::{Mutant, Outcome};
 use crate::{Result, elements as publication};
 
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 const SNAPSHOT: &str = "testing-session.json";
 const JOURNAL: &str = "testing-verdicts.jsonl";
 const PHASE: &str = "testing-phase.json";
@@ -70,7 +70,6 @@ pub(crate) struct TestingSettings {
     #[serde(default)]
     pub(crate) mutators: Option<String>,
     pub(super) timeout_floor: core::time::Duration,
-    pub(super) confirm: bool,
     pub(super) narrowed: bool,
     pub(super) incremental: bool,
 }
@@ -1407,7 +1406,6 @@ mod tests {
                 jobs: 1,
                 mutators: None,
                 timeout_floor: Duration::ZERO,
-                confirm: false,
                 narrowed: false,
                 incremental: false,
             },
@@ -2029,7 +2027,6 @@ mod tests {
             jobs: 7,
             mutators: Some("arith.add_to_sub,relational.lt_to_le".to_owned()),
             timeout_floor: Duration::from_secs(20),
-            confirm: true,
             narrowed: true,
             incremental: false,
         };
@@ -2324,7 +2321,6 @@ mod tests {
                 jobs: 1,
                 mutators: None,
                 timeout_floor: Duration::from_secs(20),
-                confirm: true,
                 narrowed: true,
                 incremental: false,
             },
@@ -2539,7 +2535,6 @@ mod tests {
             stall: Stall::NONE,
             jobs: 4,
             meter: false,
-            confirm: true,
         };
         let mut events = crate::testing::Recorder::default();
         let mut calls = 0;
@@ -3522,7 +3517,6 @@ mod tests {
                 stall: Stall::NONE,
                 jobs: 1,
                 meter: false,
-                confirm: state.settings.confirm,
             },
             false,
             &mut state.killers,
@@ -3759,7 +3753,6 @@ mod tests {
             assert_eq!(loaded.plan.mutants[2].outcome, Outcome::Ignored);
             assert_eq!(loaded.killers.hint("m1").unwrap().test, "test_one");
             assert_eq!(loaded.session.baseline, state.session.baseline);
-            assert_eq!(loaded.settings.confirm, state.settings.confirm);
         }
     }
 
@@ -3923,7 +3916,7 @@ mod tests {
     #[cfg_attr(miri, ignore = "writes and reloads prepared snapshot files")]
     fn rejects_incompatible_identity_version_platform_and_missing_snapshot() {
         let (_directory, mut state) = fixture();
-        for incompatible in [1, VERSION + 1] {
+        for incompatible in [1, 2, VERSION + 1] {
             state.version = incompatible;
             save(&state);
             assert!(failure(&state.record.base).contains("incompatible"));
@@ -4168,7 +4161,7 @@ mod tests {
         let base = &state.record.base;
         let path = base.join(SNAPSHOT);
         let mut snapshot: Value = from_slice(&fs::read(&path).unwrap()).unwrap();
-        snapshot["settings"]["confirm"] = false.into();
+        snapshot["settings"]["jobs"] = 99.into();
         fs::write(&path, to_vec(&snapshot).unwrap()).unwrap();
         assert!(failure(base).contains("integrity"));
         save(&state);

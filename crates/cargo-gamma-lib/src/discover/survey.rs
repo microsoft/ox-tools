@@ -351,7 +351,7 @@ impl Survey {
             external_inputs,
             cache_inputs,
             configuration,
-            walk_rust_files,
+            walk_rust_files_excluding,
             validate_trait_exclusions,
             Diff::read,
         )
@@ -384,7 +384,7 @@ impl Survey {
             ExternalPathInputs::default(),
             false,
             configuration,
-            walk_rust_files,
+            walk_rust_files_excluding,
             validate_trait_exclusions,
             Diff::read,
         )
@@ -405,7 +405,7 @@ impl Survey {
         external_inputs: ExternalPathInputs,
         cache_inputs: bool,
         configuration: impl FnOnce(&Utf8Path, &CargoOptions, &HashMap<String, Vec<String>>) -> Cfgs,
-        mut walk: impl FnMut(&Utf8Path) -> Result<Vec<Utf8PathBuf>>,
+        mut walk: impl FnMut(&Utf8Path, &[Utf8PathBuf]) -> Result<Vec<Utf8PathBuf>>,
         validate_exclusions: impl FnOnce(&[String], &[TargetFile], &Cfgs) -> Result<()>,
         read_diff: impl FnOnce(&Utf8Path) -> Result<Diff>,
     ) -> Result<Self> {
@@ -442,6 +442,18 @@ impl Survey {
         let checking_exclusions = !args.exclude_trait_impls.is_empty();
         let collecting_walked = checking_patterns || diff.is_some();
         let mut walked: Vec<Utf8PathBuf> = Vec::new();
+        let mut diff_only_directories = HashSet::default();
+        let mut diff_only_exclusions = Vec::new();
+        if diff.is_some() {
+            diff_only_exclusions.extend([target.clone(), root.join("target"), root.join(".git")]);
+            for package in metadata.workspace_packages() {
+                if let Some(directory) = package.manifest_path.parent() {
+                    diff_only_exclusions.extend([directory.join("target"), directory.join(".git")]);
+                }
+            }
+            diff_only_exclusions.sort();
+            diff_only_exclusions.dedup();
+        }
 
         if let Some(named) = unknown_packages(metadata, args) {
             return Err(error!("no package named `{named}` in this workspace").usage());
@@ -490,6 +502,20 @@ impl Survey {
                 }
 
                 if !is_mutable_target(target, enabled.get(package.name.as_str())) {
+                    if diff.is_some() && (mutating || checking_patterns || checking_exclusions) {
+                        let source = Utf8Path::new(target.src_path.as_str());
+                        walked.push(placed_under(&root, source, &package.name)?);
+                        // Build scripts live at the package root; do not recursively inventory
+                        // that directory and its build artifacts just to recognize build.rs.
+                        if !target.kind.contains(&TargetKind::CustomBuild)
+                            && let Some(directory) = source.parent()
+                            && diff_only_directories.insert(directory)
+                        {
+                            for absolute in walk(directory, &diff_only_exclusions)? {
+                                walked.push(placed_under(&root, &absolute, &package.name)?);
+                            }
+                        }
+                    }
                     continue;
                 }
 
@@ -509,7 +535,7 @@ impl Survey {
                     continue;
                 };
 
-                for absolute in walk(directory)? {
+                for absolute in walk(directory, &[])? {
                     let relative = placed_under(&root, &absolute, &package.name)?;
 
                     // #[gamma::skip(all, reason = "widening this internal validation list only adds unused entries or duplicate syntax trees to an idempotent name set")]
@@ -578,6 +604,8 @@ impl Survey {
         // needs the walk to have happened, and it fails rather than selects nothing when not one
         // of the paths it names turns out to be a file here.
         if let Some(diff) = diff.as_mut() {
+            walked.sort();
+            walked.dedup();
             diff.resolve(&root, &walked)?;
 
             // A file the diff does not mention cannot contain a changed line, so it is dropped
@@ -2705,11 +2733,18 @@ fn is_included(path: &Utf8Path, args: &SelectArgs) -> bool {
 /// A path that is not UTF-8 is refused only when it names a Rust source file. Such a file would
 /// have been mutated and now cannot even be named, while a file of any other kind was never part
 /// of the population and its spelling is nobody's business here.
-// #[gamma::skip(iter.remove_sort, reason = "filesystem traversal order is platform-dependent; callers consume this as a set and deterministic ordering is retained solely for stable diagnostics")]
 fn walk_rust_files(directory: &Utf8Path) -> Result<Vec<Utf8PathBuf>> {
+    walk_rust_files_excluding(directory, &[])
+}
+
+// #[gamma::skip(iter.remove_sort, reason = "filesystem traversal order is platform-dependent; callers consume this as a set and deterministic ordering is retained solely for stable diagnostics")]
+fn walk_rust_files_excluding(directory: &Utf8Path, excluded: &[Utf8PathBuf]) -> Result<Vec<Utf8PathBuf>> {
     let mut found: Vec<Utf8PathBuf> = Vec::new();
 
-    for entry in WalkDir::new(directory) {
+    let entries = WalkDir::new(directory)
+        .into_iter()
+        .filter_entry(|entry| !entry.file_type().is_dir() || !excluded.iter().any(|path| entry.path() == path.as_std_path()));
+    for entry in entries {
         let entry = entry.map_err(|cause| error!("could not list the source files under `{directory}`").caused_by(cause))?;
 
         // #[gamma::skip(all, reason = "a directory has no rs extension and the following match discards it as a non-source path anyway")]
@@ -2767,6 +2802,135 @@ mod tests {
     }
 
     #[test]
+    fn diff_recognizes_nonmutated_targets_and_their_helpers_without_mutating_them() {
+        let mut metadata = selection_metadata();
+        let package = &mut metadata.packages[0];
+        for (kind, path) in [
+            (TargetKind::Test, "tests/regression.rs"),
+            (TargetKind::Test, "tests/second.rs"),
+            (TargetKind::Example, "examples/demo.rs"),
+            (TargetKind::Test, "regression.rs"),
+            (TargetKind::Example, "demo.rs"),
+            (TargetKind::CustomBuild, "build.rs"),
+        ] {
+            let mut target = package.targets[0].clone();
+            target.kind = vec![kind];
+            target.name = path.to_owned();
+            target.src_path = Utf8Path::new("C:/fixture/alpha").join(path);
+            package.targets.push(target);
+        }
+        metadata.target_directory = "C:/fixture/alpha/build-output".into();
+        let args = SelectArgs {
+            dir: metadata.workspace_root.clone(),
+            packages: vec!["alpha".into()],
+            in_diff: Some("scripted-diff".into()),
+            ..SelectArgs::default()
+        };
+        let mut directories = Vec::new();
+        let survey = Survey::for_build_with_metadata(
+            &args,
+            None,
+            None,
+            &CargoOptions::default(),
+            &FeatureArgs::default(),
+            &metadata,
+            ExternalPathInputs::default(),
+            true,
+            |_, _, _| Cfgs::unconditional(),
+            |directory, excluded| {
+                directories.push(directory.to_owned());
+                if directory.file_name() == Some("src") {
+                    assert!(excluded.is_empty(), "ordinary mutation discovery must remain unpruned");
+                } else {
+                    for path in [
+                        "C:/fixture/alpha/build-output",
+                        "C:/fixture/target",
+                        "C:/fixture/.git",
+                        "C:/fixture/alpha/target",
+                        "C:/fixture/alpha/.git",
+                    ] {
+                        assert!(excluded.contains(&Utf8PathBuf::from(path)), "{path}");
+                    }
+                }
+                match directory.file_name() {
+                    Some("src") => Ok(vec![directory.join("lib.rs")]),
+                    Some("tests") => Ok(vec![directory.join("regression.rs"), directory.join("common/mod.rs")]),
+                    Some("examples") => Ok(vec![directory.join("demo.rs")]),
+                    Some("alpha") => Ok(["regression.rs", "demo.rs", "support/helper.rs"].map(|path| directory.join(path)).to_vec()),
+                    other => panic!("unexpected source inventory: {other:?}"),
+                }
+            },
+            |_, _, _| Ok(()),
+            |path| {
+                assert_eq!(path, Utf8Path::new("scripted-diff"));
+                Ok(Diff::parse(concat!(
+                    "--- a/alpha/src/lib.rs\n+++ b/alpha/src/lib.rs\n@@ -0,0 +1 @@\n+changed\n",
+                    "--- /other/checkout/alpha/tests/regression.rs\n+++ /other/checkout/alpha/tests/regression.rs\n@@ -0,0 +1 @@\n+changed\n",
+                    "--- a/alpha/tests/common/mod.rs\n+++ b/alpha/tests/common/mod.rs\n@@ -0,0 +1 @@\n+changed\n",
+                    "--- /other/checkout/alpha/examples/demo.rs\n+++ /other/checkout/alpha/examples/demo.rs\n@@ -0,0 +1 @@\n+changed\n",
+                    "--- a/alpha/regression.rs\n+++ b/alpha/regression.rs\n@@ -0,0 +1 @@\n+changed\n",
+                    "--- a/alpha/demo.rs\n+++ b/alpha/demo.rs\n@@ -0,0 +1 @@\n+changed\n",
+                    "--- a/alpha/support/helper.rs\n+++ b/alpha/support/helper.rs\n@@ -0,0 +1 @@\n+changed\n",
+                    "--- a/alpha/build.rs\n+++ b/alpha/build.rs\n@@ -0,0 +1 @@\n+changed\n",
+                )))
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            directories,
+            ["src", "src", "tests", "examples", ""].map(|directory| Utf8Path::new("C:/fixture/alpha").join(directory))
+        );
+        assert_eq!(
+            survey.files.iter().map(|file| file.path.as_str()).collect::<Vec<_>>(),
+            ["alpha/src/lib.rs"]
+        );
+        assert_eq!(survey.by_package["alpha"], [0]);
+        assert_eq!(
+            survey.declaration_files["alpha"],
+            [Utf8PathBuf::from("C:/fixture/alpha/src/lib.rs")]
+        );
+        let diff = survey.diff.unwrap();
+        for path in [
+            "alpha/src/lib.rs",
+            "alpha/tests/regression.rs",
+            "alpha/tests/common/mod.rs",
+            "alpha/examples/demo.rs",
+            "alpha/regression.rs",
+            "alpha/demo.rs",
+            "alpha/support/helper.rs",
+            "alpha/build.rs",
+        ] {
+            assert!(diff.touches_file(Utf8Path::new(path)), "{path}");
+        }
+    }
+
+    #[test]
+    fn validation_walk_prunes_excluded_subtrees_without_losing_helper_sources() {
+        let root = Utf8Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/isolation-graph");
+        let listed = walk_rust_files_excluding(&root, &[root.join("ordinary")]).unwrap();
+        assert_eq!(
+            listed,
+            [
+                "application/src/lib.rs",
+                "application/tests/integration.rs",
+                "dependency/src/lib.rs"
+            ]
+            .map(|path| root.join(path))
+        );
+        assert_eq!(
+            walk_rust_files(&root).unwrap(),
+            [
+                "application/src/lib.rs",
+                "application/tests/integration.rs",
+                "dependency/src/lib.rs",
+                "ordinary/src/lib.rs",
+                "ordinary/src/main.rs",
+            ]
+            .map(|path| root.join(path))
+        );
+    }
+
+    #[test]
     fn oct25_metadata_selection_keeps_resource_roots_and_exact_sorted_populations() {
         let metadata = selection_metadata();
         let args = SelectArgs {
@@ -2785,7 +2949,8 @@ mod tests {
             ExternalPathInputs::default(),
             false,
             |_, _, _| Cfgs::unconditional(),
-            |directory| {
+            |directory, excluded| {
+                assert!(excluded.is_empty());
                 if directory == Utf8Path::new("C:/fixture/gamma/src") {
                     return Err(error!("the unselected package must not introduce a walk failure"));
                 }
@@ -2847,7 +3012,8 @@ mod tests {
                 ExternalPathInputs::default(),
                 cache_inputs,
                 |_, _, _| Cfgs::unconditional(),
-                |directory| {
+                |directory, excluded| {
+                    assert!(excluded.is_empty());
                     directories.push(directory.to_owned());
                     Ok(vec![directory.join("lib.rs")])
                 },
@@ -2887,7 +3053,8 @@ mod tests {
             ExternalPathInputs::default(),
             false,
             |_, _, _| Cfgs::unconditional(),
-            |directory| {
+            |directory, excluded| {
+                assert!(excluded.is_empty());
                 directories.push(directory.to_owned());
                 Ok(vec![directory.join("lib.rs")])
             },
@@ -2943,7 +3110,8 @@ mod tests {
             ExternalPathInputs::default(),
             false,
             |_, _, _| Cfgs::unconditional(),
-            |directory| {
+            |directory, excluded| {
+                assert!(excluded.is_empty());
                 directories.push(directory.to_owned());
                 Ok(vec![directory.join("lib.rs")])
             },
@@ -3006,7 +3174,10 @@ mod tests {
                 ExternalPathInputs::default(),
                 false,
                 |_, _, _| Cfgs::unconditional(),
-                |directory| Ok(vec![directory.join("lib.rs")]),
+                |directory, excluded| {
+                    assert!(excluded.is_empty());
+                    Ok(vec![directory.join("lib.rs")])
+                },
                 |_, _, _| Ok(()),
                 |path| {
                     assert_eq!(path, Utf8Path::new("owned-diff"));
@@ -3049,7 +3220,8 @@ mod tests {
             ExternalPathInputs::default(),
             false,
             |_, _, _| panic!("configuration must not run after a failed walk"),
-            |directory| {
+            |directory, excluded| {
+                assert!(excluded.is_empty());
                 assert_eq!(directory, Utf8Path::new("C:/fixture/alpha/src"));
                 Err(error!("scripted source inventory failure"))
             },
@@ -5315,7 +5487,7 @@ mod tests {
             ExternalPathInputs::default(),
             false,
             |_root, _cargo, _enabled| Cfgs::default(),
-            |_| panic!("empty metadata has no source directories"),
+            |_, _| panic!("empty metadata has no source directories"),
             validate_trait_exclusions,
             Diff::read,
         )

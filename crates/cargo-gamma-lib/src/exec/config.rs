@@ -45,14 +45,6 @@ pub struct Config {
     /// Whether to run the baseline. Skipping it is faster and strictly less trustworthy.
     pub baseline: bool,
 
-    /// Whether a failing test is re-run with no mutant active before the kill is believed.
-    ///
-    /// Skipping the confirmation saves one run per kill — the cheapest class, since it stops at the
-    /// first failing test — and buys a score that counts a flaky test's failures as detections. The
-    /// run can no longer tell the two apart, so the flakes disappear into the kill count rather
-    /// than being reported.
-    pub confirm: bool,
-
     /// Whether to cut a mutant off as soon as its test binary stops reporting progress.
     pub stall: bool,
 
@@ -141,7 +133,6 @@ impl Config {
             test_timeout_multiplier: 1.5,
             timeout_floor: Duration::from_secs(20),
             baseline: true,
-            confirm: true,
             stall: true,
             stall_factor: 10.0,
             stall_floor: Duration::from_secs(5),
@@ -249,7 +240,6 @@ mod tests {
         assert_eq!(config.jobs, 8.min(watchable()));
         assert_eq!(config.timeout_floor, Duration::from_secs(20));
         assert!(config.baseline);
-        assert!(config.confirm);
         assert!(config.stall);
         assert!(!config.leak_dirs);
         assert!(config.cache_dir.is_none());
