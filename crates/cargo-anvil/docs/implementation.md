@@ -243,17 +243,22 @@ expected category, so a check silently gaining, losing, or changing scoping fail
 The recipe keeps two independently keyed snapshots under `target/anvil/impact/snapshots/`:
 
 - `baseline.json` (base ref) — expensive (needs a throwaway git worktree). Keyed on the
-  **composite** of the base commit sha *and* the effective `.delta.toml` identity, persisted in
-  `baseline.key` as `<base-sha> <config-hash>`. Folding the config hash in is a correctness
+  **composite** of the base commit sha, effective `.delta.toml` identity, and pinned cargo-delta
+  version, persisted in `baseline.key` as `<base-sha> <config-hash> <cargo-delta-version>`.
+  Folding the config hash in is a correctness
   requirement, not an optimization: the config governs *what* every snapshot captures, so a
   warm cache keyed on the base sha alone could diff a stale-config baseline against a
   new-config current snapshot and silently mis-scope.
-- `current.json` (working tree) — cheap. Keyed on the HEAD sha alone (`current.key`); the
-  dirty-tree guard means a snapshotted tree corresponds exactly to HEAD.
+- `current.json` (working tree) — cheap. Keyed on the HEAD sha and pinned cargo-delta version
+  (`current.key` stores `<HEAD-sha> <cargo-delta-version>`); the dirty-tree guard means a
+  snapshotted tree corresponds exactly to HEAD.
 
-The composite baseline key is why the base worktree is retaken when the base moves *or*
-`.delta.toml` changes; `baseline_regenerates_when_delta_config_changes_without_moving_the_base`
-pins that second input. The worktree lives under the runner-managed scratch dir
+Including the pinned cargo-delta version in both keys invalidates snapshots written by older
+tool versions, including formats that the new tool cannot read. Existing versionless keys
+also miss once and regenerate. The composite baseline key also retakes the base worktree when
+the base moves or `.delta.toml` changes;
+`baseline_regenerates_when_delta_config_changes_without_moving_the_base` pins that config input.
+The worktree lives under the runner-managed scratch dir
 (`RUNNER_TEMP` → `AGENT_TEMPDIRECTORY` → system temp) and is named with `$PID` and a fresh
 GUID. Reused process IDs cannot select abandoned directories, and a run never removes a
 pre-existing checkout to claim its path. Its own worktree is removed in a `finally`.
@@ -261,12 +266,14 @@ Creation failures include Git's diagnostic output.
 
 ### Fail-closed mapping and the dirty-tree safety net
 
-cargo-delta reports library/target identifiers that do not uniquely name a Cargo package, so
-`_anvil-impact-format` reverse-maps them to version-qualified package selectors using three
-Ordinal (case-sensitive) lookups (package name, lib/proc-macro target, manifest-dir leaf). When
-a reported identifier resolves to **zero** packages (an unmapped gap) or **more than one** (an
-ambiguity), the recipe fails hard rather than guessing — under-scoping would silently skip
-affected work. Complementarily, a dirty working tree (any uncommitted change outside `target/`,
+Cargo-delta JSON tiers contain Cargo package names. `_anvil-impact-format` resolves them to
+version-qualified package selectors using one Ordinal (case-sensitive) lookup restricted to
+workspace members from locked Cargo metadata. Library/proc-macro target names and manifest
+directory leaves are not aliases, so a collision with either cannot obscure an exact package
+name. Cargo enforces unique package names within a workspace, so each reported name
+matches at most one member. A name with no match signals a report/metadata mismatch;
+the recipe fails rather than silently dropping affected work.
+Complementarily, a dirty working tree (any uncommitted change outside `target/`,
 detected via a git `:(exclude)` pathspec) widens *every* tier to `--workspace` locally, because
 cargo-delta scopes on the committed diff and cannot see working-tree edits. Cloud checkouts are clean, so this
 only affects local runs.

@@ -532,8 +532,8 @@ a CI shell and threading the result between jobs as environment variables.
 
 | Artifact                     | Purpose                                                                 |
 |------------------------------|-------------------------------------------------------------------------|
-| `snapshots/baseline.json`    | cargo-delta snapshot of the base ref. Cached, keyed on the composite of the base commit sha **and** the effective `.delta.toml` identity (`baseline.key` stores `<base-sha> <config-hash>`) — the expensive throwaway-worktree snapshot is retaken when the base moves *or* the cargo-delta config changes, so the baseline is never diffed against a current snapshot captured under different rules. |
-| `snapshots/current.json`     | cargo-delta snapshot of the working tree. Cached, keyed on the HEAD sha (`current.key`); the dirty-tree guard widens instead of snapshotting, so a snapshotted tree always corresponds exactly to HEAD. |
+| `snapshots/baseline.json`    | cargo-delta snapshot of the base ref. Cached, keyed on the base commit sha, effective `.delta.toml` identity, and pinned cargo-delta version (`baseline.key` stores `<base-sha> <config-hash> <cargo-delta-version>`). The expensive throwaway-worktree snapshot is retaken when any input changes, preventing reuse across incompatible rules or snapshot formats. |
+| `snapshots/current.json`     | cargo-delta snapshot of the working tree. Cached, keyed on the HEAD sha and pinned cargo-delta version (`current.key` stores `<HEAD-sha> <cargo-delta-version>`). Tool upgrades invalidate both snapshots, including existing versionless cache entries. The dirty-tree guard widens instead of snapshotting, so a snapshotted tree always corresponds exactly to HEAD. |
 | `impact.json`                | the `cargo delta impact --format json` report (the durable source of truth). An unchanged tree yields an empty impact set, which cargo-delta reports either as a report with empty tiers or by printing nothing at all, in which case the recipe stores `{}`. A bare `{}` is therefore not a reliable "nothing changed" signal: the dirty-tree and baseline-without-a-workspace paths also write `{}` as a synthetic placeholder while widening every tier to `--workspace`. Read the `include_<tier>.txt` files for the scope actually selected. |
 | `include_<tier>.txt`         | the pre-projected per-tier scope string (see below), one file per tier. |
 | `doctest_packages.txt`       | Ordinally sorted `name@version` specs for workspace members with at least one metadata target marked `doctest = true`. It is projected from the formatter's locked metadata read and lets doc-test avoid rereading target capabilities. |
@@ -592,18 +592,17 @@ deletes any older capability projection first, so a stale file cannot suppress a
 added or newly doctest-capable workspace member.
 
 `_anvil-impact-format` **fails the recipe** (non-zero exit, aborting `anvil-impact`)
-when at least one name cargo-delta reported cannot be resolved to exactly one workspace
-package. The helper resolves each reported name against three namespaces: the exact cargo
-package name, the library/proc-macro target name (snake_case, for crates whose package and
-lib names differ), and the manifest-directory leaf (for deeply nested workspaces where
-cargo-delta emits a directory name). A name is unresolvable when it maps to **no** package
-*or* to **more than one** distinct package (a genuinely ambiguous identifier). Because
-cargo-delta reports *library* identifiers rather than unique cargo specs, an unresolvable
-name signals a gap in this reverse-mapping — not a scoping decision — so the helper logs
-`cargo-delta returned unknown package '<name>'` or `cargo-delta returned ambiguous package
-identifier '<name>'` to stderr and exits non-zero rather than guessing (and risking a
-silently under-scoped tier that skips a check). Failing hard surfaces the mapping gap so it
-gets fixed, instead of masking it behind a silently full-workspace run.
+when at least one package name cargo-delta reported is absent from the workspace.
+The pinned cargo-delta reports JSON tiers as Cargo package names. The helper
+uses an Ordinal (case-sensitive) package-name lookup over workspace members from locked
+Cargo metadata, then reads each matched package's version to produce its Cargo selector.
+Cargo enforces unique package names within a workspace, so each reported name has
+either one exact match or none.
+Library/proc-macro target names and manifest-directory leaves are not aliases: they can
+coincide with another package's name without affecting the lookup. An unknown name
+signals a report/metadata mismatch, not a scoping decision. The helper logs
+`cargo-delta returned unknown package '<name>'` to stderr and exits non-zero rather than
+silently dropping affected work or masking the mismatch behind a full-workspace run.
 
 Formatting illustrates the modified-tier contract. The tier decides only whether
 the recipe runs. Once admitted, the recipe validates its pinned tools and uses
