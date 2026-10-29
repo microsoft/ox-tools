@@ -1774,6 +1774,14 @@ mod tests {
             if !tools_available() {
                 return;
             }
+            if !Command::new("rustup")
+                .args(["toolchain", "list"])
+                .output()
+                .is_ok_and(|output| output.status.success())
+            {
+                eprintln!("skipping MSRV resolver integration: rustup toolchain list is unavailable");
+                return;
+            }
             let no_msrv = fixture("[workspace]\nresolver = \"2\"\n");
             fs::write(no_msrv.path().join("rust-toolchain.toml"), "[toolchain]\nchannel = \"1.94\"\n")
                 .expect("toolchain fixture must be writable");

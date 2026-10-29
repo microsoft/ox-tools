@@ -2308,6 +2308,14 @@ fn install_tool_controls_source_fallback_and_prerequisite_ordering() {
     if !tools_available() {
         return;
     }
+    if !Command::new("rustup")
+        .args(["toolchain", "list"])
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        eprintln!("skipping tool installation integration: rustup toolchain list is unavailable");
+        return;
+    }
     let tmp = fixture(&[("versions.just", VERSIONS), ("tools.just", TOOLS)], &[]);
     let justfile_path = tmp.path().join("Justfile");
     let mut justfile = fs::read_to_string(&justfile_path).unwrap();
