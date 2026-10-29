@@ -21,10 +21,14 @@ entry, retaining any explicit key indicator and the original sequence marker.
 Aliases and inherited defaults are inspected without expanding their graphs.
 The ecosystem and exclusion list share one read-only field lookup: explicit
 values override defaults, merge sequences use their first matching value, and
-active merge spans detect cycles. This keeps unrelated ecosystems and complete
-inherited exclusions untouched; it does not authorize editing merged or shared
-containers. Local typed error causes distinguish safety refusals from parser
-failures while the planner retains its `AppError` boundary.
+active merge spans detect cycles. A per-document cache retains completed lookups
+by resolved node and field, including absent results, so repeated acyclic merge
+targets are evaluated once rather than repeatedly expanding their dependencies.
+Failed lookups are not cached, and their active merge state is unwound. This
+keeps unrelated ecosystems and complete inherited exclusions untouched; it does
+not authorize editing merged or shared containers. Local typed error causes
+distinguish safety refusals from parser failures while the planner retains its
+`AppError` boundary.
 
 The planner records a `patch_file` write with no ownership checksum. Neither the
 whole configuration nor its user exclusions become catalog-owned. Pending

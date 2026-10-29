@@ -123,17 +123,18 @@ pub(crate) fn update(text: &str, paths: &[&str]) -> Result<Option<String>, AppEr
         .resolve(&root);
     let paths: Vec<_> = paths.iter().map(|path| literal_glob_path(path)).collect();
     let mut insertions = Vec::new();
+    let mut lookups = FieldLookups::default();
     for job in updates.sequence()? {
         let job = job.resolve(&root);
         let ecosystem = job
-            .effective_field(&root, "package-ecosystem", &mut Vec::new())?
+            .effective_field(&root, "package-ecosystem", &mut lookups)?
             .ok_or_else(|| MissingFieldError::new("package-ecosystem", "Dependabot update job"))?
             .scalar()?;
         if ecosystem != "github-actions" {
             continue;
         }
         let fields = job.fields()?;
-        let exclusions = job.effective_field(&root, "exclude-paths", &mut Vec::new())?;
+        let exclusions = job.effective_field(&root, "exclude-paths", &mut lookups)?;
         let existing = exclusions.map(|node| node.sequence()).transpose()?.unwrap_or_default();
         let existing = existing
             .iter()
@@ -246,6 +247,16 @@ struct Node {
     children: Vec<Self>,
 }
 
+/// Per-document results keyed by resolved mapping position and requested field.
+/// Missing values are completed results too; only active merges denote cycles.
+#[derive(Debug, Default)]
+struct FieldLookups<'a> {
+    active: Vec<usize>,
+    completed: BTreeMap<(usize, &'static str), Option<&'a Node>>,
+    #[cfg(test)]
+    visits: usize,
+}
+
 impl Node {
     /// Resolve one alias by identity without expanding a potentially cyclic graph.
     fn resolve<'a>(&'a self, root: &'a Self) -> &'a Self {
@@ -301,20 +312,37 @@ impl Node {
     }
 
     /// Read only one effective setting. Explicit values win; merge sequences
-    /// use their first matching default. The active source spans bound cycles.
-    fn effective_field<'a>(&'a self, root: &'a Self, field: &'static str, active: &mut Vec<usize>) -> Result<Option<&'a Self>, AppError> {
+    /// use their first matching default. Cache completed values and absence so
+    /// repeated merge targets are not expanded; active source spans detect cycles.
+    fn effective_field<'a>(
+        &'a self,
+        root: &'a Self,
+        field: &'static str,
+        lookups: &mut FieldLookups<'a>,
+    ) -> Result<Option<&'a Self>, AppError> {
         let node = self.resolve(root);
+        let key = (node.span.start, field);
+        if let Some(value) = lookups.completed.get(&key) {
+            return Ok(*value);
+        }
+        #[cfg(test)]
+        {
+            lookups.visits += 1;
+        }
         let fields = node.fields()?;
         if let Some(value) = fields.get(field) {
-            return Ok(Some(value.resolve(root)));
+            let value = Some(value.resolve(root));
+            lookups.completed.insert(key, value);
+            return Ok(value);
         }
         let Some(defaults) = fields.get("<<").map(|defaults| defaults.resolve(root)) else {
+            lookups.completed.insert(key, None);
             return Ok(None);
         };
-        if active.contains(&node.span.start) {
+        if lookups.active.contains(&node.span.start) {
             return Err(CyclicMergeError::new(field).into());
         }
-        active.push(node.span.start);
+        lookups.active.push(node.span.start);
         let defaults = if defaults.kind == Kind::Sequence {
             defaults.children.as_slice()
         } else {
@@ -324,11 +352,13 @@ impl Node {
             if value.is_some() {
                 Ok(value)
             } else {
-                defaults.effective_field(root, field, active)
+                defaults.effective_field(root, field, lookups)
             }
         });
-        active.pop();
-        result
+        lookups.active.pop();
+        let value = result?;
+        lookups.completed.insert(key, value);
+        Ok(value)
     }
 }
 
@@ -573,6 +603,83 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error_cause::<CyclicMergeError>(&error).field, "exclude-paths");
+    }
+
+    #[test]
+    fn repeated_merge_targets_do_not_repeat_completed_missing_lookups() {
+        const SOURCE: &str = concat!(
+            "version: 2\nupdates:\n",
+            "  - &level0 {package-ecosystem: cargo, directory: /, schedule: {interval: weekly}}\n",
+            "  - &level1 {<<: [*level0, *level0], directory: /level1}\n",
+            "  - &level2 {<<: [*level1, *level1], directory: /level2}\n",
+            "  - &level3 {<<: [*level2, *level2], directory: /level3}\n",
+            "  - &level4 {<<: [*level3, *level3], directory: /level4}\n",
+            "  - &level5 {<<: [*level4, *level4], directory: /level5}\n",
+            "  - &level6 {<<: [*level5, *level5], directory: /level6}\n",
+            "  - &level7 {<<: [*level6, *level6], directory: /level7}\n",
+            "  - &level8 {<<: [*level7, *level7], directory: /level8}\n",
+            "  - &level9 {<<: [*level8, *level8], directory: /level9}\n",
+            "  - &level10 {<<: [*level9, *level9], directory: /level10}\n",
+            "  - &level11 {<<: [*level10, *level10], directory: /level11}\n",
+            "  - &level12 {<<: [*level11, *level11], directory: /level12}\n",
+            "  - &level13 {<<: [*level12, *level12], directory: /level13}\n",
+            "  - &level14 {<<: [*level13, *level13], directory: /level14}\n",
+            "  - &level15 {<<: [*level14, *level14], directory: /level15}\n",
+            "  - {<<: [*level15, *level15], package-ecosystem: github-actions, directory: /}\n",
+        );
+        let root = parse(SOURCE).unwrap();
+        let fields = root.fields().unwrap();
+        let jobs = fields["updates"].sequence().unwrap();
+        let mut lookups = FieldLookups::default();
+        let job = jobs.last().unwrap();
+        assert!(job.effective_field(&root, "exclude-paths", &mut lookups).unwrap().is_none());
+        assert_eq!(lookups.visits, 17, "each distinct mapping should be evaluated once for this field");
+        assert!(job.effective_field(&root, "exclude-paths", &mut lookups).unwrap().is_none());
+        assert_eq!(lookups.visits, 17, "an already-completed lookup should not walk its defaults again");
+        let ecosystem = job.effective_field(&root, "package-ecosystem", &mut lookups).unwrap().unwrap();
+        assert_eq!(ecosystem.scalar().unwrap(), "github-actions");
+        assert_eq!(lookups.visits, 18, "different fields need independent lookup results");
+        let error = update(SOURCE, PATHS).unwrap_err();
+        error_cause::<MergedJobError>(&error);
+    }
+
+    #[test]
+    fn completed_field_values_are_reused_without_caching_cycle_failures() {
+        let source = format!(
+            "version: 2\nupdates:\n\
+             \x20 - &base {{package-ecosystem: cargo, directory: /, exclude-paths: {}}}\n\
+             \x20 - {{<<: *base, directory: /tools}}\n\
+             \x20 - &cycle {{package-ecosystem: github-actions, directory: /, <<: *cycle}}\n",
+            quoted_paths(PATHS),
+        );
+        let root = parse(&source).unwrap();
+        let fields = root.fields().unwrap();
+        let jobs = fields["updates"].sequence().unwrap();
+        let mut lookups = FieldLookups::default();
+        for job in [&jobs[1], &jobs[0], &jobs[1]] {
+            let exclusions = job.effective_field(&root, "exclude-paths", &mut lookups).unwrap().unwrap();
+            let values = exclusions
+                .sequence()
+                .unwrap()
+                .iter()
+                .map(Node::scalar)
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert_eq!(values, PATHS);
+            assert_eq!(
+                lookups.visits, 2,
+                "completed values must be reused for both the job and its default"
+            );
+        }
+        let ecosystem = jobs[1].effective_field(&root, "package-ecosystem", &mut lookups).unwrap().unwrap();
+        assert_eq!(ecosystem.scalar().unwrap(), "cargo");
+        assert_eq!(lookups.visits, 4, "a different field must not reuse another field's value");
+        for _ in 0..2 {
+            let error = jobs[2].effective_field(&root, "exclude-paths", &mut lookups).unwrap_err();
+            assert_eq!(error_cause::<CyclicMergeError>(&error).field, "exclude-paths");
+            assert!(lookups.active.is_empty(), "failed lookup must unwind its active merge state");
+            assert!(!lookups.completed.contains_key(&(jobs[2].span.start, "exclude-paths")));
+        }
     }
 
     #[test]

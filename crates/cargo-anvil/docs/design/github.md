@@ -1116,7 +1116,9 @@ Existing exclusions use the same read-only lookup: complete inherited lists are
 no-ops, explicit lists override defaults, and merge sequences use the first
 matching list rather than combining lists.
 Aliases are followed by reference for read-only comparisons, without expanding
-their graphs. Already-complete shared exclusion lists remain byte-for-byte no-ops;
+their graphs. Repeated merge targets reuse completed field lookups, including
+missing values, while cyclic defaults retain their refusal.
+Already-complete shared exclusion lists remain byte-for-byte no-ops;
 an insertion that would change a shared target is still refused.
 
 The source repository deliberately continues receiving generated-action update
