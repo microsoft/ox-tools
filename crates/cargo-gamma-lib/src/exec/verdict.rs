@@ -107,7 +107,7 @@ pub(super) struct Attempt<'name> {
 }
 
 impl Attempt<'_> {
-    /// The same attempt with no mutant active, which is how a suspected kill is exonerated.
+    /// The same attempt with no mutant active, to check a nextest enumeration failure.
     const fn exonerating(self) -> Self {
         Self { active: None, ..self }
     }
@@ -175,15 +175,13 @@ pub(super) enum Verdict {
         limit: u64,
     },
 
-    /// A test failed with the mutant active and failed again with no mutant active.
+    /// A test failed during an unmutated nextest enumeration control.
     ///
-    /// Not a verdict about the mutant either way. The suite noticed something, but the same thing
-    /// happens without the mutant, so nothing about this run is evidence about this mutant.
-    /// Carries the test that failed, which is the only actionable thing here: the remedy is to fix
-    /// that test, not to write a new one.
+    /// The control did not establish that the active mutant caused the enumeration failure.
+    /// Carries the failed test, when known, rather than crediting the mutant with a kill.
     Flaky(Option<String>),
 
-    /// An unmutated confirmation did not finish cleanly enough to attribute a suspected failure.
+    /// An unmutated nextest control did not finish cleanly enough to attribute an enumeration failure.
     Unconfirmed(Option<String>, &'static str),
 
     /// The run-wide machinery could not continue producing trustworthy verdicts.
@@ -249,11 +247,8 @@ pub(super) struct FailureEvidence {
 
 /// Runs one test binary with an optional active mutant, under a wall-clock budget.
 ///
-/// Every provisional abnormal verdict is confirmed by a second run before it is believed. A false
-/// kill inflates the score, while a false resource-exhaustion verdict lowers it and can fail the
-/// run; neither should depend on one noisy execution.
-///
-/// The confirmations differ because the suspicions do:
+/// Test failures are accepted directly after baseline validation, without an unmutated rerun.
+/// Resource suspicions still receive a second observation:
 ///
 /// * A timeout or a stall is retried with the same mutant under a budget several times larger.
 ///   Both are verdicts a loaded machine can produce on its own — the budget is calibrated from a
@@ -266,17 +261,9 @@ pub(super) struct FailureEvidence {
 ///   the job object, so the verdict is inferred from the job's accounting, and on the timeout path
 ///   it is inferred from what the accounting read when the run was cut short. An inference deserves
 ///   the same second look as a budget running out.
-/// * A failing test is retried with **no** mutant active. Nothing about a red test says the mutant
-///   made it red, and a test that is merely flaky would otherwise be scored as a kill every time it
-///   happened to fail. If it fails again with the mutant out of the picture, the suite is what is
-///   unreliable, and the run says so with [`Verdict::Flaky`] rather than crediting the mutant.
-///
-/// The kill confirmation costs one extra run of the cheapest verdict class — the one that finishes
-/// as soon as a test fails rather than running the whole binary. `confirm` turns it off, at the
-/// price of a score that counts flakes as kills and cannot show which ones they were.
 #[cfg(test)]
-pub(super) fn run_binary(work: &Workspace, binary: &TestBinary, attempt: Attempt<'_>, confirm: bool) -> Verdict {
-    run_binary_observed(work, binary, attempt, confirm).verdict
+pub(super) fn run_binary(work: &Workspace, binary: &TestBinary, attempt: Attempt<'_>) -> Verdict {
+    run_binary_observed(work, binary, attempt).verdict
 }
 
 #[derive(Debug)]
@@ -292,23 +279,21 @@ pub(super) enum ReachObservation {
     Unknown,
 }
 
-pub(super) fn reach_hint_is_final(attempt: Attempt<'_>, confirm: bool) -> bool {
-    attempt.timeout.is_none() && attempt.stall.budget.is_none() && !attempt.request.meter && !confirm
+pub(super) fn reach_hint_is_final(attempt: Attempt<'_>) -> bool {
+    attempt.timeout.is_none() && attempt.stall.budget.is_none() && !attempt.request.meter
 }
 
-pub(super) fn run_binary_observed(work: &Workspace, binary: &TestBinary, attempt: Attempt<'_>, confirm: bool) -> BinaryRun {
+pub(super) fn run_binary_observed(work: &Workspace, binary: &TestBinary, attempt: Attempt<'_>) -> BinaryRun {
     #[cfg(test)]
     if let Some(run) = SCRIPTED_RUNNER
-        .with_borrow_mut(|runner| runner.as_mut().map(|runner| runner(binary, attempt, confirm)))
-        .or_else(|| SHARED_RUNNER.with_borrow(|runner| runner.as_ref().map(|runner| runner(binary, attempt, confirm))))
+        .with_borrow_mut(|runner| runner.as_mut().map(|runner| runner(binary, attempt)))
+        .or_else(|| SHARED_RUNNER.with_borrow(|runner| runner.as_ref().map(|runner| runner(binary, attempt))))
     {
         return finish_binary_run(binary, attempt.only, run);
     }
 
     let _resources = work.acquire_resources(binary, attempt.only);
-    let run = run_binary_with_observer(&SimpleClock::new_system(), attempt, confirm, |attempt| {
-        observe(work, binary, attempt)
-    });
+    let run = run_binary_with_observer(&SimpleClock::new_system(), attempt, |attempt| observe(work, binary, attempt));
     finish_binary_run(binary, attempt.only, run)
 }
 
@@ -317,12 +302,7 @@ fn finish_binary_run(binary: &TestBinary, only: Only<'_>, run: BinaryRun) -> Bin
     run
 }
 
-fn run_binary_with_observer(
-    clock: &SimpleClock,
-    attempt: Attempt<'_>,
-    confirm: bool,
-    mut observe: impl FnMut(Attempt<'_>) -> Observation,
-) -> BinaryRun {
+fn run_binary_with_observer(clock: &SimpleClock, attempt: Attempt<'_>, mut observe: impl FnMut(Attempt<'_>) -> Observation) -> BinaryRun {
     let mut first = true;
     let mut observe = |attempt: Attempt<'_>| {
         super::sweep::record_binary_launch_attempt(!first);
@@ -345,10 +325,7 @@ fn run_binary_with_observer(
         observed.verdict
     });
 
-    // Reached from the first run and from a confirmation alike: a suspected timeout that turns out
-    // to be a failing test is exactly as much of a suspicion as one reported straight away.
     let verdict = match confirmed {
-        Verdict::Failed(test) if confirm => confirm_kill_with(attempt, test, |attempt| observe(attempt).verdict),
         Verdict::TestEnumerationFailed(output) => confirm_enumeration_with(attempt, output, |attempt| observe(attempt).verdict),
         other => other,
     };
@@ -357,10 +334,10 @@ fn run_binary_with_observer(
 }
 
 #[cfg(test)]
-type ScriptedRunner = Box<dyn FnMut(&TestBinary, Attempt<'_>, bool) -> BinaryRun>;
+type ScriptedRunner = Box<dyn FnMut(&TestBinary, Attempt<'_>) -> BinaryRun>;
 
 #[cfg(test)]
-pub(super) type SharedRunner = Arc<dyn Fn(&TestBinary, Attempt<'_>, bool) -> BinaryRun + Send + Sync>;
+pub(super) type SharedRunner = Arc<dyn Fn(&TestBinary, Attempt<'_>) -> BinaryRun + Send + Sync>;
 
 #[cfg(test)]
 std::thread_local! {
@@ -395,10 +372,7 @@ pub(super) fn with_shared_runner<T>(runner: SharedRunner, body: impl FnOnce() ->
 /// execution, suspicion settlement and confirmation. Unlike the observer seam this replaces the
 /// whole binary run. Scoped to the calling thread and reset on return or unwind.
 #[cfg(test)]
-pub(super) fn with_binary_runner<T>(
-    runner: impl FnMut(&TestBinary, Attempt<'_>, bool) -> BinaryRun + 'static,
-    body: impl FnOnce() -> T,
-) -> T {
+pub(super) fn with_binary_runner<T>(runner: impl FnMut(&TestBinary, Attempt<'_>) -> BinaryRun + 'static, body: impl FnOnce() -> T) -> T {
     struct Reset;
     impl Drop for Reset {
         fn drop(&mut self) {
@@ -618,69 +592,6 @@ fn settle_suspicions(attempt: Attempt<'_>, mut run: impl FnMut(Attempt<'_>) -> V
     }
 
     verdict
-}
-
-/// Decides whether a failing test says anything about the mutant that was active when it failed.
-///
-/// The question is settled the only way it can be: by running the same binary again with the
-/// mutant switched off. A suite that fails either way was not detecting anything.
-#[cfg_attr(coverage_nightly, coverage(off))]
-#[cfg(test)]
-fn confirm_kill(work: &Workspace, binary: &TestBinary, attempt: Attempt<'_>, test: Option<String>) -> Verdict {
-    confirm_kill_with(attempt, test, |attempt| observe(work, binary, attempt).verdict)
-}
-
-fn confirm_kill_with(attempt: Attempt<'_>, test: Option<String>, observe: impl FnOnce(Attempt<'_>) -> Verdict) -> Verdict {
-    // Nothing to exonerate. A run with no mutant active has already answered the question the
-    // confirmation would ask, and asking it again would only pay for the same answer.
-    if attempt.active.is_none() {
-        return Verdict::Failed(test);
-    }
-
-    let exonerating_attempt = test.as_deref().map_or_else(
-        || attempt.exonerating(),
-        |name| Attempt {
-            active: None,
-            only: Only::One(name),
-            ..attempt
-        },
-    );
-
-    match observe(exonerating_attempt) {
-        // The suite is green without the mutant and red with it. That is a detection, and the only
-        // observation in this match that is one.
-        Verdict::Passed => Verdict::Failed(test),
-
-        // Neither a detection nor a gap in the tests. Crediting the mutant would let one
-        // unreliable test manufacture a kill for every mutant it happens to be run against;
-        // recording a survivor would send the reader to write an assertion for code an assertion
-        // already covers. The test that failed both ways travels with the verdict, because fixing
-        // it is the only thing anybody can do about this.
-        Verdict::Failed(also) => Verdict::Flaky(test.or(also)),
-
-        // The confirmation could not be metered as this run was configured, so it decided nothing.
-        // The reason travels rather than being replaced by a verdict nobody established.
-        Verdict::Unmetered(reason) => Verdict::Unmetered(reason),
-
-        // The same, one scope down: the machinery refused this one run, so the exoneration
-        // established nothing and the mutant goes unjudged rather than taking the sweep with it.
-        Verdict::Unjudged(reason) => Verdict::Unjudged(reason),
-
-        // The exoneration exceeded a budget instead of finishing, so the suite was never observed
-        // green without the mutant — and the one thing this must not do is read "not observed" as
-        // "observed green". The exoneration inherits the mutant run's budgets while running the
-        // whole binary, where the mutant's own run stopped at its first failing test, so an
-        // overrun here is as much a fact about the machine as about anything.
-        //
-        // Keep the resource failure distinct from a test that failed both ways. Both are
-        // score-neutral, but an unfinished confirmation is not proof of test flakiness.
-        //
-        // The remaining variants cannot arrive from an exoneration — `TestEnumerationFailed` is
-        // only settled with a mutant active, and `Flaky` is reached from here rather than from
-        // `observe` — and they are folded in rather than matched separately because the conclusion
-        // would be the same either way: nothing was established.
-        unestablished => unconfirmed(test, &unestablished),
-    }
 }
 
 /// Confirms that nextest's inability to enumerate tests was caused by the active mutant.
@@ -1599,10 +1510,7 @@ fn prefer_named(verdict: Verdict, peak: Option<u64>, ceiling: Option<u64>) -> Ve
 /// seen from either side of one race: whether the reader publishes the failure before the exit
 /// observation cleans up the child decides which of them is taken, and nothing orders those two events. A policy
 /// spelled out twice would make the verdict a statement about that ordering — the name kept on a
-/// machine where the reader wins and replaced by a byte count where the reaper does. Worse than
-/// losing the name: only [`Verdict::Failed`] is routed to the flake check, so a flaky test failing
-/// beside a ceiling would be credited as an unconfirmed detection on one machine and confirmed on
-/// the other.
+/// machine where the reader wins and replaced by a byte count where the reaper does.
 ///
 /// [`cut_short`] has already ended the run by the time this is asked, so both facts are final.
 fn cut_by_named_failure(name: String) -> Verdict {
@@ -2626,10 +2534,10 @@ mod final_survivor_tests {
     }
 
     #[test]
-    fn recovered_observed_runner_checkpoints_primary_and_confirmation_launches_separately() {
+    fn a_kill_records_one_launch_without_an_unmutated_confirmation() {
         let control = tick::ClockControl::new();
         let clock = control.to_simple_clock();
-        let mut verdicts = [Verdict::Failed(Some("killer".into())), Verdict::Passed].into_iter();
+        let mut verdicts = std::iter::once(Verdict::Failed(Some("killer".into())));
         super::super::sweep::begin_selection_trace();
         let events = super::super::sweep::capture_launch_costs_for_test(|| {
             let run = run_binary_with_observer(
@@ -2638,17 +2546,12 @@ mod final_survivor_tests {
                     active: Some(37),
                     ..baseline_attempt()
                 },
-                true,
                 |attempt| {
-                    if attempt.active.is_some() {
-                        assert_eq!(attempt.active, Some(37));
-                        assert!(matches!(attempt.only, Only::All));
-                    } else {
-                        assert!(matches!(attempt.only, Only::One("killer")));
-                    }
+                    assert_eq!(attempt.active, Some(37));
+                    assert!(matches!(attempt.only, Only::All));
                     control.advance_millis(7);
                     Observation {
-                        verdict: verdicts.next().expect("only the primary and confirmation observations execute"),
+                        verdict: verdicts.next().expect("a kill must execute exactly once"),
                         reach: ReachObservation::Reached,
                         failure: None,
                         quiet: Duration::ZERO,
@@ -2661,7 +2564,7 @@ mod final_survivor_tests {
             assert_eq!(run.reach, ReachObservation::Reached);
         });
         assert!(verdicts.next().is_none());
-        assert_eq!(events.len(), 4);
+        assert_eq!(events.len(), 2);
         let exact = events
             .iter()
             .map(|(_tier, confirmation, cost)| {
@@ -2675,17 +2578,56 @@ mod final_survivor_tests {
                 )
             })
             .collect::<Vec<_>>();
-        assert_eq!(
-            exact,
-            [
-                (false, 1, 0, 0, 0, 0),
-                (false, 0, 7, 0, 0, 0),
-                (true, 1, 0, 0, 0, 0),
-                (true, 0, 7, 0, 1, 0)
-            ]
-        );
+        assert_eq!(exact, [(false, 1, 0, 0, 0, 0), (false, 0, 7, 0, 0, 0)]);
         let _costs = super::super::sweep::take_execution_costs();
         assert!(super::super::sweep::take_selection_trace().is_empty());
+    }
+
+    #[test]
+    fn kill_evidence_never_launches_an_unmutated_control() {
+        let control = tick::ClockControl::new();
+        let clock = control.to_simple_clock();
+        for active in [None, Some(37)] {
+            for only in [Only::All, Only::One("hinted::killer")] {
+                for test in [None, Some("reported::killer".to_owned())] {
+                    let mut launches = 0;
+                    let attempt = Attempt {
+                        active,
+                        only,
+                        timeout: Some(Duration::from_secs(3)),
+                        stall: Stall {
+                            budget: Some(Duration::from_secs(1)),
+                        },
+                        request: MemoryRequest {
+                            calibrating: false,
+                            meter: true,
+                            limit: Some(4096),
+                        },
+                    };
+                    let result = run_binary_with_observer(&clock, attempt, |actual| {
+                        launches += 1;
+                        assert_eq!(launches, 1, "an assertion failure must not launch a control run");
+                        assert_eq!(actual.active, active);
+                        assert_eq!(actual.only, only);
+                        assert_eq!(actual.timeout, attempt.timeout);
+                        assert_eq!(actual.stall.budget, attempt.stall.budget);
+                        assert_eq!(actual.request, attempt.request);
+                        Observation {
+                            verdict: Verdict::Failed(test.clone()),
+                            reach: ReachObservation::Reached,
+                            failure: None,
+                            quiet: Duration::ZERO,
+                            tests: Some(1),
+                            peak: None,
+                        }
+                    });
+                    assert_eq!(launches, 1);
+                    assert_eq!(result.verdict, Verdict::Failed(test));
+                    assert_eq!(result.reach, ReachObservation::Reached);
+                    let _costs = super::super::sweep::take_execution_costs();
+                }
+            }
+        }
     }
 
     #[test]
@@ -2699,7 +2641,6 @@ mod final_survivor_tests {
                 active: Some(37),
                 ..baseline_attempt()
             },
-            false,
             |_| {
                 control.advance_millis(17);
                 Observation {
@@ -2735,18 +2676,11 @@ mod final_survivor_tests {
 
     #[test]
     fn telemetry_records_each_confirmation_observation_once_without_launching_processes() {
-        for (confirm, verdicts) in [
-            (true, vec![Verdict::Failed(Some("killer".into())), Verdict::Passed]),
-            (false, vec![Verdict::TimedOut, Verdict::TimedOut]),
-            (false, vec![Verdict::TestEnumerationFailed("diagnostic".into()), Verdict::Passed]),
-            (
-                true,
-                vec![Verdict::TimedOut, Verdict::Failed(Some("killer".into())), Verdict::Passed],
-            ),
-            (
-                true,
-                vec![Verdict::Failed(Some("killer".into())), Verdict::Failed(Some("killer".into()))],
-            ),
+        for verdicts in [
+            vec![Verdict::Failed(Some("killer".into()))],
+            vec![Verdict::TimedOut, Verdict::TimedOut],
+            vec![Verdict::TestEnumerationFailed("diagnostic".into()), Verdict::Passed],
+            vec![Verdict::TimedOut, Verdict::Failed(Some("killer".into()))],
         ] {
             let expected = verdicts.len();
             let mut verdicts = verdicts.into_iter().enumerate();
@@ -2759,7 +2693,6 @@ mod final_survivor_tests {
                     active: Some(37),
                     ..baseline_attempt()
                 },
-                confirm,
                 |_| {
                     let (index, verdict) = verdicts.next().expect("only the scripted observations may be executed");
                     control.advance(Duration::from_millis(u64::try_from(index + 1).unwrap() * 7));
@@ -2830,7 +2763,6 @@ mod final_survivor_tests {
                     request: MemoryRequest::default(),
                     only: Only::All,
                 },
-                false,
                 |_| {
                     let (verdict, reach) = results.next().expect("one initial observation and one timeout confirmation");
                     Observation {
@@ -2850,7 +2782,7 @@ mod final_survivor_tests {
     }
 
     #[test]
-    fn enumeration_suspicions_are_exonerated_even_when_kill_confirmation_is_disabled() {
+    fn enumeration_suspicions_still_require_an_unmutated_check() {
         let mut calls = Vec::new();
         let result = run_binary_with_observer(
             &SimpleClock::new_system(),
@@ -2861,7 +2793,6 @@ mod final_survivor_tests {
                 request: MemoryRequest::default(),
                 only: Only::All,
             },
-            false,
             |attempt| {
                 calls.push(attempt.active);
                 Observation {
@@ -4071,35 +4002,25 @@ mod tests {
             request: MemoryRequest::default(),
             only: Only::All,
         };
-        assert!(reach_hint_is_final(base, false));
-        assert!(!reach_hint_is_final(
-            Attempt {
-                timeout: Some(Duration::from_secs(1)),
-                ..base
+        assert!(reach_hint_is_final(base));
+        assert!(!reach_hint_is_final(Attempt {
+            timeout: Some(Duration::from_secs(1)),
+            ..base
+        }));
+        assert!(!reach_hint_is_final(Attempt {
+            stall: Stall {
+                budget: Some(Duration::from_secs(1)),
             },
-            false
-        ));
-        assert!(!reach_hint_is_final(
-            Attempt {
-                stall: Stall {
-                    budget: Some(Duration::from_secs(1)),
-                },
-                ..base
+            ..base
+        }));
+        assert!(!reach_hint_is_final(Attempt {
+            request: MemoryRequest {
+                calibrating: false,
+                meter: true,
+                limit: None
             },
-            false
-        ));
-        assert!(!reach_hint_is_final(
-            Attempt {
-                request: MemoryRequest {
-                    calibrating: false,
-                    meter: true,
-                    limit: None
-                },
-                ..base
-            },
-            false
-        ));
-        assert!(!reach_hint_is_final(base, true));
+            ..base
+        }));
     }
 
     #[test]
@@ -4118,7 +4039,6 @@ mod tests {
                 request: MemoryRequest::default(),
                 only: Only::All,
             },
-            false,
         );
 
         assert_eq!(run.verdict, Verdict::Passed);
@@ -4578,7 +4498,7 @@ mod tests {
         assert_eq!(issued, 1 + CONFIRM_ROUNDS, "the ladder is not bounded");
     }
 
-    /// A verdict that is already evidence costs no confirmation here; `confirm_kill` owns that one.
+    /// An assertion failure needs no resource confirmation.
     #[test]
     fn a_settled_verdict_is_not_re_run() {
         let mut issued = 0_usize;
@@ -4881,7 +4801,6 @@ mod tests {
                 },
                 only: Only::All,
             },
-            true,
         );
 
         match verdict {
@@ -4919,7 +4838,6 @@ mod tests {
                 },
                 only: Only::All,
             },
-            true,
         );
 
         assert!(matches!(verdict, Verdict::Unjudged(_)), "{verdict:?}");
@@ -4937,7 +4855,7 @@ mod tests {
         let binary = crate::testing::helper();
         let _refused = faults::arm(Fault::Spawn);
 
-        let verdict = run_binary(&work, &binary, plain_attempt(), true);
+        let verdict = run_binary(&work, &binary, plain_attempt());
 
         assert_eq!(verdict, Verdict::Passed, "the retry must let the run go ahead");
     }
@@ -4954,7 +4872,7 @@ mod tests {
         let binary = crate::testing::helper();
         let _refusals: Vec<_> = (0..SPAWN_ATTEMPTS).map(|_round| faults::arm(Fault::Spawn)).collect();
 
-        let verdict = run_binary(&work, &binary, plain_attempt(), true);
+        let verdict = run_binary(&work, &binary, plain_attempt());
 
         match verdict {
             Verdict::Unjudged(reason) => assert!(reason.contains("could not be started"), "{reason}"),
@@ -4971,7 +4889,7 @@ mod tests {
         let _interrupted = process_faults::arm_late(ProcessFault::Window, Duration::from_millis(10));
         let started = Instant::now();
 
-        let verdict = run_binary(&work, &binary, plain_attempt(), true);
+        let verdict = run_binary(&work, &binary, plain_attempt());
 
         assert!(matches!(verdict, Verdict::Unmetered(_)), "{verdict:?}");
         assert!(started.elapsed() < SPAWN_BACKOFF.saturating_mul(2), "{:?}", started.elapsed());
@@ -4984,7 +4902,7 @@ mod tests {
         let binary = crate::testing::helper();
         let _refused = faults::arm(Fault::Thread);
 
-        let verdict = run_binary(&work, &binary, plain_attempt(), true);
+        let verdict = run_binary(&work, &binary, plain_attempt());
 
         match verdict {
             Verdict::Unjudged(reason) => assert!(reason.contains("output could not be supervised"), "{reason}"),
@@ -5057,7 +4975,6 @@ mod tests {
                 },
                 only: Only::All,
             },
-            true,
         );
 
         match verdict {
@@ -5267,8 +5184,7 @@ mod tests {
                     stall: Stall::NONE,
                     request: MemoryRequest::default(),
                     only: Only::All,
-                },
-                true
+                }
             ),
             Verdict::TimedOut
         );
@@ -5324,7 +5240,6 @@ mod tests {
                 request: MemoryRequest::default(),
                 only: Only::All,
             },
-            true,
         );
 
         assert!(matches!(verdict, Verdict::Stalled(_)), "{verdict:?}");
@@ -5393,8 +5308,7 @@ mod tests {
                     stall: Stall::NONE,
                     request: MemoryRequest::default(),
                     only: Only::All,
-                },
-                true
+                }
             ),
             Verdict::Passed
         );
@@ -5416,8 +5330,7 @@ mod tests {
                     stall: Stall::NONE,
                     request: MemoryRequest::default(),
                     only: Only::All,
-                },
-                true
+                }
             ),
             Verdict::Passed
         );
@@ -5443,7 +5356,6 @@ mod tests {
                 request: MemoryRequest::default(),
                 only: Only::All,
             },
-            true,
         );
         let took = started.elapsed();
 
@@ -5502,8 +5414,7 @@ mod tests {
                     stall: Stall::NONE,
                     request: MemoryRequest::default(),
                     only: Only::All,
-                },
-                true
+                }
             ),
             Verdict::Failed(Some("a::first".to_owned()))
         );
@@ -5526,8 +5437,7 @@ mod tests {
                     stall: Stall::NONE,
                     request: MemoryRequest::default(),
                     only: Only::All,
-                },
-                true
+                }
             ),
             Verdict::Passed
         );
@@ -5551,8 +5461,7 @@ mod tests {
                     stall: Stall::NONE,
                     request: MemoryRequest::default(),
                     only: Only::All,
-                },
-                true
+                }
             ),
             Verdict::Passed
         );
@@ -5579,8 +5488,7 @@ mod tests {
                     stall: Stall::NONE,
                     request: MemoryRequest::default(),
                     only: Only::All,
-                },
-                true
+                }
             ),
             Verdict::Passed
         );
@@ -5612,8 +5520,7 @@ mod tests {
                     stall: Stall::NONE,
                     request: MemoryRequest::default(),
                     only: Only::All,
-                },
-                true
+                }
             ),
             Verdict::Passed
         );
@@ -5622,8 +5529,6 @@ mod tests {
     /// A binary that exits non-zero fails, named by libtest's own report.
     #[test]
     fn a_failing_binary_is_named_by_its_first_failing_test() {
-        // Failing only while a mutant is active is what a detection looks like, and it is what the
-        // kill confirmation is there to establish: a binary that failed either way would be flaky.
         let (_directory, work) = scripted(&[
             "when-env:GAMMA_ACTIVE|print:test a::b ... FAILED",
             "when-env:GAMMA_ACTIVE|exit:101",
@@ -5644,8 +5549,7 @@ mod tests {
                     stall: Stall::NONE,
                     request: MemoryRequest::default(),
                     only: Only::All,
-                },
-                true
+                }
             ),
             Verdict::Failed(Some("a::b".to_owned()))
         );
@@ -5705,7 +5609,6 @@ mod tests {
                 },
                 only: Only::All,
             },
-            true,
         );
 
         // Reporting this as a plain failure would be defensible and wrong: the suite noticed
@@ -5786,8 +5689,7 @@ mod tests {
                         limit: Some(512 * 1024 * 1024)
                     },
                     only: Only::All,
-                },
-                true
+                }
             ),
             Verdict::Passed
         );
@@ -5883,8 +5785,7 @@ mod tests {
     /// The two exits carry the same pair of facts, and which one a run takes is decided by nothing
     /// but whether the reader published the failure before `try_wait` reaped the child. An early
     /// cut that preferred the ceiling would drop the name a reader goes and opens, discard the
-    /// killer hint the next mutant would have probed with, and — because only `Failed` is routed to
-    /// `confirm_kill` — skip the flake check for exactly the runs that raced the other way.
+    /// killer hint the next mutant would have probed with.
     ///
     /// Asserted here rather than through a launched binary because the state cannot be arranged on
     /// Linux: the ceiling sets `memory.oom.group`, so an OOM takes the whole subtree with it and
@@ -5943,75 +5844,9 @@ mod tests {
                 },
                 only: Only::All,
             },
-            false,
         );
 
         assert_eq!(verdict, Verdict::Failed(Some("failing::case".to_owned())));
-    }
-
-    /// An exoneration isolates the failing test rather than running the whole binary to completion,
-    /// so a slow tail in the rest of the suite does not cause the confirmation to time out and
-    /// misclassify the detection as flaky.
-    #[test]
-    fn an_exoneration_runs_only_the_failing_test_avoiding_suite_tail_timeouts() {
-        let (_directory, work) = scripted(&[
-            "when-env:GAMMA_ACTIVE|print:test first ... FAILED",
-            "when-env:GAMMA_ACTIVE|exit:101",
-            "when-arg:first|exit:0",
-            "sleep:30000",
-        ]);
-        let binary = crate::testing::helper();
-
-        let verdict = run_binary(
-            &work,
-            &binary,
-            Attempt {
-                active: Some(7),
-                timeout: Some(Duration::from_millis(500)),
-                stall: Stall::NONE,
-                request: MemoryRequest::default(),
-                only: Only::All,
-            },
-            true,
-        );
-
-        assert_eq!(verdict, Verdict::Failed(Some("first".to_owned())));
-    }
-
-    /// An exoneration that ran out of time did not establish that the suite is green without the
-    /// mutant, so it does not confirm the kill.
-    ///
-    /// The confirmation asks one question — does the suite still fail with the mutant switched off
-    /// — and a run that exceeded its budget answered neither way. Reading it as "green without,
-    /// red with" credits the suite with a detection on the strength of a scheduling hiccup, and it
-    /// does so in the score-inflating direction, which is the one this tool must not be wrong in.
-    #[test]
-    fn an_exoneration_that_ran_out_of_time_does_not_confirm_a_kill() {
-        // Fails only while a mutant is active; with none it runs long enough to outlive any budget
-        // a test would give it, which is the shape the exoneration has to cope with.
-        let (_directory, work) = scripted(&["when-env:GAMMA_ACTIVE|exit:101", "sleep:30000"]);
-        let binary = crate::testing::helper();
-
-        let verdict = confirm_kill(
-            &work,
-            &binary,
-            Attempt {
-                active: Some(7),
-                timeout: Some(Duration::from_millis(200)),
-                stall: Stall::NONE,
-                request: MemoryRequest::default(),
-                only: Only::All,
-            },
-            Some("a::b".to_owned()),
-        );
-
-        // Neither a kill nor a survivor, and the test that failed travels with it: that name is the
-        // only thing anybody can act on here.
-        assert_eq!(
-            verdict,
-            Verdict::Unconfirmed(Some("a::b".to_owned()), "exceeded its time budget"),
-            "{verdict:?}"
-        );
     }
 
     #[test]
@@ -6028,12 +5863,12 @@ mod tests {
             (Verdict::Stalled(Some("last".into())), "stopped reporting progress"),
             (Verdict::MemoryLimit { peak: Some(11), limit: 10 }, "exceeded its memory ceiling"),
         ] {
-            let confirmed = confirm_kill_with(attempt, Some("selected".into()), |actual| {
+            let confirmed = confirm_enumeration_with(attempt, "diagnostic".into(), |actual| {
                 assert_eq!(actual.active, None);
                 assert!(matches!(actual.only, Only::One("selected")));
                 verdict
             });
-            assert_eq!(confirmed, Verdict::Unconfirmed(Some("selected".into()), expected));
+            assert_eq!(confirmed, Verdict::Unconfirmed(None, expected));
         }
         assert_eq!(
             confirm_enumeration_with(attempt, "diagnostic".into(), |_| Verdict::TimedOut),
@@ -6042,7 +5877,30 @@ mod tests {
     }
 
     #[test]
-    fn confirmation_matrix_preserves_killers_enumeration_output_and_failed_exonerations() {
+    fn unexpected_confirmation_verdicts_keep_the_generic_unconfirmed_reason() {
+        let attempt = Attempt {
+            active: Some(7),
+            timeout: Some(Duration::from_secs(30)),
+            stall: Stall::NONE,
+            request: MemoryRequest::default(),
+            only: Only::One("selected"),
+        };
+        let reason = "did not establish a trustworthy passing result";
+        let verdicts: [fn() -> Verdict; 3] = [
+            || Verdict::Flaky(Some("other".into())),
+            || Verdict::TestEnumerationFailed("enumeration refused".into()),
+            || Verdict::Unconfirmed(None, "previous confirmation was incomplete"),
+        ];
+        for verdict in verdicts {
+            assert_eq!(
+                confirm_enumeration_with(attempt, "output".into(), |_| verdict()),
+                Verdict::Unconfirmed(None, reason)
+            );
+        }
+    }
+
+    #[test]
+    fn enumeration_confirmation_preserves_output_and_failed_exonerations() {
         let attempt = Attempt {
             active: Some(7),
             timeout: Some(Duration::from_secs(30)),
@@ -6050,7 +5908,7 @@ mod tests {
             request: MemoryRequest::default(),
             only: Only::All,
         };
-        for test in [None, Some("original".to_owned())] {
+        for test in [None, Some("observed".to_owned())] {
             let check = |actual: Attempt<'_>, expected: Only<'_>| {
                 assert_eq!(actual.active, None);
                 assert_eq!(actual.only, expected);
@@ -6059,13 +5917,6 @@ mod tests {
                 assert_eq!(actual.request, attempt.request);
             };
             assert_eq!(
-                confirm_kill_with(attempt, test.clone(), |actual| {
-                    check(actual, test.as_deref().map_or(Only::All, Only::One));
-                    Verdict::Passed
-                }),
-                Verdict::Failed(test.clone())
-            );
-            assert_eq!(
                 confirm_enumeration_with(attempt, "enumeration diagnostic".to_owned(), |actual| {
                     check(actual, Only::All);
                     Verdict::Passed
@@ -6073,38 +5924,19 @@ mod tests {
                 Verdict::TestEnumerationFailed("enumeration diagnostic".to_owned())
             );
             assert_eq!(
-                confirm_kill_with(attempt, test.clone(), |actual| {
-                    check(actual, test.as_deref().map_or(Only::All, Only::One));
-                    Verdict::Failed(Some("observed".to_owned()))
-                }),
-                Verdict::Flaky(test.clone().or_else(|| Some("observed".to_owned())))
-            );
-            assert_eq!(
                 confirm_enumeration_with(attempt, "enumeration diagnostic".to_owned(), |actual| {
                     check(actual, Only::All);
-                    Verdict::Failed(Some("observed".to_owned()))
+                    Verdict::Failed(test.clone())
                 }),
-                Verdict::Flaky(Some("observed".to_owned()))
+                Verdict::Flaky(test)
             );
         }
         for infrastructure in [Verdict::Unjudged, Verdict::Unmetered] {
-            assert_eq!(
-                confirm_kill_with(attempt, Some("original".to_owned()), |_| infrastructure(
-                    "injected failure".to_owned()
-                )),
-                infrastructure("injected failure".to_owned())
-            );
             assert_eq!(
                 confirm_enumeration_with(attempt, "diagnostic".to_owned(), |_| infrastructure("injected failure".to_owned())),
                 infrastructure("injected failure".to_owned())
             );
         }
-        assert_eq!(
-            confirm_kill_with(attempt.exonerating(), Some("original".to_owned()), |_| {
-                panic!("an unmutated failure must not launch another exoneration");
-            }),
-            Verdict::Failed(Some("original".to_owned()))
-        );
     }
 
     #[test]
@@ -6160,63 +5992,6 @@ mod tests {
         assert_eq!(verdict, Verdict::Unconfirmed(None, "exceeded its time budget"), "{verdict:?}");
     }
 
-    /// A test that fails with the mutant and fails again without it is flaky, not a detection.
-    ///
-    /// Scoring a failing suite as a kill with nothing at all having established that the mutant
-    /// caused it would let one unreliable test manufacture a kill for every mutant it was run
-    /// against, and inflate the score by however many that was.
-    #[test]
-    fn a_test_that_fails_without_the_mutant_too_is_not_a_kill() {
-        let (_directory, work) = scripted(&["print:running 1 test", "print:test a::b ... FAILED", "exit:101"]);
-        let flaky = crate::testing::helper();
-
-        // Neither a kill nor a survivor: something failed, but not because of the mutant, and the
-        // mutant is what was being judged. The test that failed both ways travels with the verdict
-        // because fixing it is the only remedy anybody has here.
-        assert_eq!(
-            run_binary(
-                &work,
-                &flaky,
-                Attempt {
-                    active: Some(7),
-                    timeout: Some(Duration::from_secs(30)),
-                    stall: Stall::NONE,
-                    request: MemoryRequest::default(),
-                    only: Only::All,
-                },
-                true
-            ),
-            Verdict::Flaky(Some("a::b".to_owned()))
-        );
-    }
-
-    /// Turning the confirmation off buys back the second run and gives up telling the two apart.
-    ///
-    /// The same binary that is flaky above is scored as a detection here, which is exactly the cost
-    /// of the flag: nothing established that the mutant caused the failure, and without the
-    /// confirming run nothing could have.
-    #[test]
-    fn a_run_that_declines_to_confirm_believes_the_failing_test() {
-        let (_directory, work) = scripted(&["print:running 1 test", "print:test a::b ... FAILED", "exit:101"]);
-        let flaky = crate::testing::helper();
-
-        assert_eq!(
-            run_binary(
-                &work,
-                &flaky,
-                Attempt {
-                    active: Some(7),
-                    timeout: Some(Duration::from_secs(30)),
-                    stall: Stall::NONE,
-                    request: MemoryRequest::default(),
-                    only: Only::All,
-                },
-                false
-            ),
-            Verdict::Failed(Some("a::b".to_owned()))
-        );
-    }
-
     /// The confirmation is skipped when there was no mutant to exonerate.
     ///
     /// A run with nothing active has already answered the question the confirmation would ask, so
@@ -6236,8 +6011,7 @@ mod tests {
                     stall: Stall::NONE,
                     request: MemoryRequest::default(),
                     only: Only::All,
-                },
-                true
+                }
             ),
             Verdict::Failed(Some("a::b".to_owned()))
         );
@@ -6752,7 +6526,6 @@ mod tests {
                 request: MemoryRequest::default(),
                 only: Only::All,
             },
-            false,
         );
 
         assert!(matches!(verdict, Verdict::Passed), "{verdict:?}");

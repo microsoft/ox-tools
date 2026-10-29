@@ -80,9 +80,6 @@ pub struct Config {
     /// Skip the baseline measurement.
     pub no_baseline: Option<bool>,
 
-    /// Believe a failing test without re-running it with no mutant active.
-    pub no_confirm: Option<bool>,
-
     /// Packages to mutate. Empty means every package in the workspace.
     pub packages: Vec<String>,
 
@@ -249,7 +246,6 @@ impl Config {
             test_timeout_multiplier: Option<IgnoredAny>,
             incremental: Option<IgnoredAny>,
             no_baseline: Option<IgnoredAny>,
-            no_confirm: Option<IgnoredAny>,
             packages: Option<IgnoredAny>,
             test_packages: Option<IgnoredAny>,
             test_lib: Option<IgnoredAny>,
@@ -424,10 +420,6 @@ impl Config {
         args.measure.include_tests.extend(self.include_tests.iter().cloned());
         args.measure.exclude_tests.extend(self.exclude_tests.iter().cloned());
         args.no_baseline = args.no_baseline || self.no_baseline.unwrap_or(false);
-        args.no_confirm = args.no_confirm || self.no_confirm.unwrap_or(false);
-        if args.max_flaky.is_some() && args.no_confirm {
-            return Err(error!("`max-flaky` requires confirmation; remove `--no-confirm` or the `no-confirm` configuration").usage());
-        }
         args.artifact_dir = args.artifact_dir.take().or_else(|| self.artifact_dir.clone());
         if !args.measure.test_packages.is_empty() && args.measure.test_workspace {
             return Err(contradiction(
@@ -593,14 +585,12 @@ mod miri_tests {
                 nextest: configured,
                 test_lib: configured,
                 no_baseline: configured,
-                no_confirm: configured,
                 all_features: configured,
                 no_default_features: configured,
                 ..Config::default()
             };
             let mut args = RunArgs {
                 no_baseline: true,
-                no_confirm: true,
                 ..RunArgs::default()
             };
             args.measure.nextest = true;
@@ -611,7 +601,6 @@ mod miri_tests {
             assert!(args.measure.nextest);
             assert!(args.measure.test_lib);
             assert!(args.no_baseline);
-            assert!(args.no_confirm);
             assert!(args.select.features.all_features);
             assert!(args.select.features.no_default_features);
         }
@@ -767,16 +756,14 @@ mod miri_tests {
     }
 
     #[test]
-    fn a_flaky_gate_requires_confirmation_after_configuration_is_merged() {
-        let config = Config::parse("max-flaky = 0\nno-confirm = true\n").expect("configuration parses");
+    fn a_flaky_gate_remains_available_without_kill_confirmations() {
+        let config = Config::parse("max-flaky = 0\n").expect("configuration parses");
         let mut args = RunArgs::default();
 
-        let failure = config
+        config
             .apply(&mut args)
-            .expect_err("the gate cannot observe flakes without confirmation");
-
-        assert!(failure.is_usage(), "{failure}");
-        assert!(failure.to_string().contains("requires confirmation"), "{failure}");
+            .expect("nextest enumeration can still produce flaky outcomes");
+        assert_eq!(args.max_flaky, Some(0));
     }
 
     #[test]
@@ -860,7 +847,6 @@ mod tests {
 
         assert!(!args.measure.nextest);
         assert!(!args.no_baseline);
-        assert!(!args.no_confirm);
     }
 
     #[test]
@@ -1122,14 +1108,20 @@ mod tests {
     }
 
     #[test]
-    fn no_confirm_is_accepted_without_a_flaky_gate() {
-        let config = Config::parse("no-confirm = true\n").expect("configuration parses");
-        let mut args = RunArgs::default();
-
-        config.apply(&mut args).expect("confirmation can be disabled without a flaky gate");
-
-        assert!(args.no_confirm);
-        assert_eq!(args.max_flaky, None);
+    fn obsolete_no_confirm_configuration_is_rejected() {
+        let error = Config::parse("no-confirm = true\n").expect_err("kill confirmation is no longer configurable");
+        assert_eq!(
+            error,
+            concat!(
+                "unknown field `no-confirm`, expected one of `mutators`, `files`, `exclude-files`, ",
+                "`exclude-trait-impls`, `min-score`, `max-flaky`, `jobs`, `resources`, `test-timeout-multiplier`, ",
+                "`incremental`, `no-baseline`, `packages`, `test-packages`, `test-lib`, `test-workspace`, ",
+                "`whole-test-binaries`, `include-tests`, `exclude-tests`, `features`, `all-features`, ",
+                "`no-default-features`, `profile`, `cargo-args`, `cargo-test-args`, `errors`, `minimum-test-timeout`, ",
+                "`nextest`, `memory`, `memory-multiplier`, `memory-headroom`, `memory-limit`, `baseline-memory-limit`, ",
+                "`build-timeout`, `build-timeout-multiplier`, `artifact-dir`, `shard`",
+            )
+        );
     }
 
     #[test]
@@ -1308,7 +1300,7 @@ mod tests {
 
     #[test]
     fn resumed_reporting_gates_preserve_cli_overrides_and_leave_execution_frozen() {
-        let config = Config::parse("min-score = 80.0\nmax-flaky = 2\njobs = 12\nno-confirm = true\n").unwrap();
+        let config = Config::parse("min-score = 80.0\nmax-flaky = 2\njobs = 12\n").unwrap();
         for (minimum, flaky) in [(None, None), (Some(90.0), Some(0))] {
             let mut args = RunArgs {
                 resume_testing: true,
@@ -1320,7 +1312,6 @@ mod tests {
             assert_eq!(args.min_score, Some(minimum.unwrap_or(80.0)));
             assert_eq!(args.max_flaky, Some(flaky.unwrap_or(2)));
             assert_eq!(args.measure.jobs, None);
-            assert!(!args.no_confirm);
         }
     }
 
@@ -1608,7 +1599,6 @@ mod tests {
             test_timeout_multiplier: Some(63.5),
             incremental: Some(IncrementalMode::No),
             no_baseline: Some(true),
-            no_confirm: Some(false),
             packages: vec!["package-from-the-file".to_owned()],
             test_packages: vec!["test-package-from-the-file".to_owned()],
             test_lib: Some(true),
@@ -1695,7 +1685,6 @@ mod tests {
         assert_eq!(args.measure.include_tests, ["included-test-from-the-file"]);
         assert_eq!(args.measure.exclude_tests, ["excluded-test-from-the-file"]);
         assert!(args.no_baseline);
-        assert!(!args.no_confirm);
         assert_eq!(args.artifact_dir.as_deref(), Some(Utf8Path::new("artifacts-from-the-file")));
     }
 
