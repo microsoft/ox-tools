@@ -340,6 +340,15 @@ mod tests {
 
     #[test]
     fn pr_groups_consume_downloaded_impact_while_scheduled_defaults_off() {
+        assert_eq!(
+            PR_IMPL_WORKFLOW.matches("uses: ./.anvil/github/actions/impact").count(),
+            2,
+            "both impact jobs must invoke the generated action at its consolidated path"
+        );
+        assert!(
+            !PR_IMPL_WORKFLOW.contains(".github/actions/anvil-impact"),
+            "the retired pre-consolidation action path must not return"
+        );
         // PR group jobs download the per-OS impact artifact and run in
         // `consume` mode; scoped checks read that downloaded cache.
         assert!(PR_IMPL_WORKFLOW.contains("uses: actions/download-artifact"));
