@@ -41,8 +41,10 @@ struct SharedContainerError;
 struct MergedJobError;
 
 #[ohno::error]
-#[display("cyclic YAML merge defaults prevent determining the Dependabot job's ecosystem; expand the merge")]
-struct CyclicMergeError;
+#[display("cyclic YAML merge defaults prevent determining the Dependabot `{field}` setting; expand the merge")]
+struct CyclicMergeError {
+    field: &'static str,
+}
 
 #[ohno::error]
 #[display("expected a scalar Dependabot setting; expand YAML aliases used for this value")]
@@ -124,13 +126,14 @@ pub(crate) fn update(text: &str, paths: &[&str]) -> Result<Option<String>, AppEr
     for job in updates.sequence()? {
         let job = job.resolve(&root);
         let ecosystem = job
-            .effective_ecosystem(&root, &mut Vec::new())?
-            .ok_or_else(|| MissingFieldError::new("package-ecosystem", "Dependabot update job"))?;
+            .effective_field(&root, "package-ecosystem", &mut Vec::new())?
+            .ok_or_else(|| MissingFieldError::new("package-ecosystem", "Dependabot update job"))?
+            .scalar()?;
         if ecosystem != "github-actions" {
             continue;
         }
         let fields = job.fields()?;
-        let exclusions = fields.get("exclude-paths").map(|node| node.resolve(&root));
+        let exclusions = job.effective_field(&root, "exclude-paths", &mut Vec::new())?;
         let existing = exclusions.map(|node| node.sequence()).transpose()?.unwrap_or_default();
         let existing = existing
             .iter()
@@ -297,19 +300,19 @@ impl Node {
         Ok(fields)
     }
 
-    /// Read only the effective ecosystem. Explicit values win; merge sequences
+    /// Read only one effective setting. Explicit values win; merge sequences
     /// use their first matching default. The active source spans bound cycles.
-    fn effective_ecosystem<'a>(&'a self, root: &'a Self, active: &mut Vec<usize>) -> Result<Option<&'a str>, AppError> {
+    fn effective_field<'a>(&'a self, root: &'a Self, field: &'static str, active: &mut Vec<usize>) -> Result<Option<&'a Self>, AppError> {
         let node = self.resolve(root);
         let fields = node.fields()?;
-        if let Some(ecosystem) = fields.get("package-ecosystem") {
-            return ecosystem.resolve(root).scalar().map(Some);
+        if let Some(value) = fields.get(field) {
+            return Ok(Some(value.resolve(root)));
         }
         let Some(defaults) = fields.get("<<").map(|defaults| defaults.resolve(root)) else {
             return Ok(None);
         };
         if active.contains(&node.span.start) {
-            return Err(CyclicMergeError::new().into());
+            return Err(CyclicMergeError::new(field).into());
         }
         active.push(node.span.start);
         let defaults = if defaults.kind == Kind::Sequence {
@@ -317,11 +320,11 @@ impl Node {
         } else {
             std::slice::from_ref(defaults)
         };
-        let result = defaults.iter().try_fold(None, |ecosystem, defaults| {
-            if ecosystem.is_some() {
-                Ok(ecosystem)
+        let result = defaults.iter().try_fold(None, |value, defaults| {
+            if value.is_some() {
+                Ok(value)
             } else {
-                defaults.effective_ecosystem(root, active)
+                defaults.effective_field(root, field, active)
             }
         });
         active.pop();
@@ -514,6 +517,7 @@ mod tests {
         );
         for job in [
             "  - <<: [*cargo, *actions]\n    directory: /tools\n",
+            "  - <<: [*actions, *cargo]\n    directory: /tools\n",
             "  - <<: [{}, *cargo]\n    directory: /tools\n",
             "  - <<: *nested\n    directory: /tools\n",
             "  - <<: *actions\n    package-ecosystem: cargo\n    directory: /tools\n",
@@ -521,15 +525,54 @@ mod tests {
         ] {
             assert_eq!(update(&format!("{defaults}{job}"), PATHS).unwrap(), None);
         }
+        let job = "  - <<: *cargo\n    package-ecosystem: github-actions\n    directory: /tools\n";
+        let error = update(&format!("{defaults}{job}"), PATHS).unwrap_err();
+        error_cause::<MergedJobError>(&error);
+        let error = update("version: 2\nupdates:\n  - &cycle\n    <<: *cycle\n    directory: /\n", PATHS).unwrap_err();
+        assert_eq!(error_cause::<CyclicMergeError>(&error).field, "package-ecosystem");
+    }
+
+    #[test]
+    fn inherited_exclusions_are_read_only_with_merge_precedence_and_overrides() {
+        let paths = quoted_paths(PATHS);
+        let defaults = format!(
+            "version: 2\nupdates:\n\
+             \x20 - &cargo {{package-ecosystem: cargo, directory: /, schedule: {{interval: weekly}}}}\n\
+             \x20 - &actions {{package-ecosystem: github-actions, directory: /, exclude-paths: {paths}}}\n",
+        );
         for job in [
-            "  - <<: [*actions, *cargo]\n    directory: /tools\n",
-            "  - <<: *cargo\n    package-ecosystem: github-actions\n    directory: /tools\n",
+            "  - <<: *actions\n    target-branch: release\n".to_owned(),
+            "  - <<: [*actions, *cargo]\n    target-branch: release\n".to_owned(),
+            "  - <<: [{}, *actions]\n    target-branch: release\n".to_owned(),
+            "  - <<: [*cargo, *actions]\n    package-ecosystem: github-actions\n    target-branch: release\n".to_owned(),
+            "  - <<: {'<<': *actions}\n    target-branch: release\n".to_owned(),
+            format!(
+                "  - <<: {{package-ecosystem: github-actions, exclude-paths: [vendor/**]}}\n\
+                 \x20   exclude-paths: {paths}\n    target-branch: release\n",
+            ),
+        ] {
+            assert_eq!(update(&format!("{defaults}{job}"), PATHS).unwrap(), None);
+        }
+        for job in [
+            "  - <<: *actions\n    exclude-paths: []\n    target-branch: release\n",
+            "  - <<: *actions\n    exclude-paths: [vendor/**]\n    target-branch: release\n",
+            "  - <<: [{exclude-paths: []}, *actions]\n    target-branch: release\n",
         ] {
             let error = update(&format!("{defaults}{job}"), PATHS).unwrap_err();
             error_cause::<MergedJobError>(&error);
         }
-        let error = update("version: 2\nupdates:\n  - &cycle\n    <<: *cycle\n    directory: /\n", PATHS).unwrap_err();
-        error_cause::<CyclicMergeError>(&error);
+        let error = update(
+            &format!("{defaults}  - <<: *actions\n    exclude-paths: null\n    target-branch: release\n"),
+            PATHS,
+        )
+        .unwrap_err();
+        error_cause::<ExpectedSequenceError>(&error);
+        let error = update(
+            "version: 2\nupdates:\n  - &cycle\n    package-ecosystem: github-actions\n    <<: *cycle\n    directory: /\n",
+            PATHS,
+        )
+        .unwrap_err();
+        assert_eq!(error_cause::<CyclicMergeError>(&error).field, "exclude-paths");
     }
 
     #[test]
