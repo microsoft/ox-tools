@@ -89,6 +89,15 @@ impl Original {
 }
 
 impl Splices {
+    #[cfg(test)]
+    pub(super) fn seeded_guards_for_test(root: Utf8PathBuf, guards: Guards) -> Self {
+        Self {
+            root,
+            guards,
+            ..Self::default()
+        }
+    }
+
     /// Drops indexes whose positions were invalidated by reordering the plan's mutant vector.
     ///
     /// Instrumented text and guards remain valid because they are keyed by file and ordinal, not
@@ -135,7 +144,11 @@ impl Splices {
             self.indexed_mutants = 0;
             // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
             self.withdrawn.clear();
-            self.active_selection = false;
+
+            // #[gamma::skip(stmt.delete_assign, reason = "On root change, instrument clears placed and all indexes immediately before this active_selection reset. Leaving the old flag or assigning true only makes refresh_index extend dirty with the now-empty placed map, then unconditionally reset active_selection=false. No other operation reads the flag before refresh_index; guards/writes/results are identical.", tag = "equivalent")]
+            self.active_selection =
+            // #[gamma::skip(literal.bool_flip, reason = "On root change, instrument clears placed and all indexes immediately before this active_selection reset. Leaving the old flag or assigning true only makes refresh_index extend dirty with the now-empty placed map, then unconditionally reset active_selection=false. No other operation reads the flag before refresh_index; guards/writes/results are identical.", tag = "equivalent")]
+            false;
         }
 
         self.restore_removed_files(work, plan)?;
@@ -156,7 +169,11 @@ impl Splices {
             self.indexed_files = 0;
             self.indexed_mutants = 0;
             self.withdrawn.clear();
-            self.active_selection = false;
+
+            // #[gamma::skip(stmt.delete_assign, reason = "This is the root-change reset inside instrument_active. After clearing caches, the method calls restore_removed_files and refresh_plan_index (neither reads active_selection), then unconditionally assigns active_selection=true before instrumentation. Deleting the earlier false assignment or changing it to true is overwritten before any flag read.", tag = "equivalent")]
+            self.active_selection =
+            // #[gamma::skip(literal.bool_flip, reason = "This is the root-change reset inside instrument_active. After clearing caches, the method calls restore_removed_files and refresh_plan_index (neither reads active_selection), then unconditionally assigns active_selection=true before instrumentation. Deleting the earlier false assignment or changing it to true is overwritten before any flag read.", tag = "equivalent")]
+            false;
         }
 
         self.restore_removed_files(work, plan)?;
@@ -189,6 +206,7 @@ impl Splices {
 
         'dirty_files: for position in dirty {
             let Some(file) = plan.files.get(position) else {
+                // #[gamma::skip(loop.continue_to_break, reason = "dirty positions come exclusively from file_index. refresh_plan_index clears that map whenever the plan identity changes or file count shrinks; every stored index is inserted from plan.files.enumerate(), so all such positions remain below the current file count. Thus plan.files.get(position) cannot be None at this exact continue label, even when file contents/order change.", tag = "equivalent")]
                 continue 'dirty_files;
             };
             if let Some((_ordinals, previous)) = self.placed.get(&file.path) {
@@ -203,7 +221,9 @@ impl Splices {
                 .flatten()
                 .filter_map(|position| plan.mutants.get(*position))
                 // #[gamma::skip(relational.gt_to_ge, reason = "ordinal is u32 and zero is absent from mutants_by_file because refresh_index excludes the sentinel before indexing")]
-                .filter(|mutant| mutant.ordinal > 0 && is_live(mutant.ordinal))
+                .filter(|mutant|
+                // #[gamma::skip(logical.and_remove_left, reason = "mutants_by_file is populated only when mutant.ordinal>0 by refresh_plan_index; plan_reordered invalidates position indexes, and ordinary convergence never changes ordinals while these indexes live. instrument_selected filters only those indexed positions, so every admitted mutant already has positive ordinal. The removed left conjunction is a repeated sentinel guard; actual zero-ordinal mutants cannot enter this iterator.", tag = "equivalent")]
+                mutant.ordinal > 0 && is_live(mutant.ordinal))
                 .collect();
             let ordinals: Vec<u32> = live.iter().map(|mutant| mutant.ordinal).collect();
 

@@ -49,7 +49,10 @@ fn body_array(body: &str) -> Result<Array, ManagedRegionRefusal> {
         .parse::<DocumentMut>()
         .map_err(|error| refusal(error, RefusalRemedy::InvalidGeneratedToml))?;
     if toml_comment_lines(&source).into_iter().any(|line| {
-        let comment = source[line.start..line.end].trim();
+        let comment = source[
+        // #[gamma::skip(range.exclusive_to_inclusive, reason = "Comment spans already include LF; one following syntax byte cannot extend either sentinel prefix.", tag = "equivalent")]
+        line.start..line.end]
+            .trim();
         comment.starts_with("# >>> anvil-managed:") || comment.starts_with("# <<< anvil-managed:")
     }) {
         return Err(refusal(
@@ -59,7 +62,7 @@ fn body_array(body: &str) -> Result<Array, ManagedRegionRefusal> {
     }
     let array = document["entries"]
         .as_array()
-        .ok_or_else(|| refusal("the region must contain only array entries", RefusalRemedy::InvalidGeneratedToml))?;
+        .expect("the fixed entries = [ prefix parses as an array");
     if document.as_table().len() != 1 {
         return Err(refusal(
             "the region must contain only array entries",
@@ -105,7 +108,10 @@ fn render_body(body: &str, newline: &str) -> Result<String, ManagedRegionRefusal
         // Indent entry/comment lines, but not continuations inside values:
         // indentation in a multiline string is data, not TOML decoration.
         let in_value = spans.iter().any(|span| contains_interior(span, offset));
-        let content = line.trim_end_matches(['\r', '\n']);
+        let content = line.trim_end_matches(
+            // #[gamma::skip(collection.reverse_array, reason = "This pattern is a character membership set; reversing its order cannot change matching.", tag = "equivalent")]
+            ['\r', '\n'],
+        );
         if in_value || !content.trim().is_empty() {
             if !in_value {
                 rendered.push_str("  ");
@@ -151,16 +157,18 @@ fn scaffold(text: &str, path: &[String]) -> Result<String, ManagedRegionRefusal>
     // toml_edit normalizes existing CRLF decoration when serializing. Apply
     // only its scaffold delta to the original bytes, including mixed endings.
     let edited = document.to_string();
-    let prefix: usize = normalized
+    let (prefix, prefix_characters) = normalized
         .chars()
         .zip(edited.chars())
         .take_while(|(before, after)| before == after)
-        .map(|(character, _)| character.len_utf8())
-        .sum();
-    let suffix: usize = normalized[prefix..]
+        .fold((0, 0), |(bytes, characters), (character, _)| {
+            (bytes + character.len_utf8(), characters + 1)
+        });
+    let suffix: usize = normalized
         .chars()
         .rev()
-        .zip(edited[prefix..].chars().rev())
+        .zip(edited.chars().rev())
+        .take(normalized.chars().count() - prefix_characters)
         .take_while(|(before, after)| before == after)
         .map(|(character, _)| character.len_utf8())
         .sum();
@@ -174,16 +182,21 @@ fn scaffold(text: &str, path: &[String]) -> Result<String, ManagedRegionRefusal>
     }
     let inserted = edited[prefix..edited.len() - suffix].replace('\n', text_newline(text));
     let scaffolded = format!("{}{inserted}{}", &text[..before], &text[after..]);
-    let document = Document::parse(scaffolded.as_str()).map_err(|error| refusal(error, RefusalRemedy::HostAlreadyUnparsable))?;
+    let document =
+    // #[gamma::skip(try.propagate_to_unwrap, reason = "Scaffolding serializes a successfully parsed TOML document; this reparse cannot fail without a parser bug.", tag = "equivalent")]
+    Document::parse(scaffolded.as_str()).map_err(|error| refusal(error, RefusalRemedy::HostAlreadyUnparsable))?;
     let array = lookup(document.as_item(), path)
         .and_then(Item::as_array)
         .expect("the scaffold inserted or validated an array");
     let span = array.span().expect("parsed array retains its span");
     let regions = validated_regions(&scaffolded)?;
-    if regions
-        .iter()
-        .any(|region| (region.body.start..region.body.end).contains(&span.start))
-    {
+    if regions.iter().any(|region| {
+        (
+            // #[gamma::skip(range.exclusive_to_inclusive, reason = "A closing sentinel line begins with whitespace or #, never the opening bracket of an array.", tag = "equivalent")]
+            region.body.start..region.body.end
+        )
+            .contains(&span.start)
+    }) {
         return Err(refusal(
             "creating the missing array would overlap another managed region; scaffold relocation is not supported",
             RefusalRemedy::EnclosingOwnership,
@@ -261,8 +274,12 @@ pub(crate) fn plan_toml_array_region(
         (original, document, regions)
     } else {
         scaffolded = scaffold(original, &spec.path)?;
-        let document = Document::parse(scaffolded.as_str()).map_err(|error| refusal(error, RefusalRemedy::HostAlreadyUnparsable))?;
-        let regions = validated_regions(&scaffolded)?;
+        let document =
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "Scaffolding has already parsed and validated these same unchanged bytes.", tag = "equivalent")]
+        Document::parse(scaffolded.as_str()).map_err(|error| refusal(error, RefusalRemedy::HostAlreadyUnparsable))?;
+        let regions =
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "Scaffolding has already parsed and validated these same unchanged bytes.", tag = "equivalent")]
+        validated_regions(&scaffolded)?;
         (scaffolded.as_str(), document, regions)
     };
     let mut parent = document.as_item();
@@ -285,7 +302,9 @@ pub(crate) fn plan_toml_array_region(
             continue;
         }
         // Delimiters and their token ends cannot coincide with full sentinel-line boundaries.
-        let ownership = other.start_line.start..other.end_line.end;
+        let ownership =
+        // #[gamma::skip(range.exclusive_to_inclusive, reason = "Parsed array delimiter boundaries cannot coincide with the end of a full sentinel comment line.", tag = "equivalent")]
+        other.start_line.start..other.end_line.end;
         if ownership.contains(&span.start) || ownership.contains(&span.end) {
             return Err(refusal(
                 format!(
@@ -294,10 +313,14 @@ pub(crate) fn plan_toml_array_region(
                 RefusalRemedy::EnclosingOwnership,
             ));
         }
-        let without = remove_region(base, id, CommentSyntax::Hash).map_err(|error| refusal(error, RefusalRemedy::MalformedMarkers))?;
+        let without =
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "The same unchanged TOML marker stream was already validated as unique balanced pairs.", tag = "equivalent")]
+        remove_region(base, id, CommentSyntax::Hash).map_err(|error| refusal(error, RefusalRemedy::MalformedMarkers))?;
         validate_neighbor_splice(base, &without, std::slice::from_ref(&spec.path))?;
     }
     let region =
+
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "The same unchanged TOML marker stream was already validated as unique balanced pairs.", tag = "equivalent")]
         find_region(base, spec.region.id.as_str(), CommentSyntax::Hash).map_err(|error| refusal(error, RefusalRemedy::MalformedMarkers))?;
     if let Some(region) = &region {
         if !span.contains(&region.start_line.start) || !span.contains(&region.end_line.end) {
@@ -319,7 +342,9 @@ pub(crate) fn plan_toml_array_region(
         }
     }
     let newline = text_newline(original);
-    let body = render_body(&spec.region.body, newline)?;
+    let body =
+    // #[gamma::skip(try.propagate_to_unwrap, reason = "The unchanged generated body was already validated as a nonempty string array.", tag = "equivalent")]
+    render_body(&spec.region.body, newline)?;
     let rendered = format!(
         "  # >>> anvil-managed: {}{newline}{body}  # <<< anvil-managed: {}{newline}",
         spec.region.id, spec.region.id
@@ -330,7 +355,9 @@ pub(crate) fn plan_toml_array_region(
         rendered_body: &body,
         syntax: CommentSyntax::Hash,
         placement: RegionPlacement::End,
-        newline: Some(newline),
+        newline:
+        // #[gamma::skip(option.some_to_none, reason = "The override equals the newline inferred from the same unchanged host by the None fallback.", tag = "equivalent")]
+        Some(newline),
     };
     plan_region_with_splice(manifest, host_text, request, crate::region::HostScanner::Toml, || {
         let spliced = if let Some(region) = region {
@@ -343,6 +370,8 @@ pub(crate) fn plan_toml_array_region(
             format!("{}{newline}{rendered}{rest}", &adopted[..at])
         };
         Document::parse(&spliced).map_err(|error| refusal(error, RefusalRemedy::InvalidGeneratedToml))?;
+
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "Only validated non-sentinel values are spliced outside protected marker spans; the balanced marker pairs remain valid.", tag = "equivalent")]
         validated_regions(&spliced)?;
         Ok(spliced)
     })
@@ -353,9 +382,42 @@ pub(crate) fn plan_toml_array_region(
 /// A neighboring region must not remove array delimiters or rebind an existing
 /// selector to a different source location, even when the result still parses.
 pub(crate) fn validate_neighbor_splice(before: &str, after: &str, paths: &[Vec<String>]) -> Result<(), ManagedRegionRefusal> {
+    validate_neighbor_offsets(before, after, paths, splice_offset_map(before, after))
+}
+
+/// Preserve arrays between disjoint deletions in original-source coordinates.
+/// Ranges must be sorted and non-overlapping; collapsing them would hide surviving arrays.
+pub(crate) fn validate_neighbor_deletions(
+    before: &str,
+    after: &str,
+    paths: &[Vec<String>],
+    deletions: &[crate::region::ByteRange],
+) -> Result<(), ManagedRegionRefusal> {
+    validate_neighbor_offsets(before, after, paths, |offset| {
+        let mut removed = 0;
+        for range in deletions {
+            if offset < range.start {
+                // #[gamma::skip(loop.break_to_continue, reason = "Deletion ranges are sorted; after this offset precedes one range it precedes every later range too.", tag = "equivalent")]
+                break;
+            }
+            if offset < range.end {
+                return None;
+            }
+            removed += range.end - range.start;
+        }
+        Some(offset - removed)
+    })
+}
+
+/// Check selector identity with a map from original to updated byte offsets (`None` if deleted).
+fn validate_neighbor_offsets(
+    before: &str,
+    after: &str,
+    paths: &[Vec<String>],
+    map_offset: impl Fn(usize) -> Option<usize>,
+) -> Result<(), ManagedRegionRefusal> {
     let original = Document::parse(before).map_err(|error| refusal(error, RefusalRemedy::HostAlreadyUnparsable))?;
     let updated = Document::parse(after).map_err(|error| refusal(error, RefusalRemedy::BetweenManagedRegions))?;
-    let map_offset = splice_offset_map(before, after);
     for path in paths {
         let Some(array) = lookup(original.as_item(), path).and_then(Item::as_array) else {
             continue;
@@ -463,7 +525,9 @@ fn adopt_entries(text: &str, array: &Array, body: &str) -> Result<String, Manage
             used.insert(index);
             let span = value.span().expect("parsed array values retain source spans");
             let next = values
-                .get(index + 1)
+                .get(index +
+                // #[gamma::skip(literal.int_increment, reason = "The mandatory first separator precedes the next value; extending the scan cannot change that comma.", tag = "equivalent")]
+                1)
                 .and_then(|value| value.span())
                 // Including the array closer is harmless; punctuation AFTER it belongs to the parent.
                 .map_or_else(|| array.span().expect("parsed array retains its span").end, |span| span.start);
@@ -498,7 +562,10 @@ fn separator_comma(gap: &str) -> Option<usize> {
     let mut comment = false;
     for (index, character) in gap.char_indices() {
         match character {
-            '\n' => comment = false,
+            '\n' => {
+                // #[gamma::skip(assign_value.default, reason = "Default produces the same concrete false or None value as this assignment.", tag = "equivalent")]
+                comment = false;
+            }
             '#' => comment = true,
             ',' if !comment => return Some(index),
             _ => {}
@@ -518,6 +585,58 @@ mod tests {
     use crate::decision::Decision;
     use crate::plan::{Plan, Target};
 
+    #[test]
+    fn scaffolding_an_empty_host_inserts_the_entire_array_assignment() {
+        assert_eq!(scaffold("", &["items".to_owned()]).unwrap(), "items = []\n");
+    }
+
+    #[test]
+    fn deleting_array_trivia_can_end_exactly_at_its_closing_delimiter() {
+        validate_neighbor_deletions(
+            "items = [\n# note\n]\n",
+            "items = []\n",
+            &[vec!["items".to_owned()]],
+            &[crate::region::ByteRange { start: 9, end: 17 }],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn deleting_nested_delimiters_cannot_rebind_a_live_array_selector() {
+        let error = validate_neighbor_deletions(
+            "items = [[1]]\n",
+            "items = [1]\n",
+            &[vec!["items".to_owned()]],
+            &[
+                crate::region::ByteRange { start: 8, end: 9 },
+                crate::region::ByteRange { start: 11, end: 12 },
+            ],
+        )
+        .unwrap_err();
+        assert_eq!(error.remedy, RefusalRemedy::ArrayDependency);
+        assert_eq!(
+            error.reason.to_string(),
+            "this change would remove or rebind the live TOML array selector [\"items\"]"
+        );
+    }
+
+    #[test]
+    fn survivor_array_shape_errors_and_unicode_scaffolding_have_exact_results() {
+        let body = "\"managed\",\n]\nentries = false\n#";
+        let refusal = body_array(body).unwrap_err();
+        assert_eq!(refusal.remedy, RefusalRemedy::InvalidGeneratedToml);
+        for text in ["name = \"λ\"\n", "name = \"λ\"\r\n", "[plugins]\nname = \"λ\"\n"] {
+            let path = vec!["plugins".to_owned(), "default".to_owned()];
+            let scaffolded = scaffold(text, &path).unwrap();
+            assert!(scaffolded.starts_with(text), "{scaffolded:?}");
+            let parsed = scaffolded.parse::<DocumentMut>().unwrap();
+            assert!(parsed["plugins"]["default"].as_array().unwrap().is_empty());
+        }
+        let malformed = "# >>> anvil-managed: orphan\n[plugins]\n";
+        let refusal = scaffold(malformed, &["plugins".to_owned(), "default".to_owned()]).unwrap_err();
+        assert_eq!(refusal.remedy, RefusalRemedy::MalformedMarkers);
+        assert_eq!(refusal.reason.to_string(), "opening sentinel without its matching close");
+    }
     const BODY: &str = "# Guidance.\n\"managed\",\n";
     const REGION: &str = "  # >>> anvil-managed: entries\n  # Guidance.\n  \"managed\",\n  # <<< anvil-managed: entries\n";
     const FRESH: &str =
@@ -527,6 +646,30 @@ mod tests {
     /// the built-in catalog's full embedded artifact set.
     fn test_cli() -> CliMeta {
         CliMeta::new("anvil")
+    }
+
+    #[test]
+    fn survivor_array_separator_ownership_errors_propagate_without_panicking() {
+        let mut spec = spec();
+        spec.path = vec!["items".to_owned()];
+        spec.region.body = "\"managed\",".to_owned();
+        let host = "items = [\"managed\"\n# >>> anvil-managed: other\n,\n# <<< anvil-managed: other\n]\n";
+        let error = plan_toml_array_region(&Manifest::default(), Some(host), "config.toml", &spec).unwrap_err();
+        assert_eq!(error.remedy, RefusalRemedy::EnclosingOwnership);
+        assert_eq!(
+            error.reason.to_string(),
+            "the matching array entry's separator belongs to another managed region"
+        );
+
+        let host = "items = [\"user\"\n# >>> anvil-managed: entries\n,\n# <<< anvil-managed: entries\n]\n";
+        let mut manifest = Manifest::default();
+        manifest.set_region("config.toml", "entries", checksum_str(",\n"));
+        let error = plan_toml_array_region(&manifest, Some(host), "config.toml", &spec).unwrap_err();
+        assert_eq!(error.remedy, RefusalRemedy::InvalidGeneratedToml);
+        assert!(
+            error.reason.to_string().contains("missing comma between array elements"),
+            "{error:?}"
+        );
     }
 
     fn spec() -> TomlArrayRegionSpec {
@@ -696,6 +839,36 @@ mod tests {
         let error = adopt_entries("# <<< anvil-managed: missing\nitems = []", array, "\"managed\",").unwrap_err();
         assert_eq!(error.remedy, RefusalRemedy::MalformedMarkers);
         assert_eq!(error.reason.to_string(), "closing sentinel without its matching opener");
+    }
+
+    #[test]
+    fn survivor_adoption_deletion_offsets_preserve_only_original_array_delimiters() {
+        let before = "first = true\nitems = [\"user\"]\nlast = true\n";
+        let after = "items = [\"user\"]\n";
+        let paths = [vec!["items".to_owned()]];
+        let deletions = [
+            crate::region::ByteRange { start: 0, end: 13 },
+            crate::region::ByteRange {
+                start: 30,
+                end: before.len(),
+            },
+        ];
+        validate_neighbor_deletions(before, after, &paths, &deletions).unwrap();
+        let error = validate_neighbor_deletions(
+            before,
+            "",
+            &paths,
+            &[crate::region::ByteRange {
+                start: 0,
+                end: before.len(),
+            }],
+        )
+        .unwrap_err();
+        assert_eq!(error.remedy, RefusalRemedy::ArrayDependency);
+        assert_eq!(
+            error.reason.to_string(),
+            "this change would remove or rebind the live TOML array selector [\"items\"]"
+        );
     }
 
     #[test]

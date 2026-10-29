@@ -184,7 +184,9 @@ impl Killers {
 
         let path = killer.rsplit('$').next().unwrap_or(killer).trim();
 
-        if path.is_empty() {
+        if
+        // #[gamma::skip(cond.always_false, reason = "Empty trimmed killer path cannot match paths_to_file or a leaf: absorb inserts only nonempty Rust identifier-derived paths/leaves. Removing empty early return therefore reaches files.next()==None and returns the same None.", tag = "equivalent")]
+        path.is_empty() {
             return None;
         }
 

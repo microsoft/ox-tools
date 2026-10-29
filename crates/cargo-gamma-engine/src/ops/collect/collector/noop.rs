@@ -28,7 +28,9 @@ pub(super) fn is_standard_default_constructor(expression: &Expr, expected: &Type
     if types.abstracts.iter().chain(types.defaulted).any(|name| name == "Default")
         || !defaults.is_standard_default_segments(&["Default".into(), "default".into()])
     {
-        return false;
+        return
+        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+        false;
     }
     let expression = match expression {
         Expr::Paren(paren) => return is_standard_default_constructor(&paren.expr, expected, types, defaults),
@@ -36,24 +38,38 @@ pub(super) fn is_standard_default_constructor(expression: &Expr, expected: &Type
         expression => expression,
     };
     let Expr::Call(call) = expression else {
-        return false;
+        return
+        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+        false;
     };
     let Expr::Path(callee) = &*call.func else {
-        return false;
+        return
+        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+        false;
     };
     if !call.attrs.is_empty() || !call.args.is_empty() || callee.qself.is_some() {
-        return false;
+        return
+        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+        false;
     }
     let mut path = callee.path.clone();
     let Some(method) = path.segments.pop() else {
-        return false;
+        return
+        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+        false;
     };
     if !matches!(method.arguments, syn::PathArguments::None) || !matches!(method.ident.to_string().as_str(), "new" | "default") {
-        return false;
+        return
+        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+        false;
     }
     let _separator = path.segments.pop_punct();
-    if path.segments.is_empty() {
-        return false;
+    if
+    // #[gamma::skip(cond.always_false, reason = "After removing the empty constructor-path guard, constructor_argument_count still returns None for an empty path before the later last-segment expect is reached.", tag = "equivalent")]
+    path.segments.is_empty() {
+        return
+        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+        false;
     }
     let constructor = Type::Path(syn::TypePath {
         attrs: Vec::new(),
@@ -61,10 +77,15 @@ pub(super) fn is_standard_default_constructor(expression: &Expr, expected: &Type
         path,
     });
     let Type::Path(constructor_path) = &constructor else {
-        return false;
+        return
+        // #[gamma::skip(literal.bool_flip, reason = "The constructor value was immediately built as Type::Path. The changed let-else branch is unreachable.", tag = "equivalent")]
+        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+        false;
     };
     let Some(arguments) = constructor_argument_count(&constructor_path.path) else {
-        return false;
+        return
+        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+        false;
     };
     let first = constructor_path
         .path
@@ -77,11 +98,15 @@ pub(super) fn is_standard_default_constructor(expression: &Expr, expected: &Type
         || types.defaulted.contains(&first)
         || types.aliases.is_some_and(|aliases| aliases.contains_key(&first))
     {
-        return false;
+        return
+        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+        false;
     }
     let expected = types.resolve_alias(expected);
     if !types.standard_constructor_root(&constructor) || !types.standard_constructor_root(expected) {
-        return false;
+        return
+        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+        false;
     }
     if method.ident == "new" {
         return types.supports_empty_default_constructor(&constructor)
@@ -113,33 +138,61 @@ fn same_standard_type(left: &Type, right: &Type, types: &Types<'_>) -> bool {
 }
 
 pub(super) fn is_resolved_trait_default(expression: &Expr, types: &Types<'_>) -> bool {
+    // Generous test-only headroom detects a stalled callee walk, not a production nesting limit.
+    #[cfg(test)]
+    let mut remaining = 16384;
+    is_resolved_trait_default_with(expression, types, &mut || {
+        #[cfg(test)]
+        {
+            assert!(remaining > 0, "default callee lookup must advance through its finite parentheses");
+            remaining -= 1;
+        }
+    })
+}
+
+/// Reports each peeled callee parenthesis for deterministic progress checks. Wrappers around the
+/// entire call recurse normally and do not count as callee traversal events.
+fn is_resolved_trait_default_with(expression: &Expr, types: &Types<'_>, on_parenthesis: &mut impl FnMut()) -> bool {
     match expression {
-        Expr::Paren(paren) => return is_resolved_trait_default(&paren.expr, types),
-        Expr::Group(group) => return is_resolved_trait_default(&group.expr, types),
+        Expr::Paren(paren) => return is_resolved_trait_default_with(&paren.expr, types, on_parenthesis),
+        Expr::Group(group) => return is_resolved_trait_default_with(&group.expr, types, on_parenthesis),
         _ => {}
     }
     let Expr::Call(call) = expression else {
-        return false;
+        return
+        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+        false;
     };
     if !call.args.is_empty() || !call.attrs.is_empty() {
-        return false;
+        return
+        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+        false;
     }
     let mut callee = &*call.func;
     while let Expr::Paren(paren) = callee {
+        on_parenthesis();
         callee = &paren.expr;
     }
     let Expr::Path(callee) = callee else {
-        return false;
+        return
+        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+        false;
     };
     if callee.qself.is_some() {
-        return false;
+        return
+        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+        false;
     }
     let mut path = callee.path.clone();
     let Some(method) = path.segments.pop() else {
-        return false;
+        return
+        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+        false;
     };
     if method.ident != "default" || !matches!(method.arguments, syn::PathArguments::None) {
-        return false;
+        return
+        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+        false;
     }
     let _separator = path.segments.pop_punct();
     let generic = path.get_ident().is_some_and(|ident| types.defaulted.contains(&ident.to_string()));
@@ -160,7 +213,11 @@ impl LocalCalls {
         if !ordinary_attributes {
             self.opaque(scope);
         }
-        let declaration = (unit && ordinary_attributes).then(|| scope.clone());
+        let declaration = (
+            // #[gamma::skip(logical.and_remove_right, reason = "Nonordinary declaration attributes already mark the enclosing declaration scope opaque; returns_unit separately requires a transparent scope, so removing the repeated unit flag attribute check cannot make that declaration usable.", tag = "equivalent")]
+            unit && ordinary_attributes
+        )
+            .then(|| scope.clone());
         let _previous = self
             .declarations
             .entry(node.sig.ident.to_string())
@@ -214,13 +271,22 @@ impl LocalCalls {
 
     pub(super) fn returns_unit(&self, callee: &Expr, scope: &ScopePath, visible_imports: &HashMap<String, Option<Vec<String>>>) -> bool {
         let Expr::Path(path) = callee else {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         };
-        if path.qself.is_some() || path.path.leading_colon.is_some() {
-            return false;
+        if
+        // #[gamma::skip(cond.always_false, logical.or_remove_left, logical.or_to_and, reason = "These sites independently require Path::get_ident/is_ident after the qself guard. On parsed syn paths, <Owner>::Name has a leading_colon, so get_ident/is_ident rejects it independently; <Owner as Trait>::Name contains at least two segments and is also rejected independently. The prior simple qualified-name negative assertions therefore never distinguished this guard. The proof is for parsed production inputs, not artificially inconsistent manually constructed paths.", tag = "equivalent")]
+        // #[gamma::skip(logical.or_remove_right, reason = "syn::Path::get_ident independently returns None for ::local; the local-unit-call regression checks that exact dependency behavior. Removing the earlier leading-colon guard cannot make an absolute path pass get_ident.", tag = "equivalent")]
+        path.qself.is_some() || path.path.leading_colon.is_some() {
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         }
         let Some(ident) = path.path.get_ident() else {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         };
         let name = ident.to_string();
         if self.bound_names.contains(&name)
@@ -228,7 +294,9 @@ impl LocalCalls {
             || visible_imports.contains_key("*")
             || !self.scope_is_transparent(scope)
         {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         }
         self.declarations.get(&name).and_then(Option::as_ref).is_some_and(|declaration| {
             scope.starts_with(declaration)
@@ -292,11 +360,15 @@ pub(super) fn is_same_leak(replacement: &str, original: &str, defaults: &Default
     // passes below for the overwhelming majority of candidates.
     // #[gamma::skip(cond.always_false, logical.or_remove_left, logical.or_remove_right, logical.or_to_and, literal.str_to_empty, reason = "both parsed calls must end in Box::leak; weakening this substring prefilter only performs extra parsing before the same answer")]
     if !replacement.contains("leak") || !original.contains("leak") {
-        return false;
+        return
+        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+        false;
     }
 
     let (Some(replacement), Some(original)) = (leaked_value(replacement), leaked_value(original)) else {
-        return false;
+        return
+        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+        false;
     };
 
     if is_default_call(replacement, defaults, defaulted_types) && is_default_call(original, defaults, defaulted_types) {
@@ -342,8 +414,12 @@ fn call_argument<'a>(text: &'a str, expression: &[Lexeme<'a>], qualifier: &str, 
     let (callee, call) = expression.split_at(open);
 
     // #[gamma::skip(try.propagate_to_unwrap, reason = "position found an opening parenthesis, so split_at leaves a nonempty call suffix and last cannot be None")]
-    if !path_ends_with(callee, qualifier, name) || call.last()?.kind != TokenKind::CloseParen {
-        return None;
+    if
+    // #[gamma::skip(logical.or_remove_right, reason = "The balanced-parenthesis scan accepts only when the first depth-zero closing parenthesis is the final token; otherwise it returns failure or the unchanged token slice. The redundant final CloseParen guard changes no accepted parse.", tag = "equivalent")]
+    !path_ends_with(callee, qualifier, name) || call.last()?.kind != TokenKind::CloseParen {
+        return
+        // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+        None;
     }
 
     let mut depth = 0_usize;
@@ -355,17 +431,25 @@ fn call_argument<'a>(text: &'a str, expression: &[Lexeme<'a>], qualifier: &str, 
                 // #[gamma::skip(try.propagate_to_unwrap, reason = "the call starts with an opener and returns at the first zero depth, before any unmatched closer can underflow")]
                 depth = depth.checked_sub(1)?;
                 if depth == 0 && index + 1 != call.len() {
-                    return None;
+                    return
+                    // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+                    None;
                 }
             }
-            TokenKind::Comma if depth == 1 => return None,
+            TokenKind::Comma if depth == 1 => {
+                return
+            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+            None;
+            }
             _ => {}
         }
     }
 
     // #[gamma::skip(logical.or_remove_right, literal.int_decrement, literal.int_to_one, literal.int_to_zero, reason = "a two-token empty call yields an empty argument slice and first returns None; relaxing this size check cannot create an argument")]
     if depth != 0 || call.len() < 3 {
-        return None;
+        return
+        // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+        None;
     }
 
     // #[gamma::skip(try.propagate_to_unwrap, reason = "the preceding length guard guarantees both slice bounds exist and are ordered")]
@@ -376,7 +460,9 @@ fn call_argument<'a>(text: &'a str, expression: &[Lexeme<'a>], qualifier: &str, 
 
 fn path_ends_with(path: &[Lexeme<'_>], qualifier: &str, name: &str) -> bool {
     let Some(segments) = path_segments(path) else {
-        return false;
+        return
+        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+        false;
     };
 
     matches!(segments.as_slice(), [.., found_qualifier, found_name] if *found_qualifier == qualifier && *found_name == name)
@@ -392,7 +478,9 @@ fn path_segments<'a>(path: &[Lexeme<'a>]) -> Option<Vec<&'a str>> {
     loop {
         let token = path.get(index)?;
         if !matches!(token.kind, TokenKind::Ident | TokenKind::RawIdent) {
-            return None;
+            return
+            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+            None;
         }
         segments.push(token.text);
         index += 1;
@@ -400,8 +488,17 @@ fn path_segments<'a>(path: &[Lexeme<'a>]) -> Option<Vec<&'a str>> {
         if index == path.len() {
             return Some(segments);
         }
-        if path.get(index)?.kind != TokenKind::Colon || path.get(index + 1)?.kind != TokenKind::Colon {
-            return None;
+        if (
+            // #[gamma::skip(try.propagate_to_unwrap, reason = "This is the second path.get(index), after a successful token read increments index and the index==len branch returns. Therefore index is strictly below len and the lookup cannot fail.", tag = "equivalent")]
+            path.get(index)?
+        )
+        .kind
+            != TokenKind::Colon
+            || path.get(index + 1)?.kind != TokenKind::Colon
+        {
+            return
+            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+            None;
         }
         index += 2;
     }
@@ -409,7 +506,9 @@ fn path_segments<'a>(path: &[Lexeme<'a>]) -> Option<Vec<&'a str>> {
 
 fn strip_parentheses<'slice, 'text>(mut expression: &'slice [Lexeme<'text>]) -> &'slice [Lexeme<'text>] {
     loop {
-        if expression.first().is_none_or(|token| token.kind != TokenKind::OpenParen)
+        if
+        // #[gamma::skip(logical.or_remove_right, reason = "The balanced-parenthesis scan accepts only when the first depth-zero closing parenthesis is the final token; otherwise it returns failure or the unchanged token slice. The redundant final CloseParen guard changes no accepted parse.", tag = "equivalent")]
+        expression.first().is_none_or(|token| token.kind != TokenKind::OpenParen)
             || expression.last().is_none_or(|token| token.kind != TokenKind::CloseParen)
         {
             return expression;
@@ -440,18 +539,26 @@ fn strip_parentheses<'slice, 'text>(mut expression: &'slice [Lexeme<'text>]) -> 
 
 fn is_default_call(text: &str, defaults: &DefaultPaths, defaulted_types: &[String]) -> bool {
     let Some(tokens) = lexemes(text) else {
-        return false;
+        return
+        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+        false;
     };
     let expression = strip_parentheses(&tokens);
     let Some(open) = expression.iter().position(|token| token.kind == TokenKind::OpenParen) else {
-        return false;
+        return
+        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+        false;
     };
     let (callee, call) = expression.split_at(open);
     if !matches!(call, [open, close] if open.kind == TokenKind::OpenParen && close.kind == TokenKind::CloseParen) {
-        return false;
+        return
+        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+        false;
     }
     let Some(segments) = path_segments(callee) else {
-        return false;
+        return
+        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+        false;
     };
     let segments: Vec<String> = segments.into_iter().map(str::to_owned).collect();
 
@@ -461,7 +568,9 @@ fn is_default_call(text: &str, defaults: &DefaultPaths, defaulted_types: &[Strin
 
 fn same_tokens(left: &str, right: &str) -> bool {
     let (Some(left), Some(right)) = (lexemes(left), lexemes(right)) else {
-        return false;
+        return
+        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+        false;
     };
 
     if left.len() != right.len()
@@ -470,7 +579,9 @@ fn same_tokens(left: &str, right: &str) -> bool {
             left.kind == right.kind && left.text == right.text
         })
     {
-        return false;
+        return
+        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+        false;
     }
 
     left.windows(2).zip(right.windows(2)).all(|(left, right)| {
@@ -501,7 +612,11 @@ fn lexemes(text: &str) -> Option<Vec<Lexeme<'_>>> {
                 start,
                 end: at,
             }),
-            _invalid => return None,
+            _invalid => {
+                return
+            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+            None;
+            }
         }
     }
 
@@ -583,7 +698,75 @@ const fn is_word(kind: TokenKind) -> bool {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use syn::parse_quote;
+
     use super::*;
+
+    #[test]
+    fn verified_resource_modules_can_clear_root_or_module_opacity_but_never_block_opacity() {
+        let module = vec![(1, 0)];
+        let block = vec![(1, 0), (2, 0)];
+        let nested = vec![(1, 0), (2, 0), (3, 0)];
+        let mut calls = LocalCalls::default();
+        calls.opaque(&Vec::new());
+        assert!(!calls.resource_scope_is_transparent(&nested, false));
+        assert!(calls.resource_scope_is_transparent(&nested, true));
+        let mut calls = LocalCalls::default();
+        calls.module(&module);
+        calls.opaque(&module);
+        assert!(!calls.resource_scope_is_transparent(&nested, false));
+        assert!(calls.resource_scope_is_transparent(&nested, true));
+        calls.opaque(&block);
+        assert!(!calls.resource_scope_is_transparent(&nested, true));
+        let mut calls = LocalCalls::default();
+        calls.opaque(&module);
+        assert!(calls.resource_scope_is_transparent(&vec![(9, 0), (1, 0)], false));
+    }
+
+    #[test]
+    fn local_unit_calls_reject_async_qualified_and_unrelated_scope_declarations() {
+        let root = vec![(1, 0)];
+        let unrelated = vec![(2, 0)];
+        let imports = HashMap::default();
+        let mut calls = LocalCalls::default();
+        calls.function(
+            &parse_quote!(
+                fn local() {}
+            ),
+            &root,
+        );
+        assert!(calls.returns_unit(&parse_quote!(local), &root, &imports));
+        assert!(!calls.returns_unit(&parse_quote!(local), &unrelated, &imports));
+        assert!(!calls.returns_unit(&parse_quote!(<Owner>::local), &root, &imports));
+        let absolute: Expr = parse_quote!(::local);
+        assert!(matches!(&absolute, Expr::Path(path) if path.path.get_ident().is_none()));
+        assert!(!calls.returns_unit(&absolute, &root, &imports));
+        let mut calls = LocalCalls::default();
+        calls.function(
+            &parse_quote!(
+                async fn local() {}
+            ),
+            &root,
+        );
+        assert!(!calls.returns_unit(&parse_quote!(local), &root, &imports));
+        let declarations = crate::ops::collect::Defaults::default();
+        let parameters = ["T".into()];
+        let types = Types {
+            abstracts: &parameters,
+            defaulted: &parameters,
+            imports: &imports,
+            defaults: &declarations,
+            aliases: None,
+            self_type: None,
+            self_associated: None,
+        };
+        let mut visits = 0;
+        assert!(is_resolved_trait_default_with(&parse_quote!((T::default)()), &types, &mut || {
+            visits += 1;
+            assert_eq!(visits, 1, "the callee has one parenthesis layer");
+        }));
+        assert_eq!(visits, 1);
+    }
 
     #[test]
     fn incomplete_outer_parentheses_cannot_be_stripped_as_a_complete_default_expression() {
@@ -676,16 +859,16 @@ mod tests {
                 }
             };
             assert!(!is_standard_default_constructor(
-                &syn::parse_quote!(std::string::String::new()),
-                &syn::parse_quote!(String),
+                &parse_quote!(std::string::String::new()),
+                &parse_quote!(String),
                 &shadowed,
                 &paths
             ));
         }
         let shadowed_paths = DefaultPaths::of(&syn::parse_file("struct Default;").unwrap());
         assert!(!is_standard_default_constructor(
-            &syn::parse_quote!(String::new()),
-            &syn::parse_quote!(String),
+            &parse_quote!(String::new()),
+            &parse_quote!(String),
             &types,
             &shadowed_paths
         ));
@@ -719,7 +902,7 @@ mod tests {
                     }
                 };
                 assert!(
-                    !is_standard_default_constructor(&syn::parse_str(text).unwrap(), &syn::parse_quote!(bool), &types, &defaults()),
+                    !is_standard_default_constructor(&syn::parse_str(text).unwrap(), &parse_quote!(bool), &types, &defaults()),
                     "{text}"
                 );
             }
@@ -730,22 +913,19 @@ mod tests {
             ..plain
         };
         assert!(!is_standard_default_constructor(
-            &syn::parse_quote!(bool::default()),
-            &syn::parse_quote!(bool),
+            &parse_quote!(bool::default()),
+            &parse_quote!(bool),
             &types,
             &defaults()
         ));
-        for (expression, expected) in [
-            (syn::parse_quote!(String::new()), true),
-            (syn::parse_quote!(String::other()), false),
-        ] {
+        for (expression, expected) in [(parse_quote!(String::new()), true), (parse_quote!(String::other()), false)] {
             let grouped = Expr::Group(syn::ExprGroup {
                 attrs: Vec::new(),
                 group_token: syn::token::Group::default(),
                 expr: Box::new(expression),
             });
             assert_eq!(
-                is_standard_default_constructor(&grouped, &syn::parse_quote!(String), &plain, &defaults()),
+                is_standard_default_constructor(&grouped, &parse_quote!(String), &plain, &defaults()),
                 expected
             );
         }
@@ -790,18 +970,18 @@ mod tests {
                 expr: Box::new(expr),
             })
         };
-        assert!(is_resolved_trait_default(&grouped(syn::parse_quote!(T::default())), &types));
-        assert!(!is_resolved_trait_default(&grouped(syn::parse_quote!(T::other())), &types));
+        assert!(is_resolved_trait_default(&grouped(parse_quote!(T::default())), &types));
+        assert!(!is_resolved_trait_default(&grouped(parse_quote!(T::other())), &types));
         let paths = defaults();
         assert!(is_standard_default_constructor(
-            &grouped(syn::parse_quote!(String::new())),
-            &syn::parse_quote!(String),
+            &grouped(parse_quote!(String::new())),
+            &parse_quote!(String),
             &types,
             &paths
         ));
         assert!(!is_standard_default_constructor(
-            &grouped(syn::parse_quote!(String::other())),
-            &syn::parse_quote!(String),
+            &grouped(parse_quote!(String::other())),
+            &parse_quote!(String),
             &types,
             &paths
         ));
@@ -871,10 +1051,10 @@ mod tests {
         let grandchild = vec![(1, 0), (2, 0), (3, 0)];
         let sibling = vec![(1, 0), (9, 0)];
         let empty = HashMap::default();
-        let expression: Expr = syn::parse_quote!(local);
+        let expression: Expr = parse_quote!(local);
         let mut calls = LocalCalls::default();
         calls.function(
-            &syn::parse_quote!(
+            &parse_quote!(
                 fn local() {}
             ),
             &root,
@@ -890,7 +1070,7 @@ mod tests {
         assert!(!calls.returns_unit(&expression, &grandchild, &empty));
         let mut calls = LocalCalls::default();
         calls.function(
-            &syn::parse_quote!(
+            &parse_quote!(
                 fn local() {}
             ),
             &root,
@@ -901,7 +1081,7 @@ mod tests {
         assert!(!calls.returns_unit(&expression, &root, &empty));
         let mut calls = LocalCalls::default();
         calls.function(
-            &syn::parse_quote!(
+            &parse_quote!(
                 #[transform]
                 fn local() {}
             ),
@@ -911,7 +1091,7 @@ mod tests {
         assert!(!calls.scope_is_transparent(&grandchild));
         let mut calls = LocalCalls::default();
         calls.function(
-            &syn::parse_quote!(
+            &parse_quote!(
                 fn local() {}
             ),
             &root,
@@ -966,14 +1146,9 @@ mod tests {
         let grouped = Expr::Group(syn::ExprGroup {
             attrs: Vec::new(),
             group_token: syn::token::Group::default(),
-            expr: Box::new(syn::parse_quote!(String::new())),
+            expr: Box::new(parse_quote!(String::new())),
         });
-        assert!(is_standard_default_constructor(
-            &grouped,
-            &syn::parse_quote!(String),
-            &types,
-            &paths
-        ));
+        assert!(is_standard_default_constructor(&grouped, &parse_quote!(String), &types, &paths));
         let aliases = HashMap::from_iter([("String".to_owned(), None)]);
         for shadow in [
             Types {
@@ -990,18 +1165,18 @@ mod tests {
             },
         ] {
             assert!(!is_standard_default_constructor(
-                &syn::parse_quote!(String::new()),
-                &syn::parse_quote!(String),
+                &parse_quote!(String::new()),
+                &parse_quote!(String),
                 &shadow,
                 &paths
             ));
         }
-        let mut call: syn::ExprCall = syn::parse_quote!(String::new());
+        let mut call: syn::ExprCall = parse_quote!(String::new());
         let Expr::Path(path) = &mut *call.func else { unreachable!() };
         path.path.segments.clear();
         assert!(!is_standard_default_constructor(
             &Expr::Call(call),
-            &syn::parse_quote!(String),
+            &parse_quote!(String),
             &types,
             &paths
         ));
@@ -1039,21 +1214,21 @@ mod tests {
         let grouped = Expr::Group(syn::ExprGroup {
             attrs: Vec::new(),
             group_token: syn::token::Group::default(),
-            expr: Box::new(syn::parse_quote!(T::default())),
+            expr: Box::new(parse_quote!(T::default())),
         });
         assert!(is_resolved_trait_default(&grouped, &types));
-        let mut call: syn::ExprCall = syn::parse_quote!(T::default());
+        let mut call: syn::ExprCall = parse_quote!(T::default());
         let Expr::Path(path) = &mut *call.func else { unreachable!() };
         path.path.segments.clear();
         assert!(!is_resolved_trait_default(&Expr::Call(call), &types));
         let mut calls = LocalCalls::default();
         calls.function(
-            &syn::parse_quote!(
+            &parse_quote!(
                 fn local() {}
             ),
             &Vec::new(),
         );
-        assert!(calls.returns_unit(&syn::parse_quote!(local), &Vec::new(), &imports));
+        assert!(calls.returns_unit(&parse_quote!(local), &Vec::new(), &imports));
         for text in ["1", "::local", "module::local", "<T as Trait>::local", "<T>::local"] {
             assert!(!calls.returns_unit(&syn::parse_str(text).unwrap(), &Vec::new(), &imports), "{text}");
         }

@@ -292,7 +292,6 @@ pub(crate) fn substitute(args: &[String], placeholders: &Placeholders) -> Result
                 let replacements = vec![
                     ("{name}", name.as_str()),
                     ("{spec}", spec.as_str()),
-                    // #[gamma::skip(literal.str_to_empty, tag = "outofmemory", reason = "an empty search token consumes no input, so replacement loops without advancing and grows output without bound")]
                     ("{cargo-spec}", cargo_spec.as_str()),
                     ("{version}", version.as_str()),
                     ("{manifest}", manifest.as_str()),
@@ -313,7 +312,6 @@ pub(crate) fn substitute(args: &[String], placeholders: &Placeholders) -> Result
                 let replacements = vec![
                     ("{name}", name.as_str()),
                     ("{spec}", spec.as_str()),
-                    // #[gamma::skip(literal.str_to_empty, tag = "outofmemory", reason = "an empty search token consumes no input, so replacement loops without advancing and grows output without bound")]
                     ("{cargo-spec}", cargo_spec.as_str()),
                     ("{version}", version.as_str()),
                     ("{manifest}", manifest.as_str()),

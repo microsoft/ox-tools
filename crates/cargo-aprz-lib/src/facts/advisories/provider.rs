@@ -9,8 +9,16 @@ use compact_str::CompactString;
 use ohno::IntoAppError;
 use rustsec::database::Database;
 use tick::FutureExt;
+#[cfg(any(not(test), miri))]
+use tokio::fs::OpenOptions as CacheLockOptions;
 
+#[cfg(all(test, not(miri)))]
+use self::tests::CacheLockOptions;
+#[cfg(all(test, not(miri)))]
+use self::tests::SnapshotStage;
 use super::AdvisoryData;
+#[cfg(any(not(test), miri))]
+type SnapshotStage = tempfile::TempDir;
 use crate::facts::ProviderResult;
 use crate::facts::cache::{Cache, CacheResult};
 use crate::facts::crate_spec::CrateSpec;
@@ -57,7 +65,7 @@ impl Provider {
 
     async fn with_fetcher<F: DbFetcher>(cache: &Cache, progress: Arc<dyn Progress>, database_url: &str, fetcher: Arc<F>) -> Result<Self> {
         let lock = Arc::new(lock_cache(cache.dir()).await?);
-        if let CacheResult::Data((identity, directory)) = cache.load::<(String, String)>("last_synced.bin")
+        if let CacheResult::Data((identity, directory)) = snapshot_marker(cache)
             && identity == archive_identity(database_url)
         {
             let path = snapshot_path(cache.dir(), &directory)?;
@@ -67,7 +75,14 @@ impl Provider {
         }
 
         let root = cache.dir().to_path_buf();
-        let stage = tokio::task::spawn_blocking(move || tempfile::Builder::new().prefix(".advisories-").tempdir_in(root)).await??;
+        #[cfg(all(test, not(miri)))]
+        let stage_host = tests::NativeScope::capture();
+        let stage = tokio::task::spawn_blocking(move || {
+            #[cfg(all(test, not(miri)))]
+            let _scope = tests::NativeScope::install(stage_host);
+            create_snapshot_stage(root)
+        })
+        .await??;
         download_db(stage.path(), database_url, progress.as_ref(), fetcher)
             .await
             .into_app_err(
@@ -78,8 +93,14 @@ impl Provider {
             .into_app_err("validating the downloaded advisory database")?;
         let cache = cache.clone();
         let database_url = database_url.to_owned();
-        tokio::task::spawn_blocking(move || with_cache_lock(lock, || publish_snapshot(SnapshotIo::new(cache, stage), &database_url)))
-            .await??;
+        #[cfg(all(test, not(miri)))]
+        let publication_host = tests::NativeScope::capture();
+        tokio::task::spawn_blocking(move || {
+            #[cfg(all(test, not(miri)))]
+            let _scope = tests::NativeScope::install(publication_host);
+            with_cache_lock(lock, || publish_snapshot(SnapshotIo::new(cache, stage), &database_url))
+        })
+        .await??;
         Ok(Self {
             database: Arc::new(database),
         })
@@ -192,7 +213,7 @@ async fn open_cache_lock(root: &Path) -> Result<std::fs::File> {
     tokio::fs::create_dir_all(root)
         .await
         .into_app_err("creating directory for the advisory cache")?;
-    Ok(tokio::fs::OpenOptions::new()
+    Ok(CacheLockOptions::new()
         .read(true)
         .write(true)
         .create(true)
@@ -204,9 +225,17 @@ async fn open_cache_lock(root: &Path) -> Result<std::fs::File> {
 }
 
 async fn wait_for_cache_lock(lock: &std::fs::File, timeout: Duration, clock: &tick::Clock) -> Result<()> {
+    wait_for_cache_lock_with(timeout, clock, || try_cache_lock(lock)).await
+}
+
+async fn wait_for_cache_lock_with(
+    timeout: Duration,
+    clock: &tick::Clock,
+    mut try_lock: impl FnMut() -> std::result::Result<(), std::fs::TryLockError>,
+) -> Result<()> {
     async {
         loop {
-            match lock.try_lock() {
+            match try_lock() {
                 Ok(()) => return Ok(()),
                 Err(std::fs::TryLockError::WouldBlock) => clock.delay(Duration::from_millis(50)).await,
                 Err(std::fs::TryLockError::Error(error)) => return Err(error),
@@ -217,6 +246,14 @@ async fn wait_for_cache_lock(lock: &std::fs::File, timeout: Duration, clock: &ti
     .await
     .into_app_err("timed out waiting for another advisory cache refresh to finish")??;
     Ok(())
+}
+
+fn try_cache_lock(lock: &std::fs::File) -> std::result::Result<(), std::fs::TryLockError> {
+    #[cfg(all(test, not(miri)))]
+    if let Some(error) = tests::LOCK_ATTEMPT_ERROR.take() {
+        return Err(std::fs::TryLockError::Error(error));
+    }
+    lock.try_lock()
 }
 
 fn snapshot_path(root: &Path, directory: &str) -> Result<std::path::PathBuf> {
@@ -231,6 +268,58 @@ fn snapshot_path(root: &Path, directory: &str) -> Result<std::path::PathBuf> {
 
 fn archive_identity(url: &str) -> String {
     blake3::hash(url.as_bytes()).to_hex().to_string()
+}
+
+fn snapshot_marker(cache: &Cache) -> CacheResult<(String, String)> {
+    #[cfg(all(test, not(miri)))]
+    if let Some(host) = tests::NativeScope::capture() {
+        return host.marker(cache);
+    }
+    cache.load("last_synced.bin")
+}
+
+fn create_snapshot_stage(root: std::path::PathBuf) -> std::io::Result<SnapshotStage> {
+    #[cfg(all(test, not(miri)))]
+    if let Some(host) = tests::NativeScope::capture() {
+        return host.create_stage(&root);
+    }
+    let stage = tempfile::Builder::new().prefix(".advisories-").tempdir_in(root);
+    #[cfg(all(test, not(miri)))]
+    let stage = stage.map(SnapshotStage::Native);
+    stage
+}
+
+fn create_snapshot_marker(root: &Path) -> std::io::Result<tempfile::NamedTempFile> {
+    #[cfg(all(test, not(miri)))]
+    if let Some(host) = tests::NativeScope::capture() {
+        return host.create_marker(root);
+    }
+    tempfile::NamedTempFile::new_in(root)
+}
+
+fn save_snapshot_marker(cache: &Cache, filename: &str, data: &(String, &str)) -> Result<()> {
+    #[cfg(all(test, not(miri)))]
+    if let Some(host) = tests::NativeScope::capture() {
+        return host.save_marker(cache, filename, data);
+    }
+    cache.save(filename, data)
+}
+
+fn persist_snapshot_marker(marker: tempfile::NamedTempFile, destination: &Path) -> std::io::Result<()> {
+    #[cfg(all(test, not(miri)))]
+    if let Some(host) = tests::NativeScope::capture() {
+        host.persist_marker(&marker, destination);
+        return Ok(());
+    }
+    marker.persist(destination).map(|_| ()).map_err(|error| error.error)
+}
+
+fn remove_snapshot(path: &Path) -> std::io::Result<()> {
+    #[cfg(all(test, not(miri)))]
+    if let Some(host) = tests::NativeScope::capture() {
+        return host.remove(path);
+    }
+    std::fs::remove_dir_all(path)
 }
 
 async fn run_blocking_with_progress<T, F>(progress: &dyn Progress, msg: &str, success_verb: &str, blocking_fn: F) -> Result<T>
@@ -258,13 +347,532 @@ mod tests {
     use core::sync::atomic::{AtomicUsize, Ordering};
     use std::env::var_os;
     use std::fs;
+    #[cfg(windows)]
+    use std::os::windows::fs::OpenOptionsExt as _;
     use std::process::Command;
     use std::sync::Mutex;
     use std::task::Poll;
 
     use futures_util::StreamExt;
+    #[cfg(windows)]
+    use windows::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
 
     use super::*;
+
+    fn publish_snapshot(cache: &Cache, stage: impl Into<SnapshotStage>, url: &str) -> Result<()> {
+        super::publish_snapshot(SnapshotIo::new(cache.clone(), stage.into()), url)
+    }
+
+    const NATIVE_HOST_URL: &str = "https://example.test/native-advisory-archive";
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(super) enum NativeScenario {
+        InvalidCachedPath,
+        StageError,
+        StagePanic,
+        InvalidDatabase,
+        MarkerError,
+        MarkerPanic,
+        SaveError,
+        ForeignPrevious,
+        InvalidPrevious,
+        OwnedPrevious,
+        LegacyMissing,
+        LegacyDenied,
+    }
+
+    /// Scenario dispatcher and event recorder shared explicitly with blocking workers.
+    pub(super) struct NativeHost {
+        scenario: NativeScenario,
+        events: Mutex<Vec<String>>,
+    }
+
+    impl NativeHost {
+        fn new(scenario: NativeScenario) -> Arc<Self> {
+            Arc::new(Self {
+                scenario,
+                events: Mutex::new(Vec::new()),
+            })
+        }
+
+        pub(super) fn record(&self, event: &str) {
+            // Only append/snapshot plain strings under this lock. Scripted callbacks
+            // and panic probes run after unlocking so their trace remains readable.
+            self.events.lock().unwrap().push(event.to_owned());
+        }
+
+        fn events(&self) -> Vec<String> {
+            self.events.lock().unwrap().clone()
+        }
+
+        pub(super) fn marker(&self, cache: &Cache) -> CacheResult<(String, String)> {
+            self.record("load");
+            let directory = match self.scenario {
+                NativeScenario::InvalidCachedPath => "../escape",
+                NativeScenario::ForeignPrevious => "user-owned",
+                NativeScenario::InvalidPrevious => ".advisories-../escape",
+                NativeScenario::OwnedPrevious => ".advisories-old",
+                _ => return CacheResult::Miss,
+            };
+            cache.load_data_for_test("last_synced.bin", (archive_identity(NATIVE_HOST_URL), directory.to_owned()))
+        }
+
+        pub(super) fn create_stage(&self, root: &Path) -> std::io::Result<SnapshotStage> {
+            assert_eq!(root, Path::new(env!("CARGO_MANIFEST_DIR")));
+            self.record("create-stage");
+            assert_ne!(
+                self.scenario,
+                NativeScenario::StagePanic,
+                "native advisory stage factory panic probe"
+            );
+            if self.scenario == NativeScenario::StageError {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "native advisory stage error probe",
+                ));
+            }
+            let fixture = if self.scenario == NativeScenario::InvalidDatabase {
+                "partial-write"
+            } else {
+                "database"
+            };
+            Ok(SnapshotStage::Borrowed(root.join("tests/fixtures/advisories").join(fixture)))
+        }
+
+        pub(super) fn create_marker(&self, root: &Path) -> std::io::Result<tempfile::NamedTempFile> {
+            assert_eq!(root, Path::new(env!("CARGO_MANIFEST_DIR")));
+            self.record("create-marker");
+            assert_ne!(
+                self.scenario,
+                NativeScenario::MarkerPanic,
+                "native advisory marker factory panic probe"
+            );
+            if self.scenario == NativeScenario::MarkerError {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "native advisory marker error probe",
+                ));
+            }
+            let path = root.join("tests/fixtures/advisories/survivor-no-created-marker");
+            assert!(!path.exists());
+            let mut path = tempfile::TempPath::try_from_path(path)?;
+            path.disable_cleanup(true);
+            Ok(tempfile::NamedTempFile::from_parts(fs::File::open(root.join("Cargo.toml"))?, path))
+        }
+
+        pub(super) fn save_marker(&self, cache: &Cache, filename: &str, data: &(String, &str)) -> Result<()> {
+            assert_eq!(cache.dir(), Path::new(env!("CARGO_MANIFEST_DIR")));
+            assert_eq!(filename, "survivor-no-created-marker");
+            assert_eq!(data, &(archive_identity(NATIVE_HOST_URL), "database"));
+            self.record("save-marker");
+            if self.scenario == NativeScenario::SaveError {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "native advisory marker save probe",
+                ))
+                .into_app_err("saving marker");
+            }
+            Ok(())
+        }
+
+        pub(super) fn persist_marker(&self, marker: &tempfile::NamedTempFile, destination: &Path) {
+            assert!(!marker.path().exists());
+            assert_eq!(destination, Path::new(env!("CARGO_MANIFEST_DIR")).join("last_synced.bin"));
+            self.record("persist-marker");
+        }
+
+        pub(super) fn remove(&self, path: &Path) -> std::io::Result<()> {
+            let name = path.file_name().unwrap().to_str().unwrap();
+            self.record(&format!("remove:{name}"));
+            match self.scenario {
+                NativeScenario::LegacyMissing => Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
+                NativeScenario::LegacyDenied => Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+                _ => Ok(()),
+            }
+        }
+    }
+
+    /// Owned stages clean up on drop; borrowed checked-in fixtures never acquire ownership.
+    pub(crate) enum SnapshotStage {
+        Native(tempfile::TempDir),
+        Borrowed(std::path::PathBuf),
+    }
+
+    impl From<tempfile::TempDir> for SnapshotStage {
+        fn from(stage: tempfile::TempDir) -> Self {
+            Self::Native(stage)
+        }
+    }
+
+    impl SnapshotStage {
+        pub(super) fn path(&self) -> &Path {
+            match self {
+                Self::Native(stage) => stage.path(),
+                Self::Borrowed(path) => path,
+            }
+        }
+
+        pub(super) fn keep(self) -> std::path::PathBuf {
+            match self {
+                Self::Native(stage) => stage.keep(),
+                Self::Borrowed(path) => {
+                    NativeScope::capture().unwrap().record("keep-stage");
+                    path
+                }
+            }
+        }
+    }
+
+    thread_local! {
+        static NATIVE_HOST: std::cell::RefCell<Option<Arc<NativeHost>>> = const { std::cell::RefCell::new(None) };
+    }
+
+    /// Restores this thread's previous adapter on drop. Blocking workers must
+    /// explicitly capture and install it; thread-local state does not follow tasks.
+    pub(super) struct NativeScope(Option<Arc<NativeHost>>);
+
+    impl NativeScope {
+        pub(super) fn capture() -> Option<Arc<NativeHost>> {
+            NATIVE_HOST.with_borrow(Clone::clone)
+        }
+
+        pub(super) fn install(host: Option<Arc<NativeHost>>) -> Self {
+            Self(NATIVE_HOST.replace(host))
+        }
+    }
+
+    impl Drop for NativeScope {
+        fn drop(&mut self) {
+            NATIVE_HOST.with_borrow_mut(|host| *host = self.0.take());
+        }
+    }
+
+    type LockOpenHook = Box<dyn FnMut([bool; 4], &Path) -> std::io::Result<std::fs::File> + Send>;
+
+    thread_local! {
+        static LOCK_OPEN: std::cell::RefCell<Option<LockOpenHook>> = const { std::cell::RefCell::new(None) };
+        pub(super) static LOCK_ATTEMPT_ERROR: std::cell::Cell<Option<std::io::Error>> = const { std::cell::Cell::new(None) };
+    }
+
+    pub(super) struct CacheLockOptions {
+        native: tokio::fs::OpenOptions,
+        flags: [bool; 4],
+    }
+
+    impl CacheLockOptions {
+        pub(super) fn new() -> Self {
+            Self {
+                native: tokio::fs::OpenOptions::new(),
+                flags: [false; 4],
+            }
+        }
+
+        pub(super) fn read(&mut self, value: bool) -> &mut Self {
+            self.native.read(value);
+            self.flags[0] = value;
+            self
+        }
+
+        pub(super) fn write(&mut self, value: bool) -> &mut Self {
+            self.native.write(value);
+            self.flags[1] = value;
+            self
+        }
+
+        pub(super) fn create(&mut self, value: bool) -> &mut Self {
+            self.native.create(value);
+            self.flags[2] = value;
+            self
+        }
+
+        pub(super) fn truncate(&mut self, value: bool) -> &mut Self {
+            self.native.truncate(value);
+            self.flags[3] = value;
+            self
+        }
+
+        pub(super) async fn open(&self, path: impl AsRef<Path>) -> std::io::Result<tokio::fs::File> {
+            let path = path.as_ref();
+            let intercepted = LOCK_OPEN.with_borrow_mut(|hook| hook.as_mut().map(|hook| hook(self.flags, path)));
+            match intercepted {
+                Some(result) => result.map(tokio::fs::File::from_std),
+                None => self.native.open(path).await,
+            }
+        }
+    }
+
+    fn native_cache() -> Cache {
+        Cache::new(Path::new(env!("CARGO_MANIFEST_DIR")), Duration::MAX, false)
+    }
+
+    fn borrowed_database_stage() -> SnapshotStage {
+        SnapshotStage::Borrowed(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/advisories/database"))
+    }
+
+    fn inject_readonly_lock() -> impl Drop {
+        struct Restore(Option<LockOpenHook>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                LOCK_OPEN.with_borrow_mut(|hook| *hook = self.0.take());
+            }
+        }
+        Restore(LOCK_OPEN.replace(Some(Box::new(|flags, path| {
+            assert_eq!(flags, [true, true, true, false]);
+            assert_eq!(path, Path::new(env!("CARGO_MANIFEST_DIR")).join("archive.lock"));
+            #[cfg(windows)]
+            let path = Path::new("NUL");
+            #[cfg(not(windows))]
+            let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+            fs::File::open(path)
+        }))))
+    }
+
+    async fn native_initialization_error(scenario: NativeScenario) -> (ohno::AppError, Vec<String>) {
+        let host = NativeHost::new(scenario);
+        let _scope = NativeScope::install(Some(Arc::clone(&host)));
+        let _lock = inject_readonly_lock();
+        let error = Provider::with_fetcher(
+            &native_cache(),
+            Arc::new(RecordingProgress::default()),
+            NATIVE_HOST_URL,
+            Arc::new(NoOpFetcher),
+        )
+        .await
+        .unwrap_err();
+        (error, host.events())
+    }
+
+    #[tokio::test]
+    async fn survivor_native_initialization_preserves_cached_path_and_stage_failures() {
+        let (error, events) = native_initialization_error(NativeScenario::InvalidCachedPath).await;
+        assert!(error.to_string().contains("invalid advisory cache snapshot path"), "{error}");
+        assert_eq!(events, ["load"]);
+
+        let (error, events) = native_initialization_error(NativeScenario::StageError).await;
+        assert_eq!(
+            error.find_source::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        assert!(error.find_source::<tokio::task::JoinError>().is_none());
+        assert_eq!(events, ["load", "create-stage"]);
+
+        let (error, events) = native_initialization_error(NativeScenario::StagePanic).await;
+        assert!(error.find_source::<tokio::task::JoinError>().unwrap().is_panic());
+        assert_eq!(events, ["load", "create-stage"]);
+    }
+
+    #[tokio::test]
+    async fn survivor_download_validation_error_keeps_the_exact_outer_context() {
+        let (error, events) = native_initialization_error(NativeScenario::InvalidDatabase).await;
+        assert!(error.to_string().contains("validating the downloaded advisory database"), "{error}");
+        assert_eq!(events, ["load", "create-stage"]);
+    }
+
+    #[tokio::test]
+    async fn survivor_initialization_publication_worker_and_io_errors_are_distinct() {
+        for scenario in [NativeScenario::MarkerError, NativeScenario::MarkerPanic] {
+            let (error, events) = native_initialization_error(scenario).await;
+            assert_eq!(events, ["load", "create-stage", "load", "create-marker"]);
+            if scenario == NativeScenario::MarkerPanic {
+                assert!(error.find_source::<tokio::task::JoinError>().unwrap().is_panic());
+            } else {
+                assert!(error.find_source::<tokio::task::JoinError>().is_none());
+                assert_eq!(
+                    error.find_source::<std::io::Error>().unwrap().kind(),
+                    std::io::ErrorKind::PermissionDenied
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn survivor_publication_ignores_foreign_snapshots_and_rejects_invalid_prefixed_paths() {
+        for scenario in [NativeScenario::ForeignPrevious, NativeScenario::InvalidPrevious] {
+            let host = NativeHost::new(scenario);
+            let _scope = NativeScope::install(Some(Arc::clone(&host)));
+            let result = publish_snapshot(&native_cache(), borrowed_database_stage(), NATIVE_HOST_URL);
+            if scenario == NativeScenario::InvalidPrevious {
+                assert!(result.unwrap_err().to_string().contains("invalid advisory cache snapshot path"));
+                assert_eq!(host.events(), ["load"]);
+            } else {
+                result.unwrap();
+                assert_eq!(
+                    host.events(),
+                    [
+                        "load",
+                        "create-marker",
+                        "save-marker",
+                        "persist-marker",
+                        "keep-stage",
+                        "remove:repo"
+                    ]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn survivor_publication_native_marker_failures_do_not_publish_or_keep_the_stage() {
+        for scenario in [NativeScenario::MarkerError, NativeScenario::SaveError] {
+            let host = NativeHost::new(scenario);
+            let _scope = NativeScope::install(Some(Arc::clone(&host)));
+            let error = publish_snapshot(&native_cache(), borrowed_database_stage(), NATIVE_HOST_URL).unwrap_err();
+            assert_eq!(
+                error.find_source::<std::io::Error>().unwrap().kind(),
+                std::io::ErrorKind::PermissionDenied
+            );
+            let expected = if scenario == NativeScenario::MarkerError {
+                vec!["load", "create-marker"]
+            } else {
+                vec!["load", "create-marker", "save-marker"]
+            };
+            assert_eq!(host.events(), expected);
+        }
+    }
+
+    #[test]
+    fn publication_discovers_previous_snapshots_when_cache_reads_are_disabled() {
+        let host = NativeHost::new(NativeScenario::OwnedPrevious);
+        let _scope = NativeScope::install(Some(Arc::clone(&host)));
+        let cache = Cache::new(Path::new(env!("CARGO_MANIFEST_DIR")), Duration::ZERO, true);
+        let io = publication::SnapshotIo::new(cache, borrowed_database_stage());
+        assert_eq!(
+            io.previous_snapshot().unwrap(),
+            Some(Path::new(env!("CARGO_MANIFEST_DIR")).join(".advisories-old"))
+        );
+        assert_eq!(host.events(), ["load"]);
+    }
+
+    #[test]
+    fn survivor_legacy_cleanup_warns_only_for_errors_other_than_missing_directories() {
+        for scenario in [NativeScenario::LegacyMissing, NativeScenario::LegacyDenied] {
+            let host = NativeHost::new(scenario);
+            let _scope = NativeScope::install(Some(Arc::clone(&host)));
+            let logs = crate::facts::test_logging::capture_logs(|| {
+                publish_snapshot(&native_cache(), borrowed_database_stage(), NATIVE_HOST_URL).unwrap();
+            });
+            let expected = vec![
+                "load",
+                "create-marker",
+                "save-marker",
+                "persist-marker",
+                "keep-stage",
+                "remove:repo",
+            ];
+            assert_eq!(host.events(), expected);
+            let expected_logs = if scenario == NativeScenario::LegacyDenied {
+                vec![(
+                    log::Level::Warn,
+                    LOG_TARGET.to_owned(),
+                    format!(
+                        "Could not remove old advisory snapshot '{}': {}",
+                        native_cache().dir().join("repo").display(),
+                        std::io::Error::from(std::io::ErrorKind::PermissionDenied)
+                    ),
+                )]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(logs, expected_logs);
+        }
+    }
+
+    #[tokio::test]
+    async fn survivor_cache_lock_forwards_exact_native_open_options_and_errors() {
+        struct Restore(Option<LockOpenHook>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                LOCK_OPEN.with_borrow_mut(|hook| *hook = self.0.take());
+            }
+        }
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        // The awaited open completes the callback; this counter publishes no other state.
+        let _restore = Restore(LOCK_OPEN.replace(Some(Box::new({
+            let calls = Arc::clone(&calls);
+            move |flags, path| {
+                assert_eq!(flags, [true, true, true, false]);
+                assert_eq!(path, root.join("archive.lock"));
+                calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "native lock-open probe"))
+            }
+        }))));
+        let error = open_cache_lock(root).await.unwrap_err();
+        assert!(error.to_string().contains("native lock-open probe"), "{error}");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn survivor_cache_lock_directory_errors_return_before_creating_a_lock_file() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let error = lock_cache(&root).await.unwrap_err();
+        assert!(error.to_string().contains("creating directory for the advisory cache"), "{error}");
+        assert!(!root.join("archive.lock").exists());
+    }
+
+    #[tokio::test]
+    async fn cache_lock_returns_acquisition_errors_after_successfully_opening_the_handle() {
+        struct Restore;
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                LOCK_ATTEMPT_ERROR.set(None);
+            }
+        }
+        let _restore = Restore;
+        let _open = inject_readonly_lock();
+        LOCK_ATTEMPT_ERROR.set(Some(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "scripted cache-lock acquisition failure",
+        )));
+        let error = lock_cache(Path::new(env!("CARGO_MANIFEST_DIR"))).await.unwrap_err();
+        let cause = error.find_source::<std::io::Error>().unwrap();
+        assert_eq!(cause.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(cause.to_string(), "scripted cache-lock acquisition failure");
+        assert!(LOCK_ATTEMPT_ERROR.take().is_none());
+    }
+
+    #[tokio::test]
+    async fn survivor_cache_lock_retries_at_exactly_fifty_virtual_milliseconds() {
+        let attempts = std::cell::Cell::new(0);
+        let control = tick::ClockControl::new();
+        let clock = control.to_clock();
+        let wait = wait_for_cache_lock_with(Duration::from_secs(1), &clock, || match attempts.replace(attempts.get() + 1) {
+            0 => Err(std::fs::TryLockError::WouldBlock),
+            1 => Ok(()),
+            _ => panic!("the exact-delay lock test allows only the initial attempt and one retry"),
+        });
+        let mut wait = std::pin::pin!(wait);
+        assert!(futures_util::poll!(&mut wait).is_pending());
+        assert_eq!(attempts.get(), 1);
+        control.advance(Duration::from_millis(49));
+        assert!(futures_util::poll!(&mut wait).is_pending());
+        control.advance(Duration::from_millis(1));
+        assert!(matches!(futures_util::poll!(&mut wait), Poll::Ready(Ok(()))));
+        assert_eq!(attempts.get(), 2);
+    }
+
+    #[tokio::test]
+    #[cfg(windows)]
+    async fn survivor_cache_lock_preserves_native_directory_lock_errors_without_spinning() {
+        let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/advisories/database");
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0)
+            .open(directory)
+            .unwrap();
+        let std::fs::TryLockError::Error(expected) = lock.try_lock().unwrap_err() else {
+            panic!("a directory handle must refuse byte-range locking rather than contend with another owner");
+        };
+        let error = wait_for_cache_lock(&lock, Duration::from_secs(1), &tick::Clock::new_tokio())
+            .await
+            .unwrap_err();
+        assert!(
+            std::iter::successors(error.source(), |cause| cause.source())
+                .filter_map(|cause| cause.downcast_ref::<std::io::Error>())
+                .any(|cause| cause.kind() == expected.kind() && cause.raw_os_error() == expected.raw_os_error()),
+            "{error}"
+        );
+    }
 
     fn write_advisory(root: &Path, package: &str, id: &str, withdrawn: Option<&str>) {
         let dir = root.join("crates").join(package);
@@ -640,6 +1248,17 @@ mod tests {
     }
 
     #[test]
+    fn survivor_snapshot_paths_require_exactly_one_normal_component() {
+        for path in ["", ".", "..", "../escape", "nested/snapshot", "nested/../snapshot"] {
+            assert!(snapshot_path(Path::new("cache"), path).is_err(), "{path:?}");
+        }
+        assert_eq!(
+            snapshot_path(Path::new("cache"), ".advisories-valid").unwrap(),
+            Path::new("cache").join(".advisories-valid")
+        );
+    }
+
+    #[test]
     fn marker_publication_failure_removes_the_unpublished_snapshot() {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir(root.path().join("last_synced.bin")).unwrap();
@@ -648,7 +1267,7 @@ mod tests {
         let stage = tempfile::Builder::new().prefix(".advisories-").tempdir_in(root.path()).unwrap();
         let snapshot = stage.path().to_path_buf();
 
-        let error = publish_snapshot(SnapshotIo::new(cache, stage), "https://example.invalid/archive.tar.gz")
+        let error = publish_snapshot(&cache, stage, "https://example.invalid/archive.tar.gz")
             .expect_err("a directory cannot be replaced by the marker file");
 
         assert!(error.to_string().contains("publishing the advisory cache"), "{error}");
@@ -710,7 +1329,7 @@ mod tests {
         let stage = tempfile::Builder::new().prefix(".advisories-").tempdir_in(root.path()).unwrap();
         let name = stage.path().file_name().unwrap().to_str().unwrap().to_owned();
 
-        publish_snapshot(SnapshotIo::new(cache.clone(), stage), "new-url").expect("legacy cleanup is best-effort after publication");
+        publish_snapshot(&cache, stage, "new-url").expect("legacy cleanup is best-effort after publication");
 
         let CacheResult::Data(marker) = cache.load::<(String, String)>("last_synced.bin") else {
             panic!("cleanup failures must not discard the new marker");
@@ -810,7 +1429,7 @@ mod tests {
         let stage = tempfile::Builder::new().prefix(".advisories-").tempdir_in(root.path()).unwrap();
         let name = stage.path().file_name().unwrap().to_str().unwrap().to_owned();
 
-        publish_snapshot(SnapshotIo::new(cache.clone(), stage), "https://example.invalid/archive.tar.gz")
+        publish_snapshot(&cache, stage, "https://example.invalid/archive.tar.gz")
             .expect("old snapshot cleanup is optional once the new snapshot is published");
 
         let CacheResult::Data(marker) = cache.load::<(String, String)>("last_synced.bin") else {

@@ -356,7 +356,7 @@ fn workspace_manifest_of(manifest_path: &Path) -> Result<PathBuf> {
 }
 
 fn workspace_manifest_with(manifest_path: &Path, members: impl FnMut(&Path) -> Result<Vec<PathBuf>>) -> Result<PathBuf> {
-    workspace_manifest_resolved_with(manifest_path, members, Path::canonicalize, detect::read_manifest)
+    workspace_manifest_resolved_with(manifest_path, members, Path::canonicalize, detect::read_manifest, Path::is_file)
 }
 
 fn workspace_manifest_resolved_with(
@@ -364,6 +364,7 @@ fn workspace_manifest_resolved_with(
     mut members: impl FnMut(&Path) -> Result<Vec<PathBuf>>,
     canonicalize: impl FnOnce(&Path) -> std::io::Result<PathBuf>,
     mut read_manifest: impl FnMut(&Path) -> Result<toml_edit::DocumentMut>,
+    mut is_file: impl FnMut(&Path) -> bool,
 ) -> Result<PathBuf> {
     let manifest = read_manifest(manifest_path)?;
     if matches!(detect::catalog(&manifest)?, Catalog::Workspace(_)) {
@@ -377,7 +378,7 @@ fn workspace_manifest_resolved_with(
 
     for ancestor in package_dir.ancestors().skip(1) {
         let candidate = ancestor.join("Cargo.toml");
-        if !candidate.is_file() {
+        if !is_file(&candidate) {
             continue;
         }
         let document = read_manifest(&candidate)?;
@@ -1143,6 +1144,7 @@ mod source_campaign_tests {
                 assert!(!read.replace(true), "the supplied manifest is read exactly once");
                 detect::parse_manifest("[package]\nname='fixture'\nversion='0.1.0'\n", path)
             },
+            |_| panic!("failed canonicalization must stop before ancestor classification"),
         )
         .unwrap_err();
         assert_eq!(error.message(), "injected canonicalization failure");
@@ -1200,6 +1202,7 @@ mod source_campaign_tests {
                 reads.push(path.to_path_buf());
                 detect::parse_manifest("[workspace]\n", path)
             },
+            |_| panic!("a supplied workspace must resolve before ancestor classification"),
         )
         .expect("the supplied workspace resolves directly");
 
@@ -1640,11 +1643,43 @@ mod selection_tests {
 mod tests {
     use std::fs;
 
+    use ohno::app_err;
     use tempfile::TempDir;
 
     use super::{
-        CheckStage, WriteBackStep, catalog_check, catalog_check_with_hook, verify_members_unchanged, write_back, write_back_with_fault,
+        CheckStage, WriteBackStep, catalog_check, catalog_check_with_hook, verify_members_unchanged, workspace_manifest_resolved_with,
+        write_back, write_back_with_fault,
     };
+    use crate::detect::parse_manifest;
+
+    #[test]
+    fn survivor_ancestor_search_does_not_reopen_the_supplied_package_manifest() {
+        let input = std::path::Path::new("input-member/Cargo.toml");
+        let canonical = std::path::Path::new("workspace/member/Cargo.toml");
+        let enclosing = std::path::Path::new("workspace/Cargo.toml");
+        let mut reads = Vec::new();
+        let mut inspected = Vec::new();
+        let result = workspace_manifest_resolved_with(
+            input,
+            |_| panic!("injected package documents are never workspaces"),
+            |_| Ok(canonical.to_path_buf()),
+            |path| {
+                reads.push(path.to_path_buf());
+                if path == canonical {
+                    return Err(app_err!("the package manifest disappeared after its first read"));
+                }
+                parse_manifest("[package]\nname='member'\nversion='0.1.0'\n", path)
+            },
+            |path| {
+                inspected.push(path.to_path_buf());
+                path == canonical || path == enclosing
+            },
+        )
+        .unwrap();
+        assert_eq!(result, input);
+        assert_eq!(reads, [input, enclosing]);
+        assert_eq!(inspected, [enclosing, std::path::Path::new("Cargo.toml")]);
+    }
 
     fn write_member(path: &std::path::Path, name: &str, body: &str) {
         fs::create_dir_all(path.join("src")).expect("create member source directory");

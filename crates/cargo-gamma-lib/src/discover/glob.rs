@@ -99,8 +99,14 @@ fn glob_match(tokens: &[Token], text: &str, scratch: &mut Scratch) -> bool {
     let width = row_width(scratch.text.len());
     scratch.next.clear();
     scratch.next.resize(width, false);
+
+    // #[gamma::skip(stmt.delete_call, reason = "scratch.current is unconditionally fill(false) before every token; matching accesses only indices0..=text.len(). Omitting clear,adding an unused terminal cell,or changing resize fill is overwritten/unobserved before use; empty tokens use scratch.next only.", tag = "equivalent")]
     scratch.current.clear();
-    scratch.current.resize(width, false);
+    scratch.current.resize(
+        width,
+        // #[gamma::skip(literal.bool_flip, reason = "scratch.current is unconditionally fill(false) before every token; matching accesses only indices0..=text.len(). Omitting clear,adding an unused terminal cell,or changing resize fill is overwritten/unobserved before use; empty tokens use scratch.next only.", tag = "equivalent")]
+        false,
+    );
     debug_assert_eq!(
         scratch.next.len(),
         scratch.text.len() + 1,
@@ -162,6 +168,7 @@ fn tokenize(pattern: &str) -> Vec<Token> {
     let mut index = 0;
 
     while index < characters.len() {
+        let previous = index;
         match characters[index] {
             '?' => {
                 tokens.push(Token::One);
@@ -172,7 +179,12 @@ fn tokenize(pattern: &str) -> Vec<Token> {
             '*' => {
                 let start = index;
                 while index < characters.len() && characters[index] == '*' {
+                    let before_star = index;
                     index += 1;
+                    assert!(
+                        index > before_star,
+                        "each star consumed by the tokenizer must advance the input cursor"
+                    );
                 }
 
                 if index - start == 1 {
@@ -189,6 +201,7 @@ fn tokenize(pattern: &str) -> Vec<Token> {
                 index += 1;
             }
         }
+        assert!(index > previous, "each token must consume at least one input character");
     }
 
     tokens
@@ -198,6 +211,44 @@ fn tokenize(pattern: &str) -> Vec<Token> {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oct25_tokenizer_preserves_every_token_kind_with_bounded_cursor_progress() {
+        let tokens = tokenize("?a***b**/c*");
+        assert!(matches!(
+            tokens.as_slice(),
+            [
+                Token::One,
+                Token::Literal('a'),
+                Token::RecursiveStar,
+                Token::Literal('b'),
+                Token::RecursivePrefix,
+                Token::Literal('c'),
+                Token::Star
+            ]
+        ));
+        assert!(matches!(tokenize("?").as_slice(), [Token::One]));
+        assert!(matches!(tokenize("**/").as_slice(), [Token::RecursivePrefix]));
+        assert!(matches!(tokenize("*").as_slice(), [Token::Star]));
+    }
+
+    #[test]
+    fn recovered_literal_rows_clear_the_terminal_state_between_two_recursive_stars() {
+        let mut scratch = Scratch::default();
+        for text in ["", "a", "abc", "a/b", "界"] {
+            assert!(!glob_match(
+                &[Token::RecursiveStar, Token::Literal('x'), Token::RecursiveStar],
+                text,
+                &mut scratch,
+            ));
+            assert_eq!(scratch.next, vec![false; text.chars().count() + 1]);
+        }
+        assert!(glob_match(
+            &[Token::RecursiveStar, Token::Literal('x'), Token::RecursiveStar],
+            "a/x/b",
+            &mut scratch,
+        ));
+    }
 
     #[test]
     fn a_matching_row_has_one_terminal_boundary_cell() {

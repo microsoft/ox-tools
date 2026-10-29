@@ -181,9 +181,16 @@ pub fn today() -> String {
 }
 
 fn today_at(now: SystemTime) -> String {
-    let seconds = now.duration_since(UNIX_EPOCH).map_or(0, |since| since.as_secs());
+    let seconds = now.duration_since(UNIX_EPOCH).map_or(
+        // #[gamma::skip(literal.int_increment, reason = "Only pre-Unix-epoch fallback seconds changes0->1. Both are divided by86400 before any use, yielding identical day0 and1970-01-01.", tag = "equivalent")]
+        0,
+        |since| since.as_secs(),
+    );
 
-    civil_from_days(i64::try_from(seconds / 86_400).unwrap_or(0))
+    civil_from_days(i64::try_from(seconds / 86_400).unwrap_or(
+        // #[gamma::skip(literal.int_increment, reason = "seconds is u64, and seconds/86400 <=213503982334601, strictly below i64::MAX. try_from cannot fail; its unwrap_or fallback0/1 is unreachable.", tag = "equivalent")]
+        0,
+    ))
 }
 
 /// Converts a count of days since the Unix epoch into `YYYY-MM-DD`.
@@ -194,7 +201,15 @@ fn civil_from_days(days: i64) -> String {
     let shifted = days + 719_468;
     let era = shifted.div_euclid(146_097);
     let day_of_era = shifted.rem_euclid(146_097);
-    let year_of_era = (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year_of_era =
+        (day_of_era
+            - day_of_era /
+    // #[gamma::skip(literal.int_decrement, reason = "day_of_era is rem_euclid146097, hence0..146096. /1459 differs from/1460 only for d in[1459k,1460k-1], k1..100. The original year numerator N lies strictly between365(4k-1)+1 and365(4k), including the at-most3 century corrections (k<=3 has none). Subtracting the additional1 leaves the same /365 quotient; subsequent year/day/month calculations are therefore unchanged.", tag = "equivalent")]
+    1460 + day_of_era /
+    // #[gamma::skip(literal.int_decrement, reason = "day_of_era0..146096. /36523 differs from/36524 only on[k*36523,k*36524-1], k1..4. On each such interval floor(d/1460)=25k and floor(d/146096)=0, so the original year numerator is in[36500k-k-1,36500k-2]. Adding1 stays strictly below36500k and above36500k-365; /365 year quotient and every derived result are unchanged.", tag = "equivalent")]
+    36_524 - day_of_era /
+    // #[gamma::skip(literal.int_decrement, reason = "day_of_era0..146096. /146095 differs from/146096 only at d146095. Original year numerator146095-100+3=145998 becomes145997; both /365 give399 (next boundary146000). Thus year_of_era and all subsequent derived calendar fields are identical.", tag = "equivalent")]
+    146_096) / 365;
     let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
     let month_prime = (5 * day_of_year + 2) / 153;
 

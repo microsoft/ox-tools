@@ -82,7 +82,10 @@ pub(super) fn values_for(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Repl
     let source = types.concrete_self_type_or_associated(alias_resolved).unwrap_or(ty);
     let instantiated = types.instantiate_alias(source);
     let resolved = instantiated.as_ref().unwrap_or_else(|| types.resolve_alias(source));
-    let aliased = instantiated.is_some() || !core::ptr::eq(source, resolved);
+    let aliased =
+    // #[gamma::skip(logical.or_remove_left, reason = "A present instantiated alias points into its newly owned Option<Type>, not the borrowed source Type, so pointer inequality is already true whenever instantiated.is_some().", tag = "equivalent")]
+    // #[gamma::skip(logical.or_remove_right, logical.or_to_and, reason = "Owned instantiation returns Some for finite repeated alias instantiations, and that value has a distinct address from source, so both disjuncts are true together. On None, absent/imported/abstract/defaulted aliases leave borrowed lookup at source; exact cycles return source too. Production indexes erase cyclic graphs and bind generic parameters before publishing aliases, excluding a None-plus-changed-borrowed result.", tag = "equivalent")]
+    instantiated.is_some() || !core::ptr::eq(source, resolved);
     // The zero-argument alias has a concrete success type that ordinary payload lookup cannot see.
     let fmt_result = types.is_fmt_result(resolved);
     let kind = if fmt_result { Kind::Result } else { types.value_kind(resolved) };
@@ -94,7 +97,9 @@ pub(super) fn values_for(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Repl
     // An `impl Iterator` is the one exception, and only because it is not really a guess: every
     // iterator can be named through `gamma_rt::Either`, whatever concrete type the body chose.
     if kind != Kind::Iterator && is_abstract_type(resolved, types.abstracts) {
-        return Vec::new();
+        return
+        // #[gamma::skip(return_value.default, reason = "The original Vec::new() already constructs the default value of its inferred return type.", tag = "equivalent")]
+        Vec::new();
     }
 
     // Withhold an unknown concrete type only when source-visible evidence proves it cannot be
@@ -102,14 +107,18 @@ pub(super) fn values_for(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Repl
     // bad guess, while dropping the candidate here would make a real `Default` implementation
     // impossible to discover.
     if kind == Kind::Unknown && types.lacks_default(resolved) {
-        return Vec::new();
+        return
+        // #[gamma::skip(return_value.default, reason = "The original Vec::new() already constructs the default value of its inferred return type.", tag = "equivalent")]
+        Vec::new();
     }
     if types
         .collection_hasher_index(resolved)
         .and_then(|index| types.payload(resolved, index))
         .is_some_and(|hasher| types.lacks_default(&hasher))
     {
-        return Vec::new();
+        return
+        // #[gamma::skip(return_value.default, reason = "The original Vec::new() already constructs the default value of its inferred return type.", tag = "equivalent")]
+        Vec::new();
     }
     // An alias must preserve its declared constructor shape rather than borrowing the standard
     // collection spelling of the type it resolves to.
@@ -120,8 +129,12 @@ pub(super) fn values_for(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Repl
     if depth == 0 {
         let eligible = types.has_default(resolved)
             || kind == Kind::Array && types.array_may_default(resolved)
-            || kind == Kind::Unknown && !types.lacks_default(resolved);
-        return if kind != Kind::Result && eligible {
+            ||
+            // #[gamma::skip(logical.and_remove_right, reason = "Unknown kinds lacking Default return early before eligibility is computed. Removing the later repeated lacks_default restriction cannot admit any additional reachable kind.", tag = "equivalent")]
+            kind == Kind::Unknown && !types.lacks_default(resolved);
+        return if
+        // #[gamma::skip(logical.and_remove_left, reason = "Result has no Default proof and cannot match the Array or Unknown eligibility branches, so eligibility is false for every Result before the repeated Result exclusion is reached.", tag = "equivalent")]
+        kind != Kind::Result && eligible {
             vec![if types.has_proven_default(resolved) {
                 proven("fn_value.default", "Default::default()")
             } else {
@@ -517,7 +530,11 @@ pub(super) fn tuple_values(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Re
 
         combinations = next;
 
-        if combinations.is_empty() {
+        if
+        // #[gamma::skip(cond.always_false, reason = "Once the tuple Cartesian-product accumulator is empty, all subsequent products remain empty. Changing the early break affects internal work but not emitted alternatives or confidence.", tag = "equivalent")]
+        combinations.is_empty() {
+            // #[gamma::skip(loop.delete_break, reason = "Once the tuple Cartesian-product accumulator is empty, all subsequent products remain empty. Changing the early break affects internal work but not emitted alternatives or confidence.", tag = "equivalent")]
+            // #[gamma::skip(loop.break_to_continue, reason = "Once the tuple Cartesian-product accumulator is empty, all subsequent products remain empty. Changing the early break affects internal work but not emitted alternatives or confidence.", tag = "equivalent")]
             break;
         }
     }
@@ -591,7 +608,9 @@ pub(super) fn literal_values(kind: Kind, ty: &Type) -> Vec<ReplacementValue> {
 // #[gamma::skip(parameter.default_shadow, reason = "_depth is deliberately unused and defaulting it cannot affect any reference replacement")]
 pub(super) fn reference_values(ty: &Type, _depth: usize, _types: &Types<'_>) -> Vec<ReplacementValue> {
     let Some(elem) = reference_elem(ty) else {
-        return Vec::new();
+        return
+        // #[gamma::skip(return_value.default, reason = "The original Vec::new() already constructs the default value of its inferred return type.", tag = "equivalent")]
+        Vec::new();
     };
     match strip(ty) {
         Type::Reference(reference) if reference.mutability.is_none() && matches!(strip(elem), Type::Slice(_)) => {
@@ -638,7 +657,9 @@ pub(super) fn inner_values(ty: &Type, index: usize, depth: usize, types: &Types<
 /// wrapper infers it from the arm holding the original.
 pub(super) fn iterator_item(ty: &Type) -> Option<&Type> {
     let Type::ImplTrait(imp) = strip(ty) else {
-        return None;
+        return
+        // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+        None;
     };
 
     imp.bounds.iter().find_map(|bound| {
@@ -665,14 +686,20 @@ pub(super) fn type_argument(ty: &Type, index: usize) -> Option<&Type> {
 /// The type arguments of a path type, ignoring lifetimes and const generics.
 pub(super) fn type_argument_values(ty: &Type) -> Vec<&Type> {
     let Type::Path(path) = strip(ty) else {
-        return Vec::new();
+        return
+        // #[gamma::skip(return_value.default, reason = "The original Vec::new() already constructs the default value of its inferred return type.", tag = "equivalent")]
+        Vec::new();
     };
 
     let Some(segment) = path.path.segments.last() else {
-        return Vec::new();
+        return
+        // #[gamma::skip(return_value.default, reason = "The original Vec::new() already constructs the default value of its inferred return type.", tag = "equivalent")]
+        Vec::new();
     };
     let PathArguments::AngleBracketed(args) = &segment.arguments else {
-        return Vec::new();
+        return
+        // #[gamma::skip(return_value.default, reason = "The original Vec::new() already constructs the default value of its inferred return type.", tag = "equivalent")]
+        Vec::new();
     };
 
     args.args
@@ -691,7 +718,9 @@ pub(super) fn type_text(ty: &Type) -> String {
 
 pub(super) fn type_name(ty: &Type) -> Option<&syn::Ident> {
     let Type::Path(path) = strip(ty) else {
-        return None;
+        return
+        // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+        None;
     };
     path.path.segments.last().map(|segment| &segment.ident)
 }
@@ -702,7 +731,9 @@ pub(super) fn type_name(ty: &Type) -> Option<&syn::Ident> {
 /// being named: `Cow<'a, str>` names one type, not two.
 pub(super) fn type_arguments(segment: &PathSegment) -> usize {
     let PathArguments::AngleBracketed(args) = &segment.arguments else {
-        return 0;
+        return
+        // #[gamma::skip(return_value.default, reason = "The inferred usize literal zero already equals Default::default::<usize>().", tag = "equivalent")]
+        0;
     };
 
     args.args.iter().filter(|arg| matches!(arg, GenericArgument::Type(_))).count()
@@ -721,7 +752,9 @@ pub(super) fn wrapper_ctor(ty: &Type) -> String {
 /// The written path of a type, without its generic arguments.
 fn path_text(ty: &Type) -> Option<String> {
     let Type::Path(path) = strip(ty) else {
-        return None;
+        return
+        // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+        None;
     };
 
     Some(
@@ -902,6 +935,76 @@ mod tests {
             self_type: None,
             self_associated: None,
         }
+    }
+
+    #[test]
+    fn map_payloads_spend_the_same_depth_for_keys_and_values_and_keep_optimistic_value_confidence() {
+        let defaults = Defaults::default();
+        let imports = HashMap::default();
+        let types = test_types(&[], &imports, &defaults);
+        assert_eq!(
+            values_for(&parse_quote!(HashMap<Option<bool>, Option<bool>>), 2, &types),
+            [
+                proven("fn_value.empty_collection", "HashMap::new()"),
+                proven("fn_value.one_element", "core::iter::once((None, None)).collect()"),
+            ],
+        );
+        let values = values_for(&parse_quote!(HashMap<bool, dependency::Value>), 2, &types);
+        let one_element = values.iter().find(|(name, _, _)| *name == "fn_value.one_element").unwrap();
+        assert_eq!(
+            *one_element,
+            optimistic("fn_value.one_element", "core::iter::once((true, Default::default())).collect()")
+        );
+        let values = values_for(&parse_quote!(HashMap<dependency::Key, bool>), 2, &types);
+        let one_element = values.iter().find(|(name, _, _)| *name == "fn_value.one_element").unwrap();
+        assert_eq!(
+            *one_element,
+            optimistic("fn_value.one_element", "core::iter::once((Default::default(), true)).collect()")
+        );
+    }
+
+    #[test]
+    fn map_keys_with_symbolic_array_lengths_keep_optimistic_default_confidence() {
+        let defaults = Defaults::default();
+        let imports = HashMap::default();
+        let types = test_types(&[], &imports, &defaults);
+        let ty = parse_quote!(HashMap<[bool; N], bool>);
+        assert!(types.collection_elements_proven(&ty));
+        assert!(!types.has_proven_default(&parse_quote!([bool; N])));
+        assert_eq!(
+            values_for(&ty, 1, &types),
+            [
+                proven("fn_value.empty_collection", "HashMap::new()"),
+                optimistic(
+                    "fn_value.one_element",
+                    "core::iter::once((Default::default(), Default::default())).collect()"
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn aliases_to_noncollection_wrappers_preserve_owned_payload_alternatives() {
+        let defaults = Defaults::default();
+        let imports = HashMap::default();
+        let aliases = HashMap::from_iter([(
+            "Alias".into(),
+            Some(Alias {
+                parameters: Vec::new(),
+                target: parse_quote!(std::borrow::Cow<'static, bool>),
+            }),
+        )]);
+        let types = Types {
+            aliases: Some(&aliases),
+            ..test_types(&[], &imports, &defaults)
+        };
+        assert_eq!(
+            values_for(&parse_quote!(Alias), 2, &types),
+            [
+                proven("fn_value.bool_true", "std::borrow::Cow::Owned(true)"),
+                proven("fn_value.bool_false", "std::borrow::Cow::Owned(false)"),
+            ],
+        );
     }
 
     #[test]

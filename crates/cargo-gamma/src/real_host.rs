@@ -15,6 +15,14 @@ fn progress_is_terminal(_stdout: impl FnOnce() -> bool, stderr: impl FnOnce() ->
     stderr()
 }
 
+fn diagnostic_is_terminal() -> bool {
+    #[cfg(test)]
+    if let Some(terminal) = tests::DIAGNOSTIC_TERMINAL.get() {
+        return terminal;
+    }
+    stderr().is_terminal()
+}
+
 #[cfg_attr(coverage_nightly, coverage(off))]
 impl Host for RealHost {
     fn output(&mut self) -> impl Write {
@@ -27,7 +35,7 @@ impl Host for RealHost {
 
     // #[gamma::skip(fn_value.bool_false, fn_value.bool_true, reason = "the answer belongs to the invoking terminal and tests validly run both attached and detached")]
     fn is_terminal(&self) -> bool {
-        progress_is_terminal(|| stdout().is_terminal(), || stderr().is_terminal())
+        progress_is_terminal(|| stdout().is_terminal(), diagnostic_is_terminal)
     }
 
     // #[gamma::skip(fn_value.none, reason = "terminal dimensions are optional and None is already the valid fallback when the host cannot report them")]
@@ -44,6 +52,25 @@ impl Host for RealHost {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    thread_local! {
+        pub(super) static DIAGNOSTIC_TERMINAL: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    }
+
+    #[test]
+    fn survivor_real_host_preserves_both_native_terminal_answers() {
+        struct Restore(Option<bool>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                DIAGNOSTIC_TERMINAL.set(self.0);
+            }
+        }
+        let _restore = Restore(DIAGNOSTIC_TERMINAL.get());
+        for terminal in [true, false] {
+            DIAGNOSTIC_TERMINAL.set(Some(terminal));
+            assert_eq!(RealHost.is_terminal(), terminal);
+        }
+    }
+
     use std::env;
     use std::process::Command;
 

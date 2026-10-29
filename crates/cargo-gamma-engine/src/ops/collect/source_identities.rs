@@ -83,7 +83,10 @@ impl Sources {
         match path.first()?.as_str() {
             "crate" => {
                 module.clear();
-                path = &path[1..];
+                // #[gamma::skip(stmt.delete_assign, reason = "Sources::resolve still clears the base module for crate. Every consumer delegates to Identities::resolve_path/default_for/is_enum, whose common resolver strips crate itself, so retaining the marker resolves identically.", tag = "equivalent")]
+                path = &path[
+                // #[gamma::skip(literal.int_decrement, reason = "Sources::resolve still clears the base module for crate. Every consumer delegates to Identities::resolve_path/default_for/is_enum, whose common resolver strips crate itself, so retaining the marker resolves identically.", tag = "equivalent")]
+                1..];
             }
             "self" => path = &path[1..],
             "super" => {
@@ -95,7 +98,11 @@ impl Sources {
             _ => {}
         }
         module.extend_from_slice(path);
-        Some((self.roots.get(root)?, module))
+        Some((
+            // #[gamma::skip(try.propagate_to_unwrap, reason = "Sources contexts are inserted only by bind (which first inserts the same root in roots) or alias (which copies an existing context). Later bind retains all old roots. Therefore a resolved context's root lookup cannot be None; panic_on_failure never changes a reachable outcome.", tag = "equivalent")]
+            self.roots.get(root)?,
+            module,
+        ))
     }
 
     pub(super) fn default_for(&self, source: &str, inline: &[String], path: &[String]) -> Option<bool> {
@@ -115,10 +122,14 @@ impl Sources {
 
     pub(super) fn same_type(&self, source: &str, inline: &[String], left: &[String], right: &[String]) -> bool {
         let Some((identities, left)) = self.resolve(source, inline, left) else {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         };
         let Some((_, right)) = self.resolve(source, inline, right) else {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         };
         identities
             .resolve_path(&left)
@@ -138,6 +149,35 @@ mod tests {
 
     fn path(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|part| (*part).into()).collect()
+    }
+
+    #[test]
+    fn a_third_duplicate_source_cannot_resurrect_declaration_evidence() {
+        let mut sources = Sources::default();
+        for definition in ["struct First;", "struct Second;", "#[derive(Default)] struct Third;"] {
+            sources.insert("src\\lib.rs", identities(definition));
+        }
+        sources.bind(&[("src/lib.rs".into(), "src/lib.rs".into(), Vec::new())]);
+        assert_eq!(sources.default_for("src/lib.rs", &[], &path(&["Third"])), None);
+        assert!(!sources.defines("src/lib.rs", &[], &path(&["Third"])));
+    }
+
+    #[test]
+    fn binding_normalizes_both_paths_skips_missing_inputs_and_consumes_each_pending_source_once() {
+        let mut sources = Sources::default();
+        sources.insert("src/lib.rs", identities("#[derive(Default)] struct Ready;"));
+        let mappings = [
+            ("missing.rs".into(), "root.rs".into(), Vec::new()),
+            ("src\\lib.rs".into(), "root\\lib.rs".into(), Vec::new()),
+        ];
+        sources.bind(&mappings);
+        assert!(sources.roots.contains_key("root/lib.rs"));
+        assert_eq!(sources.default_for("src/lib.rs", &[], &path(&["Ready"])), Some(true));
+        assert_eq!(sources.default_for("src/lib.rs", &[], &path(&["self", "Ready"])), Some(true));
+        sources.bind(&mappings);
+        assert_eq!(sources.default_for("src\\lib.rs", &[], &path(&["Ready"])), Some(true));
+        assert_eq!(sources.default_for("missing.rs", &[], &path(&["Ready"])), None);
+        assert_eq!(sources.default_for("src/lib.rs", &[], &[]), None);
     }
 
     #[test]

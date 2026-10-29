@@ -257,15 +257,15 @@ fn attribute_marks_test(attr_text: &str) -> bool {
         .strip_prefix('#')
         .map(|rest| rest.trim_start().trim_start_matches('!'))
         .and_then(|rest| rest.trim_start().strip_prefix('['))
-        .and_then(|rest| rest.trim_end().strip_suffix(']'))
+        .and_then(|rest| rest.strip_suffix(']'))
         .map(str::trim)
     else {
         return false;
     };
 
-    let (name, args) = meta.split_once('(').map_or((meta, None), |(name, rest)| {
-        (name.trim(), rest.trim_end().strip_suffix(')').map(str::trim))
-    });
+    let (name, args) = meta
+        .split_once('(')
+        .map_or((meta, None), |(name, rest)| (name.trim(), rest.strip_suffix(')').map(str::trim)));
 
     let name = name.rsplit("::").next().unwrap_or_default().trim();
 
@@ -750,6 +750,16 @@ mod tests {
         assert_eq!(strip_call("all (test)", "all"), Some("test"));
         assert_eq!(strip_call("all test", "all"), None);
         assert_eq!(split_predicates("test,, all(test, unix), "), vec!["test", "all(test, unix)"]);
+    }
+
+    #[test]
+    fn survivor_attribute_parenthesis_whitespace_is_trimmed_at_the_closing_boundary() {
+        for attribute in ["#[ cfg(test) ]", "#[cfg(test)   ]", "#[cfg(test   )   ]", "#[ cfg( test ) ]"] {
+            assert!(attribute_marks_test(attribute), "{attribute:?}");
+        }
+        for attribute in ["#[cfg(not(test) )]", "#[cfg(any(test, unix) )]"] {
+            assert!(!attribute_marks_test(attribute), "{attribute:?}");
+        }
     }
 
     #[test]

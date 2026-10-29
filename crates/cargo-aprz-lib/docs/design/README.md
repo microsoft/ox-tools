@@ -43,14 +43,13 @@ their prerequisites disappear.
 
 ## HTTP and advisory acquisition
 
-HTTP requests use the public `fetch` crate's Tokio transport with native TLS.
+HTTP requests use the public `fetch` crate's Tokio transport with rustls.
 Coverage, documentation, and hosting providers can be constructed and cloned
 without a Tokio runtime. They create their shared transport on the first async
 request inside Tokio, using the same request resilience configuration.
-Connections are direct; environment HTTP proxy settings are not consumed.
-Windows and macOS use their platform TLS implementations; Linux builds require
-supported, patched OpenSSL 3 development packages, dynamically linked. The
-Fetch request pipeline configures native retry and timeout middleware:
+Connections are direct. The transport does not use HTTP proxy settings from the
+environment. Linux builds do not require OpenSSL 3 development packages.
+The Fetch request pipeline configures native retry and timeout middleware:
 three retries for transport errors,
 5xx, 429, and 403 with `Retry-After`. Downloads retry the complete transfer on
 body failures through a separate whole-transfer Seatbelt wrapper. Transport errors

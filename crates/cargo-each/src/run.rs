@@ -1052,7 +1052,7 @@ mod tests {
         Invocation, InvocationResult, OutputEmitError, PLAN_BUILD_CONTEXT, PROCESS_POLL_INTERVAL, Plan, RunningWorker,
         SELECTION_READ_CONTEXT, SNAPSHOT_EOF_MESSAGE, STDERR_STREAM, STDOUT_STREAM, SnapshotSource, TemporarySnapshot, TreeOutcome,
         WORKER_PANIC_TEST_PROGRAM, WORKER_READY_POLL_INTERVAL, WORKER_SPAWN_ERROR_TEST_PROGRAM, WORKSPACE_RUST_VERSION_CONTEXT,
-        add_infrastructure_failure, combine_captured_output, create_output_capture_with, display_duration, display_invocation,
+        add_infrastructure_failure, combine_captured_output, create_output_capture_with, display_arg, display_duration, display_invocation,
         effective_worker_count, emit_buffered_to, emit_label_to, execute_parallel, execute_parallel_with, exit_byte,
         failure_stops_launching, finish_capture, panic_description, parallel_failure_exit_code, parse_package_predicates,
         parse_target_kinds, parse_target_predicates, record_emitted_failure, run, run_captured, run_captured_with, run_cargo_with,
@@ -1062,6 +1062,13 @@ mod tests {
     };
     use crate::cli::CargoCli;
     use crate::workspace::{Member, MemberTarget, Workspace};
+
+    #[test]
+    fn survivor_argument_display_escapes_non_ascii_whitespace() {
+        assert_eq!(display_arg("left\u{a0}right"), "\"left\\u{a0}right\"");
+        assert_eq!(display_arg("\u{2003}"), "\"\\u{2003}\"");
+        assert_eq!(display_arg("a b"), "\"a b\"");
+    }
 
     fn target_requirement_workspace() -> Workspace {
         let member = |name: &str, features: &[&str], targets: Vec<MemberTarget>| Member {
@@ -1173,6 +1180,35 @@ mod tests {
         assert_eq!(
             normalized,
             "`--require-target-per-package` found selected packages without a matching target: beta@0.1.0\n> failed to build command plan"
+        );
+    }
+
+    #[test]
+    fn workspace_run_propagates_target_filter_parse_errors_before_execution() {
+        let CargoCli::Each(args) = CargoCli::try_parse_from([
+            "cargo",
+            "each",
+            "-p",
+            "alpha",
+            "--each-target",
+            "test",
+            "--target-filter",
+            "unknown",
+            "--",
+            "echo",
+            "{target}",
+        ])
+        .unwrap();
+        let error = run_cargo_with(
+            &args,
+            |_| Ok(target_requirement_workspace()),
+            |_, _, _, _| panic!("an invalid filter must not execute a command"),
+        )
+        .unwrap_err();
+        let message = error.to_string();
+        assert_eq!(
+            message.split(" (at ").next().unwrap(),
+            "invalid filter expression `unknown`: expected one of: name:<glob>, required-feature:<name>, name-in-metadata:<dotted.key>\n> invalid target filter expression"
         );
     }
 

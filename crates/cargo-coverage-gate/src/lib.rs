@@ -18,9 +18,10 @@
 //! verdict includes actionable details without relying on a later
 //! coverage-service upload. A coverable line is a distinct LCOV `DA:` record.
 //! Before aggregation, the CLI and released-surface library APIs filter each
-//! tracefile to the source surface that can ship from Cargo library and binary
-//! targets. Test, example, bench, build-script, and other non-release target
-//! sources are removed. Within a released source file, only items whose `cfg`
+//! tracefile using provable Cargo source and test-only boundaries.
+//! Test, example, bench, build-script, and other non-release target sources
+//! are removed when their non-release ownership is established. Within a
+//! released source file, only items whose `cfg`
 //! semantics require `test` (plus ordinary `#[test]`/`#[bench]` functions) are
 //! removed; feature-gated `test-util` APIs remain measured when they can compile
 //! in a non-test build. Local Cargo target `required-features` are treated as
@@ -31,6 +32,28 @@
 //! prove local-feature activation, even for optional or renamed dependencies
 //! exposing a same-named local feature: another feature may activate the
 //! dependency through `dep:dep`.
+//!
+//! A potentially released source-declaring macro or a measured file missing
+//! from the module graph makes indirect source ownership uncertain.
+//! Filtering then warns on stderr, removes only file-local
+//! test-only ranges, and retains ambiguous counters, including zero-hit
+//! production lines. Such output is conservative, not complete production-only
+//! classification. Ordinary authored `#[cfg(test)]` blocks still need no
+//! annotations. Exceptional helpers can use the existing nightly
+//! `#[cfg_attr(coverage_nightly, coverage(off))]` attribute when appropriate;
+//! enable `#![cfg_attr(coverage_nightly, feature(coverage_attribute))]` in the
+//! containing crate. This does not expand macros, classify generated tests,
+//! or recover sources omitted from the input LCOV.
+//! A measured, readable Rust file in a known workspace member namespace
+//! retains its counters even when its declaring module is inside an opaque
+//! macro. The filter parses its local syntax without expanding that macro.
+//!
+//! Compiler-library records that escape upstream filename exclusions are
+//! removed only after canonical source paths establish that they are beneath
+//! the library-source tree reported by the selected `RUSTC --print sysroot`.
+//! Cargo-owned project sources take precedence, including explicit sources
+//! outside their package directory. Unknown project or dependency sources
+//! still fail; directory names alone never establish compiler ownership.
 //! Numeric failures show exact covered/coverable counts and uncovered ranges;
 //! `expect-no-coverable-lines` failures show the unexpected coverable ranges;
 //! and `NO DATA` explains that no records were attributed. Location lists are
@@ -281,15 +304,32 @@ mod workspace;
 
 pub use error::CoverageGateError;
 
-/// Filter one LCOV tracefile to the released Cargo library and binary surface.
+/// Filter one LCOV tracefile using provable Cargo and test-only boundaries.
 ///
 /// Cargo target roots and out-of-line module declarations establish source
 /// ownership. Files reachable only from tests, examples, benches, build
-/// scripts, or other non-release targets are removed. Within released files,
+/// scripts, or other non-release targets are removed when their ownership is
+/// established. Within released files,
 /// line records are removed only when Rust syntax proves they are test-only
 /// (`#[test]`, `#[bench]`, `#[cfg(test)]`, a `cfg` predicate that requires
 /// `test`, or an exact qualified attribute listed in workspace metadata).
 /// Function and branch records are omitted because the proof is line-granular.
+///
+/// When a potentially released source macro or a measured graph gap makes indirect ownership
+/// uncertain, filtering warns on stderr, retains ambiguous source counters,
+/// and excludes only file-local test-only ranges. This conservative result
+/// is not complete production-only classification. Measured Rust files beneath
+/// a known member namespace are parsed and retained using local test-only proofs,
+/// even without a discovered module edge. Unknown external sources and unrelated
+/// path, parse, checksum, edition, and line-validation failures remain errors.
+/// Macro expansion and counters absent from the input are not inferred.
+///
+/// Otherwise unknown records outside workspace member directories are excluded
+/// only when their canonical paths are beneath the selected compiler's verified
+/// `lib/rustlib/src/rust/library` tree. Discovery honors `RUSTC` and the workspace
+/// working directory and is performed at most once per report batch, only when
+/// needed. Missing source files or failed compiler queries remain errors;
+/// an absent optional compiler source tree does not authorize any exclusion.
 ///
 /// This is a workspace operation, not a pure text transform. It runs
 /// `cargo metadata --no-deps`, reads and parses reachable Rust sources, and
@@ -298,7 +338,10 @@ pub use error::CoverageGateError;
 /// directory. The returned LCOV is parsed and serialized canonically, so
 /// retained `SF:` paths are normalized to the owning member path reported by
 /// Cargo metadata, and record ordering and summary records may differ from the
-/// input.
+/// input. When conservative filtering depends on a measured source-graph gap,
+/// a zero-line `SF:` record preserves that evidence even if all counters for
+/// that source are test-only. It adds no coverable lines or hits and keeps
+/// filtering idempotent.
 ///
 /// Qualified framework test macros are configured explicitly:
 ///
@@ -328,9 +371,10 @@ pub use error::CoverageGateError;
 /// # Errors
 ///
 /// Returns [`CoverageGateError`] when Cargo metadata cannot be loaded, the
-/// LCOV input is malformed, any source reachable from a Cargo target root
+/// LCOV input is malformed, a reachable or measured member source
 /// cannot be resolved/read/parsed, target ownership cannot be determined, or
-/// LCOV line data does not match the current source tree.
+/// LCOV line data does not match the current source tree. Compiler-source
+/// discovery failures are also returned when provenance is needed.
 #[cfg_attr(coverage_nightly, coverage(off))]
 // This adapter only selects the real metadata loader; the injected implementation below is mutation-covered.
 #[mutants::skip]
@@ -343,6 +387,8 @@ pub fn filter_lcov(lcov_text: &str, manifest_path: Option<&Path>) -> Result<Stri
 ///
 /// The returned vector preserves input order and length.
 /// An empty input returns an empty vector without workspace discovery.
+/// Each output carries any zero-line source witness needed to preserve the
+/// batch's conservative classification when that output is filtered on its own.
 ///
 /// # Errors
 ///
@@ -611,9 +657,96 @@ fn evaluate_unfiltered_many_for_target_with_metadata_loader(
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use std::path::PathBuf;
+
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn survivor_public_wrappers_forward_exact_optional_manifests_before_metadata_execution() {
+        for manifest in [None, Some(PathBuf::from("distinct-wrapper-manifest/Cargo.toml"))] {
+            let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+            workspace::metadata_loader_test_seam::with_loader(
+                {
+                    let manifest = manifest.clone();
+                    let calls = std::rc::Rc::clone(&calls);
+                    move |actual| {
+                        assert_eq!(actual, manifest.as_deref());
+                        calls.set(calls.get() + 1);
+                        Err(crate::error::InvalidPackageSelectorError::new("public-wrapper-manifest-probe".to_owned()).into())
+                    }
+                },
+                || {
+                    for result in [
+                        filter_lcov("", manifest.as_deref()).map(|_| ()),
+                        filter_lcov_many(&[""], manifest.as_deref()).map(|_| ()),
+                        evaluate("", manifest.as_deref(), &[]).map(|_| ()),
+                        evaluate_many(&[""], manifest.as_deref(), &[]).map(|_| ()),
+                        evaluate_many_for_target(&[""], manifest.as_deref(), &[], None).map(|_| ()),
+                        evaluate_unfiltered("", manifest.as_deref(), &[]).map(|_| ()),
+                        evaluate_unfiltered_many(&[""], manifest.as_deref(), &[]).map(|_| ()),
+                        evaluate_unfiltered_many_for_target(&[""], manifest.as_deref(), &[], None).map(|_| ()),
+                    ] {
+                        let error = result.unwrap_err().to_string();
+                        assert!(error.contains("public-wrapper-manifest-probe"), "{error}");
+                    }
+                },
+            );
+            assert_eq!(calls.get(), 8);
+        }
+    }
+
+    #[test]
+    fn survivor_filter_wrappers_reject_malformed_input_without_metadata_discovery() {
+        for input in ["not lcov", "DA:not-a-line,1\n"] {
+            let error = workspace::metadata_loader_test_seam::with_loader(
+                |_| panic!("malformed LCOV must not load metadata"),
+                || filter_lcov(input, Some(Path::new("must-not-be-invoked/Cargo.toml"))),
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("lcov tracefile"), "{error}");
+            let error = filter_lcov_with_metadata_loader(input, None, |_| panic!("malformed LCOV must not load metadata")).unwrap_err();
+            assert!(error.to_string().contains("lcov tracefile"), "{error}");
+        }
+    }
+
+    #[test]
+    fn survivor_unfiltered_evaluation_rejects_malformed_input_without_metadata_discovery() {
+        for input in [include_str!("../tests/fixtures/lcov/malformed.info"), "DA:not-a-line,1\n"] {
+            let error = workspace::metadata_loader_test_seam::with_loader(
+                |_| panic!("malformed LCOV must not load metadata"),
+                || evaluate_unfiltered_many_for_target(&[input], Some(Path::new("must-not-be-invoked/Cargo.toml")), &[], None),
+            )
+            .unwrap_err();
+            assert!(
+                std::iter::successors(Some(&error as &(dyn std::error::Error + 'static)), |source| source.source())
+                    .any(<dyn std::error::Error>::is::<crate::error::ParseLcovError>),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn survivor_metadata_loader_errors_propagate_through_each_in_process_wrapper() {
+        fn fail(_: Option<&Path>) -> Result<cargo_metadata::Metadata, CoverageGateError> {
+            Err(crate::error::InvalidPackageSelectorError::new("injected-loader-failure".to_owned()).into())
+        }
+        for result in [
+            filter_lcov_many_with_metadata_loader(&[""], None, fail).map(|_| ()),
+            evaluate_many_for_target_with_metadata_loader(&[""], None, &[], None, fail).map(|_| ()),
+            evaluate_unfiltered_many_for_target_with_metadata_loader(&[""], None, &[], None, fail).map(|_| ()),
+        ] {
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains("injected-loader-failure"), "{error}");
+        }
+        let mut metadata = fixture_metadata();
+        metadata.workspace_metadata = serde_json::json!({"coverage-gate": {"min-lines-percent": "invalid"}});
+        let error = evaluate_unfiltered_many_for_target_with_metadata_loader(&[""], None, &[], None, |_| Ok(metadata))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("min-lines-percent"), "{error}");
+    }
 
     fn fixture_metadata() -> cargo_metadata::Metadata {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/source-index");

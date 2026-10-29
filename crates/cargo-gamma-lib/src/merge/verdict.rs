@@ -32,6 +32,9 @@ pub(super) struct Verdict<'reports> {
     /// A deterministic identity retained through staged merges.
     pub(super) lineage: String,
 
+    /// Whether the winning verdict came from a name-filtered source.
+    pub(super) name_filtered: bool,
+
     /// The rendering details compatible with the merged file's selected source.
     ///
     /// `Pending` does not replace an informative status, but a newer listing still describes the

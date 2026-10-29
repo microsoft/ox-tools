@@ -396,6 +396,8 @@ impl Provider {
             if !paused {
                 tracker.set_topic_status(TrackedTopic::Repos, TopicStatus::Active);
                 log::info!(target: LOG_TARGET, "{display_name} rate limit lifted, resuming requests");
+
+                // #[gamma::skip(call_result.default, reason = "This call returns unit; default_after preserves the call and its side effects, then returns the identical unit value.", tag = "equivalent")]
                 print_to_tracker_if_needed(&tracker, info_enabled(), || {
                     format!("{display_name} rate limit lifted, resuming requests")
                 });
@@ -408,6 +410,8 @@ impl Provider {
                     target: LOG_TARGET,
                     "{display_name} rate limit: ~{remaining_mins} minute(s) remaining until {formatted_time}"
                 );
+
+                // #[gamma::skip(call_result.default, reason = "This call returns unit; default_after preserves the call and its side effects, then returns the identical unit value.", tag = "equivalent")]
                 print_to_tracker_if_needed(&tracker, info_enabled(), || {
                     format!("{display_name} rate limit: ~{remaining_mins} minute(s) remaining until {formatted_time}")
                 });
@@ -593,8 +597,6 @@ impl Provider {
 
             if page_num == MAX_ISSUE_PAGES {
                 log::debug!(target: LOG_TARGET, "Reached maximum issue page limit ({MAX_ISSUE_PAGES}) for '{owner}/{repo}', stopping pagination after {} issues", all_issues.len());
-                // #[gamma::skip(loop.break_to_continue, loop.delete_break, tag = "equivalent", reason = "this is the final iteration of 1..=MAX_ISSUE_PAGES, so breaking, continuing, and falling through return the same pages and request count")]
-                break;
             }
         }
 
@@ -982,6 +984,7 @@ mod tests {
     use std::sync::Mutex;
 
     use semver::Version;
+    use wiremock::{Mock, ResponseTemplate};
 
     use super::*;
     use crate::facts::Progress;
@@ -1147,14 +1150,14 @@ mod tests {
         for pages in [1, 2, 10] {
             CAPTURED_LOGS.lock().unwrap().clear();
             let server = wiremock::MockServer::start().await;
-            wiremock::Mock::given(wiremock::matchers::path("/repos/owner/repo"))
-                .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            Mock::given(wiremock::matchers::path("/repos/owner/repo"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                     "stargazers_count": 1, "forks_count": 0, "subscribers_count": 0
                 })))
                 .mount(&server)
                 .await;
             for page in 1..=pages {
-                let response = wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!([{
+                let response = ResponseTemplate::new(200).set_body_json(serde_json::json!([{
                     "created_at": "2024-01-01T00:00:00Z", "closed_at": null,
                     "state": "open", "pull_request": null, "labels": []
                 }]));
@@ -1163,7 +1166,7 @@ mod tests {
                 } else {
                     response
                 };
-                wiremock::Mock::given(wiremock::matchers::path("/repos/owner/repo/issues"))
+                Mock::given(wiremock::matchers::path("/repos/owner/repo/issues"))
                     .and(wiremock::matchers::query_param("page", page.to_string()))
                     .respond_with(response)
                     .mount(&server)
@@ -2065,7 +2068,7 @@ mod tests {
             .respond_with(
                 wiremock::ResponseTemplate::new(200)
                     .insert_header("link", r#"<https://example.invalid/next>; rel="next""#)
-                    .set_body_json(issue),
+                    .set_body_json(issue.clone()),
             )
             .up_to_n_times(1)
             .mount(&server)
@@ -2102,6 +2105,27 @@ mod tests {
             .expect("since is RFC3339")
             .with_timezone(&Utc);
         assert_eq!(since, now - chrono::Duration::days(ISSUE_LOOKBACK_DAYS));
+
+        server.reset().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .insert_header("link", r#"<https://example.invalid/next>; rel="next""#)
+                    .set_body_json(issue),
+            )
+            .mount(&server)
+            .await;
+        let HostingApiResult::Success(limited, _) = provider.get_issues_and_pulls_at(client, "owner", "repo", now).await else {
+            panic!("pagination must stop successfully even when every page advertises another");
+        };
+        assert_eq!(limited.request_count, 10);
+        assert_eq!(limited.issues.len(), 10);
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 10);
+        assert_eq!(
+            requests.last().unwrap().url.query_pairs().find(|(key, _)| key == "page").unwrap().1,
+            "10"
+        );
     }
 
     #[tokio::test]

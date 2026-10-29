@@ -159,6 +159,7 @@ pub(crate) fn report_with(shard: Option<(u32, u32)>, started_at: u64, mutants: V
             mutant_id_version: Some(crate::model::MUTANT_ID_VERSION),
             merged: false,
             population_complete: shard.is_none(),
+            name_filtered: false,
             shard: shard.map(|(index, count)| ShardInfo { index, count }),
             tests: None,
             not_built: None,

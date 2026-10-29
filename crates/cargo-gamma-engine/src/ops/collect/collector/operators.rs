@@ -31,7 +31,11 @@ impl Collector<'_> {
             BinOp::Mul(_) => "*",
             BinOp::Div(_) => "/",
             BinOp::Rem(_) => "%",
-            _ => return None,
+            _ => {
+                return
+            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+            None;
+            }
         };
         let left = self.inferred_expression_type(&node.left)?;
         let right = self.inferred_expression_type(&node.right)?;
@@ -62,7 +66,6 @@ impl Collector<'_> {
         if let Expr::Lit(literal) = expression {
             match literal.lit {
                 Lit::Int(_) | Lit::Float(_) => return Some(Operand::Scalar),
-                Lit::Str(_) => return Some(Operand::Str),
                 _ => {}
             }
         }
@@ -109,7 +112,11 @@ impl Collector<'_> {
             BinOp::DivAssign(_) => "/=",
             BinOp::Rem(_) => "%",
             BinOp::RemAssign(_) => "%=",
-            _ => return false,
+            _ => {
+                return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
+            }
         };
         if self.defaults.has_single_source_evidence()
             && let (Some(left), Some(right)) = (
@@ -135,14 +142,15 @@ impl Collector<'_> {
             };
         }
         let (Some(left), Some(right)) = (self.operator_operand(&node.left), self.operator_operand(&node.right)) else {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         };
         let operator = replacement.trim_end_matches('=');
         let original_result = result(left, right, original.trim_end_matches('='));
         let replacement_result = result(left, right, operator);
         match (original_result, replacement_result) {
             (Some(original), Some(replacement)) => original != replacement,
-            (Some(_), None) => true,
             _ => left != Operand::Other && right != Operand::Other,
         }
     }

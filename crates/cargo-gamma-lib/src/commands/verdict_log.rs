@@ -17,6 +17,11 @@ pub(super) const TEST_SELECTION_LOG: &str = "gamma-selection.jsonl";
 const MAX_SELECTION_LOG_BYTES: usize = 64 * 1024 * 1024;
 const SELECTION_TRUNCATION_MARKER: &[u8] = b"{\"truncated\":true,\"reason\":\"selection journal reached its 64 MiB retention limit\"}\n";
 
+#[cfg(feature = "internals")]
+#[doc(hidden)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub mod native_test_util;
+
 #[derive(Debug, Default)]
 pub(super) enum VerdictLog {
     #[default]
@@ -37,6 +42,31 @@ pub(super) enum VerdictLog {
     },
 }
 
+#[cfg(test)]
+type ResumePolicyObserver = Box<dyn FnOnce(&Utf8Path, usize) -> crate::Result<()>>;
+
+#[cfg(test)]
+thread_local! {
+    static RESUME_POLICY_OBSERVER: std::cell::RefCell<Option<ResumePolicyObserver>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The read, truncation and durability boundary needed to recover an interrupted journal tail.
+trait TailFile: std::io::Read + std::io::Seek {
+    fn set_len(&mut self, length: u64) -> std::io::Result<()>;
+    fn sync_all(&mut self) -> std::io::Result<()>;
+}
+
+impl TailFile for File {
+    fn set_len(&mut self, length: u64) -> std::io::Result<()> {
+        Self::set_len(self, length)
+    }
+
+    // #[gamma::skip(fn_value.ok, reason = "This thin File adapter performs the native durable flush. A healthy owned output cannot distinguish omission; native flush failure or power-loss injection is outside deterministic unit-test boundaries.", tag = "native-boundary")]
+    fn sync_all(&mut self) -> std::io::Result<()> {
+        Self::sync_all(self)
+    }
+}
+
 impl VerdictLog {
     pub(super) fn resume(&mut self, scratch: &Utf8Path) -> crate::Result<()> {
         self.resume_with_inspector(scratch, MAX_SELECTION_LOG_BYTES, |_| {})
@@ -45,6 +75,10 @@ impl VerdictLog {
     // Observes or mutates the selection journal after repair, before its retained-tail read and
     // Writing-state installation; native opening and recovery remain part of resume.
     fn resume_with_inspector(&mut self, scratch: &Utf8Path, limit: usize, inspect: impl FnOnce(&mut File)) -> crate::Result<()> {
+        #[cfg(test)]
+        if let Some(observer) = RESUME_POLICY_OBSERVER.with_borrow_mut(Option::take) {
+            return observer(scratch, limit);
+        }
         self.resume_with_metadata(scratch, limit, inspect, File::metadata)
     }
 
@@ -57,34 +91,75 @@ impl VerdictLog {
         inspect: impl FnOnce(&mut File),
         metadata: impl FnOnce(&File) -> std::io::Result<std::fs::Metadata>,
     ) -> crate::Result<()> {
+        self.resume_with_progress(scratch, limit, inspect, metadata, Self::resume_progress_file)
+    }
+
+    fn resume_with_progress(
+        &mut self,
+        scratch: &Utf8Path,
+        limit: usize,
+        inspect: impl FnOnce(&mut File),
+        metadata: impl FnOnce(&File) -> std::io::Result<std::fs::Metadata>,
+        progress: impl FnOnce(File, &Utf8Path) -> crate::Result<File>,
+    ) -> crate::Result<()> {
         let path = scratch.join(TESTING_PROGRESS_LOG);
-        let mut file = OpenOptions::new()
+        let file = OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
             .truncate(false)
             .open(&path)
             .map_err(|cause| error!("could not reopen testing progress log `{path}`").caused_by(cause))?;
-        Self::repair_log_tail(&mut file)
-            .map_err(|cause| error!("could not recover testing progress log `{path}`; check that it is writable").caused_by(cause))?;
-        drop(file);
-        let file = OpenOptions::new()
-            .append(true)
-            .open(&path)
-            .map_err(|cause| error!("could not reopen testing progress log `{path}`").caused_by(cause))?;
+        let file = progress(file, &path)?;
         let selection_path = scratch.join(TEST_SELECTION_LOG);
-        let mut selection_file = OpenOptions::new()
+        let selection_file = OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
             .truncate(false)
             .open(&selection_path)
             .map_err(|cause| error!("could not reopen test-selection log `{selection_path}`").caused_by(cause))?;
+        let (selection_file, selection_bytes, selection_truncated) =
+            Self::resume_selection_file(selection_file, &selection_path, limit, inspect, metadata)?;
+        *self = Self::Writing {
+            file,
+            path,
+            selection_file,
+            selection_path,
+            selection_buffer: Vec::new(),
+            selection_bytes,
+            selection_truncated,
+            replay_prepared: false,
+        };
+        Ok(())
+    }
+
+    fn resume_progress_file(mut file: File, path: &Utf8Path) -> crate::Result<File> {
+        Self::repair_log_tail(&mut file)
+            .map_err(|cause| error!("could not recover testing progress log `{path}`; check that it is writable").caused_by(cause))?;
+        drop(file);
+        let file = OpenOptions::new()
+            .append(true)
+            .open(path)
+            .map_err(|cause| error!("could not reopen testing progress log `{path}`").caused_by(cause))?;
+        Ok(file)
+    }
+
+    fn resume_selection_file(
+        mut selection_file: File,
+        selection_path: &Utf8Path,
+        limit: usize,
+        inspect: impl FnOnce(&mut File),
+        metadata: impl FnOnce(&File) -> std::io::Result<std::fs::Metadata>,
+    ) -> crate::Result<(File, usize, bool)> {
         let length = Self::repair_log_tail_with_metadata(&mut selection_file, metadata).map_err(|cause| {
             error!("could not recover test-selection log `{selection_path}`; check that it is writable").caused_by(cause)
         })?;
         inspect(&mut selection_file);
-        let selection_bytes = usize::try_from(length).unwrap_or(usize::MAX);
+        let selection_bytes = usize::try_from(length).unwrap_or(
+            // #[gamma::skip(expr.decrement, reason = "On this Windows 64-bit target every u64 converts to usize; the usize::MAX/MAX-1 fallback is unreachable. This proof is target-specific, not a 32-bit claim.", tag = "equivalent")]
+            usize::MAX,
+        );
         let tail_length = length.min(SELECTION_TRUNCATION_MARKER.len() as u64);
         let mut tail = vec![0; selection_bytes.min(SELECTION_TRUNCATION_MARKER.len())];
         selection_file
@@ -95,19 +170,13 @@ impl VerdictLog {
         drop(selection_file);
         let selection_file = OpenOptions::new()
             .append(true)
-            .open(&selection_path)
+            .open(selection_path)
             .map_err(|cause| error!("could not reopen test-selection log `{selection_path}`").caused_by(cause))?;
-        *self = Self::Writing {
-            file,
-            path,
+        Ok((
             selection_file,
-            selection_path,
-            selection_buffer: Vec::new(),
             selection_bytes,
-            selection_truncated: tail == SELECTION_TRUNCATION_MARKER || selection_bytes >= limit,
-            replay_prepared: false,
-        };
-        Ok(())
+            tail == SELECTION_TRUNCATION_MARKER || selection_bytes >= limit,
+        ))
     }
 
     fn repair_log_tail(file: &mut File) -> std::io::Result<u64> {
@@ -120,11 +189,21 @@ impl VerdictLog {
         metadata: impl FnOnce(&File) -> std::io::Result<std::fs::Metadata>,
     ) -> std::io::Result<u64> {
         let length = metadata(file)?.len();
+        Self::repair_log_tail_at(file, length)
+    }
+
+    fn repair_log_tail_at(file: &mut impl TailFile, length: u64) -> std::io::Result<u64> {
         let mut end = length;
-        let mut buffer = [0; 4096];
+        let mut buffer = [
+        // #[gamma::skip(literal.int_increment, reason = "The initial tail buffer contents are overwritten by read_exact before the requested prefix is searched; unused bytes beyond count are never observed.", tag = "equivalent")]
+        0; 4096];
         while end > 0 {
             let start = end.saturating_sub(buffer.len() as u64);
             let count = usize::try_from(end - start).expect("the read length is bounded by the 4096-byte buffer");
+            assert!(
+                count > 0,
+                "a positive journal tail position always requests a nonempty preceding chunk"
+            );
             file.seek(std::io::SeekFrom::Start(start))?;
             file.read_exact(&mut buffer[..count])?;
             if let Some(newline) = buffer[..count].iter().rposition(|byte| *byte == b'\n') {
@@ -237,6 +316,8 @@ impl VerdictLog {
             return Ok(());
         }
         buffer.clear();
+
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "SelectionAttempt is an entirely derived Serialize struct of u32/usize/u64/bool/String/Option<String> plus fieldless derived SelectionTier/SelectionResult enums. serde_json serializes into its private Vec<u8> buffer, not the caller's fallible writer. That concrete encoding has no recoverable serialization failure, so panic_on_failure around the encoding cannot distinguish; subsequent writer/flush failures remain unchanged.", tag = "equivalent")]
         serde_json::to_writer(&mut *buffer, attempt).map_err(std::io::Error::other)?;
         buffer.push(b'\n');
         if bytes.saturating_add(buffer.len()).saturating_add(SELECTION_TRUNCATION_MARKER.len()) > limit {
@@ -267,12 +348,160 @@ impl VerdictLog {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::fs::{self, File};
-    use std::io::Write as _;
+    use std::io::{self, Cursor, Read, Seek, SeekFrom, Write as _};
 
     use camino::Utf8Path;
+    use serde_json::{Value, from_slice, from_str, to_vec};
 
-    use super::{MAX_SELECTION_LOG_BYTES, SELECTION_TRUNCATION_MARKER, TEST_SELECTION_LOG, TESTING_PROGRESS_LOG, VerdictLog};
+    use super::{
+        MAX_SELECTION_LOG_BYTES, RESUME_POLICY_OBSERVER, SELECTION_TRUNCATION_MARKER, TEST_SELECTION_LOG, TESTING_PROGRESS_LOG, VerdictLog,
+    };
+    use crate::error::error;
     use crate::exec::{SelectionAttempt, SelectionResult, SelectionTier};
+
+    #[test]
+    fn recovered_native_verdict_log_resume_forwards_the_exact_documented_selection_retention_policy() {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                RESUME_POLICY_OBSERVER.with_borrow_mut(|slot| *slot = None);
+            }
+        }
+        let called = std::rc::Rc::new(std::cell::Cell::new(false));
+        RESUME_POLICY_OBSERVER.with_borrow_mut(|slot| {
+            assert!(slot.is_none());
+            *slot = Some(Box::new({
+                let called = std::rc::Rc::clone(&called);
+                move |scratch, limit| {
+                    assert_eq!(scratch, Utf8Path::new("invalid\0resume-policy"));
+                    assert_eq!(limit, 64 * 1024 * 1024);
+                    called.set(true);
+                    Err(error!("the in-process resume host refuses before journal opening"))
+                }
+            }));
+        });
+        let _reset = Reset;
+        let mut journal = VerdictLog::default();
+        let failure = journal.resume(Utf8Path::new("invalid\0resume-policy")).unwrap_err();
+        assert_eq!(failure.message(), "the in-process resume host refuses before journal opening");
+        assert!(called.get());
+        assert!(matches!(journal, VerdictLog::Disabled));
+    }
+
+    /// Records recovery operations and rejects scripts that exceed their bounded operation trace.
+    struct MemoryTail {
+        cursor: Cursor<Vec<u8>>,
+        trace: Vec<(&'static str, u64)>,
+        failure: Option<&'static str>,
+    }
+
+    impl MemoryTail {
+        // Generous test-only stalled-scan guard; exact traces below, not this allowance, define recovery.
+        fn operation(&mut self, name: &'static str, count: u64) -> io::Result<()> {
+            self.trace.push((name, count));
+            if self.failure == Some(name) || self.trace.len() > 20 {
+                Err(io::Error::other(format!("injected {name} failure")))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    impl Read for MemoryTail {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.operation("read", u64::try_from(buf.len()).unwrap())?;
+            self.cursor.read(buf)
+        }
+    }
+
+    impl Seek for MemoryTail {
+        fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+            let SeekFrom::Start(position) = pos else {
+                panic!("tail recovery only performs absolute seeks");
+            };
+            self.operation("seek", position)?;
+            self.cursor.seek(SeekFrom::Start(position))
+        }
+    }
+
+    impl super::TailFile for MemoryTail {
+        fn set_len(&mut self, length: u64) -> io::Result<()> {
+            self.operation("truncate", length)?;
+            self.cursor.get_mut().truncate(usize::try_from(length).unwrap());
+            Ok(())
+        }
+
+        fn sync_all(&mut self) -> io::Result<()> {
+            self.operation("sync", 0)
+        }
+    }
+
+    #[test]
+    fn recovered_tail_recovery_scans_exact_bounded_chunks_and_syncs_only_a_truncated_suffix() {
+        let mut boundary = vec![b'x'; 8192];
+        boundary[4095] = b'\n';
+        for (bytes, retained, expected_trace) in [
+            (Vec::new(), 0, vec![]),
+            (b"x".to_vec(), 0, vec![("seek", 0), ("read", 1), ("truncate", 0), ("sync", 0)]),
+            (b"\n".to_vec(), 1, vec![("seek", 0), ("read", 1)]),
+            (b"\nx".to_vec(), 1, vec![("seek", 0), ("read", 2), ("truncate", 1), ("sync", 0)]),
+            (
+                boundary,
+                4096,
+                vec![
+                    ("seek", 4096),
+                    ("read", 4096),
+                    ("seek", 0),
+                    ("read", 4096),
+                    ("truncate", 4096),
+                    ("sync", 0),
+                ],
+            ),
+            (
+                vec![b'x'; 8193],
+                0,
+                vec![
+                    ("seek", 4097),
+                    ("read", 4096),
+                    ("seek", 1),
+                    ("read", 4096),
+                    ("seek", 0),
+                    ("read", 1),
+                    ("truncate", 0),
+                    ("sync", 0),
+                ],
+            ),
+        ] {
+            let expected = bytes[..retained].to_vec();
+            let length = u64::try_from(bytes.len()).unwrap();
+            let mut file = MemoryTail {
+                cursor: Cursor::new(bytes),
+                trace: Vec::new(),
+                failure: None,
+            };
+            assert_eq!(
+                VerdictLog::repair_log_tail_at(&mut file, length).unwrap(),
+                u64::try_from(retained).unwrap()
+            );
+            assert_eq!(file.cursor.into_inner(), expected);
+            assert_eq!(file.trace, expected_trace);
+        }
+    }
+
+    #[test]
+    fn recovered_tail_recovery_propagates_seek_read_truncate_and_sync_errors_without_panicking() {
+        for failure in ["seek", "read", "truncate", "sync"] {
+            let mut file = MemoryTail {
+                cursor: Cursor::new(b"\nx".to_vec()),
+                trace: Vec::new(),
+                failure: Some(failure),
+            };
+            let error = VerdictLog::repair_log_tail_at(&mut file, 2).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::Other);
+            assert_eq!(error.to_string(), format!("injected {failure} failure"));
+            assert_eq!(file.trace.last().unwrap().0, failure);
+        }
+    }
 
     #[test]
     fn resumed_progress_discards_only_the_interrupted_verdict_tail() {
@@ -362,6 +591,79 @@ mod tests {
     }
 
     #[test]
+    fn recovered_selection_reuses_only_the_current_record_buffer() {
+        let first = attempt();
+        let mut second = first.clone();
+        second.ordinal = 19;
+        second.test = Some("tests::different".into());
+        let mut output = Vec::new();
+        let mut buffer = b"stale buffered bytes".to_vec();
+        let mut bytes = 0;
+        let mut truncated = false;
+        for attempt in [&first, &second] {
+            VerdictLog::write_selection(&mut output, attempt, &mut buffer, &mut bytes, &mut truncated, usize::MAX).unwrap();
+        }
+        let records: Vec<Value> = output
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| from_slice(line).unwrap())
+            .collect();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0]["ordinal"], 7);
+        assert_eq!(records[0]["test"], "tests::caught");
+        assert_eq!(records[1]["ordinal"], 19);
+        assert_eq!(records[1]["test"], "tests::different");
+        assert_eq!(bytes, output.len());
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn recovered_selection_propagates_write_and_flush_errors_before_accounting() {
+        struct FailingWriter {
+            fail_write: bool,
+            output: Vec<u8>,
+        }
+        impl std::io::Write for FailingWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                if self.fail_write {
+                    return Err(std::io::ErrorKind::BrokenPipe.into());
+                }
+                self.output.extend_from_slice(buf);
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Err(std::io::ErrorKind::PermissionDenied.into())
+            }
+        }
+        for limit in [0, usize::MAX] {
+            for fail_write in [false, true] {
+                let mut writer = FailingWriter {
+                    fail_write,
+                    output: Vec::new(),
+                };
+                let mut bytes = 0;
+                let mut truncated = false;
+                let error =
+                    VerdictLog::write_selection(&mut writer, &attempt(), &mut Vec::new(), &mut bytes, &mut truncated, limit).unwrap_err();
+                assert_eq!(
+                    error.kind(),
+                    if fail_write {
+                        std::io::ErrorKind::BrokenPipe
+                    } else {
+                        std::io::ErrorKind::PermissionDenied
+                    }
+                );
+                assert_eq!(bytes, 0);
+                assert!(!truncated);
+                if !fail_write && limit == 0 {
+                    assert_eq!(writer.output, SELECTION_TRUNCATION_MARKER);
+                }
+            }
+        }
+    }
+
+    #[test]
     #[cfg(all(feature = "system-tests", not(miri)))]
     fn survivor_resumed_selection_stops_at_the_exact_cap_without_requiring_a_truncation_marker() {
         let directory = crate::testing::workdir("selection-resume-cap-");
@@ -388,7 +690,7 @@ mod tests {
             if cap <= retained.len() {
                 assert_eq!(actual, retained, "a cap without the marker still forbids additional appends");
             } else {
-                let mut record = serde_json::to_vec(&attempt()).expect("the selection attempt serializes");
+                let mut record = to_vec(&attempt()).expect("the selection attempt serializes");
                 record.push(b'\n');
                 assert_eq!(actual, [retained.as_slice(), &record].concat());
             }
@@ -455,7 +757,7 @@ mod tests {
     fn survivor_record_selection_forwards_the_exact_production_retention_budget_at_both_adjacent_boundaries() {
         let directory = crate::testing::workdir("selection-production-budget-");
         let scratch = Utf8Path::from_path(directory.path()).expect("fixture root is UTF-8");
-        let mut record = serde_json::to_vec(&attempt()).expect("the selection attempt serializes");
+        let mut record = to_vec(&attempt()).expect("the selection attempt serializes");
         record.push(b'\n');
         for extra in [0, 1] {
             let mut log = VerdictLog::default();
@@ -531,7 +833,7 @@ mod tests {
 
     #[test]
     fn survivor_selection_retention_updates_byte_accounting_once_and_keeps_the_marker_reserved() {
-        let mut record = serde_json::to_vec(&attempt()).unwrap();
+        let mut record = to_vec(&attempt()).unwrap();
         record.push(b'\n');
         for limit in [
             record.len() + SELECTION_TRUNCATION_MARKER.len() - 1,
@@ -571,7 +873,7 @@ mod tests {
         let text = fs::read_to_string(scratch.join(TEST_SELECTION_LOG)).expect("the flushed selection log should be readable immediately");
         let lines = text.lines().collect::<Vec<_>>();
         assert_eq!(lines.len(), 1);
-        let record: serde_json::Value = serde_json::from_str(lines[0]).expect("selection record should be valid JSON");
+        let record: Value = from_str(lines[0]).expect("selection record should be valid JSON");
         assert_eq!(record["ordinal"], 7);
         assert_eq!(record["tier"], "item");
         assert_eq!(record["rank"], 2);
@@ -614,7 +916,7 @@ mod tests {
         let mut log = VerdictLog::default();
         log.start(scratch).expect("campaign log creation should succeed");
 
-        let mut record = serde_json::to_vec(&attempt()).expect("selection attempt should serialize");
+        let mut record = to_vec(&attempt()).expect("selection attempt should serialize");
         record.push(b'\n');
         let limit = record.len() + SELECTION_TRUNCATION_MARKER.len();
 
@@ -685,7 +987,7 @@ mod tests {
 
     #[test]
     fn resume_repairs_torn_selection_lines_and_retention_markers() {
-        let mut record = serde_json::to_vec(&attempt()).unwrap();
+        let mut record = to_vec(&attempt()).unwrap();
         record.push(b'\n');
         for suffix in [&b"{\"ordinal\":"[..], &vec![b'x'; 8200], &SELECTION_TRUNCATION_MARKER[..20]] {
             let directory = tempfile::tempdir().unwrap();
@@ -699,7 +1001,7 @@ mod tests {
             let bytes = fs::read(&path).unwrap();
             assert_eq!(bytes, [record.as_slice(), record.as_slice()].concat());
             for line in bytes.split(|byte| *byte == b'\n').filter(|line| !line.is_empty()) {
-                serde_json::from_slice::<serde_json::Value>(line).unwrap();
+                from_slice::<Value>(line).unwrap();
             }
         }
         let directory = tempfile::tempdir().unwrap();

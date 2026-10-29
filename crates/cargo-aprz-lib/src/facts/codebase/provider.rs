@@ -447,7 +447,6 @@ impl Provider {
     async fn analyze_source_files(crate_path: &Path, codebase_data: &mut CodebaseData) {
         const MAX_FILES: usize = 10_000;
         const MAX_FILE_SIZE: u64 = 5_000_000; // 5MB
-        const MAX_DEPTH: usize = 50;
 
         let src_dir = crate_path.join("src");
         if !src_dir.exists() {
@@ -456,16 +455,12 @@ impl Provider {
 
         // Collect file paths first (blocking directory walk)
         let file_paths: Vec<_> = spawn_blocking(move || {
-            walkdir::WalkDir::new(&src_dir)
-                .follow_links(false) // Don't follow symlinks to prevent loops
-                // #[gamma::skip(expr.decrement, expr.increment, reason = "maximum filesystem traversal depth is an adapter safety limit")]
-                .max_depth(MAX_DEPTH)
-                .into_iter()
-                .filter_map(filter_walk_entry)
-                .filter(is_rust_source_entry)
-                .take(MAX_FILES)
-                .filter_map(|entry| filter_source_entry(&entry, MAX_FILE_SIZE))
-                .collect()
+            collect_source_paths(&src_dir, MAX_FILE_SIZE, MAX_FILES, |root, follow_links, max_depth| {
+                walkdir::WalkDir::new(root)
+                    .follow_links(follow_links)
+                    .max_depth(max_depth)
+                    .into_iter()
+            })
         })
         .await
         .expect("task must not panic");
@@ -507,6 +502,7 @@ impl Provider {
 
         let results = join_all(analysis_tasks).await;
 
+        // #[gamma::skip(call_result.default, reason = "accumulate_source_results returns unit; this edit still performs the same accumulation before replacing unit with unit", tag = "equivalent")]
         accumulate_source_results(
             results
                 .into_iter()
@@ -602,6 +598,23 @@ impl Drop for RequestCompletion {
     fn drop(&mut self) {
         self.tracker.complete_request(self.topic);
     }
+}
+
+/// Bounds source discovery without following linked directories into traversal cycles.
+fn collect_source_paths<I: Iterator<Item = walkdir::Result<walkdir::DirEntry>>>(
+    source: &Path,
+    max_file_size: u64,
+    max_files: usize,
+    walk: impl FnOnce(&Path, bool, usize) -> I,
+) -> Vec<PathBuf> {
+    const MAX_DEPTH: usize = 50;
+
+    walk(source, false, MAX_DEPTH)
+        .filter_map(filter_walk_entry)
+        .filter(is_rust_source_entry)
+        .take(max_files)
+        .filter_map(|entry| filter_source_entry(&entry, max_file_size))
+        .collect()
 }
 
 fn source_analysis_worker_count(available: Option<core::num::NonZeroUsize>) -> core::num::NonZeroUsize {
@@ -710,6 +723,21 @@ mod tests {
     use super::*;
     use crate::facts::Progress;
     use crate::facts::request_tracker::TopicStatus;
+
+    #[test]
+    fn survivor_source_walk_forwards_the_native_no_follow_policy() {
+        let root = Path::new("scripted-source-tree");
+        let calls = std::cell::Cell::new(0);
+        let paths = collect_source_paths(root, 5_000_000, 10_000, |source, follow_links, max_depth| {
+            assert_eq!(source, root);
+            assert!(!follow_links, "source analysis must not follow native directory links");
+            assert_eq!(max_depth, 50);
+            calls.set(calls.get() + 1);
+            std::iter::empty()
+        });
+        assert!(paths.is_empty());
+        assert_eq!(calls.get(), 1);
+    }
 
     #[test]
     fn test_safe_repo_components() {

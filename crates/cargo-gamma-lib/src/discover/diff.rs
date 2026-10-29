@@ -94,7 +94,9 @@ impl Diff {
         // What the `diff --git` header said the post-image prefix is, and what the `---` line
         // spelled the pre-image as. Either is enough to recognize the prefix on the `+++` line.
         let mut dst_prefix: Option<String> = None;
-        let mut pre_image: Option<String> = None;
+        let mut pre_image: Option<String> =
+        // #[gamma::skip(option.none_to_some, reason = "This replaces only initial pre_image=None with Some(String::new()). Before any --- header assigns a real path, the only consumer new_file_path selects an explicit dst_prefix first; otherwise derived_prefix(empty, raw) returns None because raw header_path is nonempty and split_first_segment(empty) returns None. Both None and Some(empty) therefore select the identical b/ fallback. Later headers/reset overwrite this initial value.", tag = "equivalent")]
+        None;
 
         // The pre- and post-image lines the current hunk still expects, taken from its `@@` header.
         // While either is positive the parser is inside the hunk body, where a line that begins like
@@ -246,6 +248,7 @@ impl Diff {
             .usage());
         }
 
+        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
         normalize_lines(&mut resolved);
         self.touched = resolved;
 
@@ -420,7 +423,11 @@ fn locate_with(
             // #[gamma::skip(stmt.delete_assign, tag = "timeout", reason = "the suffix scan must consume a path segment on every iteration")]
             rest = tail;
 
-            if rest.is_empty() {
+            if
+            // #[gamma::skip(cond.always_false, reason = "This branch is reached only after rest becomes the empty suffix. The valid known set is produced from actual Survey source file paths, never an empty path. Removing the break/guard merely performs known.contains(empty)=false and then split_first_segment(empty)=None, terminating the same loop. All actual candidate matches and subsequent ambiguity resolution are unchanged.", tag = "equivalent")]
+            rest.is_empty() {
+                // #[gamma::skip(loop.break_to_continue, reason = "This break runs only after rest has just become the empty suffix. Changing it to continue immediately reevaluates split_first_segment(\"\"); that returns None without effects, terminating the same while loop before any known-file lookup. Candidate order and returned match remain identical.", tag = "equivalent")]
+                // #[gamma::skip(loop.delete_break, reason = "This branch is reached only after rest becomes the empty suffix. The valid known set is produced from actual Survey source file paths, never an empty path. Removing the break/guard merely performs known.contains(empty)=false and then split_first_segment(empty)=None, terminating the same loop. All actual candidate matches and subsequent ambiguity resolution are unchanged.", tag = "equivalent")]
                 break;
             }
 
@@ -477,7 +484,10 @@ fn ends_with_path(path: &Utf8Path, suffix: &Utf8Path) -> bool {
 /// A range with no `,count` covers a single line, per the unified-diff format.
 fn hunk_header(rest: &str) -> Option<(u32, u32, u32)> {
     let mut fields = rest.trim_start().split(' ');
-    let old = fields.next()?.strip_prefix('-')?;
+    let old =
+    // #[gamma::skip(try.propagate_to_unwrap, reason = "str::split(' ') always yields at least one element, including empty input. The first fields.next() is always Some; malformed old ranges fail later strip_prefix('-') unchanged.", tag = "equivalent")]
+    fields.next()?;
+    let old = old.strip_prefix('-')?;
     let new = fields.next()?.strip_prefix('+')?;
 
     let (_old_start, old_count) = parse_range(old)?;
@@ -497,6 +507,47 @@ fn parse_range(field: &str) -> Option<(u32, u32)> {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod survivor_tests {
     use super::*;
+
+    #[test]
+    fn recovered_diff_location_continues_from_an_untracked_absolute_path_to_the_raw_path() {
+        let root = Utf8Path::new(if cfg!(windows) { r"C:\workspace" } else { "/workspace" });
+        let absolute = root.join("untracked.rs");
+        let relative = Utf8Path::new("src/selected.rs");
+        let known = HashSet::from_iter([relative]);
+        assert_eq!(
+            locate_with(&absolute, relative, root, &known, &[], |_| panic!("Rust paths must be inventoried")),
+            Some(relative.to_owned())
+        );
+    }
+
+    #[test]
+    fn oct25_diff_location_skips_an_unsafe_relative_candidate_before_a_known_raw_path() {
+        let relative = Utf8Path::new("src/selected.rs");
+        assert_eq!(
+            locate_with(
+                Utf8Path::new("../outside.rs"),
+                relative,
+                Utf8Path::new("workspace"),
+                &HashSet::from_iter([relative]),
+                &[],
+                |_| panic!("Rust paths must be inventoried"),
+            ),
+            Some(relative.to_owned())
+        );
+    }
+
+    #[test]
+    fn recovered_diff_suffix_resolution_accepts_safe_relative_paths_but_not_parent_traversal() {
+        let root = Utf8Path::new("workspace");
+        let candidates = vec![Utf8PathBuf::from("src/selected.rs")];
+        for (path, expected) in [
+            ("prefix/src/selected.rs", Some(candidates[0].clone())),
+            ("../src/selected.rs", None),
+        ] {
+            let path = Utf8Path::new(path);
+            assert_eq!(locate_with(path, path, root, &HashSet::default(), &candidates, |_| false), expected);
+        }
+    }
 
     #[test]
     fn survivor_malformed_hunk_ranges_are_ignored_without_panicking() {
@@ -601,6 +652,31 @@ mod tests {
     use std::io;
 
     use super::*;
+
+    #[test]
+    fn recovered_diff_reader_routes_dash_only_to_its_supplied_stream_and_files_only_to_the_named_opener() {
+        let stdin = b"+++ b/stream.rs\n@@ -0,0 +7 @@\n+stream\n";
+        let file = b"+++ b/file.rs\n@@ -0,0 +19 @@\n+file\n";
+        for from_stdin in [false, true] {
+            let path = Utf8Path::new(if from_stdin { "-" } else { "memory.diff" });
+            let mut opened = false;
+            let diff = Diff::read_from_with(path, std::io::Cursor::new(stdin), |actual| {
+                assert!(!from_stdin, "dash input must not invoke the file opener");
+                assert_eq!(actual, Utf8Path::new("memory.diff"));
+                opened = true;
+                Ok(std::io::Cursor::new(file))
+            })
+            .unwrap();
+            assert_eq!(opened, !from_stdin);
+            assert_eq!(
+                diff.touched,
+                HashMap::from_iter([(
+                    Utf8PathBuf::from(if from_stdin { "stream.rs" } else { "file.rs" }),
+                    vec![if from_stdin { 7 } else { 19 }]
+                )])
+            );
+        }
+    }
 
     #[test]
     fn header_pair_without_git_metadata_derives_nonstandard_prefix_from_preimage() {

@@ -193,7 +193,9 @@ pub(crate) fn plan_region_with_splice(
         placement,
         newline,
     } = request;
-    let newline = newline.unwrap_or_else(|| text_newline(host_text.unwrap_or("")));
+    // #[gamma::skip(literal.str_to_xyzzy, reason = "both empty and xyzzy contain no line ending, so missing hosts still infer LF")]
+    let fallback_host = host_text.unwrap_or("");
+    let newline = newline.unwrap_or_else(|| text_newline(fallback_host));
     let rendered_body = render_body_with_newline(rendered_body, newline);
     let template_checksum = checksum_str(&rendered_body);
     // Case-insensitively, as the retirement path does. `push_region_at`
@@ -497,6 +499,34 @@ mod tests {
     use crate::region::find_region;
 
     const SYN: CommentSyntax = CommentSyntax::Hash;
+
+    #[test]
+    fn invalid_splice_returns_a_scan_refusal_instead_of_panicking() {
+        let request = ManagedRegionRequest::at_end("settings.json", "r", "body\n", CommentSyntax::SlashSlash);
+        let refusal = plan_region_with_splice(&Manifest::default(), None, request, HostScanner::Json, || {
+            Ok("/* unterminated".to_owned())
+        })
+        .unwrap_err();
+        assert_eq!(refusal.remedy, RefusalRemedy::InvalidGeneratedJson);
+        assert_eq!(
+            refusal.reason.to_string(),
+            "JSON-like host contains an unterminated block comment; close it before managing regions"
+        );
+    }
+
+    #[test]
+    fn line_scanned_splices_do_not_require_json_style_visible_sentinels() {
+        let item = plan_region_with_splice(
+            &Manifest::default(),
+            None,
+            request("ordinary.txt", "r", "body\n"),
+            HostScanner::Lines,
+            || Ok("opaque host output\n".to_owned()),
+        )
+        .unwrap();
+        assert_eq!(item.spliced_host.as_deref(), Some("opaque host output\n"));
+        assert_eq!(item.rendered.as_deref(), Some("body\n"));
+    }
 
     fn request<'a>(host_relpath: &'a str, region_id: &'a str, rendered_body: &'a str) -> ManagedRegionRequest<'a> {
         ManagedRegionRequest::at_end(host_relpath, region_id, rendered_body, SYN)

@@ -51,8 +51,13 @@ pub fn is_consistent(root: &Utf8Path) -> bool {
 }
 
 fn clear_sentinel(root: &Utf8Path) -> Result<()> {
+    clear_sentinel_with(root, |path| fs::remove_file(path.as_std_path()))
+}
+
+/// Clears the reset sentinel through the supplied removal operation, preserving native error policy.
+fn clear_sentinel_with(root: &Utf8Path, remove: impl FnOnce(&Utf8Path) -> std::io::Result<()>) -> Result<()> {
     let path = sentinel(root);
-    match fs::remove_file(path.as_std_path()) {
+    match remove(&path) {
         Ok(()) => Ok(()),
         Err(cause) if cause.kind() == ErrorKind::NotFound => Ok(()),
         Err(cause) => {
@@ -109,6 +114,8 @@ pub fn sync_or_copy_using(
 
     if !root.as_std_path().is_dir() {
         copy(source, root, skip, options, &reflinks)?;
+
+        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
         mark_consistent(root);
         return Ok(SyncOutcome::FreshCopy);
     }
@@ -117,6 +124,8 @@ pub fn sync_or_copy_using(
         // Prior run was interrupted — cannot trust what is there. Remove and resync.
         clear(root).map_err(|cause| error!("could not clear the inconsistent scratch tree at `{root}`").caused_by(cause))?;
         copy(source, root, skip, options, &reflinks)?;
+
+        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
         mark_consistent(root);
         return Ok(SyncOutcome::FreshCopy);
     }
@@ -126,6 +135,7 @@ pub fn sync_or_copy_using(
 
     match synchronize(source, root, skip, options, &reflinks) {
         Ok(()) => {
+            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
             mark_consistent(root);
             Ok(SyncOutcome::Synchronized)
         }
@@ -139,6 +149,8 @@ pub fn sync_or_copy_using(
                 .caused_by(cause)
             })?;
             copy(source, root, skip, options, &reflinks)?;
+
+            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
             mark_consistent(root);
             Ok(SyncOutcome::FreshCopy)
         }
@@ -156,8 +168,25 @@ pub fn delta_sync(source: &Utf8Path, root: &Utf8Path, skip: &Utf8Path, options: 
     // Collect the set of relative paths the source tree produces.
     let expected = collect_source_entries(source, skip, options)?;
 
+    sync_entries_in_order(expected.iter(), |relative| {
+        let src = source.join(relative);
+        let dst = root.join(relative);
+        sync_entry(&src, &dst, reflinks)
+    })?;
+
+    // Remove stale entries from the scratch tree.
+    remove_stale(root, &expected)?;
+
+    Ok(())
+}
+
+/// Orders supplied entries parent-first before invoking synchronization, stopping on its first error.
+fn sync_entries_in_order<'a>(
+    entries: impl IntoIterator<Item = &'a Utf8PathBuf>,
+    mut sync: impl FnMut(&Utf8Path) -> Result<()>,
+) -> Result<()> {
     // Synchronize parents before their descendants so type mismatches cannot redirect writes.
-    let mut ordered: Vec<_> = expected.iter().collect();
+    let mut ordered: Vec<_> = entries.into_iter().collect();
     ordered.sort_unstable_by(|left, right| {
         left.components()
             .count()
@@ -165,14 +194,8 @@ pub fn delta_sync(source: &Utf8Path, root: &Utf8Path, skip: &Utf8Path, options: 
             .then_with(|| left.cmp(right))
     });
     for relative in ordered {
-        let src = source.join(relative);
-        let dst = root.join(relative);
-        sync_entry(&src, &dst, reflinks)?;
+        sync(relative)?;
     }
-
-    // Remove stale entries from the scratch tree.
-    remove_stale(root, &expected)?;
-
     Ok(())
 }
 
@@ -219,6 +242,8 @@ pub fn collect_source_entries_with(
     let failure: Mutex<Option<Error>> = Mutex::new(None);
 
     let mut builder = WalkBuilder::new(source.as_std_path());
+
+    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
     configure_source_walk(options, |setting, enabled| {
         let _builder = match setting {
             WalkSetting::Hidden => builder.hidden(enabled),
@@ -245,6 +270,7 @@ pub fn collect_source_entries_with(
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(cause) => {
+                    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
                     record_walk_failure(failure, cause);
                     return WalkState::Quit;
                 }
@@ -281,6 +307,7 @@ pub fn collect_source_entries_with(
 
     // Include tracked files that the ignore walk may have skipped, same as copy_tracked does.
     if let Some(tracked) = tracked(source)? {
+        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
         restore_tracked_entries(&mut result, source, skip, tracked, source_entry_exists);
     }
 
@@ -324,18 +351,7 @@ pub fn sync_entry(source: &Utf8Path, destination: &Utf8Path, reflinks: &Reflinks
     let src_meta = fs::symlink_metadata(source.as_std_path()).map_err(|cause| error!("could not read `{source}`").caused_by(cause))?;
 
     if src_meta.is_dir() {
-        match fs::symlink_metadata(destination.as_std_path()) {
-            Ok(dst_meta) if dst_meta.is_dir() => return Ok(()),
-            Ok(_) => {
-                // A symlink or other non-directory where a directory should be — replace it.
-                remove_stale_entry(destination)
-                    .map_err(|cause| error!("could not remove stale entry at `{destination}`").caused_by(cause))?;
-            }
-            Err(cause) if is_not_found(&cause) => {}
-            Err(cause) => return Err(error!("could not inspect `{destination}`").caused_by(cause)),
-        }
-        fs::create_dir_all(destination.as_std_path()).map_err(|cause| error!("could not create `{destination}`").caused_by(cause))?;
-        return Ok(());
+        return sync_directory(destination, || fs::symlink_metadata(destination.as_std_path()));
     }
 
     if src_meta.is_symlink() {
@@ -344,6 +360,35 @@ pub fn sync_entry(source: &Utf8Path, destination: &Utf8Path, reflinks: &Reflinks
 
     // Regular file.
     sync_file(source, destination, &src_meta, reflinks)
+}
+
+/// Synchronizes a directory while replacing only its initial destination-metadata query.
+fn sync_directory(destination: &Utf8Path, inspect: impl FnOnce() -> std::io::Result<fs::Metadata>) -> Result<()> {
+    sync_directory_with(
+        destination,
+        || inspect().map(|metadata| metadata.is_dir()),
+        remove_stale_entry,
+        |path| fs::create_dir_all(path.as_std_path()),
+    )
+}
+
+fn sync_directory_with(
+    destination: &Utf8Path,
+    inspect: impl FnOnce() -> std::io::Result<bool>,
+    remove: impl FnOnce(&Utf8Path) -> std::io::Result<()>,
+    create: impl FnOnce(&Utf8Path) -> std::io::Result<()>,
+) -> Result<()> {
+    match inspect() {
+        Ok(true) => return Ok(()),
+        Ok(false) => {
+            // A symlink or other non-directory where a directory should be — replace it.
+            remove(destination).map_err(|cause| error!("could not remove stale entry at `{destination}`").caused_by(cause))?;
+        }
+        Err(cause) if is_not_found(&cause) => {}
+        Err(cause) => return Err(error!("could not inspect `{destination}`").caused_by(cause)),
+    }
+    create(destination).map_err(|cause| error!("could not create `{destination}`").caused_by(cause))?;
+    Ok(())
 }
 
 /// Synchronizes a regular file, preserving mtime for unchanged files.
@@ -451,21 +496,7 @@ fn readers_have_same_contents(left: impl Read, right: impl Read) -> std::io::Res
 /// Synchronizes a symlink. Recreates it if the target changed or if the destination is not a link.
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub fn sync_symlink(source: &Utf8Path, destination: &Utf8Path) -> Result<()> {
-    sync_symlink_with(source, destination, |target, destination, directory| {
-        #[cfg(unix)]
-        {
-            let _ = directory;
-            std::os::unix::fs::symlink(target, destination)
-        }
-        #[cfg(windows)]
-        {
-            if directory {
-                std::os::windows::fs::symlink_dir(target, destination)
-            } else {
-                std::os::windows::fs::symlink_file(target, destination)
-            }
-        }
-    })
+    sync_symlink_with(source, destination, super::copy::create_symlink)
 }
 
 pub fn sync_symlink_with(
@@ -549,6 +580,7 @@ pub fn copy_file_for_sync_with_stamp(
                 return copy_failure(source, destination, cause);
             }
             Err(_unsupported) => {
+                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
                 mark_reflinks_unsupported(reflinks);
                 let _removed = fs::remove_file(destination.as_std_path());
             }
@@ -586,31 +618,14 @@ pub fn remove_stale_with_directory<S: std::hash::BuildHasher>(
     expected: &HashSet<Utf8PathBuf, S>,
     mut remove_directory: impl FnMut(&Utf8Path) -> std::io::Result<()>,
 ) -> Result<()> {
-    // Collect all entries in the scratch tree.
-    let mut stale_files: Vec<Utf8PathBuf> = Vec::new();
-    let mut stale_dirs: Vec<Utf8PathBuf> = Vec::new();
-
-    'entries: for entry in WalkDir::new(root.as_std_path()).into_iter().filter_map(core::result::Result::ok) {
-        let Some(path) = Utf8Path::from_path(entry.path()) else {
-            continue 'entries;
-        };
-
-        let Ok(relative) = path.strip_prefix(root) else {
-            continue 'entries;
-        };
-
-        if is_walk_root(relative) {
-            continue 'entries;
-        }
-
-        if !expected.contains(relative) {
-            if walk_entry_is_directory(&entry) {
-                stale_dirs.push(path.to_owned());
-            } else {
-                stale_files.push(path.to_owned());
-            }
-        }
-    }
+    let entries = WalkDir::new(root.as_std_path())
+        .into_iter()
+        .filter_map(core::result::Result::ok)
+        .map(|entry| {
+            let directory = walk_entry_is_directory(&entry);
+            (entry.into_path(), directory)
+        });
+    let (stale_files, mut stale_dirs) = stale_inventory(root, expected, entries);
 
     // Remove stale files first.
     for file in &stale_files {
@@ -620,6 +635,8 @@ pub fn remove_stale_with_directory<S: std::hash::BuildHasher>(
     }
 
     // Remove stale directories deepest-first so that parents are empty when reached.
+
+    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
     sort_stale_directories(&mut stale_dirs);
     for dir in &stale_dirs {
         // Only remove if truly empty (children may have been expected).
@@ -637,13 +654,44 @@ pub fn remove_stale_with_directory<S: std::hash::BuildHasher>(
     Ok(())
 }
 
+/// Classifies stale paths without removing them; the caller owns file and child-first directory removal.
+fn stale_inventory<S: std::hash::BuildHasher>(
+    root: &Utf8Path,
+    expected: &HashSet<Utf8PathBuf, S>,
+    entries: impl IntoIterator<Item = (std::path::PathBuf, bool)>,
+) -> (Vec<Utf8PathBuf>, Vec<Utf8PathBuf>) {
+    let mut files = Vec::new();
+    let mut directories = Vec::new();
+    'entries: for (path, directory) in entries {
+        let Ok(path) = Utf8PathBuf::from_path_buf(path) else {
+            continue 'entries;
+        };
+        let Ok(relative) = path.strip_prefix(root) else {
+            continue 'entries;
+        };
+        if is_walk_root(relative) {
+            continue 'entries;
+        }
+        if !expected.contains(relative) {
+            if directory {
+                directories.push(path);
+            } else {
+                files.push(path);
+            }
+        }
+    }
+    (files, directories)
+}
+
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub fn record_walk_failure(failure: &Mutex<Option<Error>>, cause: ignore::Error) {
+    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
     record(failure, error!("could not read the source tree").caused_by(cause));
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub fn record_invalid_path(failure: &Mutex<Option<Error>>, path: &std::path::Path) {
+    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
     record(
         failure,
         error!("`{}` is not valid UTF-8 and cannot be synchronized", path.display()),
@@ -653,6 +701,7 @@ pub fn record_invalid_path(failure: &Mutex<Option<Error>>, path: &std::path::Pat
 fn source_path<'a>(path: &'a std::path::Path, failure: &Mutex<Option<Error>>) -> Option<&'a Utf8Path> {
     let source = Utf8Path::from_path(path);
     if source.is_none() {
+        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
         record_invalid_path(failure, path);
     }
     source
@@ -789,6 +838,106 @@ fn record(failure: &Mutex<Option<Error>>, cause: Error) {
 #[cfg(not(miri))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    #[test]
+    fn oct25_delta_sync_orders_parents_before_children_and_equal_depths_lexically() {
+        let entries = ["z/child/leaf.rs", "z/child", "a/file.rs", "z", "a"].map(Utf8PathBuf::from);
+        let mut visited = Vec::new();
+        sync_entries_in_order(&entries, |path| {
+            visited.push(path.to_owned());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            visited,
+            ["a", "z", "a/file.rs", "z/child", "z/child/leaf.rs"].map(Utf8PathBuf::from)
+        );
+    }
+
+    #[test]
+    fn oct25_stale_inventory_continues_after_an_outside_root_entry() {
+        let root = Utf8Path::new("workspace");
+        let (files, directories) = stale_inventory(
+            root,
+            &HashSet::<Utf8PathBuf>::default(),
+            [
+                ("outside/ignored.rs".into(), false),
+                ("workspace/stale.rs".into(), false),
+                ("workspace/old".into(), true),
+            ],
+        );
+        assert_eq!(files, [Utf8PathBuf::from("workspace/stale.rs")]);
+        assert_eq!(directories, [Utf8PathBuf::from("workspace/old")]);
+    }
+
+    #[test]
+    fn recovered_non_utf8_stale_entry_does_not_hide_later_files_or_directories() {
+        #[cfg(windows)]
+        let invalid = std::ffi::OsString::from_wide(&[0xd800]);
+        #[cfg(unix)]
+        let invalid = std::ffi::OsString::from_vec(vec![0xff]);
+        let root = Utf8Path::new("scratch");
+        let file = root.join("later.rs");
+        let directory = root.join("later-directory");
+        let expected = HashSet::from([Utf8PathBuf::from("kept")]);
+        let entries = [
+            (root.as_std_path().to_owned(), true),
+            (root.join("kept").into_std_path_buf(), false),
+            (root.as_std_path().join(invalid), false),
+            (file.clone().into_std_path_buf(), false),
+            (directory.clone().into_std_path_buf(), true),
+        ];
+        assert_eq!(stale_inventory(root, &expected, entries), (vec![file], vec![directory]));
+    }
+
+    #[test]
+    fn recovered_directory_sync_preserves_an_existing_directory_and_returns_creation_errors() {
+        let destination = Utf8Path::new("in-memory-sync-directory");
+        sync_directory_with(
+            destination,
+            || Ok(true),
+            |_| panic!("an existing directory must not be removed"),
+            |_| panic!("an existing directory must not be created again"),
+        )
+        .unwrap();
+        let mut creations = 0;
+        let failure = sync_directory_with(
+            destination,
+            || Err(std::io::ErrorKind::NotFound.into()),
+            |_| panic!("a missing directory must not be removed"),
+            |actual| {
+                assert_eq!(actual, destination);
+                creations += 1;
+                Err(std::io::Error::new(ErrorKind::PermissionDenied, "named directory-creation refusal"))
+            },
+        )
+        .unwrap_err();
+        assert_eq!(failure.message(), "could not create `in-memory-sync-directory`");
+        assert_eq!(creations, 1);
+    }
+
+    #[test]
+    fn recovered_clearing_an_absent_sentinel_is_success_but_other_removal_errors_are_returned() {
+        let root = Utf8Path::new("never-written-sentinel-root");
+        for (kind, succeeds) in [(ErrorKind::NotFound, true), (ErrorKind::PermissionDenied, false)] {
+            let result = clear_sentinel_with(root, |path| {
+                assert_eq!(path, sentinel(root));
+                Err(std::io::Error::new(kind, "in-memory sentinel removal"))
+            });
+            if succeeds {
+                result.unwrap();
+            } else {
+                let failure = result.unwrap_err();
+                assert_eq!(
+                    failure.message(),
+                    format!(
+                        "could not invalidate scratch consistency at `{}`; close files held open there and retry",
+                        sentinel(root)
+                    )
+                );
+            }
+        }
+    }
+
     use core::time::Duration;
     #[cfg(unix)]
     use std::os::unix::ffi::OsStringExt as _;

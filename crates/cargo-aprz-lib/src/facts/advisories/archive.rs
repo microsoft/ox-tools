@@ -21,23 +21,40 @@ const MAX_COMPRESSED_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_UNPACKED_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_ENTRIES: usize = 100_000;
 
-pub(super) async fn download(destination: &Path, url: &str, timeout: Duration, client: fetch::HttpClient) -> Result<()> {
+pub async fn download(destination: &Path, url: &str, timeout: Duration, client: fetch::HttpClient) -> Result<()> {
     download_with_clock(destination, url, timeout, client, tick::Clock::new_tokio()).await
 }
 
-pub(super) async fn download_with_clock(
+pub async fn download_with_clock(
     destination: &Path,
     url: &str,
     timeout: Duration,
     client: fetch::HttpClient,
     clock: tick::Clock,
 ) -> Result<()> {
+    download_with_io(destination, url, timeout, client, clock, write_archive, extract_archive).await
+}
+
+pub async fn download_with_io<W, F>(
+    destination: &Path,
+    url: &str,
+    timeout: Duration,
+    client: fetch::HttpClient,
+    clock: tick::Clock,
+    write: W,
+    extract: impl FnOnce(&tempfile::NamedTempFile, &Path) -> Result<()> + Send + 'static,
+) -> Result<()>
+where
+    W: Fn(fetch::HttpResponse, std::path::PathBuf) -> F + Clone + Send + Sync + 'static,
+    F: Future<Output = Result<Result<tempfile::NamedTempFile>>> + Send,
+{
     let url = url.to_owned();
     let destination = destination.to_path_buf();
     let archive_file = resilient_http::retry_download_with_clock(
+        // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "This private resilience context enables neither logs nor metrics; its name is not exported.", tag = "equivalent")]
         "advisory_archive",
-        (destination.clone(), url, client, clock.clone()),
-        move |(destination, url, client, clock)| async move {
+        (destination.clone(), url, client, clock.clone(), write),
+        move |(destination, url, client, clock, write)| async move {
             // Request resilience is already exhausted; only body failures need a whole-transfer retry.
             let response = match resilient_http::resilient_get(&client, &url).await {
                 Ok(response) => response,
@@ -54,7 +71,7 @@ pub(super) async fn download_with_clock(
             {
                 return Ok(Err(error));
             }
-            write_archive(response, destination)
+            write(response, destination)
                 .timeout(&clock, timeout)
                 .await
                 .into_app_err("download timed out")?
@@ -63,20 +80,32 @@ pub(super) async fn download_with_clock(
     )
     .await??;
     tokio::task::spawn_blocking(move || {
-        extract(File::open(archive_file.path())?, &destination)?;
+        extract(&archive_file, &destination)?;
         archive_file.close()?;
         Ok(())
     })
     .await?
 }
 
-async fn write_archive(response: fetch::HttpResponse, destination: std::path::PathBuf) -> Result<Result<tempfile::NamedTempFile>> {
-    let (archive_file, output) = tokio::task::spawn_blocking(move || -> std::io::Result<_> {
-        let archive_file = tempfile::NamedTempFile::new_in(destination)?;
-        let output = archive_file.reopen()?;
-        Ok((archive_file, output))
+pub fn extract_archive(archive: &tempfile::NamedTempFile, destination: &Path) -> Result<()> {
+    extract(File::open(archive.path())?, destination)
+}
+
+pub async fn write_archive(response: fetch::HttpResponse, destination: std::path::PathBuf) -> Result<Result<tempfile::NamedTempFile>> {
+    write_archive_with(response, destination, |destination| {
+        let archive = tempfile::NamedTempFile::new_in(destination)?;
+        let output = archive.reopen()?;
+        Ok((archive, output))
     })
-    .await??;
+    .await
+}
+
+pub async fn write_archive_with(
+    response: fetch::HttpResponse,
+    destination: std::path::PathBuf,
+    create: impl FnOnce(std::path::PathBuf) -> std::io::Result<(tempfile::NamedTempFile, File)> + Send + 'static,
+) -> Result<Result<tempfile::NamedTempFile>> {
+    let (archive_file, output) = tokio::task::spawn_blocking(move || -> std::io::Result<_> { create(destination) }).await??;
     let mut output = tokio::fs::File::from_std(output);
     let mut stream = std::pin::pin!(resilient_http::response_stream(response));
     let mut downloaded = 0_u64;
@@ -100,18 +129,47 @@ fn check_download_size(bytes: u64) -> Result<()> {
     Ok(())
 }
 
-fn extract(input: impl Read, destination: &Path) -> Result<()> {
+pub fn extract(input: impl Read, destination: &Path) -> Result<()> {
     let contents = tempfile::Builder::new().prefix(".unpack-").tempdir_in(destination)?;
-    unpack(input, contents.path())?;
-    let root = database_root(contents.path())?;
+    extract_contents(input, destination, contents.path())
+}
+
+fn extract_contents(input: impl Read, destination: &Path, contents: &Path) -> Result<()> {
+    extract_contents_with(
+        input,
+        destination,
+        contents,
+        |source, target| std::fs::rename(source, target),
+        |root| root.join("rust").is_dir(),
+    )
+}
+
+pub fn extract_contents_with(
+    input: impl Read,
+    destination: &Path,
+    contents: &Path,
+    publish: impl FnMut(&Path, &Path) -> std::io::Result<()>,
+    has_rust: impl FnOnce(&Path) -> bool,
+) -> Result<()> {
+    unpack(input, contents)?;
+    let root = database_root(contents)?;
     // Never publish an empty or malformed database as a successful refresh.
     let database = rustsec::database::Database::open(&root).into_app_err("parsing the advisory archive")?;
     if database.iter().next().is_none() {
         bail!("advisory archive contains no advisories; check --advisory-archive-url");
     }
-    std::fs::rename(root.join("crates"), destination.join("crates"))?;
-    if root.join("rust").is_dir() {
-        std::fs::rename(root.join("rust"), destination.join("rust"))?;
+    publish_database(&root, destination, publish, has_rust)
+}
+
+fn publish_database(
+    root: &Path,
+    destination: &Path,
+    mut publish: impl FnMut(&Path, &Path) -> std::io::Result<()>,
+    has_rust: impl FnOnce(&Path) -> bool,
+) -> Result<()> {
+    publish(&root.join("crates"), &destination.join("crates"))?;
+    if has_rust(root) {
+        publish(&root.join("rust"), &destination.join("rust"))?;
     }
     Ok(())
 }
@@ -124,11 +182,14 @@ fn unpack(input: impl Read, destination: &Path) -> Result<()> {
 ///
 /// Declared entry sizes are budgeted before any file is written, while the decoder
 /// separately caps every decoded byte, including tar headers and padding.
-fn unpack_with_limits(input: impl Read, destination: &Path, max_bytes: u64, max_entries: usize) -> Result<()> {
+pub fn unpack_with_limits(input: impl Read, destination: &Path, max_bytes: u64, max_entries: usize) -> Result<()> {
     let decoder = MultiGzDecoder::new(input).take(max_bytes + 1);
     let mut archive = Archive::new(decoder);
     let mut declared_bytes = 0_u64;
-    for (index, entry) in archive.entries()?.enumerate() {
+    for (index, entry) in
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "The archive was just constructed at position zero; entries can fail only after its reader has advanced.", tag = "equivalent")]
+        archive.entries()?.enumerate()
+    {
         if index >= max_entries {
             bail!("advisory archive exceeds the {max_entries}-entry limit");
         }
@@ -146,13 +207,17 @@ fn unpack_with_limits(input: impl Read, destination: &Path, max_bytes: u64, max_
             bail!("advisory archives may contain only regular files and directories, not links or special entries");
         }
         let path = entry.path()?;
-        let text = path
+        let text =
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "On Windows tar rejects non-Unicode paths before this conversion; the Unix conversion failure has a direct test.", tag = "platform")]
+        path
             .to_str()
             .ok_or_else(|| ohno::app_err!("advisory archive paths must be UTF-8"))?;
-        if text.contains(['\\', ':'])
-            || path
-                .components()
-                .any(|part| matches!(part, Component::Prefix(_) | Component::RootDir))
+        if text.contains(
+            // #[gamma::skip(collection.reverse_array, reason = "This pattern is a character membership set; reversing its order cannot change matching.", tag = "equivalent")]
+            ['\\', ':'],
+        ) || path
+            .components()
+            .any(|part| matches!(part, Component::Prefix(_) | Component::RootDir))
         {
             bail!("advisory archive contains an unsafe path; use an archive with only relative paths");
         }
@@ -170,14 +235,24 @@ fn unpack_with_limits(input: impl Read, destination: &Path, max_bytes: u64, max_
     Ok(())
 }
 
-fn database_root(contents: &Path) -> Result<std::path::PathBuf> {
+pub fn database_root(contents: &Path) -> Result<std::path::PathBuf> {
     if contents.join("crates").is_dir() {
         return Ok(contents.to_path_buf());
     }
-    let mut roots = std::fs::read_dir(contents)?;
+    database_root_from_entries(std::fs::read_dir(contents)?)
+}
+
+pub fn database_root_from_entries(roots: impl Iterator<Item = std::io::Result<std::fs::DirEntry>>) -> Result<std::path::PathBuf> {
+    database_root_from_entries_with(roots, std::fs::DirEntry::file_type)
+}
+
+pub fn database_root_from_entries_with(
+    mut roots: impl Iterator<Item = std::io::Result<std::fs::DirEntry>>,
+    entry_type: impl FnOnce(&std::fs::DirEntry) -> std::io::Result<std::fs::FileType>,
+) -> Result<std::path::PathBuf> {
     if let Some(root) = roots.next() {
         let root = root?;
-        if roots.next().is_none() && root.file_type()?.is_dir() && root.path().join("crates").is_dir() {
+        if roots.next().is_none() && entry_type(&root)?.is_dir() && root.path().join("crates").is_dir() {
             return Ok(root.path());
         }
     }
@@ -187,116 +262,171 @@ fn database_root(contents: &Path) -> Result<std::path::PathBuf> {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    // The atomics below only count fake-handler calls. Tests read them after awaiting the
-    // download (or alongside polling it on the same task), so they publish no other memory;
-    // SeqCst is kept for simplicity rather than because any ordering is required.
-    use core::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
+    use std::io::Write as _;
 
     use super::*;
 
-    fn fixture(name: &str) -> std::path::PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests")
-            .join("fixtures")
-            .join("advisories")
-            .join(name)
-    }
-
-    fn extract_fixture(name: &str) -> Result<rustsec::database::Database> {
-        let stage = tempfile::tempdir()?;
-        extract(File::open(fixture(name))?, stage.path())?;
-
-        Ok(rustsec::database::Database::open(stage.path())?)
+    #[test]
+    fn database_root_returns_directory_iteration_errors_without_panicking() {
+        let error = database_root_from_entries(std::iter::once(Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "scripted archive directory iteration failure",
+        ))))
+        .unwrap_err();
+        let cause = error.find_source::<std::io::Error>().unwrap();
+        assert_eq!(cause.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(cause.to_string(), "scripted archive directory iteration failure");
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "requires native filesystem and advisory database parsing")]
-    fn reads_a_database_at_the_archive_root() {
-        let database = extract_fixture("root.tar.gz").expect("root fixture contains a valid database");
-
+    fn survivor_optional_rust_publication_uses_the_exact_child_and_propagates_errors() {
+        let root = Path::new("validated-database");
+        let destination = Path::new("in-memory-extraction-destination");
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+        let error = publish_database(
+            root,
+            destination,
+            {
+                let calls = std::rc::Rc::clone(&calls);
+                move |source, target| {
+                    let child = match calls.get() {
+                        0 => "crates",
+                        1 => "rust",
+                        _ => panic!("only the two database children may be published"),
+                    };
+                    assert_eq!(source, root.join(child));
+                    assert_eq!(target, destination.join(child));
+                    calls.set(calls.get() + 1);
+                    if child == "rust" {
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::PermissionDenied,
+                            "scripted rust-directory publication probe",
+                        ))
+                    } else {
+                        Ok(())
+                    }
+                }
+            },
+            |actual| {
+                assert_eq!(actual, root);
+                true
+            },
+        )
+        .unwrap_err();
         assert_eq!(
-            database
-                .iter()
-                .map(|advisory| advisory.metadata.package.as_str())
-                .collect::<Vec<_>>(),
-            ["archive-crate"]
+            error.find_source::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::PermissionDenied
         );
+        assert!(error.to_string().contains("scripted rust-directory publication probe"), "{error}");
+        assert_eq!(calls.get(), 2);
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "requires native filesystem and advisory database parsing")]
-    fn reads_a_database_under_a_single_enclosing_directory() {
-        let database = extract_fixture("wrapped.tar.gz").expect("wrapped fixture contains a valid database");
-
-        assert_eq!(
-            database
-                .iter()
-                .map(|advisory| advisory.metadata.package.as_str())
-                .collect::<Vec<_>>(),
-            ["archive-crate"]
-        );
-    }
-
-    const MULTI_MEMBER: &[u8] = include_bytes!("../../../tests/fixtures/advisories/multi-member.tar.gz");
-
-    #[test]
-    #[cfg_attr(miri, ignore = "requires native filesystem and advisory database parsing")]
-    fn reads_advisories_across_gzip_member_boundaries() {
-        let mut first_member = Vec::new();
-        flate2::read::GzDecoder::new(MULTI_MEMBER).read_to_end(&mut first_member).unwrap();
-        let contains = |needle: &[u8]| first_member.windows(needle.len()).any(|window| window == needle);
-        assert!(
-            contains(b"RUSTSEC-2020-0001") && !contains(b"RUSTSEC-2020-0002"),
-            "the fixture must place a gzip member boundary between its two advisory entries"
-        );
-
-        let database = extract_fixture("multi-member.tar.gz").expect("gzip members form one complete tar archive");
-
-        let mut ids = database.iter().map(|advisory| advisory.metadata.id.to_string()).collect::<Vec<_>>();
-        ids.sort();
-        assert_eq!(ids, ["RUSTSEC-2020-0001", "RUSTSEC-2020-0002"]);
+    fn survivor_empty_archives_enforce_the_exact_decoded_byte_budget_without_filesystem_writes() {
+        let mut encoded = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoded.write_all(&[0; 1024]).unwrap();
+        let encoded = encoded.finish().unwrap();
+        let destination = Path::new("unused-extraction-destination");
+        unpack_with_limits(encoded.as_slice(), destination, 1024, 0).unwrap();
+        let error = unpack_with_limits(encoded.as_slice(), destination, 1023, 0)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "advisory archive exceeds the 1023-byte uncompressed size limit");
+        unpack_with_limits(encoded.as_slice(), destination, 1025, 0).unwrap();
+        let error = unpack_with_limits(&b"not gzip"[..], destination, 2048, 10).unwrap_err().to_string();
+        assert!(!error.is_empty());
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "requires native filesystem operations")]
-    fn rejects_a_corrupt_later_gzip_member_before_publishing_database_files() {
-        let stage = tempfile::tempdir().unwrap();
-
-        extract(File::open(fixture("corrupt-later-member.tar.gz")).unwrap(), stage.path())
-            .expect_err("a later member's checksum must be validated");
-
-        assert!(
-            !stage.path().join("crates").exists(),
-            "the first member must not be published alone"
-        );
+    fn survivor_default_unpacked_budget_accepts_the_exact_number_of_decoded_bytes() {
+        const MEMBER_BYTES: u64 = 64 * 1024;
+        let mut encoded = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        std::io::copy(&mut std::io::repeat(0).take(MEMBER_BYTES), &mut encoded).unwrap();
+        let member = encoded.finish().unwrap();
+        assert_eq!(MAX_UNPACKED_BYTES % MEMBER_BYTES, 0);
+        let encoded = member.repeat(usize::try_from(MAX_UNPACKED_BYTES / MEMBER_BYTES).unwrap());
+        let destination = Path::new("unused-extraction-destination");
+        unpack(encoded.as_slice(), destination).unwrap();
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "requires native filesystem operations")]
-    fn uncompressed_size_limit_covers_all_gzip_members() {
-        let stage = tempfile::tempdir().unwrap();
-
-        unpack_with_limits(MULTI_MEMBER, stage.path(), 2048, MAX_ENTRIES)
-            .expect_err("the combined tar entries and padding exceed the budget");
+    fn survivor_default_entry_budget_counts_global_metadata_without_creating_files() {
+        const HEADERS_PER_MEMBER: usize = 1000;
+        let mut header = tar::Header::new_gnu();
+        header.set_path("metadata").unwrap();
+        header.set_size(0);
+        header.set_entry_type(tar::EntryType::XGlobalHeader);
+        header.set_cksum();
+        let destination = Path::new("unused-extraction-destination");
+        let compress = |bytes: &[u8]| {
+            let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+            std::io::Write::write_all(&mut encoder, bytes).unwrap();
+            encoder.finish().unwrap()
+        };
+        assert_eq!(MAX_ENTRIES % HEADERS_PER_MEMBER, 0);
+        let block = compress(&header.as_bytes().repeat(HEADERS_PER_MEMBER));
+        let extra_header = compress(header.as_bytes());
+        let end = compress(&[0; 1024]);
+        for entries in [MAX_ENTRIES, MAX_ENTRIES + 1] {
+            let mut encoded = block.repeat(MAX_ENTRIES / HEADERS_PER_MEMBER);
+            if entries > MAX_ENTRIES {
+                encoded.extend_from_slice(&extra_header);
+            }
+            encoded.extend_from_slice(&end);
+            let result = unpack(encoded.as_slice(), destination);
+            if entries == MAX_ENTRIES {
+                result.unwrap();
+            } else {
+                assert_eq!(result.unwrap_err().to_string(), "advisory archive exceeds the 100000-entry limit");
+            }
+        }
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "requires native filesystem and advisory database parsing")]
-    fn accepts_the_global_pax_metadata_used_by_github_archives() {
-        let database = extract_fixture("github-pax.tar.gz").expect("GitHub metadata is not a filesystem entry");
+    fn survivor_declared_payload_budget_is_cumulative_and_distinct_from_truncation() {
+        let header = |size| {
+            let mut header = tar::Header::new_gnu();
+            header.set_path("metadata").unwrap();
+            header.set_size(size);
+            header.set_entry_type(tar::EntryType::XGlobalHeader);
+            header.set_cksum();
+            header
+        };
+        let destination = Path::new("unused-extraction-destination");
+        let mut source = header(512).as_bytes().to_vec();
+        source.extend_from_slice(&[0; 512]);
+        source.extend_from_slice(header(2048).as_bytes());
+        let mut encoded = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        std::io::Write::write_all(&mut encoded, &source).unwrap();
+        let error = unpack_with_limits(encoded.finish().unwrap().as_slice(), destination, 2048, 10).unwrap_err();
+        assert_eq!(error.to_string(), "advisory archive exceeds the 2048-byte uncompressed size limit");
 
-        assert_eq!(database.iter().count(), 1);
+        let mut encoded = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        std::io::Write::write_all(&mut encoded, header(1024).as_bytes()).unwrap();
+        let error = unpack_with_limits(encoded.finish().unwrap().as_slice(), destination, 1024, 10).unwrap_err();
+        assert!(!error.to_string().contains("uncompressed size limit"), "{error}");
+        assert_eq!(error.to_string(), "unexpected EOF during skip");
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "requires native filesystem and advisory database parsing")]
-    fn preserves_the_optional_rust_advisory_collection() {
-        let stage = tempfile::tempdir().unwrap();
-
-        extract(File::open(fixture("with-rust.tar.gz")).unwrap(), stage.path()).expect("an optional rust/ collection is supported");
-
-        assert!(stage.path().join("rust").is_dir());
+    fn survivor_invalid_utf8_archive_paths_return_errors_before_writing() {
+        let mut header = tar::Header::new_gnu();
+        header.set_path("entry").unwrap();
+        header.as_mut_bytes()[0] = 0xff;
+        header.set_size(0);
+        header.set_mode(0o644);
+        header.set_cksum();
+        let compressor = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        let mut builder = tar::Builder::new(compressor);
+        builder.append(&header, std::io::empty()).unwrap();
+        let encoded = builder.into_inner().unwrap().finish().unwrap();
+        let destination = Path::new("unused-extraction-destination");
+        let error = unpack(encoded.as_slice(), destination).unwrap_err();
+        if cfg!(windows) {
+            assert!(error.to_string().contains("only Unicode paths are supported on Windows"), "{error}");
+        } else {
+            assert_eq!(error.to_string(), "advisory archive paths must be UTF-8");
+        }
     }
 
     #[test]
@@ -310,241 +440,4 @@ mod tests {
 
         assert!(error.to_string().contains("compressed size limit"), "{error}");
     }
-
-    #[tokio::test]
-    #[cfg_attr(miri, ignore = "requires Tokio filesystem workers")]
-    async fn rejects_oversized_content_length_before_reading_the_body() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let client = fetch::HttpClient::new_fake(fetch::fake::FakeHandler::from_fn({
-            let calls = Arc::clone(&calls);
-            move |_| {
-                calls.fetch_add(1, Ordering::SeqCst);
-                fetch::HttpResponseBuilder::new_fake()
-                    .status(fetch::StatusCode::OK)
-                    .header("content-length", "67108865")
-                    .build()
-            }
-        }));
-        let destination = tempfile::tempdir().unwrap();
-
-        let error = download(
-            destination.path(),
-            "https://example.test/database.tar.gz",
-            Duration::from_mins(1),
-            client,
-        )
-        .await
-        .expect_err("the advertised size must be checked before parsing an empty body");
-
-        assert!(error.to_string().contains("compressed size limit"), "{error}");
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert_eq!(std::fs::read_dir(destination.path()).unwrap().count(), 0);
-    }
-
-    #[tokio::test(start_paused = true)]
-    #[cfg_attr(miri, ignore = "requires Tokio timers and filesystem workers")]
-    async fn http_status_failures_do_not_restart_the_whole_transfer() {
-        for status in [fetch::StatusCode::NOT_FOUND, fetch::StatusCode::INTERNAL_SERVER_ERROR] {
-            let calls = Arc::new(AtomicUsize::new(0));
-            let client = fetch::HttpClient::new_fake(fetch::fake::FakeHandler::from_fn({
-                let calls = Arc::clone(&calls);
-                move |_| {
-                    calls.fetch_add(1, Ordering::SeqCst);
-                    fetch::HttpResponseBuilder::new_fake().status(status).build()
-                }
-            }));
-            let destination = tempfile::tempdir().unwrap();
-
-            let error = download(
-                destination.path(),
-                "https://example.test/database.tar.gz",
-                Duration::from_mins(1),
-                client,
-            )
-            .await
-            .expect_err("HTTP failures must be returned without an outer retry");
-
-            assert!(error.to_string().contains(&format!("HTTP {status}")), "{error}");
-            assert_eq!(calls.load(Ordering::SeqCst), 1);
-            assert_eq!(std::fs::read_dir(destination.path()).unwrap().count(), 0);
-        }
-    }
-
-    #[tokio::test(start_paused = true)]
-    #[cfg_attr(miri, ignore = "requires Tokio timers and filesystem workers")]
-    async fn exhausted_request_errors_do_not_restart_the_whole_transfer() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let client = fetch::HttpClient::new_fake(fetch::fake::FakeHandler::from_error_fn({
-            let calls = Arc::clone(&calls);
-            move |_| {
-                calls.fetch_add(1, Ordering::SeqCst);
-                fetch::HttpError::from(std::io::Error::other("request resilience exhausted"))
-            }
-        }));
-        let destination = tempfile::tempdir().unwrap();
-
-        let error = download(
-            destination.path(),
-            "https://example.test/database.tar.gz",
-            Duration::from_mins(1),
-            client,
-        )
-        .await
-        .expect_err("request failures have already exhausted native resilience");
-
-        assert!(format!("{error:#}").contains("request resilience exhausted"), "{error:#}");
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    #[cfg_attr(miri, ignore = "requires Tokio filesystem workers and advisory database parsing")]
-    async fn request_retry_after_waits_do_not_consume_the_body_timeout() {
-        for status in [fetch::StatusCode::TOO_MANY_REQUESTS, fetch::StatusCode::FORBIDDEN] {
-            let control = tick::ClockControl::new();
-            let clock = tick::Clock::from(control.clone());
-            let calls = Arc::new(AtomicUsize::new(0));
-            let handler = fetch::fake::FakeHandler::from_fn({
-                let calls = Arc::clone(&calls);
-                move |_| {
-                    if calls.fetch_add(1, Ordering::SeqCst) == 0 {
-                        fetch::HttpResponseBuilder::new_fake()
-                            .status(status)
-                            .header("retry-after", "120")
-                            .build()
-                    } else {
-                        fetch::HttpResponseBuilder::new_fake()
-                            .bytes(bytes::Bytes::from_static(include_bytes!(
-                                "../../../tests/fixtures/advisories/root.tar.gz"
-                            )))
-                            .build()
-                    }
-                }
-            });
-            let client = resilient_http::configure_request_resilience(fetch::HttpClient::builder_fake(handler, &clock)).build();
-            let destination = tempfile::tempdir().unwrap();
-            let download = download_with_clock(
-                destination.path(),
-                "https://example.test/database.tar.gz",
-                Duration::from_mins(1),
-                client,
-                clock,
-            );
-            let mut download = std::pin::pin!(download);
-            tokio::time::timeout(Duration::from_secs(10), async {
-                while calls.load(Ordering::SeqCst) == 0 {
-                    assert!(futures_util::poll!(&mut download).is_pending());
-                    tokio::task::yield_now().await;
-                }
-            })
-            .await
-            .expect("the fake request handler must be reached within the safety deadline");
-
-            control.advance(Duration::from_secs(61));
-            assert!(futures_util::poll!(&mut download).is_pending());
-            assert_eq!(
-                calls.load(Ordering::SeqCst),
-                1,
-                "the body timeout must not restart a waiting request"
-            );
-            control.advance(Duration::from_secs(58));
-            assert!(futures_util::poll!(&mut download).is_pending());
-            assert_eq!(calls.load(Ordering::SeqCst), 1, "Retry-After must elapse before the next GET");
-
-            control.advance(Duration::from_secs(1));
-            download
-                .await
-                .expect("the body receives its own timeout after the request retry succeeds");
-
-            assert_eq!(calls.load(Ordering::SeqCst), 2);
-            assert_eq!(rustsec::database::Database::open(destination.path()).unwrap().iter().count(), 1);
-        }
-    }
-
-    #[tokio::test]
-    #[cfg_attr(miri, ignore = "requires Tokio filesystem workers")]
-    async fn streamed_compressed_size_violations_are_not_retried() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let client = fetch::HttpClient::new_fake(fetch::fake::FakeHandler::from_fn({
-            let calls = Arc::clone(&calls);
-            move |_| {
-                calls.fetch_add(1, Ordering::SeqCst);
-                fetch::HttpResponseBuilder::new_fake()
-                    .stream(futures_util::stream::iter(
-                        (0..65).map(|_| Ok(bytes::Bytes::from(vec![0_u8; 1024 * 1024]).into())),
-                    ))
-                    .build()
-            }
-        }));
-        let destination = tempfile::tempdir().unwrap();
-
-        let error = download(
-            destination.path(),
-            "https://example.test/database.tar.gz",
-            Duration::from_mins(1),
-            client,
-        )
-        .await
-        .expect_err("streaming must enforce the limit without a content-length header");
-
-        assert!(error.to_string().contains("compressed size limit"), "{error}");
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert_eq!(std::fs::read_dir(destination.path()).unwrap().count(), 0);
-    }
-
-    #[test]
-    #[cfg_attr(miri, ignore = "requires native filesystem operations")]
-    fn counts_entries_before_extracting_them() {
-        let destination = tempfile::tempdir().unwrap();
-        let input = include_bytes!("../../../tests/fixtures/advisories/wrapped.tar.gz");
-
-        let error = unpack_with_limits(input.as_slice(), destination.path(), MAX_UNPACKED_BYTES, 0)
-            .expect_err("a zero-entry budget cannot admit a file");
-
-        assert!(error.to_string().contains("0-entry limit"), "{error}");
-    }
-
-    #[test]
-    #[cfg_attr(miri, ignore = "requires native filesystem operations")]
-    fn includes_tar_padding_in_the_uncompressed_size_limit() {
-        let destination = tempfile::tempdir().unwrap();
-        let input = include_bytes!("../../../tests/fixtures/advisories/wrapped.tar.gz");
-
-        let error = unpack_with_limits(input.as_slice(), destination.path(), 4096, MAX_ENTRIES)
-            .expect_err("the small fixture has more than 4096 uncompressed bytes, including padding");
-
-        assert!(error.to_string().contains("4096-byte uncompressed size limit"), "{error}");
-    }
-
-    macro_rules! rejected_archive {
-        ($name:ident, $fixture:literal, $message:literal) => {
-            #[test]
-            #[cfg_attr(miri, ignore = "requires native filesystem and advisory database parsing")]
-            fn $name() {
-                let error = extract_fixture($fixture).expect_err("invalid archive must not be accepted");
-
-                assert!(format!("{error:#}").contains($message), "{error:#}");
-            }
-        };
-    }
-
-    #[test]
-    #[cfg_attr(miri, ignore = "requires native filesystem and advisory database parsing")]
-    fn rejects_malformed_advisories() {
-        let error = extract_fixture("invalid-database.tar.gz").expect_err("invalid archive must not be accepted");
-
-        let cause = error
-            .find_source::<rustsec::Error>()
-            .unwrap_or_else(|| panic!("the RustSec parser must reject the advisory: {error:#}"));
-        assert_eq!(cause.kind(), rustsec::ErrorKind::Parse, "{error:#}");
-    }
-
-    rejected_archive!(rejects_missing_database, "missing-crates.tar.gz", "must contain crates/");
-    rejected_archive!(rejects_empty_database, "empty-database.tar.gz", "contains no advisories");
-    rejected_archive!(rejects_parent_paths, "parent-path.tar.gz", "unsafe path");
-    rejected_archive!(rejects_absolute_paths, "absolute-path.tar.gz", "unsafe path");
-    rejected_archive!(rejects_windows_traversal_on_every_platform, "backslash-path.tar.gz", "unsafe path");
-    rejected_archive!(rejects_symbolic_links, "symlink.tar.gz", "not links");
-    rejected_archive!(rejects_hard_links, "hardlink.tar.gz", "not links");
-    rejected_archive!(rejects_oversized_entries, "oversized.tar.gz", "uncompressed size limit");
-    rejected_archive!(checks_the_gzip_trailer, "truncated.tar.gz", "unexpected end");
 }

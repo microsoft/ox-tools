@@ -24,7 +24,7 @@ pub(crate) const MAX_SHARDS: u32 = 65_536;
 /// What a merge concluded.
 #[derive(Debug, Default)]
 pub struct Merged {
-    /// The merged report, ready to render.
+    /// The merged report, ready to render when every filtered verdict has a compatible presentation.
     pub report: Option<Report>,
 
     /// Mutants with a verdict inside the freshness window.
@@ -80,6 +80,9 @@ pub struct Merged {
 
     /// Verdicts omitted because their mutation presentation does not fit the selected source.
     pub incompatible: usize,
+
+    /// Filtered verdicts without a compatible presentation, which would be lost by staging.
+    pub unpresentable_filtered: usize,
 }
 
 impl Merged {
@@ -113,7 +116,7 @@ impl Merged {
     /// population structurally rather than by relying on the printed score being unflattering.
     #[must_use]
     pub fn scored(&self) -> Option<f64> {
-        (self.valid > 0).then(|| self.score())
+        (self.valid > 0 && self.unpresentable_filtered == 0).then(|| self.score())
     }
 
     /// How much of the rotation the inputs covered, as a percentage.

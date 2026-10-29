@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-10-29
+
+- 🐛 Bug Fixes
+
+  - aprz: prepare rustls 1.2.2 release
+
+## [1.2.1] - 2026-10-27
+
+- ✨ Features
+
+  - cargo-gamma: improve campaign scheduling and UX ([#208](https://github.com/microsoft/ox-tools/pull/208))
+  - cargo-unused-deps: complete dependency analysis ([#188](https://github.com/microsoft/ox-tools/pull/188))
+
+- 🐛 Bug Fixes
+
+  - exclude test modules from coverage ([#229](https://github.com/microsoft/ox-tools/pull/229))
+
+- ♻️ Code Refactoring
+
+  - cargo-aprz: replace reqwest with fetch ([#275](https://github.com/microsoft/ox-tools/pull/275))
+
+- 🧩 Miscellaneous
+
+  - Address Sander's 'Tsunami of Feedback' ([#221](https://github.com/microsoft/ox-tools/pull/221))
+
 ## [1.2.0] - 2026-09-23
 
 - ✨ Features

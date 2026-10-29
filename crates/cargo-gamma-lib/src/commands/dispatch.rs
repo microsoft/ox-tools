@@ -60,7 +60,7 @@ pub const EXIT_INTERNAL: i32 = 70;
 /// and the exit codes themselves, is reachable from an ordinary integration test.
 pub fn run<H: Host>(host: &mut H, args: impl IntoIterator<Item = impl Into<OsString> + Clone>) -> i32 {
     #[cfg(windows)]
-    cargo_gamma_unsafe::job::suppress_error_dialogs();
+    suppress_platform_error_dialogs();
 
     let notes = crate::notes::Run::new();
     let _notes = crate::notes::enter(Some(&notes));
@@ -81,6 +81,30 @@ pub fn run<H: Host>(host: &mut H, args: impl IntoIterator<Item = impl Into<OsStr
         Ok(code) => code,
         Err(_payload) => EXIT_INTERNAL,
     }
+}
+
+#[cfg(all(test, windows))]
+std::thread_local! {
+    static ERROR_DIALOG_SUPPRESSION_OBSERVER: core::cell::Cell<Option<usize>> = const { core::cell::Cell::new(None) };
+}
+
+/// Initializes native dialog suppression; an installed test counter records entry instead.
+#[cfg(windows)]
+fn suppress_platform_error_dialogs() {
+    #[cfg(test)]
+    if ERROR_DIALOG_SUPPRESSION_OBSERVER.with(|observed| {
+        if let Some(count) = observed.get() {
+            observed.set(Some(count + 1));
+            true
+        } else {
+            false
+        }
+    }) {
+        return;
+    }
+
+    // #[gamma::skip(stmt.delete_call, reason = "This exact call mutates process-global Windows error mode through a native Once; observing deletion requires prohibited global-state mutation, not the earlier owned policy observer.", tag = "native-boundary")]
+    cargo_gamma_unsafe::job::suppress_error_dialogs();
 }
 
 /// Runs the tool, letting a panic escape.
@@ -109,7 +133,9 @@ fn dispatched_with<H: Host>(
 
             if is_help {
                 let _ = write!(host.output(), "{text}");
-                return EXIT_OK;
+                return
+                // #[gamma::skip(return_value.default, reason = "EXIT_OK is i32 zero, and Default::default() in the return position is the same i32 zero.", tag = "equivalent")]
+                EXIT_OK;
             }
 
             let _ = write!(host.error(), "{text}");
@@ -191,7 +217,9 @@ fn normalize_list_mode(args: &mut Vec<OsString>) {
     if args.get(list).is_none_or(|argument| argument != "list") {
         return;
     }
-    let modes = ["mutants", "files", "mutators", "presets"];
+    let modes =
+    // #[gamma::skip(collection.reverse_array, reason = "normalize_list_mode's fixed modes array is used only through contains for exact string membership; reversing [mutants,files,mutators,presets] preserves that membership set and every argv insertion decision.", tag = "equivalent")]
+    ["mutants", "files", "mutators", "presets"];
     let tail = args.get(list + 1..).unwrap_or_default();
 
     if tail.iter().any(|argument| matches!(argument.to_str(), Some("-h" | "--help"))) {
@@ -216,24 +244,33 @@ const GLOBAL_OPTIONS: [&str; 1] = ["--color"];
 /// Finds the first argument after any leading global options.
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn subcommand_index(args: &[OsString]) -> Option<usize> {
-    let mut index = 1;
+    subcommand_index_with(
+        // #[gamma::skip(expr.increment, reason = "an extra index reaches args.get(None), returning None just like exhausting all arguments without finding a subcommand", tag = "equivalent")]
+        args.len(),
+        |index| args.get(index).and_then(|entry| entry.to_str()),
+    )
+}
 
-    while let Some(first) = args.get(index).and_then(|entry| entry.to_str()) {
-        if GLOBAL_OPTIONS
+fn subcommand_index_with<'a>(length: usize, mut argument: impl FnMut(usize) -> Option<&'a str>) -> Option<usize> {
+    // #[gamma::skip(range.exclusive_to_inclusive, expr.increment, reason = "the production getter returns None past argv; probing one extra trailing index still returns None when no subcommand was found", tag = "equivalent")]
+    let mut indices = 1..length;
+    while let Some(index) = indices.next() {
+        let first = argument(index)?;
+        if
+        // #[gamma::skip(iter.any_to_all, reason = "GLOBAL_OPTIONS contains exactly the singleton --color; any and all evaluate the same one pure predicate.", tag = "equivalent")]
+        GLOBAL_OPTIONS
             .iter()
             .any(|option| first.strip_prefix(option).is_some_and(|rest| rest.starts_with('=')))
         {
-            index += 1;
-        } else if GLOBAL_OPTIONS.contains(&first) {
-            // #[gamma::skip(stmt.delete_assign, literal.int_to_zero, tag = "timeout", reason = "the global-option scan must consume the option and value to make progress")]
-            index += 2;
+            continue;
+        }
+        if GLOBAL_OPTIONS.contains(&first) {
+            let _value = indices.next();
         } else {
-            // #[gamma::skip(loop.break_to_continue, loop.delete_break, tag = "timeout", reason = "an unrecognized argument ends this scan; continuing revisits the same argument forever")]
-            break;
+            return Some(index);
         }
     }
-
-    (index < args.len()).then_some(index)
+    None
 }
 
 /// Whether `args` is a bare `run` invocation with the word `run` left off.
@@ -247,7 +284,9 @@ fn implies_run(args: &[OsString]) -> bool {
     let mut rest = args;
 
     while let Some(first) = rest.first().and_then(|entry| entry.to_str()) {
-        if GLOBAL_OPTIONS
+        if
+        // #[gamma::skip(iter.any_to_all, reason = "Both global-option scans iterate the immutable singleton GLOBAL_OPTIONS=[--color]. For exactly one element, any(predicate) and all(predicate) each evaluate that same predicate exactly once and return its result; there is no empty/multiple-element case.", tag = "equivalent")]
+        GLOBAL_OPTIONS
             .iter()
             .any(|option| first.strip_prefix(option).is_some_and(|rest| rest.starts_with('=')))
         {
@@ -380,10 +419,91 @@ fn check_shard(select: &SelectArgs) -> crate::Result<()> {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::fs;
+    #[cfg(windows)]
+    use std::os::windows::ffi::OsStringExt as _;
     use std::sync::Barrier;
+
+    use serde_json::{Value, from_str};
 
     use super::*;
     use crate::testing::Sink as TestSink;
+
+    #[test]
+    fn subcommand_scanning_stops_at_non_unicode_arguments() {
+        let mut visited = Vec::new();
+        let found = subcommand_index_with(4, |index| {
+            visited.push(index);
+            match index {
+                1 => Some("--color=never"),
+                2 => None,
+                _ => panic!("a non-Unicode argument must stop subcommand scanning"),
+            }
+        });
+        assert_eq!(found, None);
+        assert_eq!(visited, [1, 2]);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn native_non_unicode_arguments_are_left_for_the_cli_parser() {
+        let invalid = OsString::from_wide(&[0xD800]);
+        let args = [OsString::from("cargo-gamma"), invalid, OsString::from("list")];
+        assert_eq!(subcommand_index(&args), None);
+        assert_eq!(
+            normalize(args.clone()),
+            [args[0].clone(), OsString::from("run"), args[1].clone(), args[2].clone()]
+        );
+    }
+
+    #[test]
+    fn oct25_joined_global_option_advances_the_real_subcommand_scanner_once() {
+        let mut visits = 0;
+        let command = subcommand_index_with(3, |index| {
+            visits += 1;
+            assert_eq!(index, visits, "the joined option must advance rather than revisit itself");
+            match index {
+                1 => Some("--color=never"),
+                2 => Some("merge"),
+                _ => panic!("the scan must stop at the first subcommand"),
+            }
+        });
+        assert_eq!(command, Some(2));
+        assert_eq!(visits, 2);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn recovered_native_cli_suppresses_error_dialogs_exactly_once_before_returning_version_output() {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                ERROR_DIALOG_SUPPRESSION_OBSERVER.with(|observed| observed.set(None));
+            }
+        }
+        ERROR_DIALOG_SUPPRESSION_OBSERVER.with(|observed| {
+            assert_eq!(observed.replace(Some(0)), None);
+        });
+        let _reset = Reset;
+        let mut host = crate::testing::Sink::default();
+        assert_eq!(run(&mut host, ["cargo-gamma", "--version"]), EXIT_OK);
+        assert!(host.out().ends_with(&format!("{}\n", env!("CARGO_PKG_VERSION"))));
+        assert!(host.err().is_empty());
+        assert_eq!(ERROR_DIALOG_SUPPRESSION_OBSERVER.with(core::cell::Cell::get), Some(1));
+    }
+
+    #[test]
+    fn recovered_equals_global_options_advance_once_before_the_actual_subcommand() {
+        let args = ["cargo-gamma", "--color=never", "--color=always", "list", "files"];
+        let mut visited = Vec::new();
+        let found = subcommand_index_with(args.len(), |index| {
+            visited.push(index);
+            assert!(visited.len() <= args.len(), "the global option scan must make bounded progress");
+            args.get(index).copied()
+        });
+        assert_eq!(found, Some(3));
+        assert_eq!(visited, [1, 2, 3]);
+        assert_eq!(normalize(args), args.map(OsString::from));
+    }
 
     struct ClosedOutput {
         err: Vec<u8>,
@@ -755,7 +875,7 @@ mod tests {
             let code = run(&mut host, ["cargo-gamma", "gamma", "list", "mutators", "--json", "--dir", &root]);
             assert_eq!(code, EXIT_OK, "{}", host.err());
 
-            let entries: Vec<serde_json::Value> = serde_json::from_str(&host.out()).expect("the listing is JSON");
+            let entries: Vec<Value> = from_str(&host.out()).expect("the listing is JSON");
             let enabled = |name: &str| {
                 entries
                     .iter()

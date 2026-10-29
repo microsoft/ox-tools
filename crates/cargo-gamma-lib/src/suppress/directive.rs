@@ -137,7 +137,9 @@ fn parse_arguments(tokens: &TokenStream) -> Arguments {
     let mut current: Vec<TokenTree> = Vec::new();
 
     let mut flush = |current: &mut Vec<TokenTree>, arguments: &mut Arguments| {
-        if current.is_empty() {
+        if
+        // #[gamma::skip(cond.always_false, reason = "Empty current tokens would otherwise return early. Removing that guard merely takes the empty Vec, fails len>=3, renders/cleans an empty String, and skips cleaned.is_empty body. No selectors, multiplier, named values, unknowns or errors change.", tag = "equivalent")]
+        current.is_empty() {
             return;
         }
 
@@ -258,7 +260,9 @@ fn empty_argument_error(tokens: &TokenStream) -> Option<&'static str> {
             current_is_empty = true;
             saw_comma = true;
         } else {
-            current_is_empty = false;
+            current_is_empty =
+            // #[gamma::skip(assign_value.default, reason = "The assigned false is exactly the inferred primitive type's Default value.", tag = "equivalent")]
+            false;
         }
     }
 
@@ -322,6 +326,77 @@ mod tests {
 
     use super::super::directives;
     use super::*;
+    use crate::fixtures;
+
+    #[test]
+    fn recovered_signed_multiplier_rejects_a_third_value_token() {
+        for name in ["test_timeout_multiplier", "timeout_multiplier", "multiplier", "factor"] {
+            let parsed = parse_arguments(&format!("{name} = +2 3").parse().unwrap());
+            assert_eq!(parsed.errors, [format!("trailing tokens after `{name}` value")]);
+            assert_eq!(parsed.test_timeout_multiplier, None);
+        }
+    }
+
+    #[test]
+    fn recovered_first_unknown_named_argument_is_the_reported_error() {
+        let source = file("#[gamma::skip(arith, first_typo = 1, second_typo = 2)]\nfn f() {}");
+        let error = directives(&source).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "test.rs:1: unknown argument `first_typo` in directive, expected `reason`, `tag`, or `test_timeout_multiplier`"
+        );
+    }
+
+    #[test]
+    fn recovered_empty_selector_fragments_do_not_create_separator_gaps() {
+        let tokens = TokenStream::from(TokenTree::Group(Group::new(Delimiter::None, TokenStream::new())));
+        let arguments = parse_arguments(&tokens);
+        assert_eq!(arguments.selectors, "");
+        assert!(arguments.errors.is_empty());
+        assert_eq!(arguments.reason, None);
+        assert_eq!(arguments.test_timeout_multiplier, None);
+        for text in [r#"arith, "", literal"#, r#"arith, "   ", literal"#] {
+            let parsed = parse_arguments(&text.parse().unwrap());
+            assert_eq!(parsed.selectors, "arith,literal");
+            assert!(parsed.errors.is_empty());
+        }
+    }
+
+    #[test]
+    fn recovered_transparent_groups_preserve_named_arguments_and_two_token_selectors() {
+        let tokens = TokenStream::from(TokenTree::Group(Group::new(Delimiter::None, r#"reason = "kept""#.parse().unwrap())));
+        let parsed = parse_arguments(&tokens);
+        assert_eq!(parsed.reason.as_deref(), Some("kept"));
+        assert_eq!(parsed.test_timeout_multiplier, None);
+        assert_eq!(parsed.selectors, "");
+        assert!(parsed.errors.is_empty());
+        let tokens = TokenStream::from(TokenTree::Group(Group::new(Delimiter::None, "factor = 2".parse().unwrap())));
+        let parsed = parse_arguments(&tokens);
+        assert_eq!(parsed.test_timeout_multiplier, Some(2.0));
+        assert_eq!(parsed.selectors, "");
+        assert!(parsed.errors.is_empty());
+        for name in ["reason", "factor"] {
+            let parsed = parse_arguments(&format!("{name} =").parse().unwrap());
+            assert_eq!(parsed.selectors, format!("{name}="));
+            assert_eq!(parsed.reason, None);
+            assert_eq!(parsed.test_timeout_multiplier, None);
+            assert!(parsed.errors.is_empty());
+        }
+    }
+
+    #[test]
+    fn recovered_governing_scope_excludes_its_exact_end() {
+        let source = file("fn f() {}");
+        let mut directive = build(None, &TokenStream::new(), Channel::Attribute, 1, 10..20, &source).unwrap();
+        let mut mutant = fixtures::mutant();
+        for (start, expected) in [(9, false), (10, true), (19, true), (20, false), (21, false)] {
+            mutant.span = start..start + 1;
+            assert_eq!(directive.governs(&mutant), expected, "{start}");
+        }
+        directive.scope = 20..20;
+        mutant.span = 20..21;
+        assert!(!directive.governs(&mutant));
+    }
 
     #[test]
     fn survivor_argument_token_shapes_keep_multiplier_aliases_and_first_error() {

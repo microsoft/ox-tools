@@ -165,7 +165,12 @@ impl Expression<TargetAtom> {
             Self::Not(predicate) => !predicate.matches(member, target),
             Self::Atom(atom) => match atom {
                 TargetAtom::Name(pattern) => {
-                    if pattern.contains(['*', '?']) {
+                    if
+                    // #[gamma::skip(cond.always_true, reason = "Without * or ? the glob matcher is literal equality; this branch only preserves the cheaper equality fast path.", tag = "perf")]
+                    pattern.contains(
+                        // #[gamma::skip(collection.reverse_array, reason = "This pattern is a character membership set; reversing its order cannot change matching.", tag = "equivalent")]
+                        ['*', '?'],
+                    ) {
                         glob_matches(pattern, &target.name)
                     } else {
                         pattern == &target.name
@@ -659,6 +664,46 @@ mod tests {
                 ]),
             ])
         );
+    }
+
+    #[test]
+    fn target_filter_constructor_returns_tokenization_errors() {
+        let expression = "name:\"unfinished";
+        let error = TargetPredicate::parse(expression).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "invalid filter expression `name:\"unfinished`: unclosed double quote"
+        );
+    }
+
+    #[test]
+    fn target_boolean_filters_preserve_mixed_results_and_validate_every_operand() {
+        let (mut member, mut target) = target_filter_fixture();
+        target.name = "unit-a".to_owned();
+        member.metadata = json!({"checks": {"names": ["another", "unit-a"], "invalid": 7}});
+        for (expression, expected) in [
+            ("name:missing or name:unit-a", true),
+            ("name:unit-a or name:missing", true),
+            ("name:missing or name:absent", false),
+            ("name:unit-? and required-feature:loom", true),
+            ("name:unit-? and required-feature:missing", false),
+            ("name-in-metadata:checks.names", true),
+            ("name:unit-??", false),
+        ] {
+            let predicate = TargetPredicate::parse(expression).unwrap();
+            predicate.validate(&member).unwrap();
+            assert_eq!(predicate.matches(&member, &target), expected, "{expression}");
+        }
+        for expression in [
+            "name:unit-a or name-in-metadata:checks.invalid",
+            "name:missing and name-in-metadata:checks.invalid",
+        ] {
+            let error = TargetPredicate::parse(expression).unwrap().validate(&member).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "package `alpha` metadata `checks.invalid` must be an array of strings when used by `name-in-metadata:checks.invalid`"
+            );
+        }
     }
 
     fn target_filter_fixture() -> (Member, MemberTarget) {

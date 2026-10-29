@@ -264,6 +264,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn recovered_cfg_attr_predicate_is_not_itself_a_directive() {
+        let file = SourceFile::parse(
+            "predicate.rs",
+            "#[cfg_attr(gamma::skip, allow(dead_code))]\nfn example() {}\n".to_owned(),
+        )
+        .unwrap();
+        assert!(directives(&file).unwrap().is_empty());
+    }
+
+    #[test]
     fn survivor_timeout_multiplier_aliases_are_retained_in_both_attributes_and_comments() {
         for name in ["test_timeout_multiplier", "timeout_multiplier"] {
             for comment in ["", "// "] {

@@ -136,7 +136,9 @@ fn escape_csv(s: &str) -> Cow<'_, str> {
         if b == b'"' {
             has_quote = true;
             // #[gamma::skip(stmt.delete_assign, literal.bool_flip, reason = "has_quote selects the always-quoted branch below, so this redundant needs_quoting assignment cannot affect the result")]
-            needs_quoting = true;
+            needs_quoting =
+            // #[gamma::skip(assign_value.default, reason = "The quote-byte branch already sets has_quote, which independently requires quoting.", tag = "equivalent")]
+            true;
         } else if matches!(b, b',' | b'\n' | b'\r') {
             needs_quoting = true;
         }

@@ -269,6 +269,10 @@ fn create_cache_dir_with(
 #[mutants::skip] // Windows-only optimization; Linux mutation runners cannot compile or observe this code.
 // #[gamma::skip(all, reason = "NTFS compression is an opportunistic Windows filesystem optimization whose success depends on the host volume and privileges")]
 fn configure_windows_cache_directory(cache_path: &Path, name: &str, needs_creation: bool) {
+    #[cfg(all(test, not(miri)))]
+    if tests::record_configuration_request(cache_path, name, needs_creation) {
+        return;
+    }
     configure_cache_compression(cache_path, name, needs_creation, |path| disable_directory_compression(path));
 }
 
@@ -381,7 +385,64 @@ mod tests {
     use windows::Win32::System::Ioctl::FSCTL_GET_COMPRESSION;
     use windows::core::HSTRING;
 
-    use super::{disable_directory_compression, should_disable_cache_compression};
+    use super::{
+        configure_windows_cache_directory, create_cache_dir_with, disable_directory_compression, should_disable_cache_compression,
+    };
+
+    type ConfigurationRequests = Vec<(std::path::PathBuf, String, bool)>;
+
+    thread_local! {
+        static CONFIGURATION_REQUESTS: std::cell::RefCell<Option<ConfigurationRequests>> = const { std::cell::RefCell::new(None) };
+    }
+
+    pub(super) fn record_configuration_request(path: &Path, name: &str, needs_creation: bool) -> bool {
+        CONFIGURATION_REQUESTS.with_borrow_mut(|requests| {
+            requests.as_mut().is_some_and(|requests| {
+                requests.push((path.to_path_buf(), name.to_owned(), needs_creation));
+                true
+            })
+        })
+    }
+
+    #[test]
+    fn survivor_existing_cache_directory_forwards_the_exact_native_configuration_request() {
+        struct Restore;
+
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                CONFIGURATION_REQUESTS.with_borrow_mut(|requests| *requests = None);
+            }
+        }
+
+        let _restore = Restore;
+        CONFIGURATION_REQUESTS.with_borrow_mut(|requests| {
+            assert!(requests.is_none());
+            *requests = Some(Vec::new());
+        });
+        let root = Path::new("synthetic-cache");
+        let expected = root.join("crates");
+        let created = std::cell::Cell::new(false);
+        let actual = create_cache_dir_with(
+            root,
+            "crates",
+            |path| {
+                assert_eq!(path, expected);
+                true
+            },
+            |path| {
+                assert_eq!(path, expected);
+                created.set(true);
+                Ok(())
+            },
+            configure_windows_cache_directory,
+        )
+        .unwrap();
+        assert_eq!(actual, expected);
+        assert!(created.get());
+        CONFIGURATION_REQUESTS.with_borrow(|requests| {
+            assert_eq!(requests.as_ref().unwrap(), &[(expected, "crates".to_owned(), false)]);
+        });
+    }
 
     /// Owns a directory handle opened by a Windows-only test and closes it on drop.
     struct HandleGuard(HANDLE);

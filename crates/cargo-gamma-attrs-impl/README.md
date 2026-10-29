@@ -55,7 +55,7 @@ guarantee of its own. Depend on `cargo-gamma-attrs`.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-gamma-attrs-impl">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbH5RUmmY8e-sbYyqmHPyeK9obgdLJAJ7T65AbUAUW0Y4uz2thZIGDdmNhcmdvLWdhbW1hLWF0dHJzLWltcGxlMC4zLjB2Y2FyZ29fZ2FtbWFfYXR0cnNfaW1wbA
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbH5RUmmY8e-sbYyqmHPyeK9obgdLJAJ7T65AbUAUW0Y4uz2thZIGDdmNhcmdvLWdhbW1hLWF0dHJzLWltcGxlMC40LjB2Y2FyZ29fZ2FtbWFfYXR0cnNfaW1wbA
  [__link0]: https://crates.io/crates/cargo-gamma-attrs
  [__link1]: https://docs.rs/cargo-gamma-attrs
- [__link2]: https://docs.rs/cargo-gamma-attrs-impl/0.3.0/cargo_gamma_attrs_impl/?search=value
+ [__link2]: https://docs.rs/cargo-gamma-attrs-impl/0.4.0/cargo_gamma_attrs_impl/?search=value

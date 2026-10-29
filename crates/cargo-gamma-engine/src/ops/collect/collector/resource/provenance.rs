@@ -10,7 +10,7 @@ use syn::{Expr, Lit, Type};
 
 use super::super::Collector;
 use super::{Binding, Primitive, StableCall, scalar_sources};
-use crate::{HashMap, HashSet};
+use crate::HashMap;
 
 struct Calls {
     sites: Vec<syn::ExprPath>,
@@ -36,11 +36,11 @@ impl<'ast> Visit<'ast> for Calls {
 }
 
 fn vector_length(expression: &Expr, bindings: &HashMap<String, Binding>) -> bool {
-    let Expr::MethodCall(length) = expression else { return false };
+    let Expr::MethodCall(length) = expression else { return false }; // #[gamma::skip(return_value.default, reason = "false is the bool default.", tag = "equivalent")]
     if !length.attrs.is_empty() || length.method != "len" || !length.args.is_empty() || length.turbofish.is_some() {
-        return false;
+        return false; // #[gamma::skip(return_value.default, reason = "false is the bool default.", tag = "equivalent")]
     }
-    let Expr::Path(receiver) = &*length.receiver else { return false };
+    let Expr::Path(receiver) = &*length.receiver else { return false }; // #[gamma::skip(return_value.default, reason = "false is the bool default.", tag = "equivalent")]
     receiver.path.get_ident().is_some_and(|name| {
         matches!(
             bindings.get(&name.to_string()),
@@ -67,7 +67,7 @@ impl Collector<'_> {
                 StableCall {
                     parameters: vec![Binding::Char],
                     output: Binding::Integer,
-                    char_option: false,
+                    char_option: false, // #[gamma::skip(literal.bool_flip, reason = "The char-width sentinel is consumed only by contains_key; its StableCall fields are never read.", tag = "equivalent")]
                 },
             );
         }
@@ -94,7 +94,10 @@ impl Collector<'_> {
                 continue;
             }
             let mut path = callee.path.segments.iter().map(|part| part.ident.to_string()).collect::<Vec<_>>();
-            let Some(first) = path.first() else { continue };
+            let Some(first) = path.first() else {
+                // #[gamma::skip(loop.continue_to_break, reason = "Parsed callee paths contain a segment, and mapping segments preserves nonempty length.", tag = "equivalent")]
+                continue;
+            };
             if self.bindings.contains_key(first)
                 || shadows.contains(first)
                 || self.generics.contains(first)
@@ -111,6 +114,7 @@ impl Collector<'_> {
                         char_option: true,
                     },
                 );
+                // #[gamma::skip(loop.delete_continue, reason = "Primitive-scope validation excludes a resolvable declaration named Some, so the extra lookup cannot overwrite this entry.", tag = "equivalent")]
                 continue;
             }
             if let Some(import) = imports.get(first) {
@@ -207,8 +211,7 @@ impl Collector<'_> {
                 }
             }
             if let Some(ty) = self.standard_constructor_type(&call)
-                && let Some(kind @ (Binding::Vec | Binding::VecChar)) =
-                    self.resource_binding(&ty, &self.scope_path, &mut HashSet::default())
+                && let Some(kind @ (Binding::Vec | Binding::VecChar)) = self.resource_binding(&ty, &self.scope_path)
             {
                 let _prior = bindings.insert(name, kind);
                 continue;
@@ -247,12 +250,281 @@ impl Collector<'_> {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use syn::PathArguments;
+
     use super::*;
     use crate::cfg::CfgSet;
     use crate::ops::collect::Defaults;
     use crate::ops::collect::collector::indexes::block_id;
     use crate::ops::registry::Selection;
     use crate::parse::SourceFile;
+
+    #[test]
+    fn qualified_self_cannot_reuse_a_resolvable_module_helper() {
+        with_loop(
+            "mod implementation { pub fn inspect(value:char)->bool{true} }
+             fn run(){while ready {
+                 <T as crate::implementation>::inspect('x');
+                 crate::implementation::inspect('x');
+             }}",
+            |collector, expression| {
+                let mut sites = Calls {
+                    sites: Vec::new(),
+                    remaining: 256,
+                };
+                sites.visit_expr(expression);
+                assert_eq!(sites.sites.len(), 2);
+                assert_eq!(sites.sites[0].qself.as_ref().map(|qualified| qualified.position), Some(2));
+                assert!(sites.sites[0].path.leading_colon.is_none());
+                assert_eq!(
+                    sites.sites[0].path, sites.sites[1].path,
+                    "only qualified-self metadata distinguishes the otherwise resolvable helper"
+                );
+                assert_eq!(
+                    calls(collector, expression),
+                    HashMap::from_iter([(
+                        "crate :: implementation :: inspect".into(),
+                        (vec![Binding::Char], Binding::Bool, false),
+                    )])
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn a_generic_segment_cannot_reuse_a_resolvable_module_helper() {
+        with_loop(
+            "mod implementation { pub fn inspect(value:char)->bool{true} }
+             fn run(){while ready {
+                 crate::implementation::inspect::<u8>('x');
+                 crate::implementation::inspect('x');
+             }}",
+            |collector, expression| {
+                let mut sites = Calls {
+                    sites: Vec::new(),
+                    remaining: 256,
+                };
+                sites.visit_expr(expression);
+                assert_eq!(sites.sites.len(), 2);
+                assert!(sites.sites[0].qself.is_none());
+                assert!(sites.sites[0].path.leading_colon.is_none());
+                assert_eq!(sites.sites[0].path.segments.len(), 3);
+                assert_eq!(sites.sites[0].path.segments[0].arguments, PathArguments::None);
+                assert!(matches!(
+                    sites.sites[0].path.segments[2].arguments,
+                    PathArguments::AngleBracketed(_)
+                ));
+                assert_eq!(
+                    calls(collector, expression),
+                    HashMap::from_iter([(
+                        "crate :: implementation :: inspect".into(),
+                        (vec![Binding::Char], Binding::Bool, false),
+                    )])
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn exact_maximum_length_provenance_does_not_stop_later_initializer_analysis() {
+        with_loop(
+            "fn run() { let bound=left.len().max(right.len()); let later=7; while ready{} }",
+            |collector, expression| {
+                let mut bindings = HashMap::from_iter([("left".into(), Binding::Vec), ("right".into(), Binding::Vec)]);
+                collector.resource_source_bindings(expression, &mut bindings);
+                assert_eq!(
+                    bindings,
+                    HashMap::from_iter([
+                        ("left".into(), Binding::Vec),
+                        ("right".into(), Binding::Vec),
+                        ("bound".into(), Binding::Integer),
+                        ("later".into(), Binding::Integer),
+                    ])
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn stable_calls_resolve_import_aliases_without_accepting_qualified_self_or_type_arguments() {
+        with_loop(
+            "mod implementation { pub fn inspect(value: char) -> bool { true } }
+             use crate::implementation::inspect as renamed;
+             fn inspect(value: char) -> bool { true }
+             fn other(value: char) -> bool { false }
+             fn run() { while ready { renamed('x'); inspect::<u8>('x'); <u8>::inspect('x'); other('x'); } }",
+            |collector, expression| {
+                assert_eq!(
+                    calls(collector, expression),
+                    HashMap::from_iter([("other".into(), (vec![Binding::Char], Binding::Bool, false))])
+                );
+                collector.scope_imports.entry(collector.scope_path.clone()).or_default().insert(
+                    "renamed".into(),
+                    Some(vec!["crate".into(), "implementation".into(), "inspect".into()]),
+                );
+                assert_eq!(
+                    calls(collector, expression),
+                    HashMap::from_iter([
+                        ("renamed".into(), (vec![Binding::Char], Binding::Bool, false)),
+                        ("other".into(), (vec![Binding::Char], Binding::Bool, false)),
+                    ])
+                );
+                collector
+                    .scope_imports
+                    .entry(collector.scope_path.clone())
+                    .or_default()
+                    .insert("renamed".into(), None);
+                assert_eq!(
+                    calls(collector, expression),
+                    HashMap::from_iter([("other".into(), (vec![Binding::Char], Binding::Bool, false)),])
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn vector_length_evidence_rejects_attributes_and_near_match_methods() {
+        let bindings = HashMap::from_iter([("rows".into(), Binding::Vec)]);
+        for source in ["#[custom] rows.len()", "rows.capacity()", "rows.len(0)", "rows", "0"] {
+            assert!(!vector_length(&syn::parse_str(source).unwrap(), &bindings), "{source}");
+        }
+    }
+
+    #[test]
+    fn independent_helper_shadows_do_not_stop_a_later_resolved_call() {
+        for shadow in 0..3 {
+            with_loop(
+                "fn inspect(value:char)->bool{true} fn other(value:char)->bool{false} fn run(){while ready{inspect('x');other('x');}}",
+                |collector, expression| {
+                    match shadow {
+                        0 => collector.bind("inspect".into(), false),
+                        1 => collector.generics.push("inspect".into()),
+                        2 => collector.defaulted.push("inspect".into()),
+                        _ => unreachable!(),
+                    }
+                    assert_eq!(
+                        calls(collector, expression),
+                        HashMap::from_iter([("other".into(), (vec![Binding::Char], Binding::Bool, false)),])
+                    );
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn absolute_nonzero_type_still_requires_unshadowed_standard_root_evidence() {
+        with_loop(
+            "fn run(n: ::std::num::NonZeroU32){let n=n.get();while ready{}}",
+            |collector, expression| {
+                let mut bindings = HashMap::default();
+                collector.resource_source_bindings(expression, &mut bindings);
+                assert_eq!(
+                    bindings,
+                    HashMap::from_iter([("n".into(), Binding::Primitive(Primitive::Unsigned(32)))])
+                );
+                collector.root_imports.insert("std".into(), None);
+                let mut bindings = HashMap::default();
+                collector.resource_source_bindings(expression, &mut bindings);
+                assert_eq!(bindings, HashMap::default());
+            },
+        );
+    }
+
+    #[test]
+    fn character_collection_provenance_continues_to_later_independent_initializers() {
+        with_loop(
+            "fn run(value: &str) {
+                let characters = value.chars().collect();
+                let later = 7;
+                while ready {}
+             }",
+            |collector, expression| {
+                let mut bindings = HashMap::from_iter([("characters".into(), Binding::Vec)]);
+                collector.resource_source_bindings(expression, &mut bindings);
+                assert_eq!(
+                    bindings,
+                    HashMap::from_iter([("characters".into(), Binding::VecChar), ("later".into(), Binding::Integer)])
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn source_constructors_distinguish_vec_from_other_standard_collections_and_custom_names() {
+        for (source, expected) in [
+            ("let rows = Vec::new();", Some(Binding::Vec)),
+            ("let rows = Vec::with_capacity(7);", Some(Binding::Vec)),
+            ("let rows = std::collections::HashMap::new();", None),
+            ("let rows = String::new();", None),
+            ("let rows = custom::Vec::new();", None),
+        ] {
+            let prefix = if source.contains("custom::") {
+                "mod custom {pub struct Vec;}"
+            } else {
+                ""
+            };
+            with_loop(
+                &format!("{prefix} fn run() {{ {source} let later = 7; while ready {{}} }}"),
+                |collector, expression| {
+                    let mut bindings = HashMap::default();
+                    collector.resource_source_bindings(expression, &mut bindings);
+                    let mut expected_bindings = HashMap::from_iter([("later".into(), Binding::Integer)]);
+                    if let Some(kind) = expected {
+                        expected_bindings.insert("rows".into(), kind);
+                    }
+                    assert_eq!(bindings, expected_bindings, "{source}");
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn stable_calls_require_explicit_imports_and_unshadowed_some_identity() {
+        with_loop(
+            "fn helper(value:char)->bool{true} fn run(){while ready {helper('x');}}",
+            |collector, expression| {
+                assert_eq!(calls(collector, expression).len(), 1);
+                collector
+                    .scope_imports
+                    .entry(collector.scope_path.clone())
+                    .or_default()
+                    .insert("*".into(), None);
+                assert_eq!(calls(collector, expression), HashMap::default());
+            },
+        );
+        with_loop("struct Some(char); fn run(){while ready {Some(&'x');}}", |collector, expression| {
+            assert_eq!(calls(collector, expression), HashMap::default());
+        });
+    }
+
+    #[test]
+    fn absolute_vector_constructor_does_not_bypass_shadowed_standard_root_evidence() {
+        with_loop(
+            "fn run(){let rows=::std::vec::Vec::new();let later=7;while ready{}}",
+            |collector, expression| {
+                collector
+                    .scope_imports
+                    .entry(collector.scope_path.clone())
+                    .or_default()
+                    .insert("std".into(), None);
+                let mut bindings = HashMap::default();
+                collector.resource_source_bindings(expression, &mut bindings);
+                assert_eq!(bindings, HashMap::from_iter([("later".into(), Binding::Integer)]));
+            },
+        );
+    }
+
+    #[test]
+    fn source_constructor_provenance_keeps_later_initializers_after_qualified_standard_calls() {
+        with_loop(
+            "fn run(){type String=Vec<char>;let rows=std::string::String::new();let later=7;while ready{}}",
+            |collector, expression| {
+                let mut bindings = HashMap::default();
+                collector.resource_source_bindings(expression, &mut bindings);
+                assert_eq!(bindings.get("later"), Some(&Binding::Integer));
+            },
+        );
+    }
 
     fn with_loop(source: &str, check: impl FnOnce(&mut Collector<'_>, &Expr)) {
         struct Target(Vec<Expr>);

@@ -210,10 +210,6 @@
 #
 # no-baseline = false
 
-# Believe a failing test without re-running it with no mutant active. Default: false.
-#
-# no-confirm = false
-
 # ---------------------------------------------------------------------------------------------
 # Memory
 # ---------------------------------------------------------------------------------------------
@@ -271,9 +267,11 @@
 #
 # min-score = 70.0
 
-# Fail if more than this many flaky outcomes remain. Default: no gate.
+# Fail if more than this many flaky nextest enumeration-control outcomes remain. Default: no gate.
 #
-# This gate is independent of the mutation score and requires confirmation to remain enabled.
+# This gate is independent of the mutation score. Ordinary kills are not rerun without the mutant,
+# so it does not detect intermittent assertion failures after baseline. Merging historical reports
+# can also gate their recorded flaky outcomes.
 #
 # max-flaky = 0
 

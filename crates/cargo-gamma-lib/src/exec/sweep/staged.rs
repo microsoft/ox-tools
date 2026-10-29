@@ -3,6 +3,8 @@
 
 //! Per-mutant execution stages and intermediate probe state.
 
+use std::time::Instant;
+
 use super::*;
 
 /// Campaign-wide execution barriers, from exact evidence through speculative probes to fallback.
@@ -126,12 +128,12 @@ impl Execution<'_> {
                 timeout: binary.budget_for(self.timeout_multiplier, self.sweep.timeout_floor),
                 stall: self.sweep.stall,
                 request: MemoryRequest {
+                    calibrating: false,
                     meter: self.sweep.meter,
                     limit: binary.memory,
                 },
                 only,
             },
-            self.sweep.confirm,
         );
         let elapsed = started.elapsed();
         if matches!(run.verdict, Verdict::Failed(_) | Verdict::TestEnumerationFailed(_)) {
@@ -203,7 +205,7 @@ impl Execution<'_> {
     fn exact(&self, hint: Option<&Killer>, state: &mut ProbeState) -> Option<Judgement> {
         let hint = hint?;
         let index = self.reachable.iter().position(|binary| binary.matches_killer(hint))?;
-        if negative_excludes(self.negative, self.reachable[index], self.timeout_multiplier, self.sweep) {
+        if negative_excludes(self.negative, self.reachable[index], self.sweep) {
             return None;
         }
         if !HarnessFilters::parse(self.work.test_arguments()).admits(&hint.test) {
@@ -228,7 +230,7 @@ impl Execution<'_> {
             let Some(index) = self.reachable.iter().position(|binary| binary.matches_killer(killer)) else {
                 continue;
             };
-            if negative_excludes(self.negative, self.reachable[index], self.timeout_multiplier, self.sweep) {
+            if negative_excludes(self.negative, self.reachable[index], self.sweep) {
                 continue;
             }
             if !filters.admits(&killer.test) || !seen.insert((index, killer.test.as_str())) {
@@ -293,7 +295,7 @@ impl Execution<'_> {
                 record_duplicate_avoided(self.tally);
                 continue;
             }
-            if negative_excludes(self.negative, self.reachable[index], self.timeout_multiplier, self.sweep) {
+            if negative_excludes(self.negative, self.reachable[index], self.sweep) {
                 if phase == Stage::Fallback {
                     self.tally.saved.fetch_add(1, Ordering::Relaxed);
                     self.tally.reach_saved.fetch_add(1, Ordering::Relaxed);

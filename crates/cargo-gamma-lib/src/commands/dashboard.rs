@@ -503,7 +503,10 @@ impl Dashboard {
         // #[gamma::skip(iter.max_to_min, literal.int_increment, reason = "panel produces nonempty rectangular rows, so every row has the same width and unwrap_or's fallback is unreachable")]
         let left_width = left.iter().map(|line| visible_width(line)).max().unwrap_or(0);
         let rows = left.len();
-        let mut body = Vec::with_capacity(rows.saturating_add(10));
+        let mut body = Vec::with_capacity(rows.saturating_add(
+            // #[gamma::skip(literal.int_decrement, literal.int_increment, literal.int_to_one, literal.int_to_zero, reason = "Only private initial allocation capacity changes; subsequent pushes/writes determine identical output contents.", tag = "equivalent")]
+            10,
+        ));
         body.push(self.header());
         body.push(String::new());
         // #[gamma::skip(iter.max_to_min, literal.int_increment, reason = "panel produces nonempty rectangular rows, so every row has the same width and unwrap_or's fallback is unreachable")]
@@ -516,7 +519,12 @@ impl Dashboard {
             let lhs = left.get(row).map_or("", String::as_str);
             // #[gamma::skip(literal.str_to_xyzzy, reason = "equalize_panels makes right.len() equal left.len(), so get(row) is Some throughout the row loop")]
             let rhs = right.get(row).map_or("", String::as_str);
-            let gap = left_width.saturating_sub(visible_width(lhs)).saturating_add(3);
+            let gap = left_width
+                .saturating_sub(
+                    // #[gamma::skip(expr.increment, reason = "Every left panel row is rectangular and left_width equals visible_width(lhs). Both left_width.saturating_sub(width) and subtraction of width+1 are0; the following +3 gap remains3.", tag = "equivalent")]
+                    visible_width(lhs),
+                )
+                .saturating_add(3);
             body.push(format!("{top_indent}{lhs}{}{rhs}", " ".repeat(gap)));
         }
 
@@ -715,7 +723,9 @@ impl Dashboard {
     fn waffle(&self) -> (Vec<WaffleState>, usize, usize) {
         let classifications = self.classifications();
         let total = classifications.iter().map(|(_, count)| count).sum::<usize>();
-        if total == 0 {
+        if
+        // #[gamma::skip(cond.always_false, reason = "At zero classifications the normal path computes cell_count0; apportioned's total<=cells branch yields all zero counts, collected cells empty, square_columns(0)=1, rows0.div_ceil(1)=0. Exactly matches the removed(empty,1,0) return.", tag = "equivalent")]
+        total == 0 {
             return (Vec::new(), 1, 0);
         }
 
@@ -742,6 +752,7 @@ impl Dashboard {
     }
 
     fn viable(&self) -> usize {
+        // #[gamma::skip(collection.reverse_array, reason = "Array contains the seven viable classification counts and is immediately summed as usize. Reversal preserves the sum on the supported64-bit host; no presentation order escapes.", tag = "equivalent")]
         [
             self.summary.killed,
             self.summary.survived,
@@ -854,9 +865,15 @@ fn panel(title: &str, content: &[String], styler: Styler) -> Vec<String> {
         .iter()
         .map(|line| visible_width(line).saturating_add(2))
         .max()
-        .unwrap_or(0)
+        .unwrap_or(
+            // #[gamma::skip(literal.int_increment, reason = "panel's max(content widths).unwrap_or(0) changes only an empty-content fallback to1. The following max(title_width+3) is at least3, overriding both0/1 identically.", tag = "equivalent")]
+            0,
+        )
         .max(title_width.saturating_add(3));
-    let mut lines = Vec::with_capacity(content.len().saturating_add(2));
+    let mut lines = Vec::with_capacity(content.len().saturating_add(
+        // #[gamma::skip(literal.int_decrement, literal.int_increment, literal.int_to_zero, reason = "Only private initial allocation capacity changes; subsequent pushes/writes determine identical output contents.", tag = "equivalent")]
+        2,
+    ));
     lines.push(styler.apply(
         &format!("╭─ {title} {}╮", "─".repeat(width.saturating_sub(title_width + 3))),
         border.bold(),
@@ -878,17 +895,26 @@ fn panel(title: &str, content: &[String], styler: Styler) -> Vec<String> {
 fn equalize_panels(left: &mut Vec<String>, right: &mut Vec<String>) {
     let target = left.len().max(right.len());
     while left.len() < target {
+        let before = left.len();
         let width = visible_width(&left[0]);
         left.insert(left.len() - 1, format!("│{}│", " ".repeat(width.saturating_sub(2))));
+        assert_eq!(left.len(), before + 1, "panel equalization inserts exactly one row per iteration");
     }
     while right.len() < target {
+        assert!(right.len() < target, "only the shorter panel may receive padding rows");
+        let before = right.len();
         let width = visible_width(&right[0]);
         right.insert(right.len() - 1, format!("│{}│", " ".repeat(width.saturating_sub(2))));
+        assert_eq!(right.len(), before + 1, "panel equalization inserts exactly one row per iteration");
     }
 }
 
 fn centered(lines: Vec<String>, width: usize) -> Vec<String> {
-    let panel_width = lines.first().map_or(0, |line| visible_width(line));
+    let panel_width =
+    // #[gamma::skip(iter.first_to_last, reason = "centered's only production input is panel-produced rectangular hints rows. First/last have identical visible width. For an empty input the changed fallback0/1 affects only an unused prefix because no output lines exist.", tag = "equivalent")]
+    lines.first().map_or(
+    // #[gamma::skip(literal.int_increment, reason = "centered's only production input is panel-produced rectangular hints rows. First/last have identical visible width. For an empty input the changed fallback0/1 affects only an unused prefix because no output lines exist.", tag = "equivalent")]
+    0, |line| visible_width(line));
     let indent = width.saturating_sub(panel_width) / 2;
     let prefix = " ".repeat(indent);
     lines.into_iter().map(|line| format!("{prefix}{line}")).collect()
@@ -909,7 +935,14 @@ fn metric_text(label: &str, value: &str) -> String {
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn number(value: usize) -> String {
     let digits = value.to_string();
-    let mut rendered = String::with_capacity(digits.len() + digits.len() / 3);
+    let mut rendered = String::with_capacity(
+        // #[gamma::skip(arith.add_to_mul, arith.add_to_sub, reason = "Only private initial allocation capacity changes; subsequent pushes/writes determine identical output contents.", tag = "equivalent")]
+        digits.len() +
+    // #[gamma::skip(arith.div_to_mul, arith.div_to_rem, reason = "Only private initial allocation capacity changes; subsequent pushes/writes determine identical output contents.", tag = "equivalent")]
+    digits.len() /
+    // #[gamma::skip(literal.int_decrement, literal.int_increment, literal.int_to_one, reason = "Only private initial allocation capacity changes; subsequent pushes/writes determine identical output contents.", tag = "equivalent")]
+    3,
+    );
     for (index, character) in digits.chars().enumerate() {
         if index > 0 && (digits.len() - index).is_multiple_of(3) {
             rendered.push(',');
@@ -1061,6 +1094,42 @@ mod tests {
         }
         for (cells, expected) in [(0, 1), (1, 1), (2, 2), (4, 2), (5, 3), (9, 3), (10, 4), (100, 10)] {
             assert_eq!(square_columns(cells), expected);
+        }
+    }
+
+    #[test]
+    fn recovered_empty_chart_padding_and_clipped_labels_keep_their_exact_columns() {
+        let dashboard = Dashboard::new(true, Some(160), Styler::new(false));
+        let rows = dashboard.mutants_panel();
+        assert_eq!(rows[1].chars().skip(24).take(3).collect::<String>(), " UU");
+        let mut narrow = dashboard;
+        narrow.width = 20;
+        assert_eq!(narrow.labelled("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "detail"), "ABCDEFGHIJKLMNOPQ...");
+    }
+
+    #[test]
+    fn recovered_zero_apportionment_and_oversized_square_requests_preserve_helper_boundaries() {
+        let classes = [(WaffleState::Killed, 0), (WaffleState::Survived, 0)];
+        assert_eq!(apportioned(&classes, 0, 0), [0, 0]);
+        for cells in [101, 121, 400] {
+            assert_eq!(square_columns(cells), 10);
+        }
+    }
+
+    #[test]
+    fn recovered_duration_rounding_distinguishes_adjacent_millisecond_values() {
+        for (milliseconds, expected) in [(1_049, "1.0s"), (1_050, "1.1s"), (1_149, "1.1s"), (1_150, "1.1s")] {
+            assert_eq!(duration(milliseconds), expected, "{milliseconds}");
+        }
+    }
+
+    #[test]
+    fn recovered_worker_activity_balances_starts_and_finishes_without_underflow() {
+        let mut dashboard = populated(160);
+        dashboard.active_workers = 0;
+        for (active, expected) in [(false, 0), (true, 1), (true, 2), (true, 3), (false, 2), (false, 1), (false, 0)] {
+            dashboard.mutant_activity(active);
+            assert_eq!(dashboard.active_workers, expected);
         }
     }
 
@@ -2154,5 +2223,33 @@ mod tests {
         assert!(dashboard.test_execution_panel_at(now)[9].contains("not measured"));
         dashboard.summary.pending = 1;
         assert_eq!(dashboard.render_medium()[5], "Progress  0/1 (0.0%)");
+    }
+    #[test]
+    fn recovered_panel_equalization_keeps_both_bottom_borders_after_every_inserted_row() {
+        for left_height in 2..=5 {
+            for right_height in 2..=5 {
+                let make = |height: usize, label: &str| {
+                    let mut rows = vec![format!("{label}-top")];
+                    rows.extend((2..height).map(|row| format!("{label}-{row}")));
+                    rows.push(format!("{label}-bottom"));
+                    rows
+                };
+                let mut left = make(left_height, "left");
+                let mut right = make(right_height, "right");
+                let expected = |rows: &[String], target: usize| {
+                    let mut result = rows[..rows.len() - 1].to_vec();
+                    let width = visible_width(&rows[0]);
+                    result.extend((rows.len()..target).map(|_| format!("│{}│", " ".repeat(width - 2))));
+                    result.push(rows.last().unwrap().clone());
+                    result
+                };
+                let target = left_height.max(right_height);
+                let expected_left = expected(&left, target);
+                let expected_right = expected(&right, target);
+                equalize_panels(&mut left, &mut right);
+                assert_eq!(left, expected_left);
+                assert_eq!(right, expected_right);
+            }
+        }
     }
 }

@@ -178,7 +178,9 @@ fn wrap_text(text: &str, width: usize, indent: usize) -> Vec<String> {
             // Start a new line
             if is_first_line {
                 lines.push(current_line);
-                is_first_line = false;
+                is_first_line =
+                // #[gamma::skip(assign_value.default, reason = "Default produces the same concrete false or None value as this assignment.", tag = "equivalent")]
+                false;
             } else {
                 lines.push(format!("{:indent$}{}", "", current_line, indent = indent));
             }

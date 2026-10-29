@@ -95,7 +95,379 @@ fn retain_blamed(blamed: &mut HashMap<u32, CompilerReason>, plan: &Plan, package
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod final_survivor_tests {
+    #[cfg(unix)]
+    use std::os::unix::process::ExitStatusExt as _;
+    #[cfg(windows)]
+    use std::os::windows::process::ExitStatusExt as _;
+
+    use serde_json::{Value, from_str, from_value, json};
+
     use super::*;
+
+    #[derive(Default)]
+    struct RecordedConvergence {
+        progress: Vec<usize>,
+        activity: Vec<(u32, usize, usize)>,
+    }
+
+    impl Events for RecordedConvergence {
+        fn phase(&mut self, _verb: &str, _detail: &str) {}
+        fn mutant(&mut self, _mutant: &Mutant) {}
+        fn convergence_progress(&mut self, excluded: usize) {
+            self.progress.push(excluded);
+        }
+        fn convergence_activity(&mut self, round: u32, excluded: usize, proofs: usize) {
+            self.activity.push((round, excluded, proofs));
+        }
+    }
+
+    /// Points at the same ordinal-spaced source line as the corresponding seeded guard.
+    fn memory_diagnostic(ordinal: u32) -> String {
+        let line = ordinal * 10;
+        json!({
+            "reason": "compiler-message",
+            "package_id": "selected 1.0.0",
+            "target": {"name": "subject", "kind": ["lib"]},
+            "message": {
+                "level": "error",
+                "message": "in-process compiler evidence",
+                "code": {"code": "E0308"},
+                "spans": [{
+                    "file_name": "src/lib.rs", "is_primary": true,
+                    "line_start": line, "column_start": 1, "line_end": line, "column_end": 2
+                }]
+            }
+        })
+        .to_string()
+    }
+
+    fn memory_compiler_output(succeeded: bool, stdout: String) -> std::process::Output {
+        std::process::Output {
+            status: std::process::ExitStatus::from_raw(if succeeded { 0 } else { 256 }),
+            stdout: stdout.into_bytes(),
+            stderr: Vec::new(),
+        }
+    }
+
+    /// Separates selected/foreign attribution; nonzero prior learning exposes accidental progress resets.
+    fn seeded_convergence_plan(root: &Utf8Path) -> (Plan, Converger) {
+        let mut plan = plan();
+        plan.root = root.to_owned();
+        plan.mutants = ["selected", "outside"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, package)| Mutant {
+                ordinal: u32::try_from(index + 1).unwrap(),
+                package: package.into(),
+                file: Utf8PathBuf::from("src/lib.rs").into(),
+                ..crate::fixtures::mutant()
+            })
+            .collect();
+        let guards = [1, 2]
+            .map(|ordinal| {
+                let position = |line| crate::schema::Position::new(line, 1).unwrap();
+                (
+                    ordinal,
+                    (
+                        "src/lib.rs".into(),
+                        Guard {
+                            site: position(ordinal * 10)..position(ordinal * 10 + 1),
+                            mutated: None,
+                        },
+                    ),
+                )
+            })
+            .into_iter()
+            .collect();
+        let converger = Converger {
+            historical_exclusions: 7,
+            splices: Splices::seeded_guards_for_test(root.to_owned(), guards),
+            ..Converger::default()
+        };
+        (plan, converger)
+    }
+
+    #[test]
+    fn recovered_convergence_keeps_selected_roots_filters_foreign_blame_and_publishes_exact_progress() {
+        let work = Workspace::adopt("never-written-convergence-root".into(), "never-written-convergence-target".into());
+        let (plan, mut converger) = seeded_convergence_plan(&work.root);
+        let roots = vec!["selected".to_owned()];
+        let mut events = RecordedConvergence::default();
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+        let result = with_compiler(
+            {
+                let calls = std::rc::Rc::clone(&calls);
+                move |_work, args, _budget, _events| {
+                    let call = calls.get();
+                    calls.set(call + 1);
+                    assert!(call < 2, "the bounded compiler script permits only withdrawal and success");
+                    assert_eq!(args, ["check", "--tests", "--message-format=json", "--package", "selected"]);
+                    Ok(Some(memory_compiler_output(
+                        call == 1,
+                        if call == 0 {
+                            format!("{}\n{}", memory_diagnostic(1), memory_diagnostic(2))
+                        } else {
+                            String::new()
+                        },
+                    )))
+                }
+            },
+            || {
+                converger.converge(
+                    &work,
+                    &plan,
+                    Some(&roots),
+                    &["check", "--tests"],
+                    BuildLimits::default(),
+                    &mut events,
+                )
+            },
+        )
+        .unwrap();
+        assert!(matches!(result, Convergence::Built(ref output) if output.is_empty()));
+        assert_eq!(calls.get(), 2);
+        assert_eq!(converger.withdrawn, HashSet::from_iter([1]));
+        assert_eq!(converger.census.keys().copied().collect::<HashSet<_>>(), HashSet::from_iter([1]));
+        assert_eq!(converger.per_round, [1]);
+        assert_eq!(events.progress, [8]);
+        assert_eq!(events.activity, [(1, 7, 0), (2, 8, 0)]);
+    }
+
+    #[test]
+    fn recovered_convergence_returns_durable_exclusion_errors_before_withdrawing_the_proven_mutant() {
+        let root = Utf8Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/isolation-graph/application");
+        let work = Workspace::adopt(root, "never-written-exclusion-target".into());
+        let (plan, mut converger) = seeded_convergence_plan(&work.root);
+        converger.compiler_exclusions = Some(from_value(json!({"version": 1, "mutants": {}})).unwrap());
+        converger.exclusion_store = Some(|_, _| Err(error!("named exclusion-store refusal")));
+        let expected = "named exclusion-store refusal";
+        let mut events = RecordedConvergence::default();
+        let result = with_compiler(
+            |_work, _args, _budget, _events| Ok(Some(memory_compiler_output(false, memory_diagnostic(1)))),
+            || {
+                converger.converge_scoped(
+                    &work,
+                    &plan,
+                    BuildScope {
+                        roots: None,
+                        mutants: None,
+                        publish_progress: true,
+                    },
+                    &["check", "--tests"],
+                    BuildLimits::default(),
+                    &mut events,
+                )
+            },
+        );
+        let Err(failure) = result else {
+            panic!("a checked-in file cannot become the inventory's parent directory");
+        };
+        assert_eq!(failure.message(), expected);
+        assert!(converger.withdrawn.is_empty());
+        assert!(converger.census.is_empty());
+        assert!(converger.per_round.is_empty());
+        assert_eq!(converger.rounds, 1);
+        assert!(events.progress.is_empty());
+        assert_eq!(events.activity, [(1, 7, 0)]);
+    }
+
+    #[test]
+    fn recovered_convergence_sorts_and_deduplicates_unresolved_context_labels_before_returning_the_exact_error() {
+        let work = Workspace::adopt("never-written-unresolved-root".into(), "never-written-unresolved-target".into());
+        let mut plan = plan();
+        plan.mutants = ["alpha", "beta", "gamma"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, package)| Mutant {
+                ordinal: u32::try_from(index + 1).unwrap(),
+                package: package.into(),
+                file: Utf8PathBuf::from("src/lib.rs").into(),
+                ..crate::fixtures::mutant()
+            })
+            .collect();
+        let stdout = [("alpha", "zulu"), ("beta", "aardvark"), ("gamma", "aardvark")]
+            .map(|(package, target)| {
+                let mut message: Value = from_str(&memory_diagnostic(1)).unwrap();
+                message["package_id"] = format!("{package} 1.0.0").into();
+                message["target"]["name"] = target.into();
+                message.to_string()
+            })
+            .join("\n");
+        let mut converger = Converger {
+            subset_oracle: Some(|_| None),
+            ..Converger::default()
+        };
+        let result = with_compiler(
+            move |_work, _arguments, _budget, _events| Ok(Some(memory_compiler_output(false, stdout.clone()))),
+            || {
+                converger.converge(
+                    &work,
+                    &plan,
+                    None,
+                    &["check", "--tests"],
+                    BuildLimits::default(),
+                    &mut RecordedConvergence::default(),
+                )
+            },
+        );
+        let Err(failure) = result else {
+            panic!("unproven compiler failures must be returned without exclusion");
+        };
+        assert_eq!(
+            failure.message(),
+            "could not safely isolate compiler failures in aardvark (lib) (1 unresolved candidates), zulu (lib) (1 unresolved candidates) within the bounded proof budget; \
+             no unproven mutants were excluded. Re-run with `--show-build` to inspect the generated-code \
+             errors, then fix the mutation encoding or narrow the campaign with `--file`. \
+             Increasing the rollback limit does not increase the isolation proof budget"
+        );
+        assert_eq!(converger.isolation_budget.proofs, 3);
+        assert!(converger.withdrawn.is_empty());
+        assert!(converger.census.is_empty());
+        assert_eq!(converger.history.len(), 1);
+    }
+
+    #[test]
+    fn recovered_finish_preserves_a_frozen_empty_root_set_as_an_explicit_whole_workspace_cargo_build() {
+        let work = Workspace::adopt("never-written-finish-root".into(), "never-written-finish-target".into());
+        let mut plan = plan();
+        let mut converger = Converger::default();
+        converger.freeze_context(None);
+        let result = with_compiler(
+            |_work, arguments, _budget, _events| {
+                assert_eq!(
+                    arguments,
+                    ["check", "--tests", "--keep-going", "--message-format=json", "--workspace"]
+                );
+                Err(error!("the in-memory whole-workspace finish observer stops execution"))
+            },
+            || {
+                converger.finish(
+                    &work,
+                    &mut plan,
+                    Some(&["must-not-be-reused".to_owned()]),
+                    BuildLimits::default(),
+                    &mut RecordedConvergence::default(),
+                )
+            },
+        );
+        let Err(failure) = result else {
+            panic!("the compiler observer returns an error before any final build");
+        };
+        assert_eq!(failure.message(), "the in-memory whole-workspace finish observer stops execution");
+    }
+
+    #[test]
+    fn recovered_convergence_withdraws_a_proven_interaction_even_when_an_independent_context_remains_unresolved() {
+        let work = Workspace::adopt("never-written-mixed-root".into(), "never-written-mixed-target".into());
+        let mut plan = plan();
+        plan.mutants = ["alpha", "alpha", "beta"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, package)| Mutant {
+                ordinal: u32::try_from(index + 1).unwrap(),
+                package: package.into(),
+                file: Utf8PathBuf::from("src/lib.rs").into(),
+                ..crate::fixtures::mutant()
+            })
+            .collect();
+        let stdout = ["alpha", "beta"]
+            .map(|package| {
+                let mut message: Value = from_str(&memory_diagnostic(1)).unwrap();
+                message["package_id"] = format!("{package} 1.0.0").into();
+                message.to_string()
+            })
+            .join("\n");
+        let mut converger = Converger {
+            subset_oracle: Some(|active| {
+                if active.contains(&3) {
+                    None
+                } else {
+                    Some(active.contains(&1) && active.contains(&2))
+                }
+            }),
+            ..Converger::default()
+        };
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+        let result = with_compiler(
+            {
+                let calls = std::rc::Rc::clone(&calls);
+                move |_work, _arguments, _budget, _events| {
+                    let call = calls.get();
+                    calls.set(call + 1);
+                    assert!(call < 2, "the in-memory compiler allows only one withdrawal and its final success");
+                    Ok(Some(memory_compiler_output(
+                        call == 1,
+                        if call == 0 { stdout.clone() } else { String::new() },
+                    )))
+                }
+            },
+            || {
+                converger.converge(
+                    &work,
+                    &plan,
+                    None,
+                    &["check", "--tests"],
+                    BuildLimits::default(),
+                    &mut RecordedConvergence::default(),
+                )
+            },
+        )
+        .unwrap();
+        assert!(matches!(result, Convergence::Built(_)));
+        assert_eq!(calls.get(), 2);
+        assert_eq!(converger.withdrawn, HashSet::from_iter([1]));
+        assert_eq!(converger.abandoned, HashSet::from_iter([1]));
+        assert_eq!(converger.interactions, HashMap::from_iter([(1, vec![1, 2])]));
+        assert!(converger.census.is_empty());
+        assert_eq!(converger.per_round, [1]);
+    }
+
+    #[test]
+    fn recovered_historical_census_requires_both_the_zero_ordinal_and_compile_error_status() {
+        let mut plan = plan();
+        plan.mutants = [
+            (0, Outcome::CompileError, "historical", "first"),
+            (0, Outcome::CompileError, "historical", "first"),
+            (0, Outcome::Pending, "pending", "second"),
+            (0, Outcome::Survived, "survived", "third"),
+            (1, Outcome::CompileError, "live", "fourth"),
+            (7, Outcome::CompileError, "live", "fifth"),
+        ]
+        .map(|(ordinal, outcome, package, mutator)| Mutant {
+            ordinal,
+            outcome,
+            package: package.into(),
+            mutator: mutator.into(),
+            ..crate::fixtures::mutant()
+        })
+        .into();
+        assert_eq!(
+            Converger::default().tally(&plan),
+            [Withdrawal {
+                package: "historical".into(),
+                code: String::new(),
+                category: "historical compiler exclusion".into(),
+                replacement_site: false,
+                mutator: "first".into(),
+                mutants: 2,
+            }]
+        );
+    }
+
+    #[test]
+    fn recovered_native_manifest_separators_resolve_without_a_fallback_package_id() {
+        let mut plan = plan();
+        plan.specs.insert("selected".into(), ("members/selected".into(), "1.0.0".into()));
+        assert_eq!(
+            package_of_message(
+                Some(r"C:\Workspace\members\selected\Cargo.toml"),
+                None,
+                &plan,
+                Utf8Path::new("C:/Workspace"),
+            ),
+            Some("selected".into())
+        );
+    }
 
     fn plan() -> Plan {
         Plan {
@@ -368,6 +740,8 @@ pub struct Abandoned {
 /// restored to their original source. `--rollback-rounds` caps this one convergence loop.
 #[derive(Debug, Default)]
 pub struct Converger {
+    #[cfg(test)]
+    exclusion_store: Option<fn(&crate::discover::CompilerExclusions, &Utf8Path) -> Result<()>>,
     pub fixed_roots: Option<Vec<String>>,
     pub compiler_exclusions: Option<crate::discover::CompilerExclusions>,
     pub historical_exclusions: usize,
@@ -515,6 +889,10 @@ impl Converger {
         if let Some(inventory) = self.compiler_exclusions.as_mut()
             && inventory.remember(&plan.mutants, &blamed.keys().copied().collect(), |ordinal| blamed[&ordinal].note())
         {
+            #[cfg(test)]
+            if let Some(store) = self.exclusion_store {
+                return store(inventory, work.base());
+            }
             inventory.store(work.base())?;
         }
         Ok(())
@@ -702,7 +1080,7 @@ impl Converger {
                     unresolved.retain(|(ordinals, _context)| !ordinals.is_empty());
                 }
 
-                if blamed.is_empty() && interactions.is_empty() && !unresolved.is_empty() {
+                if blamed.is_empty() && interactions.is_empty() {
                     let mut contexts = unresolved
                         .iter()
                         .map(|(ordinals, context)| format!("{context} ({} unresolved candidates)", ordinals.len()))
@@ -719,11 +1097,15 @@ impl Converger {
                     ));
                 }
 
-                if !interactions.is_empty() {
+                if
+                // #[gamma::skip(cond.always_true, reason = "When the original !interactions.is_empty condition is false, earlier guards imply nonempty blamed proven by isolation and no interactions. The forced interaction arm performs exactly the same persist/admit/withdrawn/census/history/progress steps as the normal following blame-only arm: its extra extend/sort/dedup acts on unique map keys, its interaction loop is empty, census reinsertion changes nothing, and continue reaches the same next iteration. Both use identical sorted build_round output and per-round count.", tag = "equivalent")]
+                !interactions.is_empty() {
                     let mut withdrawn = blamed.keys().copied().collect::<Vec<_>>();
                     withdrawn.extend(interactions.iter().map(|(excluded, _members)| *excluded));
                     withdrawn.sort_unstable();
                     withdrawn.dedup();
+
+                    // #[gamma::skip(try.propagate_to_unwrap, reason = "This is the interaction-arm persistence call after isolate_scoped. Every possible blamed singleton was already passed through persist_compiler_exclusions successfully by isolate_scoped before being returned, and compiler_exclusions remains owned/unchanged between calls. For Some inventory, remember finds no vacant identity and returns false, so store is not called; for None it also returns Ok. Thus this exact second persistence call cannot return Err to distinguish ? from unwrap.", tag = "equivalent")]
                     self.persist_compiler_exclusions(work, plan, &blamed)?;
                     if !self.admit_withdrawal_round(withdrawn.len(), limits) {
                         let error = Self::rollback_limit_error(self.rounds, limits.rounds(), &self.per_round, work, &stdout);
@@ -732,7 +1114,6 @@ impl Converger {
                         return Ok(Convergence::Stuck(error));
                     }
 
-                    let census_before = self.census.len();
                     for (ordinal, reason) in blamed {
                         let _ = self.withdrawn.insert(ordinal);
                         let _ = self.census.entry(ordinal).or_insert(reason);
@@ -744,9 +1125,6 @@ impl Converger {
                         let _ = self.interactions.insert(excluded, members);
                     }
                     self.history.push(build_round(elapsed, plan, withdrawn));
-                    if scope.publish_progress && self.census.len() > census_before {
-                        events.convergence_progress(self.historical_exclusions + self.census.len());
-                    }
                     continue;
                 }
             }

@@ -3,11 +3,14 @@
 
 use std::borrow::Cow;
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Seek as _, Write as _};
+#[cfg(test)]
+use std::io::Seek as _;
+use std::io::{BufRead, BufReader, Read, Write as _};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use cargo_gamma_engine::ops::collect::Confidence;
 use serde::{Deserialize, Serialize};
+use walkdir::WalkDir;
 
 use super::killers::Killers;
 use super::measure::{Built, Oracle};
@@ -17,11 +20,15 @@ use crate::error::error;
 use crate::model::{Mutant, Outcome};
 use crate::{Result, elements as publication};
 
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 const SNAPSHOT: &str = "testing-session.json";
 const JOURNAL: &str = "testing-verdicts.jsonl";
 const PHASE: &str = "testing-phase.json";
 const MAX_STATE_BYTES: u64 = 512 * 1024 * 1024;
+
+#[cfg(test)]
+/// Encoded append attempts, including the attempt refused by the scripted durability boundary.
+pub(super) type JournalEntries = std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>;
 
 #[cfg(feature = "internals")]
 #[doc(hidden)]
@@ -36,6 +43,11 @@ pub(crate) struct RecordPreparation {
     pub(crate) context: ContextDigest,
     pub(crate) inputs: WorkspaceSnapshot,
     pub(crate) killers: crate::discover::Killers,
+    /// Whether `--re` narrowed the population, so publication must retain unselected evidence.
+    ///
+    /// Absent from state written before name filtering existed, which was never filtered.
+    #[serde(default)]
+    pub(crate) name_filtered: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -58,7 +70,6 @@ pub(crate) struct TestingSettings {
     #[serde(default)]
     pub(crate) mutators: Option<String>,
     pub(super) timeout_floor: core::time::Duration,
-    pub(super) confirm: bool,
     pub(super) narrowed: bool,
     pub(super) incremental: bool,
 }
@@ -81,6 +92,37 @@ pub(crate) struct TestingState {
     pub(crate) dropped: Vec<String>,
     artifact_roots: Vec<Utf8PathBuf>,
     artifacts: Vec<Artifact>,
+}
+
+/// Completely replaces state creation on the current thread, including publication and failure.
+#[cfg(test)]
+type StartObserver = Box<dyn FnMut(&TestingSettings) -> Result<TestingState>>;
+
+#[cfg(test)]
+thread_local! {
+    static START_OBSERVER: std::cell::RefCell<Option<StartObserver>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Installs a non-nestable state-creation replacement and removes it on return or unwind.
+#[cfg(test)]
+pub(super) fn with_start_observer<T>(
+    observer: impl FnMut(&TestingSettings) -> Result<TestingState> + 'static,
+    body: impl FnOnce() -> T,
+) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            START_OBSERVER.with_borrow_mut(|slot| {
+                let _ = slot.take();
+            });
+        }
+    }
+    START_OBSERVER.with_borrow_mut(|slot| {
+        assert!(slot.is_none(), "a thread cannot install two testing-state observers simultaneously");
+        *slot = Some(Box::new(observer));
+    });
+    let _reset = Reset;
+    body()
 }
 
 #[derive(Serialize, Deserialize)]
@@ -111,16 +153,15 @@ enum ArtifactKind {
 
 impl ArtifactMetadata {
     fn read(path: &Utf8Path) -> Result<Self> {
-        Self::read_with(
-            path,
-            |follow| inspect_artifact(path, follow),
-            || {
-                Utf8PathBuf::from_path_buf(fs::read_link(path).map_err(|cause| {
-                    error!("could not read prepared symlink `{path}`; restore it or start a new campaign").caused_by(cause)
-                })?)
-                .map_err(|_path| error!("prepared symlink `{path}` has a non-UTF-8 target"))
-            },
+        Self::read_with(path, |follow| inspect_artifact(path, follow), || Self::read_artifact_link(path))
+    }
+
+    fn read_artifact_link(path: &Utf8Path) -> Result<Utf8PathBuf> {
+        Utf8PathBuf::from_path_buf(
+            fs::read_link(path)
+                .map_err(|cause| error!("could not read prepared symlink `{path}`; restore it or start a new campaign").caused_by(cause))?,
         )
+        .map_err(|_path| error!("prepared symlink `{path}` has a non-UTF-8 target"))
     }
 
     fn read_with(
@@ -142,12 +183,8 @@ impl ArtifactMetadata {
                          replace it with a real directory and start a new campaign"
                     ));
                 }
-                Ok(_) => {
-                    executable = 0;
-                }
-                Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => {
-                    executable = 0;
-                }
+                Ok(_) => {}
+                Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => {}
                 Err(cause) => {
                     return Err(
                         error!("could not inspect prepared symlink target `{path}`; restore it or start a new campaign").caused_by(cause),
@@ -159,23 +196,17 @@ impl ArtifactMetadata {
             None
         };
         if !matches!(kind, ArtifactKind::File | ArtifactKind::FileSymlink) {
-            executable = 0;
+            executable =
+            // #[gamma::skip(assign_value.default, reason = "The assigned 0 is exactly the inferred primitive type's Default value.", tag = "equivalent")]
+            0;
         }
         Ok(Self { kind, executable, link })
     }
 }
 
 fn inspect_artifact(path: &Utf8Path, follow: bool) -> std::io::Result<(ArtifactKind, u32)> {
-    let metadata = if follow { fs::metadata(path)? } else { fs::symlink_metadata(path)? };
-    let kind = if metadata.file_type().is_symlink() {
-        ArtifactKind::Symlink
-    } else if metadata.is_file() {
-        ArtifactKind::File
-    } else if metadata.is_dir() {
-        ArtifactKind::Directory
-    } else {
-        ArtifactKind::Other
-    };
+    let metadata = artifact_stat(path, follow)?;
+    let kind = prepared_file_kind(&metadata.file_type());
     #[cfg(unix)]
     let executable = {
         use std::os::unix::fs::PermissionsExt as _;
@@ -186,9 +217,79 @@ fn inspect_artifact(path: &Utf8Path, follow: bool) -> std::io::Result<(ArtifactK
     Ok((kind, executable))
 }
 
+/// Classifies prepared artifacts without requiring native links or special-file fixtures.
+trait PreparedFileType {
+    fn is_symlink(&self) -> bool;
+    fn is_file(&self) -> bool;
+    fn is_dir(&self) -> bool;
+}
+
+impl PreparedFileType for fs::FileType {
+    // #[gamma::skip(fn_value.bool_false, reason = "This thin native FileType adapter requires a real symlink to distinguish false. Privileged/platform-dependent symlink fixtures are prohibited; owned file-type policy tests do not exercise this adapter.", tag = "native-boundary")]
+    fn is_symlink(&self) -> bool {
+        Self::is_symlink(self)
+    }
+    fn is_file(&self) -> bool {
+        Self::is_file(self)
+    }
+    fn is_dir(&self) -> bool {
+        Self::is_dir(self)
+    }
+}
+
+fn prepared_file_kind(file_type: &impl PreparedFileType) -> ArtifactKind {
+    if file_type.is_symlink() {
+        ArtifactKind::Symlink
+    } else if file_type.is_file() {
+        ArtifactKind::File
+    } else if file_type.is_dir() {
+        ArtifactKind::Directory
+    } else {
+        ArtifactKind::Other
+    }
+}
+
+/// Captures files and links as leaves without traversing link targets.
+fn prepared_leaf(file_type: &impl PreparedFileType) -> bool {
+    file_type.is_file() || file_type.is_symlink()
+}
+
+#[cfg(any(test, feature = "internals"))]
+thread_local! {
+    static ARTIFACT_STATS: std::cell::RefCell<Option<(fs::Metadata, fs::Metadata)>> = const { std::cell::RefCell::new(None) };
+}
+
+fn artifact_stat(path: &Utf8Path, follow: bool) -> std::io::Result<fs::Metadata> {
+    #[cfg(any(test, feature = "internals"))]
+    if let Some(metadata) = ARTIFACT_STATS.with_borrow(|stats| {
+        stats
+            .as_ref()
+            .map(|(link, target)| if follow { target.clone() } else { link.clone() })
+    }) {
+        return Ok(metadata);
+    }
+    artifact_stat_using(
+        path,
+        // #[gamma::skip(bool_expr.negate, reason = "This thin native metadata adapter selects follow versus symlink_metadata. Distinguishing its exact follow argument requires a real symlink/host metadata fixture; owned operation-selection policy is tested separately.", tag = "native-boundary")]
+        follow,
+        |path| fs::metadata(path),
+        |path| fs::symlink_metadata(path),
+    )
+}
+
+/// Selects following or non-following metadata without performing either native operation itself.
+fn artifact_stat_using(
+    path: &Utf8Path,
+    follow: bool,
+    metadata: impl FnOnce(&Utf8Path) -> std::io::Result<fs::Metadata>,
+    symlink_metadata: impl FnOnce(&Utf8Path) -> std::io::Result<fs::Metadata>,
+) -> std::io::Result<fs::Metadata> {
+    if follow { metadata(path) } else { symlink_metadata(path) }
+}
+
 #[derive(Debug)]
 pub(crate) struct TestingJournal {
-    file: File,
+    output: JournalOutput,
     pub(super) previous_sweep: Option<super::session::SweepCost>,
     pub(super) prior_confirmations: std::collections::BTreeSet<crate::model::MutantId>,
     pub(super) initial_hints: Option<super::session::InitialHints>,
@@ -197,6 +298,16 @@ pub(crate) struct TestingJournal {
     /// `test_all` joining its workers and completing those callbacks, so relaxed counting suffices;
     /// journal-write completion establishes durability separately.
     pub(super) live_refresh_failures: core::sync::atomic::AtomicUsize,
+}
+
+#[derive(Debug)]
+enum JournalOutput {
+    File(File),
+    #[cfg(test)]
+    Memory {
+        entries: JournalEntries,
+        fail_after: Option<usize>,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -262,6 +373,8 @@ fn decode_committed(line: &[u8], path: &Utf8Path) -> Result<JournalEntry> {
     let committed: Committed = serde_json::from_slice(line)
         .map_err(|cause| error!("testing verdicts `{path}` are corrupt; start a new campaign").caused_by(cause))?;
     let encoded =
+
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "WireEntry's derived encoding contains optional Mutant/Killer/SweepCost/diagnostic: UTF-8 strings/paths,primitive numbers,bools,unit enums,ranges,lists,and string-keyed accounting maps/sets. Confidence is skipped; serde_json represents nonfinite optional f64 as null rather than returning Err. No user Serialize or fallible writer exists. Vec serialization therefore has no Err at either exact call.", tag = "equivalent")]
         serde_json::to_vec(&committed.verdict).map_err(|cause| error!("could not validate testing verdicts `{path}`").caused_by(cause))?;
     if blake3::hash(&encoded).to_hex().as_str() != committed.checksum {
         return Err(error!(
@@ -290,7 +403,9 @@ fn decode_committed(line: &[u8], path: &Utf8Path) -> Result<JournalEntry> {
 }
 
 fn encode_committed(verdict: &JournalEntry) -> Result<Vec<u8>> {
-    let mut bytes = serde_json::to_vec(&verdict.wire()).map_err(|cause| error!("could not encode a testing verdict").caused_by(cause))?;
+    let mut bytes =
+    // #[gamma::skip(try.propagate_to_unwrap, reason = "WireEntry's derived encoding contains optional Mutant/Killer/SweepCost/diagnostic: UTF-8 strings/paths,primitive numbers,bools,unit enums,ranges,lists,and string-keyed accounting maps/sets. Confidence is skipped; serde_json represents nonfinite optional f64 as null rather than returning Err. No user Serialize or fallible writer exists. Vec serialization therefore has no Err at either exact call.", tag = "equivalent")]
+    serde_json::to_vec(&verdict.wire()).map_err(|cause| error!("could not encode a testing verdict").caused_by(cause))?;
     let checksum = blake3::hash(&bytes).to_hex();
     assert_eq!(bytes.pop(), Some(b'}'), "WireEntry serializes as a JSON object");
     bytes.extend_from_slice(b",\"checksum\":\"");
@@ -300,7 +415,11 @@ fn encode_committed(verdict: &JournalEntry) -> Result<Vec<u8>> {
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &Utf8Path) -> Result<T> {
-    read_json_with_limit(path, MAX_STATE_BYTES)
+    with_state_limit(path, read_json_with_limit)
+}
+
+fn with_state_limit<T>(path: &Utf8Path, read: impl FnOnce(&Utf8Path, u64) -> Result<T>) -> Result<T> {
+    read(path, MAX_STATE_BYTES)
 }
 
 fn read_json_with_limit<T: serde::de::DeserializeOwned>(path: &Utf8Path, limit: u64) -> Result<T> {
@@ -345,6 +464,8 @@ fn set_phase(base: &Utf8Path, phase: Phase) -> Result<()> {
         None
     };
     let contents =
+
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "Concrete Status contains only derived enum Phase and Option<String> snapshot. Both have infallible JSON representations, and to_string uses an in-memory buffer with no user writer. No serialization Err is reachable at this call.", tag = "equivalent")]
         serde_json::to_string(&Status { phase, snapshot }).map_err(|cause| error!("could not encode testing phase").caused_by(cause))?;
     publication::write(&base.join(PHASE), &contents)
 }
@@ -382,6 +503,11 @@ fn partial_record(plan: &Plan, preparation: RecordPreparation, mut killers: Kill
 }
 
 impl TestingState {
+    #[cfg(test)]
+    pub(crate) fn from_test_plan(plan: Plan) -> Self {
+        tests::recovered_memory_state(plan)
+    }
+
     pub(crate) fn is_settled(&self) -> bool {
         self.plan.mutants.iter().all(|mutant| mutant.outcome != Outcome::Pending)
     }
@@ -401,6 +527,10 @@ impl TestingState {
         record: &RecordPreparation,
         omissions: (&[String], &[String]),
     ) -> Result<Self> {
+        #[cfg(test)]
+        if let Some(result) = START_OBSERVER.with_borrow_mut(|slot| slot.as_mut().map(|observer| observer(&settings))) {
+            return result;
+        }
         let state = Self {
             version: VERSION,
             tool: env!("CARGO_PKG_VERSION").to_owned(),
@@ -409,7 +539,9 @@ impl TestingState {
             confidences: frozen_confidences(plan),
             session: built.session.clone(),
             oracle: built.oracle.clone(),
-            workspace: built.work.testing_snapshot()?,
+            workspace:
+            // #[gamma::skip(try.propagate_to_unwrap, reason = "testing_snapshot is serde_json::to_value of a concrete private Snapshot, with no filesystem operation or fallible user serializer. Its paths/string keys serialize as strings; CargoOptions/Harness are strings, vectors, booleans and string/path-key maps; Resources stores only string/path-key maps, vectors and usize while mutex/condvar are skipped. TestEnvironment encodes OsString maps as vector pairs (not JSON map keys), and Launch's Option<OsString> uses lossless serde native-string representation. scheduler_version is u32 and other options are strings/these DTOs. Thus JSON key and numeric-range errors are impossible for these concrete fields; native non-Unicode loader/environment round-trip is additionally asserted by recovered_native_workspace_snapshot_round_trips_non_unicode_loader_and_environment_values. Allocation exhaustion/panics are not Err paths. panic_on_failure receives Ok on every accepted value.", tag = "equivalent")]
+            built.work.testing_snapshot()?,
             settings,
             killers,
             record: record.clone(),
@@ -440,7 +572,7 @@ impl TestingState {
     }
 
     fn read_checkpoint(base: &Utf8Path) -> Result<(Self, u64)> {
-        Self::read_checkpoint_with_limit(base, MAX_STATE_BYTES)
+        with_state_limit(base, Self::read_checkpoint_with_limit)
     }
 
     fn read_checkpoint_with_limit(base: &Utf8Path, limit: u64) -> Result<(Self, u64)> {
@@ -490,6 +622,13 @@ impl TestingState {
             return Err(error!("testing state at `{base}` does not match its captured source generation"));
         }
         restore_confidences(&mut state.plan, &state.confidences, &ids, base)?;
+        let valid_bytes = state.replay_journal(base, limit, &ordinals)?;
+        // A completed sweep can leave unjudged mutants pending. Until ledger publication, resume
+        // must preserve its settled prefix and retry those mutants rather than reject the phase.
+        Ok((state, valid_bytes))
+    }
+
+    fn replay_journal(&mut self, base: &Utf8Path, limit: u64, ordinals: &crate::HashMap<u32, usize>) -> Result<u64> {
         let path = base.join(JOURNAL);
         let file = File::open(&path).map_err(|cause| error!("could not read testing verdicts `{path}`").caused_by(cause))?;
         let mut reader = BufReader::new(file);
@@ -497,14 +636,12 @@ impl TestingState {
             &path,
             &mut reader,
             limit,
-            &mut state.plan.mutants,
-            &mut state.session.phases,
-            &mut state.killers,
-            &ordinals,
+            &mut self.plan.mutants,
+            &mut self.session.phases,
+            &mut self.killers,
+            ordinals,
         )?;
-        // A completed sweep can leave unjudged mutants pending. Until ledger publication, resume
-        // must preserve its settled prefix and retry those mutants rather than reject the phase.
-        Ok((state, valid_bytes))
+        Ok(valid_bytes)
     }
 
     pub(crate) fn validate_artifacts(&self) -> Result<()> {
@@ -546,10 +683,22 @@ fn replay_verdicts(
 ) -> Result<u64> {
     let mut valid_bytes = 0_u64;
     let mut line = Vec::new();
+    let mut exhausted = false;
     loop {
+        assert!(!exhausted, "journal replay must stop after the first end-of-input observation");
         line.clear();
         let length = read_verdict_line(path, reader, &mut line, limit)?;
-        if length == 0 {
+
+        // #[gamma::skip(stmt.delete_assign, reason = "The exhausted flag is assertion-only bookkeeping. EOF exits this loop before its next read, so its assigned value is never observed on EOF; every continuing iteration assigns false.", tag = "equivalent")]
+        exhausted =
+        // #[gamma::skip(assign_value.default, reason = "The exhausted flag is assertion-only bookkeeping. EOF exits this loop before its next read, so its assigned value is never observed on EOF; every continuing iteration assigns false.", tag = "equivalent")]
+        length ==
+        // #[gamma::skip(literal.int_increment, reason = "The exhausted flag is assertion-only bookkeeping. EOF exits this loop before its next read, so its assigned value is never observed on EOF; every continuing iteration assigns false.", tag = "equivalent")]
+        0;
+        if
+        // #[gamma::skip(cond.always_false, reason = "When read_verdict_line returns length0 its freshly cleared line buffer is empty. If the first EOF break/guard is removed, the immediately following line.last()!=Some(newline) branch breaks before another read or state mutation. Same valid prefix, reader position, and return.", tag = "equivalent")]
+        length == 0 {
+            // #[gamma::skip(loop.delete_break, reason = "When read_verdict_line returns length0 its freshly cleared line buffer is empty. If the first EOF break/guard is removed, the immediately following line.last()!=Some(newline) branch breaks before another read or state mutation. Same valid prefix, reader position, and return.", tag = "equivalent")]
             break;
         }
         if length as u64 > limit {
@@ -563,10 +712,12 @@ fn replay_verdicts(
         valid_bytes += length as u64;
         let (settled_mutant, probe) = match settled {
             JournalEntry::Accounting { sweep, .. } => {
+                // #[gamma::skip(call_result.default, reason = "restore_sweep_cost returns (); default_after preserves the complete call and all accounting side effects, replacing unit only with the identical unit value.", tag = "equivalent")]
                 restore_sweep_cost(phases, Some(sweep));
                 continue;
             }
             JournalEntry::Verdict { mutant, probe, sweep, .. } => {
+                // #[gamma::skip(call_result.default, reason = "restore_sweep_cost returns (); default_after preserves the complete call and all accounting side effects, replacing unit only with the identical unit value.", tag = "equivalent")]
                 restore_sweep_cost(phases, sweep);
                 (mutant, probe)
             }
@@ -593,8 +744,30 @@ fn replay_verdicts(
 
 impl TestingJournal {
     #[cfg(test)]
+    pub(super) fn memory_for_test(fail: bool) -> (Self, JournalEntries) {
+        Self::memory_failing_after_for_test(fail.then_some(0))
+    }
+
+    #[cfg(test)]
+    /// Captures encoded append attempts, including scripted failures, without opening a native file.
+    pub(super) fn memory_failing_after_for_test(fail_after: Option<usize>) -> (Self, JournalEntries) {
+        let entries = JournalEntries::default();
+        let journal = Self {
+            output: JournalOutput::Memory {
+                entries: std::sync::Arc::clone(&entries),
+                fail_after,
+            },
+            previous_sweep: None,
+            prior_confirmations: std::collections::BTreeSet::new(),
+            initial_hints: None,
+            live_refresh_failures: core::sync::atomic::AtomicUsize::new(0),
+        };
+        (journal, entries)
+    }
+
+    #[cfg(test)]
     pub(super) fn replace_writer_for_test(&mut self, file: File) {
-        self.file = file;
+        self.output = JournalOutput::File(file);
     }
 
     pub(super) fn open(base: &Utf8Path, valid_bytes: Option<u64>) -> Result<Self> {
@@ -616,7 +789,7 @@ impl TestingJournal {
             .open(&path)
             .map_err(|cause| error!("could not open testing verdicts `{path}`").caused_by(cause))?;
         Ok(Self {
-            file,
+            output: JournalOutput::File(file),
             previous_sweep: None,
             prior_confirmations: std::collections::BTreeSet::new(),
             initial_hints: None,
@@ -654,17 +827,32 @@ impl TestingJournal {
     }
 
     fn publish_entry(&self, verdict: &JournalEntry) -> Result<()> {
-        let bytes = encode_committed(verdict)?;
-        let mut file = &self.file;
-        let length = file
-            .seek(std::io::SeekFrom::End(0))
-            .map_err(|cause| error!("could not locate the durable testing prefix; the campaign has stopped").caused_by(cause))?;
-        append_checkpoint(
-            &bytes,
-            |bytes| file.write_all(bytes),
-            || self.file.sync_data(),
-            || self.file.set_len(length),
-        )
+        let bytes =
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "encode_committed has exactly one fallible-looking operation: serializing the concrete WireEntry into Vec, whose accepted fields all have JSON representations. It then checks the guaranteed closing object brace and appends checksum/newline in memory. Thus this Result is always Ok absent an invariant violation/abort, neither affected by panic_on_failure.", tag = "equivalent")]
+        encode_committed(verdict)?;
+        match &self.output {
+            JournalOutput::File(native) => {
+                let mut file = native;
+                append_at_durable_end(&mut file, |file, length| {
+                    append_checkpoint(
+                        &bytes,
+                        |bytes| file.write_all(bytes),
+                        || native.sync_data(),
+                        || native.set_len(length),
+                    )
+                })
+            }
+            #[cfg(test)]
+            JournalOutput::Memory { entries, fail_after } => {
+                let mut entries = entries.lock().expect("in-memory journal observers do not panic under the lock");
+                let failed = fail_after.is_some_and(|limit| entries.len() >= limit);
+                entries.push(bytes);
+                if failed {
+                    return Err(error!("injected durable append error"));
+                }
+                Ok(())
+            }
+        }
     }
 
     pub(super) fn complete(base: &Utf8Path) -> Result<()> {
@@ -728,6 +916,13 @@ fn is_loaded_library(path: &Utf8Path, libraries: &[Utf8PathBuf]) -> bool {
             .is_some_and(|parent| libraries.iter().any(|library| parent == library))
 }
 
+fn append_at_durable_end<F: std::io::Seek>(file: &mut F, append: impl FnOnce(&mut F, u64) -> Result<()>) -> Result<()> {
+    let length = file
+        .seek(std::io::SeekFrom::End(0))
+        .map_err(|cause| error!("could not locate the durable testing prefix; the campaign has stopped").caused_by(cause))?;
+    append(file, length)
+}
+
 fn append_checkpoint(
     bytes: &[u8],
     write: impl FnOnce(&[u8]) -> std::io::Result<()>,
@@ -778,21 +973,34 @@ fn capture_artifacts_with<I: IntoIterator<Item = std::io::Result<fs::DirEntry>>>
     paths.sort();
     paths
         .into_iter()
-        .map(|path| {
-            let metadata = ArtifactMetadata::read(&path)?;
-            let digest = artifact_digest(&path, Some(&metadata))?;
-            Ok(Artifact {
-                generated_output: Some(generated_output(&path, &output, &roots)),
-                path,
-                digest,
-                metadata: Some(metadata),
-            })
-        })
+        .map(|path| capture_artifact_with(path, &output, &roots, ArtifactMetadata::read, artifact_digest))
         .collect()
 }
 
+/// Inspects metadata before hashing so link identity and generated-output classification stay aligned.
+fn capture_artifact_with(
+    path: Utf8PathBuf,
+    output: &Utf8Path,
+    roots: &[Utf8PathBuf],
+    inspect: impl FnOnce(&Utf8Path) -> Result<ArtifactMetadata>,
+    digest: impl FnOnce(&Utf8Path, Option<&ArtifactMetadata>) -> Result<String>,
+) -> Result<Artifact> {
+    let metadata = inspect(&path)?;
+    let digest = digest(&path, Some(&metadata))?;
+    Ok(Artifact {
+        generated_output: Some(generated_output(&path, output, roots)),
+        path,
+        digest,
+        metadata: Some(metadata),
+    })
+}
+
 fn generated_output(path: &Utf8Path, output: &Utf8Path, roots: &[Utf8PathBuf]) -> bool {
-    let Some(workspace) = output.parent() else { return false };
+    let Some(workspace) = output.parent() else {
+        return
+    // #[gamma::skip(literal.bool_flip, reason = "generated_output's workspace=output.parent() else-return false is called only with output=built.work.root.join(\"target\") or that same output passed by tree_paths. A path ending in appended target always has Some parent, including relative/empty roots. This false->true return lies in an unreachable branch for every production caller.", tag = "equivalent")]
+    false;
+    };
     path.ancestors()
         .take_while(|ancestor| ancestor.starts_with(workspace))
         .filter(|ancestor| ancestor.file_name() == Some("target"))
@@ -815,19 +1023,17 @@ fn tree_paths_with_entries<E: std::error::Error + Send + Sync + 'static>(
     for root in roots {
         let metadata =
             fs::symlink_metadata(root).map_err(|cause| error!("could not inspect prepared testing tree `{root}`").caused_by(cause))?;
-        if metadata.is_file() || metadata.file_type().is_symlink() {
+        if prepared_leaf(&metadata.file_type()) {
             let _ = paths.insert(root.clone());
             continue;
         }
-        for entry in walkdir::WalkDir::new(root)
-            .follow_links(false)
-            .follow_root_links(false)
+        for entry in prepared_tree_walk(root)
             .into_iter()
             .filter_entry(|entry| Utf8Path::from_path(entry.path()).is_none_or(|path| !generated_output(path, output, roots)))
         {
             let entry =
                 inspect_entry(entry).map_err(|cause| error!("could not inspect prepared testing tree `{root}`").caused_by(cause))?;
-            if entry.file_type().is_file() || entry.file_type().is_symlink() {
+            if prepared_leaf(&entry.file_type()) {
                 let path = Utf8PathBuf::from_path_buf(entry.into_path())
                     .map_err(|_path| error!("prepared testing tree `{root}` contains a non-UTF-8 path"))?;
                 let _ = paths.insert(path);
@@ -835,6 +1041,24 @@ fn tree_paths_with_entries<E: std::error::Error + Send + Sync + 'static>(
         }
     }
     Ok(paths)
+}
+
+#[cfg(any(test, feature = "internals"))]
+thread_local! {
+    static TREE_WALK_POLICY: std::cell::RefCell<Option<Vec<(bool, bool)>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Never follows links, including a linked root, while inventorying prepared artifacts.
+fn prepared_tree_walk(root: &Utf8Path) -> WalkDir {
+    let follow_links = false;
+    let follow_root_links = false;
+    #[cfg(any(test, feature = "internals"))]
+    TREE_WALK_POLICY.with_borrow_mut(|observed| {
+        if let Some(policies) = observed {
+            policies.push((follow_links, follow_root_links));
+        }
+    });
+    WalkDir::new(root).follow_links(follow_links).follow_root_links(follow_root_links)
 }
 
 fn artifact_digest(path: &Utf8Path, metadata: Option<&ArtifactMetadata>) -> Result<String> {
@@ -884,10 +1108,20 @@ fn fingerprint(path: &Utf8Path) -> Result<String> {
 fn fingerprint_from(path: &Utf8Path, mut reader: impl Read) -> Result<String> {
     let mut hasher = blake3::Hasher::new();
     let mut buffer = vec![0_u8; 64 * 1024];
+    let mut exhausted = false;
     loop {
+        assert!(
+            !exhausted,
+            "artifact fingerprinting must stop after the first end-of-input observation"
+        );
         let length = reader
             .read(&mut buffer)
             .map_err(|cause| error!("could not read prepared artifact `{path}`").caused_by(cause))?;
+
+        // #[gamma::skip(stmt.delete_assign, reason = "The exhausted flag is assertion-only bookkeeping. EOF exits this loop before its next read, so its assigned value is never observed on EOF; every continuing iteration assigns false.", tag = "equivalent")]
+        exhausted =
+        // #[gamma::skip(assign_value.default, reason = "The exhausted flag is assertion-only bookkeeping. EOF exits this loop before its next read, so its assigned value is never observed on EOF; every continuing iteration assigns false.", tag = "equivalent")]
+        length == 0;
         if length == 0 {
             break;
         }
@@ -905,6 +1139,7 @@ mod survivor_tests;
 mod tests {
     use core::error::Error as _;
     use core::time::Duration;
+    use std::io;
     #[cfg(unix)]
     use std::os::unix::ffi::OsStringExt as _;
     #[cfg(windows)]
@@ -912,10 +1147,487 @@ mod tests {
     #[cfg(windows)]
     use std::os::windows::fs::OpenOptionsExt as _;
 
+    use serde_json::{Value, from_slice, from_value, json, to_string, to_value, to_vec};
+
     use super::*;
     use crate::discover::TargetFile;
     use crate::exec::{OrderingHints, Workspace};
-    use crate::fixtures;
+    use crate::{HashMap, fixtures};
+
+    #[test]
+    fn oct25_artifact_stat_selects_the_real_follow_or_link_operation() {
+        let path = Utf8Path::new("synthetic-artifact-stat");
+        for follow in [false, true] {
+            let called = std::cell::Cell::new(None);
+            let failure = artifact_stat_using(
+                path,
+                follow,
+                |seen| {
+                    assert_eq!(seen, path);
+                    called.set(Some(true));
+                    Err(io::ErrorKind::PermissionDenied.into())
+                },
+                |seen| {
+                    assert_eq!(seen, path);
+                    called.set(Some(false));
+                    Err(io::ErrorKind::NotFound.into())
+                },
+            )
+            .unwrap_err();
+            assert_eq!(called.get(), Some(follow));
+            assert_eq!(
+                failure.kind(),
+                if follow {
+                    io::ErrorKind::PermissionDenied
+                } else {
+                    io::ErrorKind::NotFound
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn recovered_prepared_file_kind_policy_retains_links_and_distinguishes_every_valid_file_type() {
+        #[derive(Clone, Copy)]
+        enum Kind {
+            File,
+            Directory,
+            Symlink,
+            Other,
+        }
+        impl PreparedFileType for Kind {
+            fn is_symlink(&self) -> bool {
+                matches!(self, Self::Symlink)
+            }
+            fn is_file(&self) -> bool {
+                matches!(self, Self::File)
+            }
+            fn is_dir(&self) -> bool {
+                matches!(self, Self::Directory)
+            }
+        }
+        for (file_type, expected_kind, retained) in [
+            (Kind::File, ArtifactKind::File, true),
+            (Kind::Directory, ArtifactKind::Directory, false),
+            (Kind::Symlink, ArtifactKind::Symlink, true),
+            (Kind::Other, ArtifactKind::Other, false),
+        ] {
+            assert_eq!(prepared_file_kind(&file_type), expected_kind);
+            assert_eq!(prepared_leaf(&file_type), retained);
+        }
+    }
+
+    #[test]
+    fn recovered_durable_end_seek_failure_prevents_append_and_success_supplies_the_exact_prefix_length() {
+        struct RefusedSeek(Vec<std::io::SeekFrom>);
+        impl std::io::Seek for RefusedSeek {
+            fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+                self.0.push(pos);
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "named durable-prefix seek refusal",
+                ))
+            }
+        }
+        let mut refused = RefusedSeek(Vec::new());
+        let failure = append_at_durable_end(&mut refused, |_, _| {
+            panic!("an unknown durable end must prevent every append or rollback operation")
+        })
+        .unwrap_err();
+        assert_eq!(
+            failure.message(),
+            "could not locate the durable testing prefix; the campaign has stopped"
+        );
+        assert!(failure.to_string().contains("named durable-prefix seek refusal"));
+        assert_eq!(refused.0, [std::io::SeekFrom::End(0)]);
+        let mut file = std::io::Cursor::new(vec![1, 2, 3, 4]);
+        file.set_position(1);
+        append_at_durable_end(&mut file, |file, prefix| {
+            assert_eq!((prefix, file.position()), (4, 4));
+            file.write_all(&[5]).unwrap();
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(file.into_inner(), [1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn recovered_artifact_capture_keeps_the_exact_metadata_digest_and_generated_output_boolean() {
+        let output = Utf8PathBuf::from("memory-workspace").join("target");
+        for (path, generated) in [
+            (output.join("debug").join("subject"), true),
+            (Utf8PathBuf::from("external").join("subject"), false),
+        ] {
+            let artifact = capture_artifact_with(
+                path.clone(),
+                &output,
+                &[],
+                |seen| {
+                    assert_eq!(seen, path);
+                    Ok(ArtifactMetadata {
+                        kind: ArtifactKind::Symlink,
+                        executable: 0,
+                        link: Some("retained-target".into()),
+                    })
+                },
+                |seen, metadata| {
+                    assert_eq!(seen, path);
+                    let metadata = metadata.expect("digesting a captured artifact must use the just-inspected metadata");
+                    assert_eq!(metadata.kind, ArtifactKind::Symlink);
+                    assert_eq!(metadata.executable, 0);
+                    assert_eq!(metadata.link.as_deref(), Some(Utf8Path::new("retained-target")));
+                    Ok("exact-retained-digest".into())
+                },
+            )
+            .unwrap();
+            assert_eq!(artifact.path, path);
+            assert_eq!(artifact.digest, "exact-retained-digest");
+            assert_eq!(artifact.generated_output, Some(generated));
+            assert_eq!(
+                artifact.metadata.unwrap(),
+                ArtifactMetadata {
+                    kind: ArtifactKind::Symlink,
+                    executable: 0,
+                    link: Some("retained-target".into())
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn recovered_artifact_capture_propagates_the_actual_digest_error_without_constructing_a_partial_artifact() {
+        let path = Utf8PathBuf::from("memory-artifact");
+        let mut inspected = false;
+        let mut digested = false;
+        let result = capture_artifact_with(
+            path.clone(),
+            Utf8Path::new("unused-output"),
+            &[],
+            |seen| {
+                assert_eq!(seen, path);
+                inspected = true;
+                Ok(ArtifactMetadata {
+                    kind: ArtifactKind::File,
+                    executable: 5,
+                    link: None,
+                })
+            },
+            |seen, metadata| {
+                assert_eq!(seen, path);
+                assert_eq!(metadata.unwrap().executable, 5);
+                digested = true;
+                Err(error!("in-memory digest read was refused"))
+            },
+        );
+        let failure = result.err().expect("the injected digest returned an error");
+        assert_eq!(failure.message(), "in-memory digest read was refused");
+        assert!(inspected && digested);
+    }
+
+    #[test]
+    fn recovered_snapshot_and_journal_readers_forward_the_exact_state_size_limit() {
+        let path = Utf8Path::new("retained/state.json");
+        let observed = with_state_limit(path, |actual, limit| {
+            assert_eq!(actual, path);
+            assert_eq!(limit, 536_870_912);
+            Ok(73)
+        })
+        .unwrap();
+        assert_eq!(observed, 73);
+        let error = with_state_limit(path, |_, _| Err::<(), _>(error!("reader rejected checkpoint"))).unwrap_err();
+        assert_eq!(error.message(), "reader rejected checkpoint");
+    }
+
+    #[test]
+    fn recovered_journal_diagnostics_preserve_each_message_and_its_exact_accounting() {
+        let (journal, entries) = TestingJournal::memory_for_test(false);
+        for (message, launches) in [("first diagnostic", 3), ("second diagnostic", 17)] {
+            journal
+                .publish_diagnostic(
+                    super::super::session::SweepCost {
+                        launches,
+                        ..super::super::session::SweepCost::default()
+                    },
+                    message.into(),
+                )
+                .unwrap();
+        }
+        let entries = entries
+            .lock()
+            .expect("journal capture only appends or copies owned bytes under this lock")
+            .clone();
+        assert_eq!(entries.len(), 2);
+        for (bytes, (message, launches)) in entries.iter().zip([("first diagnostic", 3), ("second diagnostic", 17)]) {
+            assert_eq!(bytes.last(), Some(&b'\n'));
+            let value: Value = from_slice(bytes).unwrap();
+            assert_eq!(value["diagnostic"], message);
+            assert_eq!(value["sweep"]["launches"], launches);
+            assert_eq!(value["checksum"].as_str().unwrap().len(), 64);
+            assert!(value.get("mutant").is_none());
+        }
+    }
+
+    pub(super) fn recovered_memory_state(plan: Plan) -> TestingState {
+        let base = Utf8PathBuf::from("invalid\0campaign");
+        TestingState {
+            version: VERSION,
+            tool: env!("CARGO_PKG_VERSION").into(),
+            platform: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+            confidences: frozen_confidences(&plan),
+            plan,
+            session: Session {
+                baseline: Duration::ZERO,
+                baseline_wall: Duration::ZERO,
+                tests: None,
+                quiet: Duration::ZERO,
+                stall: None,
+                build: Duration::ZERO,
+                peak: None,
+                metered: false,
+                unbounded: None,
+                withdrawn: 0,
+                census: Vec::new(),
+                rounds: 0,
+                rounds_taken: Vec::new(),
+                binaries: Vec::new(),
+                scratch: base.clone(),
+                filtered: 0,
+                widened: false,
+                ordering: OrderingHints::default(),
+                phases: Phases::default(),
+            },
+            oracle: Oracle {
+                packages: Vec::new(),
+                package_local: false,
+                whole_workspace: false,
+            },
+            workspace: json!({}),
+            settings: TestingSettings {
+                jobs: 1,
+                mutators: None,
+                timeout_floor: Duration::ZERO,
+                narrowed: false,
+                incremental: false,
+            },
+            killers: Killers::default(),
+            record: RecordPreparation {
+                report_info: None,
+                name_filtered: false,
+                context: ContextDigest::default(),
+                inputs: from_value(json!({"complete":true,"files":[]})).unwrap(),
+                killers: crate::discover::Killers::default(),
+                base,
+            },
+            stuck: Vec::new(),
+            dropped: Vec::new(),
+            artifact_roots: Vec::new(),
+            artifacts: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn recovered_pending_completion_rejects_before_touching_the_invalid_campaign_path() {
+        let state = recovered_memory_state(fixtures::plan(vec![Mutant {
+            outcome: Outcome::Pending,
+            ..fixtures::mutant()
+        }]));
+        assert_eq!(
+            state.complete_testing().unwrap_err().message(),
+            "cannot publish a testing checkpoint with pending mutants"
+        );
+    }
+
+    #[test]
+    fn recovered_artifact_workspace_validation_returns_structured_root_and_library_errors() {
+        let mut state = recovered_memory_state(fixtures::plan(Vec::new()));
+        assert_eq!(
+            state.validate_artifacts().unwrap_err().message(),
+            "prepared testing workspace has no source root; start a new campaign"
+        );
+        state.workspace = json!({"root":"adopted","libraries":[3]});
+        assert_eq!(
+            state.validate_artifacts().unwrap_err().message(),
+            "prepared testing workspace has invalid library paths; start a new campaign"
+        );
+        state.workspace = json!({"root":"adopted","libraries":[]});
+        state.validate_artifacts().unwrap();
+    }
+
+    #[test]
+    fn recovered_partial_record_requires_the_exact_retained_source_generation() {
+        let mut plan = fixtures::plan(vec![fixtures::mutant()]);
+        plan.files.push(TargetFile {
+            path: "src/lib.rs".into(),
+            absolute: "adopted\\src\\lib.rs".into(),
+            package: "subject".to_owned(),
+            source: Some("fn f() {}".to_owned()),
+        });
+        let state = recovered_memory_state(plan);
+        let error = partial_record(&state.plan, state.record, state.killers, &RunRecord::default()).unwrap_err();
+        assert_eq!(
+            error.message(),
+            "could not construct partial campaign evidence from `invalid\0campaign`; start a new campaign"
+        );
+    }
+
+    #[test]
+    fn oct25_replay_stops_at_the_first_eof_or_uncommitted_tail_with_bounded_progress() {
+        struct Scripted {
+            bytes: &'static [u8],
+            reads: usize,
+        }
+        impl Read for Scripted {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                self.reads += 1;
+                if self.reads == 1 && !self.bytes.is_empty() {
+                    buf[..self.bytes.len()].copy_from_slice(self.bytes);
+                    return Ok(self.bytes.len());
+                }
+                if self.reads == if self.bytes.is_empty() { 1 } else { 2 } {
+                    return Ok(0);
+                }
+                Err(std::io::ErrorKind::PermissionDenied.into())
+            }
+        }
+        for bytes in [b"".as_slice(), b"uncommitted".as_slice()] {
+            let mut reader = BufReader::new(Scripted { bytes, reads: 0 });
+            assert_eq!(
+                replay_verdicts(
+                    Utf8Path::new("memory"),
+                    &mut reader,
+                    100,
+                    &mut [],
+                    &mut Phases::default(),
+                    &mut Killers::default(),
+                    &HashMap::default(),
+                )
+                .unwrap(),
+                0
+            );
+            assert_eq!(reader.get_ref().reads, if bytes.is_empty() { 1 } else { 2 });
+        }
+    }
+
+    #[test]
+    fn recovered_replay_oversize_detection_reads_only_one_byte_beyond_the_limit() {
+        let mut reader = std::io::Cursor::new(b"0123456789");
+        assert!(
+            replay_verdicts(
+                Utf8Path::new("memory"),
+                &mut reader,
+                3,
+                &mut [],
+                &mut Phases::default(),
+                &mut Killers::default(),
+                &HashMap::default(),
+            )
+            .unwrap_err()
+            .message()
+            .contains("exceeds the supported size")
+        );
+        assert_eq!(reader.position(), 4);
+    }
+
+    #[test]
+    fn oct25_fingerprints_stop_at_eof_and_include_single_bytes_and_chunk_boundaries() {
+        struct EofOnce {
+            cursor: std::io::Cursor<Vec<u8>>,
+            ended: bool,
+        }
+        impl Read for EofOnce {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                assert!(!self.ended, "fingerprinting must stop after the first EOF");
+                let length = self.cursor.read(buf)?;
+                self.ended = length == 0;
+                Ok(length)
+            }
+        }
+        for length in [0, 1, 65_536, 65_537] {
+            let bytes = vec![b'q'; length];
+            let expected = blake3::hash(&bytes).to_hex().to_string();
+            let reader = EofOnce {
+                cursor: std::io::Cursor::new(bytes),
+                ended: false,
+            };
+            assert_eq!(fingerprint_from(Utf8Path::new("memory"), reader).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn recovered_artifact_validation_checks_metadata_before_digest_and_preserves_digest_errors() {
+        let artifact = Artifact {
+            path: "memory-artifact".into(),
+            digest: "same".into(),
+            generated_output: None,
+            metadata: Some(ArtifactMetadata {
+                kind: ArtifactKind::File,
+                executable: 0o100,
+                link: None,
+            }),
+        };
+        let changed = validate_artifact(
+            &artifact,
+            |_| {
+                Ok(ArtifactMetadata {
+                    kind: ArtifactKind::File,
+                    executable: 0,
+                    link: None,
+                })
+            },
+            |_, _| panic!("a metadata change must be rejected before reading bytes"),
+        )
+        .unwrap_err();
+        assert_eq!(
+            changed.message(),
+            "cannot resume testing: prepared artifact `memory-artifact` changed; restore the campaign artifacts or start a new campaign"
+        );
+        let error = validate_artifact(
+            &artifact,
+            |_| {
+                Ok(ArtifactMetadata {
+                    kind: ArtifactKind::File,
+                    executable: 0o100,
+                    link: None,
+                })
+            },
+            |path, metadata| {
+                assert_eq!(path, Utf8Path::new("memory-artifact"));
+                assert_eq!(metadata, artifact.metadata.as_ref());
+                Err(error!("scripted digest failure"))
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.message(), "scripted digest failure");
+    }
+
+    #[test]
+    fn recovered_verdict_replay_propagates_reader_errors_without_settling_mutants() {
+        struct Refused;
+        impl Read for Refused {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::PermissionDenied.into())
+            }
+        }
+        let mut mutant = crate::fixtures::mutant();
+        mutant.outcome = Outcome::Pending;
+        let mut mutants = [mutant];
+        let error = replay_verdicts(
+            Utf8Path::new("memory-journal"),
+            &mut std::io::BufReader::new(Refused),
+            100,
+            &mut mutants,
+            &mut Phases::default(),
+            &mut Killers::default(),
+            &HashMap::from_iter([(1, 0)]),
+        )
+        .unwrap_err();
+        assert_eq!(error.message(), "could not read testing verdicts `memory-journal`");
+        assert_eq!(
+            error.source().unwrap().downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(mutants[0].outcome, Outcome::Pending);
+    }
 
     #[cfg(not(miri))]
     mod replay_model {
@@ -1116,10 +1828,7 @@ mod tests {
                             }
                             assert_eq!(replayed.unwrap(), valid_bytes as u64);
                             assert_eq!(reader.stream_position().unwrap(), end as u64, "finite input must be consumed");
-                            assert_eq!(
-                                serde_json::to_value(&mutants).unwrap(),
-                                serde_json::to_value(&model_mutants).unwrap()
-                            );
+                            assert_eq!(to_value(&mutants).unwrap(), to_value(&model_mutants).unwrap());
                             let restored = phases.sweep.unwrap();
                             let accounting = restored.accounting.unwrap();
                             assert_eq!(restored.launches, model_cost.0);
@@ -1146,9 +1855,9 @@ mod tests {
             test: "regression".into(),
         };
         let sweep = super::super::session::SweepCost::default();
-        let mutant_json = serde_json::to_string(&mutant).unwrap();
-        let probe_json = serde_json::to_string(&probe).unwrap();
-        let sweep_json = serde_json::to_string(&sweep).unwrap();
+        let mutant_json = to_string(&mutant).unwrap();
+        let probe_json = to_string(&probe).unwrap();
+        let sweep_json = to_string(&sweep).unwrap();
         for (entry, payload) in [
             (
                 JournalEntry::Verdict {
@@ -1213,10 +1922,10 @@ mod tests {
 
         let path = Utf8Path::new("in-memory-verdicts.jsonl");
         let mutant = fixtures::mutant();
-        let payload = format!(r#"{{"mutant":{},"probe":null}}"#, serde_json::to_string(&mutant).unwrap());
+        let payload = format!(r#"{{"mutant":{},"probe":null}}"#, to_string(&mutant).unwrap());
         let line = format!(
             r#"{{"mutant":{},"probe":null,"checksum":"{}"}}"#,
-            serde_json::to_string(&mutant).unwrap(),
+            to_string(&mutant).unwrap(),
             blake3::hash(payload.as_bytes()).to_hex()
         );
         let JournalEntry::Verdict { mutant: legacy, sweep, .. } = decode_committed(line.as_bytes(), path).unwrap() else {
@@ -1270,7 +1979,7 @@ mod tests {
                 "file-only failure evidence is checksummed and readable"
             );
             restore_sweep_cost(&mut phases, Some(sweep));
-            phases = serde_json::from_value(serde_json::to_value(phases).unwrap()).unwrap();
+            phases = from_value(to_value(phases).unwrap()).unwrap();
         }
         let cost = phases.sweep.take().unwrap();
         assert_eq!(cost.launches, 7, "journal costs are snapshots, not deltas");
@@ -1318,16 +2027,15 @@ mod tests {
             jobs: 7,
             mutators: Some("arith.add_to_sub,relational.lt_to_le".to_owned()),
             timeout_floor: Duration::from_secs(20),
-            confirm: true,
             narrowed: true,
             incremental: false,
         };
-        let mut encoded = serde_json::to_value(&settings).unwrap();
-        let loaded: TestingSettings = serde_json::from_value(encoded.clone()).unwrap();
+        let mut encoded = to_value(&settings).unwrap();
+        let loaded: TestingSettings = from_value(encoded.clone()).unwrap();
         assert_eq!(loaded.jobs, 7);
         assert_eq!(loaded.mutators, settings.mutators);
         encoded.as_object_mut().unwrap().remove("mutators");
-        let legacy: TestingSettings = serde_json::from_value(encoded).unwrap();
+        let legacy: TestingSettings = from_value(encoded).unwrap();
         assert_eq!(legacy.jobs, 7);
         assert!(legacy.mutators.is_none());
     }
@@ -1451,20 +2159,21 @@ mod tests {
             idle: Vec::new(),
             sharded_out: 0,
             settled_out: 0,
-            digests: crate::HashMap::from_iter([("src/lib.rs".into(), crate::discover::digest(source.as_bytes()))]),
+            digests: HashMap::from_iter([("src/lib.rs".into(), crate::discover::digest(source.as_bytes()))]),
             skipped: Vec::new(),
-            reach: crate::HashMap::default(),
-            specs: crate::HashMap::default(),
+            reach: HashMap::default(),
+            specs: HashMap::default(),
         };
         let preparation = RecordPreparation {
             report_info: None,
             context: ContextDigest::default(),
-            inputs: serde_json::from_value(serde_json::json!({
+            inputs: from_value(json!({
                 "complete": true,
                 "files": [{"path": "src/lib.rs", "digest": crate::discover::digest(source.as_bytes()), "size": source.len()}]
             }))
             .unwrap(),
             killers: crate::discover::Killers::default(),
+            name_filtered: false,
             base: "state".into(),
         };
         let journal_killer = Killer {
@@ -1523,14 +2232,14 @@ mod tests {
         )
         .unwrap();
         incomplete.replace_knowledge(
-            crate::HashMap::from_iter([("m1".into(), learned_killer.clone()), ("pending".into(), learned_killer)]),
+            HashMap::from_iter([("m1".into(), learned_killer.clone()), ("pending".into(), learned_killer)]),
             generalized.clone(),
         );
         let mut killers = Killers::default();
         killers.record("m1".into(), journal_killer.clone());
         let record = partial_record(&plan, preparation, killers, &incomplete).unwrap();
         assert_eq!(record.generalized(), generalized);
-        assert_eq!(record.probes(), &crate::HashMap::from_iter([("m1".into(), journal_killer)]));
+        assert_eq!(record.probes(), &HashMap::from_iter([("m1".into(), journal_killer)]));
         assert_eq!(
             record.iter().collect::<Vec<_>>(),
             vec![("m1", Outcome::Killed), ("pending", Outcome::Pending)]
@@ -1571,8 +2280,8 @@ mod tests {
             settled_out: 0,
             digests: std::iter::once(("src/lib.rs".into(), crate::discover::digest(b"a"))).collect(),
             skipped: Vec::new(),
-            reach: crate::HashMap::default(),
-            specs: crate::HashMap::default(),
+            reach: HashMap::default(),
+            specs: HashMap::default(),
         };
         let session = Session {
             baseline: Duration::from_secs(2),
@@ -1607,12 +2316,11 @@ mod tests {
                 package_local: true,
                 whole_workspace: false,
             },
-            workspace: serde_json::json!({ "root": root.join("src") }),
+            workspace: json!({ "root": root.join("src") }),
             settings: TestingSettings {
                 jobs: 1,
                 mutators: None,
                 timeout_floor: Duration::from_secs(20),
-                confirm: true,
                 narrowed: true,
                 incremental: false,
             },
@@ -1622,6 +2330,7 @@ mod tests {
                 context: ContextDigest::default(),
                 inputs: RunRecord::snapshot_with_external(&root, &base, &[], false),
                 killers: crate::discover::Killers::default(),
+                name_filtered: false,
                 base,
             },
             stuck: Vec::new(),
@@ -1639,7 +2348,7 @@ mod tests {
     }
 
     fn save(state: &TestingState) {
-        publication::write(&state.record.base.join(SNAPSHOT), &serde_json::to_string(state).unwrap()).unwrap();
+        publication::write(&state.record.base.join(SNAPSHOT), &to_string(state).unwrap()).unwrap();
         publication::write(&state.record.base.join(JOURNAL), "").unwrap();
         set_phase(&state.record.base, Phase::Testing).unwrap();
     }
@@ -1806,7 +2515,7 @@ mod tests {
         let base = &state.record.base;
         let journal = TestingJournal::open(base, None).unwrap();
         let failing = TestingJournal {
-            file: File::open(base.join(JOURNAL)).unwrap(),
+            output: JournalOutput::File(File::open(base.join(JOURNAL)).unwrap()),
             previous_sweep: None,
             prior_confirmations: std::collections::BTreeSet::new(),
             initial_hints: None,
@@ -1826,7 +2535,6 @@ mod tests {
             stall: Stall::NONE,
             jobs: 4,
             meter: false,
-            confirm: true,
         };
         let mut events = crate::testing::Recorder::default();
         let mut calls = 0;
@@ -1959,7 +2667,7 @@ mod tests {
                 "pending-zero" => state.plan.mutants[0].ordinal = 0,
                 _ => unreachable!(),
             }
-            publication::write(&base.join(SNAPSHOT), &serde_json::to_string(&state).unwrap()).unwrap();
+            publication::write(&base.join(SNAPSHOT), &to_string(&state).unwrap()).unwrap();
             set_phase(&base, Phase::Testing).unwrap();
             let category = if case.starts_with("duplicate") || case == "pending-zero" {
                 "ambiguous mutant identities"
@@ -2034,8 +2742,8 @@ mod tests {
             diagnostic: None,
         };
         let verdict = verdict.wire();
-        let encoded = serde_json::to_vec(&verdict).unwrap();
-        let mut bytes = serde_json::to_vec(&Committed {
+        let encoded = to_vec(&verdict).unwrap();
+        let mut bytes = to_vec(&Committed {
             verdict,
             checksum: blake3::hash(&encoded).to_hex().to_string(),
         })
@@ -2054,9 +2762,9 @@ mod tests {
     #[test]
     fn partial_records_refuse_input_snapshots_that_do_not_contain_the_retained_sources() {
         let (_directory, mut state) = fixture();
-        let mut inputs = serde_json::to_value(&state.record.inputs).unwrap();
-        inputs["files"] = serde_json::json!([]);
-        state.record.inputs = serde_json::from_value(inputs).unwrap();
+        let mut inputs = to_value(&state.record.inputs).unwrap();
+        inputs["files"] = json!([]);
+        state.record.inputs = from_value(inputs).unwrap();
         save(&state);
         let Err(failure) = partial_testing_record(&state.record.base) else {
             panic!("partial evidence cannot pair source outcomes with a missing source generation")
@@ -2167,13 +2875,13 @@ mod tests {
             }
         }
         let path = Utf8Path::new("bounded-state.json");
-        let failure = read_json_from::<serde_json::Value>(path, FailsAtEnd(std::io::Cursor::new(b"null")), 3)
+        let failure = read_json_from::<Value>(path, FailsAtEnd(std::io::Cursor::new(b"null")), 3)
             .expect_err("the first excess byte proves oversize without requesting another byte");
         assert_eq!(
             failure.message(),
             format!("testing state `{path}` exceeds the supported size; start a new campaign")
         );
-        let failure = read_json_from::<serde_json::Value>(path, FailsAtEnd(std::io::Cursor::new(b"null")), 5)
+        let failure = read_json_from::<Value>(path, FailsAtEnd(std::io::Cursor::new(b"null")), 5)
             .expect_err("the terminal reader failure occurs before reaching the sentinel");
         assert_eq!(failure.message(), format!("could not read testing state `{path}`"));
         let failure = fingerprint_from(path, FailsAtEnd(std::io::Cursor::new(b"artifact")))
@@ -2400,7 +3108,7 @@ mod tests {
         );
         let failure = set_phase(base, Phase::Testing).expect_err("a testing phase requires a prepared snapshot");
         assert!(failure.message().contains("testing-session.json"));
-        let failure = read_json::<serde_json::Value>(&base.join("missing")).expect_err("a missing state file cannot be read");
+        let failure = read_json::<Value>(&base.join("missing")).expect_err("a missing state file cannot be read");
         assert!(failure.message().starts_with("could not read testing state"));
     }
 
@@ -2517,7 +3225,7 @@ mod tests {
             loaded.plan.mutants.iter().map(|mutant| mutant.confidence).collect::<Vec<_>>(),
             expected
         );
-        assert!(serde_json::to_value(&settled).unwrap().get("confidence").is_none());
+        assert!(to_value(&settled).unwrap().get("confidence").is_none());
         state.confidences.insert(state.plan.mutants[0].id.clone(), "invalid".into());
         save(&state);
         assert_eq!(
@@ -2538,7 +3246,7 @@ mod tests {
             fs::create_dir_all(&directory).unwrap();
             let library = directory.join(format!("subject.{extension}"));
             fs::write(&library, "prepared library").unwrap();
-            state.workspace["libraries"] = serde_json::json!([directory]);
+            state.workspace["libraries"] = json!([directory]);
             state.artifacts.push(Artifact {
                 generated_output: None,
                 path: library.clone(),
@@ -2809,7 +3517,6 @@ mod tests {
                 stall: Stall::NONE,
                 jobs: 1,
                 meter: false,
-                confirm: state.settings.confirm,
             },
             false,
             &mut state.killers,
@@ -2860,10 +3567,7 @@ mod tests {
         };
         journal.publish_with_cost(&first, &state.killers, Some(prefix.clone())).unwrap();
         let (mut restored, _) = TestingState::load(base).unwrap();
-        assert_eq!(
-            serde_json::to_value(&restored.session.phases.sweep).unwrap(),
-            serde_json::to_value(Some(&prefix)).unwrap(),
-        );
+        assert_eq!(to_value(&restored.session.phases.sweep).unwrap(), to_value(Some(&prefix)).unwrap(),);
         let prior = restored.session.phases.sweep.clone();
         let mut workspace = super::super::workspace::Workspace::adopt(restored.plan.root.clone(), base.join("target"));
         workspace.arm_testing_journal().unwrap();
@@ -2886,10 +3590,7 @@ mod tests {
             1,
         );
         let (mut completed, _) = TestingState::load(base).unwrap();
-        assert_eq!(
-            serde_json::to_value(&completed.session.phases.sweep).unwrap(),
-            serde_json::to_value(&published).unwrap(),
-        );
+        assert_eq!(to_value(&completed.session.phases.sweep).unwrap(), to_value(&published).unwrap(),);
         let total = completed.session.phases.sweep.as_ref().unwrap();
         assert_eq!(
             (total.launches, total.probes, total.launches_saved, total.packages[0].mutants),
@@ -2904,10 +3605,7 @@ mod tests {
             .unwrap(),
             0,
         );
-        assert_eq!(
-            serde_json::to_value(completed.session.phases.sweep).unwrap(),
-            serde_json::to_value(published).unwrap(),
-        );
+        assert_eq!(to_value(completed.session.phases.sweep).unwrap(), to_value(published).unwrap(),);
     }
 
     #[test]
@@ -2917,12 +3615,12 @@ mod tests {
         let base = &state.record.base;
         let (loaded, _) = TestingState::load(base).unwrap();
         assert_eq!(
-            serde_json::to_value(loaded.record.report_info).unwrap(),
-            serde_json::to_value(&state.record.report_info).unwrap(),
+            to_value(loaded.record.report_info).unwrap(),
+            to_value(&state.record.report_info).unwrap(),
         );
-        let mut legacy = serde_json::to_value(&state).unwrap();
+        let mut legacy = to_value(&state).unwrap();
         legacy["record"].as_object_mut().unwrap().remove("report_info");
-        publication::write(&base.join(SNAPSHOT), &serde_json::to_string(&legacy).unwrap()).unwrap();
+        publication::write(&base.join(SNAPSHOT), &to_string(&legacy).unwrap()).unwrap();
         set_phase(base, Phase::Testing).unwrap();
         let (loaded, _) = TestingState::load(base).unwrap();
         assert!(loaded.record.report_info.is_none());
@@ -3055,7 +3753,6 @@ mod tests {
             assert_eq!(loaded.plan.mutants[2].outcome, Outcome::Ignored);
             assert_eq!(loaded.killers.hint("m1").unwrap().test, "test_one");
             assert_eq!(loaded.session.baseline, state.session.baseline);
-            assert_eq!(loaded.settings.confirm, state.settings.confirm);
         }
     }
 
@@ -3174,7 +3871,7 @@ mod tests {
     fn a_checkpoint_write_failure_is_an_error_and_leaves_the_mutant_pending() {
         let (_directory, state) = fixture();
         let journal = TestingJournal {
-            file: File::open(state.record.base.join(JOURNAL)).unwrap(),
+            output: JournalOutput::File(File::open(state.record.base.join(JOURNAL)).unwrap()),
             previous_sweep: None,
             prior_confirmations: std::collections::BTreeSet::new(),
             initial_hints: None,
@@ -3219,7 +3916,7 @@ mod tests {
     #[cfg_attr(miri, ignore = "writes and reloads prepared snapshot files")]
     fn rejects_incompatible_identity_version_platform_and_missing_snapshot() {
         let (_directory, mut state) = fixture();
-        for incompatible in [1, VERSION + 1] {
+        for incompatible in [1, 2, VERSION + 1] {
             state.version = incompatible;
             save(&state);
             assert!(failure(&state.record.base).contains("incompatible"));
@@ -3463,18 +4160,18 @@ mod tests {
         let (_directory, state) = fixture();
         let base = &state.record.base;
         let path = base.join(SNAPSHOT);
-        let mut snapshot: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        snapshot["settings"]["confirm"] = false.into();
-        fs::write(&path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
+        let mut snapshot: Value = from_slice(&fs::read(&path).unwrap()).unwrap();
+        snapshot["settings"]["jobs"] = 99.into();
+        fs::write(&path, to_vec(&snapshot).unwrap()).unwrap();
         assert!(failure(base).contains("integrity"));
         save(&state);
         let mut mutant = state.plan.mutants[0].clone();
         mutant.outcome = Outcome::Survived;
         TestingJournal::open(base, None).unwrap().publish(&mutant, &state.killers).unwrap();
         let path = base.join(JOURNAL);
-        let mut verdict: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let mut verdict: Value = from_slice(&fs::read(&path).unwrap()).unwrap();
         verdict["mutant"]["outcome"] = "Killed".into();
-        let mut bytes = serde_json::to_vec(&verdict).unwrap();
+        let mut bytes = to_vec(&verdict).unwrap();
         bytes.push(b'\n');
         fs::write(path, bytes).unwrap();
         assert!(failure(base).contains("integrity"));

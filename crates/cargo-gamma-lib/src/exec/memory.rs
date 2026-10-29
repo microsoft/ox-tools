@@ -20,8 +20,12 @@
 //! **The limit has to cover the whole descendant tree.** Tests launch servers, databases, helper
 //! programs and nested cargo invocations, and those are exactly where a runaway allocation does the
 //! most damage. Anything that accounts only for the direct child leaves the dangerous case
-//! unbounded, which is why `wait4`, `getrusage` and polling `/proc` are not used here: they
-//! describe one process, and they race short-lived descendants besides.
+//! unbounded. Linux cgroups and Windows jobs account for the tree in the kernel. macOS has no
+//! equivalent boundary, so it samples the whole process group's physical footprint every 10 ms
+//! and sweeps the group when it passes its ceiling. This is a soft bound: allocation can overshoot
+//! between samples, and descendants that leave the group escape accounting. Short-lived peaks can
+//! be missed during baseline calibration; each process's lifetime peak, still readable after it
+//! exits, helps recover them.
 //!
 //! **Support is claimed only where it exists.** cgroup v2 delegation is not universal, and a
 //! container or CI runner may not have it. A run that asked for a memory ceiling and did not get
@@ -165,11 +169,13 @@ impl MemoryPolicy {
         matches!(self.control, MemoryControl::Enforce)
     }
 
-    /// The same policy with all memory control removed, for a host that cannot provide it.
+    /// The same policy with measurement, enforcement, and both explicit ceilings removed.
     #[must_use]
     pub const fn disabled(&self) -> Self {
         Self {
             control: MemoryControl::Off,
+            limit: None,
+            baseline_limit: None,
             ..*self
         }
     }
@@ -299,9 +305,32 @@ mod tests {
 
         assert!(stated.insisted());
 
-        // Disabling preserves everything else, so a degraded run still reports the numbers it was
+        // Disabling preserves calibration settings, so a degraded run still reports the numbers it was
         // configured with rather than silently reverting them too.
         assert!((stated.disabled().multiplier - stated.multiplier).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn disabling_removes_both_limits_and_preserves_the_other_fields() {
+        let policy = MemoryPolicy {
+            control: MemoryControl::Enforce,
+            demand: Demand::Stated,
+            multiplier: 3.5,
+            headroom: 456,
+            limit: Some(100),
+            baseline_limit: Some(200),
+        };
+        assert_eq!(
+            policy.disabled(),
+            MemoryPolicy {
+                control: MemoryControl::Off,
+                demand: Demand::Stated,
+                multiplier: 3.5,
+                headroom: 456,
+                limit: None,
+                baseline_limit: None,
+            }
+        );
     }
 
     /// A small baseline peak is governed by the absolute headroom, not by the multiplier.

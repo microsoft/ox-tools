@@ -389,11 +389,15 @@ impl CfgSet {
 /// evidence that code should be omitted from the population.
 fn cfg_predicate(attribute: &Meta) -> Option<Meta> {
     let Meta::List(list) = attribute else {
-        return None;
+        return
+        // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+        None;
     };
 
     if !attribute.path().is_ident("cfg") {
-        return None;
+        return
+        // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+        None;
     }
 
     list.parse_args::<Meta>().ok()
@@ -405,11 +409,15 @@ fn cfg_predicate(attribute: &Meta) -> Option<Meta> {
 /// just like an unparsable `cfg`: it must not shrink the population on a guess.
 fn cfg_attr(attribute: &Meta) -> Option<(Meta, Vec<Meta>)> {
     let Meta::List(list) = attribute else {
-        return None;
+        return
+        // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+        None;
     };
 
     if !attribute.path().is_ident("cfg_attr") {
-        return None;
+        return
+        // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+        None;
     }
 
     let parser = Punctuated::<Meta, Token![,]>::parse_terminated;

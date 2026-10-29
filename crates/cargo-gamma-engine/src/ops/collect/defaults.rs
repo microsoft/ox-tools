@@ -99,7 +99,9 @@ impl DefaultPaths {
         let mut segments: Vec<String> = path.segments.iter().map(|segment| segment.ident.to_string()).collect();
 
         if segments.pop().as_deref() != Some("default") {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         }
 
         self.is_standard_callee_segments(&segments)
@@ -107,7 +109,9 @@ impl DefaultPaths {
 
     pub(super) fn is_standard_default_segments(&self, segments: &[String]) -> bool {
         let Some((method, qualifier)) = segments.split_last() else {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         };
 
         method == "default" && self.is_standard_callee_segments(qualifier)
@@ -133,10 +137,14 @@ impl DefaultPaths {
         } else if is_standard_module_path(&path) {
             let _replaced = self.module_aliases.insert(binding.clone(), path);
 
-            if binding == "Default" {
+            if
+            // #[gamma::skip(cond.always_true, reason = "These guards control insertion of shadow-set entries for bindings other than Default. Every meaningful shadow query either checks the literal Default, or checks a name only after name==Default. Additional non-Default entries therefore cannot change any result.", tag = "equivalent")]
+            binding == "Default" {
                 let _added = self.shadows.insert(binding);
             }
-        } else if binding == "Default" {
+        } else if
+        // #[gamma::skip(cond.always_true, reason = "These guards control insertion of shadow-set entries for bindings other than Default. Every meaningful shadow query either checks the literal Default, or checks a name only after name==Default. Additional non-Default entries therefore cannot change any result.", tag = "equivalent")]
+        binding == "Default" {
             let _added = self.shadows.insert(binding.clone());
             let _added = self.derive_shadows.insert(binding);
         }
@@ -567,7 +575,9 @@ impl Defaults {
     #[must_use]
     pub fn lacks_default(&self, ty: &Type) -> bool {
         let Some(name) = unqualified_name_of(ty) else {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         };
 
         self.lacks_default_name(&name)
@@ -582,7 +592,9 @@ impl Defaults {
     /// Exact source-local paths are useful only before indexes with unknown module roots merge.
     pub(crate) fn lacks_local_path(&self, path: &[String]) -> bool {
         if !self.is_complete() {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         }
         if let Some(identities) = &self.identities {
             return identities.default_for(path) == Some(false);
@@ -603,16 +615,40 @@ impl Defaults {
     }
 
     fn note_default_aliases(&mut self) {
+        // Initial names plus all alias-target edges and at most one edge per local import bound
+        // the popped work, including duplicate names. This assertion is test-only.
+        #[cfg(test)]
+        let mut remaining = self.defaulted.len() + self.alias_targets.values().map(HashSet::len).sum::<usize>() + self.local_imports.len();
+        self.note_default_aliases_with(|_| {
+            #[cfg(test)]
+            {
+                assert!(remaining > 0, "each default alias edge can be enqueued only once");
+                remaining -= 1;
+            }
+        });
+    }
+
+    /// Reports each popped name before deduplication, including repeated names, so deterministic
+    /// progress tests observe queued work rather than only newly discovered aliases.
+    fn note_default_aliases_with(&mut self, mut on_visit: impl FnMut(&str)) {
         let mut pending = self.defaulted.iter().cloned().collect::<Vec<_>>();
         let mut seen = HashSet::default();
         while let Some(name) = pending.pop() {
-            if seen.insert(name.clone())
-                && let Some(targets) = self.alias_targets.get(&name)
-            {
+            on_visit(&name);
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            if let Some(targets) = self.alias_targets.get(&name) {
                 for target in targets {
                     let _uncertain = self.uncertain_types.insert(target.clone());
                     pending.push(target.clone());
                 }
+            }
+            if let Some(Some(target)) = self.local_imports.get(&name)
+                && target != &name
+            {
+                let _uncertain = self.uncertain_types.insert(target.clone());
+                pending.push(target.clone());
             }
         }
     }
@@ -640,9 +676,12 @@ impl Defaults {
         self.completeness = self.completeness.merge(other.completeness);
         let collisions = self.defined.intersection(&other.defined).cloned().collect::<Vec<_>>();
         for name in collisions {
-            if self.ambiguous.contains(&name)
-                || other.ambiguous.contains(&name)
-                || self.defaulted.contains(&name) != other.defaulted.contains(&name)
+            if
+            // #[gamma::skip(logical.or_remove_left, reason = "An existing ambiguity is already retained in self.ambiguous, and every incoming ambiguity is unconditionally extended immediately after the collision loop. Omitting or conjoining these redundant collision tests does not change the final set; default-status disagreement is the only new ambiguity this loop needs to add.", tag = "equivalent")]
+            (
+                // #[gamma::skip(logical.or_remove_left, logical.or_remove_right, logical.or_to_and, reason = "An existing ambiguity is already retained in self.ambiguous, and every incoming ambiguity is unconditionally extended immediately after the collision loop. Omitting or conjoining these redundant collision tests does not change the final set; default-status disagreement is the only new ambiguity this loop needs to add.", tag = "equivalent")]
+                self.ambiguous.contains(&name) || other.ambiguous.contains(&name)
+            ) || self.defaulted.contains(&name) != other.defaulted.contains(&name)
             {
                 let _inserted = self.ambiguous.insert(name);
             }
@@ -659,10 +698,12 @@ impl Defaults {
             self.alias_targets.entry(name).or_default().extend(targets);
         }
         for (name, target) in other.local_imports {
+            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
             merge_alias(&mut self.local_imports, name, target);
         }
 
         for (alias, error) in other.result_error {
+            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
             merge_alias(&mut self.result_error, alias, error);
         }
         self.note_default_aliases();
@@ -675,21 +716,49 @@ impl Defaults {
     #[must_use]
     pub fn lacks_error_default(&self, name: &str) -> bool {
         if !self.completeness.supplies_negative_evidence() || self.indirect.contains("*") {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         }
+        // At most one step per local import plus the terminal or repeated name.
+        #[cfg(test)]
+        let mut remaining = self.local_imports.len() + 1;
+        self.lacks_error_default_with(name, |_| {
+            #[cfg(test)]
+            {
+                assert!(remaining > 0, "local import lookup must stop at the first repeated name");
+                remaining -= 1;
+            }
+        })
+    }
+
+    /// Reports each name lookup before cycle deduplication, including the terminating repeat,
+    /// so tests can assert finite import traversal without changing evidence policy.
+    fn lacks_error_default_with(&self, name: &str, mut on_visit: impl FnMut(&str)) -> bool {
         let mut name = name;
         let mut seen = HashSet::default();
-        loop {
-            if !seen.insert(name) || self.aliases.contains(name) || self.uncertain_types.contains(name) {
-                return false;
+        while {
+            on_visit(name);
+            seen.insert(name)
+        } {
+            if self.aliases.contains(name) || self.uncertain_types.contains(name) {
+                return
+                // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+                false;
             }
             if self.indirect.contains(name) {
                 let Some(Some(target)) = self.local_imports.get(name) else {
-                    return false;
+                    return
+                    // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+                    false;
                 };
                 if target != name {
-                    if self.defined.contains(name) && (self.defaulted.contains(name) || self.ambiguous.contains(name)) {
-                        return false;
+                    if
+                    // #[gamma::skip(logical.and_remove_left, reason = "Both defaulted and ambiguous names come from defined declarations; either already implies defined membership.", tag = "equivalent")]
+                    self.defined.contains(name) && (self.defaulted.contains(name) || self.ambiguous.contains(name)) {
+                        return
+                        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+                        false;
                     }
                     name = target;
                     continue;
@@ -697,6 +766,7 @@ impl Defaults {
             }
             return self.defined.contains(name) && !self.defaulted.contains(name);
         }
+        false
     }
 
     /// Returns whether the workspace declares a type with this unqualified name.
@@ -876,6 +946,7 @@ impl<'ast> Visit<'ast> for Defaults {
             if let Some(error) = defaulted.or(written) {
                 // One file can hold two aliases of the same name, in separate modules, just as two
                 // files can. Both go through the same demotion.
+                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                 merge_alias(&mut self.result_error, node.ident.to_string(), Some(error));
             }
         }
@@ -887,7 +958,11 @@ impl<'ast> Visit<'ast> for Defaults {
     fn visit_item_use(&mut self, node: &'ast syn::ItemUse) {
         fn names(tree: &syn::UseTree, into: &mut HashSet<String>) {
             match tree {
-                syn::UseTree::Path(path) => names(&path.tree, into),
+                syn::UseTree::Path(path) =>
+                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
+                {
+                    names(&path.tree, into);
+                }
                 syn::UseTree::Name(name) => {
                     let _inserted = into.insert(name.ident.to_string());
                 }
@@ -899,6 +974,7 @@ impl<'ast> Visit<'ast> for Defaults {
                 }
                 syn::UseTree::Group(group) => {
                     for tree in &group.items {
+                        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                         names(tree, into);
                     }
                 }
@@ -908,6 +984,7 @@ impl<'ast> Visit<'ast> for Defaults {
             match tree {
                 syn::UseTree::Path(path) => {
                     prefix.push(path.ident.to_string());
+                    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                     targets(&path.tree, prefix, into);
                     let _last = prefix.pop();
                 }
@@ -929,6 +1006,7 @@ impl<'ast> Visit<'ast> for Defaults {
                 }
                 syn::UseTree::Group(group) => {
                     for tree in &group.items {
+                        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                         targets(tree, prefix, into);
                     }
                 }
@@ -938,8 +1016,10 @@ impl<'ast> Visit<'ast> for Defaults {
         if self.cfg.skip_gate(&node.attrs) {
             return;
         }
+        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
         names(&node.tree, &mut self.indirect);
         let mut imports = Vec::new();
+        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
         targets(&node.tree, &mut Vec::new(), &mut imports);
         for (name, path) in imports {
             let local = node.leading_colon.is_none()
@@ -950,6 +1030,7 @@ impl<'ast> Visit<'ast> for Defaults {
                             .as_ref()
                             .is_some_and(|identities| identities.local_module(&self.module_path, root))
                 });
+            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
             merge_alias(&mut self.local_imports, name, local.then(|| path.last().cloned()).flatten());
         }
     }
@@ -993,7 +1074,9 @@ fn name_of(ty: &Type) -> Option<String> {
 /// index.
 fn unqualified_name_of(ty: &Type) -> Option<String> {
     match ty {
-        Type::Path(path) if path.qself.is_none() => path.path.get_ident().map(ToString::to_string),
+        Type::Path(path) if
+        // #[gamma::skip(match_guard.always_true, reason = "These sites independently require Path::get_ident/is_ident after the qself guard. On parsed syn paths, <Owner>::Name has a leading_colon, so get_ident/is_ident rejects it independently; <Owner as Trait>::Name contains at least two segments and is also rejected independently. The prior simple qualified-name negative assertions therefore never distinguished this guard. The proof is for parsed production inputs, not artificially inconsistent manually constructed paths.", tag = "equivalent")]
+        path.qself.is_none() => path.path.get_ident().map(ToString::to_string),
         Type::Paren(paren) => unqualified_name_of(&paren.elem),
         Type::Group(group) => unqualified_name_of(&group.elem),
         _ => None,
@@ -1003,11 +1086,18 @@ fn unqualified_name_of(ty: &Type) -> Option<String> {
 /// The name of a type's `index`th generic argument.
 fn payload_name(ty: &Type, index: usize) -> Option<String> {
     let Type::Path(path) = ty else {
-        return None;
+        return
+        // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+        None;
     };
 
-    let syn::PathArguments::AngleBracketed(args) = &path.path.segments.last()?.arguments else {
-        return None;
+    let syn::PathArguments::AngleBracketed(args) = &
+    // #[gamma::skip(try.propagate_to_unwrap, reason = "payload_name is called on a source-parsed alias target. A parsed Type::Path has at least one segment, so segments.last() cannot fail on this call path.", tag = "equivalent")]
+    path.path.segments.last()?.arguments
+    else {
+        return
+        // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+        None;
     };
 
     args.args
@@ -1023,6 +1113,43 @@ fn payload_name(ty: &Type, index: usize) -> Option<String> {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use proc_macro2::TokenStream;
+    use syn::{parse_file, parse_quote};
+
+    use super::*;
+
+    #[test]
+    fn default_implementations_through_renamed_imports_prevent_false_negative_target_evidence() {
+        for source in [
+            "struct Error; use self::Error as Alias; impl Default for Alias { fn default() -> Self { Error } }",
+            "struct Error; use self::Error as Middle; use self::Middle as Alias;
+             impl Default for Alias { fn default() -> Self { Error } }",
+        ] {
+            let defaults = super::Defaults::of(&syn::parse_file(source).unwrap());
+            for name in ["Alias", "Error"] {
+                assert!(!defaults.lacks_error_default(name), "{source}: {name}");
+            }
+            assert!(defaults.generic_default_is_unproven("Error"));
+        }
+        let mut defaults = super::Defaults::of(&syn::parse_file("struct Error;").unwrap());
+        assert!(defaults.lacks_error_default("Error"));
+        defaults.absorb(super::Defaults::of(
+            &syn::parse_file("use crate::Error as Alias; impl Default for Alias { fn default() -> Self { Self } }").unwrap(),
+        ));
+        assert!(!defaults.lacks_error_default("Error"));
+
+        let defaults = super::Defaults::of(
+            &syn::parse_file(
+                "struct Error; mod implementation {
+                    use crate::Error; impl core::default::Default for Error { fn default() -> Self { Self } }
+                 }",
+            )
+            .unwrap(),
+        );
+        assert!(defaults.has_default_name("Error"));
+        assert!(!defaults.generic_default_is_unproven("Error"));
+    }
+
     #[test]
     fn imported_error_names_follow_unambiguous_local_targets_but_not_conflicting_defaults() {
         let mut defaults = super::Defaults::of(&syn::parse_file("struct Error; use self::Error as Alias;").unwrap());
@@ -1052,10 +1179,214 @@ mod tests {
         assert!(index.lacks_default(&syn::parse_quote!(Missing)));
     }
 
-    use proc_macro2::TokenStream;
-    use syn::{parse_file, parse_quote};
+    #[test]
+    fn source_aliases_preserve_both_nominal_and_resource_evidence_without_poisoning_self_aliases() {
+        for report in ["src\\lib.rs", "display\\lib.rs"] {
+            let mut defaults = Defaults::of_source_in(
+                &parse_file("struct Record; enum Choice { A }").unwrap(),
+                &CfgSet::unconditional(),
+                "src\\lib.rs",
+            );
+            defaults.bind_sources(&[("src\\lib.rs".into(), "src\\lib.rs".into(), Vec::new())]);
+            defaults.alias_source("src\\lib.rs", report);
+            assert_eq!(defaults.source_default(report, &[], &["Record".into()]), Some(false));
+            assert!(defaults.resource_namespace_transparent(report, &[]));
+            assert!(defaults.source_is_enum(report, &[], &["Choice".into()]));
+            assert!(!defaults.source_is_enum(report, &[], &["Record".into()]));
+        }
+    }
 
-    use super::*;
+    #[test]
+    fn extending_resource_evidence_shares_namespaces_but_not_nominal_type_claims() {
+        let cfg = CfgSet::unconditional();
+        let mut root = Defaults::of_source_in(&parse_file("mod child;").unwrap(), &cfg, "lib.rs");
+        let child = Defaults::of_source_in(&parse_file("struct Record;").unwrap(), &cfg, "child.rs");
+        root.extend_resource_evidence(&child);
+        root.bind_sources(&[
+            ("lib.rs".into(), "lib.rs".into(), Vec::new()),
+            ("child.rs".into(), "lib.rs".into(), vec!["child".into()]),
+        ]);
+        assert!(root.resource_namespace_transparent("child.rs", &[]));
+        assert_eq!(root.source_default("child.rs", &[], &["Record".into()]), None);
+    }
+
+    #[test]
+    fn default_implementations_through_alias_chains_make_every_underlying_name_uncertain() {
+        let file = parse_file(
+            "struct Real; type Middle = Real; type Outer = Middle;
+             impl Default for Outer { fn default() -> Self { Real } }",
+        )
+        .unwrap();
+        let defaults = Defaults::of(&file);
+        for name in ["Middle", "Real"] {
+            assert!(defaults.generic_default_is_unproven(name), "{name}");
+            assert!(!defaults.lacks_error_default(name), "{name}");
+        }
+        let mut combined = Defaults::of(&parse_file("struct Real; type Middle = Real; type Outer = Middle;").unwrap());
+        combined.absorb(Defaults::of(
+            &parse_file("impl Default for Outer { fn default() -> Self { Real } }").unwrap(),
+        ));
+        assert!(combined.generic_default_is_unproven("Real"));
+        assert!(!combined.lacks_error_default("Real"));
+    }
+
+    #[test]
+    fn default_alias_worklist_skips_repeated_names_without_abandoning_pending_siblings() {
+        let mut defaults = Defaults {
+            defaulted: HashSet::from_iter(["Root".into()]),
+            alias_targets: HashMap::from_iter([
+                ("Root".into(), HashSet::from_iter(["Deferred".into()])),
+                ("Cycle".into(), HashSet::from_iter(["Cycle".into()])),
+            ]),
+            local_imports: HashMap::from_iter([("Root".into(), Some("Cycle".into()))]),
+            ..Defaults::default()
+        };
+        let expected = ["Root", "Cycle", "Cycle", "Deferred"];
+        let mut visits = 0;
+        defaults.note_default_aliases_with(|name| {
+            assert_eq!(Some(name), expected.get(visits).copied(), "alias visit {visits}");
+            visits += 1;
+        });
+        assert_eq!(visits, expected.len());
+        assert_eq!(defaults.uncertain_types, HashSet::from_iter(["Cycle".into(), "Deferred".into()]));
+    }
+
+    #[test]
+    fn partial_and_merged_indexes_do_not_claim_single_source_or_foreign_path_negative_evidence() {
+        let mut defaults = Defaults::of(&parse_file("struct Missing;").unwrap());
+        assert!(defaults.has_single_source_evidence());
+        defaults.mark_incomplete();
+        assert!(!defaults.has_single_source_evidence());
+        assert!(!defaults.lacks_local_path(&["crate".into(), "Missing".into()]));
+        let mut defaults = Defaults::of(&parse_file("struct Missing;").unwrap());
+        defaults.absorb(Defaults::of(&parse_file("").unwrap()));
+        assert!(!defaults.has_single_source_evidence());
+        assert_eq!(defaults.local_default(&["Missing".into()]), None);
+        assert!(defaults.lacks_local_path(&["crate".into(), "Missing".into()]));
+        assert!(!defaults.lacks_local_path(&["external".into(), "Missing".into()]));
+        assert!(!defaults.lacks_default(&parse_quote!(<Owner>::Missing)));
+    }
+
+    #[test]
+    fn an_empty_accumulator_adopts_the_first_sources_exact_declaration_identity() {
+        let mut defaults = Defaults::default();
+        defaults.absorb(Defaults::of(&parse_file("struct Missing;").unwrap()));
+        assert!(defaults.has_single_source_evidence());
+        assert_eq!(defaults.local_default(&["Missing".into()]), Some(false));
+    }
+
+    #[test]
+    fn absorbed_conditional_and_generic_impl_uncertainty_remain_independent() {
+        let mut defaults = Defaults::of(&parse_file("struct Existing;").unwrap());
+        defaults.absorb(Defaults::of(
+            &parse_file("#[cfg_attr(feature = \"maybe\", derive(Default))] struct Conditional;").unwrap(),
+        ));
+        assert!(defaults.generic_default_is_unproven("Conditional"));
+        defaults.absorb(Defaults::of(
+            &parse_file(
+                "struct Generic<T>(core::marker::PhantomData<T>);
+             impl<T> Default for Generic<T> { fn default() -> Self { Self(core::marker::PhantomData) } }",
+            )
+            .unwrap(),
+        ));
+        assert!(defaults.generic_default_is_unproven("Generic"));
+    }
+
+    #[test]
+    fn generic_impl_uncertainty_checks_parameters_and_where_clauses_separately() {
+        let defaults = Defaults::of(
+            &parse_file(
+                "struct Plain; impl Default for Plain { fn default() -> Self { Plain } }
+             struct Constrained; impl Default for Constrained where u8: Copy { fn default() -> Self { Constrained } }",
+            )
+            .unwrap(),
+        );
+        assert!(!defaults.generic_default_is_unproven("Plain"));
+        assert!(defaults.generic_default_is_unproven("Constrained"));
+    }
+
+    #[test]
+    fn local_import_chains_keep_uniform_negative_evidence_and_reject_cycles() {
+        let defaults = Defaults::of(
+            &parse_file(
+                "struct Error; use self::Error as First; use self::First as Second;
+             mod one { pub struct Alias; }
+             mod two { pub struct Other; use self::Other as Alias; }
+             use self::CycleB as CycleA; use self::CycleA as CycleB;",
+            )
+            .unwrap(),
+        );
+        assert!(defaults.lacks_error_default("Second"));
+        assert!(defaults.lacks_error_default("Alias"));
+        assert!(!defaults.lacks_error_default("CycleA"));
+        assert!(!defaults.lacks_error_default("Unknown"));
+    }
+
+    #[test]
+    fn local_import_cycles_stop_on_the_first_revisited_name() {
+        let defaults = Defaults::of(&parse_file("use self::Second as First; use self::First as Second;").unwrap());
+        let expected = ["First", "Second", "First"];
+        let mut visits = 0;
+        assert!(!defaults.lacks_error_default_with("First", |name| {
+            assert_eq!(Some(name), expected.get(visits).copied(), "import visit {visits}");
+            visits += 1;
+        }));
+        assert_eq!(visits, expected.len());
+    }
+
+    #[test]
+    fn grouped_self_imports_keep_the_introduced_module_and_alias_names_exact() {
+        let defaults = Defaults::of(
+            &parse_file(
+                "mod errors { pub struct Error; }
+             use self::errors::{self, self as local, Error as First, Error as Second};",
+            )
+            .unwrap(),
+        );
+        assert_eq!(defaults.local_imports.get("errors"), Some(&Some("errors".into())));
+        assert_eq!(defaults.local_imports.get("local"), Some(&Some("errors".into())));
+        assert_eq!(defaults.local_imports.get("First"), Some(&Some("Error".into())));
+        assert_eq!(defaults.local_imports.get("Second"), Some(&Some("Error".into())));
+        assert!(defaults.lacks_error_default("First"));
+        assert!(defaults.lacks_error_default("Second"));
+    }
+
+    #[test]
+    fn absolute_external_imports_and_configured_out_imports_cannot_override_local_type_evidence() {
+        let defaults = Defaults::of(
+            &parse_file(
+                "mod errors { pub struct Error; }
+             use ::errors::Error as External;
+             use errors::Error as Local;
+             mod outer { mod errors { pub struct NestedError; } use errors::NestedError as Nested; }",
+            )
+            .unwrap(),
+        );
+        assert!(!defaults.lacks_error_default("External"));
+        assert!(defaults.lacks_error_default("Local"));
+        assert!(defaults.lacks_error_default("Nested"));
+        let defaults = Defaults::of_in(
+            &parse_file("struct Error; #[cfg(any())] use external::Other as Error;").unwrap(),
+            &CfgSet::parse(""),
+        );
+        assert!(defaults.lacks_error_default("Error"));
+    }
+
+    #[test]
+    fn nested_module_imports_resolve_roots_that_do_not_exist_at_the_crate_root() {
+        let defaults = Defaults::of(&parse_file("mod outer { mod errors { pub struct Error; } use errors::Error as Nested; }").unwrap());
+        assert_eq!(defaults.local_imports.get("Nested"), Some(&Some("Error".into())));
+        assert!(defaults.lacks_error_default("Nested"));
+    }
+
+    #[test]
+    fn enum_declarations_supply_default_evidence_for_both_positive_and_negative_cases() {
+        let defaults = Defaults::of(&parse_file("enum Missing { A } #[derive(Default)] enum Ready { #[default] A }").unwrap());
+        assert!(defaults.defines("Missing"));
+        assert!(defaults.lacks_default(&parse_quote!(Missing)));
+        assert!(defaults.declares_default_name("Ready"));
+        assert!(!defaults.lacks_default(&parse_quote!(Ready)));
+    }
 
     #[test]
     fn single_source_negative_evidence_requires_the_qualified_declaration() {

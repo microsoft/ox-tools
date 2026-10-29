@@ -7,7 +7,6 @@ use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode, Output, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::{env, fs, io};
 
 use cargo_coverage_gate::filter_lcov_many;
@@ -16,8 +15,12 @@ use ohno::{AppError, EnrichableExt as _, IntoAppError};
 use semver::Version;
 
 use crate::cli::{CollectionArgs, CoverageGateArgs, FeatureConfiguration};
+#[cfg(any(windows, test))]
+use crate::report_file::TemporaryPath;
+#[cfg(test)]
+use crate::report_file::{SynchronizedWrite, missing_lcov_parent_error, write_temporary_contents};
+use crate::report_file::{TEMPORARY_SEQUENCE, publish_reports, reserve_temporary_sequence};
 
-static TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const MIN_CARGO_LLVM_COV_VERSION: &str = "0.9.0";
 const METADATA_LOAD_CONTEXT: &str = "failed to load cargo workspace metadata";
 const NEXTEST_DESCRIPTION: &str = "cargo llvm-cov nextest";
@@ -27,10 +30,6 @@ const RUSTC_TARGET_LIBDIR_PARENT_ERROR: &str = "rustc target-libdir output had n
 
 fn diagnostic_path(path: &Path) -> String {
     crate::package_glob::diagnostic(&path.display().to_string())
-}
-
-fn missing_lcov_parent_error(path: &Path) -> AppError {
-    AppError::new(format!("LCOV path `{}` has no parent directory", diagnostic_path(path)))
 }
 
 pub(crate) fn run(args: &CoverageGateArgs, collection: &CollectionArgs) -> Result<ExitCode, AppError> {
@@ -92,10 +91,39 @@ pub(crate) fn run(args: &CoverageGateArgs, collection: &CollectionArgs) -> Resul
     for configuration in configurations {
         collected.push(collect_configuration(&execution, configuration)?);
     }
-    let lcov_paths = filter_and_publish_reports(&execution, &collected)?;
+    let evaluation = filter_then_evaluate(&execution, &collected, |lcov_paths| {
+        crate::run::evaluate_filtered_paths(args, lcov_paths, &selection.gated_names(), Some(&effective_target.triple), |path| {
+            fs::read_to_string(path)
+        })
+    });
+    complete_collection(evaluation, || coverage_scratch.cleanup())
+}
 
-    let evaluation = crate::run::evaluate_filtered_paths(args, &lcov_paths, &selection.gated_names(), Some(&effective_target.triple));
-    combine_evaluation_and_cleanup(evaluation, coverage_scratch.cleanup()).complete()
+fn complete_collection(
+    evaluation: Result<Result<ExitCode, AppError>, AppError>,
+    cleanup: impl FnOnce() -> Result<(), AppError>,
+) -> Result<ExitCode, AppError> {
+    let evaluation = evaluation?;
+    combine_evaluation_and_cleanup(evaluation, cleanup()).complete()
+}
+
+fn filter_then_evaluate(
+    execution: &CollectionExecution<'_>,
+    collected: &[CollectedReport],
+    evaluate: impl FnOnce(&[PathBuf]) -> Result<ExitCode, AppError>,
+) -> Result<Result<ExitCode, AppError>, AppError> {
+    filter_then_evaluate_with(execution, collected, filter_and_publish_reports, evaluate)
+}
+
+fn filter_then_evaluate_with(
+    execution: &CollectionExecution<'_>,
+    collected: &[CollectedReport],
+    publish: impl FnOnce(&CollectionExecution<'_>, &[CollectedReport]) -> Result<Vec<PathBuf>, AppError>,
+    evaluate: impl FnOnce(&[PathBuf]) -> Result<ExitCode, AppError>,
+) -> Result<Result<ExitCode, AppError>, AppError> {
+    // Publication failures return before evaluation; gate failures still need explicit scratch cleanup.
+    let paths = publish(execution, collected)?;
+    Ok(evaluate(&paths))
 }
 
 fn prepare_collection(
@@ -621,25 +649,16 @@ fn filter_and_publish_reports_with_reader(
     let raw_refs = raw.iter().map(String::as_str).collect::<Vec<_>>();
     let manifest = execution.workspace.root.join("Cargo.toml");
     let filtered = filter(&raw_refs, &manifest)?;
-    let mut staged = Vec::with_capacity(collected.len());
-    for (index, report) in collected.iter().enumerate() {
+    publish_reports(collected.iter().enumerate().map(|(index, report)| {
         let contents = filtered
             .get(index)
             .expect("filter_lcov_many preserves one output for every input tracefile");
-        let directory = report
-            .stable_path
-            .parent()
-            .ok_or_else(|| missing_lcov_parent_error(&report.stable_path))?;
-        let temporary = TemporaryPath::write(
-            directory,
-            &format!("{}-filtered.info", report.configuration.artifact_name()),
-            contents.as_bytes(),
-        )?;
-        staged.push((temporary, report.stable_path.clone()));
-    }
-    for (temporary, target) in staged {
-        temporary.publish(&target)?;
-    }
+        (
+            report.stable_path.as_path(),
+            format!("{}-filtered.info", report.configuration.artifact_name()),
+            contents.as_str(),
+        )
+    }))?;
     Ok(collected.iter().map(|report| report.stable_path.clone()).collect())
 }
 
@@ -1148,84 +1167,6 @@ fn command_display(command: &Command) -> String {
 }
 
 #[derive(Debug)]
-struct TemporaryPath {
-    path: PathBuf,
-    armed: bool,
-}
-
-/// A temporary-file writer boundary that makes durability failures independently testable.
-trait SynchronizedWrite: io::Write {
-    fn sync_all(&self) -> io::Result<()>;
-}
-
-impl SynchronizedWrite for fs::File {
-    #[mutants::skip] // Trivial File delegation; the injected writer test double covers synchronization failures.
-    fn sync_all(&self) -> io::Result<()> {
-        Self::sync_all(self)
-    }
-}
-
-impl TemporaryPath {
-    fn new(directory: &Path, label: &str) -> Self {
-        let sequence = reserve_temporary_sequence(&TEMPORARY_SEQUENCE);
-        Self {
-            path: directory.join(format!(".coverage-gate-{}-{sequence}-{label}", std::process::id())),
-            armed: true,
-        }
-    }
-
-    fn write(directory: &Path, label: &str, contents: &[u8]) -> Result<Self, AppError> {
-        let (temporary, mut file) = Self::create(directory, label)?;
-        Self::finish_write(temporary, &mut file, contents)
-    }
-
-    fn finish_write(temporary: Self, writer: &mut impl SynchronizedWrite, contents: &[u8]) -> Result<Self, AppError> {
-        write_temporary_contents(&temporary, writer, contents)?;
-        Ok(temporary)
-    }
-
-    fn create(directory: &Path, label: &str) -> Result<(Self, fs::File), AppError> {
-        let temporary = Self::new(directory, label);
-        let file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(temporary.path())
-            .into_app_err(format!("failed to create temporary file `{}`", temporary.path().display()))?;
-        Ok((temporary, file))
-    }
-
-    fn path(&self) -> &Path {
-        &self.path
-    }
-
-    fn publish(self, target: &Path) -> Result<(), AppError> {
-        fs::rename(&self.path, target).into_app_err(format!(
-            "failed to publish staged coverage report `{}` to `{}`",
-            self.path.display(),
-            target.display()
-        ))?;
-        Ok(())
-    }
-}
-
-impl Drop for TemporaryPath {
-    fn drop(&mut self) {
-        if self.armed {
-            let _ = fs::remove_file(&self.path);
-        }
-    }
-}
-
-fn write_temporary_contents(temporary: &TemporaryPath, writer: &mut impl SynchronizedWrite, contents: &[u8]) -> Result<(), AppError> {
-    writer
-        .write_all(contents)
-        .into_app_err(format!("failed to write temporary file `{}`", temporary.path().display()))?;
-    writer
-        .sync_all()
-        .into_app_err(format!("failed to flush temporary file `{}`", temporary.path().display()))
-}
-
-#[derive(Debug)]
 struct TemporaryDirectory {
     path: PathBuf,
     armed: bool,
@@ -1268,8 +1209,25 @@ impl TemporaryDirectory {
     }
 
     fn cleanup(self) -> Result<(), AppError> {
-        remove_dir_if_present(&self.path).into_app_err(format!("failed to remove isolated coverage target `{}`", self.path.display()))
+        self.cleanup_with(remove_dir_if_present)
     }
+
+    fn cleanup_with(mut self, remove: impl FnOnce(&Path) -> io::Result<()>) -> Result<(), AppError> {
+        // Windows explicit cleanup owns the full attempt budget; other platforms retain the Drop fallback.
+        self.armed = !cfg!(windows);
+        let result = remove(&self.path);
+        let context = cleanup_error_context(&self.path, result.as_ref().err());
+        result.into_app_err(context)
+    }
+}
+
+fn cleanup_error_context(path: &Path, error: Option<&io::Error>) -> String {
+    let guidance = if cfg!(windows) && error.is_some_and(|error| error.raw_os_error() == Some(32)) {
+        "; release any process handles to this directory and retry cleanup"
+    } else {
+        ""
+    };
+    format!("failed to remove isolated coverage target `{}`{guidance}", path.display())
 }
 
 impl Drop for TemporaryDirectory {
@@ -1280,6 +1238,12 @@ impl Drop for TemporaryDirectory {
     }
 }
 
+#[cfg(windows)]
+fn remove_dir_if_present(path: &Path) -> io::Result<()> {
+    remove_windows_dir_if_present_with(path, |path| fs::remove_dir_all(path), std::thread::sleep)
+}
+
+#[cfg(not(windows))]
 fn remove_dir_if_present(path: &Path) -> io::Result<()> {
     match fs::remove_dir_all(path) {
         Ok(()) => Ok(()),
@@ -1288,8 +1252,34 @@ fn remove_dir_if_present(path: &Path) -> io::Result<()> {
     }
 }
 
-fn reserve_temporary_sequence(sequence: &AtomicU64) -> u64 {
-    sequence.fetch_add(1, Ordering::Relaxed)
+#[cfg(any(windows, test))]
+/// Injected removal and waiting let tests exercise the production Windows retry policy deterministically on every host.
+fn remove_windows_dir_if_present_with(
+    path: &Path,
+    mut remove: impl FnMut(&Path) -> io::Result<()>,
+    mut wait: impl FnMut(std::time::Duration),
+) -> io::Result<()> {
+    // Bounded retries let transient Windows handles close without hiding persistent locks.
+    const MAX_RETRIES: u32 = 4;
+    let mut retry = 0;
+    loop {
+        match remove(path) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) if retry >= MAX_RETRIES => return Err(error),
+            Err(error) if error.raw_os_error() == Some(32) => {
+                let delay = std::time::Duration::from_millis(200 << retry);
+                eprintln!(
+                    "warning: sharing violation while removing coverage target `{}`: {error}; retrying in {} ms",
+                    path.display(),
+                    delay.as_millis()
+                );
+                wait(delay);
+                retry += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1302,6 +1292,7 @@ mod tests {
     #[cfg(windows)]
     use std::os::windows::process::ExitStatusExt as _;
     use std::process::{ExitStatus, id as process_id};
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     use tempfile::tempdir;
 
@@ -1309,6 +1300,58 @@ mod tests {
 
     const RAW_ALL_FEATURES: &str = "TN:all-features\nSF:fixture.rs\nDA:1,1\nend_of_record\n";
     const RAW_NO_DEFAULT: &str = "TN:no-default\nSF:fixture.rs\nDA:1,1\nend_of_record\n";
+
+    #[test]
+    fn survivor_publication_filter_preserves_exact_manifest_and_failure_context_without_outputs() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let workspace = workspace(root);
+        let selection = Selection {
+            explicit: false,
+            members: workspace.members.clone(),
+        };
+        let args = collection_args();
+        let tools = ToolPrograms {
+            cargo: OsString::from("never-invoked"),
+            rustc: OsString::from("never-invoked"),
+        };
+        let execution = CollectionExecution {
+            workspace: &workspace,
+            selection: &selection,
+            args: &args,
+            scratch_dir: root,
+            coverage_target_root: root,
+            target: "x86_64-pc-windows-msvc",
+            tools: &tools,
+            quiet: false,
+        };
+        let calls = Cell::new(0);
+        let error = filter_then_evaluate_with(
+            &execution,
+            &[],
+            |execution, collected| {
+                filter_and_publish_reports_with(execution, collected, |raw, manifest| {
+                    assert!(raw.is_empty());
+                    assert_eq!(manifest, root.join("Cargo.toml"));
+                    calls.set(calls.get() + 1);
+                    Err(app_error("scripted filtering failure")).into_app_err("failed to filter LCOV to released Cargo surfaces")
+                })
+            },
+            |_| panic!("failed filtering must never reach gate evaluation"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("failed to filter LCOV to released Cargo surfaces"), "{error}");
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn complete_collection_returns_publication_errors_without_evaluating_cleanup() {
+        let error = complete_collection(Err(app_error("publication failed")), || {
+            panic!("publication failures use the scratch owner's fallback cleanup")
+        })
+        .unwrap_err();
+        assert_eq!(error.to_string(), "publication failed");
+    }
 
     fn member(name: &str, version: &str) -> WorkspaceMember {
         WorkspaceMember {
@@ -1350,6 +1393,47 @@ mod tests {
             target_dir: root.join("target"),
             members: vec![member("zeta", "2.0.0"), member("alpha", "1.0.0")],
         }
+    }
+
+    #[test]
+    fn survivor_raw_report_validation_returns_errors_before_filtering_or_staging() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let workspace = workspace(root);
+        let selection = Selection {
+            explicit: false,
+            members: workspace.members.clone(),
+        };
+        let args = collection_args();
+        let tools = ToolPrograms {
+            cargo: OsString::from("never-invoked"),
+            rustc: OsString::from("never-invoked"),
+        };
+        let execution = CollectionExecution {
+            workspace: &workspace,
+            selection: &selection,
+            args: &args,
+            scratch_dir: root,
+            coverage_target_root: root,
+            target: "x86_64-pc-windows-msvc",
+            tools: &tools,
+            quiet: false,
+        };
+        let collected = [CollectedReport {
+            raw_path: PathBuf::from("in-memory-raw.info"),
+            stable_path: root.join("must-not-be-created.info"),
+            configuration: FeatureConfiguration::AllFeatures,
+        }];
+        let error = filter_and_publish_reports_with_reader(
+            &execution,
+            &collected,
+            |_| Ok("not LCOV".to_owned()),
+            |_, _| panic!("malformed raw LCOV must never reach filtering or staging"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("in-memory-raw.info"), "{error}");
+        assert!(error.contains("all-features"), "{error}");
+        assert!(error.contains("not well-formed"), "{error}");
     }
 
     fn collection_args() -> CollectionArgs {
@@ -3143,11 +3227,64 @@ mod tests {
 
     #[test]
     fn temporary_paths_reserve_distinct_sequence_numbers() {
-        let mut first = TemporaryPath::new(Path::new("scratch"), "response");
-        let mut second = TemporaryPath::new(Path::new("scratch"), "response");
+        let first = TemporaryPath::new(Path::new("scratch"), "response");
+        let second = TemporaryPath::new(Path::new("scratch"), "response");
         assert_ne!(first.path(), second.path());
-        first.armed = false;
-        second.armed = false;
+        assert!(!first.armed);
+        assert!(!second.armed);
+    }
+
+    #[test]
+    fn temporary_creation_collision_never_removes_an_unowned_path() {
+        let path = PathBuf::from("scripted-existing-staging-file");
+        let mut temporary = TemporaryPath {
+            path: path.clone(),
+            armed: false,
+        };
+        let opens = Cell::new(0);
+        let error = temporary
+            .create_with(|actual| {
+                assert_eq!(actual, path);
+                opens.set(opens.get() + 1);
+                Err::<(), _>(io::Error::from(io::ErrorKind::AlreadyExists))
+            })
+            .unwrap_err();
+        assert_eq!(error.find_source::<io::Error>().unwrap().kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(opens.get(), 1);
+        assert!(!temporary.armed);
+        let removals = Cell::new(0);
+        temporary.cleanup_with(|_| {
+            removals.set(removals.get() + 1);
+            Ok(())
+        });
+        assert_eq!(removals.get(), 0);
+    }
+
+    #[test]
+    fn temporary_creation_arms_cleanup_only_for_the_created_path() {
+        let path = PathBuf::from("scripted-created-staging-file");
+        let mut temporary = TemporaryPath {
+            path: path.clone(),
+            armed: false,
+        };
+        let opens = Cell::new(0);
+        let file = temporary
+            .create_with(|actual| {
+                assert_eq!(actual, path);
+                opens.set(opens.get() + 1);
+                Ok(17)
+            })
+            .unwrap();
+        assert_eq!(file, 17);
+        assert_eq!(opens.get(), 1);
+        assert!(temporary.armed);
+        let mut removed = Vec::new();
+        temporary.cleanup_with(|actual| {
+            removed.push(actual.to_path_buf());
+            Ok(())
+        });
+        assert_eq!(removed, [path]);
+        assert!(!temporary.armed);
     }
 
     #[test]
@@ -3387,6 +3524,112 @@ mod tests {
         fs::write(&file, b"not a directory").expect("write file");
         let invalid = TemporaryDirectory { path: file, armed: true };
         invalid.cleanup().expect_err("a file cannot be removed as a target directory");
+    }
+
+    #[test]
+    fn cleanup_retries_sharing_violations_then_succeeds() {
+        let mut attempts = 0;
+        let mut delays = [200, 400].into_iter();
+        let result = remove_windows_dir_if_present_with(
+            Path::new("coverage-target"),
+            |_| {
+                attempts += 1;
+                if attempts < 3 {
+                    Err(io::Error::from_raw_os_error(32))
+                } else {
+                    Ok(())
+                }
+            },
+            |delay| assert_eq!(Some(delay.as_millis()), delays.next()),
+        );
+        assert_eq!((result.is_ok(), attempts, delays.next()), (true, 3, None));
+    }
+
+    #[test]
+    fn cleanup_stops_after_bounded_sharing_violation_retries() {
+        let mut attempts = 0;
+        let mut delays = [200, 400, 800, 1600].into_iter();
+        let error = remove_windows_dir_if_present_with(
+            Path::new("coverage-target"),
+            |_| {
+                attempts += 1;
+                assert!(attempts <= 5, "cleanup must not exceed five removal attempts");
+                Err(io::Error::from_raw_os_error(32))
+            },
+            |delay| assert_eq!(Some(delay.as_millis()), delays.next()),
+        )
+        .expect_err("persistent locks remain errors");
+        assert_eq!((error.raw_os_error(), attempts, delays.next()), (Some(32), 5, None));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "uses temporary directories, which Miri isolation does not support")]
+    fn cleanup_preserves_only_the_non_windows_drop_fallback() {
+        let parent = tempdir().expect("tempdir");
+        let path = parent.path().join("coverage-target");
+        fs::create_dir(&path).expect("create owned scratch directory");
+        let directory = TemporaryDirectory {
+            path: path.clone(),
+            armed: true,
+        };
+        let mut attempts = 0;
+        let result = directory.cleanup_with(|_| {
+            attempts += 1;
+            Err(io::Error::from_raw_os_error(32))
+        });
+        assert_eq!((result.is_err(), attempts, path.is_dir()), (true, 1, cfg!(windows)));
+    }
+
+    #[test]
+    fn cleanup_handle_guidance_requires_a_windows_sharing_violation() {
+        let path = Path::new("coverage-target");
+        for code in [5, 13, 32] {
+            let error = io::Error::from_raw_os_error(code);
+            let message = cleanup_error_context(path, Some(&error));
+            assert_eq!(
+                (
+                    message.contains(&format!("failed to remove isolated coverage target `{}`", path.display())),
+                    message.contains("release any process handles"),
+                ),
+                (true, cfg!(windows) && code == 32)
+            );
+        }
+    }
+
+    #[test]
+    fn cleanup_preserves_a_different_error_after_a_sharing_violation() {
+        let mut errors = [32, 5].into_iter();
+        let mut retries = 0;
+        let error = remove_windows_dir_if_present_with(
+            Path::new("coverage-target"),
+            |_| Err(io::Error::from_raw_os_error(errors.next().expect("only two attempts are allowed"))),
+            |_| retries += 1,
+        )
+        .expect_err("the later access-denied error must not be hidden");
+        assert_eq!((error.raw_os_error(), retries), (Some(5), 1));
+    }
+
+    #[test]
+    fn cleanup_does_not_retry_other_errors() {
+        for code in [5, 13, 33, 206] {
+            let error = remove_windows_dir_if_present_with(
+                Path::new("coverage-target"),
+                |_| Err(io::Error::from_raw_os_error(code)),
+                |_| panic!("only Windows sharing violations may be retried"),
+            )
+            .expect_err("other errors fail immediately");
+            assert_eq!(error.raw_os_error(), Some(code));
+        }
+    }
+
+    #[test]
+    fn cleanup_accepts_a_missing_directory_without_retrying() {
+        let result = remove_windows_dir_if_present_with(
+            Path::new("coverage-target"),
+            |_| Err(io::Error::from(io::ErrorKind::NotFound)),
+            |_| panic!("a missing directory is already clean"),
+        );
+        result.expect("a missing directory is already clean");
     }
 
     #[test]

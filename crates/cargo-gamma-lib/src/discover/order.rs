@@ -41,6 +41,7 @@ pub(crate) fn stages(packages: &[String], reach: &HashMap<String, HashSet<String
         // neighbours. Every existing stage is therefore a candidate, and the one whose reach set
         // equals this package's — if any — is the stage it belongs in.
         let joins = stages.iter_mut().find(|stage| {
+            // #[gamma::skip(iter.first_to_last, reason = "Stage insertion requires equality of every member's reach set with its existing representative. By induction all members of a stage have identical reach sets, so first and last induce the same join decision (single unknown packages never gain peers).", tag = "equivalent")]
             stage.first().is_some_and(|first| {
                 reach
                     .get(first.as_str())

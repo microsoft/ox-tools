@@ -39,7 +39,9 @@ impl<'ast> Visit<'ast> for Shadows<'_> {
     }
 
     fn visit_pat_ident(&mut self, pattern: &'ast syn::PatIdent) {
-        if pattern.span().byte_range().start > self.target {
+        if
+        // #[gamma::skip(relational.gt_to_ge, reason = "A binding pattern begins strictly before or after the target While token, never at it.", tag = "equivalent")]
+        pattern.span().byte_range().start > self.target {
             return;
         }
         self.locals.retain(|(name, _)| name != &pattern.ident.to_string());
@@ -57,7 +59,7 @@ impl<'ast> Visit<'ast> for Shadows<'_> {
 
 pub(in super::super) fn scalar_sources(file: &syn::File, target: &Range<usize>) -> Option<ScalarSources> {
     if file.items.len() > 256 {
-        return None;
+        return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
     }
     let function = file.items.iter().find_map(|item| match item {
         syn::Item::Fn(function) if function.block.span().byte_range().contains(&target.start) => Some(function),
@@ -72,8 +74,10 @@ pub(in super::super) fn scalar_sources(file: &syn::File, target: &Range<usize>) 
             return Some(ScalarSources { locals, nonzero_get });
         }
         if statement.span().byte_range().end > target.start {
-            if statement.span().byte_range().start > target.start {
-                return None;
+            if
+            // #[gamma::skip(relational.gt_to_ge, reason = "An equal-start direct target statement returned above; other containing statements start strictly earlier.", tag = "equivalent")]
+            statement.span().byte_range().start > target.start {
+                return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
             }
             let mut shadows = Shadows {
                 target: target.start,
@@ -83,7 +87,7 @@ pub(in super::super) fn scalar_sources(file: &syn::File, target: &Range<usize>) 
             };
             shadows.visit_stmt(statement);
             if shadows.budget == 0 {
-                return None;
+                return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
             }
             return Some(ScalarSources { locals, nonzero_get });
         }
@@ -94,13 +98,13 @@ pub(in super::super) fn scalar_sources(file: &syn::File, target: &Range<usize>) 
         };
         let Pat::Ident(pattern) = pattern else {
             locals.clear();
-            nonzero_get = None;
+            nonzero_get = None; // #[gamma::skip(assign_value.default, reason = "None is the Option default.", tag = "equivalent")]
             continue;
         };
         let name = pattern.ident.to_string();
         locals.retain(|(prior, _)| prior != &name);
         if nonzero_get.as_ref().is_some_and(|(prior, _)| prior == &name) {
-            nonzero_get = None;
+            nonzero_get = None; // #[gamma::skip(assign_value.default, reason = "None is the Option default.", tag = "equivalent")]
         }
         if !local.attrs.is_empty() || pattern.by_ref.is_some() || pattern.subpat.is_some() {
             continue;
@@ -137,16 +141,114 @@ pub(in super::super) fn scalar_sources(file: &syn::File, target: &Range<usize>) 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use syn::{ExprWhile, Item, parse_file, parse_quote, parse_str};
+
     use super::*;
+
+    #[test]
+    fn source_shadow_search_skips_sibling_blocks_and_visits_nested_identifier_subpatterns() {
+        let found = sources("fn f(){let n=7;{{let n=unknown;}while ready{}}}");
+        assert_eq!(found.locals, vec![("n".into(), parse_quote!(7))]);
+        for source in [
+            "fn f(){let n=7;{let outer @ Some(n)=input;while ready{}}}",
+            "fn f(n:NonZeroU32){let n=n.get();{let outer @ Some(n)=input;while ready{}}}",
+        ] {
+            let found = sources(source);
+            assert!(found.locals.is_empty(), "{source}");
+            assert!(found.nonzero_get.is_none(), "{source}");
+        }
+    }
+
+    #[test]
+    fn nested_source_search_ignores_work_after_the_target() {
+        let source = format!(
+            "fn f(){{let n=7;{{ {} while ready{{}} {} }}}}",
+            "();".repeat(253),
+            "();".repeat(300)
+        );
+        let found = sources(&source);
+        assert_eq!(found.locals, vec![("n".into(), parse_quote!(7))]);
+    }
+
+    #[test]
+    fn attributed_get_initializer_cannot_establish_nonzero_provenance() {
+        let control = sources("fn f(n:NonZeroU32){let n=n.get();while ready{}}");
+        assert_eq!(control.nonzero_get, Some(("n".into(), parse_quote!(NonZeroU32))));
+        let attributed = sources("fn f(n:NonZeroU32){let n=#[custom] n.get();while ready{}}");
+        assert!(attributed.nonzero_get.is_none());
+    }
+
+    #[test]
+    fn initializer_size_limit_skips_only_the_oversized_declaration() {
+        for (length, retained) in [(1023, true), (1024, true), (1025, false)] {
+            let initializer = format!("\"{}\"", "x".repeat(length - 2));
+            let found = sources(&format!("fn f(){{ let large={initializer}; let known=7; while ready{{}} }}"));
+            let mut expected = vec![("known".into(), parse_quote!(7))];
+            if retained {
+                expected.insert(0, ("large".into(), parse_str(&initializer).unwrap()));
+            }
+            assert_eq!(found.locals, expected, "initializer byte length {length}");
+        }
+    }
+
+    #[test]
+    fn scalar_declaration_item_limit_accepts_256_items_but_not_257() {
+        let original = parse_file("fn f(){ let n=7; while ready{} } struct Unrelated;").unwrap();
+        let Item::Fn(function) = &original.items[0] else {
+            panic!("the fixture begins with its target function");
+        };
+        let target = function.block.stmts[1].span().byte_range();
+        for (count, accepted) in [(255, true), (256, true), (257, false), (258, false)] {
+            let mut file = original.clone();
+            file.items.resize(count, original.items[1].clone());
+            assert_eq!(
+                scalar_sources(&file, &target).map(|found| (found.locals, found.nonzero_get)),
+                accepted.then(|| (vec![("n".into(), parse_quote!(7))], None)),
+                "{count} file items"
+            );
+        }
+    }
+
+    #[test]
+    fn subpatterns_remove_stale_initializer_and_nonzero_evidence() {
+        assert!(sources("fn f(){ let n=1; let n @ _=input; while ready{} }").locals.is_empty());
+        let found = sources("fn f(n:NonZeroU32){ let n=n.get(); { let n @ _=input; while ready{} } }");
+        assert!(found.locals.is_empty());
+        assert!(found.nonzero_get.is_none());
+        let found = sources("fn f(n:NonZeroU32){ let n=n.get(); let (left,right)=input; while ready{} }");
+        assert!(found.locals.is_empty());
+        assert!(found.nonzero_get.is_none());
+        assert_eq!(sources("fn f(){let n=7;while ready{}}").locals, vec![("n".into(), parse_quote!(7))]);
+    }
+
+    #[test]
+    fn nested_source_search_budget_counts_each_pre_target_expression_once() {
+        for (padding, accepted) in [(252, true), (253, true), (254, false), (255, false)] {
+            let found = format!("fn f(){{ let n=7; {{ {} while ready{{}} }} }}", "();".repeat(padding));
+            let file = parse_file(&found).unwrap();
+            let Item::Fn(function) = &file.items[0] else {
+                panic!("the fixture declares one target function");
+            };
+            let Stmt::Expr(Expr::Block(block), _) = &function.block.stmts[1] else {
+                panic!("the target is nested in a block expression");
+            };
+            let target = block.block.stmts.last().unwrap().span().byte_range();
+            assert_eq!(
+                scalar_sources(&file, &target).map(|found| found.locals),
+                accepted.then(|| vec![("n".into(), parse_quote!(7))]),
+                "{padding} pre-target expressions"
+            );
+        }
+    }
 
     fn sources(source: &str) -> ScalarSources {
         struct Find(Option<Range<usize>>);
         impl<'ast> Visit<'ast> for Find {
-            fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
+            fn visit_expr_while(&mut self, node: &'ast ExprWhile) {
                 self.0 = Some(node.span().byte_range());
             }
         }
-        let file = syn::parse_file(source).unwrap();
+        let file = parse_file(source).unwrap();
         let mut find = Find(None);
         find.visit_file(&file);
         scalar_sources(&file, &find.0.unwrap()).unwrap()
@@ -154,20 +256,14 @@ mod tests {
 
     #[test]
     fn source_search_fails_closed_on_exhausted_or_outside_statement_targets() {
-        let mut file = syn::parse_file("fn f(){ let n=1; { while ready{} } }").unwrap();
-        let syn::Item::Fn(function) = &mut file.items[0] else {
-            unreachable!()
-        };
+        let mut file = parse_file("fn f(){ let n=1; { while ready{} } }").unwrap();
+        let Item::Fn(function) = &mut file.items[0] else { unreachable!() };
         let start = function.block.span().byte_range().start + 1;
         assert!(scalar_sources(&file, &(start..start)).is_none());
-        let syn::Item::Fn(function) = &mut file.items[0] else {
-            unreachable!()
-        };
+        let Item::Fn(function) = &mut file.items[0] else { unreachable!() };
         let end = function.block.span().byte_range().end - 1;
         assert!(scalar_sources(&file, &(end..end)).is_none());
-        let syn::Item::Fn(function) = &mut file.items[0] else {
-            unreachable!()
-        };
+        let Item::Fn(function) = &mut file.items[0] else { unreachable!() };
         let Stmt::Expr(Expr::Block(block), _) = &mut function.block.stmts[1] else {
             unreachable!()
         };
@@ -175,10 +271,7 @@ mod tests {
             unreachable!()
         };
         let target = target.span().byte_range();
-        block
-            .block
-            .stmts
-            .splice(0..0, core::iter::repeat_n(syn::parse_quote!(consume(0);), 256));
+        block.block.stmts.splice(0..0, core::iter::repeat_n(parse_quote!(consume(0);), 256));
         assert!(scalar_sources(&file, &target).is_none());
         let item = file.items[0].clone();
         file.items.extend(core::iter::repeat_n(item, 256));
@@ -188,10 +281,7 @@ mod tests {
     #[test]
     fn scalar_sources_keep_latest_direct_initializer_and_ignore_post_target_bindings() {
         let found = sources("fn f(){ let n=1; let n:u32=2; let mut other=3; while ready{} let later=4; }");
-        assert_eq!(
-            found.locals,
-            vec![("n".into(), syn::parse_quote!(2)), ("other".into(), syn::parse_quote!(3))]
-        );
+        assert_eq!(found.locals, vec![("n".into(), parse_quote!(2)), ("other".into(), parse_quote!(3))]);
         assert!(found.nonzero_get.is_none());
         for source in [
             "fn f(){ let n=1; let n; while ready{} }",
@@ -205,14 +295,14 @@ mod tests {
         }
         assert_eq!(
             sources("fn f(){ let n=1; { let unrelated=2; while ready{} } }").locals,
-            vec![("n".into(), syn::parse_quote!(1))],
+            vec![("n".into(), parse_quote!(1))],
         );
     }
 
     #[test]
     fn nonzero_get_provenance_requires_first_immutable_self_named_parameter_binding() {
         let found = sources("fn f(n:NonZeroU32){ let n=n.get(); while ready{} }");
-        assert_eq!(found.nonzero_get, Some(("n".into(), syn::parse_quote!(NonZeroU32))));
+        assert_eq!(found.nonzero_get, Some(("n".into(), parse_quote!(NonZeroU32))));
         for source in [
             "fn f(n:NonZeroU32){ let mut n=n.get(); while ready{} }",
             "fn f(n:NonZeroU32){ let first=0; let n=n.get(); while ready{} }",
@@ -227,7 +317,7 @@ mod tests {
             assert!(sources(source).nonzero_get.is_none(), "{source}");
         }
         let found = sources("fn f(n:NonZeroU32){ let n=n.get(); { let other=0; while ready{} } }");
-        assert_eq!(found.nonzero_get, Some(("n".into(), syn::parse_quote!(NonZeroU32))));
+        assert_eq!(found.nonzero_get, Some(("n".into(), parse_quote!(NonZeroU32))));
     }
 
     #[test]
@@ -235,20 +325,20 @@ mod tests {
         for (source, expected) in [
             (
                 "fn f(){ let n=1; let keep=2; if let Some(n)=input { while ready{} } }",
-                vec![("keep".into(), syn::parse_quote!(2))],
+                vec![("keep".into(), parse_quote!(2))],
             ),
             (
                 "fn f(){ let n=1; let keep=2; match input { Some(n) => { while ready{} }, _ => {} } }",
-                vec![("keep".into(), syn::parse_quote!(2))],
+                vec![("keep".into(), parse_quote!(2))],
             ),
             ("fn f(){ let n=1; let closure=|n| { while ready{} }; }", Vec::new()),
             (
                 "fn f(){ let n=1; { let n=2; } { while ready{} let n=3; } }",
-                vec![("n".into(), syn::parse_quote!(1))],
+                vec![("n".into(), parse_quote!(1))],
             ),
             (
                 "fn f(){ let n=1; { unrelated!(); } { while ready{} } }",
-                vec![("n".into(), syn::parse_quote!(1))],
+                vec![("n".into(), parse_quote!(1))],
             ),
         ] {
             assert_eq!(sources(source).locals, expected, "{source}");
@@ -262,7 +352,7 @@ mod tests {
             ("fn f(n:NonZeroU32){ let n=n.get(); { opaque!(); while ready{} } }", None),
             (
                 "fn f(n:NonZeroU32){ let n=n.get(); { let n=0; } { while ready{} let n=0; } }",
-                Some(("n".into(), syn::parse_quote!(NonZeroU32))),
+                Some(("n".into(), parse_quote!(NonZeroU32))),
             ),
             ("fn f(ref n:NonZeroU32){ let n=n.get(); while ready{} }", None),
             ("fn f(n @ _:NonZeroU32){ let n=n.get(); while ready{} }", None),
@@ -275,8 +365,8 @@ mod tests {
     fn declaration_window_includes_the_last_allowed_loop_but_not_the_next_statement() {
         for (declarations, accepted) in [(63, true), (64, false)] {
             let mut file =
-                syn::parse_file("fn f(){ let n=1; while ready{} }").expect("the fixed declaration and target loop are valid Rust syntax");
-            let syn::Item::Fn(function) = &mut file.items[0] else {
+                parse_file("fn f(){ let n=1; while ready{} }").expect("the fixed declaration and target loop are valid Rust syntax");
+            let Item::Fn(function) = &mut file.items[0] else {
                 panic!("the fixture has exactly one function");
             };
             let declaration = function.block.stmts[0].clone();
@@ -287,7 +377,7 @@ mod tests {
                 .splice(0..0, core::iter::repeat_n(declaration, declarations - 1));
             assert_eq!(
                 scalar_sources(&file, &target).map(|found| (found.locals, found.nonzero_get)),
-                accepted.then(|| (vec![("n".into(), syn::parse_quote!(1))], None)),
+                accepted.then(|| (vec![("n".into(), parse_quote!(1))], None)),
                 "{declarations} preceding declarations"
             );
         }

@@ -77,7 +77,9 @@ pub(super) fn of(metadata: &Metadata) -> Vec<Dependency> {
 
 fn dependency(metadata: &Metadata, root: &str, alias: &str, package: &Package) -> Option<Dependency> {
     let node = metadata.resolve.as_ref()?.nodes.iter().find(|node| node.id == package.id)?;
-    let library_root = if package.source.is_none() && metadata.workspace_members.contains(&package.id) {
+    let library_root = if
+    // #[gamma::skip(logical.and_remove_left, reason = "Valid-producer-domain proof: dependency is private to resource_dependencies::of, fed by Cargo Metadata. A workspace member is a local manifest package, with Package.source=None; registry/git packages cannot be Cargo workspace members. Hence workspace_members.contains(package.id) implies package.source.is_none(), making the left conjunction redundant for all valid Cargo-produced metadata. Arbitrarily forged internally inconsistent Metadata is not asserted equivalent.", tag = "equivalent")]
+    package.source.is_none() && metadata.workspace_members.contains(&package.id) {
         let mut libraries = package
             .targets
             .iter()
@@ -138,10 +140,53 @@ fn registry_closure(metadata: &Metadata, start: &PackageId) -> bool {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use serde_json::from_str;
+
     use super::*;
 
     fn metadata() -> Metadata {
-        serde_json::from_str(include_str!("../../tests/fixtures/correctness/resource-dependencies.json")).unwrap()
+        from_str(include_str!("../../tests/fixtures/correctness/resource-dependencies.json")).unwrap()
+    }
+
+    #[test]
+    fn recovered_library_root_accepts_a_lib_among_multiple_crate_kinds() {
+        let metadata = metadata();
+        let mut package = metadata.packages[1].clone();
+        package.targets[0].kind = from_str(r#"["lib", "rlib"]"#).unwrap();
+        let dependency = dependency(&metadata, "src/root.rs", "renamed", &package).unwrap();
+        assert_eq!(dependency.library_root.as_deref(), Some(package.targets[0].src_path.as_str()));
+    }
+
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "65,536-record boundary workload; smaller dependency tests remain enabled under Miri"
+    )]
+    fn recovered_dependency_inventory_limit_counts_records_before_deduplication() {
+        let template = metadata();
+        for (count, retained) in [(65_535, true), (65_536, true), (65_537, false), (65_538, false)] {
+            let mut metadata = template.clone();
+            let owner = &template.packages[0];
+            let leaf = &template.packages[2];
+            metadata.workspace_members = vec![owner.id.clone()];
+            metadata.packages = vec![owner.clone(), leaf.clone()];
+            metadata.packages[0].targets = vec![owner.targets[0].clone(); count];
+            let resolve = metadata.resolve.as_mut().unwrap();
+            resolve.nodes.retain(|node| node.id == owner.id || node.id == leaf.id);
+            let edge = resolve.nodes[0]
+                .deps
+                .iter()
+                .find(|edge| edge.pkg == leaf.id && edge.dep_kinds.iter().any(|kind| kind.kind != DependencyKind::Build))
+                .unwrap()
+                .clone();
+            resolve.nodes[0].deps = vec![edge];
+            let records = of(&metadata);
+            assert_eq!(records.len(), usize::from(retained), "{count} records before deduplication");
+            if retained {
+                assert_eq!(records[0].package_id, leaf.id.to_string());
+                assert_eq!(records[0].crate_root, owner.targets[0].src_path.as_str());
+            }
+        }
     }
 
     fn registry_chain(count: usize) -> (Metadata, PackageId) {
@@ -359,7 +404,7 @@ mod tests {
         metadata.resolve.as_mut().unwrap().nodes[2].deps.push(cycle);
         assert!(!registry_closure(&metadata, &leaf_id));
         metadata.resolve.as_mut().unwrap().nodes[2].deps.pop();
-        metadata.packages[2].source = Some(serde_json::from_str("\"registry+https://example.test/index\"").unwrap());
+        metadata.packages[2].source = Some(from_str("\"registry+https://example.test/index\"").unwrap());
         assert!(!registry_closure(&metadata, &leaf_id));
         metadata.packages[2].source = None;
         assert!(!registry_closure(&metadata, &leaf_id));

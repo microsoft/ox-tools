@@ -292,7 +292,9 @@ impl Resources {
             Only::All => binary.all.clone(),
             Only::One(test) => binary.by_test.get(test).cloned().unwrap_or_default(),
         };
-        if !matches!(only, Only::All) {
+        if
+        // #[gamma::skip(cond.always_true, reason = "Resources discovery/fakes build binary.all as sorted deduplicated union including every binary.binary resource. For Only::All, entering the extra branch only appends an already-contained subset then sorts/deduplicates back to the exact original vector.", tag = "equivalent")]
+        !matches!(only, Only::All) {
             names.extend(binary.binary.iter().cloned());
             names.sort_unstable();
             names.dedup();
@@ -368,7 +370,12 @@ fn decode(encoded: &str) -> Option<String> {
     if !encoded.len().is_multiple_of(2) {
         return None;
     }
-    let mut bytes = Vec::with_capacity(encoded.len() / 2);
+    let mut bytes = Vec::with_capacity(
+        // #[gamma::skip(arith.div_to_mul, arith.div_to_rem, reason = "Only private initial allocation capacity changes; subsequent pushes/writes determine identical output contents.", tag = "equivalent")]
+        encoded.len() /
+    // #[gamma::skip(literal.int_decrement, literal.int_increment, reason = "Only private initial allocation capacity changes; subsequent pushes/writes determine identical output contents.", tag = "equivalent")]
+    2,
+    );
     for pair in encoded.as_bytes().chunks_exact(2) {
         let high = digit(pair[0])?;
         let low = digit(pair[1])?;
@@ -439,6 +446,7 @@ mod tests {
                     core::slice::from_ref(&binary),
                     &[],
                     MemoryRequest {
+                        calibrating: false,
                         meter: true,
                         limit: Some(37),
                     },

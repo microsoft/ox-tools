@@ -93,11 +93,17 @@ impl Scopes {
         let mut best = first.clone();
 
         for span in candidates {
-            if span.start != start {
+            if
+            // #[gamma::skip(cond.always_true, reason = "Scopes invariant sorts start ascending and equal starts by end descending. first is already widest at its start; all later equal-start ends<=best.end. Later starts are skipped/break regardless. Eliminating tie updates,always breaking on first candidate,or continuing past different starts preserves first range; >= can only assign identical range.", tag = "equivalent")]
+            span.start != start {
+                // #[gamma::skip(loop.break_to_continue, reason = "Scopes invariant sorts start ascending and equal starts by end descending. first is already widest at its start; all later equal-start ends<=best.end. Later starts are skipped/break regardless. Eliminating tie updates,always breaking on first candidate,or continuing past different starts preserves first range; >= can only assign identical range.", tag = "equivalent")]
                 break;
             }
 
-            if span.end > best.end {
+            if
+            // #[gamma::skip(cond.always_false, relational.gt_to_ge, reason = "Scopes invariant sorts start ascending and equal starts by end descending. first is already widest at its start; all later equal-start ends<=best.end. Later starts are skipped/break regardless. Eliminating tie updates,always breaking on first candidate,or continuing past different starts preserves first range; >= can only assign identical range.", tag = "equivalent")]
+            span.end > best.end {
+                // #[gamma::skip(stmt.delete_assign, reason = "Scopes invariant sorts start ascending and equal starts by end descending. first is already widest at its start; all later equal-start ends<=best.end. Later starts are skipped/break regardless. Eliminating tie updates,always breaking on first candidate,or continuing past different starts preserves first range; >= can only assign identical range.", tag = "equivalent")]
                 best = span.clone();
             }
         }
@@ -310,6 +316,29 @@ mod tests {
     use super::super::tests::{file, mutants_of};
     use super::super::{directives, suppress};
     use super::*;
+
+    #[test]
+    fn recovered_attributed_trait_and_foreign_function_heads_own_interposed_comments() {
+        for text in [
+            "trait Api {\n#[allow(unused)]\n// marker\nfn call(&self) -> usize;\n}\n",
+            "unsafe extern \"C\" {\n#[allow(unused)]\n// marker\nfn call() -> usize;\n}\n",
+        ] {
+            let file = SourceFile::parse("in-memory.rs", text.to_owned()).unwrap();
+            let scopes = Scopes::of(&file);
+            let start = text.find("fn call").unwrap();
+            let end = text.find(';').unwrap() + 1;
+            assert_eq!(scopes.following(text.find("// marker").unwrap()), Some(start..end));
+        }
+    }
+
+    #[test]
+    fn recovered_foreign_signature_const_expressions_have_their_own_scope() {
+        let text = "unsafe extern \"C\" { fn call(value: [u8; 1 + 2]); }";
+        let file = SourceFile::parse("in-memory.rs", text.to_owned()).unwrap();
+        let scopes = Scopes::of(&file);
+        let start = text.find("1 + 2").unwrap();
+        assert_eq!(scopes.following(start), Some(start..start + 5));
+    }
 
     fn suppressed(source: &str, mutators: &str) -> (usize, usize) {
         let (parsed, mut mutants) = mutants_of(source, mutators);

@@ -100,7 +100,12 @@ impl Pending {
         let local = |path: &[String]| module.iter().chain(path).cloned().collect::<Vec<_>>();
         let target = |path: &[String]| {
             if path.first().is_some_and(|name| name == "crate") {
-                return Some(path[1..].to_vec());
+                return Some(
+                    path[
+                // #[gamma::skip(literal.int_decrement, reason = "Sources::bind supplies absorb_at only original per-file Pending entries; composed roots are receivers, never re-absorbed as children. Keeping the leading crate marker thus does not cause a second module rebase. Identities::resolve_path strips that marker before every declaration/link lookup and visited-path check, so finish and subsequent queries resolve the same declaration identities.", tag = "equivalent")]
+                1..]
+                        .to_vec(),
+                );
             }
             let mut prefix = module.to_vec();
             let mut path = path;
@@ -171,24 +176,39 @@ impl Identities {
             if path.first().is_some_and(|name| name == "crate") {
                 let _root = path.remove(0);
             }
-            if remaining == 0 || !visited.insert(path.clone()) {
-                return None;
+            if
+            // #[gamma::skip(logical.or_remove_right, reason = "Identities::resolve_path retains its finite decreasing budget and visited-path guard. Removing the visited check still returns None at the budget for cycles; permitting one extra unchanged iteration after no link matches immediately hits visited (or the budget) and returns the same None. Positive declaration resolutions and chosen link replacements are unchanged.", tag = "equivalent")]
+            remaining == 0 || !visited.insert(path.clone()) {
+                return
+                // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+                None;
             }
             // #[gamma::skip(all, reason = "this decreasing budget bounds alias cycles whose expanded paths never repeat")]
             remaining -= 1;
             if self.declarations.contains_key(&path) {
                 return Some(path);
             }
-            let mut replaced = false;
-            for end in (1..=path.len()).rev() {
+            let mut replaced =
+            // #[gamma::skip(literal.bool_flip, reason = "Identities::resolve_path retains its finite decreasing budget and visited-path guard. Removing the visited check still returns None at the budget for cycles; permitting one extra unchanged iteration after no link matches immediately hits visited (or the budget) and returns the same None. Positive declaration resolutions and chosen link replacements are unchanged.", tag = "equivalent")]
+            false;
+            for end in (
+                // #[gamma::skip(literal.int_decrement, reason = "Every link key is Walk::key(name), which always appends a name (even an empty introduced name), and absorb_at prefixes that nonempty key. The added empty-prefix lookup therefore cannot find a link and changes no resolution.", tag = "equivalent")]
+                1..=path.len()
+            )
+                .rev()
+            {
                 if let Some(target) = self.links.get(&path[..end]) {
                     let _old = path.splice(..end, target.as_ref()?.iter().cloned());
                     replaced = true;
                     break;
                 }
             }
-            if !replaced {
-                return None;
+            if
+            // #[gamma::skip(cond.always_false, reason = "Identities::resolve_path retains its finite decreasing budget and visited-path guard. Removing the visited check still returns None at the budget for cycles; permitting one extra unchanged iteration after no link matches immediately hits visited (or the budget) and returns the same None. Positive declaration resolutions and chosen link replacements are unchanged.", tag = "equivalent")]
+            !replaced {
+                return
+                // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+                None;
             }
         }
     }
@@ -361,9 +381,127 @@ impl<'ast> Visit<'ast> for Walk<'_> {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use syn::parse_file;
+
     use super::{Identities, Pending};
+    use crate::HashMap;
     use crate::cfg::CfgSet;
     use crate::ops::collect::Defaults;
+
+    #[test]
+    fn longest_alias_prefix_wins_and_shorter_value_aliases_cannot_redirect_its_target() {
+        let file = parse_file(
+            "mod original { pub fn value() {} }
+             use original::value as a;
+             mod a {
+                 pub struct Target;
+                 pub mod nested { pub use super::Target as Exported; }
+             }",
+        )
+        .unwrap();
+        let identities = Identities::of(&file, &CfgSet::unconditional());
+        assert_eq!(
+            identities.resolve_path(&["a".into(), "nested".into(), "Exported".into()]),
+            Some(vec!["a".into(), "Target".into()])
+        );
+    }
+
+    #[test]
+    fn growing_alias_cycles_obey_the_exact_derived_work_budget_before_declaring_a_match() {
+        for (first, accepted) in [("b", true), ("a", false)] {
+            let target = vec![first.to_owned(), "c".into(), "c".into()];
+            let identities = Identities {
+                declarations: HashMap::from_iter([(target.clone(), Some(false))]),
+                links: HashMap::from_iter([
+                    (vec!["a".into()], Some(vec!["b".into(), "c".into()])),
+                    (vec!["b".into()], Some(vec!["a".into()])),
+                ]),
+                ..Identities::default()
+            };
+            assert_eq!(identities.resolve_path(&["a".into()]), accepted.then_some(target), "{first}");
+        }
+    }
+
+    #[test]
+    fn empty_self_import_targets_are_unknown_rather_than_panicking() {
+        let identities = Identities::of(&parse_file("use self as Root;").unwrap(), &CfgSet::unconditional());
+        assert_eq!(identities.resolve_path(&["Root".into()]), None);
+        assert_eq!(identities.default_for(&["Root".into()]), None);
+    }
+
+    #[test]
+    fn configured_out_declarations_and_expanding_enum_attributes_supply_no_identity_proof() {
+        let file = parse_file(
+            "#[cfg(any())] struct Absent;
+             mod nested { #[cfg(any())] enum Hidden { A } struct Present; }
+             #[transform] enum Expanded { A }",
+        )
+        .unwrap();
+        let identities = Identities::of(&file, &CfgSet::parse(""));
+        assert_eq!(identities.default_for(&["Absent".into()]), None);
+        assert_eq!(identities.default_for(&["nested".into(), "Hidden".into()]), None);
+        assert_eq!(identities.default_for(&["nested".into(), "Present".into()]), Some(false));
+        assert!(!identities.is_enum(&["Expanded".into()]));
+    }
+
+    #[test]
+    fn labeled_merges_keep_generic_default_uncertainty_and_climb_multiple_missing_parents() {
+        let cfg = CfgSet::unconditional();
+        let generic = Pending::of(
+            &parse_file("struct Generic<T>(T); impl<T> Default for Generic<T> { fn default() -> Self { panic!() } }").unwrap(),
+            &cfg,
+        );
+        let mut root = Pending::default();
+        root.absorb_at(&generic, &["child".into()]);
+        assert_eq!(root.finish().default_for(&["child".into(), "Generic".into()]), None);
+        let file = parse_file("use super::super::Shape as Escaped;").unwrap();
+        let identities = Identities::of(&file, &cfg);
+        assert_eq!(identities.resolve_path(&["Escaped".into()]), None);
+        let identities = Identities::of(
+            &parse_file("mod inner { use custom::Default; struct Opaque; } #[derive(Default)] struct Ready;").unwrap(),
+            &cfg,
+        );
+        assert_eq!(identities.default_for(&["Ready".into()]), Some(true));
+        assert_eq!(identities.default_for(&["inner".into(), "Opaque".into()]), Some(false));
+    }
+
+    #[test]
+    fn rebased_double_parent_imports_resolve_the_root_instead_of_a_child_shadow() {
+        let cfg = CfgSet::unconditional();
+        let mut root = Pending::of(&parse_file("#[derive(Default)] struct Shape;").unwrap(), &cfg);
+        let child = Pending::of(&parse_file("struct Shape; use super::super::Shape as Imported;").unwrap(), &cfg);
+        root.absorb_at(&child, &["outer".into(), "child".into()]);
+        let identities = root.finish();
+        assert_eq!(identities.default_for(&["Shape".into()]), Some(true));
+        assert_eq!(
+            identities.default_for(&["outer".into(), "child".into(), "Shape".into()]),
+            Some(false)
+        );
+        assert_eq!(
+            identities.default_for(&["outer".into(), "child".into(), "Imported".into()]),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn nested_nonstandard_default_imports_cannot_supply_a_standard_derive_proof() {
+        let source = "mod nested { use custom::Default; #[derive(Default)] struct Local; }
+                      #[derive(Default)] struct Outer;";
+        let identities = Identities::of(&parse_file(source).unwrap(), &CfgSet::unconditional());
+        assert_eq!(identities.default_for(&["nested".into(), "Local".into()]), None);
+        assert_eq!(identities.default_for(&["Outer".into()]), Some(true));
+    }
+
+    #[test]
+    fn absolute_imports_do_not_resolve_through_same_named_source_modules() {
+        let source = "mod external { #[derive(Default)] pub struct Shape; }
+                      use ::external::Shape as Imported;
+                      use external::Shape as Local;";
+        let identities = Identities::of(&parse_file(source).unwrap(), &CfgSet::unconditional());
+        assert_eq!(identities.default_for(&["external".into(), "Shape".into()]), Some(true));
+        assert_eq!(identities.default_for(&["Local".into()]), Some(true));
+        assert_eq!(identities.default_for(&["Imported".into()]), None);
+    }
 
     #[test]
     fn campaign_nominal_default_evidence_requires_every_derive_to_be_known() {
@@ -379,11 +517,11 @@ mod tests {
             ("#[transform] #[derive(Default)]", None),
         ] {
             let source = format!("{attributes} struct Shape;");
-            let identities = Identities::of(&syn::parse_file(&source).unwrap(), &CfgSet::unconditional());
+            let identities = Identities::of(&parse_file(&source).unwrap(), &CfgSet::unconditional());
             assert_eq!(identities.default_for(&["Shape".into()]), expected, "{source}");
         }
         let source = "use custom::Default; #[derive(Default)] struct Shape;";
-        let identities = Identities::of(&syn::parse_file(source).unwrap(), &CfgSet::unconditional());
+        let identities = Identities::of(&parse_file(source).unwrap(), &CfgSet::unconditional());
         assert_eq!(identities.default_for(&["Shape".into()]), None);
     }
 
@@ -395,7 +533,7 @@ mod tests {
             impl Default for Ready { fn default() -> Self { Self { byte: 0 } } }
             #[derive(Default)] enum Choice { #[default] A, B }
             #[transform] enum Opaque { A }";
-        let identities = Identities::of(&syn::parse_file(source).unwrap(), &CfgSet::unconditional());
+        let identities = Identities::of(&parse_file(source).unwrap(), &CfgSet::unconditional());
         for (name, expected_default, expected_enum) in [
             ("Missing", Some(false), false),
             ("Ready", Some(true), false),
@@ -416,7 +554,7 @@ mod tests {
                 use super::data::{self, Ready as Present};
                 pub mod leaf { use super::super::data::Ready as Deep; }
             }";
-        let identities = Identities::of(&syn::parse_file(source).unwrap(), &CfgSet::unconditional());
+        let identities = Identities::of(&parse_file(source).unwrap(), &CfgSet::unconditional());
         for (path, declaration, expected) in [
             ("Ready", "data::Ready", Some(true)),
             ("Absent", "data::Missing", Some(false)),
@@ -453,7 +591,7 @@ mod tests {
             use ::external::Ready as Foreign;
             type Generic<T> = Ready;
             type Absolute = ::external::Ready;";
-        let identities = Identities::of(&syn::parse_file(source).unwrap(), &CfgSet::unconditional());
+        let identities = Identities::of(&parse_file(source).unwrap(), &CfgSet::unconditional());
         for name in ["Ambiguous", "First", "Second", "Foreign", "Generic", "Absolute"] {
             assert_eq!(identities.resolve_path(&[name.into()]), None, "{name}");
             assert_eq!(identities.default_for(&[name.into()]), None, "{name}");
@@ -466,11 +604,11 @@ mod tests {
     fn campaign_labeled_identity_merges_rebase_parent_links_and_implementations() {
         let cfg = CfgSet::unconditional();
         let mut root = Pending::of(
-            &syn::parse_file("struct Root; mod child {} #[derive(Default)] struct Ready;").unwrap(),
+            &parse_file("struct Root; mod child {} #[derive(Default)] struct Ready;").unwrap(),
             &cfg,
         );
         let child = Pending::of(
-            &syn::parse_file(
+            &parse_file(
                 "use super::Root as Parent; use crate::Ready as Absolute;
                  struct Local; impl Default for Local { fn default() -> Self { Self } }
                  mod nested { use super::Local as Present; }
@@ -500,7 +638,7 @@ mod tests {
 
     #[test]
     fn nested_reexports_preserve_root_declaration_default_identity() {
-        let file = syn::parse_file(
+        let file = parse_file(
             "struct Missing; #[derive(Default)] struct Ready;
              mod child { use super::Missing as Absent; use crate::Ready as Present; }",
         )
@@ -512,7 +650,7 @@ mod tests {
 
     #[test]
     fn prefix_expanding_alias_cycles_are_unknown_and_terminate() {
-        let file = syn::parse_file("type Alias = Alias::Nested;").unwrap();
+        let file = parse_file("type Alias = Alias::Nested;").unwrap();
         let identities = Identities::of(&file, &CfgSet::unconditional());
         assert_eq!(identities.resolve_path(&["Alias".into()]), None);
     }
@@ -523,7 +661,7 @@ mod tests {
             "impl Default for Alias {} type Alias = Actual; struct Actual;",
             "struct Actual; type Alias = Actual; impl Default for Alias {}",
         ] {
-            let identities = Identities::of(&syn::parse_file(source).unwrap(), &CfgSet::unconditional());
+            let identities = Identities::of(&parse_file(source).unwrap(), &CfgSet::unconditional());
             assert_eq!(identities.default_for(&["Actual".into()]), Some(true));
             assert_eq!(identities.default_for(&["Alias".into()]), Some(true));
         }
@@ -532,12 +670,12 @@ mod tests {
     #[test]
     fn merged_local_reexports_keep_uniform_negative_evidence_but_unknown_targets_do_not() {
         let mut defaults =
-            Defaults::of(&syn::parse_file("mod implementation { pub struct Artifact; } pub use self::implementation::Artifact;").unwrap());
-        defaults.absorb(Defaults::of(&syn::parse_file("struct Unrelated;").unwrap()));
+            Defaults::of(&parse_file("mod implementation { pub struct Artifact; } pub use self::implementation::Artifact;").unwrap());
+        defaults.absorb(Defaults::of(&parse_file("struct Unrelated;").unwrap()));
         assert!(!defaults.has_single_source_evidence());
         assert!(defaults.lacks_error_default("Artifact"));
         assert!(defaults.lacks_local_path(&["crate".into(), "catalog".into(), "Artifact".into()]));
-        defaults.absorb(Defaults::of(&syn::parse_file("pub use dependency::Artifact;").unwrap()));
+        defaults.absorb(Defaults::of(&parse_file("pub use dependency::Artifact;").unwrap()));
         assert!(!defaults.lacks_error_default("Artifact"));
     }
 
@@ -549,12 +687,12 @@ mod tests {
         ] {
             let mut defaults = Defaults::default();
             for source in sources {
-                defaults.absorb(Defaults::of(&syn::parse_file(source).unwrap()));
+                defaults.absorb(Defaults::of(&parse_file(source).unwrap()));
             }
             assert!(!defaults.lacks_error_default("Actual"));
         }
         let defaults =
-            Defaults::of(&syn::parse_file("#[cfg_attr(all(), derive(Default))] struct Conditional; pub use self::Conditional;").unwrap());
+            Defaults::of(&parse_file("#[cfg_attr(all(), derive(Default))] struct Conditional; pub use self::Conditional;").unwrap());
         assert!(!defaults.lacks_error_default("Conditional"));
         assert!(!defaults.lacks_local_path(&["Conditional".into()]));
     }

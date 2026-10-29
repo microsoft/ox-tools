@@ -128,6 +128,16 @@ also owns memory accounting because it observes the complete tree rather than
 only its leader; kernel-enforced cgroup or job limits cannot be reconstructed
 reliably from a post-exit peak.
 
+macOS offers no kernel boundary for a process tree's memory. There, a measuring
+launch is accounted by sampling: every 10 ms the boundary sums the physical
+footprint of every process in the launch's process group, records the peak,
+and, when enforcing, sweeps the group as soon as the sum passes the ceiling.
+This bound is soft. A runaway can overshoot by its growth rate times the
+interval, and a descendant that leaves the group is not counted. Support is
+therefore reported as sampled rather than kernel-enforced. The motivating
+incident, the alternatives measured, and the overshoot figures are recorded in
+the [macOS memory design](MACOS_MEMORY.md).
+
 ## Stability
 
 The crate is published only as an implementation dependency of cargo-gamma and

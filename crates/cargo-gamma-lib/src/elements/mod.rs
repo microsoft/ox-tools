@@ -13,6 +13,15 @@ mod digest;
 mod publication;
 mod report;
 
+#[cfg(feature = "internals")]
+#[doc(hidden)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub mod native_test_util {
+    pub fn remove_if_unchanged_locked(destination: &camino::Utf8Path, path: &camino::Utf8Path, expected: &str) -> crate::Result<()> {
+        super::publication::remove_if_unchanged_locked(destination, path, expected).map(|_| ())
+    }
+}
+
 pub(crate) use digest::surviving_mutants;
 #[doc(inline)]
 pub use digest::{Digest, FileDigest, FrameworkDigest, MutantDigest, settled_mutants};

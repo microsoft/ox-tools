@@ -4,7 +4,7 @@
 //! Whether this host can meter and bound a test subtree's memory.
 
 use crate::PlatformError;
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 use crate::Situation;
 
 /// Reports whether this host can meter and bound a test subtree's memory, or why it cannot.
@@ -19,7 +19,7 @@ use crate::Situation;
 /// [`Situation::Unsupported`](crate::Situation::Unsupported), carrying the reason this host cannot
 /// account for a whole test subtree's memory: no cgroup v2 unified hierarchy, no delegated cgroup,
 /// no memory controller to hand to children, a kernel missing the interface files a leaf needs, or
-/// a Unix that is not Linux. This classification describes a host-wide capability limitation
+/// a Unix that is neither Linux nor macOS. This classification describes a host-wide capability limitation
 /// rather than the failure of one launch.
 #[cfg(target_os = "linux")]
 pub fn support() -> Result<(), PlatformError> {
@@ -40,8 +40,21 @@ pub fn support() -> Result<(), PlatformError> {
     Ok(())
 }
 
-/// Other hosts have no unprivileged whole-process-tree memory boundary.
-#[cfg(not(any(target_os = "linux", windows)))]
+/// macOS supports sampled process-group footprint accounting and soft enforcement every 10 ms.
+///
+/// A descendant that leaves the process group is neither counted nor stopped by this facility.
+#[cfg(target_os = "macos")]
+#[expect(
+    clippy::missing_const_for_fn,
+    clippy::unnecessary_wraps,
+    reason = "the shared signature reports unsupported hosts; macOS libproc support is available without setup"
+)]
+pub fn support() -> Result<(), PlatformError> {
+    Ok(())
+}
+
+/// Other hosts have no unprivileged whole-process-tree memory boundary or group sampler.
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 pub fn support() -> Result<(), PlatformError> {
     Err(PlatformError::new_static(
         Situation::Unsupported,

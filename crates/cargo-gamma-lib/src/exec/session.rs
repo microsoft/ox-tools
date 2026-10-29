@@ -361,13 +361,17 @@ impl SweepCost {
 
     pub(super) fn combine(previous: Option<Self>, current: Option<Self>) -> Option<Self> {
         let keyed_confirmations = match (&previous, &current) {
-            (Some(previous), Some(current)) => [previous, current].into_iter().all(|cost| {
-                cost.accounting
-                    .as_ref()
-                    .and_then(|accounting| accounting.initial_killer_confirmed)
-                    .unwrap_or(0)
-                    <= cost.confirmed_initial_killers.len()
-            }),
+            (Some(previous), Some(current)) =>
+            // #[gamma::skip(collection.reverse_array, reason = "Two costs are consumed by all() with a pure accounting predicate. Swapping them leaves the conjunction unchanged.", tag = "equivalent")]
+            {
+                [previous, current].into_iter().all(|cost| {
+                    cost.accounting
+                        .as_ref()
+                        .and_then(|accounting| accounting.initial_killer_confirmed)
+                        .unwrap_or(0)
+                        <= cost.confirmed_initial_killers.len()
+                })
+            }
             _ => true,
         };
         let mut total = Self::combine_checkpoint(previous, current);
@@ -381,11 +385,10 @@ impl SweepCost {
     pub(super) fn combine_checkpoint(previous: Option<Self>, current: Option<Self>) -> Option<Self> {
         let Some(mut total) = previous else { return current };
         let Some(current) = current else { return Some(total) };
-        let previous_confirmed = total
-            .accounting
-            .as_ref()
-            .and_then(|cost| cost.initial_killer_confirmed)
-            .unwrap_or(0);
+        let previous_confirmed = total.accounting.as_ref().and_then(|cost| cost.initial_killer_confirmed).unwrap_or(
+            // #[gamma::skip(literal.int_increment, reason = "The previous-confirmation fallback is used only when prior accounting or its initial_killer_confirmed is None. SweepAccounting::combine preserves prior missing counter, or clears current counter when prior accounting absent. Therefore merged initial_killer_confirmed is None and the later max(previous_confirmed) update is skipped. Changing only this unused fallback0/1 cannot alter output.", tag = "equivalent")]
+            0,
+        );
         let current_confirmed = current
             .accounting
             .as_ref()
@@ -457,8 +460,244 @@ impl SweepCost {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use core::time::Duration;
+    use std::collections::BTreeSet;
 
-    use super::{AttemptCost, PackageSweepCost, SweepAccounting, SweepCost};
+    use serde_json::{Value, from_str, from_value, json, to_value};
+
+    use super::{AttemptCost, InitialHints, PackageSweepCost, SweepAccounting, SweepCost};
+    use crate::HashMap;
+
+    #[test]
+    fn accounting_segments_distinguish_unknown_initial_hints_from_a_known_empty_set() {
+        let hints = InitialHints {
+            population: 17,
+            killers: HashMap::from_iter([(
+                "mutant".into(),
+                crate::discover::Killer {
+                    package: "package".into(),
+                    target: "lib".into(),
+                    test: "test".into(),
+                },
+            )]),
+        };
+        for complete in [false, true] {
+            for (initial, population, exact, confirmed) in [
+                (None, None, None, None),
+                (Some(&InitialHints::default()), Some(0), Some(0), Some(0)),
+                (Some(&hints), Some(17), Some(1), Some(0)),
+            ] {
+                assert_eq!(
+                    SweepAccounting::segment(initial, complete),
+                    SweepAccounting {
+                        complete,
+                        initial_population: population,
+                        initial_exact_hints: exact,
+                        initial_killer_confirmed: confirmed,
+                        ..SweepAccounting::default()
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn attempt_cost_addition_tracks_each_counter_independently_and_saturates() {
+        let current = AttemptCost {
+            launches: 2,
+            execution_ms: 3,
+            hits: 5,
+            misses: 7,
+            inconclusive: 11,
+        };
+        let mut total = AttemptCost {
+            launches: 13,
+            execution_ms: 17,
+            hits: 19,
+            misses: 23,
+            inconclusive: 29,
+        };
+        total.add(&current);
+        assert_eq!(
+            total,
+            AttemptCost {
+                launches: 15,
+                execution_ms: 20,
+                hits: 24,
+                misses: 30,
+                inconclusive: 40,
+            }
+        );
+        let maximum = AttemptCost {
+            launches: usize::MAX,
+            execution_ms: u64::MAX,
+            hits: usize::MAX,
+            misses: usize::MAX,
+            inconclusive: usize::MAX,
+        };
+        total.add(&maximum);
+        assert_eq!(total, maximum);
+    }
+
+    #[test]
+    fn resumed_accounting_requires_every_segment_to_be_complete_and_keeps_initial_coverage() {
+        for previous_complete in [false, true] {
+            for current_complete in [false, true] {
+                let mut previous = SweepAccounting {
+                    complete: previous_complete,
+                    initial_population: Some(17),
+                    initial_exact_hints: Some(11),
+                    initial_killer_confirmed: Some(5),
+                    ..SweepAccounting::default()
+                };
+                let current = SweepAccounting {
+                    complete: current_complete,
+                    initial_population: Some(97),
+                    initial_exact_hints: Some(89),
+                    initial_killer_confirmed: Some(83),
+                    exact: AttemptCost {
+                        launches: 2,
+                        ..AttemptCost::default()
+                    },
+                    inferred: AttemptCost {
+                        launches: 3,
+                        ..AttemptCost::default()
+                    },
+                    fallback: AttemptCost {
+                        launches: 5,
+                        ..AttemptCost::default()
+                    },
+                    confirmation: AttemptCost {
+                        launches: 7,
+                        ..AttemptCost::default()
+                    },
+                    duplicate_launches_avoided: 11,
+                    live_refresh_failures: 13,
+                };
+                previous.add(&current);
+                assert_eq!(
+                    previous,
+                    SweepAccounting {
+                        complete: previous_complete && current_complete,
+                        initial_population: Some(17),
+                        initial_exact_hints: Some(11),
+                        initial_killer_confirmed: Some(5),
+                        exact: AttemptCost {
+                            launches: 2,
+                            ..AttemptCost::default()
+                        },
+                        inferred: AttemptCost {
+                            launches: 3,
+                            ..AttemptCost::default()
+                        },
+                        fallback: AttemptCost {
+                            launches: 5,
+                            ..AttemptCost::default()
+                        },
+                        confirmation: AttemptCost {
+                            launches: 7,
+                            ..AttemptCost::default()
+                        },
+                        duplicate_launches_avoided: 11,
+                        live_refresh_failures: 13,
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn accounting_merge_with_legacy_segments_retains_work_but_marks_coverage_unknown() {
+        let known = SweepAccounting {
+            complete: true,
+            initial_population: Some(17),
+            initial_exact_hints: Some(11),
+            initial_killer_confirmed: Some(5),
+            exact: AttemptCost {
+                launches: 7,
+                ..AttemptCost::default()
+            },
+            ..SweepAccounting::default()
+        };
+        assert_eq!(SweepAccounting::combine(None, None), None);
+        assert_eq!(
+            SweepAccounting::combine(Some(known.clone()), None),
+            Some(SweepAccounting {
+                complete: false,
+                ..known.clone()
+            })
+        );
+        assert_eq!(
+            SweepAccounting::combine(None, Some(known.clone())),
+            Some(SweepAccounting {
+                complete: false,
+                initial_population: None,
+                initial_exact_hints: None,
+                initial_killer_confirmed: None,
+                ..known
+            })
+        );
+    }
+
+    #[test]
+    fn recovered_missing_confirmation_counters_do_not_invent_counts_or_invalidate_complete_segments() {
+        for previous_count in [None, Some(0)] {
+            for current_count in [None, Some(0)] {
+                let segment = |count| SweepCost {
+                    accounting: Some(SweepAccounting {
+                        complete: true,
+                        initial_killer_confirmed: count,
+                        ..SweepAccounting::default()
+                    }),
+                    ..SweepCost::default()
+                };
+                let merged = SweepCost::combine(Some(segment(previous_count)), Some(segment(current_count))).unwrap();
+                let accounting = merged.accounting.unwrap();
+                assert!(accounting.complete);
+                assert_eq!(accounting.initial_killer_confirmed, previous_count);
+                assert!(merged.confirmed_initial_killers.is_empty());
+            }
+        }
+        let segment = |id: &str| SweepCost {
+            confirmed_initial_killers: BTreeSet::from([id.into()]),
+            ..SweepCost::default()
+        };
+        let merged = SweepCost::combine_checkpoint(Some(segment("first")), Some(segment("second"))).unwrap();
+        assert_eq!(merged.confirmed_initial_killers, BTreeSet::from(["first".into(), "second".into()]));
+    }
+
+    #[test]
+    fn checkpoint_package_offsets_saturate_when_prior_wall_time_exceeds_millisecond_range() {
+        let prior = SweepCost {
+            elapsed: Duration::MAX,
+            ..SweepCost::default()
+        };
+        let segment = cost(1, 1, &[("package", 2, 3, 5)]);
+        let combined = SweepCost::combine_checkpoint(Some(prior), Some(segment)).unwrap();
+        assert_eq!(combined.elapsed, Duration::MAX);
+        assert_eq!(combined.packages.len(), 1);
+        let package = &combined.packages[0];
+        assert_eq!(
+            (
+                package.package.as_ref(),
+                package.mutants,
+                package.first_started_ms,
+                package.settled_ms
+            ),
+            ("package", 2, u64::MAX, u64::MAX)
+        );
+        let zero = SweepCost::combine_checkpoint(
+            Some(SweepCost {
+                elapsed: Duration::MAX,
+                ..SweepCost::default()
+            }),
+            Some(cost(1, 0, &[("zero", 1, 0, 0)])),
+        )
+        .unwrap();
+        assert_eq!(
+            (zero.packages[0].first_started_ms, zero.packages[0].settled_ms),
+            (u64::MAX, u64::MAX)
+        );
+    }
 
     #[test]
     fn live_sweep_json_preserves_nulls_field_names_and_pretty_output() {
@@ -487,13 +726,13 @@ mod tests {
             live_refresh_failures: 6,
             ..SweepAccounting::default()
         });
-        let live: serde_json::Value = serde_json::from_str(&cost.live_json().unwrap()).unwrap();
-        let empty = serde_json::json!({
+        let live: Value = from_str(&cost.live_json().unwrap()).unwrap();
+        let empty = json!({
             "launchAttempts": 0, "executionMs": 0, "hits": 0, "misses": 0, "inconclusive": 0
         });
         assert_eq!(
             live,
-            serde_json::json!({
+            json!({
                 "schemaVersion": 1,
                 "sweepWallMs": u64::MAX,
                 "accounting": {
@@ -611,16 +850,16 @@ mod tests {
             Duration::from_millis(150),
             "summed concurrent attempts are not wall time"
         );
-        let restored: SweepCost = serde_json::from_value(serde_json::to_value(&total).unwrap()).unwrap();
+        let restored: SweepCost = from_value(to_value(&total).unwrap()).unwrap();
         let settled = SweepCost::combine(Some(restored), None).unwrap();
         assert_eq!(
-            serde_json::to_value(&settled).unwrap(),
-            serde_json::to_value(&total).unwrap(),
+            to_value(&settled).unwrap(),
+            to_value(&total).unwrap(),
             "settled resume adds nothing"
         );
-        let mut legacy = serde_json::to_value(&total).unwrap();
+        let mut legacy = to_value(&total).unwrap();
         legacy.as_object_mut().unwrap().remove("accounting");
-        let legacy: SweepCost = serde_json::from_value(legacy).unwrap();
+        let legacy: SweepCost = from_value(legacy).unwrap();
         assert!(legacy.accounting.is_none());
         let resumed = SweepCost::combine(Some(legacy), Some(total)).unwrap();
         assert_eq!(resumed.launches, 42, "old counters are retained, not silently reset");
@@ -638,13 +877,13 @@ mod tests {
     }
 
     fn cost(count: usize, elapsed: u64, packages: &[(&str, usize, u64, u64)]) -> SweepCost {
-        let mut value = serde_json::to_value(SweepCost::default()).unwrap();
+        let mut value = to_value(SweepCost::default()).unwrap();
         for field in value.as_object_mut().unwrap().values_mut() {
             if field.is_number() {
-                *field = serde_json::json!(count);
+                *field = json!(count);
             }
         }
-        let mut cost: SweepCost = serde_json::from_value(value).unwrap();
+        let mut cost: SweepCost = from_value(value).unwrap();
         cost.elapsed = Duration::from_millis(elapsed);
         cost.packages = packages
             .iter()
@@ -659,22 +898,37 @@ mod tests {
     }
 
     #[test]
+    fn recovered_deserialized_package_segments_keep_the_earliest_start_even_when_saved_wall_time_precedes_it() {
+        let previous = cost(0, 3, &[("subject", 2, 8, 12)]);
+        let previous: SweepCost = from_value(to_value(previous).unwrap()).unwrap();
+        let current = cost(0, 7, &[("subject", 3, 1, 9)]);
+        let combined = SweepCost::combine_checkpoint(Some(previous), Some(current)).unwrap();
+        assert_eq!(combined.elapsed, Duration::from_millis(10));
+        assert_eq!(combined.packages.len(), 1);
+        let package = &combined.packages[0];
+        assert_eq!(package.package.as_ref(), "subject");
+        assert_eq!(package.mutants, 5);
+        assert_eq!(package.first_started_ms, 4);
+        assert_eq!(package.settled_ms, 12);
+    }
+
+    #[test]
     fn inferred_test_counters_preserve_checkpoint_field_names() {
-        let mut legacy = serde_json::to_value(SweepCost::default()).unwrap();
+        let mut legacy = to_value(SweepCost::default()).unwrap();
         for (field, count) in [
             ("generalized_probes", 7),
             ("generalized_hits", 3),
             ("generalized_rejected", 5),
             ("generalized_candidates", 11),
         ] {
-            legacy[field] = serde_json::json!(count);
+            legacy[field] = json!(count);
         }
-        let restored: SweepCost = serde_json::from_value(legacy.clone()).unwrap();
+        let restored: SweepCost = from_value(legacy.clone()).unwrap();
         assert_eq!(restored.inferred_probes, 7);
         assert_eq!(restored.inferred_hits, 3);
         assert_eq!(restored.inferred_rejected, 5);
         assert_eq!(restored.inferred_candidates, 11);
-        assert_eq!(serde_json::to_value(restored).unwrap(), legacy);
+        assert_eq!(to_value(restored).unwrap(), legacy);
     }
 
     #[test]
@@ -683,18 +937,18 @@ mod tests {
         let segment = cost(3, 50, &[("b", 1, 5, 40), ("a", 2, 0, 50)]);
         let expected = cost(5, 150, &[("a", 2, 100, 150), ("b", 3, 10, 140)]);
         let total = SweepCost::combine(Some(prior), Some(segment)).unwrap();
-        assert_eq!(serde_json::to_value(&total).unwrap(), serde_json::to_value(&expected).unwrap());
+        assert_eq!(to_value(&total).unwrap(), to_value(&expected).unwrap());
         let third = cost(1, 10, &[("a", 1, 0, 10)]);
         let expected = cost(6, 160, &[("a", 3, 100, 160), ("b", 3, 10, 140)]);
         let total = SweepCost::combine(Some(total), Some(third)).unwrap();
-        assert_eq!(serde_json::to_value(&total).unwrap(), serde_json::to_value(&expected).unwrap());
+        assert_eq!(to_value(&total).unwrap(), to_value(&expected).unwrap());
         let unchanged = SweepCost::combine(Some(total), None).unwrap();
-        assert_eq!(serde_json::to_value(unchanged).unwrap(), serde_json::to_value(expected).unwrap());
+        assert_eq!(to_value(unchanged).unwrap(), to_value(expected).unwrap());
         assert!(SweepCost::combine(None, None).is_none());
         let fresh = cost(1, 10, &[]);
         assert_eq!(
-            serde_json::to_value(SweepCost::combine(None, Some(fresh)).unwrap()).unwrap(),
-            serde_json::to_value(cost(1, 10, &[])).unwrap(),
+            to_value(SweepCost::combine(None, Some(fresh)).unwrap()).unwrap(),
+            to_value(cost(1, 10, &[])).unwrap(),
         );
     }
 
@@ -747,6 +1001,6 @@ mod tests {
         let total = SweepCost::combine(Some(prior), Some(segment)).unwrap();
         let mut expected = cost(usize::MAX, 1, &[("a", usize::MAX, 0, u64::MAX)]);
         expected.elapsed = Duration::MAX;
-        assert_eq!(serde_json::to_value(total).unwrap(), serde_json::to_value(expected).unwrap());
+        assert_eq!(to_value(total).unwrap(), to_value(expected).unwrap());
     }
 }

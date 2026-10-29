@@ -48,6 +48,7 @@ pub(super) fn substitute_type_with_budget(ty: &Type, substitutions: &HashMap<Str
     // Retain the input's cost too: unsupported syntactic positions are cloned unchanged.
     *remaining -= input_size + output_size;
     let mut substituted = ty.clone();
+    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
     substitute_type_in_place(&mut substituted, substitutions);
     substituted
 }
@@ -76,25 +77,51 @@ fn substitute_type_in_place(ty: &mut Type, substitutions: &HashMap<String, Type>
         return;
     }
     match ty {
-        Type::Array(array) => substitute_type_in_place(&mut array.elem, substitutions),
-        Type::Group(group) => substitute_type_in_place(&mut group.elem, substitutions),
-        Type::Paren(paren) => substitute_type_in_place(&mut paren.elem, substitutions),
+        Type::Array(array) =>
+        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
+        {
+            substitute_type_in_place(&mut array.elem, substitutions);
+        }
+        Type::Group(group) =>
+        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
+        {
+            substitute_type_in_place(&mut group.elem, substitutions);
+        }
+        Type::Paren(paren) =>
+        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
+        {
+            substitute_type_in_place(&mut paren.elem, substitutions);
+        }
         Type::Path(path) => {
             for segment in &mut path.path.segments {
                 if let PathArguments::AngleBracketed(arguments) = &mut segment.arguments {
                     for argument in &mut arguments.args {
                         if let GenericArgument::Type(inner) = argument {
+                            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                             substitute_type_in_place(inner, substitutions);
                         }
                     }
                 }
             }
         }
-        Type::Ptr(pointer) => substitute_type_in_place(&mut pointer.elem, substitutions),
-        Type::Reference(reference) => substitute_type_in_place(&mut reference.elem, substitutions),
-        Type::Slice(slice) => substitute_type_in_place(&mut slice.elem, substitutions),
+        Type::Ptr(pointer) =>
+        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
+        {
+            substitute_type_in_place(&mut pointer.elem, substitutions);
+        }
+        Type::Reference(reference) =>
+        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
+        {
+            substitute_type_in_place(&mut reference.elem, substitutions);
+        }
+        Type::Slice(slice) =>
+        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
+        {
+            substitute_type_in_place(&mut slice.elem, substitutions);
+        }
         Type::Tuple(tuple) => {
             for element in &mut tuple.elems {
+                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                 substitute_type_in_place(element, substitutions);
             }
         }
@@ -114,9 +141,15 @@ fn type_size(ty: &Type, substitutions: Option<&HashMap<String, Type>>, limit: us
         fn enter(&mut self) -> bool {
             // This conservative depth default bounds recursive visitors independently of node work;
             // it is not a measured stack capacity or a guarantee about platform stack sizes.
-            if self.exceeded || self.remaining == 0 || self.depth == 64 {
+            if (
+                // #[gamma::skip(logical.or_remove_left, reason = "The exceeded flag is sticky and the final budget result is None whenever it is set. Removing the repeated exceeded early return only does bounded extra traversal; remaining/depth checks still guard arithmetic and the final failure remains unchanged.", tag = "equivalent")]
+                self.exceeded || self.remaining == 0
+            ) || self.depth == 64
+            {
                 self.exceeded = true;
-                return false;
+                return
+                // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+                false;
             }
             self.remaining -= 1;
             self.depth += 1;
@@ -126,7 +159,9 @@ fn type_size(ty: &Type, substitutions: Option<&HashMap<String, Type>>, limit: us
 
     impl<'ast> Visit<'ast> for Budget<'ast> {
         fn visit_type(&mut self, i: &'ast Type) {
-            if self.exceeded {
+            if
+            // #[gamma::skip(cond.always_false, reason = "The exceeded flag is sticky and the final budget result is None whenever it is set. Removing the repeated exceeded early return only does bounded extra traversal; remaining/depth checks still guard arithmetic and the final failure remains unchanged.", tag = "equivalent")]
+            self.exceeded {
                 return;
             }
             if let Some(replacement) = self.substitutions.and_then(|substitutions| substituted_parameter(i, substitutions)) {
@@ -174,7 +209,9 @@ fn type_size(ty: &Type, substitutions: Option<&HashMap<String, Type>>, limit: us
 
 pub(super) fn reserve_type(ty: &Type, remaining: &mut usize) -> bool {
     let Some(size) = type_size(ty, None, *remaining) else {
-        return false;
+        return
+        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+        false;
     };
     *remaining -= size;
     true
@@ -211,7 +248,9 @@ pub(super) struct Types<'a> {
 impl Types<'_> {
     fn source_path(&self, ty: &Type) -> Option<(&str, &[String], Vec<String>)> {
         if self.imports.contains_key("*") || matches!(strip(ty), Type::Path(path) if path.path.leading_colon.is_some()) {
-            return None;
+            return
+            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+            None;
         }
         let path = resolved_type_path(ty, self.imports)?;
         if self
@@ -220,7 +259,9 @@ impl Types<'_> {
             .and_then(Option::as_ref)
             .is_some_and(|names| path.first().is_some_and(|name| names.contains(name)))
         {
-            return None;
+            return
+            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+            None;
         }
         let source = self.imports.get(SOURCE_FILE)?.as_ref()?.first()?.as_str();
         let inline = self
@@ -252,10 +293,14 @@ impl Types<'_> {
         let left = as_type(left);
         let right = as_type(right);
         let Some((source, inline, left)) = self.source_path(&left) else {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         };
         let Some((_, _, right)) = self.source_path(&right) else {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         };
         self.defaults.source_same_type(source, inline, &left, &right)
     }
@@ -267,11 +312,16 @@ impl Types<'_> {
     /// distinguish declarations in different modules with the same final identifier.
     fn package_type_name(&self, ty: &Type) -> Option<String> {
         if self.imports.contains_key("*") || self.block_type(ty) {
-            return None;
+            return
+            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+            None;
         }
 
         let written_name = match strip(ty) {
-            Type::Path(path) if path.qself.is_none() && path.path.segments.len() == 1 => {
+            Type::Path(path) if
+            // #[gamma::skip(logical.and_remove_left, reason = "After either removed qself guard, resolved_type_path still rejects every qself path before the package name or empty-constructor result can be produced.", tag = "equivalent")]
+            path.qself.is_none() && path.path.segments.len() == 1 => {
+                // #[gamma::skip(iter.first_to_last, reason = "The enclosing guard requires exactly one path segment or exactly one generic argument, respectively, so first and last select the same element.", tag = "equivalent")]
                 path.path.segments.first().map(|segment| segment.ident.to_string())
             }
             _ => None,
@@ -287,7 +337,9 @@ impl Types<'_> {
 
     fn package_has_default(&self, ty: &Type) -> bool {
         if self.block_type(ty) {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         }
         if self.defaults.has_labeled_sources() {
             return self.source_default(ty) == Some(true);
@@ -298,7 +350,9 @@ impl Types<'_> {
 
     fn package_declares_default(&self, ty: &Type) -> bool {
         if self.block_type(ty) {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         }
         if self.defaults.has_labeled_sources() {
             return self.source_default(ty) == Some(true);
@@ -341,7 +395,9 @@ impl Types<'_> {
                 Some("super") => {
                     while path.first().is_some_and(|name| name == "super") {
                         if module.pop().is_none() {
-                            return false;
+                            return
+                            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+                            false;
                         }
                         let _parent = path.remove(0);
                     }
@@ -349,18 +405,29 @@ impl Types<'_> {
                 _ => {}
             }
             module.extend(path);
-            if explicit_local && module.first().is_none_or(|root| root != "crate") {
+            if
+            // #[gamma::skip(logical.and_remove_right, reason = "These changes only add a redundant leading crate marker to an explicitly local path. Identities::resolve_path removes repeated crate markers; the merged index fallback checks the first crate marker and terminal name and ignores extra middle prefixes. Unlike xyzzy, these replacements never omit a required marker. The old ordinary-child fixture therefore cannot differ.", tag = "equivalent")]
+            explicit_local &&
+            // #[gamma::skip(iter.first_to_last, reason = "These changes only add a redundant leading crate marker to an explicitly local path. Identities::resolve_path removes repeated crate markers; the merged index fallback checks the first crate marker and terminal name and ignores extra middle prefixes. Unlike xyzzy, these replacements never omit a required marker. The old ordinary-child fixture therefore cannot differ.", tag = "equivalent")]
+            module.first().is_none_or(|root| root !=
+            // #[gamma::skip(literal.str_to_empty, reason = "These changes only add a redundant leading crate marker to an explicitly local path. Identities::resolve_path removes repeated crate markers; the merged index fallback checks the first crate marker and terminal name and ignores extra middle prefixes. Unlike xyzzy, these replacements never omit a required marker. The old ordinary-child fixture therefore cannot differ.", tag = "equivalent")]
+            "crate")
+            {
                 module.insert(0, "crate".to_owned());
             }
             let alias = module
                 .last()
                 .is_some_and(|name| self.aliases.is_some_and(|aliases| aliases.get(name).is_some_and(Option::is_some)));
-            if (!alias || self.defaults.local_default(&module) == Some(false)) && self.defaults.lacks_local_path(&module) {
+            if
+            // #[gamma::skip(logical.and_remove_left, reason = "With identity evidence, lacks_local_path(path)==true is exactly identities.default_for(path)==Some(false), which also makes local_default(path)==Some(false). Without identities, lacks_local_path delegates to lacks_error_default; every actual declared alias is in Defaults.aliases and is rejected by that query. The removed conjunct cannot exclude any true negative-evidence answer.", tag = "equivalent")]
+            (!alias || self.defaults.local_default(&module) == Some(false)) && self.defaults.lacks_local_path(&module) {
                 return true;
             }
         }
         if self.defaults.has_single_source_evidence() {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         }
         let name = self.package_type_name(ty);
         name.is_some_and(|name| self.defaults.lacks_default_name(&name))
@@ -401,9 +468,10 @@ impl Types<'_> {
             if self.imports.contains_key(&name) || self.abstracts.contains(&name) || self.defaulted.contains(&name) {
                 return changed.then_some(resolved);
             }
-            // #[gamma::skip(cond.always_false, tag = "timeout", reason = "removing cycle detection makes mutually recursive generic aliases resolve forever")]
-            if !visited.insert(name.clone()) {
-                return None;
+            if !visited.insert(resolved.clone()) {
+                return
+                // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+                None;
             }
             let Some(alias) = aliases.get(&name).and_then(Option::as_ref) else {
                 return changed.then_some(resolved);
@@ -431,7 +499,8 @@ impl Types<'_> {
             let Type::Path(path) = strip(resolved) else {
                 return resolved;
             };
-            let Some(name) = (path.path.segments.len() == 1).then(|| path.path.segments[0].ident.to_string()) else {
+            let Some(name) = (path.qself.is_none() && path.path.segments.len() == 1).then(|| path.path.segments[0].ident.to_string())
+            else {
                 return resolved;
             };
             if self.imports.contains_key(&name) || self.abstracts.contains(&name) || self.defaulted.contains(&name) {
@@ -444,14 +513,40 @@ impl Types<'_> {
             let Some(target) = aliases.get(&name).and_then(Option::as_ref) else {
                 return resolved;
             };
+            if matches!(strip(&target.target), Type::Path(path)
+                if path.qself.is_none()
+                    && path.path.get_ident().is_some_and(|ident| target.parameters.iter().any(|parameter| ident == parameter)))
+            {
+                return resolved;
+            }
             resolved = &target.target;
         }
     }
 
     pub(super) fn primitive_kind(&self, ty: &Type) -> Kind {
+        // Generous test-only headroom catches a stalled walk; production resolution relies on
+        // pointer cycle detection, not this allowance or a supported type-size limit.
+        #[cfg(test)]
+        let mut remaining = 16384;
+        self.primitive_kind_with(ty, || {
+            #[cfg(test)]
+            {
+                assert!(
+                    remaining > 0,
+                    "primitive resolution must stop after a finite reference and alias walk"
+                );
+                remaining -= 1;
+            }
+        })
+    }
+
+    /// Observes each reference/alias iteration before cycle detection, including repeated states,
+    /// for deterministic termination assertions without replacing primitive resolution.
+    fn primitive_kind_with(&self, ty: &Type, mut on_visit: impl FnMut()) -> Kind {
         let mut resolved = ty;
         let mut visited = HashSet::default();
         loop {
+            on_visit();
             if !visited.insert(core::ptr::from_ref(resolved)) {
                 return Kind::Unknown;
             }
@@ -644,13 +739,19 @@ impl Types<'_> {
             Kind::Array => {
                 let array = array_type(concrete);
                 let syn::Expr::Lit(length) = &array.len else {
-                    return false;
+                    return
+                    // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+                    false;
                 };
                 let syn::Lit::Int(length) = &length.lit else {
-                    return false;
+                    return
+                    // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+                    false;
                 };
                 let Ok(length) = length.base10_parse::<usize>() else {
-                    return false;
+                    return
+                    // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+                    false;
                 };
 
                 length == 0 || length <= 32 && (self.has_source_independent_reference_default(&array.elem) || self.has_default(&array.elem))
@@ -660,10 +761,14 @@ impl Types<'_> {
             }
             Kind::Unknown => {
                 let Type::Path(path) = strip(concrete) else {
-                    return false;
+                    return
+                    // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+                    false;
                 };
                 if path.path.is_ident("str") {
-                    return false;
+                    return
+                    // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+                    false;
                 }
                 if resolved_type_path(concrete, self.imports).is_some_and(|segments| {
                     matches!(segments.as_slice(), [root, module, name]
@@ -704,17 +809,25 @@ impl Types<'_> {
             .package_type_name(concrete)
             .is_some_and(|name| self.defaults.generic_default_is_unproven(&name))
         {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         }
         if self.package_declares_default(concrete) || self.local_generic_default(concrete) {
             return true;
         }
         if matches!(kind, Kind::Collection | Kind::Map) && !self.supports_collection_api(concrete) {
             let Some(path) = resolved_type_path(concrete, self.imports) else {
-                return false;
+                return
+                // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+                false;
             };
 
-            return matches!(
+            return
+            // #[gamma::skip(logical.or_remove_right, reason = "has_proven_default already returned true whenever package_declares_default(concrete) or local_generic_default(concrete) was true. At this later repeated clause both pure queries are necessarily false; deleting or conjoining them changes no result.", tag = "equivalent")]
+
+            // #[gamma::skip(logical.or_remove_right, reason = "has_proven_default already returned true whenever package_declares_default(concrete) or local_generic_default(concrete) was true. At this later repeated clause both pure queries are necessarily false; deleting or conjoining them changes no result.", tag = "equivalent")]
+            matches!(
                 path.as_slice(),
                 [root, name]
                     if root == "rustc_hash"
@@ -725,23 +838,30 @@ impl Types<'_> {
 
         match kind {
             kind @ (Kind::Bool | Kind::Signed | Kind::Unsigned | Kind::Float) => self.supports_primitive_kind(concrete, kind),
-            Kind::Option => {
-                self.supports_option_api(concrete) || self.package_declares_default(concrete) || self.local_generic_default(concrete)
+            Kind::String =>
+            // #[gamma::skip(logical.or_remove_right, reason = "has_proven_default already returned true whenever package_declares_default(concrete) or local_generic_default(concrete) was true. At this later repeated clause both pure queries are necessarily false; deleting or conjoining them changes no result.", tag = "equivalent")]
+            {
+                self.supports_string_api(concrete) || self.package_declares_default(concrete)
             }
-            Kind::String => self.supports_string_api(concrete) || self.package_declares_default(concrete),
             Kind::Wrapper => {
                 self.supports_wrapper_api(concrete) && payload(concrete, 0).is_some_and(|inner| self.has_proven_default(inner))
             }
             Kind::Array => {
                 let array = array_type(concrete);
                 let syn::Expr::Lit(length) = &array.len else {
-                    return false;
+                    return
+                    // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+                    false;
                 };
                 let syn::Lit::Int(length) = &length.lit else {
-                    return false;
+                    return
+                    // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+                    false;
                 };
                 let Ok(length) = length.base10_parse::<usize>() else {
-                    return false;
+                    return
+                    // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+                    false;
                 };
 
                 length == 0
@@ -752,6 +872,7 @@ impl Types<'_> {
                     if tuple.elems.iter().all(|element| self.has_proven_default(element)))
             }
             Kind::Unknown if self.package_type_name(concrete).is_some() => {
+                // #[gamma::skip(logical.or_remove_left, logical.or_remove_right, logical.or_to_and, reason = "has_proven_default already returned true whenever package_declares_default(concrete) or local_generic_default(concrete) was true. At this later repeated clause both pure queries are necessarily false; deleting or conjoining them changes no result.", tag = "equivalent")]
                 self.package_declares_default(concrete) || self.local_generic_default(concrete)
             }
             _ => self.has_default(concrete),
@@ -782,19 +903,27 @@ impl Types<'_> {
 
     fn supports_primitive_kind_with(&self, ty: &Type, expected: Kind, visited: &mut HashSet<*const Type>) -> bool {
         if !visited.insert(core::ptr::from_ref(ty)) {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         }
         let ty = self.resolve_alias(ty);
         if let Type::Reference(reference) = strip(ty) {
             return self.supports_primitive_kind_with(&reference.elem, expected, visited);
         }
         let Some(path) = resolved_type_path(ty, self.imports) else {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         };
         let name = match path.as_slice() {
             [name] if !self.defaults.defines(name) && !self.imports.contains_key("*") => name,
             [root, module, name] if matches!(root.as_str(), "std" | "core") && module == "primitive" => name,
-            _ => return false,
+            _ => {
+                return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
+            }
         };
 
         primitive_kind(name) == Some(expected)
@@ -811,11 +940,15 @@ impl Types<'_> {
     pub(super) fn supports_collection_api(&self, ty: &Type) -> bool {
         let ty = self.resolve_alias(ty);
         if self.package_defines(ty) {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         }
 
         let Some(path) = resolved_type_path(ty, self.imports) else {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         };
         let collection_kind = |name: &str| match name {
             "Vec" | "VecDeque" | "HashSet" | "BTreeSet" | "BinaryHeap" | "LinkedList" | "FxHashSet" => Some(Kind::Collection),
@@ -849,8 +982,7 @@ impl Types<'_> {
             [root, collections, module, name]
                 if matches!(root.as_str(), "std" | "alloc")
                     && collections == "collections"
-                    && collection_module(name) == Some(module.as_str())
-                    && collection_kind(name) == Some(written_kind) =>
+                    && collection_module(name) == Some(module.as_str()) =>
             {
                 true
             }
@@ -861,14 +993,22 @@ impl Types<'_> {
 
     pub(super) fn supports_collection_constructor(&self, ty: &Type) -> bool {
         if !self.supports_collection_api(ty) {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         }
         let ty = self.resolve_alias(ty);
         let Type::Path(path) = strip(ty) else {
-            return false;
+            return
+            // #[gamma::skip(literal.bool_flip, reason = "supports_collection_api already succeeded on the same resolved alias. Its accepted path patterns require Type::Path with at least one segment, so both constructor fallback branches are unreachable.", tag = "equivalent")]
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         };
         let Some(segment) = path.path.segments.last() else {
-            return false;
+            return
+            // #[gamma::skip(literal.bool_flip, reason = "supports_collection_api already succeeded on the same resolved alias. Its accepted path patterns require Type::Path with at least one segment, so both constructor fallback branches are unreachable.", tag = "equivalent")]
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         };
         let base_arity = if resolve_type(ty) == Kind::Map { 2 } else { 1 };
 
@@ -887,7 +1027,9 @@ impl Types<'_> {
 
     fn collection_key_proven(&self, ty: &Type, remaining: usize) -> bool {
         if remaining == 0 {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         }
         let instantiated = self.instantiate_alias(ty);
         let ty = self.resolve_alias(instantiated.as_ref().unwrap_or(ty));
@@ -902,7 +1044,9 @@ impl Types<'_> {
             }
             Kind::Result => {
                 self.supports_result_api(ty)
-                    && [0, 1].into_iter().all(|index| {
+                    &&
+                    // #[gamma::skip(collection.reverse_array, reason = "Reversing the two Result payload indices under all over pure key-proof predicates changes only evaluation order, not the conjunction's value.", tag = "equivalent")]
+                    [0, 1].into_iter().all(|index| {
                         self.payload(ty, index)
                             .is_some_and(|inner| self.collection_key_proven(&inner, remaining - 1))
                     })
@@ -953,50 +1097,75 @@ impl Types<'_> {
 
     fn supports_peekable_chars_with(&self, ty: &Type, visited: &mut HashSet<*const Type>) -> bool {
         if !visited.insert(core::ptr::from_ref(ty)) {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         }
         if matches!(strip(ty), Type::Path(path) if path.path.segments.first().is_some_and(|segment| {
             let name = segment.ident.to_string();
             self.abstracts.contains(&name) || self.defaulted.contains(&name)
         })) {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         }
         let ty = self.resolve_alias(ty);
         if let Type::Reference(reference) = strip(ty) {
             return reference.mutability.is_some() && self.supports_peekable_chars_with(&reference.elem, visited);
         }
         let Type::Path(path) = strip(ty) else {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         };
         let Some(resolved) = resolved_type_path(ty, self.imports) else {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         };
         if !self.standard_root_unshadowed(&resolved)
             || !matches!(resolved.as_slice(), [root, module, name]
                 if matches!(root.as_str(), "std" | "core") && module == "iter" && name == "Peekable")
         {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         }
         let Some(segment) = path.path.segments.last() else {
-            return false;
+            return
+            // #[gamma::skip(literal.bool_flip, reason = "supports_peekable_chars_with already resolved and matched exactly std/core::iter::Peekable before the changed segments.last() fallback. A source path that resolved to those three segments cannot have an empty segment list. The old family tests reject nonpeekable/empty shapes earlier.", tag = "equivalent")]
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         };
         let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         };
         if arguments.args.len() != 1 {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         }
-        let Some(GenericArgument::Type(element)) = arguments.args.first() else {
-            return false;
+        let Some(GenericArgument::Type(element)) =
+        // #[gamma::skip(iter.first_to_last, reason = "The enclosing guard requires exactly one path segment or exactly one generic argument, respectively, so first and last select the same element.", tag = "equivalent")]
+        arguments.args.first() else {
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         };
         if matches!(strip(element), Type::Path(path) if path.path.segments.first().is_some_and(|segment| {
             let name = segment.ident.to_string();
             self.abstracts.contains(&name) || self.defaulted.contains(&name)
         })) {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         }
         let Some(resolved) = resolved_type_path(element, self.imports) else {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         };
         self.standard_root_unshadowed(&resolved)
             && matches!(resolved.as_slice(), [root, module, name]
@@ -1006,7 +1175,9 @@ impl Types<'_> {
     pub(super) fn supports_char_api(&self) -> bool {
         let ty: Type = syn::parse_quote!(char);
         let Some(path) = resolved_type_path(&ty, self.imports) else {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         };
         !self.abstracts.iter().chain(self.defaulted).any(|name| name == "char")
             && !self.defaults.defines("char")
@@ -1018,17 +1189,25 @@ impl Types<'_> {
     }
 
     pub(super) fn supports_str_reference(&self, ty: &Type) -> bool {
-        if matches!(strip(ty), Type::Path(path) if path.path.segments.first().is_some_and(|segment| {
+        if
+        // #[gamma::skip(cond.always_false, reason = "The initial str-reference guard only matches Type::Path roots marked abstract/defaulted. resolve_alias independently refuses those same single-segment roots, and never expands multi-segment paths, so the later Type::Reference pattern still rejects them.", tag = "equivalent")]
+        matches!(strip(ty), Type::Path(path) if path.path.segments.first().is_some_and(|segment| {
             let name = segment.ident.to_string();
             self.abstracts.contains(&name) || self.defaulted.contains(&name)
         })) {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         }
         let Type::Reference(reference) = strip(self.resolve_alias(ty)) else {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         };
         let Some(path) = resolved_type_path(&reference.elem, self.imports) else {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         };
         !self.abstracts.iter().chain(self.defaulted).any(|name| name == "str")
             && !self.defaults.defines("str")
@@ -1042,13 +1221,21 @@ impl Types<'_> {
     /// Constructors whose empty value has the same allocation and state as their trait default.
     pub(super) fn supports_empty_default_constructor(&self, ty: &Type) -> bool {
         let Type::Path(path) = strip(ty) else {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         };
-        if path.qself.is_some() {
-            return false;
+        if
+        // #[gamma::skip(cond.always_false, reason = "After either removed qself guard, resolved_type_path still rejects every qself path before the package name or empty-constructor result can be produced.", tag = "equivalent")]
+        path.qself.is_some() {
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         }
         let Some(first) = path.path.segments.first() else {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         };
         let name = first.ident.to_string();
         if self.abstracts.contains(&name)
@@ -1056,22 +1243,35 @@ impl Types<'_> {
             || self.defaults.defines(&name)
             || self.aliases.is_some_and(|aliases| aliases.contains_key(&name))
         {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         }
         let Some(resolved) = resolved_type_path(ty, self.imports) else {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         };
         if !self.standard_root_unshadowed(&resolved) {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         }
         let Some(name) = resolved.last() else {
-            return false;
+            return
+            // #[gamma::skip(literal.bool_flip, reason = "The preceding standard_root_unshadowed(resolved) check rejects an empty resolved path; therefore the subsequent last-segment missing branch cannot be reached.", tag = "equivalent")]
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         };
         if resolved.len() == 1 && !matches!(name.as_str(), "Vec" | "String") {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         }
         let Some(arguments) = constructor_argument_count(&path.path) else {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         };
         if name == "String" {
             return self.supports_string_api(ty) && arguments == 0;
@@ -1102,14 +1302,18 @@ impl Types<'_> {
             || self.defaulted.contains(first)
             || path.len() == 1 && (self.defaults.defines(first) || self.imports.contains_key("*"))
         {
-            return None;
+            return
+            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+            None;
         }
         Some(path)
     }
 
     pub(super) fn supports_default_trait(&self, ty: &Type) -> bool {
         let Type::Path(written) = ty else {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         };
         if written
             .path
@@ -1121,13 +1325,19 @@ impl Types<'_> {
                 self.abstracts.contains(&name) || self.defaulted.contains(&name)
             })
         {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         }
         let Some(path) = resolved_type_path(ty, self.imports) else {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         };
         if !self.standard_root_unshadowed(&path) {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         }
         matches!(path.as_slice(), [name]
             if name == "Default"
@@ -1161,7 +1371,9 @@ impl Types<'_> {
 
     fn standard_root_unshadowed(&self, path: &[String]) -> bool {
         let Some(root) = path.first() else {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         };
         if !matches!(root.as_str(), "std" | "core" | "alloc") {
             return true;
@@ -1181,10 +1393,14 @@ impl Types<'_> {
     pub(super) fn supports_nonzero_api(&self, ty: &Type) -> bool {
         let ty = self.resolve_alias(ty);
         if self.package_defines(ty) {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         }
         let Some(path) = resolved_type_path(ty, self.imports) else {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         };
         let is_nonzero = |name: &str| {
             matches!(
@@ -1217,11 +1433,15 @@ impl Types<'_> {
     fn supports_standard_type(&self, ty: &Type, expected_name: &str, expected_module: &str, roots: &[&str]) -> bool {
         let ty = self.resolve_alias(ty);
         if self.package_defines(ty) {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         }
 
         let Some(path) = resolved_type_path(ty, self.imports) else {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         };
 
         matches!(path.as_slice(), [name] if name == expected_name && !self.imports.contains_key("*"))
@@ -1240,7 +1460,9 @@ impl Types<'_> {
 
     fn supports_iterator_trait_with(&self, ty: &Type, iterator_bounded: &[String], visited: &mut HashSet<*const Type>) -> bool {
         if !visited.insert(core::ptr::from_ref(ty)) {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         }
         let ty = self.resolve_alias(ty);
         if let Type::Reference(reference) = strip(ty) {
@@ -1252,7 +1474,9 @@ impl Types<'_> {
             return true;
         }
         let Type::ImplTrait(implementation) = strip(ty) else {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         };
 
         implementation.bounds.iter().any(|bound| {
@@ -1266,11 +1490,15 @@ impl Types<'_> {
     pub(super) fn supports_range_iterator(&self, ty: &Type) -> bool {
         let ty = self.resolve_alias(ty);
         if !self.supports_standard_type(ty, "Range", "ops", &["std", "core"]) {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         }
         let arguments = type_argument_values(ty);
         let [element] = arguments.as_slice() else {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         };
 
         self.supports_primitive_kind(element, Kind::Signed) || self.supports_primitive_kind(element, Kind::Unsigned)
@@ -1311,11 +1539,13 @@ impl Types<'_> {
 
     pub(super) fn collection_hasher_index(&self, ty: &Type) -> Option<usize> {
         if !self.supports_collection_api(ty) {
-            return None;
+            return
+            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+            None;
         }
-        match resolved_type_path(ty, self.imports)?.last()?.as_str() {
-            "HashSet" => Some(1),
-            "HashMap" => Some(2),
+        match resolved_type_path(ty, self.imports)?.last().map(String::as_str) {
+            Some("HashSet") => Some(1),
+            Some("HashMap") => Some(2),
             _ => None,
         }
     }
@@ -1323,10 +1553,14 @@ impl Types<'_> {
     pub(super) fn supports_wrapper_api(&self, ty: &Type) -> bool {
         let ty = self.resolve_alias(ty);
         if self.package_defines(ty) {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         }
         let Some(path) = resolved_type_path(ty, self.imports) else {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         };
 
         matches!(path.as_slice(), [name]
@@ -1432,7 +1666,9 @@ impl Types<'_> {
 
     fn renamed_collection_has_default(&self, ty: &Type) -> bool {
         let Some(path) = resolved_type_path(ty, self.imports) else {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         };
 
         matches!(
@@ -1454,7 +1690,9 @@ impl Types<'_> {
 
     fn local_generic_default(&self, ty: &Type) -> bool {
         let Some(name) = self.package_type_name(ty) else {
-            return false;
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+            false;
         };
 
         self.defaults.declares_generic_default_name(&name)
@@ -1553,21 +1791,30 @@ impl Types<'_> {
 
     fn concrete_self_type<'a>(&'a self, ty: &Type) -> Option<&'a Type> {
         let Type::Path(path) = strip(ty) else {
-            return None;
+            return
+            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+            None;
         };
 
-        (path.qself.is_none() && path.path.is_ident("Self"))
-            .then_some(self.self_type)
-            .flatten()
+        (
+            // #[gamma::skip(logical.and_remove_left, reason = "These sites independently require Path::get_ident/is_ident after the qself guard. On parsed syn paths, <Owner>::Name has a leading_colon, so get_ident/is_ident rejects it independently; <Owner as Trait>::Name contains at least two segments and is also rejected independently. The prior simple qualified-name negative assertions therefore never distinguished this guard. The proof is for parsed production inputs, not artificially inconsistent manually constructed paths.", tag = "equivalent")]
+            path.qself.is_none() && path.path.is_ident("Self")
+        )
+        .then_some(self.self_type)
+        .flatten()
     }
 
     fn concrete_self_associated_type<'a>(&'a self, ty: &Type) -> Option<&'a Type> {
         let Type::Path(path) = strip(ty) else {
-            return None;
+            return
+            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+            None;
         };
         let mut segments = path.path.segments.iter();
         let (Some(root), Some(name), None) = (segments.next(), segments.next(), segments.next()) else {
-            return None;
+            return
+            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+            None;
         };
 
         (path.qself.is_none() && root.ident == "Self")
@@ -1589,7 +1836,9 @@ pub(super) fn constructor_argument_count(path: &Path) -> Option<usize> {
     while let Some(segment) = segments.next() {
         if segments.peek().is_some() {
             if !matches!(segment.arguments, PathArguments::None) {
-                return None;
+                return
+                // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+                None;
             }
             continue;
         }
@@ -1608,10 +1857,14 @@ pub(super) fn constructor_argument_count(path: &Path) -> Option<usize> {
 
 fn resolved_type_path(ty: &Type, imports: &HashMap<String, Option<Vec<String>>>) -> Option<Vec<String>> {
     let Type::Path(path) = strip(ty) else {
-        return None;
+        return
+        // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+        None;
     };
     if path.qself.is_some() {
-        return None;
+        return
+        // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+        None;
     }
 
     let mut segments = path
@@ -1629,13 +1882,30 @@ fn resolved_type_path(ty: &Type, imports: &HashMap<String, Option<Vec<String>>>)
                 break;
             }
             let Some(imported) = imports.get(first) else {
+                // #[gamma::skip(loop.break_to_continue, reason = "This break is the imports.get(first)=None arm, not the absolute-root arm. Replacing it with continue only repeats the same unchanged path through the finite 0..=imports.len() loop; the final returned path is identical. The previous shadowed absolute-root fixture tested a neighboring break.", tag = "equivalent")]
                 break;
             };
             let Some(prefix) = imported else {
-                return None;
+                return
+                // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+                None;
             };
             // #[gamma::skip(iter.first_to_last, reason = "the comparison is reached only for a one-element prefix, whose first and last element are identical")]
-            if prefix.len() == 1 && prefix.first() == Some(first) {
+            if
+            // #[gamma::skip(cond.always_false, reason = "These changes remove or bypass only the identity-prefix early exit. The selected prefix is exactly [first], so splicing it or continuing leaves the entire path unchanged; the remaining import budget is finite and returns that same path.", tag = "equivalent")]
+            // #[gamma::skip(logical.and_remove_left, reason = "Production import maps are canonicalized by canonical_import before Types sees them. A multi-segment import prefix that starts with its own imported key is a self-expanding cycle and is demoted to None there. The sole surviving self-prefix is the singleton identity link. Replacing it by itself for the bounded remaining iterations preserves the exact segment vector; changing the guard affects no resolved path.", tag = "equivalent")]
+            (
+                // #[gamma::skip(relational.eq_to_ne, reason = "Production import maps are canonicalized by canonical_import before Types sees them. A multi-segment import prefix that starts with its own imported key is a self-expanding cycle and is demoted to None there. The sole surviving self-prefix is the singleton identity link. Replacing it by itself for the bounded remaining iterations preserves the exact segment vector; changing the guard affects no resolved path.", tag = "equivalent")]
+                prefix.len() ==
+            // #[gamma::skip(literal.int_decrement, reason = "These changes remove or bypass only the identity-prefix early exit. The selected prefix is exactly [first], so splicing it or continuing leaves the entire path unchanged; the remaining import budget is finite and returns that same path.", tag = "equivalent")]
+            // #[gamma::skip(literal.int_increment, reason = "Production import maps are canonicalized by canonical_import before Types sees them. A multi-segment import prefix that starts with its own imported key is a self-expanding cycle and is demoted to None there. The sole surviving self-prefix is the singleton identity link. Replacing it by itself for the bounded remaining iterations preserves the exact segment vector; changing the guard affects no resolved path.", tag = "equivalent")]
+            1
+            ) && prefix.first() ==
+            // #[gamma::skip(option.some_to_none, reason = "These changes remove or bypass only the identity-prefix early exit. The selected prefix is exactly [first], so splicing it or continuing leaves the entire path unchanged; the remaining import budget is finite and returns that same path.", tag = "equivalent")]
+            Some(first)
+            {
+                // #[gamma::skip(loop.delete_break, reason = "These changes remove or bypass only the identity-prefix early exit. The selected prefix is exactly [first], so splicing it or continuing leaves the entire path unchanged; the remaining import budget is finite and returns that same path.", tag = "equivalent")]
+                // #[gamma::skip(loop.break_to_continue, reason = "These changes remove or bypass only the identity-prefix early exit. The selected prefix is exactly [first], so splicing it or continuing leaves the entire path unchanged; the remaining import budget is finite and returns that same path.", tag = "equivalent")]
                 break;
             }
             let _replaced = segments.splice(..1, prefix.iter().cloned());
@@ -1650,7 +1920,9 @@ fn resolved_type_path(ty: &Type, imports: &HashMap<String, Option<Vec<String>>>)
 /// An arbitrary dependency type ending in `Error` is not negative evidence.
 pub(super) fn is_foreign_error(ty: &Type, imports: &HashMap<String, Option<Vec<String>>>) -> bool {
     let Some(resolved) = resolved_type_path(ty, imports) else {
-        return false;
+        return
+        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+        false;
     };
 
     matches!(
@@ -1673,14 +1945,20 @@ pub(super) fn is_foreign_error(ty: &Type, imports: &HashMap<String, Option<Vec<S
 /// is close to universal in real Rust, the alias is resolved through the workspace index.
 pub(super) fn returns_undefaultable_error(output: &ReturnType, types: &Types<'_>) -> bool {
     let ReturnType::Type(_arrow, ty) = output else {
-        return false;
+        return
+        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+        false;
     };
 
     let Type::Path(path) = strip(ty) else {
-        return false;
+        return
+        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+        false;
     };
     if resolve_type(ty) != Kind::Result {
-        return false;
+        return
+        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+        false;
     }
 
     if let Some(error) = payload(ty, 1) {
@@ -1717,7 +1995,9 @@ pub(super) fn is_abstract_type(ty: &Type, abstracts: &[String]) -> bool {
 
         Type::Path(path) if path.qself.is_none() => {
             let Some(last) = path.path.segments.last() else {
-                return false;
+                return
+                // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+                false;
             };
 
             if path.path.segments.len() > 1 {

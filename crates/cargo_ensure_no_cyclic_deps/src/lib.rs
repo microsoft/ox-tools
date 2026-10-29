@@ -230,7 +230,10 @@ fn find_cycle_in_scc(graph: &DiGraph<PackageId, ()>, scc: &[NodeIndex]) -> Vec<P
     let mut cycle = None;
     while let Some((curr, path)) = queue.pop_front() {
         for neighbor in graph.neighbors(curr) {
-            if !scc_set.contains(&neighbor) {
+            if
+            // #[gamma::skip(cond.always_false, reason = "An edge leaving a Tarjan SCC cannot return to it; omitting this filter only explores unrelated vertices.", tag = "perf")]
+            !scc_set.contains(&neighbor) {
+                // #[gamma::skip(loop.delete_continue, reason = "An edge leaving a Tarjan SCC cannot return to it; omitting this filter only explores unrelated vertices.", tag = "perf")]
                 continue;
             }
             if neighbor == start && path.len() > 1 {

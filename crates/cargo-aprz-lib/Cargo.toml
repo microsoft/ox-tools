@@ -4,7 +4,7 @@
 [package]
 name = "cargo-aprz-lib"
 description = "Internal library for cargo-aprz"
-version = "1.2.0"
+version = "1.2.2"
 readme = "README.md"
 keywords = ["oxidizer", "cargo", "dependencies", "analysis", "quality"]
 categories = ["development-tools"]
@@ -80,7 +80,7 @@ compact_str = { workspace = true, features = ["std", "serde"] }
 constant_time_eq = { workspace = true }
 csv = { workspace = true }
 env_logger = { workspace = true }
-fetch = { workspace = true, features = ["json", "native-tls", "tokio"] }
+fetch = { workspace = true, features = ["json", "rustls", "tokio"] }
 flate2 = { workspace = true, features = ["zlib-rs"] }
 futures = { workspace = true }
 futures-util = { workspace = true }
@@ -149,12 +149,17 @@ serde_json = { workspace = true }
 tempfile = { workspace = true }
 tick = { workspace = true, features = ["test-util"] }
 tokio = { workspace = true, features = ["test-util"] }
+tracing = { workspace = true, features = ["std"] }
 wiremock = { workspace = true }
 
 # Every integration test reaches into the crate through the `internals` facade, directly or
 # through `tests/support`, so they are all gated on that feature.
 [[test]]
 name = "advisory_provider_integration"
+required-features = ["internals"]
+
+[[test]]
+name = "archive_integration"
 required-features = ["internals"]
 
 [[test]]
