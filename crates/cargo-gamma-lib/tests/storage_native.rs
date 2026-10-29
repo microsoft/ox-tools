@@ -63,7 +63,7 @@ fn frozen_testing_snapshot() -> Value {
         phases: Phases::default(),
     };
     json!({
-        "version": 2, "tool": env!("CARGO_PKG_VERSION"),
+        "version": 3, "tool": env!("CARGO_PKG_VERSION"),
         "platform": format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
         "confidences": {},
         "plan": {
@@ -75,7 +75,7 @@ fn frozen_testing_snapshot() -> Value {
         "workspace": {},
         "settings": {
             "jobs": 1, "mutators": null, "timeout_floor": Duration::ZERO,
-            "confirm": false, "narrowed": false, "incremental": false
+            "narrowed": false, "incremental": false
         },
         "killers": empty_execution_killers(),
         "record": {

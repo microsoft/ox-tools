@@ -50,14 +50,14 @@ verdicts, incremental reuse, reporting, and command dispatch.
   Only sealed, passing whole-binary observations may exclude another replacement
   at the same stable source site while deterministic reach narrowing is enabled.
   Exclusion additionally requires no calibrated timeout budget, stall budget,
-  memory metering, or confirmation policy. Timeout eligibility uses the
+  or memory metering. Timeout eligibility uses the
   unscaled budget's presence, not its duration: per-mutant multipliers cannot
   remove an existing budget or create an absent one. This policy check never
   rescales durations, including for extreme finite multipliers; actual execution
   retains its ordinary timeout calculation.
 - A reachable exact killer hint is probed before inferred tests, regardless of
-  its binary's canonical position. Confirmed kills settle immediately.
-  Confirmation and containment requirements apply to every phase.
+  its binary's canonical position. Ordinary assertion failures settle as kills immediately.
+  Resource retries, nextest enumeration controls, and containment requirements apply to every phase.
 - A direct-harness filter that excludes a hinted test makes that probe
   inconclusive before any process starts. Inferred and canonical selection
   remain eligible; refusing an empty selection is not a containment failure.
@@ -227,7 +227,7 @@ Every campaign first drains exact hinted killing tests across the population.
 Each worker then takes an unresolved mutant through the remaining stages to a
 final verdict before claiming another mutant:
 
-1. Run exact hinted killing tests. Every confirmed kill settles immediately,
+1. Run exact hinted killing tests. Every kill settles immediately,
    regardless of its binary's position in reachable order.
 2. Admit inferred named cases from same-item killing-test learning and
    historical site-reach candidates, then rank the combined eligible cases
@@ -236,15 +236,15 @@ final verdict before claiming another mutant:
    deterministically; transfer misses and runtime do not affect this order.
    Historical per-mutant exact-killer hints seed these counts, including
    completed or resumed kills; generalized candidate seed frequencies and
-   transfer counters do not. Confirmed final named kills from every stage,
+   transfer counters do not. Final named kills from every stage,
    including exact probes and new full-binary discoveries, update the counts
    immediately. Each mutant contributes once, moving its credit if its named
    killer changes. Unnamed whole-binary failures, enumeration failures, and
-   resource or inconclusive outcomes do not credit named tests. A confirmed
+   resource or inconclusive outcomes do not credit named tests. An observed
    unnamed single-case failure credits the selected case.
    For both direct libtest and nextest, retain
    the first six eligible distinct cases and run them individually in priority
-   order, stopping on a confirmed kill. Libtest does not group cases by binary.
+   order, stopping on a kill. Libtest does not group cases by binary.
 3. Run every distinct inferred full binary, best-first and sequentially per
    mutant. Inference includes binaries identified by the named cases, item/file
    reach observations, and file-local kills. There is no binary-candidate cap.
@@ -255,10 +255,10 @@ final verdict before claiming another mutant:
 
 Fallback retains own-package precedence, then orders each package tier by
 descending distinct-mutant kill count. Baseline runtime and stable binary
-identity break ties. Historical exact-killer hints seed the counts; confirmed
+identity break ties. Historical exact-killer hints seed the counts; observed
 kills from all stages update them before the next fallback snapshot. A known
 mutant is credited only once, moving its credit if a different binary kills it.
-Unnamed confirmed kills count too, while passing or inconclusive runs do not.
+Unnamed kills count too, while passing or inconclusive runs do not.
 This changes execution order, not the baseline-sorted reachable order used to
 choose the final non-killing outcome.
 
@@ -272,19 +272,19 @@ overall memory pressure by reducing the job count when necessary. Named-resource
 reservations apply to the actual selection, not to a mutant's entire future work.
 Independent mutants need not wait for a same-item learning scout.
 
-The phase-2 six-case limit counts mutant-active probes, not control
-confirmations or nextest-configured retries. Only passing named probes suppress
+The phase-2 six-case limit counts mutant-active probes, not resource retries,
+enumeration controls or nextest-configured retries. Only passing named probes suppress
 duplicate cases in later inference; inconclusive named probes remain eligible.
 Duplicate cases and binaries are removed without changing their ranked order.
 Unreachable, filtered, duplicate, and already-passing cases do not consume the
 six-case allowance. This cap does not remove candidates from full-binary inference.
 
 Per-process memory enforcement and named-resource admission still apply to every
-run, including named-test probes and their confirmations. Baseline and sweep use
+run, including named-test probes, resource retries and enumeration controls. Baseline and sweep use
 the same harness-thread configuration.
 
 Full-binary outcomes from phase 3 are reused in phase 4, including inconclusive
-outcomes; selected-case passes do not replace a full-binary run. A confirmed
+outcomes; selected-case passes do not replace a full-binary run. An observed
 failure in any binary takes precedence over earlier timeout, memory, or flaky
 observations. Without a kill, the first non-passing full-binary result in stable
 reachable order determines the reported resource/flakiness/inconclusive outcome.
@@ -292,11 +292,18 @@ Only mutants whose required full-binary runs all pass are survivors. An empty
 reachable set, including one established by sealed whole-binary evidence at the
 site, is no coverage. Loss of containment aborts immediately.
 
-Flaky outcomes are score-neutral. Their notes distinguish a test that failed
-with and without the mutant from an unmutated confirmation that timed out,
-stalled, or exceeded its memory ceiling. An unfinished confirmation names its
-resource failure rather than claiming the test failed twice; neither case
-establishes a kill or a survivor.
+Baseline validates the unmutated tests before the sweep. Ordinary assertion failures then settle
+kills directly, including exact hinted probes and failures reached during resource retries.
+There is no per-kill unmutated control run or confirmation toggle. A passing baseline does not
+rule out intermittent later failures, which can count as kills.
+
+Resource suspicions still receive their resource-specific retries. Nextest enumeration failures
+retain an unmutated control to distinguish runner failure from mutation-induced enumeration
+failure. A test failure in that control produces a score-neutral flaky outcome; an incomplete
+control also occupies the score-neutral flaky bucket but names its resource failure rather than
+claiming the test failed twice. This enumeration-control path is
+the only remaining producer of new flaky verdicts, not a general flaky-test detector. Historical flaky
+verdicts remain readable and mergeable. Neither flaky nor incomplete controls establish a kill or a survivor.
 
 Settled kills publish learning before their assignment is released. Named
 inference can use every exact-pass kill and full-binary discoveries from earlier
@@ -582,7 +589,11 @@ offsets is never attempted.
 Diff paths are resolved to the workspace-relative Rust files discovered by the
 survey. Absolute or rooted paths inside the workspace are normalized to those
 candidates; one from another checkout is normalized only when its suffix
-uniquely identifies one candidate. Paths that traverse outside the workspace
+uniquely identifies one candidate. Nonmutation target helpers are inventoried
+with validation-only walks that prune Cargo's resolved target directory and
+conventional `target` and `.git` directories at workspace and package roots;
+ordinary mutation-source walks retain their full source inventory.
+Paths that traverse outside the workspace
 are never accepted as source selections; this includes parent traversal and
 Windows drive-relative prefixes. Non-source paths count as understood only
 when they name regular workspace files. Diffs, checked-in hints, and
@@ -708,9 +719,9 @@ test execution, without waiting for a mutant to finish.
 
 The private campaign cache retains a versioned `testing-session.json` snapshot,
 an authoritative `testing-verdicts.jsonl` journal, and `testing-phase.json`.
-Prepared snapshot schema version 2 rejects earlier reachability-policy snapshots,
-whose settled no-coverage verdicts cannot be safely reused. Those campaigns
-require a fresh run.
+Prepared snapshot schema version 3 rejects older snapshots with different reachability or
+kill-confirmation policies. Those campaigns require a fresh run rather than mixing verdict
+policies across testing segments.
 A fresh measured run invalidates resumability before changing its workspace;
 the testing phase becomes resumable only after the prepared snapshot and empty
 journal are durably published. The coordinator appends and syncs each completed

@@ -2363,9 +2363,6 @@ pub(super) struct Sweep {
 
     /// Whether each run's memory is to be accounted for at all.
     pub(super) meter: bool,
-
-    /// Whether a failing test is re-run with no mutant active before it is believed.
-    pub(super) confirm: bool,
 }
 
 /// What one mutant's run across its reachable test binaries came to.
@@ -2486,14 +2483,11 @@ fn trace_selection(
 
 /// Whether omitting a known-unreached binary preserves required whole-binary checks.
 fn negative_reach_hint_is_final(binary: &TestBinary, sweep: Sweep) -> bool {
-    reach_hint_is_final(
-        whole_probe_attempt(
-            binary,
-            // #[gamma::skip(option.none_to_some, reason = "negative_reach_hint_is_final only tests the timeout Option's presence through reach_hint_is_final. TestBinary::budget_for returns None iff binary.budget is None for both override None and Some(0.0); numeric budget changes cannot alter this Boolean classification.", tag = "equivalent")]
-            None, sweep,
-        ),
-        sweep.confirm,
-    )
+    reach_hint_is_final(whole_probe_attempt(
+        binary,
+        // #[gamma::skip(option.none_to_some, reason = "negative_reach_hint_is_final only tests the timeout Option's presence through reach_hint_is_final. TestBinary::budget_for returns None iff binary.budget is None for both override None and Some(0.0); numeric budget changes cannot alter this Boolean classification.", tag = "equivalent")]
+        None, sweep,
+    ))
 }
 
 fn whole_probe_attempt(binary: &TestBinary, timeout_multiplier: Option<f64>, sweep: Sweep) -> Attempt<'static> {
@@ -3246,22 +3240,16 @@ mod tests {
                 },
             ] {
                 for meter in [false, true] {
-                    for confirm in [false, true] {
-                        let policy = Sweep {
-                            timeout_floor: Duration::from_secs(2),
-                            stall,
-                            jobs: 1,
-                            meter,
-                            confirm,
-                        };
-                        let expected = budget.is_none() && stall.budget.is_none() && !meter && !confirm;
-                        assert_eq!(negative_reach_hint_is_final(&binary, policy), expected);
-                        for multiplier in [None, Some(0.5), Some(2.0)] {
-                            assert_eq!(
-                                reach_hint_is_final(whole_probe_attempt(&binary, multiplier, policy), confirm),
-                                expected
-                            );
-                        }
+                    let policy = Sweep {
+                        timeout_floor: Duration::from_secs(2),
+                        stall,
+                        jobs: 1,
+                        meter,
+                    };
+                    let expected = budget.is_none() && stall.budget.is_none() && !meter;
+                    assert_eq!(negative_reach_hint_is_final(&binary, policy), expected);
+                    for multiplier in [None, Some(0.5), Some(2.0)] {
+                        assert_eq!(reach_hint_is_final(whole_probe_attempt(&binary, multiplier, policy)), expected);
                     }
                 }
             }
@@ -3282,16 +3270,13 @@ mod tests {
         let site = SiteIdentity::from_mutant(&crate::fixtures::mutant());
         let negative = NegativeLearning::default();
         negative.record(&site, &binary);
-        let policy = Sweep {
-            confirm: false,
-            ..sweep(Stall::NONE)
-        };
+        let policy = sweep(Stall::NONE);
         for budget in [None, Some(Duration::ZERO), Some(Duration::from_secs(1)), Some(Duration::MAX)] {
             binary.budget = budget;
             let mut state = PendingState::default();
             let tally = Tally::default();
             let judgement = super::super::verdict::with_binary_runner(
-                |_, _, _| panic!("neither a negative-reach exclusion nor a filtered exact hint may launch a binary"),
+                |_, _| panic!("neither a negative-reach exclusion nor a filtered exact hint may launch a binary"),
                 || {
                     staged::judge(
                         &work,
@@ -3931,7 +3916,6 @@ mod tests {
             },
             jobs: 2,
             meter: true,
-            confirm: false,
         };
         for (multiplier, timeout) in [(None, 70), (Some(2.0), 14), (Some(0.1), 3)] {
             let attempt = whole_probe_attempt(&binary, multiplier, sweep);
@@ -4038,7 +4022,7 @@ mod tests {
                 |ordinal| {
                     execution_tier(SelectionTier::Exact, false);
                     let verdict = super::super::verdict::with_binary_runner(
-                        move |_binary, _attempt, _confirm| super::super::verdict::BinaryRun {
+                        move |_binary, _attempt| super::super::verdict::BinaryRun {
                             verdict: if ordinal == 1 { Verdict::Failed(None) } else { Verdict::Passed },
                             reach: super::super::verdict::ReachObservation::Reached,
                         },
@@ -4050,8 +4034,8 @@ mod tests {
                                 request: MemoryRequest::default(),
                                 only: Only::One("known"),
                             };
-                            let first = run_binary_observed(&work, &binary, attempt, false);
-                            let second = run_binary_observed(&work, &binary, attempt, false);
+                            let first = run_binary_observed(&work, &binary, attempt);
+                            let second = run_binary_observed(&work, &binary, attempt);
                             assert_eq!(first.reach, super::super::verdict::ReachObservation::Reached);
                             assert_eq!(second.reach, super::super::verdict::ReachObservation::Reached);
                             first.verdict
@@ -4248,7 +4232,6 @@ mod tests {
                 let judged = judge_script(
                     vec![("earlier", only, Verdict::Failed(None), ReachObservation::Reached)],
                     ranked_attempt(),
-                    true,
                     || {
                         judge_learning(
                             &work,
@@ -4406,10 +4389,9 @@ mod tests {
             let clock = tick::ClockControl::new().to_simple_clock();
             let runner = Arc::new({
                 let calls = Arc::clone(&calls);
-                move |_: &TestBinary, attempt: Attempt<'_>, confirm: bool| {
+                move |_: &TestBinary, attempt: Attempt<'_>| {
                     let mut calls = calls.lock().unwrap();
                     assert!(calls.len() < 2, "each mutant must be killed by its first actual selection");
-                    assert!(!confirm);
                     assert_eq!(attempt.only.names(), if deterministic { &["known"][..] } else { &[] });
                     calls.push(attempt.active.unwrap());
                     super::super::verdict::BinaryRun {
@@ -4448,10 +4430,7 @@ mod tests {
                             &work,
                             &mut plan,
                             &reach,
-                            Sweep {
-                                confirm: false,
-                                ..ranked_sweep()
-                            },
+                            ranked_sweep(),
                             deterministic,
                             &mut killers,
                             &mut crate::testing::Recorder::default(),
@@ -4899,7 +4878,6 @@ mod tests {
                 ReachObservation::Reached,
             )],
             ranked_attempt(),
-            true,
             || {
                 judge_ranked(
                     &work,
@@ -5245,7 +5223,6 @@ mod tests {
                 ("earlier", Only::All, Verdict::Passed, ReachObservation::Reached),
             ],
             ranked_attempt(),
-            true,
             || {
                 judge_ranked(
                     &work,
@@ -5275,13 +5252,13 @@ mod tests {
 
     type JudgeStep = (&'static str, Only<'static>, Verdict, ReachObservation);
 
-    fn judge_script<T>(steps: Vec<JudgeStep>, expected: Attempt<'static>, confirm: bool, body: impl FnOnce() -> T) -> T {
+    fn judge_script<T>(steps: Vec<JudgeStep>, expected: Attempt<'static>, body: impl FnOnce() -> T) -> T {
         use std::rc::Rc;
 
         let remaining = Rc::new(RefCell::new(std::collections::VecDeque::from(steps)));
         let script = Rc::clone(&remaining);
         let result = super::super::verdict::with_binary_runner(
-            move |binary, attempt, confirming| {
+            move |binary, attempt| {
                 let (target, only, verdict, reach) = script.borrow_mut().pop_front().expect("every launch must match a scripted step");
                 assert_eq!(binary.target, target);
                 assert_eq!(format!("{:?}", attempt.only), format!("{only:?}"));
@@ -5290,7 +5267,6 @@ mod tests {
                 assert_eq!(attempt.stall.budget, expected.stall.budget);
                 assert_eq!(attempt.request.meter, expected.request.meter);
                 assert_eq!(attempt.request.limit, expected.request.limit);
-                assert_eq!(confirming, confirm);
                 BinaryRun { verdict, reach }
             },
             body,
@@ -5319,7 +5295,6 @@ mod tests {
             },
             jobs: 1,
             meter: true,
-            confirm: true,
         }
     }
 
@@ -5595,7 +5570,6 @@ mod tests {
         let mut settings = ranked_sweep();
         settings.stall = Stall::NONE;
         settings.meter = false;
-        settings.confirm = false;
         let expected = Attempt {
             timeout: None,
             stall: Stall::NONE,
@@ -5606,7 +5580,6 @@ mod tests {
         let judged = judge_script(
             vec![("later", Only::All, Verdict::Passed, ReachObservation::Reached)],
             expected,
-            false,
             || {
                 judge_ranked(
                     &work,
@@ -5657,7 +5630,6 @@ mod tests {
         let judged = judge_script(
             vec![("later", Only::One("historical"), Verdict::Failed(None), ReachObservation::Unknown)],
             ranked_attempt(),
-            true,
             || {
                 judge_ranked(
                     &work,
@@ -5729,7 +5701,6 @@ mod tests {
                 ("earlier", Only::All, Verdict::Passed, ReachObservation::Reached),
             ],
             ranked_attempt(),
-            true,
             || {
                 judge_ranked(
                     &work,
@@ -5777,7 +5748,6 @@ mod tests {
                 ("earlier", Only::All, Verdict::Passed, ReachObservation::Reached),
             ],
             ranked_attempt(),
-            true,
             || {
                 judge_ranked(
                     &work,
@@ -5833,7 +5803,6 @@ mod tests {
                 ("later", Only::All, Verdict::Passed, ReachObservation::Reached),
             ],
             ranked_attempt(),
-            true,
             || {
                 judge_ranked(
                     &work,
@@ -5875,7 +5844,6 @@ mod tests {
                     ReachObservation::Unknown,
                 )],
                 ranked_attempt(),
-                true,
                 || {
                     judge_ranked(
                         &work,
@@ -5948,7 +5916,7 @@ mod tests {
                 let tally = Tally::default();
                 begin_selection_trace();
                 let judged = super::super::verdict::with_binary_runner(
-                    move |binary, attempt, _confirming| {
+                    move |binary, attempt| {
                         let index = usize::from(binary.target == "later");
                         assert!(admitted[index], "unreachable binaries must not launch");
                         let count = recorded.borrow().len();
@@ -6081,7 +6049,6 @@ mod tests {
                 ReachObservation::Unknown,
             )],
             ranked_attempt(),
-            true,
             || {
                 judge_ranked(
                     &work,
@@ -6124,7 +6091,6 @@ mod tests {
                 ("later", Only::All, Verdict::Passed, ReachObservation::Reached),
             ],
             ranked_attempt(),
-            true,
             || {
                 judge_ranked(
                     &work,
@@ -6169,7 +6135,6 @@ mod tests {
         let mut settings = ranked_sweep();
         settings.stall = Stall::NONE;
         settings.meter = false;
-        settings.confirm = false;
         let tally = Tally::default();
         let judged = judge_script(
             vec![("later", Only::All, Verdict::Passed, ReachObservation::Reached)],
@@ -6183,7 +6148,6 @@ mod tests {
                 },
                 ..ranked_attempt()
             },
-            false,
             || {
                 judge_ranked(
                     &work,
@@ -6217,7 +6181,6 @@ mod tests {
         let mut settings = ranked_sweep();
         settings.stall = Stall::NONE;
         settings.meter = false;
-        settings.confirm = false;
         let hint = Killer {
             package: "subject".into(),
             target: binaries[0].killer_target(),
@@ -6246,7 +6209,6 @@ mod tests {
                 },
                 ..ranked_attempt()
             },
-            false,
             || {
                 judge_ranked(
                     &work,
@@ -6280,7 +6242,7 @@ mod tests {
                 let site = SiteIdentity::from_mutant(&crate::fixtures::mutant());
                 let negative = NegativeLearning::default();
                 let tally = Tally::default();
-                let judged = judge_script(vec![("earlier", Only::All, Verdict::Passed, reach)], ranked_attempt(), true, || {
+                let judged = judge_script(vec![("earlier", Only::All, Verdict::Passed, reach)], ranked_attempt(), || {
                     judge_ranked(
                         &work,
                         7,
@@ -6309,7 +6271,6 @@ mod tests {
             stall,
             jobs: 1,
             meter: false,
-            confirm: true,
         }
     }
 
@@ -6518,7 +6479,6 @@ mod tests {
                 stall: Stall::NONE,
                 jobs: 1,
                 meter: false,
-                confirm: false,
             },
             true,
             &mut Killers::default(),
@@ -6575,7 +6535,6 @@ mod tests {
                 stall: Stall::NONE,
                 jobs: 1,
                 meter: false,
-                confirm: false,
             },
             false,
             &mut killers,
@@ -6626,7 +6585,6 @@ mod tests {
                 stall: Stall::NONE,
                 jobs: 2,
                 meter: false,
-                confirm: false,
             },
             false,
             &mut Killers::default(),
@@ -6993,7 +6951,6 @@ mod tests {
             stall: Stall::NONE,
             jobs: 1,
             meter: false,
-            confirm: true,
         };
 
         let spent = test_all(
@@ -7274,7 +7231,6 @@ mod tests {
                 stall: Stall::NONE,
                 jobs: 1,
                 meter: false,
-                confirm: true,
             },
             &Tally::default(),
         );
@@ -7322,7 +7278,6 @@ mod tests {
                 stall: Stall::NONE,
                 jobs: 1,
                 meter: true,
-                confirm: true,
             },
             &Tally::default(),
         );
@@ -7361,7 +7316,6 @@ mod tests {
             stall: Stall::NONE,
             jobs: 4,
             meter: true,
-            confirm: true,
         };
 
         let failure = test_all(
@@ -7425,7 +7379,6 @@ mod tests {
                 stall: Stall::NONE,
                 jobs: 1,
                 meter: true,
-                confirm: true,
             },
             &Tally::default(),
         );
@@ -7497,7 +7450,6 @@ mod tests {
                 stall: Stall::NONE,
                 jobs: 1,
                 meter: false,
-                confirm: false,
             },
             &Tally::default(),
         );
@@ -7528,10 +7480,9 @@ mod tests {
         let tally = Tally::default();
 
         let judgement = super::super::verdict::with_binary_runner(
-            |_, attempt, confirm| {
+            |_, attempt| {
                 assert_eq!(attempt.active, Some(1));
                 assert_eq!(attempt.timeout, Some(Duration::from_millis(20)));
-                assert!(!confirm);
                 BinaryRun {
                     verdict: match attempt.only {
                         Only::One("tests::killer") => Verdict::Failed(Some("tests::killer".into())),
@@ -7553,7 +7504,6 @@ mod tests {
                         stall: Stall::NONE,
                         jobs: 1,
                         meter: false,
-                        confirm: false,
                     },
                     &tally,
                 )
@@ -7605,7 +7555,6 @@ mod tests {
                 },
                 jobs: 1,
                 meter: true,
-                confirm: true,
             },
             &tally,
         );
@@ -7625,7 +7574,6 @@ mod tests {
             stall: Stall::NONE,
             jobs: 1,
             meter: false,
-            confirm: false,
         };
 
         assert!(negative_reach_hint_is_final(&binary, base));
@@ -7650,42 +7598,62 @@ mod tests {
             !negative_reach_hint_is_final(&binary, Sweep { meter: true, ..base }),
             "memory limits and metering failures must run canonically"
         );
-        assert!(
-            !negative_reach_hint_is_final(&binary, Sweep { confirm: true, ..base }),
-            "confirmation flakes must run canonically"
-        );
     }
 
     #[test]
-    fn a_cached_killer_cannot_bypass_confirmation_of_a_flaky_test() {
-        let (_directory, work, _plan, binaries) = helper_harness(&["print:test tests::killer ... FAILED", "exit:1"]);
+    fn a_cached_killer_settles_without_an_unmutated_rerun() {
+        let work = Workspace::adopt("never-launched-kill".into(), "never-written-target".into());
+        let binaries = [TestBinary {
+            package: "subject".into(),
+            target: "unit".into(),
+            ..crate::testing::test_binary("never-launched")
+        }];
         let reachable: Vec<&TestBinary> = binaries.iter().collect();
         let hint = Killer {
             package: "subject".to_owned(),
-            target: String::new(),
+            target: "unit".into(),
             test: "tests::killer".to_owned(),
         };
         let tally = Tally::default();
 
-        let judgement = judge(
-            &work,
-            1,
-            &reachable,
-            Some(&hint),
-            None,
-            Sweep {
-                timeout_floor: Duration::ZERO,
-                stall: Stall::NONE,
-                jobs: 1,
-                meter: false,
-                confirm: true,
+        // The runner and assertion execute synchronously; relaxed accesses suffice because this
+        // counter does not synchronize other data.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let judgement = super::super::verdict::with_binary_runner(
+            {
+                let calls = Arc::clone(&calls);
+                move |_, attempt| {
+                    assert_eq!(calls.fetch_add(1, Ordering::Relaxed), 0);
+                    assert_eq!(attempt.active, Some(1));
+                    assert_eq!(attempt.only, Only::One("tests::killer"));
+                    BinaryRun {
+                        verdict: Verdict::Failed(Some("tests::killer".into())),
+                        reach: ReachObservation::Reached,
+                    }
+                }
             },
-            &tally,
+            || {
+                judge(
+                    &work,
+                    1,
+                    &reachable,
+                    Some(&hint),
+                    None,
+                    Sweep {
+                        timeout_floor: Duration::ZERO,
+                        stall: Stall::NONE,
+                        jobs: 1,
+                        meter: false,
+                    },
+                    &tally,
+                )
+            },
         );
 
-        assert!(matches!(judgement, Judgement::Reached(Outcome::Flaky, None, Some(_))));
+        assert!(matches!(judgement, Judgement::Reached(Outcome::Killed, Some(_), None)));
         assert_eq!(tally.probes.load(Ordering::Relaxed), 1);
-        assert_eq!(tally.launches.load(Ordering::Relaxed), 2);
+        assert_eq!(tally.launches.load(Ordering::Relaxed), 1);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
     }
 
     #[test]
@@ -7717,7 +7685,6 @@ mod tests {
                 stall: Stall::NONE,
                 jobs: 1,
                 meter: false,
-                confirm: false,
             },
             &tally,
         );
@@ -7761,7 +7728,6 @@ mod tests {
                 stall: Stall::NONE,
                 jobs: 1,
                 meter: false,
-                confirm: false,
             },
             &Tally::default(),
         );
@@ -7791,7 +7757,6 @@ mod tests {
                 stall: Stall::NONE,
                 jobs: 1,
                 meter: false,
-                confirm: false,
             },
             &Tally::default(),
         );
@@ -7830,7 +7795,6 @@ mod tests {
                 stall: Stall::NONE,
                 jobs: 1,
                 meter: false,
-                confirm: false,
             },
             &Tally::default(),
         );
@@ -7884,7 +7848,6 @@ mod tests {
                 stall: Stall::NONE,
                 jobs: 1,
                 meter: false,
-                confirm: false,
             },
             &Tally::default(),
         );
@@ -7899,7 +7862,6 @@ mod tests {
                 stall: Stall::NONE,
                 jobs: 1,
                 meter: false,
-                confirm: false,
             },
             &Tally::default(),
         );
@@ -7944,7 +7906,6 @@ mod tests {
                 stall: Stall::NONE,
                 jobs: 1,
                 meter: false,
-                confirm: false,
             },
             &Tally::default(),
         );
@@ -7959,7 +7920,6 @@ mod tests {
                 stall: Stall::NONE,
                 jobs: 1,
                 meter: false,
-                confirm: false,
             },
             &Tally::default(),
         );
@@ -7987,7 +7947,6 @@ mod tests {
             stall: Stall::NONE,
             jobs: 1,
             meter: false,
-            confirm: false,
         };
 
         let mut killers = Killers::default();
@@ -8049,7 +8008,6 @@ mod tests {
             stall: Stall::NONE,
             jobs: 1,
             meter: false,
-            confirm: false,
         };
 
         let without_override = judge(&work, 1, &reachable, None, None, sweep, &Tally::default());
@@ -8969,10 +8927,7 @@ mod tests {
             None,
             None,
             None,
-            Sweep {
-                confirm: false,
-                ..sweep(Stall::NONE)
-            },
+            sweep(Stall::NONE),
             &tally,
         );
 
@@ -9020,7 +8975,6 @@ mod tests {
                 },
                 jobs: 1,
                 meter: false,
-                confirm: false,
             },
             &tally,
         );
@@ -9066,10 +9020,7 @@ mod tests {
             None,
             None,
             None,
-            Sweep {
-                confirm: false,
-                ..sweep(Stall::NONE)
-            },
+            sweep(Stall::NONE),
             &tally,
         );
 
@@ -9100,10 +9051,7 @@ mod tests {
             &reachable,
             Some(&exact),
             None,
-            Sweep {
-                confirm: false,
-                ..sweep(Stall::NONE)
-            },
+            sweep(Stall::NONE),
             &exact_tally,
         );
         let inferred_judged = judge_ranked(
@@ -9115,10 +9063,7 @@ mod tests {
             None,
             None,
             None,
-            Sweep {
-                confirm: false,
-                ..sweep(Stall::NONE)
-            },
+            sweep(Stall::NONE),
             &inferred_tally,
         );
 
@@ -9162,10 +9107,7 @@ mod tests {
                 &negative,
                 false,
                 None,
-                Sweep {
-                    confirm: false,
-                    ..sweep(Stall::NONE)
-                },
+                sweep(Stall::NONE),
                 &tally,
             );
 
@@ -9307,7 +9249,6 @@ mod tests {
                 stall: Stall::NONE,
                 jobs: 1,
                 meter: false,
-                confirm: false,
             },
             &tally,
         );
@@ -9345,10 +9286,7 @@ mod tests {
             &work,
             &mut plan,
             &reach,
-            Sweep {
-                confirm: false,
-                ..sweep(Stall::NONE)
-            },
+            sweep(Stall::NONE),
             true,
             &mut Killers::default(),
             &mut crate::testing::Recorder::default(),
@@ -9398,10 +9336,7 @@ mod tests {
                 None,
                 Some((&negative, &site, deterministic)),
                 None,
-                Sweep {
-                    confirm: false,
-                    ..sweep(Stall::NONE)
-                },
+                sweep(Stall::NONE),
                 &tally,
             );
 
@@ -9426,10 +9361,7 @@ mod tests {
         assert_eq!(other_harness.target, binaries[0].target);
         assert!(!negative.contains(&site, &other_harness));
 
-        let safe_sweep = Sweep {
-            confirm: false,
-            ..sweep(Stall::NONE)
-        };
+        let safe_sweep = sweep(Stall::NONE);
         assert!(negative_excludes(Some((&negative, &site, true)), &binaries[0], safe_sweep));
         assert!(!negative_excludes(Some((&negative, &site, true)), &other_harness, safe_sweep));
     }
@@ -9469,20 +9401,18 @@ mod tests {
         negative.record(&site, &binaries[0]);
 
         let cases = [
-            (Some(Duration::from_secs(1)), Stall::NONE, false, false),
+            (Some(Duration::from_secs(1)), Stall::NONE, false),
             (
                 None,
                 Stall {
                     budget: Some(Duration::from_secs(1)),
                 },
                 false,
-                false,
             ),
-            (None, Stall::NONE, true, false),
-            (None, Stall::NONE, false, true),
+            (None, Stall::NONE, true),
         ];
 
-        for (budget, stall, meter, confirm) in cases {
+        for (budget, stall, meter) in cases {
             binaries[0].budget = budget;
             let reachable = [&binaries[0]];
             let tally = Tally::default();
@@ -9500,7 +9430,6 @@ mod tests {
                     stall,
                     jobs: 1,
                     meter,
-                    confirm,
                 },
                 &tally,
             );
@@ -9540,7 +9469,6 @@ mod tests {
                 stall: Stall::NONE,
                 jobs: 1,
                 meter: false,
-                confirm: false,
             },
             &Tally::default(),
         );
@@ -9583,7 +9511,6 @@ mod tests {
                 stall: Stall::NONE,
                 jobs: 1,
                 meter: false,
-                confirm: false,
             },
             &tally,
         );
@@ -9626,7 +9553,6 @@ mod tests {
                 stall: Stall::NONE,
                 jobs: 1,
                 meter: false,
-                confirm: false,
             },
             &tally,
         );
@@ -9659,7 +9585,6 @@ mod tests {
                 stall: Stall::NONE,
                 jobs: 1,
                 meter: false,
-                confirm: false,
             },
             &tally,
         );
@@ -10650,7 +10575,6 @@ mod tests {
                 &reach,
                 Sweep {
                     jobs,
-                    confirm: false,
                     ..sweep(Stall::NONE)
                 },
                 false,

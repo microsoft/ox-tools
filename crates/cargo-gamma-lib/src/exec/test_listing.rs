@@ -204,6 +204,7 @@ impl ListingChild for ProcessTree {
         Self::observe(self)
     }
 
+    // #[gamma::skip(fn_value.ok, reason = "This thin adapter invokes native ProcessTree termination. Scripted ListingChild tests cover termination requests and failures, but cannot exercise this actual adapter without spawning a real child.", tag = "native-boundary")]
     fn terminate_tree(&mut self) -> io::Result<()> {
         Self::terminate(self).map(|_status| ())
     }

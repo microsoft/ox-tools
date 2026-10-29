@@ -321,15 +321,17 @@ and deterministic reach narrowing. Target and package filters remain intact.
 ```toml
 # Skip the baseline run entirely.
 no-baseline = false
-
-# Believe a failing test without re-running it with no mutant active.
-no-confirm = false
 ```
 
-Both trade trustworthiness for speed, and both defaults are the trustworthy choice. Without a
+Skipping baseline trades trustworthiness for speed. Without a
 baseline there is no evidence that a failing test was caused by the mutant rather than by a suite
 that was already red, and no measurement to derive a timeout or a memory ceiling from — so a run
 with `no-baseline = true` and `memory = "enforce"` must also set `memory-limit` explicitly.
+
+After baseline, ordinary failing mutant executions are accepted as kills without an additional
+unmutated run. A passing baseline cannot rule out intermittent failures later: such failures can
+count as kills. `--no-confirm` and `no-confirm` are unsupported; omit them from commands and
+configuration.
 
 ## Memory
 
@@ -380,8 +382,7 @@ incremental = "build"
 # Fail the run if the assertion-killed mutation score is below this percentage.
 min-score = 70.0
 
-# Fail independently if more than this many flaky outcomes remain.
-# Requires confirmation to stay enabled.
+# Fail independently if more than this many flaky nextest enumeration-control outcomes remain.
 max-flaky = 0
 ```
 
@@ -409,8 +410,9 @@ uncovered mutants, timeouts, and out-of-memory mutants remain in its denominator
 If any selected mutant remains pending, either gate fails as incomplete rather than evaluating a
 score or flaky count over only the completed subset.
 `max-flaky` is independent of the score because flaky outcomes are inconclusive and excluded from
-its denominator. `max-flaky = 0` requires a fully conclusive population; it cannot be combined with
-`no-confirm = true`, which removes the observation needed to identify a flaky outcome.
+its denominator. Ordinary test failures are no longer rerun without the mutant, so this gate does
+not detect intermittent assertion failures after baseline. Only nextest enumeration control runs
+can produce new flaky verdicts. Historical flaky verdicts remain readable and can be gated on merge.
 
 ## Report population authority
 

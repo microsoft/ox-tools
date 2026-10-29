@@ -4768,6 +4768,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
                 }
                 if matches!(right, Expr::Lit(ExprLit { lit: Lit::Int(value), .. }) if value.base10_parse::<u128>().is_ok_and(|number| number == 1))
                 {
+                    // #[gamma::skip(loop.continue_to_break, reason = "assign.add_to_mul is the last entry in the AddAssign replacement table, after assign.add_to_sub; continuing this final iteration and breaking the loop both proceed to the same remaining expression visitor.", tag = "equivalent")]
                     continue;
                 }
             }
