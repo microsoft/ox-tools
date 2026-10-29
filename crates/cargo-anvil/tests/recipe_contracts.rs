@@ -267,10 +267,18 @@ fn common_checks_are_direct_cargo_each_invocations() {
     for retired in [
         "_anvil-examples-run",
         "--target-required-feature",
+        r##"{{ if example == "" { "" } else { "# " } }}cargo each"##,
+        r##"{{ if example == "" { "# " } else { "" } }}cargo each"##,
         "anvil-doc-test: anvil-doc-test-validate-prereqs anvil-impact\n    $ErrorActionPreference",
     ] {
-        assert!(!recipes.contains(retired), "retired PowerShell selection survived: {retired}");
+        assert!(!recipes.contains(retired), "retired recipe implementation survived: {retired}");
     }
+    assert!(
+        recipes.contains(
+            r#"--target-filter {{ quote(if example == "" { "not name-in-metadata:anvil.examples.no-run" } else { "name:" + example }) }} {{ if example == "" { "" } else { "--require-target-per-package" } }}"#
+        ),
+        "examples must use one target-mode command for automatic and explicit selection"
+    );
 }
 
 #[test]
