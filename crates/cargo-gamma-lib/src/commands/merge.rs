@@ -488,6 +488,39 @@ mod tests {
     use crate::testing::{Sink, fails_at_every_line, workdir};
 
     #[test]
+    fn oct29_merge_refuses_one_or_many_unpresentable_filtered_verdicts_before_publication() {
+        // The unfiltered source wins but cannot present the filtered verdicts.
+        // Invalid destinations distinguish that semantic refusal from publication errors.
+        for count in [1, 2] {
+            let mut filtered = fixtures::report_with(
+                None,
+                100,
+                (0..count)
+                    .map(|index| mutant(&format!("filtered-{index}"), index + 1, "Killed"))
+                    .collect(),
+            );
+            filtered.config.as_mut().unwrap().name_filtered = true;
+            let mut current = fixtures::report_with(Some((0, 2)), 200, vec![mutant("current", 1, "Survived")]);
+            current.files.get_mut("src/lib.rs").unwrap().source = "different source\n".into();
+            let inputs = vec![("filtered".into(), filtered), ("current".into(), current)];
+            let mut args = survivor_args("unused-in-memory-input".into());
+            args.json_report = Some("invalid\0must-not-publish.json".into());
+            args.html_report = Some("invalid\0must-not-publish.html".into());
+            let mut host = Sink::default();
+            let failure = merge_reports_at(&mut host, &args, Styler::new(false), Some(300), &inputs).unwrap_err();
+            let noun = if count == 1 { "mutant" } else { "mutants" };
+            assert_eq!(
+                failure.message(),
+                format!(
+                    "{count} name-filtered {noun} cannot be rendered in the selected source; include an unfiltered listing from the current source before merging so the verdicts are preserved"
+                )
+            );
+            assert_eq!(host.out(), "");
+            assert_eq!(host.err(), "");
+        }
+    }
+
+    #[test]
     fn recovered_native_merge_returns_the_html_destination_error_before_announcing_a_written_report() {
         let path = Utf8PathBuf::from("invalid\0merge-report.html");
         let expected = crate::paths::physical(&path).unwrap_err().message().to_owned();

@@ -140,7 +140,7 @@ pub fn render_dictionary(input: &str) -> String {
 }
 
 fn is_dictionary_entry(line: &str) -> bool {
-    !line.is_empty() && !line.bytes().all(|byte| byte.is_ascii_digit())
+    !line.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 fn read_input(path: &Path) -> Result<String, GenerateError> {
@@ -156,21 +156,13 @@ fn read_input(path: &Path) -> Result<String, GenerateError> {
 
 fn publish_dictionary(path: &Path, contents: &[u8]) -> Result<(), GenerateError> {
     let output = path.display().to_string();
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
+    let parent = output_parent(path);
 
     fs::create_dir_all(parent)
         .map_err(|error| CreateOutputDirectoryError::caused_by(parent.display().to_string(), output.clone(), error))?;
 
-    let mut staged = NamedTempFile::new_in(parent).map_err(|error| CreateTemporaryOutputError::caused_by(output.clone(), error))?;
-    staged
-        .write_all(contents)
-        .map_err(|error| WriteTemporaryOutputError::caused_by(output.clone(), error))?;
-    staged
-        .flush()
-        .map_err(|error| FlushTemporaryOutputError::caused_by(output.clone(), error))?;
+    // #[gamma::skip(try.propagate_to_unwrap, tag = "native", reason = "after directory creation succeeds, temporary-file creation, write and flush failures require native filesystem faults; stage_dictionary tests all three errors with injected IO")]
+    let staged = stage_dictionary(&output, parent, contents, |parent| NamedTempFile::new_in(parent))?;
     staged
         .persist(path)
         .map(|_| ())
@@ -179,9 +171,33 @@ fn publish_dictionary(path: &Path, contents: &[u8]) -> Result<(), GenerateError>
     Ok(())
 }
 
+fn output_parent(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
+/// Creates, writes, and flushes a staged writer without publishing it.
+fn stage_dictionary<W: Write>(
+    output: &str,
+    parent: &Path,
+    contents: &[u8],
+    create: impl FnOnce(&Path) -> std::io::Result<W>,
+) -> Result<W, GenerateError> {
+    let mut staged = create(parent).map_err(|error| CreateTemporaryOutputError::caused_by(output.to_owned(), error))?;
+    staged
+        .write_all(contents)
+        .map_err(|error| WriteTemporaryOutputError::caused_by(output.to_owned(), error))?;
+    staged
+        .flush()
+        .map_err(|error| FlushTemporaryOutputError::caused_by(output.to_owned(), error))?;
+    Ok(staged)
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use std::cell::RefCell;
     use std::error::Error as _;
     use std::path::PathBuf;
 
@@ -191,6 +207,105 @@ mod tests {
 
     fn fixture(name: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src").join("test_data").join(name)
+    }
+
+    #[test]
+    fn output_parents_preserve_named_directories_and_default_bare_names_to_current_directory() {
+        for (path, expected) in [("words.dic", "."), ("", "."), ("nested/words.dic", "nested"), ("./words.dic", ".")] {
+            assert_eq!(output_parent(Path::new(path)), Path::new(expected));
+        }
+    }
+
+    /// Records staging order while injecting a selected write or flush failure.
+    struct StagedWriter<'a> {
+        operations: &'a RefCell<Vec<&'static str>>,
+        fail: Option<&'static str>,
+        bytes: Vec<u8>,
+    }
+
+    impl Write for StagedWriter<'_> {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.operations.borrow_mut().push("write");
+            if self.fail == Some("write") {
+                return Err(std::io::Error::from(std::io::ErrorKind::WriteZero));
+            }
+            self.bytes.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.operations.borrow_mut().push("flush");
+            if self.fail == Some("flush") {
+                return Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe));
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn staging_returns_each_io_failure_without_continuing_or_panicking() {
+        let path = Path::new("owned-output").join("words.dic");
+        let parent = path.parent().unwrap();
+        let output = path.display().to_string();
+        for (fail, expected_operations, expected_kind) in [
+            ("create", vec!["create"], std::io::ErrorKind::PermissionDenied),
+            ("write", vec!["create", "write"], std::io::ErrorKind::WriteZero),
+            ("flush", vec!["create", "write", "flush"], std::io::ErrorKind::BrokenPipe),
+        ] {
+            let operations = RefCell::new(Vec::new());
+            let result = stage_dictionary(&output, parent, b"1\nalpha\n", |actual| {
+                assert_eq!(actual, parent);
+                operations.borrow_mut().push("create");
+                if fail == "create" {
+                    return Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+                }
+                Ok(StagedWriter {
+                    operations: &operations,
+                    fail: Some(fail),
+                    bytes: Vec::new(),
+                })
+            });
+            let Err(error) = result else {
+                panic!("staging must return the injected {fail} failure");
+            };
+            let source = error.source().unwrap();
+            let (actual_path, io_error) = match fail {
+                "create" => {
+                    let stage = source.downcast_ref::<CreateTemporaryOutputError>().unwrap();
+                    (&stage.path, stage.source().unwrap())
+                }
+                "write" => {
+                    let stage = source.downcast_ref::<WriteTemporaryOutputError>().unwrap();
+                    (&stage.path, stage.source().unwrap())
+                }
+                "flush" => {
+                    let stage = source.downcast_ref::<FlushTemporaryOutputError>().unwrap();
+                    (&stage.path, stage.source().unwrap())
+                }
+                _ => unreachable!("the failure table names only the three staging operations"),
+            };
+            assert_eq!(actual_path, &path.display().to_string());
+            assert_eq!(io_error.downcast_ref::<std::io::Error>().unwrap().kind(), expected_kind);
+            assert_eq!(*operations.borrow(), expected_operations);
+        }
+    }
+
+    #[test]
+    fn staging_writes_and_flushes_the_exact_dictionary_before_returning_the_writer() {
+        let operations = RefCell::new(Vec::new());
+        let contents = b"2\nalpha\nbeta\n";
+        let staged = stage_dictionary("words.dic", Path::new("."), contents, |parent| {
+            assert_eq!(parent, Path::new("."));
+            operations.borrow_mut().push("create");
+            Ok(StagedWriter {
+                operations: &operations,
+                fail: None,
+                bytes: Vec::new(),
+            })
+        })
+        .unwrap();
+        assert_eq!(staged.bytes, contents);
+        assert_eq!(*operations.borrow(), ["create", "write", "flush"]);
     }
 
     #[test]

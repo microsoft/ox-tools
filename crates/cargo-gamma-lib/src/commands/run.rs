@@ -473,7 +473,9 @@ fn finish_run<H: Host>(host: &mut H, args: &RunArgs, styler: Styler, executed: E
 
     let Some(plan) = plan else {
         if args.select.in_diff.is_some() {
-            return EXIT_OK;
+            return
+            // #[gamma::skip(return_value.default, reason = "EXIT_OK and i32::default() are both zero; replacing only this empty-diff success return cannot change its exit status or side effects.", tag = "equivalent")]
+            EXIT_OK;
         }
         // Nothing was generated at all, so no mutant carries an expectation either: whether a gate
         // exists is entirely what the command line asked for.
@@ -823,6 +825,23 @@ fn publish_completed_record(
     plan: &Plan,
     learning: Option<&crate::exec::Killers>,
 ) -> crate::Result<(Utf8PathBuf, crate::discover::RunRecord)> {
+    publish_completed_record_with(
+        prepared,
+        plan,
+        learning,
+        crate::discover::RunRecord::store_completed,
+        crate::discover::RunRecord::store_completed_partial,
+    )
+}
+
+/// Dispatches full or partial publication and propagates the injected publisher's stored record.
+fn publish_completed_record_with(
+    prepared: RecordPreparation,
+    plan: &Plan,
+    learning: Option<&crate::exec::Killers>,
+    store: impl FnOnce(&crate::discover::RunRecord, &Utf8Path) -> crate::Result<crate::discover::RunRecord>,
+    store_partial: impl FnOnce(&crate::discover::RunRecord, &Utf8Path) -> crate::Result<crate::discover::RunRecord>,
+) -> crate::Result<(Utf8PathBuf, crate::discover::RunRecord)> {
     let Some(mut record) =
         crate::discover::RunRecord::from_completed_plan_snapshot(plan, &prepared.context, prepared.inputs, &prepared.killers)
     else {
@@ -836,9 +855,9 @@ fn publish_completed_record(
     }
 
     let stored = if prepared.name_filtered {
-        record.store_completed_partial(&prepared.base)?
+        store_partial(&record, &prepared.base)?
     } else {
-        record.store_completed(&prepared.base)?
+        store(&record, &prepared.base)?
     };
     exec::finish_testing_record(&prepared.base)?;
     Ok((prepared.base, stored))
@@ -2105,6 +2124,29 @@ mod miri_tests {
     use super::*;
 
     #[test]
+    fn oct29_name_filtered_run_metadata_cannot_withdraw_unmatched_historical_mutants() {
+        let mut args = RunArgs::default();
+        args.select.name_patterns.push("selected".into());
+        let info = run_info_at(&args, None, &[], UNIX_EPOCH + Duration::from_secs(200));
+        assert!(!info.population_complete);
+        assert!(info.name_filtered);
+        let old = crate::fixtures::report_with(
+            None,
+            100,
+            vec![
+                crate::fixtures::mutant_result_at("selected", 1, "Survived"),
+                crate::fixtures::mutant_result_at("unselected", 2, "Survived"),
+            ],
+        );
+        let mut new = crate::fixtures::report_with(None, 200, vec![crate::fixtures::mutant_result_at("selected", 1, "Killed")]);
+        new.config = Some(info);
+        let merged = crate::merge::merge(&[("old".into(), old), ("filtered".into(), new)], 300, None);
+        assert_eq!((merged.withdrawn, merged.valid, merged.detected), (0, 2, 1));
+        let legacy = resumed_report_info(None);
+        assert!(!legacy.name_filtered, "unknown legacy provenance is not evidence of a name filter");
+    }
+
+    #[test]
     fn resumed_reporting_uses_frozen_execution_and_live_reporting_options() {
         let mut live = RunArgs {
             artifact_dir: Some("reports".into()),
@@ -2306,10 +2348,88 @@ mod tests {
 
     use super::super::cli::MeasureArgs;
     use super::*;
-    use crate::discover::{RunRecord, TargetFile};
+    use crate::discover::{RunRecord, Survey, TargetFile};
     use crate::exec::Session;
     use crate::testing::{Broken, Sink, fails_at_every_line, private_system_tempdir, workdir};
     use crate::{HashMap, fixtures};
+
+    #[test]
+    fn oct29_pending_run_diagnostics_name_exactly_the_requested_gates() {
+        for (min_score, max_flaky, gate) in [
+            (Some(80.0), None, "`--min-score` gate"),
+            (None, Some(0), "`--max-flaky` gate"),
+            (Some(80.0), Some(0), "`--min-score` and `--max-flaky` gates"),
+        ] {
+            for count in [1, 2] {
+                let args = RunArgs {
+                    min_score,
+                    max_flaky,
+                    ..RunArgs::default()
+                };
+                let mut host = Sink::default();
+                let code = finish_run(
+                    &mut host,
+                    &args,
+                    Styler::new(false),
+                    Executed {
+                        plan: Some(fixtures::plan(vec![
+                            Mutant {
+                                outcome: Outcome::Pending,
+                                ..fixtures::mutant()
+                            };
+                            count
+                        ])),
+                        stuck: Vec::new(),
+                    },
+                );
+                assert_eq!(code, EXIT_GATE_FAILED);
+                let noun = if count == 1 { "mutant is" } else { "mutants are" };
+                assert_eq!(
+                    host.err(),
+                    format!("error: {count} {noun} still pending, so the {gate} cannot evaluate the complete population\n")
+                );
+                assert_eq!(host.out(), "");
+            }
+        }
+    }
+
+    #[test]
+    fn oct29_unscored_runs_distinguish_observed_flakiness_and_mixed_expectations() {
+        for (mutants, args, expected, diagnostic) in [
+            (
+                vec![mutant(0, Outcome::Flaky, 1)],
+                RunArgs {
+                    max_flaky: Some(1),
+                    ..RunArgs::default()
+                },
+                EXIT_OK,
+                "",
+            ),
+            (
+                vec![mutant(0, Outcome::Ignored, 1), expecting(Outcome::NotBuilt, true)],
+                RunArgs::default(),
+                EXIT_GATE_FAILED,
+                "error: no mutant counted toward the expectations this run carried, so it was never evaluated; check that the selection — `--in-diff`, `--exclude-file`, `--re`, `--shard-count`/`--shard-index`, `--incremental` — leaves something to test\n",
+            ),
+            (Vec::new(), RunArgs::default(), EXIT_OK, ""),
+        ] {
+            let mut host = Sink::default();
+            assert_eq!(
+                finish_run(
+                    &mut host,
+                    &args,
+                    Styler::new(false),
+                    Executed {
+                        plan: Some(fixtures::plan(mutants)),
+                        stuck: Vec::new(),
+                    }
+                ),
+                expected
+            );
+            assert_eq!(host.err(), diagnostic);
+            assert_eq!(host.out(), "");
+        }
+    }
 
     #[test]
     fn oct25_resume_forwards_exact_committed_bytes_to_workspace_recovery() {
@@ -3836,6 +3956,91 @@ mod tests {
     }
 
     #[test]
+    fn oct29_completed_name_filtered_campaign_preserves_unselected_evidence_but_a_full_run_replaces_it() {
+        // This checks dispatch and propagation of a controlled publisher result, with native readback.
+        for filtered in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let base = Utf8Path::from_path(directory.path()).unwrap();
+            let root = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/completed-recovery");
+            let mut plan = source_plan(root, "lib.rs", include_str!("../../tests/fixtures/completed-recovery/lib.rs"));
+            let old_id = plan.mutants[1].id.clone();
+            let selected_id = plan.mutants[0].id.clone();
+            let mut published = plan.clone();
+            published.mutants[0].outcome = Outcome::Killed;
+            if !filtered {
+                published.mutants.truncate(1);
+            }
+            // Record-layer tests independently cover the actual partial absorption.
+            let expected = prepared_record(&published, base);
+            let expected = RunRecord::from_completed_plan_snapshot(&published, &expected.context, expected.inputs, &expected.killers)
+                .expect("the immutable fixture supplies the complete source generation");
+            plan.mutants.truncate(1);
+            plan.mutants[0].outcome = Outcome::Killed;
+            let mut prepared = prepared_record(&plan, base);
+            prepared.name_filtered = filtered;
+            let publish = |record: &RunRecord, destination: &Utf8Path, partial: bool| {
+                assert_eq!(destination, base);
+                assert_eq!(partial, filtered);
+                assert_eq!(record.iter().collect::<Vec<_>>(), [(selected_id.as_str(), Outcome::Killed)]);
+                expected.store_completed(destination)
+            };
+            let (_, stored) = publish_completed_record_with(
+                prepared,
+                &plan,
+                None,
+                |record, destination| publish(record, destination, false),
+                |record, destination| publish(record, destination, true),
+            )
+            .unwrap();
+            let entries: std::collections::BTreeMap<_, _> = stored.iter().collect();
+            assert_eq!(entries.get(selected_id.as_str()), Some(&Outcome::Killed));
+            assert_eq!(entries.get(old_id.as_str()), filtered.then_some(&Outcome::NoCoverage));
+            let loaded = RunRecord::load_required(base).unwrap();
+            assert_eq!(loaded.iter().collect::<std::collections::BTreeMap<_, _>>(), entries);
+        }
+    }
+
+    #[test]
+    fn oct29_partial_campaign_publication_returns_storage_errors_instead_of_panicking() {
+        let directory = tempfile::tempdir().unwrap();
+        let base = Utf8Path::from_path(directory.path()).unwrap();
+        let root = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/completed-recovery");
+        let plan = source_plan(root, "lib.rs", include_str!("../../tests/fixtures/completed-recovery/lib.rs"));
+        let mut prepared = prepared_record(&plan, base);
+        prepared.name_filtered = true;
+        let failure = publish_completed_record_with(
+            prepared,
+            &plan,
+            None,
+            |_, _| panic!("a name-filtered run must not publish a full record"),
+            |record, destination| {
+                assert_eq!(destination, base);
+                assert_eq!(record.iter().count(), plan.mutants.len());
+                Err(error!("named campaign state refusal"))
+            },
+        )
+        .unwrap_err();
+        assert_eq!(failure.message(), "named campaign state refusal");
+        assert!(fs::read_dir(base).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn oct29_record_preparation_carries_name_filter_scope_from_run_arguments() {
+        let survey = Survey::from_checked_fixture();
+        for filtered in [false, true] {
+            let mut args = RunArgs::default();
+            if filtered {
+                args.select.name_patterns.push("less".into());
+            }
+            let prepared = RecordPreparation::for_run(&args, &survey, crate::discover::ContextDigest::default());
+            assert_eq!(prepared.name_filtered, filtered);
+            let info = prepared.report_info.unwrap();
+            assert_eq!(info.name_filtered, filtered);
+            assert_eq!(info.population_complete, !filtered);
+        }
+    }
+
+    #[test]
     #[cfg(feature = "system-tests")]
     fn survivor_completed_and_incomplete_records_propagate_real_filesystem_and_phase_failures() {
         let directory = workdir("run-record-failures-");
@@ -4456,7 +4661,6 @@ mod tests {
     }
 
     fn plan_at(root: Utf8PathBuf) -> Plan {
-        let src = root.join("src");
         let source = include_str!("../../tests/fixtures/completed-recovery/lib.rs");
         crate::testing::write_project(
             root.as_std_path(),
@@ -4465,23 +4669,33 @@ mod tests {
                 ("src/lib.rs", source),
             ],
         );
-        let absolute = src.join("lib.rs");
+        source_plan(root, "src/lib.rs", source)
+    }
+
+    fn source_plan(root: Utf8PathBuf, path: &str, source: &str) -> Plan {
+        let absolute = root.join(path);
         let start = source.find("a < b").expect("span");
 
         let mut digests = HashMap::default();
-        let _previous = digests.insert(Utf8PathBuf::from("src/lib.rs"), crate::discover::digest(source.as_bytes()));
+        let _previous = digests.insert(Utf8PathBuf::from(path), crate::discover::digest(source.as_bytes()));
 
         Plan {
             skipped: Vec::new(),
             digests,
             root,
             files: vec![TargetFile {
-                path: Utf8PathBuf::from("src/lib.rs"),
+                path: Utf8PathBuf::from(path),
                 absolute,
                 package: "subject".to_owned(),
                 source: Some(source.to_owned()),
             }],
-            mutants: vec![mutant(start, Outcome::Survived, 120), mutant(start, Outcome::NoCoverage, 80)],
+            mutants: [mutant(start, Outcome::Survived, 120), mutant(start, Outcome::NoCoverage, 80)]
+                .into_iter()
+                .map(|mut mutant| {
+                    mutant.file = Utf8Path::new(path).into();
+                    mutant
+                })
+                .collect(),
             suppressed: 0,
             idle: Vec::new(),
             sharded_out: 0,

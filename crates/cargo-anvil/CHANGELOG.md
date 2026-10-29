@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-11-02
+
+- ✨ Features
+
+  - cargo-anvil: pin cargo-coverage-gate 0.7.3 ([#329](https://github.com/microsoft/ox-tools/pull/329))
+
+- 🐛 Bug Fixes
+
+  - cargo-anvil: isolate mutation diffs and normalize Git prefixes ([#323](https://github.com/microsoft/ox-tools/pull/323))
+
+- 🧩 Miscellaneous
+
+  - Adopt cargo-gamma in Anvil and remediate campaign survivors
+
 ## [0.22.0] - 2026-11-02
 
 - ✨ Features

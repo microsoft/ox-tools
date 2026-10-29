@@ -664,7 +664,9 @@ fn measure_with_locks(
     let started = Instant::now();
 
     let support = runner_memory_support(
+        // #[gamma::skip(bool_expr.negate, tag = "native", reason = "this call combines the live host memory probe with runner selection; runner_memory_support exhaustively tests the platform/runner policy without native preparation")]
         config.nextest,
+        // #[gamma::skip(bool_expr.negate, tag = "native", reason = "the compiled host platform is not an input a unit test can change; runner_memory_support tests both platform values explicitly")]
         cfg!(target_os = "macos"),
         memory::support().map_err(|reason| reason.to_string()),
     );
@@ -845,16 +847,7 @@ fn measure_with_locks(
     // Marker enumeration requires that finalized launch environment. Install the resulting policy
     // before baseline measurement so baseline, mutant, and confirmation launches all use
     // the same admission rules.
-    let resources = match Resources::discover(
-        &work,
-        &build.binaries,
-        &config.resources,
-        MemoryRequest {
-            calibrating: false,
-            meter: memory.measuring(),
-            limit: memory.baseline_limit,
-        },
-    ) {
+    let resources = match Resources::discover(&work, &build.binaries, &config.resources, listing_memory_request(&memory)) {
         Ok(resources) => resources,
         Err(error) => {
             failed.plan = Some(plan);
@@ -1385,11 +1378,7 @@ fn take_baseline_retaining(
         });
     }
 
-    let request = MemoryRequest {
-        calibrating: true,
-        meter: memory.measuring(),
-        limit: memory.baseline_limit,
-    };
+    let request = baseline_memory_request(memory);
 
     let total = binaries.len();
     let unit = if total == 1 { "test binary" } else { "test binaries" };
@@ -1468,6 +1457,21 @@ fn settle_memory_control(config: &Config, support: Result<(), String>) -> Result
     }
 
     Ok((policy, None))
+}
+
+fn listing_memory_request(memory: &MemoryPolicy) -> MemoryRequest {
+    MemoryRequest {
+        calibrating: false,
+        meter: memory.measuring(),
+        limit: memory.baseline_limit,
+    }
+}
+
+fn baseline_memory_request(memory: &MemoryPolicy) -> MemoryRequest {
+    MemoryRequest {
+        calibrating: true,
+        ..listing_memory_request(memory)
+    }
 }
 
 fn runner_memory_support(nextest: bool, macos: bool, support: Result<(), String>) -> Result<(), String> {
@@ -1603,6 +1607,36 @@ mod tests {
         .unwrap_err();
         assert_eq!(calls, ["alpha"]);
         assert_eq!(failure.message(), "injected runtime manifest read refusal");
+    }
+
+    #[test]
+    fn listing_and_baseline_memory_requests_differ_only_in_calibration() {
+        for control in [
+            memory::MemoryControl::Off,
+            memory::MemoryControl::Measure,
+            memory::MemoryControl::Enforce,
+        ] {
+            for limit in [None, Some(8192)] {
+                let policy = MemoryPolicy {
+                    control,
+                    baseline_limit: limit,
+                    ..MemoryPolicy::default()
+                };
+                let expected = MemoryRequest {
+                    calibrating: false,
+                    meter: control != memory::MemoryControl::Off,
+                    limit,
+                };
+                assert_eq!(listing_memory_request(&policy), expected);
+                assert_eq!(
+                    baseline_memory_request(&policy),
+                    MemoryRequest {
+                        calibrating: true,
+                        ..expected
+                    }
+                );
+            }
+        }
     }
 
     fn recovered_measured_plan() -> (super::super::testing_state::TestingState, Survey, Selection) {
