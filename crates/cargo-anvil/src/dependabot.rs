@@ -941,6 +941,37 @@ mod tests {
     }
 
     #[test]
+    fn empty_additional_yaml_documents_are_refused() {
+        for source in [
+            format!("{JOB}---"),
+            format!("{JOB}---\n"),
+            format!("{JOB}---\n# empty document\n"),
+            format!("{JOB}...\n---\n"),
+            format!("---\n{JOB}...\n---\n...\n"),
+            format!("---\n---\n{JOB}"),
+        ] {
+            let error = update(&source, PATHS).unwrap_err();
+            error_cause::<MultipleDocumentsError>(&error);
+        }
+    }
+
+    #[test]
+    fn single_yaml_document_boundaries_and_marker_strings_are_preserved() {
+        let expected = update(JOB, PATHS).unwrap().unwrap();
+        for (prefix, suffix) in [
+            ("---\n", "...\n"),
+            ("%YAML 1.2\n---\n", "...\n# end\n"),
+            ("# document\n", "    labels: ['---', '...']\n"),
+            ("", "    # ---\n    # ...\n"),
+        ] {
+            let source = format!("{prefix}{JOB}{suffix}");
+            let output = update(&source, PATHS).unwrap().unwrap();
+            assert_eq!(output, format!("{prefix}{expected}{suffix}"));
+            assert_eq!(update(&output, PATHS).unwrap(), None);
+        }
+    }
+
+    #[test]
     fn malformed_yaml_retains_the_parser_error_cause() {
         for source in ["version: 2\nupdates: [".to_owned(), format!("{JOB}  - *missing\n")] {
             let error = update(&source, PATHS).unwrap_err();
