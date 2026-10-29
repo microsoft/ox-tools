@@ -77,4 +77,6 @@ exceptions = [
     # integer codec behind `cargo-aprz`'s binary crates.io tables. It is the
     # crate's only license, so it cannot resolve to one of the entries above.
     { crate = "vu128", allow = ["0BSD"] },
+    # Mozilla's trusted CA root data used by the rustls platform verifier.
+    { crate = "webpki-root-certs", allow = ["CDLA-Permissive-2.0"] },
 ]
