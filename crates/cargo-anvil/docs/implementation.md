@@ -35,6 +35,9 @@ whole configuration nor its user exclusions become catalog-owned. Pending
 whole-file removals and refused region hosts block automatic patches, so this
 pass cannot recreate retired files or bypass a preservation refusal. Successful
 region removal still composes with the subsequent patch through the host cache.
+Only whole-file removals are omitted from the duplicate-spelling check. A refused
+region protects its file from editing without making that retained file disappear
+from ambiguity detection.
 
 ## Pull request title validation
 

@@ -1109,6 +1109,9 @@ need editing, is left unchanged with an actionable refusal; anchors on untouched
 containers do not cause refusals, and unrelated YAML anchors remain supported.
 Refused managed-region retirement also blocks automatic patches to that file;
 successful region removal still permits patching the remaining repository content.
+Protected configurations still count when checking for both filename spellings.
+Only configurations scheduled for whole-file removal are excluded from that check;
+if both spellings otherwise exist, neither is patched.
 Explicit YAML keys retain their complete mapping-entry boundaries. Inherited
 ecosystem defaults are used for read-only job classification with explicit values
 taking precedence, so merged defaults for unrelated ecosystems remain no-ops.

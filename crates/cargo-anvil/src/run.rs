@@ -349,19 +349,23 @@ fn plan_dependabot_exclusions(
     if paths.is_empty() {
         return Ok(());
     }
-    let unpatchable_hosts = plan
-        .items()
-        .iter()
-        .filter_map(|item| match &item.target {
-            Target::File { path } if item.decision == Decision::Remove => Some((hosts.resolve)(repo_root, path)),
-            Target::Region { host, .. } if item.decision == Decision::LeaveAlone => Some((hosts.resolve)(repo_root, host)),
-            _ => None,
-        })
-        .collect::<Result<BTreeSet<_>, _>>()?;
+    let mut retired_files = BTreeSet::new();
+    let mut refused_region_hosts = BTreeSet::new();
+    for item in plan.items() {
+        match (&item.target, item.decision) {
+            (Target::File { path }, Decision::Remove) => {
+                retired_files.insert((hosts.resolve)(repo_root, path)?);
+            }
+            (Target::Region { host, .. }, Decision::LeaveAlone) => {
+                refused_region_hosts.insert((hosts.resolve)(repo_root, host)?);
+            }
+            _ => {}
+        }
+    }
     let mut configurations = Vec::new();
     for path in [".github/dependabot.yml", ".github/dependabot.yaml"] {
         let path = (hosts.resolve)(repo_root, path)?;
-        if unpatchable_hosts.contains(&path) {
+        if retired_files.contains(&path) {
             continue;
         }
         if let Some(text) = hosts.get_or_read(repo_root, &path)? {
@@ -378,6 +382,9 @@ fn plan_dependabot_exclusions(
     let Some((path, text)) = configurations.pop() else {
         return Ok(());
     };
+    if refused_region_hosts.contains(&path) {
+        return Ok(());
+    }
     let resolved_paths = paths
         .iter()
         .map(|path| (hosts.resolve)(repo_root, path))
@@ -2868,20 +2875,31 @@ mod tests {
 
     #[test]
     fn dependabot_retirement_path_resolution_errors_are_reported() {
-        let catalog = Catalog::builder(test_cli())
-            .with_artifact(artifacts::github::setup_action())
-            .build()
-            .unwrap();
-        let mut hosts = memory_hosts();
-        hosts.resolve = |_, path| {
-            assert_eq!(path, ".github/Dependabot.yml");
-            bail!("cannot resolve retired configuration");
-        };
-        let mut plan = Plan::default();
-        plan.push(PlanItem::remove_file(".github/Dependabot.yml"));
-        let error = plan_dependabot_exclusions(Path::new("memory"), &[Backend::GitHub], &catalog, &mut plan, &mut hosts).unwrap_err();
-        assert!(error.to_string().contains("cannot resolve retired configuration"));
-        assert_eq!(plan.items().len(), 1);
+        for item in [
+            PlanItem::remove_file(".github/Dependabot.yml"),
+            PlanItem::noop(
+                Target::Region {
+                    host: ".github/Dependabot.yml".to_owned(),
+                    id: "retired-policy".to_owned(),
+                },
+                Decision::LeaveAlone,
+            ),
+        ] {
+            let catalog = Catalog::builder(test_cli())
+                .with_artifact(artifacts::github::setup_action())
+                .build()
+                .unwrap();
+            let mut hosts = memory_hosts();
+            hosts.resolve = |_, path| {
+                assert_eq!(path, ".github/Dependabot.yml");
+                bail!("cannot resolve retired configuration");
+            };
+            let mut plan = Plan::default();
+            plan.push(item);
+            let error = plan_dependabot_exclusions(Path::new("memory"), &[Backend::GitHub], &catalog, &mut plan, &mut hosts).unwrap_err();
+            assert!(error.to_string().contains("cannot resolve retired configuration"));
+            assert_eq!(plan.items().len(), 1);
+        }
     }
 
     #[test]
@@ -2936,6 +2954,87 @@ mod tests {
             assert_eq!(plan.items()[0].decision, Decision::LeaveAlone);
             assert_eq!(hosts.cached(&resolved).as_deref(), Some(source.as_str()));
             assert_eq!(plan.projected_manifest(&manifest).regions, manifest.regions);
+        }
+    }
+
+    #[test]
+    fn dependabot_duplicate_spellings_include_refused_retired_configs() {
+        let source = "version: 2\nupdates:\n- package-ecosystem: github-actions\n  directory: /\n";
+        let edited = format!("{source}  schedule: {{interval: monthly}}\n");
+        let protected_source = upsert_region("", "retired-policy", &edited, CommentSyntax::Hash).unwrap();
+        for (protected, other) in [
+            (".github/Dependabot.yml", ".github/dependabot.yaml"),
+            (".github/Dependabot.yaml", ".github/dependabot.yml"),
+        ] {
+            let catalog = Catalog::builder(test_cli())
+                .with_artifact(artifacts::github::setup_action())
+                .build()
+                .unwrap();
+            let mut manifest = Manifest::default();
+            manifest.set_region(protected, "retired-policy", checksum_str(source));
+            let mut hosts = memory_hosts();
+            hosts.resolve = |_, path| Ok(path.to_ascii_lowercase());
+            let resolved = protected.to_ascii_lowercase();
+            hosts.set(&resolved, protected_source.clone());
+            hosts.set(other, source.to_owned());
+            let mut plan = Plan::default();
+            plan_removals_with_array_hosts(
+                Path::new("memory"),
+                &manifest,
+                &mut plan,
+                &mut hosts,
+                &ComposedHosts::default(),
+                &BTreeSet::new(),
+            )
+            .unwrap();
+            assert_eq!(plan.refusals().len(), 1);
+            plan_dependabot_exclusions(Path::new("memory"), &[Backend::GitHub], &catalog, &mut plan, &mut hosts).unwrap();
+            assert_eq!(plan.items().len(), 1);
+            assert_eq!(plan.items()[0].decision, Decision::LeaveAlone);
+            assert_eq!(plan.refusals().len(), 2);
+            assert_eq!(
+                plan.refusals()[1],
+                "Refused to add Dependabot exclusions: both .github/dependabot.yml and .github/dependabot.yaml exist. \
+                 Keep one configuration file and rerun cargo anvil; both files were left unchanged."
+            );
+            assert_eq!(hosts.cached(&resolved).as_deref(), Some(protected_source.as_str()));
+            assert_eq!(hosts.cached(other).as_deref(), Some(source));
+            assert_eq!(plan.projected_manifest(&manifest).regions, manifest.regions);
+        }
+    }
+
+    #[test]
+    fn dependabot_file_removal_disambiguates_the_remaining_configuration() {
+        let source = "version: 2\nupdates:\n- package-ecosystem: github-actions\n  directory: /\n";
+        for (retired, remaining) in [
+            (".github/Dependabot.yml", ".github/dependabot.yaml"),
+            (".github/Dependabot.yaml", ".github/dependabot.yml"),
+        ] {
+            let catalog = Catalog::builder(test_cli())
+                .with_artifact(artifacts::github::setup_action())
+                .build()
+                .unwrap();
+            let mut hosts = memory_hosts();
+            hosts.resolve = |_, path| Ok(path.to_ascii_lowercase());
+            hosts.set(".github/dependabot.yml", source.to_owned());
+            hosts.set(".github/dependabot.yaml", source.to_owned());
+            let mut plan = Plan::default();
+            plan.push(PlanItem::remove_file(retired));
+            plan_dependabot_exclusions(Path::new("memory"), &[Backend::GitHub], &catalog, &mut plan, &mut hosts).unwrap();
+            let expected = crate::dependabot::update(source, &[".github/actions/anvil-setup/action.yml"])
+                .unwrap()
+                .unwrap();
+            assert_eq!(plan.items().len(), 2);
+            assert_eq!(plan.items()[0].decision, Decision::Remove);
+            assert_eq!(
+                plan.items()[1].target,
+                Target::File {
+                    path: remaining.to_owned()
+                }
+            );
+            assert_eq!(plan.items()[1].decision, Decision::Write);
+            assert_eq!(plan.items()[1].rendered.as_deref(), Some(expected.as_str()));
+            assert!(plan.refusals().is_empty());
         }
     }
 
