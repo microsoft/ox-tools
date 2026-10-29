@@ -45,7 +45,7 @@ impl LazyHttpClient {
 pub fn new_client() -> HttpClient {
     configure_request_resilience(
         HttpClient::builder_tokio(TokioDeps::default())
-            .tls_options(fetch::tls::TlsOptions::new_native_tls())
+            .tls_options(fetch::tls::TlsOptions::new_rustls())
             .insecure_allow_http(),
     )
     .build()

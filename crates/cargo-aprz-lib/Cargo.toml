@@ -80,7 +80,7 @@ compact_str = { workspace = true, features = ["std", "serde"] }
 constant_time_eq = { workspace = true }
 csv = { workspace = true }
 env_logger = { workspace = true }
-fetch = { workspace = true, features = ["json", "native-tls", "tokio"] }
+fetch = { workspace = true, features = ["json", "rustls", "tokio"] }
 flate2 = { workspace = true, features = ["zlib-rs"] }
 futures = { workspace = true }
 futures-util = { workspace = true }
