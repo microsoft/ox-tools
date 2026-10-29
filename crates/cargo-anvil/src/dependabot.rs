@@ -12,13 +12,63 @@ use std::fmt::Write as _;
 use std::ops::Range;
 use std::path::Path;
 
-use ohno::{AppError, IntoAppError as _, app_err, bail};
+use ohno::{AppError, IntoAppError as _};
 use saphyr_parser::{Event, Parser};
 
-use crate::backend::Backend;
-use crate::catalog::{Artifact, Catalog};
+use crate::{Artifact, Backend, Catalog};
 
 const KEEP_UPDATES: &str = "# anvil: keep-generated-action-updates";
+
+#[ohno::error]
+#[display("expected Dependabot configuration version 2 (found {actual:?})")]
+struct UnsupportedVersionError {
+    actual: String,
+}
+
+#[ohno::error]
+#[display("{context} is missing `{field}`")]
+struct MissingFieldError {
+    field: &'static str,
+    context: &'static str,
+}
+
+#[ohno::error]
+#[display("expand YAML aliases, anchors, or tags on the Dependabot containers that need editing")]
+struct SharedContainerError;
+
+#[ohno::error]
+#[display("expand YAML merge keys in the GitHub Actions Dependabot job before adding exclusions")]
+struct MergedJobError;
+
+#[ohno::error]
+#[display("cyclic YAML merge defaults prevent determining the Dependabot job's ecosystem; expand the merge")]
+struct CyclicMergeError;
+
+#[ohno::error]
+#[display("expected a scalar Dependabot setting; expand YAML aliases used for this value")]
+struct ExpectedScalarError;
+
+#[ohno::error]
+#[display("expected a YAML list for Dependabot `updates` or `exclude-paths`")]
+struct ExpectedSequenceError;
+
+#[ohno::error]
+#[display("expected a YAML mapping for the Dependabot configuration or update job; expand aliases used here")]
+struct ExpectedMappingError;
+
+#[ohno::error]
+#[display("duplicate Dependabot mapping key `{key}`; remove the duplicate before adding exclusions")]
+struct DuplicateKeyError {
+    key: String,
+}
+
+#[ohno::error]
+#[display("Dependabot configuration is empty; restore its version and update jobs")]
+struct EmptyConfigurationError;
+
+#[ohno::error]
+#[display("Dependabot configuration must contain exactly one YAML document")]
+struct MultipleDocumentsError;
 
 /// Exact paths Dependabot would otherwise update in the selected catalog.
 pub(crate) fn generated_action_paths(catalog: &Catalog, backends: &[Backend]) -> Vec<&'static str> {
@@ -61,26 +111,25 @@ pub(crate) fn update(text: &str, paths: &[&str]) -> Result<Option<String>, AppEr
 
     let root = parse(text)?;
     let fields = root.fields()?;
-    if fields.get("version").map(|node| node.resolve(&root).scalar()).transpose()? != Some("2") {
-        bail!("expected Dependabot configuration version 2");
+    let version = fields.get("version").map(|node| node.resolve(&root).scalar()).transpose()?;
+    if version != Some("2") {
+        return Err(UnsupportedVersionError::new(version.unwrap_or("<missing>").to_owned()).into());
     }
     let updates = fields
         .get("updates")
-        .ok_or_else(|| app_err!("missing Dependabot `updates` list"))?
+        .ok_or_else(|| MissingFieldError::new("updates", "Dependabot configuration"))?
         .resolve(&root);
     let paths: Vec<_> = paths.iter().map(|path| literal_glob_path(path)).collect();
     let mut insertions = Vec::new();
     for job in updates.sequence()? {
         let job = job.resolve(&root);
-        let fields = job.fields()?;
-        let ecosystem = fields
-            .get("package-ecosystem")
-            .ok_or_else(|| app_err!("Dependabot update job is missing `package-ecosystem`"))?
-            .resolve(&root)
-            .scalar()?;
+        let ecosystem = job
+            .effective_ecosystem(&root, &mut Vec::new())?
+            .ok_or_else(|| MissingFieldError::new("package-ecosystem", "Dependabot update job"))?;
         if ecosystem != "github-actions" {
             continue;
         }
+        let fields = job.fields()?;
         let exclusions = fields.get("exclude-paths").map(|node| node.resolve(&root));
         let existing = exclusions.map(|node| node.sequence()).transpose()?.unwrap_or_default();
         let existing = existing
@@ -92,7 +141,7 @@ pub(crate) fn update(text: &str, paths: &[&str]) -> Result<Option<String>, AppEr
             continue;
         }
         if fields.contains_key("<<") {
-            bail!("expand YAML merge keys in the GitHub Actions Dependabot job before adding exclusions");
+            return Err(MergedJobError::new().into());
         }
         root.require_unshared()?;
         updates.require_unshared()?;
@@ -129,17 +178,15 @@ fn literal_glob_path(path: &str) -> String {
 }
 
 fn quoted_paths(paths: &[&str]) -> String {
-    paths
-        .iter()
-        .map(|path| serde_json::to_string(path).expect("serializing a Rust string to JSON cannot fail"))
-        .collect::<Vec<_>>()
-        .join(", ")
+    serde_json::to_string(paths).expect("serializing a slice of Rust strings to JSON cannot fail")
 }
 
 fn sequence_insertion(text: &str, sequence: &Node, paths: &[&str]) -> (usize, String) {
     if text[sequence.span.start..].starts_with('[') {
         let separator = if sequence.children.is_empty() { "" } else { ", " };
-        return (sequence.span.start + 1, format!("{}{separator}", quoted_paths(paths)));
+        let paths = quoted_paths(paths);
+        let paths = &paths[1..paths.len() - 1];
+        return (sequence.span.start + 1, format!("{paths}{separator}"));
     }
     let start = line_start(text, sequence.span.start);
     let prefix = &text[start..sequence.span.start];
@@ -147,26 +194,25 @@ fn sequence_insertion(text: &str, sequence: &Node, paths: &[&str]) -> (usize, St
     (start, block_entries(paths, indent, crate::region::text_newline(text)))
 }
 
+/// Insert before the whole first entry, retaining the job's existing `- ` prefix.
+/// Restoring spaces at the mapping column displaces that entry without duplicating
+/// the sequence marker; the mapping span also retains an explicit `?` indicator.
 fn job_insertion(text: &str, job: &Node, paths: &[&str]) -> (usize, String) {
     if text[job.span.start..].starts_with('{') {
-        return (job.span.start + 1, format!("exclude-paths: [{}], ", quoted_paths(paths)));
+        return (job.span.start + 1, format!("exclude-paths: {}, ", quoted_paths(paths)));
     }
-    let key = job
-        .children
-        .first()
-        .expect("the matched GitHub Actions job has a package-ecosystem mapping key");
-    let start = line_start(text, key.span.start);
-    let indent = " ".repeat(key.span.start - start);
+    let start = line_start(text, job.span.start);
+    let indent = " ".repeat(job.span.start - start);
     let newline = crate::region::text_newline(text);
     let entries = block_entries(paths, &format!("{indent}  "), newline);
-    (key.span.start, format!("exclude-paths:{newline}{entries}{indent}"))
+    (job.span.start, format!("exclude-paths:{newline}{entries}{indent}"))
 }
 
 fn block_entries(paths: &[&str], indent: &str, newline: &str) -> String {
     let mut body = String::new();
     for path in paths {
-        let quoted = serde_json::to_string(path).expect("serializing a Rust string to JSON cannot fail");
-        let _ = write!(body, "{indent}- {quoted}{newline}");
+        let path = serde_json::to_string(path).expect("serializing a Rust string to JSON cannot fail");
+        let _ = write!(body, "{indent}- {path}{newline}");
     }
     body
 }
@@ -175,6 +221,8 @@ fn line_start(text: &str, offset: usize) -> usize {
     text[..offset].rfind(['\r', '\n']).map_or(0, |index| index + 1)
 }
 
+/// The semantic shape needed for selection, not a YAML serializer's value model.
+/// Aliases retain anchor identities instead of copying their targets.
 #[derive(Debug, PartialEq, Eq)]
 enum Kind {
     Scalar(String),
@@ -183,6 +231,9 @@ enum Kind {
     Alias(usize),
 }
 
+/// An event-tree node tied to byte offsets in the original UTF-8 source.
+/// Mapping children alternate keys and values; collections retain anchor/tag
+/// sharing for edit safety, while scalar anchors remain read-only lookup targets.
 #[derive(Debug)]
 struct Node {
     kind: Kind,
@@ -193,6 +244,7 @@ struct Node {
 }
 
 impl Node {
+    /// Resolve one alias by identity without expanding a potentially cyclic graph.
     fn resolve<'a>(&'a self, root: &'a Self) -> &'a Self {
         match self.kind {
             Kind::Alias(anchor) => root
@@ -212,7 +264,7 @@ impl Node {
 
     fn require_unshared(&self) -> Result<(), AppError> {
         if self.shared {
-            bail!("expand YAML aliases, anchors, or tags on the Dependabot containers that need editing");
+            return Err(SharedContainerError::new().into());
         }
         Ok(())
     }
@@ -220,32 +272,66 @@ impl Node {
     fn scalar(&self) -> Result<&str, AppError> {
         match &self.kind {
             Kind::Scalar(value) => Ok(value),
-            _ => bail!("expected a scalar Dependabot setting; expand YAML aliases used for this value"),
+            _ => Err(ExpectedScalarError::new().into()),
         }
     }
 
     fn sequence(&self) -> Result<&[Self], AppError> {
         if self.kind != Kind::Sequence {
-            bail!("expected a YAML list for Dependabot `updates`, `directories`, or `exclude-paths`");
+            return Err(ExpectedSequenceError::new().into());
         }
         Ok(&self.children)
     }
 
     fn fields(&self) -> Result<BTreeMap<&str, &Self>, AppError> {
         if self.kind != Kind::Mapping {
-            bail!("expected a YAML mapping for the Dependabot configuration or update job; expand aliases used here");
+            return Err(ExpectedMappingError::new().into());
         }
         let mut fields = BTreeMap::new();
         for pair in self.children.chunks_exact(2) {
             let key = pair[0].scalar()?;
             if fields.insert(key, &pair[1]).is_some() {
-                bail!("duplicate Dependabot mapping key `{key}`; remove the duplicate before adding exclusions");
+                return Err(DuplicateKeyError::new(key.to_owned()).into());
             }
         }
         Ok(fields)
     }
+
+    /// Read only the effective ecosystem. Explicit values win; merge sequences
+    /// use their first matching default. The active source spans bound cycles.
+    fn effective_ecosystem<'a>(&'a self, root: &'a Self, active: &mut Vec<usize>) -> Result<Option<&'a str>, AppError> {
+        let node = self.resolve(root);
+        let fields = node.fields()?;
+        if let Some(ecosystem) = fields.get("package-ecosystem") {
+            return ecosystem.resolve(root).scalar().map(Some);
+        }
+        let Some(defaults) = fields.get("<<").map(|defaults| defaults.resolve(root)) else {
+            return Ok(None);
+        };
+        if active.contains(&node.span.start) {
+            return Err(CyclicMergeError::new().into());
+        }
+        active.push(node.span.start);
+        let defaults = if defaults.kind == Kind::Sequence {
+            defaults.children.as_slice()
+        } else {
+            std::slice::from_ref(defaults)
+        };
+        let result = defaults.iter().try_fold(None, |ecosystem, defaults| {
+            if ecosystem.is_some() {
+                Ok(ecosystem)
+            } else {
+                defaults.effective_ecosystem(root, active)
+            }
+        });
+        active.pop();
+        result
+    }
 }
 
+/// Retain parser shapes and positions without serializing the document again.
+/// Character-to-byte conversion includes the BOM prefix, so every node indexes
+/// the original source; closed collections attach to their parent in event order.
 fn parse(text: &str) -> Result<Node, AppError> {
     let mut stack: Vec<Node> = Vec::new();
     let mut root = None;
@@ -286,14 +372,15 @@ fn parse(text: &str) -> Result<Node, AppError> {
             push_node(&mut stack, &mut root, node)?;
         }
     }
-    root.ok_or_else(|| app_err!("Dependabot configuration is empty; restore its version and update jobs"))
+    root.ok_or_else(|| EmptyConfigurationError::new().into())
 }
 
+/// Attach one completed value; parser event order preserves mapping key/value pairs.
 fn push_node(stack: &mut [Node], root: &mut Option<Node>, node: Node) -> Result<(), AppError> {
     if let Some(parent) = stack.last_mut() {
         parent.children.push(node);
     } else if root.replace(node).is_some() {
-        bail!("Dependabot configuration must contain exactly one YAML document");
+        return Err(MultipleDocumentsError::new().into());
     }
     Ok(())
 }
@@ -302,7 +389,7 @@ fn push_node(stack: &mut [Node], root: &mut Option<Node>, node: Node) -> Result<
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use crate::catalog::CliMeta;
+    use crate::CliMeta;
 
     const PATHS: &[&str] = &[".github/actions/anvil-setup/action.yml", ".github/workflows/anvil-pr-impl.yml"];
     const JOB: &str = concat!(
@@ -312,6 +399,10 @@ mod tests {
         "    directory: /\n",
         "    schedule: {interval: weekly}\n",
     );
+
+    fn error_cause<T: std::error::Error + 'static>(error: &AppError) -> &T {
+        error.find_source::<T>().expect("the refusal must retain the expected typed cause")
+    }
 
     #[test]
     fn exclusions_are_exact_selected_catalog_paths_not_prefix_globs() {
@@ -358,6 +449,87 @@ mod tests {
         assert!(update(&output, PATHS).unwrap().is_none());
         assert!(!output.contains("codeql.yml"));
         assert!(!output.contains("anvil-*"));
+    }
+
+    #[test]
+    fn explicit_job_keys_retain_their_complete_mapping_entry() {
+        let source = concat!(
+            "version: 2\nupdates:\n",
+            "  - ? package-ecosystem\n",
+            "    : github-actions\n",
+            "    directory: /\n",
+            "    schedule: {interval: weekly}\n",
+        );
+        let expected = concat!(
+            "version: 2\nupdates:\n",
+            "  - exclude-paths:\n",
+            "      - \".github/actions/anvil-setup/action.yml\"\n",
+            "      - \".github/workflows/anvil-pr-impl.yml\"\n",
+            "    ? package-ecosystem\n",
+            "    : github-actions\n",
+            "    directory: /\n",
+            "    schedule: {interval: weekly}\n",
+        );
+        for newline in ["\n", "\r\n", "\r"] {
+            let source = source.replace('\n', newline);
+            let output = update(&source, PATHS).unwrap().unwrap();
+            assert_eq!(output, expected.replace('\n', newline));
+            assert_eq!(update(&output, PATHS).unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn inherited_cargo_ecosystems_do_not_require_repeating_the_key() {
+        let source = concat!(
+            "version: 2\nupdates:\n",
+            "  - &cargo\n",
+            "    package-ecosystem: cargo\n",
+            "    directory: /\n",
+            "    schedule: {interval: weekly}\n",
+            "  - <<: *cargo\n",
+            "    directory: /tools\n",
+        );
+        assert_eq!(update(source, PATHS).unwrap(), None);
+        let source = format!("{source}{}", JOB.split_once("updates:\n").unwrap().1);
+        let output = update(&source, PATHS).unwrap().unwrap();
+        assert_eq!(
+            output,
+            source.replace(
+                "  - package-ecosystem: github-actions",
+                "  - exclude-paths:\n      - \".github/actions/anvil-setup/action.yml\"\n\
+                 \x20     - \".github/workflows/anvil-pr-impl.yml\"\n    package-ecosystem: github-actions",
+            ),
+        );
+        assert_eq!(update(&output, PATHS).unwrap(), None);
+    }
+
+    #[test]
+    fn ecosystem_merge_defaults_follow_precedence_and_explicit_overrides() {
+        let defaults = format!(
+            "version: 2\nupdates:\n\
+             \x20 - &cargo {{package-ecosystem: cargo, directory: /, schedule: {{interval: weekly}}}}\n\
+             \x20 - &actions {{package-ecosystem: github-actions, directory: /, exclude-paths: {}}}\n\
+             \x20 - &nested {{'<<': *cargo, directory: /nested}}\n",
+            quoted_paths(PATHS),
+        );
+        for job in [
+            "  - <<: [*cargo, *actions]\n    directory: /tools\n",
+            "  - <<: [{}, *cargo]\n    directory: /tools\n",
+            "  - <<: *nested\n    directory: /tools\n",
+            "  - <<: *actions\n    package-ecosystem: cargo\n    directory: /tools\n",
+            "  - &self\n    <<: *self\n    package-ecosystem: cargo\n    directory: /tools\n",
+        ] {
+            assert_eq!(update(&format!("{defaults}{job}"), PATHS).unwrap(), None);
+        }
+        for job in [
+            "  - <<: [*actions, *cargo]\n    directory: /tools\n",
+            "  - <<: *cargo\n    package-ecosystem: github-actions\n    directory: /tools\n",
+        ] {
+            let error = update(&format!("{defaults}{job}"), PATHS).unwrap_err();
+            error_cause::<MergedJobError>(&error);
+        }
+        let error = update("version: 2\nupdates:\n  - &cycle\n    <<: *cycle\n    directory: /\n", PATHS).unwrap_err();
+        error_cause::<CyclicMergeError>(&error);
     }
 
     #[test]
@@ -414,7 +586,7 @@ mod tests {
 
     #[test]
     fn anchored_containers_are_safe_when_no_patch_is_needed() {
-        let complete = format!("{JOB}    exclude-paths: [{}]\n", quoted_paths(PATHS));
+        let complete = format!("{JOB}    exclude-paths: {}\n", quoted_paths(PATHS));
         for source in [
             JOB.replace("updates:", "updates: &updates").replace("github-actions", "cargo"),
             JOB.replace("updates:", "updates: !updates").replace("github-actions", "cargo"),
@@ -431,7 +603,7 @@ mod tests {
     #[test]
     fn aliased_exclusions_are_read_only_when_every_generated_path_is_present() {
         let source = format!(
-            "{JOB}    target-branch: main\n    exclude-paths: &generated [{}]\n\
+            "{JOB}    target-branch: main\n    exclude-paths: &generated {}\n\
              \x20 - package-ecosystem: github-actions\n    directory: /\n\
              \x20   target-branch: release\n    exclude-paths: *generated\n",
             quoted_paths(PATHS),
@@ -463,13 +635,11 @@ mod tests {
             JOB.replace("github-actions", "cargo"),
         );
         let error = update(&source, PATHS).unwrap_err();
-        assert!(error.to_string().contains("containers that need editing"));
-        for source in [
-            format!("{JOB}    exclude-paths: &generated [*generated]\n"),
-            "version: 2\nupdates: &updates [*updates]\n".to_owned(),
-        ] {
-            update(&source, PATHS).expect_err("cyclic alias containers are not string exclusion lists");
-        }
+        error_cause::<SharedContainerError>(&error);
+        let error = update(&format!("{JOB}    exclude-paths: &generated [*generated]\n"), PATHS).unwrap_err();
+        error_cause::<ExpectedScalarError>(&error);
+        let error = update("version: 2\nupdates: &updates [*updates]\n", PATHS).unwrap_err();
+        error_cause::<ExpectedMappingError>(&error);
     }
 
     #[test]
@@ -592,18 +762,65 @@ mod tests {
     }
 
     #[test]
-    fn refuses_unsafe_or_invalid_configuration_instead_of_replacing_it() {
+    fn configuration_refusals_retain_specific_causes_and_fields() {
+        let error = update("", PATHS).unwrap_err();
+        error_cause::<EmptyConfigurationError>(&error);
+        for (source, expected) in [("version: 1\nupdates: []\n", "1"), ("updates: []\n", "<missing>")] {
+            let error = update(source, PATHS).unwrap_err();
+            assert_eq!(error_cause::<UnsupportedVersionError>(&error).actual, expected);
+        }
+        for (source, field, context) in [
+            ("version: 2\n", "updates", "Dependabot configuration"),
+            ("version: 2\nupdates: [{}]\n", "package-ecosystem", "Dependabot update job"),
+        ] {
+            let error = update(source, PATHS).unwrap_err();
+            let cause = error_cause::<MissingFieldError>(&error);
+            assert_eq!((cause.field, cause.context), (field, context));
+        }
+        for (source, key) in [
+            (format!("{JOB}    directory: /\n"), "directory"),
+            (format!("{JOB}version: 2\n"), "version"),
+        ] {
+            let error = update(&source, PATHS).unwrap_err();
+            assert_eq!(error_cause::<DuplicateKeyError>(&error).key, key);
+        }
+        let error = update(&format!("{JOB}    <<: {{labels: []}}\n"), PATHS).unwrap_err();
+        error_cause::<MergedJobError>(&error);
+        let error = update(&format!("{JOB}---\nversion: 2\nupdates: []\n"), PATHS).unwrap_err();
+        error_cause::<MultipleDocumentsError>(&error);
+    }
+
+    #[test]
+    fn malformed_yaml_retains_the_parser_error_cause() {
+        for source in ["version: 2\nupdates: [".to_owned(), format!("{JOB}  - *missing\n")] {
+            let error = update(&source, PATHS).unwrap_err();
+            error_cause::<saphyr_parser::ScanError>(&error);
+        }
+    }
+
+    #[test]
+    fn incorrect_yaml_shapes_retain_the_expected_type_refusal() {
+        for source in ["[]\n", "version: 2\nupdates: [github-actions]\n"] {
+            let error = update(source, PATHS).unwrap_err();
+            error_cause::<ExpectedMappingError>(&error);
+        }
         for source in [
-            String::new(),
-            "[]\n".to_owned(),
-            "version: 2\nupdates: [".to_owned(),
-            "version: 1\nupdates: []\n".to_owned(),
-            "version: 2\n".to_owned(),
-            "version: 2\nupdates: [{}]\n".to_owned(),
-            "version: 2\nupdates: [github-actions]\n".to_owned(),
-            "version: 2\nupdates: [{package-ecosystem: []}]\n".to_owned(),
-            format!("{JOB}    directory: /\n"),
-            format!("{JOB}    exclude-paths: null\n"),
+            "version: []\nupdates: []\n",
+            "version: 2\nupdates: [{? [key]: value}]\n",
+            "version: 2\nupdates: [{package-ecosystem: []}]\n",
+        ] {
+            let error = update(source, PATHS).unwrap_err();
+            error_cause::<ExpectedScalarError>(&error);
+        }
+        for source in ["version: 2\nupdates: {}\n".to_owned(), format!("{JOB}    exclude-paths: null\n")] {
+            let error = update(&source, PATHS).unwrap_err();
+            error_cause::<ExpectedSequenceError>(&error);
+        }
+    }
+
+    #[test]
+    fn shared_yaml_targets_are_refused_only_when_they_need_editing() {
+        for source in [
             format!("{JOB}    exclude-paths: &paths [vendor/**]\n"),
             format!("{JOB}    exclude-paths: !paths [vendor/**]\n"),
             JOB.replace("updates:", "updates: &updates"),
@@ -613,11 +830,9 @@ mod tests {
             format!("&root\n{JOB}"),
             format!("!root\n{JOB}"),
             format!("paths: &paths [vendor/**]\n{JOB}    exclude-paths: *paths\n"),
-            format!("{JOB}    <<: {{labels: []}}\n"),
-            format!("{JOB}---\nversion: 2\nupdates: []\n"),
-            format!("{JOB}  - *missing\n"),
         ] {
-            assert!(update(&source, PATHS).is_err(), "{source}");
+            let error = update(&source, PATHS).unwrap_err();
+            error_cause::<SharedContainerError>(&error);
         }
     }
 }

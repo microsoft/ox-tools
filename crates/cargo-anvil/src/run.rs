@@ -349,18 +349,19 @@ fn plan_dependabot_exclusions(
     if paths.is_empty() {
         return Ok(());
     }
-    let retired_files = plan
+    let unpatchable_hosts = plan
         .items()
         .iter()
         .filter_map(|item| match &item.target {
             Target::File { path } if item.decision == Decision::Remove => Some((hosts.resolve)(repo_root, path)),
+            Target::Region { host, .. } if item.decision == Decision::LeaveAlone => Some((hosts.resolve)(repo_root, host)),
             _ => None,
         })
         .collect::<Result<BTreeSet<_>, _>>()?;
     let mut configurations = Vec::new();
     for path in [".github/dependabot.yml", ".github/dependabot.yaml"] {
         let path = (hosts.resolve)(repo_root, path)?;
-        if retired_files.contains(&path) {
+        if unpatchable_hosts.contains(&path) {
             continue;
         }
         if let Some(text) = hosts.get_or_read(repo_root, &path)? {
@@ -2899,6 +2900,68 @@ mod tests {
         assert_eq!(plan.items().len(), 2);
         assert!(matches!(plan.items()[1].target, Target::File { .. }));
         assert_eq!(plan.items()[1].decision, Decision::Write);
+    }
+
+    #[test]
+    fn dependabot_patches_preserve_refused_retired_region_bodies() {
+        let original = "version: 2\nupdates:\n- package-ecosystem: github-actions\n  directory: /\n";
+        let edited = format!("{original}  schedule: {{interval: monthly}}\n");
+        let source = upsert_region("", "retired-policy", &edited, CommentSyntax::Hash).unwrap();
+        for host in [".github/Dependabot.yml", ".github/Dependabot.yaml"] {
+            let catalog = Catalog::builder(test_cli())
+                .with_artifact(artifacts::github::setup_action())
+                .build()
+                .unwrap();
+            let mut manifest = Manifest::default();
+            manifest.set_region(host, "retired-policy", checksum_str(original));
+            let mut hosts = memory_hosts();
+            hosts.resolve = |_, path| Ok(path.to_ascii_lowercase());
+            hosts.texts.insert(".github/dependabot.yml".to_owned(), None);
+            hosts.texts.insert(".github/dependabot.yaml".to_owned(), None);
+            let resolved = host.to_ascii_lowercase();
+            hosts.set(&resolved, source.clone());
+            let mut plan = Plan::default();
+            plan_removals_with_array_hosts(
+                Path::new("memory"),
+                &manifest,
+                &mut plan,
+                &mut hosts,
+                &ComposedHosts::default(),
+                &BTreeSet::new(),
+            )
+            .unwrap();
+            assert_eq!(plan.refusals().len(), 1);
+            plan_dependabot_exclusions(Path::new("memory"), &[Backend::GitHub], &catalog, &mut plan, &mut hosts).unwrap();
+            assert_eq!(plan.items().len(), 1);
+            assert_eq!(plan.items()[0].decision, Decision::LeaveAlone);
+            assert_eq!(hosts.cached(&resolved).as_deref(), Some(source.as_str()));
+            assert_eq!(plan.projected_manifest(&manifest).regions, manifest.regions);
+        }
+    }
+
+    #[test]
+    fn dependabot_customized_file_retirement_still_allows_the_unowned_patch() {
+        let source = "version: 2\nupdates:\n- package-ecosystem: github-actions\n  directory: /\n";
+        let catalog = Catalog::builder(test_cli())
+            .with_artifact(artifacts::github::setup_action())
+            .build()
+            .unwrap();
+        let mut hosts = memory_hosts();
+        hosts.set(".github/dependabot.yml", source.to_owned());
+        hosts.texts.insert(".github/dependabot.yaml".to_owned(), None);
+        let mut plan = Plan::default();
+        plan.push(PlanItem::orphaned_kept(Target::File {
+            path: ".github/dependabot.yml".to_owned(),
+        }));
+        plan_dependabot_exclusions(Path::new("memory"), &[Backend::GitHub], &catalog, &mut plan, &mut hosts).unwrap();
+        let expected = crate::dependabot::update(source, &[".github/actions/anvil-setup/action.yml"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(plan.items().len(), 2);
+        assert_eq!(plan.items()[0].decision, Decision::OrphanedKept);
+        assert_eq!(plan.items()[1].decision, Decision::Write);
+        assert_eq!(plan.items()[1].rendered.as_deref(), Some(expected.as_str()));
+        assert_eq!(hosts.cached(".github/dependabot.yml").as_deref(), Some(expected.as_str()));
     }
 
     #[test]

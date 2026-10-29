@@ -1107,6 +1107,11 @@ scheduled for whole-file retirement are not patched or recreated. Malformed or
 ambiguous configuration, including aliases or shared YAML containers that would
 need editing, is left unchanged with an actionable refusal; anchors on untouched
 containers do not cause refusals, and unrelated YAML anchors remain supported.
+Refused managed-region retirement also blocks automatic patches to that file;
+successful region removal still permits patching the remaining repository content.
+Explicit YAML keys retain their complete mapping-entry boundaries. Inherited
+ecosystem defaults are used for read-only job classification with explicit values
+taking precedence, so merged defaults for unrelated ecosystems remain no-ops.
 Aliases are followed by reference for read-only comparisons, without expanding
 their graphs. Already-complete shared exclusion lists remain byte-for-byte no-ops;
 an insertion that would change a shared target is still refused.
