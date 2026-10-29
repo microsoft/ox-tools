@@ -475,6 +475,56 @@ export -f just
     }
 
     #[test]
+    fn mutation_groups_preserve_reports_and_publish_sarif_after_failure() {
+        let report_step = RUN_GROUP_ACTION
+            .split_once("    - name: Upload Gamma reports\n")
+            .expect("mutation groups must archive their diagnostic reports")
+            .1;
+        let (reports, sarif) = report_step
+            .split_once("    - name: Upload Gamma SARIF\n")
+            .expect("mutation groups must publish SARIF separately");
+
+        for step in [reports, sarif] {
+            assert!(step.contains("always() && (inputs.group == 'pr-mutants' || inputs.group == 'scheduled-exhaustive')"));
+            assert!(!step.contains("continue-on-error: true"));
+        }
+
+        assert!(reports.contains("uses: actions/upload-artifact@"));
+        assert!(reports.contains("name: gamma-${{ inputs.group }}-${{ runner.os }}-${{ runner.arch }}-${{ github.run_attempt }}"));
+        assert!(reports.contains(
+            "hashFiles('target/cargo-gamma/gamma-report.*', 'target/cargo-gamma/gamma-diagnostics.json', 'target/cargo-gamma/gamma-perf-advice.md') != ''"
+        ));
+        let paths = reports
+            .split_once("        path: |\n")
+            .expect("report upload must explicitly select its files")
+            .1
+            .split_once("        if-no-files-found:")
+            .expect("missing selected outputs must be an error")
+            .0
+            .lines()
+            .map(str::trim)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            paths,
+            [
+                "target/cargo-gamma/gamma-report.json",
+                "target/cargo-gamma/gamma-report.html",
+                "target/cargo-gamma/gamma-report.sarif",
+                "target/cargo-gamma/gamma-diagnostics.json",
+                "target/cargo-gamma/gamma-perf-advice.md",
+                "gamma-hints.yaml",
+            ]
+        );
+        assert!(reports.contains("if-no-files-found: error"));
+        assert!(reports.contains("retention-days: 30"));
+
+        assert!(sarif.contains("hashFiles('target/cargo-gamma/gamma-report.sarif') != ''"));
+        assert!(sarif.contains("uses: github/codeql-action/upload-sarif@"));
+        assert!(sarif.contains("sarif_file: target/cargo-gamma/gamma-report.sarif"));
+        assert!(sarif.contains("category: cargo-gamma-${{ inputs.group }}-${{ runner.os }}-${{ runner.arch }}"));
+    }
+
+    #[test]
     fn status_action_manages_dynamic_failure_contexts_on_pr_head() {
         assert!(REPORT_STATUS_ACTION.contains("github.rest.repos.createCommitStatus"));
         assert!(REPORT_STATUS_ACTION.contains("github.rest.repos.listCommitStatusesForRef"));
@@ -637,6 +687,20 @@ export -f just
             .0;
         assert!(publisher_permissions.contains("\n    permissions:\n      issues: write"));
         assert!(!publisher_permissions.contains("contents: read"));
+        let exhaustive_job = SCHEDULED_IMPL_WORKFLOW
+            .split_once("\n  scheduled-exhaustive:")
+            .expect("scheduled workflow must contain exhaustive mutation testing")
+            .1
+            .split_once("\n  publish-failure:")
+            .expect("publish-failure is the next job after scheduled-exhaustive")
+            .0;
+        for scope in ["contents: read", "actions: read", "security-events: write"] {
+            assert!(
+                exhaustive_job.contains(&format!("\n      {scope}\n")),
+                "mutation upload missing permission {scope}"
+            );
+        }
+        assert_eq!(SCHEDULED_IMPL_WORKFLOW.matches("security-events: write").count(), 1);
         assert_eq!(
             SCHEDULED_IMPL_WORKFLOW.matches("uses: ./.github/actions/anvil-run-group").count(),
             SCHEDULED_GROUPS.len(),
@@ -973,6 +1037,14 @@ async function scenario(items) {
         assert!(validation_caller.contains("\n    permissions:\n      contents: read"));
         assert!(validation_caller.contains("statuses: write"));
         assert!(validation_caller.contains("pull-requests: write"));
+        for root in [PR_ROOT_WORKFLOW, SCHEDULED_ROOT_WORKFLOW] {
+            let caller_permissions = root
+                .split_once("\n    permissions:")
+                .expect("reusable workflow caller must grant upload permissions")
+                .1;
+            assert!(caller_permissions.contains("actions: read"));
+            assert!(caller_permissions.contains("security-events: write"));
+        }
         assert!(SCHEDULED_ROOT_WORKFLOW.contains("uses: ./.github/workflows/anvil-scheduled-impl.yml"));
         assert!(SCHEDULED_ROOT_WORKFLOW.contains("schedule:"));
         assert!(SCHEDULED_ROOT_WORKFLOW.contains("issues: write"));

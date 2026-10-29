@@ -263,6 +263,8 @@ jobs:
     uses: ./.github/workflows/anvil-pr-impl.yml
     permissions:
       contents: read
+      actions: read
+      security-events: write
       statuses: write
       pull-requests: write
     with:
@@ -276,8 +278,8 @@ instead of showing a second skipped caller. The event-specific `base_ref`
 expression selects the pull-request base or merge-group base SHA. The caller
 grants the write scopes needed for pull-request presentation on both event
 types; all status and comment writes remain guarded to same-repository
-`pull_request` events, so merge-group runs receive but do not exercise those
-permissions. The workflow display name is UI grouping rather than part of a
+`pull_request` events. Mutation groups also upload SARIF to code scanning,
+including on merge-group runs. The workflow display name is UI grouping rather than part of a
 check-run name; branch protection sees contexts beginning with `PR Job / ...`.
 The called PR implementation intentionally declares no `permissions` blocks, so
 its jobs inherit the caller's ceiling.
@@ -295,6 +297,11 @@ permissions:
 jobs:
   anvil:
     uses: ./.github/workflows/anvil-scheduled-impl.yml
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
+      issues: write
 ```
 
 Common edits users make to the root workflow (these flip the file to "dirty" and produce
@@ -462,9 +469,9 @@ jobs:
           impact_mode: consume
           free-disk-space: true
 
-  # pr-runtime-analysis (miri + careful) and pr-mutants (mutants) follow the
+  # pr-runtime-analysis (miri + careful) and pr-mutants (cargo-gamma) follow the
   # multi-OS shape; pr-mutants additionally sets `env: BASE_REF` for
-  # diff-scoped cargo-mutants.
+  # diff-scoped cargo-gamma.
 ```
 
 Every multi-OS job hardcodes its OS axis as an inline YAML array. Per-leg runner
@@ -681,6 +688,43 @@ check needs which env var."
 The shared action is an implementation detail of Anvil's generated reusable
 workflows. Anvil does not emit or support public per-group action paths.
 
+### Gamma reports and code scanning
+
+After `pr-mutants` or `scheduled-exhaustive`, the shared `anvil-run-group`
+action preserves any completed Gamma reports even when the group fails.
+Unrelated groups and mutation no-op matrix legs do not upload Gamma outputs.
+The upload requires at least one report, diagnostic, or performance-advice file;
+the checked-in hints file alone does not trigger an artifact.
+
+The downloadable artifact is named
+`gamma-<group>-<runner.os>-<runner.arch>-<run_attempt>` and retained for 30 days,
+subject to the repository's retention policy. It contains the JSON, HTML, and
+SARIF reports, `gamma-diagnostics.json`, and `gamma-perf-advice.md` from
+`target/cargo-gamma/`, plus the root `gamma-hints.yaml` as left by the recipe's
+hint-promotion step. Scratch directories and compiled targets are not uploaded.
+The mutation recipes pin `--artifact-dir target/cargo-gamma` on GitHub Actions,
+even when `gamma.toml` specifies a different report directory; local and ADO
+runs retain native directory configuration.
+Artifacts are available from the workflow run's Artifacts section or
+`gh run download`. Separate names prevent platforms and rerun attempts from
+overwriting one another.
+
+When `target/cargo-gamma/gamma-report.sarif` exists, a separate `upload-sarif`
+step publishes it to GitHub code scanning. Categories include the group, OS,
+and architecture so diff-scoped PR results remain separate from full scheduled
+campaigns and from other platforms. A successful campaign with no survivors
+produces no survivor alerts; hint-efficiency accounting remains in the
+downloadable diagnostics rather than code scanning.
+
+Both root workflow callers grant `security-events: write` and `actions: read`
+alongside `contents: read`; the latter two allow SARIF upload in private
+repositories. The scheduled implementation restores those scopes only on
+`scheduled-exhaustive`, keeping ordinary scheduled jobs read-only. Repositories
+must enable GitHub code scanning; private/internal repositories require GitHub
+Code Security availability. Upload failures are surfaced as job failures, not
+silently ignored, and artifact and SARIF uploads are independently guarded to
+run after group failure.
+
 ### Failure attribution and commit statuses
 
 GitHub fixes workflow job names before a job runs, so a matrix check named
@@ -827,7 +871,7 @@ prerequisites provision the selected compiler and tools. Its
   `just anvil-<group>-setup binstall` -- only the tools, components, and
   toolchains that group actually needs. Ordinary group names contain only
   lowercase letters, digits, and hyphens. `anvil-run-group` passes its group
-  input here, so a `pr-fast` matrix leg never installs cargo-mutants.
+  input here, so a `pr-fast` matrix leg never installs cargo-gamma.
 
 Linux setup jobs whose selected group includes spellcheck install
 `libclang-dev` before catalog tool installation. This is intentionally eager:
@@ -1024,6 +1068,8 @@ Recommended root workflow shape:
   caller ceiling. The same caller handles pull-request and merge-group events,
   avoiding a second skipped `PR Job`; merge-group jobs receive these scopes but
   do not use them.
+- Both reusable-workflow callers also grant `security-events: write` and
+  `actions: read` for Gamma's SARIF uploads.
 - Status publishing is guarded to same-repository `pull_request` events. Fork
   PRs never reach the status API step regardless of whether administrators keep
   GitHub's default read-only token policy or enable write tokens for fork
@@ -1032,8 +1078,9 @@ Recommended root workflow shape:
   publisher can create or comment on the failure issue. The called workflow resets its
   default permissions to `contents: read`, then restores `issues: write` only on the
   publishing job. That job-level map omits `contents`, so the publisher cannot read
-  repository contents; scheduled check jobs retain read-only access. The PR workflow
-  never receives this permission.
+  repository contents. Only `scheduled-exhaustive` restores code-scanning upload
+  scopes; the other scheduled check jobs retain read-only access. The PR workflow
+  never receives `issues: write`.
 - Scheduled-tier secrets, if any, live on `anvil-scheduled.yml` only — never on `anvil-pr.yml`.
 - All cargo-tool installs done by the catalog setup recipes use `--locked` (with
   `cargo install` or `cargo binstall` depending on `installer`).

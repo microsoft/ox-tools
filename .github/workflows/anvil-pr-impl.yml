@@ -302,7 +302,7 @@ jobs:
 
   pr-mutants:
     name: "Check Group: Mutation Testing (${{ matrix.os }})"
-    # Mutation testing: cargo mutants (diff-scoped against the PR base).
+    # Mutation testing: cargo gamma (diff-scoped against the PR base).
     # Preserve all four repository-ruleset contexts, but run the multi-hour
     # campaign only on Windows x64. The other legs complete as explicit no-ops;
     # scheduled exhaustive checks retain Linux + Windows mutation coverage.

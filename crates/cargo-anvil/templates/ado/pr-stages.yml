@@ -223,11 +223,9 @@ stages:
             - template: steps/pr-runtime-analysis.yml
 
   - stage: pr_mutants
-    displayName: anvil pr-mutants (mutants)
+    displayName: anvil pr-mutants (cargo-gamma)
     dependsOn: [impact]
     jobs:
-      # anvil-mutants-diff self-skips on aarch64-pc-windows-msvc as a
-      # defence-in-depth measure for adopters with self-hosted ARM pools.
       - template: steps/job.yml
         parameters:
           name: linux

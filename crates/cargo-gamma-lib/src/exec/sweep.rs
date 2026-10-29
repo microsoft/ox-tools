@@ -3924,6 +3924,7 @@ mod tests {
             assert_eq!(attempt.stall.budget, Some(Duration::from_millis(11)));
             assert_eq!(attempt.request.limit, Some(4096));
             assert!(attempt.request.meter);
+            assert!(!attempt.request.calibrating);
             assert!(matches!(attempt.only, Only::All));
         }
     }
@@ -5265,8 +5266,11 @@ mod tests {
                 assert_eq!(attempt.active, expected.active);
                 assert_eq!(attempt.timeout, expected.timeout);
                 assert_eq!(attempt.stall.budget, expected.stall.budget);
-                assert_eq!(attempt.request.meter, expected.request.meter);
-                assert_eq!(attempt.request.limit, expected.request.limit);
+                assert_eq!(attempt.request, expected.request);
+                assert!(
+                    !EXECUTION_TIER.get().1,
+                    "a mutant probe must not be accounted as an unmutated control"
+                );
                 BinaryRun { verdict, reach }
             },
             body,

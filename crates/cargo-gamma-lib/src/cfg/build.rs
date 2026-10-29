@@ -336,7 +336,7 @@ thread_local! {
     static AMBIENT_ENVIRONMENT: core::cell::RefCell<Option<Environment>> = const { core::cell::RefCell::new(None) };
 }
 
-#[cfg(feature = "internals")]
+#[cfg(any(test, feature = "internals"))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub fn with_empty_environment<T>(operation: impl FnOnce() -> T) -> T {
     struct Reset(Option<Environment>);
@@ -1006,6 +1006,35 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn oct29_empty_environment_restores_the_enclosing_scope_after_success_and_unwind() {
+        for unwind in [false, true] {
+            AMBIENT_ENVIRONMENT.with_borrow_mut(|slot| {
+                assert!(slot.is_none());
+                *slot = Some(Environment {
+                    target: Some("enclosing-target".into()),
+                    rustflags: Some("--cfg enclosing".into()),
+                    ..Environment::default()
+                });
+            });
+            let result = std::panic::catch_unwind(|| {
+                with_empty_environment(|| {
+                    let empty = Environment::ambient();
+                    assert_eq!(empty.target, None);
+                    assert_eq!(empty.rustflags, None);
+                    assert!(!unwind, "exercise scoped environment restoration");
+                });
+            });
+            assert_eq!(result.is_err(), unwind);
+            let enclosing = Environment::ambient();
+            assert_eq!(enclosing.target.as_deref(), Some("enclosing-target"));
+            assert_eq!(enclosing.rustflags.as_deref(), Some("--cfg enclosing"));
+            assert!(AMBIENT_ENVIRONMENT.with_borrow(Option::is_none));
+        }
+        with_empty_environment(|| {});
+        assert!(AMBIENT_ENVIRONMENT.with_borrow(Option::is_none));
+    }
 
     #[test]
     fn recovered_hyphenated_debug_assertions_take_precedence_over_the_legacy_alias() {

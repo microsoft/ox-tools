@@ -4764,6 +4764,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
             if *mutator == "assign.add_to_mul" {
                 let mut right = node.right.as_ref();
                 while let Expr::Paren(paren) = right {
+                    // #[gamma::skip(stmt.delete_assign, tag = "timeout", reason = "parenthesis traversal must advance to the inner expression; retaining the same expression stalls the loop")]
                     right = &paren.expr;
                 }
                 if matches!(right, Expr::Lit(ExprLit { lit: Lit::Int(value), .. }) if value.base10_parse::<u128>().is_ok_and(|number| number == 1))

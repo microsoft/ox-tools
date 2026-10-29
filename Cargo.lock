@@ -433,13 +433,12 @@ dependencies = [
 
 [[package]]
 name = "cargo-anvil"
-version = "0.21.1"
+version = "0.22.0"
 dependencies = [
  "assert_cmd",
  "clap",
  "insta",
  "jsonc-parser",
- "mutants",
  "ohno",
  "predicates",
  "saphyr-parser",
@@ -462,7 +461,6 @@ dependencies = [
  "cargo-aprz-lib",
  "cargo-gamma-attrs",
  "mimalloc",
- "mutants",
  "tokio",
 ]
 
@@ -494,7 +492,6 @@ dependencies = [
  "layered",
  "log",
  "mmap-rs",
- "mutants",
  "ohno",
  "owo-colors",
  "pastey",
@@ -546,7 +543,6 @@ dependencies = [
  "clap",
  "glob",
  "lcov",
- "mutants",
  "ohno",
  "predicates",
  "ra_ap_syntax",
@@ -564,7 +560,6 @@ dependencies = [
  "cargo_metadata",
  "clap",
  "command-group",
- "mutants",
  "ohno",
  "predicates",
  "serde_json",
@@ -755,7 +750,6 @@ version = "0.1.0"
 dependencies = [
  "cargo_metadata",
  "clap",
- "mutants",
  "tempfile",
 ]
 
@@ -765,7 +759,6 @@ version = "0.2.0"
 dependencies = [
  "cargo_metadata",
  "clap",
- "mutants",
  "ohno",
  "serde_json",
  "tempfile",
@@ -1840,7 +1833,6 @@ name = "hunspell-dictgen"
 version = "0.1.0"
 dependencies = [
  "clap",
- "mutants",
  "ohno",
  "tempfile",
 ]
@@ -2426,12 +2418,6 @@ checksum = "a198f9589efc03f544388dfc4a19fe8af4323662b62f598b8dcfdac62c14771c"
 dependencies = [
  "byteorder",
 ]
-
-[[package]]
-name = "mutants"
-version = "0.0.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "add0ac067452ff1aca8c5002111bd6b1c895baee6e45fcbc44e0193aea17be56"
 
 [[package]]
 name = "nix"

@@ -856,6 +856,156 @@ mod tests {
     /// One day, in seconds.
     const DAY: u64 = 86_400;
 
+    #[test]
+    fn oct29_filtered_pending_sightings_protect_unfiltered_verdicts_from_loss() {
+        let old = report_with_source(Some((0, 2)), 100, "old source\n", vec![mutant("site", 1, "Killed")]);
+        let mut filtered = report_with_source(None, 200, "old source\n", vec![mutant("site", 1, "Pending")]);
+        filtered.config.as_mut().unwrap().name_filtered = true;
+        let current = report_with_source(Some((1, 2)), 300, "current source\n", vec![mutant("other", 1, "Survived")]);
+        for inputs in [
+            vec![
+                ("old".into(), old.clone()),
+                ("filtered".into(), filtered.clone()),
+                ("current".into(), current.clone()),
+            ],
+            vec![("current".into(), current), ("filtered".into(), filtered), ("old".into(), old)],
+        ] {
+            let merged = merge(&inputs, 400, None);
+            assert_eq!((merged.incompatible, merged.unpresentable_filtered), (1, 1));
+            assert!(merged.report.is_none(), "staging must not erase the latest filtered sighting");
+        }
+    }
+
+    /// Holds provenance identities and sighting time fixed while varying verdict time and filter protection.
+    fn staged_protection(verdict_filtered: bool, sighting_filtered: bool, tested_at: u64) -> Report {
+        let mut staged = report_with_source(None, 200, "old source\n", vec![mutant("site", 1, "Killed")]);
+        let config = staged.config.as_mut().unwrap();
+        config.merged = true;
+        config.population_complete = false;
+        let mut provenance = MergeProvenance::default();
+        provenance.sources.insert(
+            "src/lib.rs".into(),
+            SourceProvenance {
+                started_at: 200,
+                origin: "source".into(),
+                lineage: "a".repeat(64),
+                name_filtered: false,
+            },
+        );
+        provenance.verdicts.insert(
+            "site".into(),
+            VerdictProvenance {
+                started_at: tested_at,
+                origin: "verdict".into(),
+                lineage: "b".repeat(64),
+                name_filtered: verdict_filtered,
+            },
+        );
+        provenance.sightings.insert(
+            "site".into(),
+            SourceProvenance {
+                started_at: 250,
+                origin: "sighting".into(),
+                lineage: "c".repeat(64),
+                name_filtered: sighting_filtered,
+            },
+        );
+        config.merge_provenance = Some(provenance);
+        staged
+    }
+
+    #[test]
+    fn oct29_equal_rank_sightings_keep_either_twins_filter_protection_independently_of_verdicts() {
+        let protected = staged_protection(false, true, 100);
+        let unprotected = staged_protection(false, false, 100);
+        let current = report_with_source(Some((1, 2)), 300, "current source\n", vec![mutant("other", 1, "Survived")]);
+        for twins in [[&protected, &unprotected], [&unprotected, &protected]] {
+            let merged = merge(
+                &[
+                    ("first".into(), twins[0].clone()),
+                    ("second".into(), twins[1].clone()),
+                    ("current".into(), current.clone()),
+                ],
+                400,
+                None,
+            );
+            assert_eq!((merged.incompatible, merged.unpresentable_filtered), (1, 1));
+            assert!(merged.report.is_none());
+        }
+    }
+
+    #[test]
+    fn oct29_only_equal_rank_verdict_twins_combine_their_filter_protection() {
+        for (left_filtered, right_filtered, left_time, right_time, expected) in [
+            (false, true, 100, 100, true),
+            (true, false, 100, 100, true),
+            (false, false, 100, 100, false),
+            (true, false, 90, 100, false),
+            (false, true, 100, 90, false),
+        ] {
+            let inputs = [
+                ("left".into(), staged_protection(left_filtered, false, left_time)),
+                ("right".into(), staged_protection(right_filtered, false, right_time)),
+            ];
+            let document = merge(&inputs, 400, None).report.unwrap();
+            let wire = to_value(&document).unwrap();
+            assert_eq!(
+                wire["config"]["mergeProvenance"]["verdicts"]["site"]["nameFiltered"],
+                if expected { Value::Bool(true) } else { Value::Null }
+            );
+            assert!(
+                !document.config.as_ref().unwrap().name_filtered,
+                "merged reports carry per-origin, not global, filter protection"
+            );
+        }
+    }
+
+    #[test]
+    fn oct29_legacy_empty_sighting_lineage_inherits_the_source_generation_in_the_published_protocol() {
+        let mut staged = staged_protection(false, true, 100);
+        staged
+            .config
+            .as_mut()
+            .unwrap()
+            .merge_provenance
+            .as_mut()
+            .unwrap()
+            .sightings
+            .get_mut("site")
+            .unwrap()
+            .lineage
+            .clear();
+        let document = merge(&[("legacy-stage".into(), staged)], 400, None).report.unwrap();
+        let provenance = document.config.as_ref().unwrap().merge_provenance.as_ref().unwrap();
+        assert_eq!(provenance.sightings["site"].lineage, "a".repeat(64));
+        assert!(provenance.sightings["site"].name_filtered);
+        let wire = crate::elements::to_json(&document).unwrap();
+        let decoded: Report = from_str(&wire).unwrap();
+        let restaged = merge(&[("stage".into(), decoded)], 400, None).report.unwrap();
+        let provenance = restaged.config.as_ref().unwrap().merge_provenance.as_ref().unwrap();
+        assert_eq!(provenance.sightings["site"].lineage, "a".repeat(64));
+    }
+
+    #[test]
+    fn oct29_two_filtered_sources_still_choose_the_newest_source_in_either_order() {
+        let mut older = report_with_source(None, 100, "older source\n", vec![mutant("site", 1, "Killed")]);
+        let mut newer = report_with_source(None, 200, "newer source\n", vec![mutant("site", 1, "Killed")]);
+        older.config.as_mut().unwrap().name_filtered = true;
+        newer.config.as_mut().unwrap().name_filtered = true;
+        for reports in [
+            [("older".into(), older.clone()), ("newer".into(), newer.clone())],
+            [("newer".into(), newer.clone()), ("older".into(), older.clone())],
+        ] {
+            let merged = merge(&reports, 300, None);
+            assert_eq!(merged.unpresentable_filtered, 0);
+            let document = merged.report.unwrap();
+            assert_eq!(document.files["src/lib.rs"].source, "newer source\n");
+            let config = document.config.unwrap();
+            assert!(!config.name_filtered);
+            assert!(config.merge_provenance.unwrap().sources["src/lib.rs"].name_filtered);
+        }
+    }
+
     fn assert_schema_valid(report: &Report) {
         let report = to_value(report).expect("concrete report fixtures serialize");
         crate::elements::validate_schema(&report).expect("these report fixtures are accepted by the actual input schema");

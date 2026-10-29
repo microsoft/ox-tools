@@ -378,8 +378,7 @@ impl Plan {
     ///
     /// When `previous_manifest` is provided, `Write` items are split
     /// into "Will create" (no prior manifest entry) and "Will update"
-    /// (existing entry getting refreshed) per
-    /// [`updates.md §9`](../../docs/design/updates.md). The stale-entries
+    /// (existing entry getting refreshed). The stale-entries
     /// section enumerates manifest entries that were present before
     /// this run but are no longer in the plan; these are purged on
     /// non-dry-run application (see [`Plan::apply`]).
@@ -736,6 +735,7 @@ mod tests {
             PlanItem::noop(target(), Decision::LeaveAlone),
             PlanItem::insync(target(), "checksum".to_owned()),
             PlanItem::write_file("owned.json", "{}".to_owned(), "checksum".to_owned()),
+            PlanItem::patch_file("repository.json", "{}".to_owned()),
             PlanItem::propose_file("owned.json", "{}".to_owned(), "checksum".to_owned()),
             PlanItem::write_region(
                 "settings.json",
@@ -994,7 +994,10 @@ mod tests {
         let mut plan = Plan::default();
         plan.push(PlanItem::patch_file(".github/dependabot.yml", "patched".to_owned()));
         assert_eq!(plan.dry_run_exit_code(), 1);
-        assert!(plan.summary(None).contains("Will update: 1 item(s)\n  - .github/dependabot.yml"));
+        assert_eq!(
+            plan.summary(None),
+            "cargo-anvil plan: 1 item(s)\nWill update: 1 item(s)\n  - .github/dependabot.yml\n"
+        );
         assert_eq!(plan.projected_manifest(&Manifest::default()), Manifest::default());
 
         let root = Path::new("memory");
@@ -1018,12 +1021,28 @@ mod tests {
     }
 
     #[test]
+    fn survivor_repository_patches_and_untracked_region_repairs_have_distinct_summaries() {
+        let mut plan = Plan::default();
+        plan.push(PlanItem::patch_file(".github/dependabot.yml", "patched".to_owned()));
+        plan.push(PlanItem::repair_region("config.toml", "settings", "repaired".to_owned()));
+        assert_eq!(
+            plan.summary(None),
+            concat!(
+                "cargo-anvil plan: 2 item(s)\n",
+                "Will create: 1 item(s)\n  - config.toml [settings]\n",
+                "Will update: 1 item(s)\n  - .github/dependabot.yml\n",
+            )
+        );
+    }
+
+    #[test]
     fn plan_item_constructors_set_only_their_documented_payloads() {
         let cases = [
             PlanItem::repair_region("host", "id", "spliced".to_owned()),
             PlanItem::noop(Target::File { path: "noop".to_owned() }, Decision::LeaveAlone),
             PlanItem::insync(Target::File { path: "sync".to_owned() }, "sync-sum".to_owned()),
             PlanItem::write_file("write", "body".to_owned(), "body-sum".to_owned()),
+            PlanItem::patch_file("repository", "patch".to_owned()),
             PlanItem::propose_file("propose", "proposal".to_owned(), "proposal-sum".to_owned()),
             PlanItem::write_region(
                 "host",
@@ -1054,6 +1073,7 @@ mod tests {
                 (Decision::LeaveAlone, None, None, None),
                 (Decision::InSync, None, None, Some("sync-sum")),
                 (Decision::Write, Some("body"), None, Some("body-sum")),
+                (Decision::Write, Some("patch"), None, None),
                 (Decision::Propose, Some("proposal"), None, Some("proposal-sum")),
                 (Decision::Write, Some("region-body"), Some("region-splice"), Some("region-sum")),
                 (Decision::Remove, None, None, None),
@@ -1702,5 +1722,33 @@ mod tests {
         .expect_err("temporary write errors return instead of panicking");
         assert!(error.to_string().contains("injected temporary write failure"), "{error}");
         assert_eq!(fs::read_to_string(&destination).expect("destination remains readable"), "original");
+    }
+    #[test]
+    fn regression_structural_provenance_and_tracking_are_projected_without_io() {
+        let target = Target::Region {
+            host: "config.json".to_owned(),
+            id: "entries".to_owned(),
+        };
+        let item = PlanItem::insync(target.clone(), "checksum".to_owned()).with_json_array_path(vec!["items".to_owned()]);
+        assert!(item.json_scanner);
+        assert_eq!(item.json_array_path, Some(vec!["items".to_owned()]));
+        let mut previous = Manifest::default();
+        previous.json_scanner_hosts.insert("previous.json".to_owned());
+        let mut plan = Plan::default();
+        plan.push(item);
+        assert_eq!(
+            plan.projected_manifest(&previous).json_scanner_hosts,
+            BTreeSet::from(["config.json".to_owned(), "previous.json".to_owned()])
+        );
+        assert!(!plan.region_tracking_removed("config.json", "entries"));
+        plan.push(PlanItem::orphaned_kept(target));
+        assert!(plan.region_tracking_removed("config.json", "entries"));
+        assert!(!plan.region_tracking_removed("other.json", "entries"));
+        assert!(!plan.region_tracking_removed("config.json", "other"));
+        plan.set_json_scanner_hosts(BTreeSet::new());
+        assert_eq!(
+            plan.projected_manifest(&previous).json_scanner_hosts,
+            BTreeSet::from(["config.json".to_owned()])
+        );
     }
 }

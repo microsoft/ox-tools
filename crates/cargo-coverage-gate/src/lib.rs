@@ -377,7 +377,6 @@ pub use error::CoverageGateError;
 /// discovery failures are also returned when provenance is needed.
 #[cfg_attr(coverage_nightly, coverage(off))]
 // This adapter only selects the real metadata loader; the injected implementation below is mutation-covered.
-#[mutants::skip]
 pub fn filter_lcov(lcov_text: &str, manifest_path: Option<&Path>) -> Result<String, CoverageGateError> {
     filter_lcov_with_metadata_loader(lcov_text, manifest_path, workspace::load_metadata)
 }

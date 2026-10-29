@@ -89,7 +89,6 @@ indicatif = { workspace = true }
 layered = { workspace = true }
 log = { workspace = true }
 mmap-rs = { workspace = true }
-mutants = { workspace = true }
 ohno = { workspace = true, features = ["app-err"] }
 owo-colors = { workspace = true }
 pastey = { workspace = true }
