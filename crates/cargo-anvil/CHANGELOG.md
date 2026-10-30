@@ -18,6 +18,7 @@
 
 - 🐛 Bug Fixes
 
+  - cargo-anvil: allow rich recipe help
   - cargo-anvil: collapse unreleased version bumps
   - cargo-anvil: retain consolidated impact action path
   - cargo-anvil: require cargo-each 0.7.0
