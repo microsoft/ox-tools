@@ -2,6 +2,33 @@
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-10-29
+
+- ✨ Features
+
+  - cargo-anvil: exclude generated actions from downstream Dependabot updates
+
+- 🐛 Bug Fixes
+
+  - cargo-anvil: retain protected Dependabot configs in ambiguity checks
+  - cargo-anvil: bound repeated Dependabot merge lookups
+  - cargo-anvil: honor inherited Dependabot exclusions
+  - cargo-anvil: preserve YAML job boundaries and refusal ownership
+  - cargo-anvil: preserve complete aliased Dependabot exclusions
+  - cargo-anvil: preserve Dependabot configuration edge cases
+  - cargo-anvil: install APRZ 1.2.1 from crates.io ([#313](https://github.com/microsoft/ox-tools/pull/313))
+
+- ✔️ Tasks
+
+  - cargo-anvil: keep the pending feature release at 0.21.0
+  - cargo-anvil: prepare 0.21.1 review fixes release
+  - cargo-anvil: prepare 0.21.0 Dependabot integration
+  - cargo-anvil: pin cargo-delta 0.5.0 ([#311](https://github.com/microsoft/ox-tools/pull/311))
+
+- 🧩 Miscellaneous
+
+  - Kill a bunch of mutants ([#315](https://github.com/microsoft/ox-tools/pull/315))
+
 ## [0.20.3] - 2026-10-29
 
 - ✔️ Tasks

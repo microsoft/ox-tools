@@ -23,6 +23,11 @@ A changed `catalog_checksum` with an unchanged `tool_version` in
 may be missing. Keep the crate version, `Cargo.lock`, and generated lock
 metadata synchronized; do not hand-edit `.anvil.lock` to fix this.
 
+Dependabot intentionally continues updating generated GitHub Actions in this
+source repository. Apply those pin changes to cargo-anvil's source templates,
+then bump the crate version and regenerate the workflows and lock metadata;
+do not merge a generated-file-only update.
+
 ## Design Docs Are Part of the Source
 
 Each crate's design is captured under `crates/<crate>/docs/`, kept in

@@ -2308,7 +2308,10 @@ fn install_tool_controls_source_fallback_and_prerequisite_ordering() {
     if !tools_available() {
         return;
     }
-    let tmp = fixture(&[("versions.just", VERSIONS), ("tools.just", TOOLS)], &[]);
+    let tmp = fixture(
+        &[("versions.just", VERSIONS), ("tools.just", TOOLS)],
+        &["anvil-toolchain-stable-install"],
+    );
     let justfile_path = tmp.path().join("Justfile");
     let mut justfile = fs::read_to_string(&justfile_path).unwrap();
     justfile.push_str(

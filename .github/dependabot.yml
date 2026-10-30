@@ -1,3 +1,6 @@
+# Keep generated-action update PRs here so maintainers update Anvil's templates
+# and regenerate the deployed workflows and catalog metadata together.
+# anvil: keep-generated-action-updates
 version: 2
 updates:
 - package-ecosystem: "cargo"
