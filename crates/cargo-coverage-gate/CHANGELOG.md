@@ -4,6 +4,10 @@
 
 ## [0.7.3] - 2026-10-29
 
+- 🐛 Bug Fixes
+
+  - cargo-coverage-gate: retry Windows sharing violations during cleanup
+
 - 🧩 Miscellaneous
 
   - Kill a bunch of mutants ([#315](https://github.com/microsoft/ox-tools/pull/315))
