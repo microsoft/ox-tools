@@ -81,8 +81,15 @@ fn try_run(cmd: &mut Command) -> Option<Output> {
 fn taplo_validates_emitted_toml_files() {
     let tmp = run_with_backend("github");
     let mut cmd = Command::new("taplo");
-    cmd.args(["check", "Cargo.toml", "deny.toml", "rustfmt.toml", ".delta.toml", ".anvil.lock"])
-        .current_dir(tmp.path());
+    cmd.args([
+        "check",
+        "Cargo.toml",
+        "deny.toml",
+        "rustfmt.toml",
+        ".delta.toml",
+        ".anvil/manifest.toml",
+    ])
+    .current_dir(tmp.path());
 
     let Some(out) = try_run(&mut cmd) else {
         eprintln!("skipping: taplo not installed");
@@ -132,20 +139,35 @@ fn just_lists_emitted_recipes() {
     for (recipe, summary) in [
         (
             "anvil-full",
-            "# Full tier: PR + scheduled, end-to-end. Useful before tagging a release.",
+            "# Run both pull-request and scheduled tiers across the full workspace.",
         ),
-        ("anvil-pr", "# Run all pull request checks."),
-        ("anvil-pr-fast", "# Run the fast pull request checks."),
-        ("anvil-pr-msrv", "# Run pull request compatibility tests under the declared MSRV."),
-        ("anvil-pr-mutants", "# Run the pull request mutation tests."),
-        ("anvil-pr-runtime-analysis", "# Run the pull request runtime analysis."),
-        ("anvil-pr-slow", "# Run the slow pull request checks."),
-        ("anvil-pr-test", "# Run the pull request tests."),
-        ("anvil-scheduled", "# Run all scheduled checks."),
-        ("anvil-scheduled-advisories", "# Run the scheduled advisory checks."),
-        ("anvil-scheduled-exhaustive", "# Run the scheduled exhaustive checks."),
-        ("anvil-scheduled-runtime-analysis", "# Run the scheduled runtime analysis."),
-        ("anvil-scheduled-test", "# Run the scheduled tests."),
+        ("anvil-pr", "# Run every pull-request check group."),
+        ("anvil-pr-fast", "# Run pull-request static analysis and repository policy checks."),
+        ("anvil-pr-msrv", "# Run pull-request compatibility tests under the declared MSRV."),
+        ("anvil-pr-mutants", "# Run pull-request mutation testing for changed code."),
+        (
+            "anvil-pr-runtime-analysis",
+            "# Run pull-request Miri, Careful, Loom, and Bolero checks.",
+        ),
+        ("anvil-pr-slow", "# Run all slow pull-request groups sequentially."),
+        ("anvil-pr-test", "# Run pull-request tests, coverage, doctests, and examples."),
+        ("anvil-scheduled", "# Run every scheduled check group across the full workspace."),
+        (
+            "anvil-scheduled-advisories",
+            "# Recheck external advisories, dependency risk, and evolving lints.",
+        ),
+        (
+            "anvil-scheduled-exhaustive",
+            "# Run full mutation, feature-combination, and benchmark checks.",
+        ),
+        (
+            "anvil-scheduled-runtime-analysis",
+            "# Run full-workspace Miri profiles on the schedule.",
+        ),
+        (
+            "anvil-scheduled-test",
+            "# Run full-workspace tests, coverage, doctests, and examples.",
+        ),
     ] {
         let found = listing.lines().any(|line| {
             let line = line.trim();
@@ -186,10 +208,10 @@ fn emitted_powershell_scripts_disable_profiles() {
 #[test]
 fn ado_yaml_emitted_files_have_consistent_indent() {
     let tmp = run_with_backend("ado");
-    let root = tmp.path().join(".pipelines");
     let mut count = 0_usize;
-    for entry in walkdir::WalkDir::new(&root)
+    for entry in [tmp.path().join(".pipelines"), tmp.path().join(".anvil/ado")]
         .into_iter()
+        .flat_map(walkdir::WalkDir::new)
         .filter_map(Result::ok)
         .filter(|e| e.file_type().is_file() && e.path().extension().is_some_and(|s| s == "yml"))
     {
@@ -209,5 +231,5 @@ fn ado_yaml_emitted_files_have_consistent_indent() {
             );
         }
     }
-    assert!(count >= 11, "expected at least 11 emitted .pipelines yml files, got {count}");
+    assert!(count >= 11, "expected at least 11 emitted ADO yml files, got {count}");
 }

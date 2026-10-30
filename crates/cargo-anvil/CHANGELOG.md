@@ -2,6 +2,46 @@
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-10-30
+
+- ⚠️ Breaking
+
+  - cargo-anvil: narrow public setup recipes
+  - cargo-anvil: remove SemVer advisory check
+
+- ✨ Features
+
+  - cargo-anvil: release v0.22.0
+  - cargo-anvil: split generated recipe roles
+  - cargo-anvil: release v0.20.0
+  - cargo-anvil: consolidate generated infrastructure
+
+- 🐛 Bug Fixes
+
+  - cargo-anvil: allow rich recipe help
+  - cargo-anvil: collapse unreleased version bumps
+  - cargo-anvil: retain consolidated impact action path
+  - cargo-anvil: require cargo-each 0.7.0
+  - cargo-anvil: reconcile consolidation with current main
+
+- 📚 Documentation
+
+  - cargo-anvil: simplify generated recipe help
+
+- ♻️ Code Refactoring
+
+  - cargo-anvil: mark hidden recipes private
+  - cargo-anvil: unify example target selection
+  - cargo-anvil: make README checks shell-free
+  - cargo-anvil: make mutants diff shell-free
+  - cargo-anvil: make Miri recipes shell-free
+  - cargo-anvil: remove portable recipe PowerShell
+
+- 🧩 Miscellaneous
+
+  - Merge current main into cargo-anvil consolidation
+  - Merge current main into cargo-anvil consolidation
+
 ## [0.21.0] - 2026-10-29
 
 - ✨ Features
