@@ -82,6 +82,14 @@ when an update is pending, generated state is inconsistent, or content
 cannot be inspected safely. `cargo anvil --force` permits an intentional
 switch from another tool built on the cargo-anvil engine.
 
+With the GitHub backend, Anvil also adds its generated workflow and action
+files to existing GitHub Actions Dependabot jobs’ `exclude-paths`. It preserves
+repository settings and updates for repository-owned workflows; it does not
+enable Dependabot or suppress security updates. Catalog source repositories
+can retain generated-action update PRs by putting the exact comment
+`# anvil: keep-generated-action-updates` in the configuration’s leading
+comment block. Existing exclusions are never removed.
+
 ### Running checks
 
 The generated command interface uses
@@ -432,7 +440,7 @@ More detailed design and operational guidance is available in the
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQb4OaNZdi9hCUbRBMVNHzGQEUbb7hLD8BRt2AbQg9j4XpdifxhZIGDa2NhcmdvLWFudmlsZjAuMjEuMGtjYXJnb19hbnZpbA
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbaeqF744bugAbakNngn9jafYbAAPHqXnyDPkbDtWgZxDFNsdhZIGDa2NhcmdvLWFudmlsZjAuMjMuMGtjYXJnb19hbnZpbA
  [__link0]: https://github.com/casey/just
  [__link1]: https://rust-lang.github.io/rustfmt/
  [__link10]: https://www.conventionalcommits.org/
@@ -451,9 +459,9 @@ This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Br
  [__link22]: https://mutants.rs/
  [__link23]: https://crates.io/crates/cargo-hack
  [__link24]: https://crates.io/crates/cargo-coverage-gate
- [__link25]: https://docs.rs/cargo-anvil/0.21.0/cargo_anvil/?search=Catalog::anvil
- [__link26]: https://docs.rs/cargo-anvil/0.21.0/cargo_anvil/?search=Artifact
- [__link27]: https://docs.rs/cargo-anvil/0.21.0/cargo_anvil/fn.run_app.html
+ [__link25]: https://docs.rs/cargo-anvil/0.23.0/cargo_anvil/?search=Catalog::anvil
+ [__link26]: https://docs.rs/cargo-anvil/0.23.0/cargo_anvil/?search=Artifact
+ [__link27]: https://docs.rs/cargo-anvil/0.23.0/cargo_anvil/fn.run_app.html
  [__link3]: https://crates.io/crates/cargo-each
  [__link4]: https://crates.io/crates/cargo-sort
  [__link5]: https://crates.io/crates/cargo-heather

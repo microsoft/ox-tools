@@ -44,7 +44,6 @@ anvil-scheduled-advisories
 anvil-scheduled-exhaustive
 anvil-scheduled-runtime-analysis
 anvil-scheduled-test
-anvil-semver-check
 anvil-spellcheck
 anvil-udeps
 [group("anvil-container")]

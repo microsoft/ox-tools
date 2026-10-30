@@ -18,7 +18,6 @@ anvil-pr-fast-setup installer="install": \
     (anvil-deny-setup installer) \
     (anvil-audit-setup installer) \
     (anvil-udeps-setup installer) \
-    (anvil-semver-check-setup installer) \
     (anvil-external-types-setup installer)
 
 anvil-pr-setup installer="install": \
@@ -49,7 +48,6 @@ anvil-pr-fast-validate-prereqs: \
     anvil-deny-validate-prereqs \
     anvil-audit-validate-prereqs \
     anvil-udeps-validate-prereqs \
-    anvil-semver-check-validate-prereqs \
     anvil-external-types-validate-prereqs
 
 anvil-pr-validate-prereqs: \
