@@ -292,18 +292,18 @@ code.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-coverage-gate">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbuIyZo8ENkC8bzboPAifIWxUbtr3JUIdeu0UbZGsunJ_TXsBhZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC43LjJzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbuIyZo8ENkC8bzboPAifIWxUbtr3JUIdeu0UbZGsunJ_TXsBhZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC43LjNzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
  [__link0]: https://github.com/taiki-e/cargo-llvm-cov
- [__link1]: https://docs.rs/cargo-coverage-gate/0.7.2/cargo_coverage_gate/fn.evaluate.html
- [__link10]: https://docs.rs/cargo-coverage-gate/0.7.2/cargo_coverage_gate/?search=EvaluatedReport::render_text
- [__link11]: https://docs.rs/cargo-coverage-gate/0.7.2/cargo_coverage_gate/?search=EvaluatedReport::render_markdown
- [__link12]: https://docs.rs/cargo-coverage-gate/0.7.2/cargo_coverage_gate/enum.Verdict.html
- [__link13]: https://docs.rs/cargo-coverage-gate/0.7.2/cargo_coverage_gate/?search=EvaluatedReport::verdict
- [__link2]: https://docs.rs/cargo-coverage-gate/0.7.2/cargo_coverage_gate/fn.evaluate_many.html
- [__link3]: https://docs.rs/cargo-coverage-gate/0.7.2/cargo_coverage_gate/fn.evaluate_many_for_target.html
- [__link4]: https://docs.rs/cargo-coverage-gate/0.7.2/cargo_coverage_gate/fn.filter_lcov.html
- [__link5]: https://docs.rs/cargo-coverage-gate/0.7.2/cargo_coverage_gate/fn.filter_lcov_many.html
- [__link6]: https://docs.rs/cargo-coverage-gate/0.7.2/cargo_coverage_gate/fn.evaluate.html
- [__link7]: https://docs.rs/cargo-coverage-gate/0.7.2/cargo_coverage_gate/fn.evaluate_many.html
- [__link8]: https://docs.rs/cargo-coverage-gate/0.7.2/cargo_coverage_gate/fn.evaluate_many_for_target.html
- [__link9]: https://docs.rs/cargo-coverage-gate/0.7.2/cargo_coverage_gate/struct.EvaluatedReport.html
+ [__link1]: https://docs.rs/cargo-coverage-gate/0.7.3/cargo_coverage_gate/fn.evaluate.html
+ [__link10]: https://docs.rs/cargo-coverage-gate/0.7.3/cargo_coverage_gate/?search=EvaluatedReport::render_text
+ [__link11]: https://docs.rs/cargo-coverage-gate/0.7.3/cargo_coverage_gate/?search=EvaluatedReport::render_markdown
+ [__link12]: https://docs.rs/cargo-coverage-gate/0.7.3/cargo_coverage_gate/enum.Verdict.html
+ [__link13]: https://docs.rs/cargo-coverage-gate/0.7.3/cargo_coverage_gate/?search=EvaluatedReport::verdict
+ [__link2]: https://docs.rs/cargo-coverage-gate/0.7.3/cargo_coverage_gate/fn.evaluate_many.html
+ [__link3]: https://docs.rs/cargo-coverage-gate/0.7.3/cargo_coverage_gate/fn.evaluate_many_for_target.html
+ [__link4]: https://docs.rs/cargo-coverage-gate/0.7.3/cargo_coverage_gate/fn.filter_lcov.html
+ [__link5]: https://docs.rs/cargo-coverage-gate/0.7.3/cargo_coverage_gate/fn.filter_lcov_many.html
+ [__link6]: https://docs.rs/cargo-coverage-gate/0.7.3/cargo_coverage_gate/fn.evaluate.html
+ [__link7]: https://docs.rs/cargo-coverage-gate/0.7.3/cargo_coverage_gate/fn.evaluate_many.html
+ [__link8]: https://docs.rs/cargo-coverage-gate/0.7.3/cargo_coverage_gate/fn.evaluate_many_for_target.html
+ [__link9]: https://docs.rs/cargo-coverage-gate/0.7.3/cargo_coverage_gate/struct.EvaluatedReport.html
