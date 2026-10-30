@@ -502,6 +502,14 @@ of replacing the verdict. A passing evaluation cannot claim complete success
 when cleanup fails, so that case exits `2`. Successful cleanup never changes
 the evaluation outcome.
 
+On Windows, explicit scratch cleanup retries only sharing violations (OS error
+32): at most five removal attempts, with delays of 200, 400, 800, and 1600 ms.
+Each retry reports the scratch path, original error, and delay. Missing scratch
+is already clean; other errors fail immediately. An exhausted sharing violation
+remains an operational error with the scratch path and guidance to release
+outstanding handles before retrying cleanup. No process is terminated and no
+lock owner is inferred.
+
 cargo-llvm-cov normally launches LLVM with its discovered object set and full
 filename filter. If that launch exceeds the Windows command-line limit,
 `run` retries through an LLVM response file. The `cargo llvm-cov report` child

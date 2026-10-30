@@ -1208,8 +1208,12 @@ impl TemporaryDirectory {
         &self.path
     }
 
-    fn cleanup(self) -> Result<(), AppError> {
-        remove_dir_if_present(&self.path).into_app_err(format!("failed to remove isolated coverage target `{}`", self.path.display()))
+    fn cleanup(mut self) -> Result<(), AppError> {
+        self.armed = false;
+        remove_dir_if_present(&self.path).into_app_err(format!(
+            "failed to remove isolated coverage target `{}`; release any process handles to this directory and retry cleanup",
+            self.path.display()
+        ))
     }
 }
 
@@ -1222,10 +1226,38 @@ impl Drop for TemporaryDirectory {
 }
 
 fn remove_dir_if_present(path: &Path) -> io::Result<()> {
-    match fs::remove_dir_all(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error),
+    remove_dir_if_present_with(
+        path,
+        |path| fs::remove_dir_all(path),
+        |delay, error| {
+            eprintln!(
+                "warning: sharing violation while removing coverage target `{}`: {error}; retrying in {} ms",
+                path.display(),
+                delay.as_millis()
+            );
+            std::thread::sleep(delay);
+        },
+    )
+}
+
+fn remove_dir_if_present_with(
+    path: &Path,
+    mut remove: impl FnMut(&Path) -> io::Result<()>,
+    mut wait: impl FnMut(std::time::Duration, &io::Error),
+) -> io::Result<()> {
+    // Five attempts allow transient Windows handles to close without hiding persistent locks.
+    const MAX_RETRIES: u32 = 4;
+    let mut retry = 0;
+    loop {
+        match remove(path) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) if cfg!(windows) && error.raw_os_error() == Some(32) && retry < MAX_RETRIES => {
+                wait(std::time::Duration::from_millis(200 << retry), &error);
+                retry += 1;
+            }
+            Err(error) => return Err(error),
+        }
     }
 }
 
@@ -3471,6 +3503,95 @@ mod tests {
         fs::write(&file, b"not a directory").expect("write file");
         let invalid = TemporaryDirectory { path: file, armed: true };
         invalid.cleanup().expect_err("a file cannot be removed as a target directory");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn cleanup_retries_sharing_violations_then_succeeds() {
+        let mut attempts = 0;
+        let mut delays = Vec::new();
+        let result = remove_dir_if_present_with(
+            Path::new("coverage-target"),
+            |_| {
+                attempts += 1;
+                if attempts < 3 {
+                    Err(io::Error::from_raw_os_error(32))
+                } else {
+                    Ok(())
+                }
+            },
+            |delay, error| {
+                assert_eq!(error.raw_os_error(), Some(32));
+                delays.push(delay.as_millis());
+            },
+        );
+        assert_eq!((result.is_ok(), attempts, delays), (true, 3, vec![200, 400]));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn cleanup_stops_after_bounded_sharing_violation_retries() {
+        let mut attempts = 0;
+        let mut delays = Vec::new();
+        let error = remove_dir_if_present_with(
+            Path::new("coverage-target"),
+            |_| {
+                attempts += 1;
+                Err(io::Error::from_raw_os_error(32))
+            },
+            |delay, _| delays.push(delay.as_millis()),
+        )
+        .expect_err("persistent locks remain errors");
+        assert_eq!((error.raw_os_error(), attempts, delays), (Some(32), 5, vec![200, 400, 800, 1600]));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn cleanup_preserves_a_different_error_after_a_sharing_violation() {
+        let mut errors = [32, 5].into_iter();
+        let mut retries = 0;
+        let error = remove_dir_if_present_with(
+            Path::new("coverage-target"),
+            |_| Err(io::Error::from_raw_os_error(errors.next().expect("only two attempts are allowed"))),
+            |_, _| retries += 1,
+        )
+        .expect_err("the later access-denied error must not be hidden");
+        assert_eq!((error.raw_os_error(), retries), (Some(5), 1));
+    }
+
+    #[test]
+    fn cleanup_does_not_retry_other_errors() {
+        for code in [5, 13, 33, 206] {
+            let error = remove_dir_if_present_with(
+                Path::new("coverage-target"),
+                |_| Err(io::Error::from_raw_os_error(code)),
+                |_, _| panic!("only Windows sharing violations may be retried"),
+            )
+            .expect_err("other errors fail immediately");
+            assert_eq!(error.raw_os_error(), Some(code));
+        }
+    }
+
+    #[test]
+    fn cleanup_accepts_a_missing_directory_without_retrying() {
+        let result = remove_dir_if_present_with(
+            Path::new("coverage-target"),
+            |_| Err(io::Error::from(io::ErrorKind::NotFound)),
+            |_, _| panic!("a missing directory is already clean"),
+        );
+        result.expect("a missing directory is already clean");
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn cleanup_does_not_treat_unix_error_32_as_a_sharing_violation() {
+        let error = remove_dir_if_present_with(
+            Path::new("coverage-target"),
+            |_| Err(io::Error::from_raw_os_error(32)),
+            |_, _| panic!("Unix error 32 is not a Windows sharing violation"),
+        )
+        .expect_err("unrelated Unix errors fail immediately");
+        assert_eq!(error.raw_os_error(), Some(32));
     }
 
     #[test]
