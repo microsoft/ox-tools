@@ -4,6 +4,10 @@
 
 ## [0.23.0] - 2026-10-30
 
+- ✨ Features
+
+  - cargo-anvil: pin coverage-gate 0.7.3
+
 - 🐛 Bug Fixes
 
   - cargo-anvil: isolate mutation diffs and normalize Git prefixes ([#323](https://github.com/microsoft/ox-tools/pull/323))
