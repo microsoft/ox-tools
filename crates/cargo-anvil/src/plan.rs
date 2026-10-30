@@ -73,10 +73,10 @@ pub struct PlanItem {
     /// The full host-file body after a region write or removal.
     /// `None` for owned files; only owned files can produce proposals.
     pub spliced_host: Option<String>,
-    /// Checksum of [`Self::rendered`], populated when `rendered` is
-    /// `Some`. The manifest records it for `Write`, `Propose` and `InSync`
-    /// whenever it is present, so a decision that leaves it `None` leaves
-    /// the previously recorded checksum untouched.
+    /// Checksum of catalog-owned content. Repository-file patches and
+    /// marker-only repairs do not record a checksum. The manifest records
+    /// it for `Write`, `Propose` and `InSync` whenever it is present, so a
+    /// decision that leaves it `None` leaves the previous checksum untouched.
     pub rendered_checksum: Option<String>,
     /// Structural JSON array selector whose provenance must be retained in
     /// the manifest. `None` for every other plan item.
@@ -149,6 +149,20 @@ impl PlanItem {
             rendered: Some(rendered),
             spliced_host: None,
             rendered_checksum: Some(checksum),
+            json_array_path: None,
+            json_scanner: false,
+        }
+    }
+
+    /// Patch an existing repository-owned file without recording whole-file ownership.
+    #[must_use]
+    pub(crate) fn patch_file(path: impl Into<String>, rendered: String) -> Self {
+        Self {
+            target: Target::File { path: path.into() },
+            decision: Decision::Write,
+            rendered: Some(rendered),
+            spliced_host: None,
+            rendered_checksum: None,
             json_array_path: None,
             json_scanner: false,
         }
@@ -382,13 +396,14 @@ impl Plan {
         for item in &self.items {
             match item.decision {
                 Decision::Write => {
-                    let existed = previous_manifest.is_some_and(|m| match &item.target {
-                        Target::File { path } => m.files.contains_key(path),
-                        Target::Region { host, id } => m.regions.contains_key(&RegionKey {
-                            host: host.clone(),
-                            id: id.clone(),
-                        }),
-                    });
+                    let existed = matches!(&item.target, Target::File { .. }) && item.rendered_checksum.is_none()
+                        || previous_manifest.is_some_and(|m| match &item.target {
+                            Target::File { path } => m.files.contains_key(path),
+                            Target::Region { host, id } => m.regions.contains_key(&RegionKey {
+                                host: host.clone(),
+                                id: id.clone(),
+                            }),
+                        });
                     if existed {
                         updates.push(item);
                     } else {
@@ -468,7 +483,7 @@ impl Plan {
         Ok(self.projected_manifest(previous_manifest))
     }
 
-    /// Apply only the owned-file and managed-region changes.
+    /// Apply owned-file changes, managed-region changes, and repository-file patches.
     ///
     /// Manifest projection is deliberately separate so dry-run and real
     /// application calculate the same next `.anvil.lock`.
@@ -972,6 +987,34 @@ mod tests {
         assert!(!plan.has_changes());
         assert_eq!(plan.dry_run_exit_code(), 0);
         assert_eq!(plan.summary(None), "cargo-anvil plan: 0 item(s)\n");
+    }
+
+    #[test]
+    fn repository_file_patches_apply_without_claiming_ownership() {
+        let mut plan = Plan::default();
+        plan.push(PlanItem::patch_file(".github/dependabot.yml", "patched".to_owned()));
+        assert_eq!(plan.dry_run_exit_code(), 1);
+        assert!(plan.summary(None).contains("Will update: 1 item(s)\n  - .github/dependabot.yml"));
+        assert_eq!(plan.projected_manifest(&Manifest::default()), Manifest::default());
+
+        let root = Path::new("memory");
+        let mut written = false;
+        plan.apply_files_with(
+            root,
+            (
+                |_, path| Ok(path.to_owned()),
+                |root, path| Ok(root.join(path)),
+                |path, text| {
+                    assert_eq!(path, root.join(".github/dependabot.yml"));
+                    assert_eq!(text, "patched");
+                    written = true;
+                    Ok(())
+                },
+                |_| panic!("patching a repository file must never delete anything"),
+            ),
+        )
+        .unwrap();
+        assert!(written);
     }
 
     #[test]

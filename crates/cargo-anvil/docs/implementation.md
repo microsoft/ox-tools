@@ -3,6 +3,42 @@
 This guide describes internal implementation constraints that keep the emitted behavior aligned
 with the user-visible contract in [design](./design/README.md).
 
+## Dependabot configuration editing
+
+The [Dependabot ownership contract](./design/github.md#dependabot-ownership) uses
+source-preserving edits rather than YAML reserialization: the configuration
+belongs to the repository, including comments and formatting. `saphyr-parser`
+events supply a small tree for selecting jobs and locating insertion boundaries.
+The tree retains mapping key/value order, collection sharing, and alias identities;
+it is not a second general-purpose YAML object model.
+
+Parser character positions are converted to byte offsets in the original UTF-8
+text, including its optional byte-order mark. Insertions run from the final
+offset backwards so earlier positions stay valid, and the complete result is
+parsed again before planning a write. Block jobs insert before a complete mapping
+entry, retaining any explicit key indicator and the original sequence marker.
+
+Aliases and inherited defaults are inspected without expanding their graphs.
+The ecosystem and exclusion list share one read-only field lookup: explicit
+values override defaults, merge sequences use their first matching value, and
+active merge spans detect cycles. A per-document cache retains completed lookups
+by resolved node and field, including absent results, so repeated acyclic merge
+targets are evaluated once rather than repeatedly expanding their dependencies.
+Failed lookups are not cached, and their active merge state is unwound. This
+keeps unrelated ecosystems and complete inherited exclusions untouched; it does
+not authorize editing merged or shared containers. Local typed error causes
+distinguish safety refusals from parser failures while the planner retains its
+`AppError` boundary.
+
+The planner records a `patch_file` write with no ownership checksum. Neither the
+whole configuration nor its user exclusions become catalog-owned. Pending
+whole-file removals and refused region hosts block automatic patches, so this
+pass cannot recreate retired files or bypass a preservation refusal. Successful
+region removal still composes with the subsequent patch through the host cache.
+Only whole-file removals are omitted from the duplicate-spelling check. A refused
+region protects its file from editing without making that retained file disappear
+from ambiguity detection.
+
 ## Pull request title validation
 
 The `pr-title.just` template owns both title validation and its failure diagnostic. The ordered

@@ -82,6 +82,14 @@
 //! cannot be inspected safely. `cargo anvil --force` permits an intentional
 //! switch from another tool built on the cargo-anvil engine.
 //!
+//! With the GitHub backend, Anvil also adds its generated workflow and action
+//! files to existing GitHub Actions Dependabot jobs' `exclude-paths`. It preserves
+//! repository settings and updates for repository-owned workflows; it does not
+//! enable Dependabot or suppress security updates. Catalog source repositories
+//! can retain generated-action update PRs by putting the exact comment
+//! `# anvil: keep-generated-action-updates` in the configuration's leading
+//! comment block. Existing exclusions are never removed.
+//!
 //! ## Running checks
 //!
 //! The generated command interface uses
@@ -436,6 +444,7 @@ pub(crate) mod catalog;
 pub(crate) mod checksum;
 pub(crate) mod cli;
 pub(crate) mod decision;
+pub(crate) mod dependabot;
 pub(crate) mod emit;
 pub(crate) mod io;
 pub(crate) mod manifest;

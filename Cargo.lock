@@ -433,7 +433,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-anvil"
-version = "0.20.3"
+version = "0.21.0"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -442,6 +442,7 @@ dependencies = [
  "mutants",
  "ohno",
  "predicates",
+ "saphyr-parser",
  "serde_json",
  "serial_test",
  "sha2",

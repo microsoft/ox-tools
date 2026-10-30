@@ -1079,7 +1079,70 @@ Pin changes belong in the source templates. Regenerate the workflows and `.anvil
 with that updated catalog; editing only generated workflows leaves their recorded
 checksums stale and takes them off the automatic update path.
 
+### Dependabot ownership
+
+When the GitHub backend is selected, `cargo anvil` adds the catalog's generated
+workflow and action-manifest YAML paths to `exclude-paths` in existing
+`github-actions` Dependabot update entries. Paths are exact repository-relative
+file names with glob metacharacters escaped, not action-name ignores or `anvil-*`
+globs: a repository-owned workflow such as `codeql.yml` remains eligible even when
+it uses the same actions. Catalog-owned `action.yml` and `action.yaml` files are
+included at the root and in other directories.
+
+Root, subdirectory, and multi-directory update jobs retain their existing scan
+settings. Exclusions remain repository-relative because the GitHub Actions
+fetcher's [directory listing filter][dependabot-contents-filter] matches the
+repository-relative `path` from each returned entry. This also avoids a shared
+`directories` list applying a bare `action.yml` exclusion to unrelated action
+directories.
+
+Anvil patches `.github/dependabot.yml` or `.github/dependabot.yaml` without taking
+ownership of the file. Existing exclusions, schedules, groups, cooldowns, other
+settings, comments, and unrelated ecosystem entries are preserved. Missing paths
+are added once; existing exclusions are never removed. Block lists, including
+indentless lists, and inline YAML lists retain flat string entries. Anvil does not
+create a Dependabot configuration or enable a missing update job. Rerun
+`cargo anvil` after adding Dependabot configuration. Configurations already
+scheduled for whole-file retirement are not patched or recreated. Malformed or
+ambiguous configuration, including aliases or shared YAML containers that would
+need editing, is left unchanged with an actionable refusal; anchors on untouched
+containers do not cause refusals, and unrelated YAML anchors remain supported.
+Refused managed-region retirement also blocks automatic patches to that file;
+successful region removal still permits patching the remaining repository content.
+Protected configurations still count when checking for both filename spellings.
+Only configurations scheduled for whole-file removal are excluded from that check;
+if both spellings otherwise exist, neither is patched.
+Explicit YAML keys retain their complete mapping-entry boundaries. Inherited
+ecosystem defaults are used for read-only job classification with explicit values
+taking precedence, so merged defaults for unrelated ecosystems remain no-ops.
+Existing exclusions use the same read-only lookup: complete inherited lists are
+no-ops, explicit lists override defaults, and merge sequences use the first
+matching list rather than combining lists.
+Aliases are followed by reference for read-only comparisons, without expanding
+their graphs. Repeated merge targets reuse completed field lookups, including
+missing values, while cyclic defaults retain their refusal.
+Already-complete shared exclusion lists remain byte-for-byte no-ops;
+an insertion that would change a shared target is still refused.
+
+The source repository deliberately continues receiving generated-action update
+PRs so maintainers can update the templates/catalog and regenerate the deployed
+pipelines. Its repository-owned Dependabot configuration starts with:
+
+```yaml
+# anvil: keep-generated-action-updates
+```
+
+This exact leading comment opts out of automatic exclusions, without depending on
+the checkout's remote or enabling a second update policy. It does not remove any
+existing exclusions. The same opt-out is available to catalog source forks.
+
+Dependabot's `exclude-paths` applies to **version updates only**, not security
+updates. Security-update PRs can therefore still require reconciliation with the
+source catalog. See the [Dependabot options reference][dependabot-exclude-paths].
+
 [immutable]: https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases
+[dependabot-exclude-paths]: https://docs.github.com/en/code-security/reference/supply-chain-security/dependabot-options-reference#exclude-paths
+[dependabot-contents-filter]: https://github.com/dependabot/dependabot-core/blob/510dd5e861be74ddc533083fe8b9953a66670f2f/common/lib/dependabot/file_fetchers/base.rb
 
 ## 10. Coverage upload
 
