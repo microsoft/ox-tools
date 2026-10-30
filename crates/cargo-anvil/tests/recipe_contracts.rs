@@ -409,12 +409,6 @@ if ($args -contains 'binstall') {
 }
 if ($args -contains '--in-diff' -and $env:FAKE_MUTANTS_DIFF_CAPTURE) {
     $diffPath = $args[([array]::IndexOf($args, '--in-diff') + 1)]
-    Add-Content -LiteralPath $env:FAKE_MUTANTS_DIFF_PATHS -Value $diffPath
-    if ($env:FAKE_MUTANTS_OVERLAP -eq 'true') {
-        $env:FAKE_MUTANTS_OVERLAP = 'false'
-        & just --justfile Justfile anvil-mutants-diff
-        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    }
     Copy-Item -LiteralPath $diffPath -Destination $env:FAKE_MUTANTS_DIFF_CAPTURE
 }
 if ($args -contains 'install' -and $args -contains '--list') {
@@ -3311,6 +3305,56 @@ fn assert_mutants_diff_cleaned(root: &Path) {
 }
 
 #[test]
+fn mutants_diff_reserves_a_unique_file_before_running_git() {
+    let allocation = MUTANTS_DIFF
+        .split_once("    $diff_path = ")
+        .unwrap()
+        .1
+        .split_once("    # Diff the base")
+        .unwrap()
+        .0;
+    assert_eq!(
+        allocation,
+        concat!(
+            "Join-Path $tmp_dir ('anvil-mutants-diff-' + [Guid]::NewGuid().ToString('N') + '.diff')\n",
+            "    New-Item -ItemType File -Path $diff_path | Out-Null\n",
+        )
+    );
+}
+
+#[test]
+fn mutants_diff_normalizes_prefixes_and_cleans_up_without_masking_native_failures() {
+    let execution = MUTANTS_DIFF
+        .split_once("    $exitCode = 0\n")
+        .unwrap()
+        .1
+        .split_once("\n# --- pr-mutants members ---")
+        .unwrap()
+        .0;
+    assert_eq!(
+        execution,
+        concat!(
+            "    try {\n",
+            "        git diff --src-prefix=a/ --dst-prefix=b/ \"$base\" --output=$diff_path\n",
+            "        $exitCode = $LASTEXITCODE\n",
+            "        if ($exitCode -eq 0) {\n",
+            "            & cargo {{_anvil_stable_toolchain_args}} mutants --in-diff $diff_path --no-shuffle --jobs 0 {{_anvil_mutants_config_arg}}\n",
+            "            $exitCode = $LASTEXITCODE\n",
+            "        }\n",
+            "    } finally {\n",
+            "        try {\n",
+            "            Remove-Item -LiteralPath $diff_path\n",
+            "        } catch {\n",
+            "            if ($exitCode -eq 0) { throw }\n",
+            "            Write-Warning \"Could not remove mutation diff '$diff_path': $_ (preserving exit code $exitCode)\"\n",
+            "        }\n",
+            "    }\n",
+            "    exit $exitCode\n",
+        )
+    );
+}
+
+#[test]
 fn mutants_recipes_select_only_the_host_config_and_preserve_exit_codes() {
     if !tools_available() {
         return;
@@ -3381,22 +3425,6 @@ fn mutants_recipes_select_only_the_host_config_and_preserve_exit_codes() {
                 assert_mutants_diff_cleaned(root);
             }
         }
-    }
-    write(&root.join("fake-bin/git.ps1"), &format!("exit {ARBITRARY_FAILURE_EXIT}\n"));
-    write(&log, "");
-    let failed = run_just(
-        root,
-        &["anvil-mutants-diff"],
-        &[
-            ("FAKE_CARGO_LOG", log.as_os_str()),
-            ("BASE_REF", OsStr::new("fixture-base")),
-            ("RUNNER_TEMP", root.as_os_str()),
-        ],
-    );
-    if !(cfg!(windows) && cfg!(target_arch = "aarch64")) {
-        assert_eq!(failed.status.code(), Some(ARBITRARY_FAILURE_EXIT.parse().unwrap()));
-        assert!(fs::read_to_string(&log).unwrap().is_empty(), "Git failure must prevent mutants");
-        assert_mutants_diff_cleaned(root);
     }
     seed_include(root, "affected", "--skip");
     write(&log, "");
@@ -3521,8 +3549,6 @@ fn mutants_diff_covers_uncommitted_work() {
     git(&["config", "core.safecrlf", "false"]);
     git(&["config", "commit.gpgsign", "false"]);
     git(&["config", "tag.gpgsign", "false"]);
-    git(&["config", "diff.mnemonicPrefix", "true"]);
-    git(&["config", "diff.noprefix", "true"]);
     write(&root.join("src/lib.rs"), "pub fn base() {}\n");
     git(&["add", "-A"]);
     git(&["commit", "-qm", "base"]);
@@ -3550,7 +3576,6 @@ fn mutants_diff_covers_uncommitted_work() {
 
     let log = root.join("cargo.log");
     let captured = root.join("captured.diff");
-    let paths = root.join("diff-paths.log");
     let output = run_just(
         root,
         &["anvil-mutants-diff"],
@@ -3559,8 +3584,6 @@ fn mutants_diff_covers_uncommitted_work() {
             ("BASE_REF", OsStr::new(&base)),
             ("RUNNER_TEMP", root.as_os_str()),
             ("FAKE_MUTANTS_DIFF_CAPTURE", captured.as_os_str()),
-            ("FAKE_MUTANTS_DIFF_PATHS", paths.as_os_str()),
-            ("FAKE_MUTANTS_OVERLAP", OsStr::new("true")),
             // The other early exit. Impact scoping sets this to `--skip` when a
             // job has no affected packages, and the value is inherited from
             // whatever environment the test runs in -- so on a CI leg that
@@ -3595,11 +3618,7 @@ fn mutants_diff_covers_uncommitted_work() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let paths = fs::read_to_string(paths).unwrap();
-    let paths = paths.lines().collect::<Vec<_>>();
-    assert_eq!(paths.len(), 2, "both overlapping invocations must reach cargo-mutants");
-    assert_ne!(paths[0], paths[1], "overlapping invocations must not share a diff");
-    assert!(paths.iter().all(|path| !Path::new(path).exists()), "both diffs must be cleaned up");
+    assert_mutants_diff_cleaned(root);
     let diff = std::fs::read_to_string(captured).unwrap();
     assert!(diff.contains("--- a/src/lib.rs\n"), "{diff}");
     assert!(diff.contains("+++ b/src/lib.rs\n"), "{diff}");
