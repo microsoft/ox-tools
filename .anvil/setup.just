@@ -22,6 +22,7 @@ mutants_command_prefix := if os() == "windows" { if arch() == "aarch64" { "# " }
 # lets cargo-binstall compile when no binary strategy succeeds; installer mode
 # is caller policy.
 [arg("installer", pattern="^(install|binstall)$")]
+[private]
 _install-tool name minimum installer="install" \
     extracted=(replace_regex(installed_cargo_tools, ('(?ms)\A.*^' + name + ' v([^:\r\n]+):\r?$.*\z'), '$1')) \
     found=(if extracted == installed_cargo_tools { "false" } else { "true" }) \
@@ -33,6 +34,7 @@ _install-tool name minimum installer="install" \
     {{ if satisfied == "true" { "# " + name + " " + installed + " satisfies >= " + minimum } else if installer == "install" { source_command } else { binary_command } }}
 
 # Fail before a check starts when a required Cargo tool is missing or too old.
+[private]
 _check-tool name minimum \
     extracted=(replace_regex(installed_cargo_tools, ('(?ms)\A.*^' + name + ' v([^:\r\n]+):\r?$.*\z'), '$1')) \
     found=(if extracted == installed_cargo_tools { "false" } else { "true" }) \
@@ -80,6 +82,7 @@ anvil-toolchain-nightly-external-types-validate-prereqs:
 
 # Rustup components. Stable components honor RUSTUP_TOOLCHAIN or a repository
 # toolchain file; repositories with neither use the workspace rust-version.
+[private]
 _install-component toolchain component:
     {{ if toolchain == "default" { if anvil_stable_toolchain_arg == "" { "rustup component add " + component } else { "rustup component add --toolchain " + quote(workspace_rust_version) + " " + component } } else { "rustup component add --toolchain " + toolchain + " " + component } }}
 

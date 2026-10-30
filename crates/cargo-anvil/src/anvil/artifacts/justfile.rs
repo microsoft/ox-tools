@@ -576,6 +576,22 @@ mod tests {
     }
 
     #[test]
+    fn hidden_recipes_are_explicitly_private() {
+        for artifact in Catalog::anvil().artifacts() {
+            let Artifact::OwnedFileSection(section) = artifact else {
+                continue;
+            };
+            let Some(name) = section.id.strip_prefix("recipe:_") else {
+                continue;
+            };
+            assert!(
+                section.body.lines().any(|line| line == "[private]"),
+                "hidden recipe _{name} must declare [private] explicitly"
+            );
+        }
+    }
+
+    #[test]
     fn shared_assignments_live_in_the_tools_preamble() {
         let preamble = tools()
             .into_iter()

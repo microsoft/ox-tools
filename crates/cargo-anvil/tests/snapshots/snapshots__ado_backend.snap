@@ -3256,6 +3256,7 @@ anvil_readme_template_arg := if anvil_readme_template == "" {
 }
 
 # Generate or check every eligible crate README with the same selection policy.
+[private]
 _anvil-readme mode: anvil-readme-check-validate-prereqs
     cargo each --workspace --filter {{ quote("publishable and not metadata:ox-gen-readme.disable=true and (target-kind:lib or target-kind:proc-macro)") }} --chdir --keep-going -- cargo {{ anvil_stable_toolchain_arg }} doc2readme --lib {{ if mode == "check" { "--check" } else if mode == "generate" { "" } else { error("invalid README mode '" + mode + "'; expected 'generate' or 'check'") } }} {{ anvil_readme_template_arg }}
     cargo each --workspace --filter {{ quote("publishable and not metadata:ox-gen-readme.disable=true and target-kind:bin and not (target-kind:lib or target-kind:proc-macro)") }} --chdir --keep-going -- cargo {{ anvil_stable_toolchain_arg }} doc2readme --bin {{ if mode == "check" { "--check" } else if mode == "generate" { "" } else { error("invalid README mode '" + mode + "'; expected 'generate' or 'check'") } }} {{ anvil_readme_template_arg }}
@@ -3311,6 +3312,7 @@ mutants_command_prefix := if os() == "windows" { if arch() == "aarch64" { "# " }
 # lets cargo-binstall compile when no binary strategy succeeds; installer mode
 # is caller policy.
 [arg("installer", pattern="^(install|binstall)$")]
+[private]
 _install-tool name minimum installer="install" \
     extracted=(replace_regex(installed_cargo_tools, ('(?ms)\A.*^' + name + ' v([^:\r\n]+):\r?$.*\z'), '$1')) \
     found=(if extracted == installed_cargo_tools { "false" } else { "true" }) \
@@ -3322,6 +3324,7 @@ _install-tool name minimum installer="install" \
     {{ if satisfied == "true" { "# " + name + " " + installed + " satisfies >= " + minimum } else if installer == "install" { source_command } else { binary_command } }}
 
 # Fail before a check starts when a required Cargo tool is missing or too old.
+[private]
 _check-tool name minimum \
     extracted=(replace_regex(installed_cargo_tools, ('(?ms)\A.*^' + name + ' v([^:\r\n]+):\r?$.*\z'), '$1')) \
     found=(if extracted == installed_cargo_tools { "false" } else { "true" }) \
@@ -3369,6 +3372,7 @@ anvil-toolchain-nightly-external-types-validate-prereqs:
 
 # Rustup components. Stable components honor RUSTUP_TOOLCHAIN or a repository
 # toolchain file; repositories with neither use the workspace rust-version.
+[private]
 _install-component toolchain component:
     {{ if toolchain == "default" { if anvil_stable_toolchain_arg == "" { "rustup component add " + component } else { "rustup component add --toolchain " + quote(workspace_rust_version) + " " + component } } else { "rustup component add --toolchain " + toolchain + " " + component } }}
 

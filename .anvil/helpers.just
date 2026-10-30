@@ -288,6 +288,7 @@ anvil_readme_template_arg := if anvil_readme_template == "" {
 }
 
 # Generate or check every eligible crate README with the same selection policy.
+[private]
 _anvil-readme mode: anvil-readme-check-validate-prereqs
     cargo each --workspace --filter {{ quote("publishable and not metadata:ox-gen-readme.disable=true and (target-kind:lib or target-kind:proc-macro)") }} --chdir --keep-going -- cargo {{ anvil_stable_toolchain_arg }} doc2readme --lib {{ if mode == "check" { "--check" } else if mode == "generate" { "" } else { error("invalid README mode '" + mode + "'; expected 'generate' or 'check'") } }} {{ anvil_readme_template_arg }}
     cargo each --workspace --filter {{ quote("publishable and not metadata:ox-gen-readme.disable=true and target-kind:bin and not (target-kind:lib or target-kind:proc-macro)") }} --chdir --keep-going -- cargo {{ anvil_stable_toolchain_arg }} doc2readme --bin {{ if mode == "check" { "--check" } else if mode == "generate" { "" } else { error("invalid README mode '" + mode + "'; expected 'generate' or 'check'") } }} {{ anvil_readme_template_arg }}
