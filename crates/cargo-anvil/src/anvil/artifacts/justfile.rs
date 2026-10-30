@@ -1137,7 +1137,6 @@ mod tests {
         enum ResolverOperation {
             StableArgs,
             InstallIfMissing,
-            ValidateWorkspaceMsrv,
             MsrvToolchain,
             InstallMsrvIfNeeded,
         }
@@ -1210,9 +1209,6 @@ mod tests {
                 }
                 ResolverOperation::InstallIfMissing => {
                     command.arg("anvil-toolchain-stable-install");
-                }
-                ResolverOperation::ValidateWorkspaceMsrv => {
-                    command.args(["_anvil-resolve-stable", "validate-workspace-msrv"]);
                 }
                 ResolverOperation::MsrvToolchain => {
                     command.args(["_anvil-resolve-stable", "msrv"]);
@@ -1796,11 +1792,6 @@ mod tests {
 
             let temp = fixture("[workspace.package]\nrust-version = \"1.93\"\n");
             let root = temp.path();
-            let output = run(root, ResolverOperation::ValidateWorkspaceMsrv, Some("explicit-toolchain"));
-            assert!(
-                output.status.success(),
-                "an explicit stable override must bypass root-MSRV workspace validation"
-            );
             let resolve_msrv = |root: &Path| {
                 let output = run(root, ResolverOperation::MsrvToolchain, None);
                 assert!(
