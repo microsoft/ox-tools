@@ -1216,16 +1216,18 @@ impl TemporaryDirectory {
         // Windows explicit cleanup owns the full attempt budget; other platforms retain the Drop fallback.
         self.armed = !cfg!(windows);
         let result = remove(&self.path);
-        let guidance = if cfg!(windows) && result.as_ref().is_err_and(|error| error.raw_os_error() == Some(32)) {
-            "; release any process handles to this directory and retry cleanup"
-        } else {
-            ""
-        };
-        result.into_app_err(format!(
-            "failed to remove isolated coverage target `{}`{guidance}",
-            self.path.display()
-        ))
+        let context = cleanup_error_context(&self.path, result.as_ref().err());
+        result.into_app_err(context)
     }
+}
+
+fn cleanup_error_context(path: &Path, error: Option<&io::Error>) -> String {
+    let guidance = if cfg!(windows) && error.is_some_and(|error| error.raw_os_error() == Some(32)) {
+        "; release any process handles to this directory and retry cleanup"
+    } else {
+        ""
+    };
+    format!("failed to remove isolated coverage target `{}`{guidance}", path.display())
 }
 
 impl Drop for TemporaryDirectory {
@@ -3580,18 +3582,13 @@ mod tests {
 
     #[test]
     fn cleanup_handle_guidance_requires_a_windows_sharing_violation() {
+        let path = Path::new("coverage-target");
         for code in [5, 13, 32] {
-            let directory = TemporaryDirectory {
-                path: PathBuf::from("coverage-target"),
-                armed: true,
-            };
-            let error = directory
-                .cleanup_with(|_| Err(io::Error::from_raw_os_error(code)))
-                .expect_err("injected removal fails");
-            let message = error.to_string();
+            let error = io::Error::from_raw_os_error(code);
+            let message = cleanup_error_context(path, Some(&error));
             assert_eq!(
                 (
-                    message.contains("failed to remove isolated coverage target `coverage-target`"),
+                    message.contains(&format!("failed to remove isolated coverage target `{}`", path.display())),
                     message.contains("release any process handles"),
                 ),
                 (true, cfg!(windows) && code == 32)
