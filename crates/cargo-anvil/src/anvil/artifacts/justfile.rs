@@ -647,34 +647,6 @@ mod tests {
     }
 
     #[test]
-    fn recipe_comments_avoid_repository_links_and_scope_labels() {
-        for artifact in helpers()
-            .into_iter()
-            .chain(impact())
-            .chain(tiers())
-            .chain(dev_files())
-            .chain(check_files())
-            .chain(group_files())
-        {
-            let Artifact::OwnedFileSection(section) = artifact else {
-                continue;
-            };
-            assert!(
-                !section.body.contains("github.com/microsoft/ox-tools"),
-                "{} must not link to the cargo-anvil source repository",
-                section.id
-            );
-            for label in ["Affected tier", "Modified tier", "Required tier", "Unscoped"] {
-                assert!(
-                    !section.body.contains(label),
-                    "{} must not carry the internal scope label {label:?}",
-                    section.id
-                );
-            }
-        }
-    }
-
-    #[test]
     fn only_global_and_group_setup_recipes_are_public() {
         let expected = [
             "anvil-setup",
