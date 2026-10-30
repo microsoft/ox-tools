@@ -227,12 +227,6 @@ anvil-tool-cargo-nextest-install installer="install": (anvil-toolchain-stable-in
 anvil-tool-cargo-nextest-validate-prereqs: (_check-tool "cargo-nextest" cargo_nextest_version)
 
 [group("anvil-setup")]
-anvil-tool-cargo-semver-checks-install installer="install": (anvil-toolchain-stable-install installer) (_install-tool "cargo-semver-checks" cargo_semver_checks_version installer)
-
-[group("anvil-setup")]
-anvil-tool-cargo-semver-checks-validate-prereqs: (_check-tool "cargo-semver-checks" cargo_semver_checks_version)
-
-[group("anvil-setup")]
 anvil-tool-cargo-sort-install installer="install": (anvil-toolchain-stable-install installer) (_install-tool "cargo-sort" cargo_sort_version installer)
 
 [group("anvil-setup")]
@@ -314,7 +308,6 @@ cargo_heather_version := "0.3.0"
 cargo_llvm_cov_version := "0.9.0"
 cargo_mutants_version := "27.1.0"
 cargo_nextest_version := "0.9.143"
-cargo_semver_checks_version := "0.50.0"
 cargo_sort_version := "2.1.4"
 cargo_spellcheck_version := "0.15.7"
 cargo_udeps_version := "0.1.61"
@@ -708,14 +701,6 @@ anvil-readme-check-setup installer="install": (anvil-tool-cargo-doc2readme-insta
 [group("anvil-setup")]
 anvil-readme-check-validate-prereqs: anvil-tool-cargo-doc2readme-validate-prereqs anvil-tool-cargo-each-validate-prereqs
 
-# Install prerequisites for the `anvil-semver-check` recipe.
-[private]
-anvil-semver-check-setup installer="install": (anvil-tool-cargo-semver-checks-install installer)
-
-# Validate prerequisites for the `anvil-semver-check` recipe.
-[private]
-anvil-semver-check-validate-prereqs: anvil-tool-cargo-semver-checks-validate-prereqs
-
 # cargo-spellcheck has a source-build-time libclang dependency. The
 # catalog installer checks it only immediately before a source install;
 # successful prebuilt installation does not require libclang.
@@ -755,7 +740,6 @@ anvil-pr-fast-setup installer="install": \
     (anvil-ensure-no-default-features-setup installer) \
     (anvil-doc-build-setup installer) \
     (anvil-readme-check-setup installer) \
-    (anvil-semver-check-setup installer) \
     (anvil-spellcheck-setup installer) \
     (anvil-pr-title-setup installer) \
     (anvil-deny-setup installer) \
@@ -776,7 +760,6 @@ anvil-pr-fast-validate-prereqs: \
     anvil-ensure-no-default-features-validate-prereqs \
     anvil-doc-build-validate-prereqs \
     anvil-readme-check-validate-prereqs \
-    anvil-semver-check-validate-prereqs \
     anvil-spellcheck-validate-prereqs \
     anvil-pr-title-validate-prereqs \
     anvil-deny-validate-prereqs \

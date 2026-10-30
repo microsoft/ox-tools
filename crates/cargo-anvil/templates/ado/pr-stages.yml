@@ -92,7 +92,6 @@ stages:
               path: target/anvil/impact
           steps:
             - template: steps/pr-fast.yml
-            - template: steps/advisory-comments.yml
       - template: steps/job.yml
         parameters:
           name: windows

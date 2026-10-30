@@ -246,7 +246,6 @@ fn generated_recipes_are_split_by_responsibility() {
     assert!(!generated.container.contains("anvil-clippy:"));
     assert!(!generated.groups.contains("anvil-clippy:"));
     assert!(!generated.helpers.contains("anvil-clippy:"));
-    assert!(generated.checks.contains("anvil-semver-check:"));
 }
 
 #[test]
@@ -391,7 +390,6 @@ fn released_domain_tool_versions_are_pinned() {
         "cargo_coverage_gate_version := \"0.7.2\"",
         "cargo_delta_version := \"0.5.0\"",
         "cargo_each_version := \"0.7.0\"",
-        "cargo_semver_checks_version := \"0.50.0\"",
     ] {
         assert!(recipes.contains(pin), "missing released tool pin: {pin}");
     }

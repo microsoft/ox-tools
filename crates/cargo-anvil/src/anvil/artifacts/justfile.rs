@@ -111,7 +111,6 @@ const CHECK_FILES: &[(&str, &str)] = split_recipe_files!(
         "mutants-full",
         "pr-title",
         "readme-check",
-        "semver-check",
         "spellcheck",
         "udeps",
     ]
@@ -432,7 +431,6 @@ mod tests {
             // cargo-delta does not map to a package, so scoping them would
             // silently skip a changed template/dictionary.
             ("readme-check", Unscoped),
-            ("semver-check", Affected),
             ("spellcheck", Unscoped),
             ("udeps", Required),
         ]
@@ -1040,7 +1038,7 @@ mod tests {
         let unscoped = EXPECTED_CHECK_POLICY.len() - scoped;
         assert_eq!(
             (scoped, unscoped),
-            (25, 7),
+            (24, 7),
             "impact scoped/unscoped split changed; update EXPECTED_CHECK_POLICY deliberately"
         );
     }

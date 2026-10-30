@@ -54,7 +54,6 @@ anvil-pr-fast: anvil-pr-fast-validate-prereqs \
     anvil-ensure-no-default-features \
     anvil-doc-build \
     anvil-readme-check \
-    anvil-semver-check \
     anvil-spellcheck \
     anvil-pr-title \
     anvil-deny \

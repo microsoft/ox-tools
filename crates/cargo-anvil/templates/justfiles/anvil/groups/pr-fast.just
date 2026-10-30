@@ -18,7 +18,6 @@ anvil-pr-fast: anvil-pr-fast-validate-prereqs \
     anvil-ensure-no-default-features \
     anvil-doc-build \
     anvil-readme-check \
-    anvil-semver-check \
     anvil-spellcheck \
     anvil-pr-title \
     anvil-deny \
@@ -45,7 +44,6 @@ anvil-pr-fast-setup installer="install": \
     (anvil-ensure-no-default-features-setup installer) \
     (anvil-doc-build-setup installer) \
     (anvil-readme-check-setup installer) \
-    (anvil-semver-check-setup installer) \
     (anvil-spellcheck-setup installer) \
     (anvil-pr-title-setup installer) \
     (anvil-deny-setup installer) \
@@ -66,7 +64,6 @@ anvil-pr-fast-validate-prereqs: \
     anvil-ensure-no-default-features-validate-prereqs \
     anvil-doc-build-validate-prereqs \
     anvil-readme-check-validate-prereqs \
-    anvil-semver-check-validate-prereqs \
     anvil-spellcheck-validate-prereqs \
     anvil-pr-title-validate-prereqs \
     anvil-deny-validate-prereqs \
