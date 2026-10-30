@@ -333,8 +333,85 @@ fn build_plan_with_hosts(
 
     validate_array_plan(repo_root, &plan, hosts, &array_hosts, &mut original_hosts)?;
     validate_projected_json_placements(repo_root, manifest, &plan, hosts)?;
+    plan_dependabot_exclusions(repo_root, backends, catalog, &mut plan, hosts)?;
 
     Ok(plan)
+}
+
+fn plan_dependabot_exclusions(
+    repo_root: &Path,
+    backends: &[Backend],
+    catalog: &Catalog,
+    plan: &mut Plan,
+    hosts: &mut HostTextCache,
+) -> Result<(), AppError> {
+    let paths = crate::dependabot::generated_action_paths(catalog, backends);
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let mut retired_files = BTreeSet::new();
+    let mut refused_region_hosts = BTreeSet::new();
+    for item in plan.items() {
+        match (&item.target, item.decision) {
+            (Target::File { path }, Decision::Remove) => {
+                retired_files.insert((hosts.resolve)(repo_root, path)?);
+            }
+            (Target::Region { host, .. }, Decision::LeaveAlone) => {
+                refused_region_hosts.insert((hosts.resolve)(repo_root, host)?);
+            }
+            _ => {}
+        }
+    }
+    let mut configurations = Vec::new();
+    for path in [".github/dependabot.yml", ".github/dependabot.yaml"] {
+        let path = (hosts.resolve)(repo_root, path)?;
+        if retired_files.contains(&path) {
+            continue;
+        }
+        if let Some(text) = hosts.get_or_read(repo_root, &path)? {
+            configurations.push((path, text));
+        }
+    }
+    if configurations.len() > 1 {
+        plan.refusal(
+            "Refused to add Dependabot exclusions: both .github/dependabot.yml and .github/dependabot.yaml exist. \
+             Keep one configuration file and rerun cargo anvil; both files were left unchanged.",
+        );
+        return Ok(());
+    }
+    let Some((path, text)) = configurations.pop() else {
+        return Ok(());
+    };
+    if refused_region_hosts.contains(&path) {
+        return Ok(());
+    }
+    let resolved_paths = paths
+        .iter()
+        .map(|path| (hosts.resolve)(repo_root, path))
+        .collect::<Result<Vec<_>, _>>()?;
+    let paths: Vec<_> = resolved_paths.iter().map(String::as_str).collect();
+    match crate::dependabot::update(&text, &paths) {
+        Ok(Some(updated)) => {
+            if catalog.artifacts().iter().any(|artifact| match artifact {
+                Artifact::OwnedFile(spec) => spec.path.eq_ignore_ascii_case(&path),
+                Artifact::Region(spec) => matches!(&spec.host, HostSelector::Path(host) if host.eq_ignore_ascii_case(&path)),
+            }) {
+                plan.refusal(format!(
+                    "Refused to patch {path}: the catalog already manages this Dependabot configuration. \
+                     Add generated-file exclusions to its catalog source instead; the automatic patch was not applied."
+                ));
+                return Ok(());
+            }
+            hosts.set(&path, updated.clone());
+            plan.push(PlanItem::patch_file(path, updated));
+        }
+        Ok(None) => {}
+        Err(error) => plan.refusal(format!(
+            "Refused to add generated-file exclusions to {path}: {error}. \
+             Repair the configuration and rerun cargo anvil. The Dependabot file was left unchanged."
+        )),
+    }
+    Ok(())
 }
 
 fn validate_projected_json_placements(
@@ -2681,6 +2758,366 @@ mod tests {
         HostTextCache {
             resolve: |root, path| crate::io::resolve_case_insensitive_with(root, path, |_, _| Ok(None)),
             ..HostTextCache::default()
+        }
+    }
+
+    fn dependabot_plan(configurations: [Option<&str>; 2], backends: &[Backend]) -> (Plan, HostTextCache) {
+        let catalog = Catalog::builder(test_cli())
+            .with_artifact(artifacts::github::setup_action())
+            .with_artifact(artifacts::github::pr_impl_workflow())
+            .build()
+            .unwrap();
+        let mut hosts = memory_hosts();
+        for (path, text) in [".github/dependabot.yml", ".github/dependabot.yaml"]
+            .into_iter()
+            .zip(configurations)
+        {
+            hosts.texts.insert(path.to_owned(), text.map(str::to_owned));
+        }
+        let mut plan = Plan::default();
+        plan_dependabot_exclusions(Path::new("memory"), backends, &catalog, &mut plan, &mut hosts).unwrap();
+        (plan, hosts)
+    }
+
+    #[test]
+    fn github_generation_patches_either_dependabot_spelling_without_tracking_it() {
+        let source = "version: 2\nupdates:\n- package-ecosystem: github-actions\n  directory: /\n  schedule: {interval: weekly}\n";
+        for (configurations, path) in [
+            ([Some(source), None], ".github/dependabot.yml"),
+            ([None, Some(source)], ".github/dependabot.yaml"),
+        ] {
+            let (plan, hosts) = dependabot_plan(configurations, &[Backend::GitHub]);
+            assert_eq!(plan.items().len(), 1);
+            assert_eq!(plan.items()[0].target, Target::File { path: path.to_owned() });
+            let updated = hosts.cached(path).unwrap();
+            assert!(updated.contains(".github/actions/anvil-setup/action.yml"));
+            assert!(updated.contains(".github/workflows/anvil-pr-impl.yml"));
+            assert_eq!(plan.projected_manifest(&Manifest::default()), Manifest::default());
+            let rerun = if path == ".github/dependabot.yml" {
+                [Some(updated.as_str()), None]
+            } else {
+                [None, Some(updated.as_str())]
+            };
+            assert_eq!(dependabot_plan(rerun, &[Backend::GitHub]).0.dry_run_exit_code(), 0);
+        }
+    }
+
+    #[test]
+    fn dependabot_patches_do_not_recreate_retired_configuration() {
+        let source = "version: 2\nupdates:\n- package-ecosystem: github-actions\n  directory: /\n";
+        for (recorded, resolved) in [
+            (".github/dependabot.yml", ".github/dependabot.yml"),
+            (".github/Dependabot.yml", ".github/dependabot.yml"),
+            (".github/dependabot.yaml", ".github/dependabot.yaml"),
+        ] {
+            let catalog = Catalog::builder(test_cli())
+                .with_artifact(artifacts::github::setup_action())
+                .build()
+                .unwrap();
+            let mut hosts = memory_hosts();
+            hosts.resolve = |_, path| Ok(path.to_ascii_lowercase());
+            hosts.texts.insert(".github/dependabot.yml".to_owned(), None);
+            hosts.texts.insert(".github/dependabot.yaml".to_owned(), None);
+            hosts.set(resolved, source.to_owned());
+            let mut plan = Plan::default();
+            plan.push(PlanItem::remove_file(recorded));
+            plan_dependabot_exclusions(Path::new("memory"), &[Backend::GitHub], &catalog, &mut plan, &mut hosts).unwrap();
+            assert_eq!(plan.items().len(), 1);
+            assert_eq!(plan.items()[0].decision, Decision::Remove);
+            assert!(plan.refusals().is_empty());
+        }
+    }
+
+    #[test]
+    fn dependabot_exclusions_follow_the_owned_files_resolved_casing() {
+        let source = "version: 2\nupdates:\n- package-ecosystem: github-actions\n  directory: /\n";
+        let catalog = Catalog::builder(test_cli())
+            .with_artifact(artifacts::github::pr_impl_workflow())
+            .build()
+            .unwrap();
+        let mut hosts = memory_hosts();
+        hosts.resolve = |_, path| {
+            Ok(if path == ".github/workflows/anvil-pr-impl.yml" {
+                ".github/workflows/Anvil-PR-Impl.yml".to_owned()
+            } else {
+                path.to_owned()
+            })
+        };
+        hosts.set(".github/dependabot.yml", source.to_owned());
+        hosts.texts.insert(".github/dependabot.yaml".to_owned(), None);
+        let mut plan = Plan::default();
+        plan_dependabot_exclusions(Path::new("memory"), &[Backend::GitHub], &catalog, &mut plan, &mut hosts).unwrap();
+        let updated = hosts.cached(".github/dependabot.yml").unwrap();
+        assert!(updated.contains(".github/workflows/Anvil-PR-Impl.yml"));
+        assert!(!updated.contains(".github/workflows/anvil-pr-impl.yml"));
+    }
+
+    #[test]
+    fn dependabot_path_resolution_errors_do_not_plan_partial_patches() {
+        let catalog = Catalog::builder(test_cli())
+            .with_artifact(artifacts::github::pr_impl_workflow())
+            .build()
+            .unwrap();
+        let mut hosts = memory_hosts();
+        hosts.resolve = |_, path| {
+            if path.starts_with(".github/workflows/") {
+                bail!("ambiguous owned-file casing");
+            }
+            Ok(path.to_owned())
+        };
+        hosts.set(".github/dependabot.yml", "version: 2\nupdates: []\n".to_owned());
+        hosts.texts.insert(".github/dependabot.yaml".to_owned(), None);
+        let mut plan = Plan::default();
+        let error = plan_dependabot_exclusions(Path::new("memory"), &[Backend::GitHub], &catalog, &mut plan, &mut hosts).unwrap_err();
+        assert!(error.to_string().contains("ambiguous owned-file casing"));
+        assert!(plan.items().is_empty());
+    }
+
+    #[test]
+    fn dependabot_retirement_path_resolution_errors_are_reported() {
+        for item in [
+            PlanItem::remove_file(".github/Dependabot.yml"),
+            PlanItem::noop(
+                Target::Region {
+                    host: ".github/Dependabot.yml".to_owned(),
+                    id: "retired-policy".to_owned(),
+                },
+                Decision::LeaveAlone,
+            ),
+        ] {
+            let catalog = Catalog::builder(test_cli())
+                .with_artifact(artifacts::github::setup_action())
+                .build()
+                .unwrap();
+            let mut hosts = memory_hosts();
+            hosts.resolve = |_, path| {
+                assert_eq!(path, ".github/Dependabot.yml");
+                bail!("cannot resolve retired configuration");
+            };
+            let mut plan = Plan::default();
+            plan.push(item);
+            let error = plan_dependabot_exclusions(Path::new("memory"), &[Backend::GitHub], &catalog, &mut plan, &mut hosts).unwrap_err();
+            assert!(error.to_string().contains("cannot resolve retired configuration"));
+            assert_eq!(plan.items().len(), 1);
+        }
+    }
+
+    #[test]
+    fn dependabot_region_retirement_does_not_skip_the_repository_file_patch() {
+        let source = "version: 2\nupdates:\n- package-ecosystem: github-actions\n  directory: /\n";
+        let catalog = Catalog::builder(test_cli())
+            .with_artifact(artifacts::github::setup_action())
+            .build()
+            .unwrap();
+        let mut hosts = memory_hosts();
+        hosts.set(".github/dependabot.yml", source.to_owned());
+        hosts.texts.insert(".github/dependabot.yaml".to_owned(), None);
+        let mut plan = Plan::default();
+        plan.push(PlanItem::remove_region(".github/dependabot.yml", "old-policy", source.to_owned()));
+        plan_dependabot_exclusions(Path::new("memory"), &[Backend::GitHub], &catalog, &mut plan, &mut hosts).unwrap();
+        assert_eq!(plan.items().len(), 2);
+        assert!(matches!(plan.items()[1].target, Target::File { .. }));
+        assert_eq!(plan.items()[1].decision, Decision::Write);
+    }
+
+    #[test]
+    fn dependabot_patches_preserve_refused_retired_region_bodies() {
+        let original = "version: 2\nupdates:\n- package-ecosystem: github-actions\n  directory: /\n";
+        let edited = format!("{original}  schedule: {{interval: monthly}}\n");
+        let source = upsert_region("", "retired-policy", &edited, CommentSyntax::Hash).unwrap();
+        for host in [".github/Dependabot.yml", ".github/Dependabot.yaml"] {
+            let catalog = Catalog::builder(test_cli())
+                .with_artifact(artifacts::github::setup_action())
+                .build()
+                .unwrap();
+            let mut manifest = Manifest::default();
+            manifest.set_region(host, "retired-policy", checksum_str(original));
+            let mut hosts = memory_hosts();
+            hosts.resolve = |_, path| Ok(path.to_ascii_lowercase());
+            hosts.texts.insert(".github/dependabot.yml".to_owned(), None);
+            hosts.texts.insert(".github/dependabot.yaml".to_owned(), None);
+            let resolved = host.to_ascii_lowercase();
+            hosts.set(&resolved, source.clone());
+            let mut plan = Plan::default();
+            plan_removals_with_array_hosts(
+                Path::new("memory"),
+                &manifest,
+                &mut plan,
+                &mut hosts,
+                &ComposedHosts::default(),
+                &BTreeSet::new(),
+            )
+            .unwrap();
+            assert_eq!(plan.refusals().len(), 1);
+            plan_dependabot_exclusions(Path::new("memory"), &[Backend::GitHub], &catalog, &mut plan, &mut hosts).unwrap();
+            assert_eq!(plan.items().len(), 1);
+            assert_eq!(plan.items()[0].decision, Decision::LeaveAlone);
+            assert_eq!(hosts.cached(&resolved).as_deref(), Some(source.as_str()));
+            assert_eq!(plan.projected_manifest(&manifest).regions, manifest.regions);
+        }
+    }
+
+    #[test]
+    fn dependabot_duplicate_spellings_include_refused_retired_configs() {
+        let source = "version: 2\nupdates:\n- package-ecosystem: github-actions\n  directory: /\n";
+        let edited = format!("{source}  schedule: {{interval: monthly}}\n");
+        let protected_source = upsert_region("", "retired-policy", &edited, CommentSyntax::Hash).unwrap();
+        for (protected, other) in [
+            (".github/Dependabot.yml", ".github/dependabot.yaml"),
+            (".github/Dependabot.yaml", ".github/dependabot.yml"),
+        ] {
+            let catalog = Catalog::builder(test_cli())
+                .with_artifact(artifacts::github::setup_action())
+                .build()
+                .unwrap();
+            let mut manifest = Manifest::default();
+            manifest.set_region(protected, "retired-policy", checksum_str(source));
+            let mut hosts = memory_hosts();
+            hosts.resolve = |_, path| Ok(path.to_ascii_lowercase());
+            let resolved = protected.to_ascii_lowercase();
+            hosts.set(&resolved, protected_source.clone());
+            hosts.set(other, source.to_owned());
+            let mut plan = Plan::default();
+            plan_removals_with_array_hosts(
+                Path::new("memory"),
+                &manifest,
+                &mut plan,
+                &mut hosts,
+                &ComposedHosts::default(),
+                &BTreeSet::new(),
+            )
+            .unwrap();
+            assert_eq!(plan.refusals().len(), 1);
+            plan_dependabot_exclusions(Path::new("memory"), &[Backend::GitHub], &catalog, &mut plan, &mut hosts).unwrap();
+            assert_eq!(plan.items().len(), 1);
+            assert_eq!(plan.items()[0].decision, Decision::LeaveAlone);
+            assert_eq!(plan.refusals().len(), 2);
+            assert_eq!(
+                plan.refusals()[1],
+                "Refused to add Dependabot exclusions: both .github/dependabot.yml and .github/dependabot.yaml exist. \
+                 Keep one configuration file and rerun cargo anvil; both files were left unchanged."
+            );
+            assert_eq!(hosts.cached(&resolved).as_deref(), Some(protected_source.as_str()));
+            assert_eq!(hosts.cached(other).as_deref(), Some(source));
+            assert_eq!(plan.projected_manifest(&manifest).regions, manifest.regions);
+        }
+    }
+
+    #[test]
+    fn dependabot_file_removal_disambiguates_the_remaining_configuration() {
+        let source = "version: 2\nupdates:\n- package-ecosystem: github-actions\n  directory: /\n";
+        for (retired, remaining) in [
+            (".github/Dependabot.yml", ".github/dependabot.yaml"),
+            (".github/Dependabot.yaml", ".github/dependabot.yml"),
+        ] {
+            let catalog = Catalog::builder(test_cli())
+                .with_artifact(artifacts::github::setup_action())
+                .build()
+                .unwrap();
+            let mut hosts = memory_hosts();
+            hosts.resolve = |_, path| Ok(path.to_ascii_lowercase());
+            hosts.set(".github/dependabot.yml", source.to_owned());
+            hosts.set(".github/dependabot.yaml", source.to_owned());
+            let mut plan = Plan::default();
+            plan.push(PlanItem::remove_file(retired));
+            plan_dependabot_exclusions(Path::new("memory"), &[Backend::GitHub], &catalog, &mut plan, &mut hosts).unwrap();
+            let expected = crate::dependabot::update(source, &[".github/actions/anvil-setup/action.yml"])
+                .unwrap()
+                .unwrap();
+            assert_eq!(plan.items().len(), 2);
+            assert_eq!(plan.items()[0].decision, Decision::Remove);
+            assert_eq!(
+                plan.items()[1].target,
+                Target::File {
+                    path: remaining.to_owned()
+                }
+            );
+            assert_eq!(plan.items()[1].decision, Decision::Write);
+            assert_eq!(plan.items()[1].rendered.as_deref(), Some(expected.as_str()));
+            assert!(plan.refusals().is_empty());
+        }
+    }
+
+    #[test]
+    fn dependabot_customized_file_retirement_still_allows_the_unowned_patch() {
+        let source = "version: 2\nupdates:\n- package-ecosystem: github-actions\n  directory: /\n";
+        let catalog = Catalog::builder(test_cli())
+            .with_artifact(artifacts::github::setup_action())
+            .build()
+            .unwrap();
+        let mut hosts = memory_hosts();
+        hosts.set(".github/dependabot.yml", source.to_owned());
+        hosts.texts.insert(".github/dependabot.yaml".to_owned(), None);
+        let mut plan = Plan::default();
+        plan.push(PlanItem::orphaned_kept(Target::File {
+            path: ".github/dependabot.yml".to_owned(),
+        }));
+        plan_dependabot_exclusions(Path::new("memory"), &[Backend::GitHub], &catalog, &mut plan, &mut hosts).unwrap();
+        let expected = crate::dependabot::update(source, &[".github/actions/anvil-setup/action.yml"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(plan.items().len(), 2);
+        assert_eq!(plan.items()[0].decision, Decision::OrphanedKept);
+        assert_eq!(plan.items()[1].decision, Decision::Write);
+        assert_eq!(plan.items()[1].rendered.as_deref(), Some(expected.as_str()));
+        assert_eq!(hosts.cached(".github/dependabot.yml").as_deref(), Some(expected.as_str()));
+    }
+
+    #[test]
+    fn generation_does_not_enable_dependabot_or_modify_source_repository_policy() {
+        for (configurations, backends) in [
+            ([None, None], vec![Backend::GitHub]),
+            ([Some("version: 2\nupdates: []\n"), None], vec![Backend::GitHub]),
+            ([Some("not even YAML: ["), None], vec![Backend::Ado]),
+            ([Some(include_str!("../../../.github/dependabot.yml")), None], vec![Backend::GitHub]),
+        ] {
+            let (plan, _) = dependabot_plan(configurations, &backends);
+            assert_eq!(plan.dry_run_exit_code(), 0);
+            assert!(plan.items().is_empty());
+        }
+    }
+
+    #[test]
+    fn unsafe_dependabot_configuration_fails_drift_checks_without_writing() {
+        for configurations in [
+            [Some("version: 2\nupdates: ["), None],
+            [Some("version: 2\nupdates: []\n"), Some("version: 2\nupdates: []\n")],
+        ] {
+            let (plan, hosts) = dependabot_plan(configurations, &[Backend::GitHub]);
+            assert_eq!(plan.dry_run_exit_code(), 1);
+            assert!(plan.items().is_empty());
+            assert!(plan.refusals()[0].contains("left unchanged"));
+            assert_eq!(hosts.cached(".github/dependabot.yml").as_deref(), configurations[0]);
+            assert_eq!(hosts.cached(".github/dependabot.yaml").as_deref(), configurations[1]);
+        }
+    }
+
+    #[test]
+    fn dependabot_patches_do_not_overwrite_catalog_owned_configuration() {
+        let source = "version: 2\nupdates:\n- package-ecosystem: github-actions\n  directory: /\n";
+        for owner in [
+            Artifact::owned_file(".github/dependabot.yml", source),
+            Artifact::region(RegionSpec {
+                host: HostSelector::Path(".github/dependabot.yml".to_owned()),
+                id: RegionId::new("repository-policy"),
+                body: String::new(),
+                syntax: CommentSyntax::Hash,
+            }),
+        ] {
+            let catalog = Catalog::builder(test_cli())
+                .with_artifact(artifacts::github::setup_action())
+                .with_artifact(owner)
+                .build()
+                .unwrap();
+            let mut hosts = memory_hosts();
+            hosts.set(".github/dependabot.yml", source.to_owned());
+            hosts.texts.insert(".github/dependabot.yaml".to_owned(), None);
+            let mut plan = Plan::default();
+            plan_dependabot_exclusions(Path::new("memory"), &[Backend::GitHub], &catalog, &mut plan, &mut hosts).unwrap();
+            assert_eq!(plan.dry_run_exit_code(), 1);
+            assert!(plan.items().is_empty());
+            assert!(plan.refusals()[0].contains("Add generated-file exclusions to its catalog source instead"));
+            assert_eq!(hosts.cached(".github/dependabot.yml").as_deref(), Some(source));
         }
     }
 
