@@ -1213,8 +1213,8 @@ impl TemporaryDirectory {
     }
 
     fn cleanup_with(mut self, remove: impl FnOnce(&Path) -> io::Result<()>) -> Result<(), AppError> {
-        // Explicit cleanup owns the full attempt budget; Drop must not add an attempt even on error.
-        self.armed = false;
+        // Windows explicit cleanup owns the full attempt budget; other platforms retain the Drop fallback.
+        self.armed = !cfg!(windows);
         let result = remove(&self.path);
         let guidance = if cfg!(windows) && result.as_ref().is_err_and(|error| error.raw_os_error() == Some(32)) {
             "; release any process handles to this directory and retry cleanup"
@@ -3558,6 +3558,24 @@ mod tests {
         )
         .expect_err("persistent locks remain errors");
         assert_eq!((error.raw_os_error(), attempts, delays.next()), (Some(32), 5, None));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "uses temporary directories, which Miri isolation does not support")]
+    fn cleanup_preserves_only_the_non_windows_drop_fallback() {
+        let parent = tempdir().expect("tempdir");
+        let path = parent.path().join("coverage-target");
+        fs::create_dir(&path).expect("create owned scratch directory");
+        let directory = TemporaryDirectory {
+            path: path.clone(),
+            armed: true,
+        };
+        let mut attempts = 0;
+        let result = directory.cleanup_with(|_| {
+            attempts += 1;
+            Err(io::Error::from_raw_os_error(32))
+        });
+        assert_eq!((result.is_err(), attempts, path.is_dir()), (true, 1, cfg!(windows)));
     }
 
     #[test]

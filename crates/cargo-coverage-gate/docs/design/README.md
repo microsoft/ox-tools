@@ -509,6 +509,9 @@ is already clean; other errors fail immediately. An exhausted sharing violation
 remains an operational error with the scratch path and guidance to release
 outstanding handles before retrying cleanup. No process is terminated and no
 lock owner is inferred.
+The Windows explicit attempt budget includes all removal attempts; the guard is
+disarmed before removal so `Drop` cannot add another. Non-Windows cleanup keeps
+its existing best-effort `Drop` fallback, including after an explicit error.
 
 cargo-llvm-cov normally launches LLVM with its discovered object set and full
 filename filter. If that launch exceeds the Windows command-line limit,
