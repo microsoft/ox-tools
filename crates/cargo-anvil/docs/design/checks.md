@@ -332,8 +332,9 @@ Each invocation reserves its own uniquely named diff file in `RUNNER_TEMP`,
 The working-tree diff explicitly requests `a/` and `b/` prefixes, independent
 of Git's mnemonic or no-prefix configuration. A `finally` block removes the
 file after success or failure. Git failures prevent mutation testing, and
-Git/cargo-mutants exit codes survive cleanup failures; cleanup failures are
-reported rather than silently ignored.
+Git/cargo-mutants exit codes and launch errors survive cleanup failures.
+Cleanup failures are fatal only after the main operation completes successfully;
+otherwise they are reported without replacing the primary failure.
 
 Both mutation recipes select `.cargo/mutants.<os>.toml` when it exists, using
 Just's native host OS name, and pass it through cargo-mutants' `--config` option.

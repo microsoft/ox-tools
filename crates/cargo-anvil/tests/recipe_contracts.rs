@@ -13,7 +13,7 @@
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
-use std::fs;
+use std::fs::{self, read_dir};
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -3300,13 +3300,14 @@ fn mutants_config_selection_is_shell_independent_and_root_relative() {
 
 fn assert_mutants_diff_cleaned(root: &Path) {
     assert!(
-        fs::read_dir(root)
+        read_dir(root)
             .unwrap()
             .all(|entry| !entry.unwrap().file_name().to_string_lossy().starts_with("anvil-mutants-diff")),
         "mutation diff files must be removed after success or failure"
     );
 }
 
+// Pins emitted allocation source; runtime PowerShell behavior belongs to the provisioned self-hosting pipeline.
 #[test]
 fn mutants_diff_reserves_a_unique_file_before_running_git() {
     let allocation = MUTANTS_DIFF
@@ -3325,6 +3326,7 @@ fn mutants_diff_reserves_a_unique_file_before_running_git() {
     );
 }
 
+// Pins emitted execution and cleanup source, not runtime PowerShell semantics exercised by the provisioned self-hosting pipeline.
 #[test]
 fn mutants_diff_normalizes_prefixes_and_cleans_up_without_masking_native_failures() {
     let execution = MUTANTS_DIFF
@@ -3337,6 +3339,7 @@ fn mutants_diff_normalizes_prefixes_and_cleans_up_without_masking_native_failure
     assert_eq!(
         execution,
         concat!(
+            "    $completed = $false\n",
             "    try {\n",
             "        git diff --src-prefix=a/ --dst-prefix=b/ \"$base\" --output=$diff_path\n",
             "        $exitCode = $LASTEXITCODE\n",
@@ -3344,12 +3347,13 @@ fn mutants_diff_normalizes_prefixes_and_cleans_up_without_masking_native_failure
             "            & cargo {{_anvil_stable_toolchain_args}} mutants --in-diff $diff_path --no-shuffle --jobs 0 {{_anvil_mutants_config_arg}}\n",
             "            $exitCode = $LASTEXITCODE\n",
             "        }\n",
+            "        $completed = $true\n",
             "    } finally {\n",
             "        try {\n",
             "            Remove-Item -LiteralPath $diff_path\n",
             "        } catch {\n",
-            "            if ($exitCode -eq 0) { throw }\n",
-            "            Write-Warning \"Could not remove mutation diff '$diff_path': $_ (preserving exit code $exitCode)\"\n",
+            "            if ($completed -and $exitCode -eq 0) { throw }\n",
+            "            Write-Warning \"Could not remove mutation diff '$diff_path': $_ (preserving the primary failure)\"\n",
             "        }\n",
             "    }\n",
             "    exit $exitCode\n",
@@ -3552,6 +3556,8 @@ fn mutants_diff_covers_uncommitted_work() {
     git(&["config", "core.safecrlf", "false"]);
     git(&["config", "commit.gpgsign", "false"]);
     git(&["config", "tag.gpgsign", "false"]);
+    git(&["config", "diff.mnemonicPrefix", "true"]);
+    git(&["config", "diff.noprefix", "true"]);
     write(&root.join("src/lib.rs"), "pub fn base() {}\n");
     git(&["add", "-A"]);
     git(&["commit", "-qm", "base"]);

@@ -2373,6 +2373,7 @@ anvil-mutants-diff: anvil-mutants-diff-validate-prereqs anvil-impact
     # CI has a clean tree, so the two forms are identical there and this is
     # not a behaviour change for it.
     $exitCode = 0
+    $completed = $false
     try {
         git diff --src-prefix=a/ --dst-prefix=b/ "$base" --output=$diff_path
         $exitCode = $LASTEXITCODE
@@ -2380,12 +2381,13 @@ anvil-mutants-diff: anvil-mutants-diff-validate-prereqs anvil-impact
             & cargo {{_anvil_stable_toolchain_args}} mutants --in-diff $diff_path --no-shuffle --jobs 0 {{_anvil_mutants_config_arg}}
             $exitCode = $LASTEXITCODE
         }
+        $completed = $true
     } finally {
         try {
             Remove-Item -LiteralPath $diff_path
         } catch {
-            if ($exitCode -eq 0) { throw }
-            Write-Warning "Could not remove mutation diff '$diff_path': $_ (preserving exit code $exitCode)"
+            if ($completed -and $exitCode -eq 0) { throw }
+            Write-Warning "Could not remove mutation diff '$diff_path': $_ (preserving the primary failure)"
         }
     }
     exit $exitCode
