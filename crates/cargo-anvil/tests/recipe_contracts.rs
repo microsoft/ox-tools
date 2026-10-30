@@ -2308,14 +2308,6 @@ fn install_tool_controls_source_fallback_and_prerequisite_ordering() {
     if !tools_available() {
         return;
     }
-    if !Command::new("rustup")
-        .args(["toolchain", "list"])
-        .output()
-        .is_ok_and(|output| output.status.success())
-    {
-        eprintln!("skipping tool installation integration: rustup toolchain list is unavailable");
-        return;
-    }
     let tmp = fixture(&[("versions.just", VERSIONS), ("tools.just", TOOLS)], &[]);
     let justfile_path = tmp.path().join("Justfile");
     let mut justfile = fs::read_to_string(&justfile_path).unwrap();
@@ -2332,7 +2324,7 @@ source-prereq:
 
     let fallback = run_just(
         tmp.path(),
-        &["_install-tool", "cargo-spellcheck", "0.15.7", "binstall", "source-prereq"],
+        &["_install-tool-core", "cargo-spellcheck", "0.15.7", "binstall", "source-prereq"],
         &[
             ("FAKE_CARGO_LOG", log.as_os_str()),
             ("FAKE_BINSTALL_EXIT", OsStr::new("7")),
@@ -2364,7 +2356,7 @@ source-prereq:
     fs::remove_file(&log).unwrap();
     let prerequisite_failure = run_just(
         tmp.path(),
-        &["_install-tool", "cargo-spellcheck", "0.15.7", "binstall", "source-prereq"],
+        &["_install-tool-core", "cargo-spellcheck", "0.15.7", "binstall", "source-prereq"],
         &[
             ("FAKE_CARGO_LOG", log.as_os_str()),
             ("FAKE_BINSTALL_EXIT", OsStr::new("7")),
@@ -2382,7 +2374,7 @@ source-prereq:
     fs::remove_file(&log).unwrap();
     let ordinary_tool = run_just(
         tmp.path(),
-        &["_install-tool", "cargo-other", "1.2.3", "binstall", ""],
+        &["_install-tool-core", "cargo-other", "1.2.3", "binstall", ""],
         &[
             ("FAKE_CARGO_LOG", log.as_os_str()),
             ("FAKE_BINSTALL_EXIT", OsStr::new("7")),
