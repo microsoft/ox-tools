@@ -116,7 +116,7 @@ anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
         exit 0
     }
 
-    # _anvil-base-ref is the single source of truth for the baseline:
+    # anvil_base_ref is the single source of truth for the baseline:
     # the PR's target branch on CI (origin/<target>), or origin/main /
     # origin/master locally. We compare the PR's *current* API against
     # that branch rather than the last crates.io release, so the recipe
@@ -131,8 +131,7 @@ anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
     # clone, or a mis-configured job) we fail loudly with actionable
     # guidance rather than silently misreporting an unresolvable baseline
     # as a breaking change.
-    $base = (& "{{just_executable()}}" _anvil-base-ref)
-    $base = $base.Trim()
+    $base = {{ quote(anvil_base_ref) }}
     & git rev-parse --verify "$base^{commit}" 2>$null | Out-Null
     if ($LASTEXITCODE -ne 0) {
         Write-Error "anvil-semver-check: baseline '$base' is not present in this clone (shallow/truncated history? fetch it or unshallow)."

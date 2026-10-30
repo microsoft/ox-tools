@@ -1040,7 +1040,7 @@ mod tests {
         let unscoped = EXPECTED_CHECK_POLICY.len() - scoped;
         assert_eq!(
             (scoped, unscoped),
-            (24, 7),
+            (25, 7),
             "impact scoped/unscoped split changed; update EXPECTED_CHECK_POLICY deliberately"
         );
     }

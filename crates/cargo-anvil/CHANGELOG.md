@@ -2,6 +2,41 @@
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-10-30
+
+- ✨ Features
+
+  - cargo-anvil: exclude generated actions from downstream Dependabot updates ([#316](https://github.com/microsoft/ox-tools/pull/316))
+  - cargo-anvil: split generated recipe roles
+  - cargo-anvil: release v0.20.0
+  - cargo-anvil: consolidate generated infrastructure
+
+- 🐛 Bug Fixes
+
+  - cargo-anvil: retain consolidated impact action path
+  - cargo-anvil: isolate recipe tests from host rustup ([#324](https://github.com/microsoft/ox-tools/pull/324))
+  - cargo-anvil: require cargo-each 0.7.0
+  - cargo-anvil: install APRZ 1.2.1 from crates.io ([#313](https://github.com/microsoft/ox-tools/pull/313))
+  - cargo-anvil: reconcile consolidation with current main
+
+- ✔️ Tasks
+
+  - cargo-anvil: pin cargo-delta 0.5.0 ([#311](https://github.com/microsoft/ox-tools/pull/311))
+
+- ♻️ Code Refactoring
+
+  - cargo-anvil: unify example target selection
+  - cargo-anvil: make README checks shell-free
+  - cargo-anvil: make mutants diff shell-free
+  - cargo-anvil: make Miri recipes shell-free
+  - cargo-anvil: remove portable recipe PowerShell
+
+- 🧩 Miscellaneous
+
+  - Merge current main into cargo-anvil consolidation
+  - Kill a bunch of mutants ([#315](https://github.com/microsoft/ox-tools/pull/315))
+  - Merge current main into cargo-anvil consolidation
+
 ## [0.21.0] - 2026-10-29
 
 - ✨ Features

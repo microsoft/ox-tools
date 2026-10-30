@@ -400,6 +400,7 @@ fn plan_dependabot_exclusions(
         Ok(Some(updated)) => {
             if catalog.artifacts().iter().any(|artifact| match artifact {
                 Artifact::OwnedFile(spec) => spec.path.eq_ignore_ascii_case(&path),
+                Artifact::OwnedFileSection(spec) => spec.path.eq_ignore_ascii_case(&path),
                 Artifact::Region(spec) => matches!(&spec.host, HostSelector::Path(host) if host.eq_ignore_ascii_case(&path)),
             }) {
                 plan.refusal(format!(
@@ -2872,7 +2873,7 @@ mod tests {
             assert_eq!(plan.items().len(), 1);
             assert_eq!(plan.items()[0].target, Target::File { path: path.to_owned() });
             let updated = hosts.cached(path).unwrap();
-            assert!(updated.contains(".github/actions/anvil-setup/action.yml"));
+            assert!(updated.contains(".anvil/github/actions/setup/action.yml"));
             assert!(updated.contains(".github/workflows/anvil-pr-impl.yml"));
             assert_eq!(plan.projected_manifest(&Manifest::default()), Manifest::default());
             let rerun = if path == ".github/dependabot.yml" {
@@ -3103,7 +3104,7 @@ mod tests {
             let mut plan = Plan::default();
             plan.push(PlanItem::remove_file(retired));
             plan_dependabot_exclusions(Path::new("memory"), &[Backend::GitHub], &catalog, &mut plan, &mut hosts).unwrap();
-            let expected = crate::dependabot::update(source, &[".github/actions/anvil-setup/action.yml"])
+            let expected = crate::dependabot::update(source, &[".anvil/github/actions/setup/action.yml"])
                 .unwrap()
                 .unwrap();
             assert_eq!(plan.items().len(), 2);
@@ -3135,7 +3136,7 @@ mod tests {
             path: ".github/dependabot.yml".to_owned(),
         }));
         plan_dependabot_exclusions(Path::new("memory"), &[Backend::GitHub], &catalog, &mut plan, &mut hosts).unwrap();
-        let expected = crate::dependabot::update(source, &[".github/actions/anvil-setup/action.yml"])
+        let expected = crate::dependabot::update(source, &[".anvil/github/actions/setup/action.yml"])
             .unwrap()
             .unwrap();
         assert_eq!(plan.items().len(), 2);

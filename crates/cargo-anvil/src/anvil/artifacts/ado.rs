@@ -132,11 +132,7 @@ pub fn impact_step() -> Artifact {
 /// `.anvil/ado/steps/advisory-comments.yml`.
 #[must_use]
 pub fn advisory_comments() -> Artifact {
-    Artifact::backend_file(
-        Backend::Ado,
-        ".anvil/ado/steps/advisory-comments.yml",
-        ADVISORY_COMMENTS_STEP,
-    )
+    Artifact::backend_file(Backend::Ado, ".anvil/ado/steps/advisory-comments.yml", ADVISORY_COMMENTS_STEP)
 }
 
 /// `.anvil/ado/steps/job.yml` — the dirty-file job wrapper.

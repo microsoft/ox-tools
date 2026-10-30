@@ -227,6 +227,12 @@ anvil-tool-cargo-nextest-install installer="install": (anvil-toolchain-stable-in
 anvil-tool-cargo-nextest-validate-prereqs: (_check-tool "cargo-nextest" cargo_nextest_version)
 
 [group("anvil-setup")]
+anvil-tool-cargo-semver-checks-install installer="install": (anvil-toolchain-stable-install installer) (_install-tool "cargo-semver-checks" cargo_semver_checks_version installer)
+
+[group("anvil-setup")]
+anvil-tool-cargo-semver-checks-validate-prereqs: (_check-tool "cargo-semver-checks" cargo_semver_checks_version)
+
+[group("anvil-setup")]
 anvil-tool-cargo-sort-install installer="install": (anvil-toolchain-stable-install installer) (_install-tool "cargo-sort" cargo_sort_version installer)
 
 [group("anvil-setup")]
@@ -291,13 +297,13 @@ rust_nightly_external_types := "nightly-2026-03-20"
 # Cargo subcommands
 # ============================================================================
 
-cargo_aprz_version := "1.2.0"
+cargo_aprz_version := "1.2.1"
 cargo_audit_version := "0.22.2"
 cargo_bolero_version := "0.13.4"
 cargo_careful_version := "0.4.10"
 cargo_check_external_types_version := "0.5.0"
-cargo_coverage_gate_version := "0.6.0"
-cargo_delta_version := "0.4.0"
+cargo_coverage_gate_version := "0.7.2"
+cargo_delta_version := "0.5.0"
 cargo_deny_version := "0.20.2"
 cargo_doc2readme_version := "0.7.3"
 cargo_each_version := "0.7.0"
@@ -308,6 +314,7 @@ cargo_heather_version := "0.3.0"
 cargo_llvm_cov_version := "0.9.0"
 cargo_mutants_version := "27.1.0"
 cargo_nextest_version := "0.9.143"
+cargo_semver_checks_version := "0.50.0"
 cargo_sort_version := "2.1.4"
 cargo_spellcheck_version := "0.15.7"
 cargo_udeps_version := "0.1.61"
@@ -701,6 +708,14 @@ anvil-readme-check-setup installer="install": (anvil-tool-cargo-doc2readme-insta
 [group("anvil-setup")]
 anvil-readme-check-validate-prereqs: anvil-tool-cargo-doc2readme-validate-prereqs anvil-tool-cargo-each-validate-prereqs
 
+# Install prerequisites for the `anvil-semver-check` recipe.
+[private]
+anvil-semver-check-setup installer="install": (anvil-tool-cargo-semver-checks-install installer)
+
+# Validate prerequisites for the `anvil-semver-check` recipe.
+[private]
+anvil-semver-check-validate-prereqs: anvil-tool-cargo-semver-checks-validate-prereqs
+
 # cargo-spellcheck has a source-build-time libclang dependency. The
 # catalog installer checks it only immediately before a source install;
 # successful prebuilt installation does not require libclang.
@@ -740,6 +755,7 @@ anvil-pr-fast-setup installer="install": \
     (anvil-ensure-no-default-features-setup installer) \
     (anvil-doc-build-setup installer) \
     (anvil-readme-check-setup installer) \
+    (anvil-semver-check-setup installer) \
     (anvil-spellcheck-setup installer) \
     (anvil-pr-title-setup installer) \
     (anvil-deny-setup installer) \
@@ -760,6 +776,7 @@ anvil-pr-fast-validate-prereqs: \
     anvil-ensure-no-default-features-validate-prereqs \
     anvil-doc-build-validate-prereqs \
     anvil-readme-check-validate-prereqs \
+    anvil-semver-check-validate-prereqs \
     anvil-spellcheck-validate-prereqs \
     anvil-pr-title-validate-prereqs \
     anvil-deny-validate-prereqs \
