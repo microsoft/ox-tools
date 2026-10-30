@@ -88,10 +88,11 @@ Developer utilities such as `anvil-build` and `anvil-readme` live in
 `checks.just`: like checks, they directly perform work rather than orchestrating
 other generated recipes.
 
-Recipe help is a single concise, repository-neutral sentence immediately above
-each declaration. Detailed rationale belongs in the design documents rather
-than generated Just comments. Private helper help names the recipes that use the
-helper and the shared responsibility it owns.
+Recipe help is repository-neutral and focused on information useful at the
+command line. It may span multiple comment lines when that improves clarity, but
+does not use blank paragraphs that make `just --list` display only a trailing
+fragment. Detailed rationale belongs in the design documents. Private helper
+documentation identifies its consumers and the shared responsibility it owns.
 
 ### Groups and tiers
 

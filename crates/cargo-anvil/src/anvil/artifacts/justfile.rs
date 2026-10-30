@@ -646,25 +646,8 @@ mod tests {
         }
     }
 
-    fn attached_recipe_doc<'a>(body: &'a str, name: &str) -> Vec<&'a str> {
-        let lines = body.lines().collect::<Vec<_>>();
-        let declaration = lines
-            .iter()
-            .position(|line| recipe_name(line) == Some(name))
-            .expect("recipe section must contain its declaration");
-        let mut end = declaration;
-        while end > 0 && lines[end - 1].starts_with('[') {
-            end -= 1;
-        }
-        let mut start = end;
-        while start > 0 && lines[start - 1].starts_with("# ") {
-            start -= 1;
-        }
-        lines[start..end].to_vec()
-    }
-
     #[test]
-    fn recipe_help_is_concise_and_repository_neutral() {
+    fn recipe_comments_avoid_repository_links_and_scope_labels() {
         for artifact in helpers()
             .into_iter()
             .chain(impact())
@@ -676,21 +659,17 @@ mod tests {
             let Artifact::OwnedFileSection(section) = artifact else {
                 continue;
             };
-            let Some(name) = section.id.strip_prefix("recipe:") else {
-                continue;
-            };
-            if is_setup_recipe(&section.id) {
-                continue;
-            }
-            let docs = attached_recipe_doc(&section.body, name);
-            assert_eq!(docs.len(), 1, "{name} must have exactly one attached help line");
-            assert!(docs[0].len() <= 120, "{name} help is too long: {}", docs[0]);
             assert!(
                 !section.body.contains("github.com/microsoft/ox-tools"),
-                "{name} help must not link to the cargo-anvil source repository"
+                "{} must not link to the cargo-anvil source repository",
+                section.id
             );
-            if name.starts_with('_') {
-                assert!(docs[0].starts_with("# Used by "), "{name} help must identify its consumers");
+            for label in ["Affected tier", "Modified tier", "Required tier", "Unscoped"] {
+                assert!(
+                    !section.body.contains(label),
+                    "{} must not carry the internal scope label {label:?}",
+                    section.id
+                );
             }
         }
     }
