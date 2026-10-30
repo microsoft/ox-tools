@@ -139,20 +139,35 @@ fn just_lists_emitted_recipes() {
     for (recipe, summary) in [
         (
             "anvil-full",
-            "# Full tier: PR + scheduled, end-to-end. Useful before tagging a release.",
+            "# Run both pull-request and scheduled tiers across the full workspace.",
         ),
-        ("anvil-pr", "# Run all pull request checks."),
-        ("anvil-pr-fast", "# Run the fast pull request checks."),
-        ("anvil-pr-msrv", "# Run pull request compatibility tests under the declared MSRV."),
-        ("anvil-pr-mutants", "# Run the pull request mutation tests."),
-        ("anvil-pr-runtime-analysis", "# Run the pull request runtime analysis."),
-        ("anvil-pr-slow", "# Run the slow pull request checks."),
-        ("anvil-pr-test", "# Run the pull request tests."),
-        ("anvil-scheduled", "# Run all scheduled checks."),
-        ("anvil-scheduled-advisories", "# Run the scheduled advisory checks."),
-        ("anvil-scheduled-exhaustive", "# Run the scheduled exhaustive checks."),
-        ("anvil-scheduled-runtime-analysis", "# Run the scheduled runtime analysis."),
-        ("anvil-scheduled-test", "# Run the scheduled tests."),
+        ("anvil-pr", "# Run every pull-request check group."),
+        ("anvil-pr-fast", "# Run pull-request static analysis and repository policy checks."),
+        ("anvil-pr-msrv", "# Run pull-request compatibility tests under the declared MSRV."),
+        ("anvil-pr-mutants", "# Run pull-request mutation testing for changed code."),
+        (
+            "anvil-pr-runtime-analysis",
+            "# Run pull-request Miri, Careful, Loom, and Bolero checks.",
+        ),
+        ("anvil-pr-slow", "# Run all slow pull-request groups sequentially."),
+        ("anvil-pr-test", "# Run pull-request tests, coverage, doctests, and examples."),
+        ("anvil-scheduled", "# Run every scheduled check group across the full workspace."),
+        (
+            "anvil-scheduled-advisories",
+            "# Recheck external advisories, dependency risk, and evolving lints.",
+        ),
+        (
+            "anvil-scheduled-exhaustive",
+            "# Run full mutation, feature-combination, and benchmark checks.",
+        ),
+        (
+            "anvil-scheduled-runtime-analysis",
+            "# Run full-workspace Miri profiles on the schedule.",
+        ),
+        (
+            "anvil-scheduled-test",
+            "# Run full-workspace tests, coverage, doctests, and examples.",
+        ),
     ] {
         let found = listing.lines().any(|line| {
             let line = line.trim();
