@@ -1252,7 +1252,8 @@ fn remove_windows_dir_if_present_with(
         match remove(path) {
             Ok(()) => return Ok(()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-            Err(error) if error.raw_os_error() == Some(32) && retry < MAX_RETRIES => {
+            Err(error) if retry >= MAX_RETRIES => return Err(error),
+            Err(error) if error.raw_os_error() == Some(32) => {
                 let delay = std::time::Duration::from_millis(200 << retry);
                 eprintln!(
                     "warning: sharing violation while removing coverage target `{}`: {error}; retrying in {} ms",
