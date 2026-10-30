@@ -451,6 +451,34 @@ mod tests {
         assert!(before_selection.contains("    $env:RUSTUP_TOOLCHAIN = '{{ rust_nightly }}'"));
     }
 
+    #[test]
+    fn miri_setup_prepares_the_pinned_sysroot_after_installing_components() {
+        let miri = CHECK_FILES
+            .iter()
+            .find_map(|(path, body)| path.ends_with("/miri.just").then_some(*body))
+            .expect("miri.just is registered in CHECK_FILES");
+
+        let (_, setup) = miri
+            .split_once("# Install prerequisites and prepare the sysroot for the `anvil-miri` recipe.\n")
+            .expect("Miri has a setup recipe");
+        let (setup, _) = setup
+            .split_once("\n# Validate prerequisites")
+            .expect("Miri setup precedes prerequisite validation");
+
+        assert_eq!(
+            setup,
+            concat!(
+                "[private]\n",
+                "[script(\"pwsh\", \"-NoProfile\")]\n",
+                "anvil-miri-setup installer=\"install\": anvil-component-nightly-miri-install ",
+                "anvil-component-nightly-rust-src-install\n",
+                "    $ErrorActionPreference = 'Stop'\n",
+                "    & cargo '+{{ rust_nightly }}' miri setup\n",
+                "    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n",
+            )
+        );
+    }
+
     // A missing MSRV skips without discovery; otherwise discovery inherits the validated compiler.
     #[test]
     fn msrv_selection_uses_the_validated_toolchain_after_the_no_msrv_skip() {
