@@ -229,7 +229,57 @@ fn is_setup_recipe(id: &str) -> bool {
         || name == "_anvil-root-msrv"
 }
 
-fn route_sections(sections: &mut [Artifact], public_path: &'static str) {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SetupExposure {
+    Private,
+    Group,
+}
+
+fn is_global_setup_recipe(name: &str) -> bool {
+    matches!(name, "anvil-setup" | "anvil-validate-prereqs")
+}
+
+fn with_private_attribute(body: &str, name: &str, private: bool) -> String {
+    let body = body
+        .split_inclusive('\n')
+        .filter(|line| line.trim_end_matches(['\r', '\n']) != "[private]")
+        .collect::<String>();
+    if !private {
+        return body;
+    }
+
+    let mut offset = 0;
+    for line in body.split_inclusive('\n') {
+        if recipe_name(line.trim_end_matches(['\r', '\n'])) == Some(name) {
+            let mut out = String::with_capacity(body.len() + "[private]\n".len());
+            out.push_str(&body[..offset]);
+            out.push_str("[private]\n");
+            out.push_str(&body[offset..]);
+            return out;
+        }
+        offset += line.len();
+    }
+    panic!("setup recipe section {name} must contain its declaration");
+}
+
+fn normalize_setup_visibility(sections: &mut [Artifact], exposure: SetupExposure) {
+    for artifact in sections {
+        let Artifact::OwnedFileSection(spec) = artifact else {
+            continue;
+        };
+        let Some(name) = spec.id.strip_prefix("recipe:") else {
+            continue;
+        };
+        if !is_setup_recipe(&spec.id) {
+            continue;
+        }
+        let public = is_global_setup_recipe(name) || exposure == SetupExposure::Group;
+        spec.body = with_private_attribute(&spec.body, name, !public);
+    }
+}
+
+fn route_sections(sections: &mut [Artifact], public_path: &'static str, setup_exposure: SetupExposure) {
+    normalize_setup_visibility(sections, setup_exposure);
     for artifact in sections {
         let Artifact::OwnedFileSection(spec) = artifact else {
             continue;
@@ -244,9 +294,15 @@ fn route_sections(sections: &mut [Artifact], public_path: &'static str) {
     }
 }
 
-fn routed_template_sections(source: &str, body: &str, public_path: &'static str) -> Vec<Artifact> {
+fn routed_template_sections(source: &str, body: &str, public_path: &'static str, setup_exposure: SetupExposure) -> Vec<Artifact> {
     let mut sections = template_sections(HELPERS_JUST_PATH, source, body);
-    route_sections(&mut sections, public_path);
+    route_sections(&mut sections, public_path, setup_exposure);
+    sections
+}
+
+fn setup_template_sections(source: &str, body: &str) -> Vec<Artifact> {
+    let mut sections = template_sections(SETUP_JUST_PATH, source, body);
+    normalize_setup_visibility(&mut sections, SetupExposure::Private);
     sections
 }
 
@@ -276,25 +332,25 @@ pub(crate) const fn scaffold() -> &'static str {
 /// Pinned toolchain and cargo-subcommand version declarations.
 #[must_use]
 pub fn versions() -> Vec<Artifact> {
-    template_sections(SETUP_JUST_PATH, "versions", VERSIONS_JUST)
+    setup_template_sections("versions", VERSIONS_JUST)
 }
 
 /// Tool install and prerequisite recipes.
 #[must_use]
 pub fn tools() -> Vec<Artifact> {
-    template_sections(SETUP_JUST_PATH, "tools", TOOLS_JUST)
+    setup_template_sections("tools", TOOLS_JUST)
 }
 
 /// Shared helper recipes and impact contract.
 #[must_use]
 pub fn helpers() -> Vec<Artifact> {
-    routed_template_sections("helpers", HELPERS_JUST, HELPERS_JUST_PATH)
+    routed_template_sections("helpers", HELPERS_JUST, HELPERS_JUST_PATH, SetupExposure::Private)
 }
 
 /// Shared `anvil-impact` recipe.
 #[must_use]
 pub fn impact() -> Vec<Artifact> {
-    routed_template_sections("impact", IMPACT_JUST, HELPERS_JUST_PATH)
+    routed_template_sections("impact", IMPACT_JUST, HELPERS_JUST_PATH, SetupExposure::Private)
 }
 
 /// Generic local-development recipe files.
@@ -302,7 +358,7 @@ pub fn impact() -> Vec<Artifact> {
 pub fn dev_files() -> Vec<Artifact> {
     DEV_FILES
         .iter()
-        .flat_map(|&(path, body)| routed_template_sections(path, body, CHECKS_JUST_PATH))
+        .flat_map(|&(path, body)| routed_template_sections(path, body, CHECKS_JUST_PATH, SetupExposure::Private))
         .collect()
 }
 
@@ -312,7 +368,7 @@ pub fn dev_files() -> Vec<Artifact> {
 pub fn check_files() -> Vec<Artifact> {
     CHECK_FILES
         .iter()
-        .flat_map(|&(path, body)| routed_template_sections(path, body, CHECKS_JUST_PATH))
+        .flat_map(|&(path, body)| routed_template_sections(path, body, CHECKS_JUST_PATH, SetupExposure::Private))
         .collect()
 }
 
@@ -322,14 +378,14 @@ pub fn check_files() -> Vec<Artifact> {
 pub fn group_files() -> Vec<Artifact> {
     GROUP_FILES
         .iter()
-        .flat_map(|&(path, body)| routed_template_sections(path, body, GROUPS_JUST_PATH))
+        .flat_map(|&(path, body)| routed_template_sections(path, body, GROUPS_JUST_PATH, SetupExposure::Group))
         .collect()
 }
 
 /// `justfiles/anvil/tiers.just` — the tier aggregators.
 #[must_use]
 pub fn tiers() -> Vec<Artifact> {
-    routed_template_sections("tiers", TIERS_JUST, GROUPS_JUST_PATH)
+    routed_template_sections("tiers", TIERS_JUST, GROUPS_JUST_PATH, SetupExposure::Private)
 }
 
 /// Look up one built-in Just recipe by its top-level name.
@@ -592,6 +648,52 @@ mod tests {
     }
 
     #[test]
+    fn only_global_and_group_setup_recipes_are_public() {
+        let expected = [
+            "anvil-setup",
+            "anvil-validate-prereqs",
+            "anvil-pr-fast-setup",
+            "anvil-pr-fast-validate-prereqs",
+            "anvil-pr-msrv-setup",
+            "anvil-pr-msrv-validate-prereqs",
+            "anvil-pr-slow-setup",
+            "anvil-pr-slow-validate-prereqs",
+            "anvil-pr-test-setup",
+            "anvil-pr-test-validate-prereqs",
+            "anvil-pr-runtime-analysis-setup",
+            "anvil-pr-runtime-analysis-validate-prereqs",
+            "anvil-pr-mutants-setup",
+            "anvil-pr-mutants-validate-prereqs",
+            "anvil-scheduled-test-setup",
+            "anvil-scheduled-test-validate-prereqs",
+            "anvil-scheduled-advisories-setup",
+            "anvil-scheduled-advisories-validate-prereqs",
+            "anvil-scheduled-runtime-analysis-setup",
+            "anvil-scheduled-runtime-analysis-validate-prereqs",
+            "anvil-scheduled-exhaustive-setup",
+            "anvil-scheduled-exhaustive-validate-prereqs",
+        ]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+        let catalog = Catalog::anvil();
+        let actual = catalog
+            .artifacts()
+            .iter()
+            .filter_map(|artifact| {
+                let Artifact::OwnedFileSection(section) = artifact else {
+                    return None;
+                };
+                if section.path != SETUP_JUST_PATH || section.body.lines().any(|line| line == "[private]") {
+                    return None;
+                }
+                section.id.strip_prefix("recipe:")
+            })
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
     fn shared_assignments_live_in_the_tools_preamble() {
         let preamble = tools()
             .into_iter()
@@ -688,12 +790,14 @@ mod tests {
 
         let mut sections = vec![
             Artifact::owned_file("unrelated", "body"),
-            section(CHECKS_JUST_PATH, "recipe:anvil-check-setup", "setup"),
-            section(CHECKS_JUST_PATH, "recipe:anvil-check", "check"),
+            section(CHECKS_JUST_PATH, "recipe:anvil-check-setup", "anvil-check-setup:\n    echo setup\n"),
+            section(CHECKS_JUST_PATH, "recipe:anvil-check", "anvil-check:\n    echo check\n"),
         ];
-        route_sections(&mut sections, CHECKS_JUST_PATH);
+        route_sections(&mut sections, CHECKS_JUST_PATH, SetupExposure::Private);
         assert!(matches!(&sections[0], Artifact::OwnedFile(spec) if spec.path == "unrelated"));
-        assert!(matches!(&sections[1], Artifact::OwnedFileSection(spec) if spec.path == SETUP_JUST_PATH));
+        assert!(
+            matches!(&sections[1], Artifact::OwnedFileSection(spec) if spec.path == SETUP_JUST_PATH && spec.body.contains("[private]"))
+        );
         assert!(matches!(&sections[2], Artifact::OwnedFileSection(spec) if spec.path == CHECKS_JUST_PATH));
     }
 
@@ -701,7 +805,7 @@ mod tests {
     fn responsibility_routing_separates_public_and_private_recipes() {
         let body = "shared := \"value\"\n\nanvil-public:\n    echo public\n\n_anvil-private:\n    echo private\n";
 
-        let checks = routed_template_sections("fixture-check", body, CHECKS_JUST_PATH);
+        let checks = routed_template_sections("fixture-check", body, CHECKS_JUST_PATH, SetupExposure::Private);
         assert!(checks.iter().any(
             |artifact| matches!(artifact, Artifact::OwnedFileSection(spec) if spec.id == "source:fixture-check" && spec.path == HELPERS_JUST_PATH)
         ));
@@ -712,7 +816,7 @@ mod tests {
             |artifact| matches!(artifact, Artifact::OwnedFileSection(spec) if spec.id == "recipe:_anvil-private" && spec.path == HELPERS_JUST_PATH)
         ));
 
-        let groups = routed_template_sections("fixture-group", body, GROUPS_JUST_PATH);
+        let groups = routed_template_sections("fixture-group", body, GROUPS_JUST_PATH, SetupExposure::Group);
         assert!(groups.iter().any(
             |artifact| matches!(artifact, Artifact::OwnedFileSection(spec) if spec.id == "recipe:anvil-public" && spec.path == GROUPS_JUST_PATH)
         ));

@@ -54,9 +54,10 @@ the managed import region.
 
 Every check has:
 
-- `anvil-<check>` to run it;
-- `anvil-<check>-setup installer=install|binstall` to provision prerequisites;
-- `anvil-<check>-validate-prereqs` to validate without installation.
+- `anvil-<check>` as its public execution entry point;
+- a private `anvil-<check>-setup` dependency that provisions prerequisites;
+- a private `anvil-<check>-validate-prereqs` dependency that validates without
+  installation.
 
 The common shape is a direct general-purpose tool invocation:
 
@@ -127,6 +128,17 @@ allows cargo-binstall's compile strategy when no binary source has the pinned
 release. This keeps newly published tools installable before binary indexes
 catch up. The selected installer is forwarded unchanged through group, tier,
 stable-toolchain, and cargo-each bootstrap setup.
+
+The public setup surface is intentionally narrow:
+
+- `anvil-setup` and `anvil-validate-prereqs` cover the complete catalog;
+- each group exposes `anvil-<group>-setup` and
+  `anvil-<group>-validate-prereqs`, matching the cloud parallelism boundary.
+
+Per-check, tier, tool, component, and toolchain setup/validation recipes are
+private implementation details. Checks still depend on their private validation
+recipes, so invoking one check directly remains fail-fast without exposing its
+prerequisite graph as a supported command surface.
 
 `cargo-each` is the bootstrap Cargo tool. It installs with Cargo already
 available to the caller, then resolves `{workspace-rust-version}` for the
