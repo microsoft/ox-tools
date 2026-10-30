@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-10-30
+
+- 🐛 Bug Fixes
+
+  - cargo-anvil: isolate mutation diffs and normalize Git prefixes ([#323](https://github.com/microsoft/ox-tools/pull/323))
+
 ## [0.21.1] - 2026-10-30
 
 - 🐛 Bug Fixes
