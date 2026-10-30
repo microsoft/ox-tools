@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+## [0.21.1] - 2026-10-30
+
+- 🐛 Bug Fixes
+
+  - cargo-anvil: isolate mutation diffs and normalize Git prefixes
+  - cargo-anvil: install APRZ 1.2.1 from crates.io ([#313](https://github.com/microsoft/ox-tools/pull/313))
+
+- ✔️ Tasks
+
+  - cargo-anvil: pin cargo-delta 0.5.0 ([#311](https://github.com/microsoft/ox-tools/pull/311))
+
+- 🧩 Miscellaneous
+
+  - Kill a bunch of mutants ([#315](https://github.com/microsoft/ox-tools/pull/315))
+
 ## [0.21.0] - 2026-10-29
 
 - ✨ Features
