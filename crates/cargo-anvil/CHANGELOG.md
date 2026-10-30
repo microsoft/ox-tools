@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.21.2] - 2026-10-30
+
+- 🐛 Bug Fixes
+
+  - cargo-anvil: prepare the Miri sysroot during setup
+
+- ✔️ Tasks
+
+  - cargo-anvil: refresh release notes for 0.21.1
+
 ## [0.21.1] - 2026-10-30
 
 - 🐛 Bug Fixes

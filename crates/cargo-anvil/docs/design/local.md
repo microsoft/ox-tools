@@ -726,6 +726,17 @@ baseline — so an environment without the base ref must either provide it, run 
 
 ## 5. Miri execution customization
 
+`anvil-miri-setup` installs the Miri and rust-src components for the catalog's
+pinned nightly, then runs `cargo +<nightly> miri setup` to prepare its sysroot.
+Setup is not complete until sysroot preparation succeeds; Cargo's failure exit
+code is preserved. This also applies when setup is reached through a group,
+tier, or the global `anvil-setup` recipe. Preparing a missing sysroot can compile
+standard-library dependencies and require registry access; component installation
+alone does not make Miri ready to run. Repeated setup reuses Miri's cached sysroot.
+Container catalogs remain responsible for sysroot location, credentials,
+permissions, and cleanup. The test runner still invokes setup with
+`--print-sysroot` to locate or prepare the sysroot at execution time.
+
 Miri compiles the selected package scope once, then executes each compiled Miri
 test executable concurrently. `ANVIL_MIRI_JOBS` overrides the default of one
 artifact worker per logical processor and must be a positive integer. The worker

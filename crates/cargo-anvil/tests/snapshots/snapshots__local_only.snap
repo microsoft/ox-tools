@@ -2233,9 +2233,13 @@ _anvil-miri-test profile package="" test_filter="" example="": anvil-impact
 
 # --- pr-runtime-analysis members ---
 
-# Install prerequisites for the `anvil-miri` recipe.
+# Install prerequisites and prepare the sysroot for the `anvil-miri` recipe.
 [private]
+[script("pwsh", "-NoProfile")]
 anvil-miri-setup installer="install": anvil-component-nightly-miri-install anvil-component-nightly-rust-src-install
+    $ErrorActionPreference = 'Stop'
+    & cargo '+{{ rust_nightly }}' miri setup
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Validate prerequisites for the `anvil-miri` recipe.
 [private]
