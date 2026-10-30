@@ -42,8 +42,12 @@ The optional `run` mode keeps collection and evaluation separated internally:
    After evaluation, a pure combiner gives evaluation errors precedence over
    cleanup errors, preserves nonzero rendered verdicts with an explicit cleanup
    warning, and converts a passing evaluation plus cleanup failure into an
-   operational error. Explicit cleanup disarms the guard after one attempt, so
-   `Drop` never retries the same failed deletion.
+   operational error. Explicit cleanup disarms the guard before removal, so
+   `Drop` never adds an attempt even if removal fails. On Windows, sharing
+   violations may make up to five bounded removal attempts, with delays of
+   200, 400, 800, and 1600 ms. Only a final Windows sharing violation receives
+   guidance to release process handles; other errors retain generic scratch-path
+   context and fail immediately.
 4. `cargo llvm-cov report --lcov` receives the same package and target
    selection. cargo-llvm-cov therefore owns raw-profile merging, ordinary and
    nested trybuild object discovery, build-directory handling, and its full

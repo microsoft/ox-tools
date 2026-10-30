@@ -1208,10 +1208,21 @@ impl TemporaryDirectory {
         &self.path
     }
 
-    fn cleanup(mut self) -> Result<(), AppError> {
+    fn cleanup(self) -> Result<(), AppError> {
+        self.cleanup_with(remove_dir_if_present)
+    }
+
+    fn cleanup_with(mut self, remove: impl FnOnce(&Path) -> io::Result<()>) -> Result<(), AppError> {
+        // Explicit cleanup owns the full attempt budget; Drop must not add an attempt even on error.
         self.armed = false;
-        remove_dir_if_present(&self.path).into_app_err(format!(
-            "failed to remove isolated coverage target `{}`; release any process handles to this directory and retry cleanup",
+        let result = remove(&self.path);
+        let guidance = if cfg!(windows) && result.as_ref().is_err_and(|error| error.raw_os_error() == Some(32)) {
+            "; release any process handles to this directory and retry cleanup"
+        } else {
+            ""
+        };
+        result.into_app_err(format!(
+            "failed to remove isolated coverage target `{}`{guidance}",
             self.path.display()
         ))
     }
@@ -1240,12 +1251,13 @@ fn remove_dir_if_present(path: &Path) -> io::Result<()> {
 }
 
 #[cfg(any(windows, test))]
+/// Injected removal and waiting let tests exercise the production Windows retry policy deterministically on every host.
 fn remove_windows_dir_if_present_with(
     path: &Path,
     mut remove: impl FnMut(&Path) -> io::Result<()>,
     mut wait: impl FnMut(std::time::Duration),
 ) -> io::Result<()> {
-    // Five attempts allow transient Windows handles to close without hiding persistent locks.
+    // Bounded retries let transient Windows handles close without hiding persistent locks.
     const MAX_RETRIES: u32 = 4;
     let mut retry = 0;
     loop {
@@ -3515,7 +3527,7 @@ mod tests {
     #[test]
     fn cleanup_retries_sharing_violations_then_succeeds() {
         let mut attempts = 0;
-        let mut delays = Vec::new();
+        let mut delays = [200, 400].into_iter();
         let result = remove_windows_dir_if_present_with(
             Path::new("coverage-target"),
             |_| {
@@ -3526,15 +3538,15 @@ mod tests {
                     Ok(())
                 }
             },
-            |delay| delays.push(delay.as_millis()),
+            |delay| assert_eq!(Some(delay.as_millis()), delays.next()),
         );
-        assert_eq!((result.is_ok(), attempts, delays), (true, 3, vec![200, 400]));
+        assert_eq!((result.is_ok(), attempts, delays.next()), (true, 3, None));
     }
 
     #[test]
     fn cleanup_stops_after_bounded_sharing_violation_retries() {
         let mut attempts = 0;
-        let mut delays = Vec::new();
+        let mut delays = [200, 400, 800, 1600].into_iter();
         let error = remove_windows_dir_if_present_with(
             Path::new("coverage-target"),
             |_| {
@@ -3542,10 +3554,31 @@ mod tests {
                 assert!(attempts <= 5, "cleanup must not exceed five removal attempts");
                 Err(io::Error::from_raw_os_error(32))
             },
-            |delay| delays.push(delay.as_millis()),
+            |delay| assert_eq!(Some(delay.as_millis()), delays.next()),
         )
         .expect_err("persistent locks remain errors");
-        assert_eq!((error.raw_os_error(), attempts, delays), (Some(32), 5, vec![200, 400, 800, 1600]));
+        assert_eq!((error.raw_os_error(), attempts, delays.next()), (Some(32), 5, None));
+    }
+
+    #[test]
+    fn cleanup_handle_guidance_requires_a_windows_sharing_violation() {
+        for code in [5, 13, 32] {
+            let directory = TemporaryDirectory {
+                path: PathBuf::from("coverage-target"),
+                armed: true,
+            };
+            let error = directory
+                .cleanup_with(|_| Err(io::Error::from_raw_os_error(code)))
+                .expect_err("injected removal fails");
+            let message = error.to_string();
+            assert_eq!(
+                (
+                    message.contains("failed to remove isolated coverage target `coverage-target`"),
+                    message.contains("release any process handles"),
+                ),
+                (true, cfg!(windows) && code == 32)
+            );
+        }
     }
 
     #[test]
