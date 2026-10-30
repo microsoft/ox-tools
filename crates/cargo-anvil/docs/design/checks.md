@@ -327,6 +327,14 @@ coverage tradeoff beside the test.
 
 The mutants check requires a base ref: locally the recipe resolves `BASE_REF` (if set), then `origin/main`, then `origin/master`, then errors out. GitHub passes `${{ github.event.pull_request.base.sha }}` as `BASE_REF`; on ADO the shared resolver reads `$(System.PullRequest.TargetBranch)` from the environment.
 
+Each invocation reserves its own uniquely named diff file in `RUNNER_TEMP`,
+`AGENT_TEMPDIRECTORY`, or the system temporary directory (in that order).
+The working-tree diff explicitly requests `a/` and `b/` prefixes, independent
+of Git's mnemonic or no-prefix configuration. A `finally` block removes the
+file after success or failure. Git failures prevent mutation testing, and
+Git/cargo-mutants exit codes survive cleanup failures; cleanup failures are
+reported rather than silently ignored.
+
 Both mutation recipes select `.cargo/mutants.<os>.toml` when it exists, using
 Just's native host OS name, and pass it through cargo-mutants' `--config` option.
 Otherwise they retain cargo-mutants' default configuration discovery. These are

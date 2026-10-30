@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [0.20.4] - 2026-10-29
+
+- 🐛 Bug Fixes
+
+  - cargo-anvil: install APRZ 1.2.1 from crates.io ([#313](https://github.com/microsoft/ox-tools/pull/313))
+
+- ✔️ Tasks
+
+  - cargo-anvil: pin cargo-delta 0.5.0 ([#311](https://github.com/microsoft/ox-tools/pull/311))
+
+- 🧩 Miscellaneous
+
+  - Kill a bunch of mutants ([#315](https://github.com/microsoft/ox-tools/pull/315))
+
 ## [0.20.3] - 2026-10-29
 
 - ✔️ Tasks
