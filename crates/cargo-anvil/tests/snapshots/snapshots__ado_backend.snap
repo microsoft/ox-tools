@@ -3573,7 +3573,8 @@ anvil-mutants-diff: anvil-mutants-diff-validate-prereqs anvil-impact
     $tmp_dir = $env:RUNNER_TEMP
     if (-not $tmp_dir) { $tmp_dir = $env:AGENT_TEMPDIRECTORY }
     if (-not $tmp_dir) { $tmp_dir = [System.IO.Path]::GetTempPath() }
-    $diff_path = Join-Path $tmp_dir 'anvil-mutants-diff.diff'
+    $diff_path = Join-Path $tmp_dir ('anvil-mutants-diff-' + [Guid]::NewGuid().ToString('N') + '.diff')
+    New-Item -ItemType File -Path $diff_path | Out-Null
     # Diff the base against the WORKING TREE, not against HEAD.
     # cargo-mutants validates every line of the diff against the file on
     # disk and aborts when they disagree, so a commit-to-commit diff fails
@@ -3581,10 +3582,25 @@ anvil-mutants-diff: anvil-mutants-diff-validate-prereqs anvil-impact
     # since the point of running a tier locally is to check work in progress.
     # CI has a clean tree, so the two forms are identical there and this is
     # not a behaviour change for it.
-    git diff "$base" --output=$diff_path
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    & cargo {{_anvil_stable_toolchain_args}} mutants --in-diff $diff_path --no-shuffle --jobs 0 {{_anvil_mutants_config_arg}}
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $exitCode = 0
+    $completed = $false
+    try {
+        git diff --src-prefix=a/ --dst-prefix=b/ "$base" --output=$diff_path
+        $exitCode = $LASTEXITCODE
+        if ($exitCode -eq 0) {
+            & cargo {{_anvil_stable_toolchain_args}} mutants --in-diff $diff_path --no-shuffle --jobs 0 {{_anvil_mutants_config_arg}}
+            $exitCode = $LASTEXITCODE
+        }
+        $completed = $true
+    } finally {
+        try {
+            Remove-Item -LiteralPath $diff_path
+        } catch {
+            if ($completed -and $exitCode -eq 0) { throw }
+            Write-Warning "Could not remove mutation diff '$diff_path': $_ (preserving the primary failure)"
+        }
+    }
+    exit $exitCode
 
 # --- pr-mutants members ---
 
