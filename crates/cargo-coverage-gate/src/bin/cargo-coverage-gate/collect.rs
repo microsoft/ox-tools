@@ -3538,6 +3538,7 @@ mod tests {
             Path::new("coverage-target"),
             |_| {
                 attempts += 1;
+                assert!(attempts <= 5, "cleanup must not exceed five removal attempts");
                 Err(io::Error::from_raw_os_error(32))
             },
             |delay| delays.push(delay.as_millis()),
