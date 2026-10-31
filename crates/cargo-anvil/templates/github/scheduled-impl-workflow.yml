@@ -32,7 +32,7 @@ on:
         required: false
 
 # A called workflow cannot elevate beyond its caller. Reset ordinary jobs here,
-# then restore only the publisher's issue scope below.
+# then restore publication scopes only on their publishing jobs below.
 permissions:
   contents: read
 
@@ -130,9 +130,12 @@ jobs:
           group: scheduled-runtime-analysis
 
   scheduled-exhaustive:
-    # x86_64-only by design: this group includes mutants-full (which
-    # doesn't build on aarch64-pc-windows-msvc — winapi crate
-    # incompatibility) plus cargo-hack feature powerset and bench.
+    # Keep exhaustive mutation testing, feature powersets, and benchmark
+    # compilation on the existing x86_64 schedule to bound recurring cost.
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
     strategy:
       fail-fast: false
       matrix:

@@ -211,7 +211,7 @@ above compose these recipes into the default policy:
   [`Loom`][__link21], and
   [`Bolero`][__link22].
 * **Broader validation:** diff-scoped and full
-  [`cargo-mutants`][__link23] runs,
+  [`cargo-gamma`][__link23] runs,
   [`cargo-hack`][__link24] feature-powerset
   checks, and benchmark compilation.
 
@@ -442,7 +442,7 @@ More detailed design and operational guidance is available in the
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbgs5VnLb2OoYbko7k92P6vHkbwjkvXZs1dFkbjMWRv7RzYqdhZIGDa2NhcmdvLWFudmlsZjAuMjEuMWtjYXJnb19hbnZpbA
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbz74I7zQ3IEwboKlLkONK75obJQlyCpAcJ_Mb3kdso-xrqy1hZIGDa2NhcmdvLWFudmlsZjAuMjIuMGtjYXJnb19hbnZpbA
  [__link0]: https://github.com/casey/just
  [__link1]: https://rust-lang.github.io/rustfmt/
  [__link10]: https://www.conventionalcommits.org/
@@ -459,12 +459,12 @@ This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Br
  [__link20]: https://crates.io/crates/cargo-careful
  [__link21]: https://crates.io/crates/loom
  [__link22]: https://crates.io/crates/bolero
- [__link23]: https://mutants.rs/
+ [__link23]: https://crates.io/crates/cargo-gamma
  [__link24]: https://crates.io/crates/cargo-hack
  [__link25]: https://crates.io/crates/cargo-coverage-gate
- [__link26]: https://docs.rs/cargo-anvil/0.21.1/cargo_anvil/?search=Catalog::anvil
- [__link27]: https://docs.rs/cargo-anvil/0.21.1/cargo_anvil/?search=Artifact
- [__link28]: https://docs.rs/cargo-anvil/0.21.1/cargo_anvil/fn.run_app.html
+ [__link26]: https://docs.rs/cargo-anvil/0.22.0/cargo_anvil/?search=Catalog::anvil
+ [__link27]: https://docs.rs/cargo-anvil/0.22.0/cargo_anvil/?search=Artifact
+ [__link28]: https://docs.rs/cargo-anvil/0.22.0/cargo_anvil/fn.run_app.html
  [__link3]: https://crates.io/crates/cargo-each
  [__link4]: https://crates.io/crates/cargo-sort
  [__link5]: https://crates.io/crates/cargo-heather

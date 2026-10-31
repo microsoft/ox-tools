@@ -733,7 +733,13 @@ mod tests {
 
     #[test]
     fn loaded_table_bytes_do_not_depend_on_the_backing_file_after_open() {
-        let file = tempfile::tempfile().expect("temporary file");
+        let dir = TempDir::new().expect("creating a temporary directory");
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(dir.path().join(TestTable::TABLE_NAME))
+            .expect("creating a backing table");
         file.set_len(4).expect("size temporary file");
         (&file).write_all(b"data").expect("write temporary file");
 

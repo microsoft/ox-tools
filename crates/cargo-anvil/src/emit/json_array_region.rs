@@ -84,7 +84,6 @@ fn validation_refusal(condition: JsonValidationCondition, remedy: RefusalRemedy)
     ManagedRegionRefusal::new(JsonValidationError::new(condition).into(), remedy)
 }
 
-#[mutants::skip] // Declarative strict-JSONC parser configuration; accepted and rejected dialect features are covered through public planner behavior.
 fn parse_options() -> ParseOptions {
     ParseOptions {
         allow_comments: true,
@@ -115,14 +114,13 @@ fn value_range(value: &Value<'_>) -> Range<usize> {
     }
 }
 
-#[mutants::skip] // Parser ranges include one closing delimiter byte; every caller needs the byte immediately before the exclusive end.
 fn closing_delimiter_offset(range: &JsonRange) -> usize {
     range.end - 1
 }
 
 fn lookup<'a>(root: &'a Value<'a>, path: &[String]) -> Result<Option<&'a Value<'a>>, ManagedRegionRefusal> {
     let mut value = root;
-    for (index, key) in path.iter().enumerate() {
+    for key in path {
         let object = value.as_object().ok_or_else(|| {
             validation_refusal(
                 JsonValidationCondition::ParentNotObject { path: path.to_vec() },
@@ -143,12 +141,6 @@ fn lookup<'a>(root: &'a Value<'a>, path: &[String]) -> Result<Option<&'a Value<'
             ));
         }
         value = &property.value;
-        if index + 1 != path.len() && value.as_object().is_none() {
-            return Err(validation_refusal(
-                JsonValidationCondition::ParentNotObject { path: path.to_vec() },
-                RefusalRemedy::ArrayShape,
-            ));
-        }
     }
     Ok(Some(value))
 }
@@ -218,7 +210,10 @@ fn body_strings(body: &str) -> Result<Vec<String>, ManagedRegionRefusal> {
         ));
     }
     if json_comment_lines(&source).any(|line| {
-        let comment = source[line.start..line.end].trim();
+        let comment = source[
+            // #[gamma::skip(range.exclusive_to_inclusive, reason = "body_strings appends a newline and closing bracket; including the next byte after a full comment line cannot change its leading sentinel spelling")]
+            line.start..line.end]
+            .trim();
         comment.starts_with("// >>> anvil-managed:") || comment.starts_with("// <<< anvil-managed:")
     }) {
         return Err(validation_refusal(
@@ -227,7 +222,15 @@ fn body_strings(body: &str) -> Result<Vec<String>, ManagedRegionRefusal> {
         ));
     }
     let last = value_range(array.elements.last().expect("the nonempty array was checked above"));
-    if separator_comma(&source[last.end..closing_delimiter_offset(&array.range)]).is_none() {
+    if separator_comma(
+        &source[
+            // #[gamma::skip(range.exclusive_to_inclusive, reason = "including the closing bracket cannot change whether the preceding gap contains a comma")]
+            last.end..
+            // #[gamma::skip(expr.increment, expr.decrement, reason = "the closing bracket is preceded by the newline appended above; adding the bracket or removing that newline cannot change comma visibility")]
+            closing_delimiter_offset(&array.range)],
+    )
+    .is_none()
+    {
         return Err(validation_refusal(
             JsonValidationCondition::GeneratedTrailingCommaMissing,
             RefusalRemedy::InvalidGeneratedJson,
@@ -237,10 +240,13 @@ fn body_strings(body: &str) -> Result<Vec<String>, ManagedRegionRefusal> {
 }
 
 fn render_body(body: &str, indent: &str, newline: &str) -> String {
-    let mut rendered = String::with_capacity(body.len() + indent.len() * body.lines().count());
+    let mut rendered = String::with_capacity(
+        // #[gamma::skip(arith.add_to_mul, arith.mul_to_add, reason = "these nonnegative allocation estimates change capacity only; rendered bytes are determined by the following appends")]
+        body.len() + indent.len() * body.lines().count(),
+    );
     let body = render_body_with_newline(body, "\n");
     for line in body.split_inclusive('\n') {
-        let content = line.trim_end_matches(['\r', '\n']);
+        let content = line.trim_end_matches('\n');
         if !content.trim().is_empty() {
             rendered.push_str(indent);
             rendered.push_str(content);
@@ -251,27 +257,60 @@ fn render_body(body: &str, indent: &str, newline: &str) -> String {
 }
 
 fn line_indent(text: &str, offset: usize) -> &str {
-    let start = text[..offset].rfind(['\r', '\n']).map_or(0, |index| index + 1);
-    &text[start..offset.min(start + text[start..offset].len() - text[start..offset].trim_start_matches([' ', '\t']).len())]
+    let start = text[..offset]
+        .rfind(
+            // #[gamma::skip(collection.reverse_array, reason = "rfind treats the character array as an unordered set")]
+            ['\r', '\n'],
+        )
+        .map_or(0, |index| index + 1);
+    let prefix = &text[
+        // #[gamma::skip(range.exclusive_to_inclusive, expr.increment, tag = "equivalent", reason = "callers pass ASCII structural-token offsets; including that token preserves the preceding indentation")]
+        start..offset];
+    &prefix[..prefix.len()
+        - prefix
+            .trim_start_matches(
+                // #[gamma::skip(collection.reverse_array, reason = "trim_start_matches treats the character array as an unordered set")]
+                [' ', '\t'],
+            )
+            .len()]
 }
 
 fn region_indent<'a>(text: &'a str, region: &Region<'_>) -> &'a str {
-    let line = &text[region.start_line.start..region.start_line.end];
-    &line[..line.len() - line.trim_start_matches([' ', '\t']).len()]
+    let line = &text[
+        // #[gamma::skip(range.exclusive_to_inclusive, reason = "an opening sentinel is followed by a body or closing sentinel; including one next byte cannot alter its leading indentation")]
+        region.start_line.start..region.start_line.end];
+    &line[..line.len()
+        - line
+            .trim_start_matches(
+                // #[gamma::skip(collection.reverse_array, reason = "trim_start_matches treats the character array as an unordered set")]
+                [' ', '\t'],
+            )
+            .len()]
 }
 
-#[mutants::skip] // Source-offset arithmetic is exercised by inline/multiline scaffolding snapshots; arithmetic mutants add no separate contract.
 fn closing_line_start(text: &str, close: usize) -> Option<usize> {
-    let start = text[..close].rfind(['\r', '\n']).map_or(0, |index| index + 1);
+    let start = text[
+        // #[gamma::skip(range.exclusive_to_inclusive, reason = "close points at a non-newline closing delimiter, so including it cannot change the preceding line boundary")]
+        ..
+        // #[gamma::skip(expr.increment, reason = "including the non-newline closing delimiter cannot change the preceding line boundary")]
+        close]
+        .rfind(
+            // #[gamma::skip(collection.reverse_array, reason = "rfind treats the character array as an unordered set")]
+            ['\r', '\n'],
+        )
+        .map_or(0, |index| index + 1);
     text[start..close]
         .chars()
         .all(|character| matches!(character, ' ' | '\t'))
         .then_some(start)
 }
 
-#[mutants::skip] // Formatting inference is covered through byte-exact scaffolding and idempotence tests rather than isolated arithmetic mutations.
 fn indent_unit(text: &str, object: &Object<'_>) -> String {
-    let parent = line_indent(text, closing_delimiter_offset(&object.range));
+    let parent = line_indent(
+        text,
+        // #[gamma::skip(expr.increment, reason = "including the non-whitespace closing brace cannot change its leading indentation")]
+        closing_delimiter_offset(&object.range),
+    );
     object
         .properties
         .first()
@@ -352,7 +391,15 @@ fn scaffold(text: &str, path: &[String]) -> Result<String, ManagedRegionRefusal>
         let close = closing_delimiter_offset(&object.range);
         let insert_at = closing_line_start(text, close).unwrap_or(close);
         let (prefix, separator, gap, prefix_newline) = if let Some(last) = object.properties.last() {
-            let separator = if separator_comma(&text[last.range.end..insert_at]).is_none() {
+            let separator = if separator_comma(
+                &text[
+                    // #[gamma::skip(range.exclusive_to_inclusive, reason = "insert_at points at closing-line whitespace or the closing brace, neither can add a separator comma")]
+                    last.range.end..
+                    // #[gamma::skip(expr.increment, reason = "insert_at points at closing-line whitespace or the closing brace, neither can add a separator comma")]
+                    insert_at],
+            )
+            .is_none()
+            {
                 if regions.iter().any(|region| {
                     // #[gamma::skip(range.inclusive_to_exclusive, reason = "a parsed property ends before the full-line closing sentinel starts, never exactly at region.body.end")]
                     (region.body.start..=region.body.end).contains(&last.range.end)
@@ -456,22 +503,28 @@ pub(crate) fn plan_json_array_region(
         (original, parsed, regions)
     } else {
         scaffolded = scaffold(original, &spec.path)?;
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "scaffold parsed its output before returning it; the text is unchanged")]
         let parsed = parse(&scaffolded)?;
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "scaffold preserves validated marker lines and inserts only serialized property names, never sentinel comments")]
         let regions = validated_regions(&scaffolded)?;
         (scaffolded.as_str(), parsed, regions)
     };
     let root = parsed.value.as_ref().expect("the selected path existed in a parsed JSON value");
-    let array = lookup(root, &spec.path)?.and_then(Value::as_array).ok_or_else(|| {
+    // #[gamma::skip(try.propagate_to_unwrap, reason = "the original lookup succeeded or scaffold resolved the same selector; scaffolding rejects duplicate properties and non-object parents")]
+    let selected = lookup(root, &spec.path)?;
+    let array = selected.and_then(Value::as_array).ok_or_else(|| {
         validation_refusal(
             JsonValidationCondition::SelectedItemNotArray { path: spec.path.clone() },
             RefusalRemedy::ArrayShape,
         )
     })?;
+    // #[gamma::skip(range.exclusive_to_inclusive, reason = "marker line offsets cannot equal the byte just after the selected closing bracket")]
     let span = array.range.start..array.range.end;
     for other in regions {
         if other.id == spec.region.id.as_str() {
             continue;
         }
+        // #[gamma::skip(range.exclusive_to_inclusive, reason = "ownership ends after a full sentinel line; a selected array starts after a property key and ends after a closing bracket, neither offset can equal that line boundary")]
         let ownership = other.start_line.start..other.end_line.end;
         if ownership.contains(&span.start) || ownership.contains(&span.end) {
             return Err(refusal(
@@ -534,7 +587,9 @@ pub(crate) fn plan_json_array_region(
             let rest = rest.strip_prefix(newline).unwrap_or(rest);
             format!("{}{newline}{rendered}{rest}", &adopted[..at])
         };
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "both host and generated string entries were parsed; whole-entry adoption and an interior non-splitting region splice preserve JSONC syntax")]
         parse(&spliced).map_err(|refusal| ManagedRegionRefusal::new(refusal.reason, RefusalRemedy::InvalidGeneratedJson))?;
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "original markers and generated body were validated; composition adds exactly one matching pair outside all other regions")]
         validated_regions(&spliced)?;
         Ok(spliced)
     })
@@ -655,6 +710,7 @@ pub(crate) fn validate_recorded_placement(text: &str, id: &str, path: &[String])
             RefusalRemedy::ArrayShape,
         )
     })?;
+    // #[gamma::skip(range.exclusive_to_inclusive, reason = "full-line sentinel offsets cannot equal the byte immediately after the selected closing bracket")]
     let span = array.range.start..array.range.end;
     if !span.contains(&region.start_line.start) || !span.contains(&region.end_line.end) {
         return Err(refusal(
@@ -697,14 +753,12 @@ fn validate_unique_properties(value: &Value<'_>) -> Result<(), ManagedRegionRefu
 
 /// Recover selectors from existing array-contained markers.
 pub(crate) fn existing_array_paths(text: &str) -> Result<Vec<Vec<String>>, ManagedRegionRefusal> {
-    fn visit<'a>(
-        value: &'a Value<'a>,
-        path: &mut Vec<&'a str>,
-        markers: &[usize],
-        paths: &mut Vec<Vec<String>>,
-    ) -> Result<(), ManagedRegionRefusal> {
+    fn visit<'a>(value: &'a Value<'a>, path: &mut Vec<&'a str>, markers: &[usize], paths: &mut Vec<Vec<String>>) {
         if let Some(array) = value.as_array()
-            && markers.iter().any(|offset| (array.range.start..array.range.end).contains(offset))
+            && markers.iter().any(|offset| {
+                // #[gamma::skip(range.exclusive_to_inclusive, reason = "a full-line comment cannot begin immediately after a closing bracket on that same physical line")]
+                (array.range.start..array.range.end).contains(offset)
+            })
         {
             paths.push(path.iter().map(|component| (*component).to_owned()).collect());
         }
@@ -712,11 +766,11 @@ pub(crate) fn existing_array_paths(text: &str) -> Result<Vec<Vec<String>>, Manag
             for property in &object.properties {
                 let name = property.name.as_str();
                 path.push(name);
-                visit(&property.value, path, markers, paths)?;
+                // #[gamma::skip(call_result.default, tag = "equivalent", reason = "visit returns unit; default_after retains every recursive update to paths")]
+                visit(&property.value, path, markers, paths);
                 path.pop();
             }
         }
-        Ok(())
     }
     let parsed = parse(text)?;
     if let Some(root) = &parsed.value {
@@ -730,7 +784,8 @@ pub(crate) fn existing_array_paths(text: &str) -> Result<Vec<Vec<String>>, Manag
         .collect();
     let mut paths = Vec::new();
     if let Some(root) = &parsed.value {
-        visit(root, &mut Vec::new(), &markers, &mut paths)?;
+        // #[gamma::skip(call_result.default, tag = "equivalent", reason = "visit returns unit; default_after retains the traversal and collected paths")]
+        visit(root, &mut Vec::new(), &markers, &mut paths);
     }
     Ok(paths)
 }
@@ -790,13 +845,6 @@ fn adopt_entries(text: &str, array: &Array<'_>, body: &str) -> Result<String, Ma
     let values: Vec<_> = array.elements.iter().collect();
     let mut removals = Vec::new();
     for generated in generated {
-        let matching = values.iter().enumerate().filter(|(_, value)| {
-            let span = value_range(value);
-            value.as_string_lit().is_some_and(|value| value.value == generated)
-                && !protected
-                    .iter()
-                    .any(|region| (region.start_line.start..region.end_line.end).contains(&span.start))
-        });
         let protected_match = values.iter().any(|value| {
             let span = value_range(value);
             value.as_string_lit().is_some_and(|value| value.value == generated)
@@ -810,12 +858,23 @@ fn adopt_entries(text: &str, array: &Array<'_>, body: &str) -> Result<String, Ma
                 RefusalRemedy::EnclosingOwnership,
             ));
         }
+        let matching = values
+            .iter()
+            .enumerate()
+            .filter(|(_, value)| value.as_string_lit().is_some_and(|value| value.value == generated));
         for (index, value) in matching {
             let span = value_range(value);
             let next = values
-                .get(index + 1)
+                .get(
+                    // #[gamma::skip(literal.int_increment, reason = "valid adjacent array values always have a separator before the immediate next value; scanning through one more value cannot change the first visible comma")]
+                    index + 1,
+                )
                 .map_or_else(|| closing_delimiter_offset(&array.range), |value| value_range(value).start);
-            if let Some(comma) = separator_comma(&text[span.end..next]) {
+            if let Some(comma) = separator_comma(
+                &text[
+                    // #[gamma::skip(range.exclusive_to_inclusive, reason = "next points at the first byte of a parsed value or the closing bracket, never a comma; one additional byte cannot expose a separator")]
+                    span.end..next],
+            ) {
                 let comma = span.end + comma..span.end + comma + 1;
                 if protected
                     .iter()
@@ -842,7 +901,6 @@ fn adopt_entries(text: &str, array: &Array<'_>, body: &str) -> Result<String, Ma
     Ok(adopted)
 }
 
-#[mutants::skip] // Byte-level JSONC separator scanner; strings, escapes, line comments, block comments, and absent commas have dedicated behavior tests.
 fn separator_comma(gap: &str) -> Option<usize> {
     let bytes = gap.as_bytes();
     let mut index = 0;
@@ -854,7 +912,9 @@ fn separator_comma(gap: &str) -> Option<usize> {
         let byte = bytes[index];
         if string {
             if escaped {
-                escaped = false;
+                escaped =
+                // #[gamma::skip(assign_value.default, reason = "bool Default is false, identical to the assigned value")]
+                false;
             } else if byte == b'\\' {
                 escaped = true;
             } else if byte == b'"' {
@@ -916,6 +976,282 @@ mod tests {
     use crate::{Catalog, CliMeta, HostSelector, RegionId, RegionSpec};
 
     const ENTRY: &str = r#""build\\Extensions\\Anvil","#;
+
+    #[test]
+    fn regression_lookup_rejects_duplicate_selected_properties_directly() {
+        let parsed = parse("{\"entries\":[],\"entries\":[]}").unwrap();
+        let refusal = lookup(parsed.value.as_ref().unwrap(), &["entries".to_owned()]).unwrap_err();
+        assert_eq!(refusal.remedy, RefusalRemedy::ArrayShape);
+        assert_eq!(
+            validation_condition(&refusal),
+            &JsonValidationCondition::AmbiguousSelector {
+                path: vec!["entries".to_owned()],
+                property: "entries".to_owned(),
+            }
+        );
+        let mut invalid = spec();
+        invalid.path.clear();
+        assert_eq!(validate_spec(&invalid).unwrap_err().remedy, RefusalRemedy::InvalidGeneratedJson);
+        assert_eq!(
+            plan_json_array_region(&Manifest::default(), Some("{}"), "CloudBuild.json", &invalid)
+                .unwrap_err()
+                .remedy,
+            RefusalRemedy::InvalidGeneratedJson
+        );
+        assert!(parse(r#"{"escape":"\x41"}"#).is_err());
+        assert_eq!(body_strings("\"managed\",\n// normal comment\n").unwrap(), ["managed"]);
+    }
+
+    #[test]
+    fn regression_rendering_and_indentation_preserve_blank_lines_tabs_and_cr() {
+        assert_eq!(render_body("\"x\",", "        ", "\n"), "        \"x\",\n");
+        assert_eq!(render_body("", "", "\n"), "");
+        assert_eq!(
+            render_body("\"one\",\r\n \t\r\n\"two\",", "\t", "\r\n"),
+            "\t\"one\",\r\n\r\n\t\"two\",\r\n"
+        );
+        assert_eq!(render_body("\"one\",\n\"two\",\n", "  ", "\n"), "  \"one\",\n  \"two\",\n");
+        assert_eq!(line_indent("a\r\t value\nnext", 9), "\t ");
+        assert_eq!(line_indent("x\nnext", 1), "");
+        assert_eq!(line_indent("x\rnext", 1), "");
+        let text = "\t // >>> anvil-managed: id\n\"one\",\n\t // <<< anvil-managed: id\n";
+        let region = validated_regions(text).unwrap().remove(0);
+        assert_eq!(region_indent(text, &region), "\t ");
+        assert_eq!(closing_line_start("x\r\t}", 3), Some(2));
+        assert_eq!(closing_line_start("x\n\t}", 3), Some(2));
+        assert_eq!(closing_line_start("x\r}", 2), Some(2));
+        assert_eq!(closing_line_start("x\n}", 2), Some(2));
+        assert_eq!(closing_line_start("x}", 1), None);
+        assert_eq!(
+            nested_property(&["a".to_owned(), "b".to_owned(), "c".to_owned()], "  ", "\t", "\r\n"),
+            "  \t\"a\": {\r\n  \t\t\"b\": {\r\n  \t\t\t\"c\": []\r\n  \t\t}\r\n  \t}"
+        );
+        let text = "{\n  \"first\": 1,\n\t\"last\": 2\n}";
+        let parsed = parse(text).unwrap();
+        assert_eq!(indent_unit(text, parsed.value.as_ref().unwrap().as_object().unwrap()), "  ");
+        let text = "{\"entries\":[\n\t\"first\",\n    \"last\"\n]}";
+        let parsed = parse(text).unwrap();
+        let array = lookup(parsed.value.as_ref().unwrap(), &["entries".to_owned()])
+            .unwrap()
+            .unwrap()
+            .as_array()
+            .unwrap();
+        assert_eq!(array_indent(text, array), "\t");
+    }
+
+    #[test]
+    fn regression_scaffolding_and_marker_errors_are_returned_with_exact_reasons() {
+        let text = "{\n// <<< anvil-managed: id\n}";
+        let refusal = validated_regions(text).unwrap_err();
+        assert_eq!(refusal.remedy, RefusalRemedy::MalformedMarkers);
+        assert_eq!(refusal.reason.to_string(), "closing sentinel without its matching opener");
+        assert_eq!(
+            scaffold(text, &["entries".to_owned()]).unwrap_err().remedy,
+            RefusalRemedy::MalformedMarkers
+        );
+        assert_eq!(
+            plan(Some(text), &Manifest::default()).unwrap_err().remedy,
+            RefusalRemedy::MalformedMarkers
+        );
+        for text in ["{\"last\":1}", "{\"last\":1\n}", "{\"last\":1,\n}"] {
+            assert!(scaffold(text, &["entries".to_owned()]).unwrap().contains("\"last\":1,"));
+        }
+        for (text, expected) in [
+            (
+                "// >>> anvil-managed:id\n// <<< anvil-managed: id\n",
+                "closing sentinel for region 'id' before its opener",
+            ),
+            (
+                "// >>> anvil-managed: id\n// <<< anvil-managed:id\n",
+                "region 'id' has an opening sentinel but no closing sentinel",
+            ),
+            ("// >>> anvil-managed:id\n// <<< anvil-managed:id\n", "unusable sentinel lines"),
+        ] {
+            let refusal = validated_regions(text).unwrap_err();
+            assert_eq!(refusal.remedy, RefusalRemedy::MalformedMarkers);
+            assert_eq!(refusal.reason.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn regression_required_and_recorded_validation_return_parse_lookup_and_body_errors() {
+        let mut spec = spec();
+        spec.path = vec!["entries".to_owned()];
+        spec.region.id = RegionId::new("entries");
+        let markers = "// >>> anvil-managed: entries\n// <<< anvil-managed: entries\n";
+        assert_eq!(
+            validate_required_entries("// <<< anvil-managed: entries\n", &spec)
+                .unwrap_err()
+                .remedy,
+            RefusalRemedy::MalformedMarkers
+        );
+        assert_eq!(
+            validate_required_entries("// >>> anvil-managed: entries\n", &spec)
+                .unwrap_err()
+                .remedy,
+            RefusalRemedy::MalformedMarkers
+        );
+        let invalid = "{\n// >>> anvil-managed: entries\n// <<< anvil-managed: entries\n";
+        assert_eq!(
+            validate_required_entries(invalid, &spec).unwrap_err().remedy,
+            RefusalRemedy::HostAlreadyUnparsable
+        );
+        assert_eq!(
+            validate_recorded_placement(invalid, "entries", &spec.path).unwrap_err().remedy,
+            RefusalRemedy::HostAlreadyUnparsable
+        );
+        assert_eq!(
+            validate_recorded_placement("// >>> anvil-managed: entries\n", "entries", &spec.path)
+                .unwrap_err()
+                .remedy,
+            RefusalRemedy::MalformedMarkers
+        );
+        let ambiguous = "{\n// >>> anvil-managed: entries\n// <<< anvil-managed: entries\n\"entries\":[],\"entries\":[]}";
+        for refusal in [
+            validate_required_entries(ambiguous, &spec).unwrap_err(),
+            validate_recorded_placement(ambiguous, "entries", &spec.path).unwrap_err(),
+        ] {
+            assert_eq!(refusal.remedy, RefusalRemedy::ArrayShape);
+            assert!(matches!(
+                validation_condition(&refusal),
+                JsonValidationCondition::AmbiguousSelector { .. }
+            ));
+        }
+        spec.region.body = "1,".to_owned();
+        let text = "{\n// >>> anvil-managed: entries\n// <<< anvil-managed: entries\n\"entries\":[]}";
+        assert_eq!(
+            validate_required_entries(text, &spec).unwrap_err().remedy,
+            RefusalRemedy::InvalidGeneratedJson
+        );
+        assert_eq!(validated_regions(markers).unwrap().len(), 1);
+        for source in ["{\"outer\":{\"x\":1,\"x\":2}}", "{\"outer\":[{\"x\":1,\"x\":2}]}"] {
+            assert_eq!(existing_array_paths(source).unwrap_err().remedy, RefusalRemedy::ArrayShape);
+        }
+    }
+
+    #[test]
+    fn regression_selector_discovery_keeps_sibling_paths_and_each_marker_direction() {
+        let source = "{ \"a\": [\n// >>> anvil-managed: a\n], \"b\": [\n// <<< anvil-managed: b\n], \"c\": [\n// ordinary\n] }";
+        assert_eq!(existing_array_paths(source).unwrap(), [vec!["a".to_owned()], vec!["b".to_owned()]]);
+        assert_eq!(
+            existing_array_paths("{\"a\":[\n// ordinary\n]}").unwrap(),
+            Vec::<Vec<String>>::new()
+        );
+        assert!(!offset_inside_array("[]", 2));
+        assert!(offset_inside_array("[]", 0));
+        assert!(offset_inside_array("[]", 1));
+        assert!(!offset_inside_array("{\"a\":[]}", 7));
+        assert!(offset_inside_array("{\"a\":[]}", 5));
+        assert!(offset_inside_array("{\"a\":[]}", 6));
+    }
+
+    #[test]
+    fn regression_neighbor_checks_continue_after_current_regions_and_absent_selectors() {
+        let mut spec = spec();
+        spec.path = vec!["entries".to_owned()];
+        spec.region.id = RegionId::new("entries");
+        spec.region.body = "\"required\",\n".to_owned();
+        // The suffix region owns the selected array's closing bracket.
+        let text = "{\"entries\":[\n// >>> anvil-managed: entries\n\"required\",\n// <<< anvil-managed: entries\n// >>> anvil-managed: suffix\n]\n// <<< anvil-managed: suffix\n}";
+        assert_eq!(
+            plan_json_array_region(&Manifest::default(), Some(text), "config.json", &spec)
+                .unwrap_err()
+                .remedy,
+            RefusalRemedy::EnclosingOwnership
+        );
+        // Removing the separator region deletes the comma between object properties.
+        let text = "{\"first\":true\n// >>> anvil-managed: separator\n,\n// <<< anvil-managed: separator\n\"entries\":[\n// >>> anvil-managed: entries\n\"required\",\n// <<< anvil-managed: entries\n]}";
+        assert_eq!(
+            plan_json_array_region(&Manifest::default(), Some(text), "config.json", &spec)
+                .unwrap_err()
+                .remedy,
+            RefusalRemedy::BetweenManagedRegions
+        );
+        assert_eq!(
+            validate_neighbor_splice(
+                "{\"entries\":[]}",
+                "{\"entries\":{}}",
+                &[vec!["absent".to_owned()], vec!["entries".to_owned()]],
+            )
+            .unwrap_err()
+            .remedy,
+            RefusalRemedy::ArrayDependency
+        );
+    }
+
+    #[test]
+    fn regression_misplaced_and_split_markers_keep_exact_diagnostics() {
+        let mut spec = spec();
+        spec.path = vec!["entries".to_owned()];
+        spec.region.id = RegionId::new("entries");
+        spec.region.body = "\"required\",\n".to_owned();
+        let outside = "{\"entries\":[]\n// >>> anvil-managed: entries\n// <<< anvil-managed: entries\n}";
+        let refusal = plan_json_array_region(&Manifest::default(), Some(outside), "config.json", &spec).unwrap_err();
+        assert_eq!(refusal.remedy, RefusalRemedy::MisplacedArrayMarkers);
+        assert_eq!(refusal.reason.to_string(), "the managed region is outside its selected JSON array");
+        let split = "{\"entries\":[null,{\n// >>> anvil-managed: entries\n\"key\":true}\n// <<< anvil-managed: entries\n]}";
+        for refusal in [
+            plan_json_array_region(&Manifest::default(), Some(split), "config.json", &spec).unwrap_err(),
+            validate_recorded_placement(split, "entries", &spec.path).unwrap_err(),
+        ] {
+            assert_eq!(refusal.remedy, RefusalRemedy::MisplacedArrayMarkers);
+            assert_eq!(refusal.reason.to_string(), "the region splits a JSON array value");
+        }
+        let text = "{\"entries\":[\"required\"\n// >>> anvil-managed: other\n,\n// <<< anvil-managed: other\n\"tail\"]}";
+        let parsed = parse(text).unwrap();
+        let array = lookup(parsed.value.as_ref().unwrap(), &spec.path)
+            .unwrap()
+            .unwrap()
+            .as_array()
+            .unwrap();
+        let refusal = adopt_entries(text, array, &spec.region.body).unwrap_err();
+        assert_eq!(refusal.remedy, RefusalRemedy::EnclosingOwnership);
+        assert_eq!(
+            refusal.reason.to_string(),
+            "the matching array entry's separator belongs to another managed region"
+        );
+    }
+
+    #[test]
+    fn regression_adoption_distinguishes_unrelated_protected_values_and_adjacent_entries() {
+        let text = "{\"entries\":[\"managed\",\"user\",\n// >>> anvil-managed: other\n\"protected\",\n// <<< anvil-managed: other\n\"managed\",\"tail\"]}";
+        let parsed = parse(text).unwrap();
+        let array = lookup(parsed.value.as_ref().unwrap(), &["entries".to_owned()])
+            .unwrap()
+            .unwrap()
+            .as_array()
+            .unwrap();
+        assert_eq!(
+            adopt_entries(text, array, "\"managed\",").unwrap(),
+            "{\"entries\":[\"user\",\n// >>> anvil-managed: other\n\"protected\",\n// <<< anvil-managed: other\n\"tail\"]}"
+        );
+        assert_eq!(
+            adopt_entries(text, array, "1,").unwrap_err().remedy,
+            RefusalRemedy::InvalidGeneratedJson
+        );
+        let malformed = "{\"entries\":[\n// >>> anvil-managed: unmatched\n\"user\"]}";
+        let parsed = parse(malformed).unwrap();
+        let array = lookup(parsed.value.as_ref().unwrap(), &["entries".to_owned()])
+            .unwrap()
+            .unwrap()
+            .as_array()
+            .unwrap();
+        assert_eq!(
+            adopt_entries(malformed, array, "\"managed\",").unwrap_err().remedy,
+            RefusalRemedy::MalformedMarkers
+        );
+        let text = "{\"entries\":[\"managed\"\n// >>> anvil-managed: other\n// <<< anvil-managed: other\n,\"tail\"]}";
+        let parsed = parse(text).unwrap();
+        let array = lookup(parsed.value.as_ref().unwrap(), &["entries".to_owned()])
+            .unwrap()
+            .unwrap()
+            .as_array()
+            .unwrap();
+        assert_eq!(
+            adopt_entries(text, array, "\"managed\",").unwrap(),
+            "{\"entries\":[\n// >>> anvil-managed: other\n// <<< anvil-managed: other\n\"tail\"]}"
+        );
+    }
 
     #[test]
     fn scaffold_preserves_exact_indentation_and_newline_boundaries() {
@@ -1924,6 +2260,11 @@ mod tests {
             "]}\n",
         );
         assert_eq!(HostScanner::Json.ids(array, CommentSyntax::SlashSlash), ["entries"]);
+        let padded = "{\"entries\":[\n\n// >>> anvil-managed: entries\n\"managed\",\n// <<< anvil-managed: entries\n\n]}";
+        assert_eq!(
+            remove_json_region(padded, "entries", CommentSyntax::SlashSlash).unwrap(),
+            "{\"entries\":[\n\n\n]}"
+        );
         let inserted = HostScanner::Json
             .insert_after(array, "entries", "// after\n", CommentSyntax::SlashSlash)
             .unwrap();

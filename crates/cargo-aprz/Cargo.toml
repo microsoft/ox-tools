@@ -36,7 +36,6 @@ path = "src/main.rs"
 [dependencies]
 cargo-aprz-lib = { workspace = true }
 mimalloc = { workspace = true }
-mutants = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [dev-dependencies]

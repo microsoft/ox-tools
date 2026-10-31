@@ -20,6 +20,7 @@ fn diagnostic_is_terminal() -> bool {
     if let Some(terminal) = tests::DIAGNOSTIC_TERMINAL.get() {
         return terminal;
     }
+    // #[gamma::skip(bool_expr.negate, tag = "native", reason = "the native stderr attachment is host state; DIAGNOSTIC_TERMINAL exercises both answers through the same host policy")]
     stderr().is_terminal()
 }
 

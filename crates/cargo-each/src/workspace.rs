@@ -274,7 +274,6 @@ fn parse_rust_version(value: &str) -> Result<Version, String> {
 }
 
 // #[gamma::skip(all, reason = "replacing the configured command with its default makes integration tests traverse dependency metadata until the mutation-test budget expires; the exact argument-vector test covers this adapter")]
-#[mutants::skip] // The default-command replacement traverses dependency metadata until timeout; the exact argument-vector test covers this adapter.
 fn metadata_command(manifest_path: Option<&Path>) -> MetadataCommand {
     let mut command = MetadataCommand::new();
     command.no_deps();

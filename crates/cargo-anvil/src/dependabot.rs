@@ -9,7 +9,6 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::ops::Range;
 use std::path::Path;
 
 use ohno::{AppError, IntoAppError as _};
@@ -104,6 +103,7 @@ pub(crate) fn update(text: &str, paths: &[&str]) -> Result<Option<String>, AppEr
     if paths.is_empty()
         || text
             .trim_start_matches('\u{feff}')
+            // #[gamma::skip(collection.reverse_array, tag = "equivalent", reason = "The character pattern matches either line ending regardless of array order.")]
             .split(['\r', '\n'])
             .take_while(|line| line.trim().is_empty() || line.trim_start().starts_with('#'))
             .any(|line| line.trim() == KEEP_UPDATES)
@@ -133,6 +133,7 @@ pub(crate) fn update(text: &str, paths: &[&str]) -> Result<Option<String>, AppEr
         if ecosystem != "github-actions" {
             continue;
         }
+        // #[gamma::skip(try.propagate_to_unwrap, tag = "equivalent", reason = "effective_field already validated this same immutable mapping and its keys above.")]
         let fields = job.fields()?;
         let exclusions = job.effective_field(&root, "exclude-paths", &mut lookups)?;
         let existing = exclusions.map(|node| node.sequence()).transpose()?.unwrap_or_default();
@@ -166,6 +167,7 @@ pub(crate) fn update(text: &str, paths: &[&str]) -> Result<Option<String>, AppEr
     for (offset, body) in insertions {
         output.insert_str(offset, &body);
     }
+    // #[gamma::skip(try.propagate_to_unwrap, literal.str_to_empty, literal.str_to_xyzzy, tag = "equivalent", reason = "This defensive reparse can fail only if insertion has a bug: parser-validated container boundaries receive JSON-quoted paths.")]
     parse(&output).into_app_err("adding generated-file exclusions would produce invalid YAML")?;
     Ok(Some(output))
 }
@@ -186,30 +188,31 @@ fn quoted_paths(paths: &[&str]) -> String {
 }
 
 fn sequence_insertion(text: &str, sequence: &Node, paths: &[&str]) -> (usize, String) {
-    if text[sequence.span.start..].starts_with('[') {
+    if text[sequence.offset..].starts_with('[') {
         let separator = if sequence.children.is_empty() { "" } else { ", " };
         let paths = quoted_paths(paths);
         let paths = &paths[1..paths.len() - 1];
-        return (sequence.span.start + 1, format!("{paths}{separator}"));
+        return (sequence.offset + 1, format!("{paths}{separator}"));
     }
-    let start = line_start(text, sequence.span.start);
-    let prefix = &text[start..sequence.span.start];
+    let start = line_start(text, sequence.offset);
+    // #[gamma::skip(range.exclusive_to_inclusive, tag = "equivalent", reason = "Including the first sequence token cannot change the prefix's leading spaces.")]
+    let prefix = &text[start..sequence.offset];
     let indent = &prefix[..prefix.len() - prefix.trim_start_matches(' ').len()];
     (start, block_entries(paths, indent, crate::region::text_newline(text)))
 }
 
 /// Insert before the whole first entry, retaining the job's existing `- ` prefix.
 /// Restoring spaces at the mapping column displaces that entry without duplicating
-/// the sequence marker; the mapping span also retains an explicit `?` indicator.
+/// the sequence marker; the mapping offset also retains an explicit `?` indicator.
 fn job_insertion(text: &str, job: &Node, paths: &[&str]) -> (usize, String) {
-    if text[job.span.start..].starts_with('{') {
-        return (job.span.start + 1, format!("exclude-paths: {}, ", quoted_paths(paths)));
+    if text[job.offset..].starts_with('{') {
+        return (job.offset + 1, format!("exclude-paths: {}, ", quoted_paths(paths)));
     }
-    let start = line_start(text, job.span.start);
-    let indent = " ".repeat(job.span.start - start);
+    let start = line_start(text, job.offset);
+    let indent = " ".repeat(job.offset - start);
     let newline = crate::region::text_newline(text);
     let entries = block_entries(paths, &format!("{indent}  "), newline);
-    (job.span.start, format!("exclude-paths:{newline}{entries}{indent}"))
+    (job.offset, format!("exclude-paths:{newline}{entries}{indent}"))
 }
 
 fn block_entries(paths: &[&str], indent: &str, newline: &str) -> String {
@@ -222,7 +225,10 @@ fn block_entries(paths: &[&str], indent: &str, newline: &str) -> String {
 }
 
 fn line_start(text: &str, offset: usize) -> usize {
-    text[..offset].rfind(['\r', '\n']).map_or(0, |index| index + 1)
+    // #[gamma::skip(range.exclusive_to_inclusive, expr.increment, tag = "equivalent", reason = "Callers pass a non-newline token offset, so including that token leaves the preceding line ending unchanged.")]
+    let prefix = &text[..offset];
+    // #[gamma::skip(collection.reverse_array, tag = "equivalent", reason = "The character pattern finds the last occurrence of either line ending regardless of array order.")]
+    prefix.rfind(['\r', '\n']).map_or(0, |index| index + 1)
 }
 
 /// The semantic shape needed for selection, not a YAML serializer's value model.
@@ -241,7 +247,7 @@ enum Kind {
 #[derive(Debug)]
 struct Node {
     kind: Kind,
-    span: Range<usize>,
+    offset: usize,
     anchor: usize,
     shared: bool,
     children: Vec<Self>,
@@ -313,7 +319,7 @@ impl Node {
 
     /// Read only one effective setting. Explicit values win; merge sequences
     /// use their first matching default. Cache completed values and absence so
-    /// repeated merge targets are not expanded; active source spans detect cycles.
+    /// repeated merge targets are not expanded; active source offsets detect cycles.
     fn effective_field<'a>(
         &'a self,
         root: &'a Self,
@@ -321,7 +327,7 @@ impl Node {
         lookups: &mut FieldLookups<'a>,
     ) -> Result<Option<&'a Self>, AppError> {
         let node = self.resolve(root);
-        let key = (node.span.start, field);
+        let key = (node.offset, field);
         if let Some(value) = lookups.completed.get(&key) {
             return Ok(*value);
         }
@@ -339,10 +345,10 @@ impl Node {
             lookups.completed.insert(key, None);
             return Ok(None);
         };
-        if lookups.active.contains(&node.span.start) {
+        if lookups.active.contains(&node.offset) {
             return Err(CyclicMergeError::new(field).into());
         }
-        lookups.active.push(node.span.start);
+        lookups.active.push(node.offset);
         let defaults = if defaults.kind == Kind::Sequence {
             defaults.children.as_slice()
         } else {
@@ -374,19 +380,31 @@ fn parse(text: &str) -> Result<Node, AppError> {
     let offsets: Vec<_> = source
         .char_indices()
         .map(|(index, _)| index + prefix)
+        // #[gamma::skip(expr.increment, tag = "equivalent", reason = "Only empty end-of-input scalars use this sentinel; they cannot be edited containers or valid mapping lookup targets.")]
         .chain(std::iter::once(text.len()))
         .collect();
     for event in Parser::new_from_str(source) {
         let (event, span) = event.into_app_err("Dependabot configuration is not valid YAML")?;
-        let span = offsets[span.start.index()]..offsets[span.end.index()];
         let (kind, anchor, shared, opening) = match event {
-            Event::Scalar(value, _, anchor, _) => (Kind::Scalar(value.into_owned()), anchor, false, false),
+            Event::Scalar(value, _, anchor, _) => (
+                Kind::Scalar(value.into_owned()),
+                anchor,
+                // #[gamma::skip(literal.bool_flip, tag = "equivalent", reason = "Scalar nodes are never edited as containers, so their sharing flag is never consulted.")]
+                false,
+                false,
+            ),
             Event::SequenceStart(anchor, tag) => (Kind::Sequence, anchor, anchor != 0 || tag.is_some(), true),
             Event::MappingStart(anchor, tag) => (Kind::Mapping, anchor, anchor != 0 || tag.is_some(), true),
-            Event::Alias(anchor) => (Kind::Alias(anchor), 0, false, false),
+            Event::Alias(anchor) => (
+                Kind::Alias(anchor),
+                // #[gamma::skip(literal.int_increment, tag = "equivalent", reason = "Aliases declare no anchors; parser-assigned alias identities are nonzero, so neither zero nor one can shadow an earlier declared target.")]
+                0,
+                // #[gamma::skip(literal.bool_flip, tag = "equivalent", reason = "An alias is resolved to its declared container before sharing is checked; the alias's own flag is never consulted.")]
+                false,
+                false,
+            ),
             Event::SequenceEnd | Event::MappingEnd => {
-                let mut node = stack.pop().expect("YAML parser balances collection start and end events");
-                node.span.end = span.end;
+                let node = stack.pop().expect("YAML parser balances collection start and end events");
                 push_node(&mut stack, &mut root, node)?;
                 continue;
             }
@@ -394,7 +412,7 @@ fn parse(text: &str) -> Result<Node, AppError> {
         };
         let node = Node {
             kind,
-            span,
+            offset: offsets[span.start.index()],
             anchor,
             shared,
             children: Vec::new(),
@@ -678,7 +696,40 @@ mod tests {
             let error = jobs[2].effective_field(&root, "exclude-paths", &mut lookups).unwrap_err();
             assert_eq!(error_cause::<CyclicMergeError>(&error).field, "exclude-paths");
             assert!(lookups.active.is_empty(), "failed lookup must unwind its active merge state");
-            assert!(!lookups.completed.contains_key(&(jobs[2].span.start, "exclude-paths")));
+            assert!(!lookups.completed.contains_key(&(jobs[2].offset, "exclude-paths")));
+        }
+    }
+
+    #[test]
+    fn survivor_flow_exclusions_preserve_exact_empty_and_nonempty_separators() {
+        for (existing, expected) in [
+            (
+                "[]",
+                "[\".github/actions/anvil-setup/action.yml\",\".github/workflows/anvil-pr-impl.yml\"]",
+            ),
+            (
+                "[vendor/**]",
+                "[\".github/actions/anvil-setup/action.yml\",\".github/workflows/anvil-pr-impl.yml\", vendor/**]",
+            ),
+        ] {
+            let source = format!("{JOB}    exclude-paths: {existing} # repository policy\n");
+            let output = update(&source, PATHS).unwrap().unwrap();
+            assert_eq!(output, format!("{JOB}    exclude-paths: {expected} # repository policy\n"));
+            assert_eq!(update(&output, PATHS).unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn survivor_line_starts_include_empty_prefixes_and_adjacent_line_endings() {
+        for (source, offset, expected) in [
+            ("first", 0, 0),
+            ("first", 2, 0),
+            ("\nfirst", 1, 1),
+            ("\rfirst", 1, 1),
+            ("\r\nfirst", 2, 2),
+            ("one\r\ntwo\nthree", 10, 9),
+        ] {
+            assert_eq!(line_start(source, offset), expected, "{source:?} at {offset}");
         }
     }
 
@@ -897,6 +948,13 @@ mod tests {
     }
 
     #[test]
+    fn no_generated_paths_skip_configuration_validation() {
+        for source in ["", "version: 1\nupdates: []\n", "version: 2\nupdates: ["] {
+            assert_eq!(update(source, &[]).unwrap(), None, "{source:?}");
+        }
+    }
+
+    #[test]
     fn source_repository_keeps_receiving_generated_action_updates() {
         let source = include_str!("../../../.github/dependabot.yml");
         assert!(!source.contains("exclude-paths:"));
@@ -904,6 +962,8 @@ mod tests {
         let opted_out = format!("# source repository\n{KEEP_UPDATES}\n{JOB}");
         for newline in ["\n", "\r\n", "\r"] {
             assert!(update(&opted_out.replace('\n', newline), PATHS).unwrap().is_none());
+            let indented = format!("\u{feff}  # source repository\n  {KEEP_UPDATES}\n{JOB}");
+            assert_eq!(update(&indented.replace('\n', newline), PATHS).unwrap(), None);
         }
         let ordinary_comment = format!("{JOB}    # anvil: keep-generated-action-updates\n");
         assert!(update(&ordinary_comment, PATHS).unwrap().is_some());
@@ -975,6 +1035,9 @@ mod tests {
     fn malformed_yaml_retains_the_parser_error_cause() {
         for source in ["version: 2\nupdates: [".to_owned(), format!("{JOB}  - *missing\n")] {
             let error = update(&source, PATHS).unwrap_err();
+            let diagnostic = error.to_string();
+            let context = diagnostic.lines().nth(1).unwrap().split_once(" (at ").unwrap().0;
+            assert_eq!(context, "> Dependabot configuration is not valid YAML");
             error_cause::<saphyr_parser::ScanError>(&error);
         }
     }

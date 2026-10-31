@@ -370,7 +370,7 @@ mod tests {
             "'--no-coverage-target', 'aarch64-pc-windows-msvc'",
             "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }",
             "could not resolve the cargo-careful executable",
-            "anvil-mutants-full: aarch64-pc-windows-msvc",
+            "gamma run --workspace --min-score 100 --max-flaky 0",
         ] {
             assert!(checks.contains(needle), "checks tree missing safety behavior '{needle}'");
         }
@@ -930,7 +930,7 @@ mod tests {
             "cargo_llvm_cov_version",
             "cargo_deny_version",
             "cargo_each_version",
-            "cargo_mutants_version",
+            "cargo_gamma_version",
             "cargo_aprz_version",
         ] {
             assert!(VERSIONS_JUST.contains(needle), "versions.just missing variable '{needle}'");
@@ -976,16 +976,18 @@ mod tests {
             "the bolero installer must invoke the generated just executable for its core helper"
         );
         assert!(
-            TOOLS_JUST.contains(r#"& "{{ just_executable() }}" _install-tool-core cargo-mutants {{cargo_mutants_version}} {{installer}}"#),
-            "the mutants installer must invoke the generated just executable for its core helper"
+            TOOLS_JUST.contains(
+                r#"anvil-tool-cargo-gamma-install installer="install": (_install-tool "cargo-gamma" cargo_gamma_version installer)"#
+            ),
+            "the gamma installer must use the shared tool installer"
         );
         assert!(
             TOOLS_JUST.contains(r#"& "{{ just_executable() }}" _check-tool cargo-bolero {{cargo_bolero_version}}"#),
             "the bolero prerequisite check must invoke the generated just executable"
         );
         assert!(
-            TOOLS_JUST.contains(r#"& "{{ just_executable() }}" _check-tool cargo-mutants {{cargo_mutants_version}}"#),
-            "the mutants prerequisite check must invoke the generated just executable"
+            TOOLS_JUST.contains(r#"anvil-tool-cargo-gamma-validate-prereqs: (_check-tool "cargo-gamma" cargo_gamma_version)"#),
+            "the gamma prerequisite check must use the shared tool validator"
         );
         for component in ["clippy", "rustfmt"] {
             let expected = format!("anvil-component-default-{component}-install: anvil-toolchain-stable-install");

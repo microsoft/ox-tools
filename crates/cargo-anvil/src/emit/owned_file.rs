@@ -13,7 +13,6 @@ use ohno::AppError;
 
 use crate::checksum::checksum_str;
 use crate::decision::{Decision, DecisionInputs, UpdateDecision, decide};
-use crate::io::read_file_if_present;
 use crate::manifest::Manifest;
 use crate::plan::{PlanItem, Target};
 
@@ -21,13 +20,20 @@ use crate::plan::{PlanItem, Target};
 ///
 /// `relpath` is the repo-root-relative forward-slash path.
 /// `rendered` is the byte-exact content the template would produce.
+/// `read` supplies disk text independently of any composed region cache.
 ///
 /// # Errors
 ///
 /// Returns an error if the file exists but can't be read.
-pub fn plan_owned_file(repo_root: &Path, manifest: &Manifest, relpath: &str, rendered: &str) -> Result<PlanItem, AppError> {
+pub fn plan_owned_file(
+    repo_root: &Path,
+    manifest: &Manifest,
+    relpath: &str,
+    rendered: &str,
+    read: impl FnOnce(&Path) -> Result<Option<String>, AppError>,
+) -> Result<PlanItem, AppError> {
     let abs = repo_root.join(relpath);
-    let on_disk = read_file_if_present(&abs)?;
+    let on_disk = read(&abs)?;
     let disk_checksum = on_disk.as_deref().map(checksum_str);
     let template_checksum = checksum_str(rendered);
     let last_rendered = manifest.file_checksum(relpath);
@@ -55,12 +61,13 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::io::read_file_if_present;
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn missing_file_writes() {
         let tmp = TempDir::new().unwrap();
-        let item = plan_owned_file(tmp.path(), &Manifest::default(), "a.txt", "content\n").unwrap();
+        let item = plan_owned_file(tmp.path(), &Manifest::default(), "a.txt", "content\n", read_file_if_present).unwrap();
         assert_eq!(item.decision, Decision::Write);
     }
 
@@ -69,7 +76,7 @@ mod tests {
     fn matching_file_in_sync() {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("a.txt"), "content\n").unwrap();
-        let item = plan_owned_file(tmp.path(), &Manifest::default(), "a.txt", "content\n").unwrap();
+        let item = plan_owned_file(tmp.path(), &Manifest::default(), "a.txt", "content\n", read_file_if_present).unwrap();
         assert_eq!(item.decision, Decision::InSync);
     }
 
@@ -81,7 +88,7 @@ mod tests {
         let mut manifest = Manifest::default();
         let old_template_checksum = checksum_str("old template\n");
         manifest.set_file("a.txt", &old_template_checksum);
-        let item = plan_owned_file(tmp.path(), &manifest, "a.txt", "new template\n").unwrap();
+        let item = plan_owned_file(tmp.path(), &manifest, "a.txt", "new template\n", read_file_if_present).unwrap();
         assert_eq!(item.decision, Decision::Propose);
     }
 
@@ -93,7 +100,7 @@ mod tests {
         let mut manifest = Manifest::default();
         let same_checksum = checksum_str("template\n");
         manifest.set_file("a.txt", &same_checksum);
-        let item = plan_owned_file(tmp.path(), &manifest, "a.txt", "template\n").unwrap();
+        let item = plan_owned_file(tmp.path(), &manifest, "a.txt", "template\n", read_file_if_present).unwrap();
         assert_eq!(item.decision, Decision::LeaveAlone);
     }
 
@@ -106,7 +113,7 @@ mod tests {
         std::fs::write(tmp.path().join("a.txt"), "").unwrap();
         let mut manifest = Manifest::default();
         manifest.set_file("a.txt", checksum_str("template\n"));
-        let item = plan_owned_file(tmp.path(), &manifest, "a.txt", "template\n").unwrap();
+        let item = plan_owned_file(tmp.path(), &manifest, "a.txt", "template\n", read_file_if_present).unwrap();
         assert_eq!(item.decision, Decision::LeaveAlone);
     }
 
@@ -117,7 +124,7 @@ mod tests {
         std::fs::write(tmp.path().join("a.txt"), "").unwrap();
         let mut manifest = Manifest::default();
         manifest.set_file("a.txt", checksum_str("old\n"));
-        let item = plan_owned_file(tmp.path(), &manifest, "a.txt", "new\n").unwrap();
+        let item = plan_owned_file(tmp.path(), &manifest, "a.txt", "new\n", read_file_if_present).unwrap();
         assert_eq!(item.decision, Decision::Propose);
     }
 
@@ -131,7 +138,7 @@ mod tests {
         std::fs::write(tmp.path().join("a.txt"), "   \n\t\n").unwrap();
         let mut manifest = Manifest::default();
         manifest.set_file("a.txt", checksum_str("template\n"));
-        let item = plan_owned_file(tmp.path(), &manifest, "a.txt", "template\n").unwrap();
+        let item = plan_owned_file(tmp.path(), &manifest, "a.txt", "template\n", read_file_if_present).unwrap();
         assert_eq!(item.decision, Decision::LeaveAlone);
     }
 
@@ -141,6 +148,6 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("a.txt"), [0xff]).unwrap();
 
-        plan_owned_file(tmp.path(), &Manifest::default(), "a.txt", "template").unwrap_err();
+        plan_owned_file(tmp.path(), &Manifest::default(), "a.txt", "template", read_file_if_present).unwrap_err();
     }
 }

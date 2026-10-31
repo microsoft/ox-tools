@@ -296,6 +296,7 @@ fn normalize_category(message: &str) -> String {
     fn consume_path_tail(characters: &mut core::iter::Peekable<core::str::Chars<'_>>) {
         loop {
             // #[gamma::skip(unary.remove_not, tag = "timeout", reason = "the whitespace predicate must become false at the end of the path tail")]
+            // #[gamma::skip(cond.negate, tag = "timeout", reason = "each path component must be consumed before lookahead; retaining it repeatedly rediscovers the same component")]
             while characters.peek().is_some_and(|next| !next.is_whitespace()) {
                 let _ = characters
                     .next()
@@ -315,6 +316,7 @@ fn normalize_category(message: &str) -> String {
                 break;
             }
 
+            // #[gamma::skip(cond.negate, tag = "timeout", reason = "separating whitespace must be consumed before scanning the next path component; retaining it prevents forward progress")]
             while characters.peek().is_some_and(|next| next.is_whitespace()) {
                 let _ = characters
                     .next()

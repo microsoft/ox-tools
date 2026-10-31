@@ -3,7 +3,7 @@
 
 [package]
 name = "cargo-anvil"
-version = "0.21.1"
+version = "0.22.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -43,7 +43,6 @@ internals = []
 [dependencies]
 clap = { workspace = true, features = ["derive", "std", "help", "usage", "error-context", "string"] }
 jsonc-parser.workspace = true
-mutants = { workspace = true }
 ohno = { workspace = true, features = ["app-err"] }
 saphyr-parser = { workspace = true }
 serde_json = { workspace = true, features = ["std"] }

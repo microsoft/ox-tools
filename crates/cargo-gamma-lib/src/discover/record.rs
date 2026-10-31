@@ -1496,7 +1496,16 @@ impl RunRecord {
     /// ignored, and test-derived outcomes carry no evidence that a later run may consume. Existing
     /// score-neutral probe learning is retained because the sweep may have written it independently.
     pub fn store_incomplete_convergence(&self, base: &Utf8Path) -> crate::Result<Self> {
-        let earlier = Self::load_for_update(base, INCOMPLETE_FILE)
+        self.store_incomplete_with(base, Self::load_for_update)
+    }
+
+    /// Applies incomplete-evidence rules with a supplied prior-record loader.
+    fn store_incomplete_with(
+        &self,
+        base: &Utf8Path,
+        load: impl FnOnce(&Utf8Path, &str) -> Result<Option<Self>, UpdateLoadError>,
+    ) -> crate::Result<Self> {
+        let earlier = load(base, INCOMPLETE_FILE)
             .map_err(|failure| {
                 crate::error::error!(
                     "refusing to overwrite incomplete campaign learning `{}`",
@@ -1940,16 +1949,41 @@ impl RunRecord {
     /// their affected source sites when they consume this ledger.
     #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn store_completed(&self, base: &Utf8Path) -> crate::Result<Self> {
-        self.store_completed_with_scope(base, false)
+        self.store_completed_with(base, Self::load_for_update, |path| fs::remove_file(path.as_std_path()))
     }
 
     /// Publishes a name-filtered campaign while retaining valid evidence for unselected IDs.
     pub(crate) fn store_completed_partial(&self, base: &Utf8Path) -> crate::Result<Self> {
-        self.store_completed_with_scope(base, true)
+        self.store_completed_partial_with(base, Self::load_for_update, |path| fs::remove_file(path.as_std_path()))
     }
 
-    fn store_completed_with_scope(&self, base: &Utf8Path, retain_unselected: bool) -> crate::Result<Self> {
-        let earlier = Self::load_for_update(base, FILE)
+    fn store_completed_with(
+        &self,
+        base: &Utf8Path,
+        load: impl FnOnce(&Utf8Path, &str) -> Result<Option<Self>, UpdateLoadError>,
+        remove: impl FnOnce(&Utf8Path) -> io::Result<()>,
+    ) -> crate::Result<Self> {
+        self.publish_completed_with(base, false, load, remove)
+    }
+
+    fn store_completed_partial_with(
+        &self,
+        base: &Utf8Path,
+        load: impl FnOnce(&Utf8Path, &str) -> Result<Option<Self>, UpdateLoadError>,
+        remove: impl FnOnce(&Utf8Path) -> io::Result<()>,
+    ) -> crate::Result<Self> {
+        self.publish_completed_with(base, true, load, remove)
+    }
+
+    /// Shares scoped absorption and publication while allowing controlled prior loading and cleanup.
+    fn publish_completed_with(
+        &self,
+        base: &Utf8Path,
+        retain_unselected: bool,
+        load: impl FnOnce(&Utf8Path, &str) -> Result<Option<Self>, UpdateLoadError>,
+        remove: impl FnOnce(&Utf8Path) -> io::Result<()>,
+    ) -> crate::Result<Self> {
+        let earlier = load(base, FILE)
             .map_err(|failure| crate::error::error!("refusing to overwrite campaign state `{}`", base.join(FILE)).caused_by(failure))?
             .unwrap_or_default();
         let merged = self.absorbing(&earlier, retain_unselected);
@@ -1957,7 +1991,7 @@ impl RunRecord {
         let text = serde_json::to_string(&merged)
             .map_err(|cause| crate::error::error!("could not serialize completed campaign state").caused_by(cause))?;
 
-        match fs::remove_file(base.join(INCOMPLETE_FILE).as_std_path()) {
+        match remove(&base.join(INCOMPLETE_FILE)) {
             Ok(()) => {}
             Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => {}
             Err(cause) => {
@@ -2594,6 +2628,8 @@ mod source_generation_tests;
 #[cfg(not(miri))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use std::cell::Cell;
+    use std::slice::from_ref;
     use std::sync::{Arc, Barrier};
     use std::thread;
 
@@ -3990,6 +4026,130 @@ mod tests {
             .expect("the in-memory snapshot supplies a complete source file"),
             compilation_roots: std::iter::once(("subject".to_owned(), vec![Utf8PathBuf::new()])).collect(),
             ..RunRecord::default()
+        }
+    }
+
+    #[test]
+    fn completed_publication_entry_points_publish_current_evidence() {
+        // Native output/readback coverage complements the injected scope-policy regressions.
+        let current = memory_record("fn selected() {}", &[mutant("selected", "src/lib.rs", Outcome::CompileError)]);
+        for partial in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let base = Utf8Path::from_path(directory.path()).unwrap();
+            let stored = if partial {
+                current.store_completed_partial(base)
+            } else {
+                current.store_completed(base)
+            }
+            .unwrap();
+            let expected = vec![("selected", Outcome::CompileError)];
+            assert_eq!(stored.iter().collect::<Vec<_>>(), expected, "partial={partial}");
+            assert_eq!(stored.population, current.population, "partial={partial}");
+            let loaded = RunRecord::load_required(base).unwrap();
+            assert_eq!(loaded.iter().collect::<Vec<_>>(), expected, "partial={partial}");
+            assert_eq!(loaded.population, current.population, "partial={partial}");
+        }
+    }
+
+    #[test]
+    fn oct29_publication_preserves_only_the_requested_same_file_scope() {
+        // Prior evidence is injected; native output verifies cleanup ordering and persisted scope.
+        let selected = mutant("selected", "src/lib.rs", Outcome::CompileError);
+        let unselected = mutant("unselected", "src/lib.rs", Outcome::CompileError);
+        let current = memory_record("fn first() {} fn second() {}", from_ref(&selected));
+        for mode in ["completed", "partial", "incomplete"] {
+            let earlier = memory_record("fn first() {} fn second() {}", &[selected.clone(), unselected.clone()]);
+            let directory = tempfile::tempdir().unwrap();
+            let base = Utf8Path::from_path(directory.path()).unwrap();
+            let destination = if mode == "incomplete" { INCOMPLETE_FILE } else { FILE };
+            let prior_loaded = Cell::new(false);
+            let incomplete_cleared = Cell::new(false);
+            let load = |path: &Utf8Path, file: &str| {
+                assert_eq!(path, base);
+                assert_eq!(file, destination);
+                assert!(!prior_loaded.replace(true));
+                Ok(Some(earlier))
+            };
+            let remove = |path: &Utf8Path| {
+                assert_eq!(path, base.join(INCOMPLETE_FILE));
+                assert!(!incomplete_cleared.replace(true));
+                assert!(!base.join(FILE).exists(), "cleanup must precede publication");
+                Ok(())
+            };
+
+            let stored = match mode {
+                "completed" => current.store_completed_with(base, load, remove),
+                "partial" => current.store_completed_partial_with(base, load, remove),
+                "incomplete" => current.store_incomplete_with(base, load),
+                _ => unreachable!(),
+            }
+            .unwrap();
+            assert!(prior_loaded.get(), "{mode}");
+            assert_eq!(incomplete_cleared.get(), mode != "incomplete", "{mode}");
+            let expected = if mode == "partial" {
+                vec![("selected", Outcome::CompileError), ("unselected", Outcome::CompileError)]
+            } else {
+                vec![("selected", Outcome::CompileError)]
+            };
+            assert_eq!(stored.iter().collect::<Vec<_>>(), expected, "{mode}");
+            let loaded: RunRecord = serde_json::from_slice(&fs::read(base.join(destination)).unwrap()).unwrap();
+            assert_eq!(loaded.iter().collect::<Vec<_>>(), expected, "{mode}");
+            assert_eq!(loaded.population, current.population, "{mode}");
+            if mode != "incomplete" {
+                assert!(!base.join(INCOMPLETE_FILE).exists(), "{mode}");
+            }
+        }
+    }
+
+    #[test]
+    fn oct29_hint_absorption_respects_nonempty_learning_replacement_and_scope() {
+        let killer = Killer {
+            package: "subject".into(),
+            target: "lib".into(),
+            test: "tests::old".into(),
+        };
+        let fresh = Killer {
+            test: "tests::fresh".into(),
+            ..killer.clone()
+        };
+        let earlier = RunRecord {
+            hints: [("selected".into(), killer.clone()), ("unselected".into(), killer.clone())]
+                .into_iter()
+                .collect(),
+            ..RunRecord::default()
+        };
+        for populated in [false, true] {
+            for replace in [false, true] {
+                for partial in [false, true] {
+                    let current = RunRecord {
+                        population: Some(vec!["selected".into()]),
+                        hints: if populated {
+                            std::iter::once(("selected".into(), fresh.clone())).collect()
+                        } else {
+                            HashMap::default()
+                        },
+                        replace_knowledge: replace,
+                        ..RunRecord::default()
+                    };
+                    let absorbed = current.absorbed_hints(&earlier, partial);
+                    assert_eq!(
+                        absorbed.get("selected"),
+                        if populated {
+                            Some(&fresh)
+                        } else if replace {
+                            None
+                        } else {
+                            Some(&killer)
+                        },
+                        "populated={populated}, replace={replace}, partial={partial}"
+                    );
+                    assert_eq!(
+                        absorbed.get("unselected"),
+                        (partial || (!populated && !replace)).then_some(&killer),
+                        "populated={populated}, replace={replace}, partial={partial}"
+                    );
+                }
+            }
         }
     }
 

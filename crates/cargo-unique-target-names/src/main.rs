@@ -33,7 +33,6 @@ use std::process::ExitCode;
 #[cfg(not(test))]
 use cargo_unique_target_names::run as run_command;
 
-#[mutants::skip] // Entry point: one-line dispatch to the library runner.
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn main() -> ExitCode {
     // TODO: This could be a main.rs only crate, but CI complains when processing bin-only crates:

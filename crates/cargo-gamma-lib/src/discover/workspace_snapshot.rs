@@ -511,6 +511,8 @@ mod tests {
         let path = Utf8Path::new("never-inspected-native-timestamp");
         assert_eq!(native_timestamp(path, false).unwrap(), link);
         assert_eq!(native_timestamp(path, true).unwrap(), target);
+        assert_eq!(crate::discover::acceptance::native_timestamp(path, false).unwrap(), link);
+        assert_eq!(crate::discover::acceptance::native_timestamp(path, true).unwrap(), target);
     }
 
     #[test]

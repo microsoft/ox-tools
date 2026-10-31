@@ -81,6 +81,7 @@ pub(super) async fn discover(explicit: Option<&GitHubToken>, github_token_from_g
     discover_with(explicit, github_token_from_gh, endpoints, github_token_from_environment, query_gh).await
 }
 
+// #[gamma::skip(fn_value.none, fn_value.some_default, tag = "native", reason = "this adapter reads process-global credentials; discover_with tests absent, blank and populated values without changing the environment")]
 fn github_token_from_environment() -> Option<OsString> {
     std::env::var_os(GITHUB_TOKEN_ENV)
 }
@@ -344,7 +345,14 @@ fn resolve_executable(program: &OsStr, path: &OsStr, path_ext: Option<&OsStr>, c
         // An empty component can make OS command lookup search CWD implicitly. Requiring an
         // actual entry such as `.` keeps repository-local executables opt-in.
         .filter(|directory| !directory.as_os_str().is_empty())
-        .map(|directory| if directory.is_absolute() { directory } else { current_dir.join(directory) })
+        .map(|directory| {
+            // #[gamma::skip(cond.always_false, tag = "equivalent", reason = "Path::join replaces the base for an absolute path, so always joining preserves every candidate and only adds an allocation.")]
+            if directory.is_absolute() {
+                directory
+            } else {
+                current_dir.join(directory)
+            }
+        })
         .flat_map(|directory| executable_names.iter().map(move |name| directory.join(name)))
         .find(|candidate| is_executable(candidate))
 }
@@ -467,6 +475,10 @@ mod tests {
     #[tokio::test]
     async fn discovery_retains_the_explicit_token_without_environment_or_gh() {
         let explicit = token("noncredential-test-value");
+        assert_eq!(
+            discover(Some(&explicit), false, &Endpoints::default()).await,
+            Some(explicit.clone())
+        );
         let discovered = discover_with(
             Some(&explicit),
             false,

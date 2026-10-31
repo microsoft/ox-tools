@@ -94,6 +94,7 @@ pub fn extract_archive(archive: &tempfile::NamedTempFile, destination: &Path) ->
 pub async fn write_archive(response: fetch::HttpResponse, destination: std::path::PathBuf) -> Result<Result<tempfile::NamedTempFile>> {
     write_archive_with(response, destination, |destination| {
         let archive = tempfile::NamedTempFile::new_in(destination)?;
+        // #[gamma::skip(try.propagate_to_unwrap, tag = "native", reason = "reopening the just-created owned temporary file can fail only through native IO or external interference; write_archive_with tests creation errors without exhausting host resources")]
         let output = archive.reopen()?;
         Ok((archive, output))
     })

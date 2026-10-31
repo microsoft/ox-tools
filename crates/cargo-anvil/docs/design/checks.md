@@ -135,7 +135,7 @@ recipe that invokes those groups sequentially.
 | `scheduled-test`       | Same default as `pr-test` | Re-runs the test suite on `main` (with coverage instrumentation) to catch flakes/environment-dependent failures and to publish a full coverage snapshot of the current `main`. |
 | `scheduled-advisories` | Same default as `pr-fast` | Runs checks whose outcome can change without a commit to this repo: `deny`, `audit`, `aprz` (external databases), `clippy` (lint set evolves with toolchain). Cross-OS because clippy compiles per host. |
 | `scheduled-runtime-analysis` | Same default as `pr-runtime-analysis` | Whole-workspace runtime correctness under `miri`, tree-borrows, strict-provenance, and race-coverage. One job per OS leg runs the four profiles sequentially so they share setup and cache state; parallelism is across OS legs. |
-| `scheduled-exhaustive` | Linux x86_64 + Windows x86_64 | Full `cargo mutants`, cargo-hack feature powerset, and benchmark compilation. The default matrix is x86-only because cargo-mutants is unsupported on Windows ARM. |
+| `scheduled-exhaustive` | Linux x86_64 + Windows x86_64 | Full `cargo gamma`, cargo-hack feature powerset, and benchmark compilation. The existing x86-only schedule bounds recurring cost. |
 
 **Backend asymmetry on ARM coverage.** The GitHub backend ships a four-leg default matrix
 (Linux/Windows × x86_64/aarch64) because GH has Microsoft-hosted ARM runners
@@ -323,7 +323,7 @@ coverage tradeoff beside the test.
 
 | Check     | Invocation                                                                  | Source |
 |-----------|-----------------------------------------------------------------------------|--------|
-| `mutants` | Resolves the base ref, writes `git diff <base>` against the working tree to a temporary unified-diff file, then runs `cargo mutants --in-diff <file> --no-shuffle --jobs 0`. Self-skips on aarch64-pc-windows-msvc where cargo-mutants doesn't build; other ARM legs run normally. | oxidizer-github |
+| `mutants` | Resolves the base ref, writes `git diff <base>` against the working tree to a temporary unified-diff file, then runs `cargo gamma run --workspace --in-diff <file> --min-score 100 --max-flaky 0`. GitHub Actions pins `--artifact-dir target/cargo-gamma` for report uploads. Empty impact scopes skip; supported ARM hosts execute the campaign. | cargo-gamma |
 
 The mutants check requires a base ref: locally the recipe resolves `BASE_REF` (if set), then `origin/main`, then `origin/master`, then errors out. GitHub passes `${{ github.event.pull_request.base.sha }}` as `BASE_REF`; on ADO the shared resolver reads `$(System.PullRequest.TargetBranch)` from the environment.
 
@@ -332,17 +332,20 @@ Each invocation reserves its own uniquely named diff file in `RUNNER_TEMP`,
 The working-tree diff explicitly requests `a/` and `b/` prefixes, independent
 of Git's mnemonic or no-prefix configuration. A `finally` block removes the
 file after success or failure. Git failures prevent mutation testing, and
-Git/cargo-mutants exit codes and launch errors survive cleanup failures.
+Git/Gamma exit codes and launch errors survive cleanup failures.
 Cleanup failures are fatal only after the main operation completes successfully;
 otherwise they are reported without replacing the primary failure.
 
-Both mutation recipes select `.cargo/mutants.<os>.toml` when it exists, using
-Just's native host OS name, and pass it through cargo-mutants' `--config` option.
-Otherwise they retain cargo-mutants' default configuration discovery. These are
-complete native configurations, not overlays or Cargo metadata. See
-[the rationale and configuration contract](./local.md#9-platform-specific-mutation-configuration):
-cargo-mutants can mutate source that the current platform compiles out, producing
-false `MISSED` results because no behavioral change reaches the tests.
+Both mutation recipes use Gamma's native `gamma.toml` configuration and defaults.
+The full recipe omits `--in-diff`; both enforce a 100% assertion-killed score
+and zero unresolved flaky outcomes, and propagate native exit codes. See
+[the configuration and migration contract](./local.md#9-mutation-testing-with-cargo-gamma).
+After either campaign returns, even unsuccessfully, the recipe runs
+`cargo gamma hints` to merge its learned hints. Campaign failures retain their
+exit code; hint-promotion failures fail an otherwise successful campaign recipe.
+GitHub mutation jobs preserve the reports and resulting hints as 30-day workflow
+artifacts and publish SARIF to code scanning, including after campaign failure.
+See [Gamma reports and code scanning](./github.md#gamma-reports-and-code-scanning).
 
 ### `scheduled-test`
 
@@ -404,7 +407,7 @@ The `miri` row above is the one place the catalog deliberately duplicates a chec
 
 | Check                 | Invocation                                                                                                   | Source |
 |-----------------------|--------------------------------------------------------------------------------------------------------------|--------|
-| `mutants-full`        | `cargo mutants --workspace --no-shuffle --jobs 0`                                                            | oxidizer-github, oxidizer (sharded cross-OS) |
+| `mutants-full`        | `cargo gamma run --workspace --min-score 100 --max-flaky 0`, followed by `cargo gamma hints`                    | cargo-gamma |
 | `cargo-hack` powerset | `cargo hack --workspace --feature-powerset --depth 2 check`                                                  | oxidizer, oxidizer-github |
 | `bench`               | `cargo bench --workspace --all-features --no-run`; benchmark execution is intentionally outside the catalog because runtime requirements are repository-specific | oxidizer |
 

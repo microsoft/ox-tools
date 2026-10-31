@@ -1,6 +1,10 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
+all-features = true
+profile = "mutants"
+cargo-args = ["--locked"]
+
 exclude-files = [
     # Repository automation invokes external tools rather than implementing product behavior.
     "crates/automation/**",
@@ -8,6 +12,8 @@ exclude-files = [
     "crates/cargo-gamma-lib/src/testing.rs",
     "crates/cargo-gamma-lib/src/commands/run/recovery_test_util.rs",
     "crates/cargo-gamma-lib/src/commands/suppress/native_test_util.rs",
+    "crates/cargo-gamma-lib/src/commands/verdict_log/native_test_util.rs",
+    "crates/cargo-gamma-lib/src/discover/survey/native_test_util.rs",
     "crates/cargo-gamma-lib/src/exec/build/native_test_util.rs",
     "crates/cargo-gamma-lib/src/exec/native_storage_test_util.rs",
     "crates/cargo-gamma-lib/src/exec/sync/native_test_util.rs",

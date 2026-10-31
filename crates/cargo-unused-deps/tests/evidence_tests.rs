@@ -86,7 +86,7 @@ fn a_bin_only_finding_does_not_try_to_compile_doctests() {
 /// Command the binary under test with nightly-only rustdoc options enabled.
 ///
 /// `RUSTC_BOOTSTRAP` is confined to synthetic fixture builds. It lets the same
-/// behavioral tests run under cargo-mutants' stable compiler.
+/// behavioral tests run under a stable compiler.
 fn command() -> Command {
     let mut command = Command::new(binary());
     command.env("RUSTC_BOOTSTRAP", "1");

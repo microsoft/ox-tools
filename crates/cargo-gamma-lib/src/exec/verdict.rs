@@ -611,18 +611,18 @@ fn confirm_enumeration_with(attempt: Attempt<'_>, output: String, observe: impl 
         // Timeout or memory-limit evidence from an exonerating run cannot be attributed to the
         // mutant because no mutant was active. Returning either verdict would record the suite as
         // having missed a mutant that was switched off for the run that produced the evidence.
-        unestablished => unconfirmed(None, &unestablished),
+        unestablished => unconfirmed(&unestablished),
     }
 }
 
-fn unconfirmed(test: Option<String>, verdict: &Verdict) -> Verdict {
+fn unconfirmed(verdict: &Verdict) -> Verdict {
     let reason = match verdict {
         Verdict::TimedOut => "exceeded its time budget",
         Verdict::Stalled(_) => "stopped reporting progress",
         Verdict::MemoryLimit { .. } => "exceeded its memory ceiling",
         _ => "did not establish a trustworthy passing result",
     };
-    Verdict::Unconfirmed(test, reason)
+    Verdict::Unconfirmed(None, reason)
 }
 
 /// Says on the diagnostic stream that a verdict was reached on less output than the binary produced.

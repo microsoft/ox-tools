@@ -865,6 +865,7 @@ impl Workspace {
         let _ = command.env("CARGO_TERM_COLOR", if self.cargo.color { "always" } else { "never" });
         self.inherit_test_cache_home(&mut command);
 
+        // #[gamma::skip(call_result.default, tag = "equivalent", reason = "cap_ambient_rustflags returns unit; default_after preserves every command environment update")]
         cap_ambient_rustflags(&mut command);
 
         // A guard is inert unless this names its mutant. Proc macros run inside the compiler, so a
@@ -2827,6 +2828,7 @@ fn anchor_manifest_paths(
 /// under deny-by-default, guard-induced warnings become errors, and the mutants that produced them
 /// are withdrawn as unviable — a score computed over a silently smaller denominator.
 fn cap_ambient_rustflags(command: &mut Command) {
+    // #[gamma::skip(call_result.default, tag = "equivalent", reason = "cap_ambient_rustflags_from returns unit and default_after preserves its environment updates")]
     cap_ambient_rustflags_from(command, |name| env::var_os(name), env::vars_os);
 }
 
@@ -2837,10 +2839,12 @@ where
     // The encoded spelling separates flags with a unit separator rather than a space, which is the
     // whole reason it exists: a flag may contain spaces.
     if let Some(inherited) = lookup("CARGO_ENCODED_RUSTFLAGS") {
+        // #[gamma::skip(call_result.default, tag = "equivalent", reason = "extend returns unit; the encoded flag update and early return are preserved")]
         return extend(command, "CARGO_ENCODED_RUSTFLAGS", inherited, "\u{1f}");
     }
 
     if let Some(inherited) = lookup("RUSTFLAGS") {
+        // #[gamma::skip(call_result.default, tag = "equivalent", reason = "extend returns unit; the flag update and early return are preserved")]
         return extend(command, "RUSTFLAGS", inherited, " ");
     }
 
@@ -2850,11 +2854,13 @@ where
         };
 
         if name.starts_with("CARGO_TARGET_") && name.ends_with("_RUSTFLAGS") {
+            // #[gamma::skip(call_result.default, tag = "equivalent", reason = "extend returns unit; default_after preserves this target's environment update")]
             extend(command, name, inherited, " ");
         }
     }
 
     if let Some(inherited) = lookup("CARGO_BUILD_RUSTFLAGS") {
+        // #[gamma::skip(call_result.default, tag = "equivalent", reason = "extend returns unit; default_after preserves the build flag update")]
         extend(command, "CARGO_BUILD_RUSTFLAGS", inherited, " ");
     }
 }
