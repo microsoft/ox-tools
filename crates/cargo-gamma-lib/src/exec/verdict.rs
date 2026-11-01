@@ -1722,8 +1722,8 @@ impl ReachCapture {
 fn reach_from_records(bytes: &[u8], ordinal: u32) -> ReachObservation {
     let mut sealed = false;
     let mut reached = false;
-    for record in bytes.chunks_exact(core::mem::size_of::<u32>()) {
-        let value = u32::from_le_bytes(record.try_into().expect("chunks_exact yields exactly one runtime reach record"));
+    for record in bytes.as_chunks::<{ core::mem::size_of::<u32>() }>().0 {
+        let value = u32::from_le_bytes(*record);
         if value == ordinal {
             reached = true;
         }
@@ -1849,7 +1849,7 @@ mod pulse_wait_regression_tests {
                     assert_eq!(collected.authoritative, expected);
                     assert_eq!(collected.text, bytes);
                     assert_eq!(collected.stdout_tail, b"tail");
-                    assert!(collected.stderr_tail.is_empty());
+                    assert_eq!(collected.stderr_tail.len(), 0);
                     assert_eq!(collected.whole, complete);
                     assert!(!collected.tail_truncated);
                 }
@@ -1866,7 +1866,7 @@ mod pulse_wait_regression_tests {
         let (kept, tail, truncated, whole) = drain(pipe, &progress, &Pulse::default(), false, false);
         assert_eq!(kept.len(), OUTPUT_CAP);
         assert_eq!(kept.last(), Some(&b'\n'));
-        assert!(tail.is_empty());
+        assert_eq!(tail.len(), 0);
         assert!(!truncated);
         assert!(whole);
     }
@@ -1879,10 +1879,10 @@ mod pulse_wait_regression_tests {
         };
         let collected = collected(&receiver, Duration::ZERO);
         assert!(receiver.replies.borrow().is_empty());
-        assert!(collected.text.is_empty());
-        assert!(collected.authoritative.is_empty());
-        assert!(collected.stdout_tail.is_empty());
-        assert!(collected.stderr_tail.is_empty());
+        assert_eq!(collected.text.len(), 0);
+        assert_eq!(collected.authoritative.len(), 0);
+        assert_eq!(collected.stdout_tail.len(), 0);
+        assert_eq!(collected.stderr_tail.len(), 0);
         assert!(!collected.tail_truncated);
         assert!(!collected.whole);
     }
@@ -2580,7 +2580,7 @@ mod final_survivor_tests {
             .collect::<Vec<_>>();
         assert_eq!(exact, [(false, 1, 0, 0, 0, 0), (false, 0, 7, 0, 0, 0)]);
         let _costs = super::super::sweep::take_execution_costs();
-        assert!(super::super::sweep::take_selection_trace().is_empty());
+        assert_eq!(super::super::sweep::take_selection_trace().len(), 0);
     }
 
     #[test]
@@ -2671,7 +2671,7 @@ mod final_survivor_tests {
         json["launches"] = attempts;
         let legacy: super::super::session::AttemptCost = serde_json::from_value(json).unwrap();
         assert_eq!(&legacy, cost, "previously named attempt counters remain readable");
-        assert!(super::super::sweep::take_selection_trace().is_empty());
+        assert_eq!(super::super::sweep::take_selection_trace().len(), 0);
     }
 
     #[test]
@@ -2715,7 +2715,7 @@ mod final_survivor_tests {
             assert!(!costs[0].0, "only the first observation is a primary execution");
             assert!(costs[1..].iter().all(|(confirmation, cost)| *confirmation && cost.launches == 1));
             assert_eq!(costs.iter().map(|(_, cost)| cost.launches).sum::<usize>(), expected);
-            assert!(super::super::sweep::take_selection_trace().is_empty());
+            assert_eq!(super::super::sweep::take_selection_trace().len(), 0);
         }
     }
 
@@ -3250,8 +3250,8 @@ mod final_survivor_tests {
                     assert!(String::from_utf8_lossy(&output.stdout_tail).contains("stdout-marker"));
                     assert!(String::from_utf8_lossy(&output.stderr_tail).contains("stderr-marker"));
                 } else {
-                    assert!(output.stdout_tail.is_empty());
-                    assert!(output.stderr_tail.is_empty());
+                    assert_eq!(output.stdout_tail.len(), 0);
+                    assert_eq!(output.stderr_tail.len(), 0);
                 }
                 assert_eq!(
                     pulse.seen() - before,

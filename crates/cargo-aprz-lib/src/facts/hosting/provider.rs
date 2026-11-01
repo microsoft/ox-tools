@@ -1214,6 +1214,7 @@ mod tests {
 
     #[tokio::test]
     async fn rate_limit_reporting_uses_scripted_ticks_without_wall_clock_deadlines() {
+        test_logging::enable_log_argument_evaluation();
         let now = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
         for seconds in [90, 30, -30] {
             for logged in [false, true] {
@@ -2558,7 +2559,7 @@ mod tests {
         assert_eq!(buckets.all, vec![365.0, 180.0]);
         assert_eq!(buckets.days_365, vec![365.0, 180.0]);
         assert_eq!(buckets.days_180, vec![180.0]);
-        assert!(buckets.days_90.is_empty());
+        assert_eq!(buckets.days_90, [] as [f64; 0]);
     }
 
     #[test]

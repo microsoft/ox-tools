@@ -751,7 +751,7 @@ mod tests {
         let mut empty = String::new();
         write_slowest(&mut empty, &[]);
         write_breakdown(&mut empty, "file", &HashMap::default());
-        assert!(empty.is_empty());
+        assert_eq!(empty.len(), 0);
     }
 
     #[test]

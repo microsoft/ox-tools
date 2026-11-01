@@ -1,0 +1,80 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+name: Windows coverage diagnostics
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/windows-coverage-diagnostics.yml
+      - crates/cargo-aprz-lib/**
+      - crates/cargo-coverage-gate/**
+      - crates/cargo-gamma-lib/**
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+
+permissions:
+  contents: read
+
+jobs:
+  coverage:
+    name: Collect with the checkout's coverage runner
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      CARGO_INCREMENTAL: "0"
+      NEXTEST_SUCCESS_OUTPUT: immediate
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          lfs: true
+      - uses: ./.github/actions/anvil-setup
+        with:
+          group: pr-test
+          free-disk-space: true
+      - name: Run coverage with the collector from this checkout
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $nightly = & just --evaluate rust_nightly
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & cargo "+$nightly" run --locked --package cargo-coverage-gate --bin cargo-coverage-gate -- coverage-gate run
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Inspect library-test profile initialization
+        if: failure()
+        shell: pwsh
+        env:
+          LLVM_PROFILE_VERBOSE: "1"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $executables = @(Get-Item target/coverage-gate/run-*/cargo-target |
+            ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Recurse -File -Filter 'cargo_*_lib*.exe' } |
+            Where-Object { $_.Name -match '^cargo_(aprz|gamma)_lib(?:-[0-9a-f]+)?\.exe$' })
+          if ($executables.Count -eq 0) { throw 'No APRZ/Gamma library-test executables are available for initialization diagnostics.' }
+          foreach ($executable in $executables) {
+            Write-Host "Inspecting $($executable.FullName)"
+            $env:LLVM_PROFILE_FILE = Join-Path $env:RUNNER_TEMP "coverage-init-$($executable.BaseName)-%p-%4m.profraw"
+            & $executable.FullName --list
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - name: Upload failed coverage diagnostics
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-coverage-diagnostics-${{ github.run_attempt }}
+          path: |
+            target/coverage-gate/run-*/**/*.profraw
+            target/coverage-gate/run-*/**/*.profdata
+            target/coverage-gate/run-*/**/*-profraw-list
+            target/coverage-gate/run-*/**/*.info
+            target/coverage-gate/run-*/cargo-target/**/cargo_aprz_lib.exe
+            target/coverage-gate/run-*/cargo-target/**/cargo_aprz_lib-*.exe
+            target/coverage-gate/run-*/cargo-target/**/cargo_gamma_lib.exe
+            target/coverage-gate/run-*/cargo-target/**/cargo_gamma_lib-*.exe
+            target/coverage-gate/run-*/cargo-target/**/test-lib-cargo_aprz_lib.json
+            target/coverage-gate/run-*/cargo-target/**/test-lib-cargo_gamma_lib.json
+            target/coverage/lcov-*.info
+          retention-days: 7
+          if-no-files-found: warn
+          include-hidden-files: true

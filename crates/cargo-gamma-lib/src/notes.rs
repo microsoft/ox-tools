@@ -170,7 +170,7 @@ mod tests {
             note("said once");
 
             assert_eq!(drain().len(), 1);
-            assert!(drain().is_empty());
+            assert_eq!(drain().len(), 0);
         });
     }
 
@@ -182,7 +182,7 @@ mod tests {
             {
                 let _without_a_run = enter(None);
                 note("hidden");
-                assert!(drain().is_empty());
+                assert_eq!(drain().len(), 0);
             }
 
             note("after");
@@ -195,7 +195,7 @@ mod tests {
         let run = Run::new();
         let _scope = enter(Some(&run));
 
-        assert!(drain().is_empty());
+        assert_eq!(drain().len(), 0);
     }
 
     #[test]
@@ -204,7 +204,7 @@ mod tests {
 
         note("unowned");
 
-        assert!(drain().is_empty());
+        assert_eq!(drain().len(), 0);
     }
 
     #[test]
@@ -239,7 +239,7 @@ mod tests {
 
     #[test]
     fn a_process_that_raised_nothing_drains_nothing() {
-        alone(|| assert!(drain().is_empty()));
+        alone(|| assert_eq!(drain().len(), 0));
     }
 
     #[test]

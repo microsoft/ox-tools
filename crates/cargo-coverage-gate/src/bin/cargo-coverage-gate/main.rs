@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(all(coverage_nightly, any(test, windows)), feature(coverage_attribute))]
 
 //! `cargo-coverage-gate`: gate pull requests on per-crate line coverage.
 

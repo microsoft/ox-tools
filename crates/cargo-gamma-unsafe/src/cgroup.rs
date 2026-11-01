@@ -696,11 +696,17 @@ impl Cgroup {
 
     /// Creates and configures a leaf beneath an already selected cgroup root.
     fn create_under(root: &Path, limit: Option<u64>) -> Result<Self, String> {
-        Self::create_under_with(root, limit, process::id(), || next_name_ticket(&SEQUENCE))
+        Self::create_under_with(root, limit, process::id(), process_generation, || next_name_ticket(&SEQUENCE))
     }
 
-    fn create_under_with(root: &Path, limit: Option<u64>, pid: u32, next: impl FnMut() -> u64) -> Result<Self, String> {
-        let generation = process_generation(pid).map_err(|cause| format!("process generation could not be read: {cause}"))?;
+    fn create_under_with(
+        root: &Path,
+        limit: Option<u64>,
+        pid: u32,
+        read_generation: impl FnOnce(u32) -> io::Result<u64>,
+        next: impl FnMut() -> u64,
+    ) -> Result<Self, String> {
+        let generation = read_generation(pid).map_err(|cause| format!("process generation could not be read: {cause}"))?;
         let path = create_child_with(root, "gamma", pid, generation, next)
             .map_err(|cause| format!("a unique child cgroup could not be created under `{}`: {cause}", root.display()))?;
 
@@ -820,9 +826,8 @@ impl Cgroup {
                     return Err(cause);
                 }
             }
-        } else {
-            fs::write(self.path.join("cgroup.kill"), "1")
         }
+        fs::write(self.path.join("cgroup.kill"), "1")
     }
 
     /// The already-open kill switch the signal registry may use while this cgroup is retained.
@@ -1223,6 +1228,45 @@ mod tests {
         assert_eq!(fs::read_to_string(group.path.join("memory.oom.group")).expect("written"), "1");
     }
 
+    #[test]
+    fn creating_a_leaf_preserves_the_root_and_reports_creation_failure() {
+        let parent = tempfile::tempdir().expect("a temporary directory");
+        let missing_root = parent.path().join("missing");
+        let error = Cgroup::create_under_with(
+            &missing_root,
+            None,
+            42,
+            |pid| {
+                assert_eq!(pid, 42);
+                Ok(123)
+            },
+            || 0,
+        )
+        .expect_err("a leaf cannot be created under a missing root");
+        assert!(
+            error.starts_with(&format!(
+                "a unique child cgroup could not be created under `{}`:",
+                missing_root.display()
+            )),
+            "{error}"
+        );
+        assert!(!missing_root.exists(), "failed leaf creation must not create its root");
+    }
+
+    #[test]
+    fn generation_failure_prevents_child_creation() {
+        let root = tempfile::tempdir().expect("a temporary directory");
+        let error = Cgroup::create_under_with(
+            root.path(),
+            None,
+            42,
+            |_| Err(io::Error::new(io::ErrorKind::PermissionDenied, "generation denied")),
+            || panic!("child creation must not run after generation lookup fails"),
+        )
+        .expect_err("generation lookup failure must be reported");
+        assert_eq!(error, "process generation could not be read: generation denied");
+        assert_eq!(fs::read_dir(root.path()).expect("the root remains readable").count(), 0);
+    }
     /// A crashed process can leave the probe directory matching a reused pid and reset sequence.
     #[test]
     fn a_stale_probe_directory_is_skipped_for_a_distinct_name() {
@@ -1260,7 +1304,7 @@ mod tests {
         fs::create_dir(&stale).expect("the stale leaf directory exists");
 
         let mut sequence = 0;
-        let group = Cgroup::create_under_with(root.path(), None, pid, || {
+        let group = Cgroup::create_under_with(root.path(), None, pid, process_generation, || {
             let candidate = sequence;
             sequence += 1;
             candidate

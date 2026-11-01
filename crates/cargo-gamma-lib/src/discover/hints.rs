@@ -2463,7 +2463,7 @@ mod tests {
             "an invalid pool index rejects the entire generalized schema"
         );
         generalized.version = record::GENERALIZED_HINTS_VERSION + 1;
-        assert!(reach_entries(&generalized).is_empty());
+        assert_eq!(reach_entries(&generalized).len(), 0);
     }
 
     /// A file that cannot be parsed must cost the run nothing but the speed-up it would have given.

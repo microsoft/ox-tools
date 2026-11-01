@@ -76,7 +76,7 @@ mod tests {
             entry("collateral", true),
         ];
         let result = verify(&before, &after, &core::iter::once("intended".to_owned()).collect());
-        assert!(result.missing.is_empty());
+        assert_eq!(result.missing.len(), 0);
         assert_eq!(result.collateral, ["collateral"]);
         assert_eq!(result.released, ["released"]);
         assert!(!result.is_clean());

@@ -659,7 +659,7 @@ fn consuming_guards_preserve_temporary_lifetimes_drop_order_and_attributes() {
     assert_eq!(out, ["held", "", ""]);
     let mut line = String::new();
     active(6, || borrows::neighbor(&mut line));
-    assert!(line.is_empty());
+    assert_eq!(line, "");
     active(0, || borrows::neighbor(&mut line));
     assert_eq!(line, "x");
     assert_ownership_neighbors();

@@ -7,10 +7,11 @@
 //! `unused_crate_dependencies` lint for its own build and reading the
 //! diagnostics cargo forwards as JSON.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode, Stdio};
+use std::process::{Command, ExitCode, ExitStatus, Stdio};
 use std::{env, fs};
 
 use ohno::{AppError, IntoAppError};
@@ -316,21 +317,75 @@ fn has_workspace_wrapper_config(config: &str) -> Result<bool> {
 /// outer `RUSTC_WRAPPER`/`CARGO_BUILD_RUSTC_WRAPPER` remains outside this
 /// workspace wrapper, while an existing workspace wrapper is chained inside it.
 pub fn wrapper(args: &[OsString]) -> Result<ExitCode> {
+    wrapper_with(args, std::env::var_os(INNER_WRAPPER_VAR), Command::status)
+}
+
+fn wrapper_with(
+    args: &[OsString],
+    inner: Option<OsString>,
+    run: impl FnOnce(&mut Command) -> std::io::Result<ExitStatus>,
+) -> Result<ExitCode> {
     let (rustc, rustc_args) = args
         .split_first()
         .into_app_err("rustc wrapper was invoked without a compiler path")?;
-    let mut command = wrapper_command(std::env::var_os(INNER_WRAPPER_VAR), rustc);
-    let status = command
-        .args(rustc_args)
+    let mut command = wrapper_command(inner, rustc);
+    command
+        .args(evidence_rustc_args(rustc_args))
         .args(["--force-warn", LINT])
         .env_remove(WRAPPER_VAR)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .into_app_err("failed to run rustc from the compile-evidence wrapper")?;
+        .stderr(Stdio::inherit());
+    let status = run(&mut command).into_app_err("failed to run rustc from the compile-evidence wrapper")?;
 
     Ok(if status.success() { ExitCode::SUCCESS } else { ExitCode::FAILURE })
+}
+
+/// Remove separate unused-extern notification modes so rustc emits the lint diagnostics consumed by the evidence parser.
+fn evidence_rustc_args(args: &[OsString]) -> Vec<Cow<'_, OsStr>> {
+    let mut filtered = Vec::with_capacity(args.len());
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        if arg != "--json" {
+            filtered.extend(evidence_rustc_arg(arg));
+            continue;
+        }
+        let Some(value) = args.next() else {
+            filtered.push(Cow::Borrowed(arg.as_os_str()));
+            return filtered;
+        };
+        let Some(options) = value.to_str() else {
+            filtered.extend([Cow::Borrowed(arg.as_os_str()), Cow::Borrowed(value.as_os_str())]);
+            continue;
+        };
+        let joined = OsString::from(format!("--json={options}"));
+        match evidence_rustc_arg(&joined) {
+            Some(Cow::Borrowed(_)) => {
+                filtered.extend([Cow::Borrowed(arg.as_os_str()), Cow::Borrowed(value.as_os_str())]);
+            }
+            Some(Cow::Owned(value)) => filtered.push(Cow::Owned(value)),
+            None => {}
+        }
+    }
+    filtered
+}
+
+fn evidence_rustc_arg(arg: &OsString) -> Option<Cow<'_, OsStr>> {
+    let Some(options) = arg.to_str().and_then(|arg| arg.strip_prefix("--json=")) else {
+        return Some(Cow::Borrowed(arg.as_os_str()));
+    };
+    if !options
+        .split(',')
+        .any(|option| matches!(option, "unused-externs" | "unused-externs-silent"))
+    {
+        return (!options.is_empty()).then_some(Cow::Borrowed(arg.as_os_str()));
+    }
+    let options = options
+        .split(',')
+        .filter(|option| !matches!(*option, "unused-externs" | "unused-externs-silent"))
+        .collect::<Vec<_>>()
+        .join(",");
+    (!options.is_empty()).then(|| Cow::Owned(format!("--json={options}").into()))
 }
 
 /// Construct the wrapper chain before appending rustc's ordinary arguments.
@@ -599,12 +654,13 @@ mod campaign_collection_tests {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use std::ffi::OsString;
+    use std::borrow::Cow;
+    use std::ffi::{OsStr, OsString};
     use std::path::{Path, PathBuf};
 
     use super::{
-        Evidence, Scope, TargetKind, cargo_home_in, cargo_or_default, failure_diagnostics, has_workspace_wrapper_config, parse,
-        reported_name, target_of, wrapper, wrapper_command,
+        Evidence, Scope, TargetKind, cargo_home_in, cargo_or_default, evidence_rustc_arg, evidence_rustc_args, failure_diagnostics,
+        has_workspace_wrapper_config, parse, reported_name, target_of, wrapper, wrapper_command, wrapper_with,
     };
 
     #[test]
@@ -709,6 +765,131 @@ mod tests {
     }
 
     #[test]
+    fn compiler_wrapper_keeps_unused_extern_diagnostics_visible() {
+        for (input, expected) in [
+            (
+                "--json=diagnostic-rendered-ansi,artifacts,future-incompat,unused-externs-silent",
+                Some("--json=diagnostic-rendered-ansi,artifacts,future-incompat"),
+            ),
+            ("--json=artifacts,unused-externs", Some("--json=artifacts")),
+            ("--json=unused-externs-silent", None),
+            ("--json=", None),
+            ("--cfg=unused-externs-silent", Some("--cfg=unused-externs-silent")),
+        ] {
+            assert_eq!(evidence_rustc_arg(&OsString::from(input)).as_deref(), expected.map(OsStr::new));
+        }
+        for input in ["--extern=dep=/path/libdep.rlib", "--json=artifacts"] {
+            let arg = OsString::from(input);
+            assert!(matches!(evidence_rustc_arg(&arg), Some(Cow::Borrowed(value)) if value == arg.as_os_str()));
+        }
+    }
+
+    #[test]
+    fn compiler_wrapper_filters_the_complete_json_argument_stream() {
+        for (input, expected) in [
+            (
+                vec![
+                    "--cfg",
+                    "custom",
+                    "--json",
+                    "diagnostic-rendered-ansi,unused-externs,artifacts,unused-externs-silent",
+                    "--extern=dep=/path/libdep.rlib",
+                    "--json=unused-externs",
+                ],
+                vec![
+                    "--cfg",
+                    "custom",
+                    "--json=diagnostic-rendered-ansi,artifacts",
+                    "--extern=dep=/path/libdep.rlib",
+                ],
+            ),
+            (
+                vec!["--json", "unused-externs-silent", "--crate-name", "fixture"],
+                vec!["--crate-name", "fixture"],
+            ),
+            (vec!["--json", "artifacts"], vec!["--json", "artifacts"]),
+            (vec!["--json", ""], vec![]),
+            (vec!["--json"], vec!["--json"]),
+            (vec!["--json", "unknown-option"], vec!["--json", "unknown-option"]),
+        ] {
+            let args: Vec<OsString> = input.into_iter().map(OsString::from).collect();
+            let expected: Vec<OsString> = expected.into_iter().map(OsString::from).collect();
+            assert_eq!(
+                evidence_rustc_args(&args).into_iter().map(Cow::into_owned).collect::<Vec<_>>(),
+                expected,
+                "compiler arguments: {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn compiler_wrapper_json_modes_preserve_unused_dependency_evidence() {
+        #[cfg(unix)]
+        use std::os::unix::process::ExitStatusExt as _;
+        #[cfg(windows)]
+        use std::os::windows::process::ExitStatusExt as _;
+
+        const MESSAGES: &str = concat!(
+            "{\"reason\":\"compiler-artifact\",\"manifest_path\":\"Cargo.toml\",\"target\":{\"kind\":[\"bin\"],\"name\":\"fixture\"}}\n",
+            "{\"reason\":\"compiler-message\",\"manifest_path\":\"Cargo.toml\",\"target\":{\"kind\":[\"bin\"],\"name\":\"fixture\"},",
+            "\"message\":{\"code\":{\"code\":\"unused_crate_dependencies\"},\"message\":\"extern crate `dead` is unused\"}}\n"
+        );
+        for notification in ["unused-externs", "unused-externs-silent"] {
+            for json_args in [
+                vec![format!("--json={notification}")],
+                vec!["--json".to_owned(), notification.to_owned()],
+            ] {
+                let mut compiler_args = vec![OsString::from("scripted-rustc"), "--cfg".into(), "custom_evidence".into()];
+                compiler_args.extend(json_args.into_iter().map(OsString::from));
+                compiler_args.extend(["--extern=dead=libdead.rlib".into(), "--extern=used=libused.rlib".into()]);
+                let mut evidence = None;
+                let code = wrapper_with(&compiler_args, None, |command| {
+                    assert_eq!(command.get_program(), "scripted-rustc");
+                    assert_eq!(
+                        command.get_args().collect::<Vec<_>>(),
+                        [
+                            "--cfg",
+                            "custom_evidence",
+                            "--extern=dead=libdead.rlib",
+                            "--extern=used=libused.rlib",
+                            "--force-warn",
+                            "unused_crate_dependencies",
+                        ]
+                    );
+                    assert_eq!(command.get_envs().collect::<Vec<_>>(), [(OsStr::new(super::WRAPPER_VAR), None)]);
+                    evidence = Some(parse(MESSAGES).expect("scripted Cargo diagnostics are valid"));
+                    Ok(super::ExitStatus::from_raw(0))
+                })
+                .expect("scripted compiler invocation succeeds");
+                assert_eq!(code, super::ExitCode::SUCCESS);
+                let evidence = evidence.expect("the wrapper must invoke the scripted compiler");
+                assert!(!evidence.used_by_any_unit(Path::new("Cargo.toml"), "dead", Scope::Always));
+                assert!(evidence.used_by_any_unit(Path::new("Cargo.toml"), "used", Scope::Always));
+            }
+        }
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn compiler_wrapper_preserves_non_utf8_json_values() {
+        #[cfg(unix)]
+        let value = {
+            use std::os::unix::ffi::OsStringExt as _;
+            OsString::from_vec(vec![0xff])
+        };
+        #[cfg(windows)]
+        let value = {
+            use std::os::windows::ffi::OsStringExt as _;
+            OsString::from_wide(&[0xd800])
+        };
+        let args = vec!["--json".into(), value, "--crate-name".into(), "fixture".into()];
+        assert_eq!(
+            evidence_rustc_args(&args).into_iter().map(Cow::into_owned).collect::<Vec<_>>(),
+            args
+        );
+    }
+
+    #[test]
     fn configured_workspace_wrappers_are_detected() {
         assert!(has_workspace_wrapper_config("build.rustc-workspace-wrapper = \"workspace-wrapper\"\n").expect("configuration is valid"));
         assert!(
@@ -809,6 +990,24 @@ mod tests {
         assert!(evidence.used_by_any_unit(Path::new("Cargo.toml"), "dep", Scope::Always));
     }
 
+    #[test]
+    fn malformed_unused_dependency_diagnostics_do_not_invent_a_dependency_name() {
+        let evidence = parse(
+            &serde_json::json!({
+                "reason": "compiler-message",
+                "manifest_path": "Cargo.toml",
+                "target": {"kind": ["lib"], "name": "fixture"},
+                "message": {
+                    "code": {"code": "unused_crate_dependencies"},
+                    "message": "extern crate name is missing its quotes"
+                }
+            })
+            .to_string(),
+        )
+        .expect("a valid JSON diagnostic with no dependency name remains ignorable");
+        assert_eq!(evidence.reports.len(), 0);
+        assert!(!evidence.used_by_any_unit(Path::new("Cargo.toml"), "dep", Scope::Always));
+    }
     #[test]
     fn missing_evidence_never_claims_use() {
         let evidence = Evidence::default();

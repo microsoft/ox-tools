@@ -369,6 +369,24 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(miri, ignore = "runs a blocking worker")]
+    async fn cleanup_failure_preserves_the_documentation_parser_error() {
+        crate::facts::test_logging::enable_log_argument_evaluation();
+        let error = Provider::calculate_docs_metrics_and_remove_with(
+            Path::new("docs.zst"),
+            &test_crate_spec("parser-fault", "2.3.4"),
+            |_, _| Err(app_err!("injected documentation parser failure")),
+            |path| async move {
+                assert_eq!(path, Path::new("docs.zst"));
+                Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "cleanup denied"))
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.to_string(), "injected documentation parser failure");
+    }
+
+    #[tokio::test]
     async fn get_docs_data_tracks_each_crate_exactly_once() {
         let temp = tempfile::tempdir().unwrap();
         let cache = Cache::new(temp.path(), core::time::Duration::MAX, false);
@@ -605,7 +623,7 @@ mod tests {
             .unwrap()
             .unwrap_err();
 
-        assert!(!error.to_string().is_empty());
+        assert_ne!(error.to_string(), "");
     }
 
     #[tokio::test(start_paused = true)]

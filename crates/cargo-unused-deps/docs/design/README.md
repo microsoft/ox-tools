@@ -121,6 +121,11 @@ installs a chaining `RUSTC_WORKSPACE_WRAPPER` and appends `--force-warn
 unused_crate_dependencies` after Cargo has resolved configured and environment flags.
 `--force-warn` cannot be lowered by crate attributes. Cargo's outer wrapper remains
 outside this one, and an environment-selected workspace wrapper is invoked behind it.
+If Cargo requests `unused-externs` or `unused-externs-silent` JSON output, the wrapper
+removes those options. The wrapper handles both `--json=...` and `--json ...`.
+Rustc otherwise emits separate unused-extern records instead of
+the lint diagnostics that this tool reads. The wrapper preserves the other JSON options
+and compiler arguments.
 The tool reads the stable Cargo configuration hierarchy for the caller's working
 directory and refuses to replace a file-configured workspace wrapper whose executable
 cannot be chained safely. Each analysis gets a fresh temporary `--target-dir`

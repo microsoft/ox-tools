@@ -54,6 +54,6 @@ mod tests {
                 .expect("the CLI declares an about description")
                 .to_string()
         );
-        assert!(!catalog.artifacts().is_empty());
+        assert_ne!(catalog.artifacts().len(), 0);
     }
 }

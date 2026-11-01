@@ -3143,7 +3143,7 @@ mod tests {
             false,
             |_, _, _| Cfgs::unconditional(),
             |directory, excluded| {
-                assert!(excluded.is_empty());
+                assert_eq!(excluded.len(), 0);
                 if directory == Utf8Path::new("C:/fixture/gamma/src") {
                     return Err(error!("the unselected package must not introduce a walk failure"));
                 }
@@ -3206,7 +3206,7 @@ mod tests {
                 cache_inputs,
                 |_, _, _| Cfgs::unconditional(),
                 |directory, excluded| {
-                    assert!(excluded.is_empty());
+                    assert_eq!(excluded.len(), 0);
                     directories.push(directory.to_owned());
                     Ok(vec![directory.join("lib.rs")])
                 },
@@ -3247,7 +3247,7 @@ mod tests {
             false,
             |_, _, _| Cfgs::unconditional(),
             |directory, excluded| {
-                assert!(excluded.is_empty());
+                assert_eq!(excluded.len(), 0);
                 directories.push(directory.to_owned());
                 Ok(vec![directory.join("lib.rs")])
             },
@@ -3304,7 +3304,7 @@ mod tests {
             false,
             |_, _, _| Cfgs::unconditional(),
             |directory, excluded| {
-                assert!(excluded.is_empty());
+                assert_eq!(excluded.len(), 0);
                 directories.push(directory.to_owned());
                 Ok(vec![directory.join("lib.rs")])
             },
@@ -3368,7 +3368,7 @@ mod tests {
                 false,
                 |_, _, _| Cfgs::unconditional(),
                 |directory, excluded| {
-                    assert!(excluded.is_empty());
+                    assert_eq!(excluded.len(), 0);
                     Ok(vec![directory.join("lib.rs")])
                 },
                 |_, _, _| Ok(()),
@@ -3414,7 +3414,7 @@ mod tests {
             false,
             |_, _, _| panic!("configuration must not run after a failed walk"),
             |directory, excluded| {
-                assert!(excluded.is_empty());
+                assert_eq!(excluded.len(), 0);
                 assert_eq!(directory, Utf8Path::new("C:/fixture/alpha/src"));
                 Err(error!("scripted source inventory failure"))
             },
@@ -3478,7 +3478,7 @@ mod tests {
             population_roots(&files.iter().collect::<Vec<_>>(), &declarations, &roots),
             [Utf8PathBuf::from("lib.rs"), Utf8PathBuf::from("selected.rs")]
         );
-        assert!(population_roots(&[], &declarations, &roots).is_empty());
+        assert_eq!(population_roots(&[], &declarations, &roots).len(), 0);
     }
 
     #[test]
@@ -3498,7 +3498,7 @@ mod tests {
         )
         .unwrap();
         assert!(parsed.declared.is_empty());
-        assert!(parsed.skipped.is_empty());
+        assert_eq!(parsed.skipped.len(), 0);
         assert!(parsed.defaults.is_empty());
     }
 
@@ -3789,7 +3789,7 @@ mod tests {
             };
             assert_eq!(result.declared.iter().map(|(path, _)| path.as_path()).collect::<Vec<_>>(), expected);
             assert_eq!(result.defaults.len(), files.len());
-            assert!(result.skipped.is_empty());
+            assert_eq!(result.skipped.len(), 0);
         }
         let missing = root.join("missing.rs");
         let result = parse_declarations_parallel(&[(a.as_path(), &cfg, "a"), (missing.as_path(), &cfg, "a")]);
@@ -3845,7 +3845,7 @@ mod tests {
                 parsed.declared.iter().map(|(path, _)| path.as_path()).collect::<Vec<_>>(),
                 files[..count].iter().map(|(path, _, _)| *path).collect::<Vec<_>>()
             );
-            assert!(parsed.skipped.is_empty());
+            assert_eq!(parsed.skipped.len(), 0);
             let observed = observed.into_inner().expect("the observer never panics under its lock");
             assert_eq!(observed.len(), count);
             assert!(
@@ -4548,7 +4548,7 @@ mod tests {
         )
         .expect("an ordinary survey does not collect cache provenance");
 
-        assert!(survey.external_inputs().is_empty());
+        assert_eq!(survey.external_inputs().len(), 0);
         assert!(!survey.has_untracked_build_script_inputs());
     }
 
@@ -4583,12 +4583,13 @@ mod tests {
         let roots = |features: FeatureArgs| external_path_inputs(&root, &features, &root).expect("metadata").roots;
 
         assert_eq!(roots(FeatureArgs::default()), [physical(&default_dep)]);
-        assert!(
+        assert_eq!(
             roots(FeatureArgs {
                 no_default_features: true,
                 ..FeatureArgs::default()
             })
-            .is_empty()
+            .len(),
+            0
         );
         assert_eq!(
             roots(FeatureArgs {
@@ -6164,7 +6165,7 @@ mod tests {
 
         let metadata = load_metadata(&root, &FeatureArgs::default()).expect("metadata");
 
-        assert!(library_tests(&metadata).is_empty());
+        assert_eq!(library_tests(&metadata).len(), 0);
     }
 
     #[test]

@@ -103,7 +103,7 @@ mod writer_tests {
         .unwrap_err();
         assert_eq!(failure.kind(), io::ErrorKind::PermissionDenied);
         assert_eq!(failure.to_string(), "summary lock refused");
-        assert!(output.is_empty());
+        assert_eq!(output.len(), 0);
     }
 
     pub(super) struct Broken;

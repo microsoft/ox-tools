@@ -677,7 +677,7 @@ mod tests {
         let (_tmp, repo_path) = create_test_repo();
         let stats = get_commit_stats(&repo_path, &[], GIT_TIMEOUT).await.unwrap();
         assert_eq!(stats.commit_count, 2);
-        assert!(stats.commits_per_window.is_empty());
+        assert_eq!(stats.commits_per_window, [] as [u64; 0]);
     }
 
     #[tokio::test]

@@ -352,13 +352,13 @@ mod tests {
         let tokens = TokenStream::from(TokenTree::Group(Group::new(Delimiter::None, TokenStream::new())));
         let arguments = parse_arguments(&tokens);
         assert_eq!(arguments.selectors, "");
-        assert!(arguments.errors.is_empty());
+        assert_eq!(arguments.errors.len(), 0);
         assert_eq!(arguments.reason, None);
         assert_eq!(arguments.test_timeout_multiplier, None);
         for text in [r#"arith, "", literal"#, r#"arith, "   ", literal"#] {
             let parsed = parse_arguments(&text.parse().unwrap());
             assert_eq!(parsed.selectors, "arith,literal");
-            assert!(parsed.errors.is_empty());
+            assert_eq!(parsed.errors.len(), 0);
         }
     }
 
@@ -369,18 +369,18 @@ mod tests {
         assert_eq!(parsed.reason.as_deref(), Some("kept"));
         assert_eq!(parsed.test_timeout_multiplier, None);
         assert_eq!(parsed.selectors, "");
-        assert!(parsed.errors.is_empty());
+        assert_eq!(parsed.errors.len(), 0);
         let tokens = TokenStream::from(TokenTree::Group(Group::new(Delimiter::None, "factor = 2".parse().unwrap())));
         let parsed = parse_arguments(&tokens);
         assert_eq!(parsed.test_timeout_multiplier, Some(2.0));
         assert_eq!(parsed.selectors, "");
-        assert!(parsed.errors.is_empty());
+        assert_eq!(parsed.errors.len(), 0);
         for name in ["reason", "factor"] {
             let parsed = parse_arguments(&format!("{name} =").parse().unwrap());
             assert_eq!(parsed.selectors, format!("{name}="));
             assert_eq!(parsed.reason, None);
             assert_eq!(parsed.test_timeout_multiplier, None);
-            assert!(parsed.errors.is_empty());
+            assert_eq!(parsed.errors.len(), 0);
         }
     }
 

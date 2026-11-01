@@ -265,9 +265,9 @@ mod final_survivor_tests {
         assert_eq!(failure.message(), expected);
         assert!(converger.withdrawn.is_empty());
         assert!(converger.census.is_empty());
-        assert!(converger.per_round.is_empty());
+        assert_eq!(converger.per_round.len(), 0);
         assert_eq!(converger.rounds, 1);
-        assert!(events.progress.is_empty());
+        assert_eq!(events.progress.len(), 0);
         assert_eq!(events.activity, [(1, 7, 0)]);
     }
 

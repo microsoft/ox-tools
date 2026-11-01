@@ -4,6 +4,10 @@ This crate implements cargo-aprz's commands, fact collection, metric
 extraction, policy-expression evaluation, and reports. It is an implementation
 detail of the command-line tool, not a stable library API.
 
+The minimum supported Rust version is 1.97. The development toolchain remains
+newer. The parser dependency stays on `ra_ap_syntax` 0.0.349 because later
+releases require Rust 1.98, beyond the supported Azure publishing compiler.
+
 ## Policy string sizes
 
 For string metrics in custom policies, both `size(crate.description)` and

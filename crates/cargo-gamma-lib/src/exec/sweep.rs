@@ -4104,8 +4104,8 @@ mod tests {
         EXECUTION_COSTS.with_borrow(|costs| assert_eq!(costs.len(), 1));
         begin_selection_trace();
         assert!(INITIAL_KILLER.with_borrow(Option::is_none));
-        assert!(take_execution_costs().is_empty());
-        assert!(take_selection_trace().is_empty());
+        assert_eq!(take_execution_costs().len(), 0);
+        assert_eq!(take_selection_trace().len(), 0);
     }
 
     #[test]
@@ -4128,7 +4128,7 @@ mod tests {
         );
         assert_eq!(accounting.exact.launches, 0);
         drop(accounting);
-        assert!(take_selection_trace().is_empty());
+        assert_eq!(take_selection_trace().len(), 0);
     }
 
     #[test]
@@ -4174,7 +4174,7 @@ mod tests {
                     to_value(if asynchronous { AttemptCost::default() } else { expected }).unwrap()
                 );
                 drop(accounting);
-                assert!(take_selection_trace().is_empty());
+                assert_eq!(take_selection_trace().len(), 0);
             }
         }
     }
@@ -4724,7 +4724,7 @@ mod tests {
             assert!(attempt.all_tests);
             assert_eq!(attempt.elapsed_ms, 11);
             assert_eq!(attempt.fallback_ms, 13);
-            assert!(take_selection_trace().is_empty());
+            assert_eq!(take_selection_trace().len(), 0);
         }
 
         begin_selection_trace();
@@ -4742,7 +4742,7 @@ mod tests {
             false,
         );
         begin_selection_trace();
-        assert!(take_selection_trace().is_empty());
+        assert_eq!(take_selection_trace().len(), 0);
     }
 
     fn telemetry_plan(mutants: Vec<Mutant>) -> Plan {
@@ -4984,7 +4984,7 @@ mod tests {
                     false,
                 );
                 EXECUTION_COSTS.with_borrow(|costs| {
-                    assert!(costs.is_empty());
+                    assert_eq!(costs.len(), 0);
                     assert_eq!(costs.capacity(), capacity, "settlement must retain worker-local capacity");
                 });
                 ACCOUNTING_SENDER.with_borrow_mut(|slot| *slot = None);
@@ -5003,7 +5003,7 @@ mod tests {
                 assert_eq!(accounting.confirmation.execution_ms, if scripted { 0 } else { 3 });
                 assert_eq!(accounting.confirmation.misses, usize::from(!scripted));
                 drop(accounting);
-                assert!(take_selection_trace().is_empty());
+                assert_eq!(take_selection_trace().len(), 0);
             }
         }
     }
@@ -5131,11 +5131,11 @@ mod tests {
         ACCOUNTING_SENDER.with_borrow_mut(|slot| *slot = Some(sender));
         begin_selection_trace();
         INITIAL_KILLER.with_borrow_mut(|slot| *slot = Some(("observed".into(), killer("recorded"))));
-        assert!(take_selection_trace().is_empty());
+        assert_eq!(take_selection_trace().len(), 0);
         assert!(INITIAL_KILLER.with_borrow(Option::is_none));
         record_binary_launch_attempt(false);
         record_binary_execution(false, Duration::from_millis(37), &Verdict::Failed(None));
-        assert!(take_execution_costs().is_empty());
+        assert_eq!(take_execution_costs().len(), 0);
         ACCOUNTING_SENDER.with_borrow_mut(|slot| *slot = None);
         assert!(
             receiver.try_recv().is_err(),
@@ -5462,7 +5462,7 @@ mod tests {
         assert_eq!(abandoned.get().map(String::as_str), Some("checkpoint lost"));
         assert_eq!(checkpoints, 1);
         assert_eq!(events.starts, 3);
-        assert!(events.mutants.is_empty());
+        assert_eq!(events.mutants.len(), 0);
         assert!(plan.mutants.iter().all(|mutant| mutant.outcome == Outcome::Survived));
         assert_eq!(package_spans.get("subject"), Some(&(3, 1, 6)));
         assert!(queued.next().is_none());
@@ -5539,8 +5539,8 @@ mod tests {
             if abandoned {
                 let failure = result.expect_err("containment loss abandons the sweep");
                 assert!(failure.message().contains("scripted containment loss"), "{failure}");
-                assert!(checkpointed.is_empty());
-                assert!(events.mutants.is_empty());
+                assert_eq!(checkpointed.len(), 0);
+                assert_eq!(events.mutants.len(), 0);
                 assert_eq!(plan.mutants[0].outcome, Outcome::Pending);
             } else {
                 let spent = result.unwrap().expect("three pending mutants supply a sweep");
@@ -8401,7 +8401,7 @@ mod tests {
                 whole_workspace: false,
             },
         );
-        assert!(reach.reachable(&plan.mutants[0]).unwrap().is_empty());
+        assert_eq!(reach.reachable(&plan.mutants[0]).unwrap().len(), 0);
         let killers = Killers::default();
         let planning = InferredPlanning::new(&killers);
         assert!(inferred_mutant_work(&plan.mutants[0], &reach, &planning).is_none());
@@ -9223,8 +9223,8 @@ mod tests {
 
         learning.record_canonical_pass("subject::a", &binary, true);
 
-        assert!(learning.candidates("subject::a").is_empty());
-        assert!(learning.candidates("subject::b").is_empty());
+        assert_eq!(learning.candidates("subject::a").len(), 0);
+        assert_eq!(learning.candidates("subject::b").len(), 0);
     }
 
     #[test]

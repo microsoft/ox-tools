@@ -1616,8 +1616,8 @@ mod tests {
         dashboard.tick(&mut host);
 
         assert!(!dashboard.is_active());
-        assert!(dashboard.status.is_empty());
-        assert!(host.err.is_empty());
+        assert_eq!(dashboard.status.len(), 0);
+        assert_eq!(host.err.len(), 0);
     }
 
     #[test]
@@ -1704,7 +1704,7 @@ mod tests {
                     assert_eq!(dashboard.width, expected);
                     assert_eq!(dashboard.phase, Phase::Planning);
                     assert_eq!(dashboard.summary, Summary::default());
-                    assert!(dashboard.status.is_empty());
+                    assert_eq!(dashboard.status.len(), 0);
                     assert!(dashboard.drawn_frame.is_none());
                     assert!(dashboard.last_draw.is_none());
                     assert!(dashboard.testing_started.is_none());
@@ -2064,7 +2064,7 @@ mod tests {
         dashboard.status(&mut host, "  Build", "subject  ");
         assert_eq!(dashboard.status, "Build subject");
         assert!(dashboard.dirty);
-        assert!(host.err.is_empty());
+        assert_eq!(host.err.len(), 0);
         dashboard.phase_progress(&mut host, 2, 3, "items");
         assert_eq!(dashboard.status, "2/3 items");
         assert!(dashboard.dirty);

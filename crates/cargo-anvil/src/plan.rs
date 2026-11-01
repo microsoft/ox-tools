@@ -297,6 +297,7 @@ impl Plan {
     }
 
     /// User-visible diagnostics accumulated while planning.
+    #[cfg(any(test, feature = "internals"))]
     #[must_use]
     pub fn notes(&self) -> &[String] {
         &self.notes
@@ -310,6 +311,7 @@ impl Plan {
     }
 
     /// Artifact-management refusals accumulated while planning.
+    #[cfg(any(test, feature = "internals"))]
     #[must_use]
     pub fn refusals(&self) -> &[String] {
         &self.refusals
@@ -458,8 +460,7 @@ impl Plan {
     /// - `Propose` items write a `.anvil-proposed` sibling and
     ///   bump the manifest entry to the new template checksum so
     ///   subsequent runs see the divergence as resolved
-    ///   (`LeaveAlone`) until the template moves again — see
-    ///   the [update protocol](../../docs/design/updates.md).
+    ///   (`LeaveAlone`) until the template moves again.
     /// - `InSync` items refresh their manifest checksum; `LeaveAlone`
     ///   items preserve their existing manifest entries.
     /// - Stale entries — items present in `previous_manifest` but not
@@ -477,6 +478,7 @@ impl Plan {
     /// items must carry a spliced host. These invariants are enforced
     /// by the `PlanItem::*` constructors, so violations only happen if
     /// callers build `PlanItem` directly with inconsistent fields.
+    #[cfg(any(test, feature = "internals"))]
     pub fn apply(&self, repo_root: &Path, previous_manifest: &Manifest) -> Result<Manifest, AppError> {
         self.apply_files(repo_root)?;
         Ok(self.projected_manifest(previous_manifest))

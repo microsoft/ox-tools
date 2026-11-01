@@ -525,9 +525,11 @@ fn adopt_entries(text: &str, array: &Array, body: &str) -> Result<String, Manage
             used.insert(index);
             let span = value.span().expect("parsed array values retain source spans");
             let next = values
-                .get(index +
+                .get(
+                    index +
                 // #[gamma::skip(literal.int_increment, reason = "The mandatory first separator precedes the next value; extending the scan cannot change that comma.", tag = "equivalent")]
-                1)
+                1,
+                )
                 .and_then(|value| value.span())
                 // Including the array closer is harmless; punctuation AFTER it belongs to the parent.
                 .map_or_else(|| array.span().expect("parsed array retains its span").end, |span| span.start);
@@ -728,15 +730,17 @@ mod tests {
                 vec!["second".to_owned(), "items".to_owned()]
             ]
         );
-        assert!(
+        assert_eq!(
             existing_array_paths("items = [\"# >>> anvil-managed: not-a-comment\"]\n")
                 .unwrap()
-                .is_empty()
+                .len(),
+            0
         );
-        assert!(
+        assert_eq!(
             existing_array_paths("items = [\n# an ordinary comment\n\"user\",\n]\n")
                 .unwrap()
-                .is_empty()
+                .len(),
+            0
         );
         let refusal = existing_array_paths("items = [").unwrap_err();
         assert_eq!(refusal.remedy, RefusalRemedy::HostAlreadyUnparsable);
