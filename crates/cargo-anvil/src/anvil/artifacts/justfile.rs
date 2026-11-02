@@ -451,31 +451,45 @@ mod tests {
         assert!(before_selection.contains("    $env:RUSTUP_TOOLCHAIN = '{{ rust_nightly }}'"));
     }
 
+    // Protect setup dependencies, the pinned command, and exit-forwarding syntax in memory;
+    // this does not execute setup or verify the prepared standard library.
     #[test]
-    fn miri_setup_prepares_the_pinned_sysroot_after_installing_components() {
+    fn miri_setup_template_wires_pinned_sysroot_preparation() {
         let miri = CHECK_FILES
             .iter()
             .find_map(|(path, body)| path.ends_with("/miri.just").then_some(*body))
             .expect("miri.just is registered in CHECK_FILES");
 
-        let (_, setup) = miri
-            .split_once("# Install prerequisites and prepare the sysroot for the `anvil-miri` recipe.\n")
-            .expect("Miri has a setup recipe");
-        let (setup, _) = setup
-            .split_once("\n# Validate prerequisites")
-            .expect("Miri setup precedes prerequisite validation");
+        let lines: Vec<_> = miri
+            .lines()
+            .filter(|line| !line.trim().is_empty() && !line.trim_start().starts_with('#'))
+            .collect();
+        let declaration = lines
+            .iter()
+            .position(|line| line.starts_with("anvil-miri-setup "))
+            .expect("miri.just must declare its setup recipe");
+        let start = lines[..declaration]
+            .iter()
+            .rposition(|line| !line.starts_with('['))
+            .map_or(0, |index| index + 1);
+        let end = lines[declaration + 1..]
+            .iter()
+            .position(|line| !line.starts_with("    "))
+            .map_or(lines.len(), |index| declaration + 1 + index);
 
         assert_eq!(
-            setup,
-            concat!(
-                "[private]\n",
-                "[script(\"pwsh\", \"-NoProfile\")]\n",
-                "anvil-miri-setup installer=\"install\": anvil-component-nightly-miri-install ",
-                "anvil-component-nightly-rust-src-install\n",
-                "    $ErrorActionPreference = 'Stop'\n",
-                "    & cargo '+{{ rust_nightly }}' miri setup\n",
-                "    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n",
-            )
+            &lines[start..end],
+            &[
+                "[private]",
+                "[script(\"pwsh\", \"-NoProfile\")]",
+                concat!(
+                    "anvil-miri-setup installer=\"install\": anvil-component-nightly-miri-install ",
+                    "anvil-component-nightly-rust-src-install",
+                ),
+                "    $ErrorActionPreference = 'Stop'",
+                "    & cargo '+{{ rust_nightly }}' miri setup",
+                "    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }",
+            ]
         );
     }
 

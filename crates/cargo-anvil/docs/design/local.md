@@ -727,7 +727,8 @@ baseline — so an environment without the base ref must either provide it, run 
 ## 5. Miri execution customization
 
 `anvil-miri-setup` installs the Miri and rust-src components for the catalog's
-pinned nightly, then runs `cargo +<nightly> miri setup` to prepare its sysroot.
+pinned nightly, then runs `cargo +<nightly> miri setup` to prepare its sysroot:
+the standard-library artifacts Miri uses to interpret tests.
 Setup is not complete until sysroot preparation succeeds; Cargo's failure exit
 code is preserved. This also applies when setup is reached through a group,
 tier, or the global `anvil-setup` recipe. Preparing a missing sysroot can compile
