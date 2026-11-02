@@ -2,12 +2,19 @@
 
 ## [Unreleased]
 
-## [0.21.2] - 2026-11-02
+## [0.22.0] - 2026-11-02
+
+- ✨ Features
+
+  - cargo-anvil: pin coverage-gate 0.7.3
 
 - 🐛 Bug Fixes
 
-  - cargo-anvil: compare locked API snapshots
   - cargo-anvil: isolate mutation diffs and normalize Git prefixes ([#323](https://github.com/microsoft/ox-tools/pull/323))
+
+- ✔️ Tasks
+
+  - cargo-anvil: refresh 0.23.0 changelog
 
 ## [0.21.1] - 2026-10-30
 
