@@ -123,9 +123,9 @@ jobs:
         with:
           lfs: true
           # anvil-semver-check compares the affected crates' current API
-          # against the PR's target branch (origin/<base>) via
-          # `cargo semver-checks --baseline-rev`. That resolves the
-          # baseline commit from the LOCAL object store (no fetch), so the
+          # against the PR's target branch (origin/<base>) using locked
+          # rustdoc snapshots. It resolves the baseline commit from the
+          # LOCAL object store and clones locally (no fetch), so the
           # target branch history must be present -- the default shallow
           # PR checkout narrows the refspec to the PR merge ref and leaves
           # origin/<base> absent. Full history makes the baseline
