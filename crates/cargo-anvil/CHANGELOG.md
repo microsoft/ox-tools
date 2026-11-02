@@ -11,6 +11,7 @@
 
 - ✨ Features
 
+  - cargo-anvil: pin cargo-coverage-gate 0.7.3 ([#329](https://github.com/microsoft/ox-tools/pull/329))
   - cargo-anvil: split generated recipe roles
   - cargo-anvil: release v0.20.0
   - cargo-anvil: consolidate generated infrastructure
@@ -42,6 +43,7 @@
 
 - 🧩 Miscellaneous
 
+  - Merge current main into cargo-anvil consolidation
   - Merge current main into cargo-anvil consolidation
   - Merge current main into cargo-anvil consolidation
 
