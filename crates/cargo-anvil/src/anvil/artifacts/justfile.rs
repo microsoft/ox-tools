@@ -1143,6 +1143,7 @@ mod tests {
         use std::process::{Command, Output};
         use std::{env, fs};
 
+        use serial_test::serial;
         use tempfile::{Builder, TempDir};
 
         use super::{TOOLS_JUST, VERSIONS_JUST};
@@ -1284,6 +1285,7 @@ mod tests {
         }
 
         #[test]
+        #[serial]
         fn honors_environment_files_and_msrv_in_precedence_order() {
             if !tools_available() {
                 return;
@@ -1300,6 +1302,7 @@ mod tests {
         }
 
         #[test]
+        #[serial]
         fn passes_selected_arguments_directly_to_cargo() {
             if !tools_available() {
                 return;
@@ -1391,6 +1394,7 @@ mod tests {
         }
 
         #[test]
+        #[serial]
         fn installs_default_components_on_the_selected_stable_toolchain() {
             if !tools_available() {
                 return;
@@ -1494,6 +1498,7 @@ mod tests {
         }
 
         #[test]
+        #[serial]
         fn rejects_missing_or_too_new_workspace_msrvs() {
             if !tools_available() {
                 return;
@@ -1604,6 +1609,7 @@ mod tests {
         }
 
         #[test]
+        #[serial]
         fn diagnoses_missing_rustup_before_installing_a_toolchain() {
             if !tools_available() {
                 return;
@@ -1647,6 +1653,7 @@ mod tests {
         }
 
         #[test]
+        #[serial]
         fn rejects_an_unpaired_internal_msrv_mapping_for_stable_selection() {
             if !tools_available() {
                 return;
@@ -1672,6 +1679,7 @@ mod tests {
         }
 
         #[test]
+        #[serial]
         fn provisions_public_and_mapped_msrv_toolchains() {
             if !tools_available() {
                 return;
@@ -1780,6 +1788,7 @@ mod tests {
         }
 
         #[test]
+        #[serial]
         fn resolves_msrv_whenever_the_root_declares_one() {
             if !tools_available() {
                 return;
