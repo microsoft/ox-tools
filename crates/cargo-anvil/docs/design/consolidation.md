@@ -33,9 +33,9 @@ repo/
 ├── .anvil/
 │   ├── manifest.toml
 │   ├── anvil.just                    import hub and alias
-│   ├── checks.just                   checks and developer utilities
+│   ├── checks.just                   checks, developer utilities, and impact command
 │   ├── groups.just                   public groups and tiers
-│   ├── helpers.just                  private recipes, impact, and shared definitions
+│   ├── helpers.just                  private recipes and shared definitions
 │   ├── setup.just                    pins and setup/validation recipes
 │   ├── container.just                container commands and helpers
 │   ├── container/

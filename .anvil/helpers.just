@@ -92,13 +92,6 @@ anvil_workspace_toolchain_selection := if anvil_stable_toolchain_arg == "" { "--
 anvil_msrv_selection := if workspace_rust_version == "" { "--none" } else { anvil_affected_selection }
 anvil_msrv_workspace_selection := if workspace_rust_version == "" { "--none" } else { "--workspace" }
 
-# Compute modified, affected, and required package files with cargo-delta.
-[group("anvil")]
-anvil-impact:
-    {{ anvil_impact_compute_prefix }}cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} delta --config .delta.toml impact --base-ref {{ quote(anvil_base_ref) }} --modified --format packages --output target/anvil/impact/modified.packages
-    {{ anvil_impact_compute_prefix }}cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} delta --config .delta.toml impact --base-ref {{ quote(anvil_base_ref) }} --affected --format packages --output target/anvil/impact/affected.packages
-    {{ anvil_impact_compute_prefix }}cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} delta --config .delta.toml impact --base-ref {{ quote(anvil_base_ref) }} --required --format packages --output target/anvil/impact/required.packages
-
 # Used by anvil-scheduled and _anvil-full to fan out all scheduled groups.
 [private]
 _anvil-scheduled: anvil-scheduled-validate-prereqs \
@@ -166,7 +159,8 @@ _anvil-miri-test package="" test_filter="" example="":
     {{ if example == "" { "" } else { "# " } }}cargo +{{ rust_nightly }} each {{ if package == "" { anvil_affected_selection } else { "--package " + quote(package) } }} --filter 'not metadata:anvil.miri.exclude=true' --jobs {{ anvil_miri_jobs }} --keep-going -- cargo +{{ rust_nightly }} miri test --package '{cargo-spec}' --tests --all-features --locked {{ if test_filter == "" { "" } else { "-- " + quote(test_filter) } }}
     {{ if example == "" { "# " } else { "" } }}cargo +{{ rust_nightly }} each --package {{ quote(package) }} --filter 'not metadata:anvil.miri.exclude=true' --jobs {{ anvil_miri_jobs }} --keep-going -- cargo +{{ rust_nightly }} miri run --package '{cargo-spec}' --example {{ quote(example) }} --all-features --locked
 
-anvil_mutants_diff_file := ".anvil-mutants-diff-" + just_pid() + ".diff"
+anvil_mutants_diff_dir := env("RUNNER_TEMP", env("AGENT_TEMPDIRECTORY", env("TEMP", env("TMPDIR", "."))))
+anvil_mutants_diff_file := anvil_mutants_diff_dir / ("anvil-mutants-diff-" + just_pid() + ".diff")
 anvil_mutants_diff_prefix := if mutants_command_prefix != "" {
     mutants_command_prefix
 } else if anvil_impact_mode == "off" {

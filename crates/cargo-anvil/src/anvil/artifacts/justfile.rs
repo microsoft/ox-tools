@@ -340,16 +340,16 @@ pub fn tools() -> Vec<Artifact> {
     setup_template_sections("tools", TOOLS_JUST)
 }
 
-/// Shared helper recipes and impact contract.
+/// Shared private helper recipes and definitions.
 #[must_use]
 pub fn helpers() -> Vec<Artifact> {
     routed_template_sections("helpers", HELPERS_JUST, HELPERS_JUST_PATH, SetupExposure::Private)
 }
 
-/// Shared `anvil-impact` recipe.
+/// Public impact command plus its shared selection definitions.
 #[must_use]
 pub fn impact() -> Vec<Artifact> {
-    routed_template_sections("impact", IMPACT_JUST, HELPERS_JUST_PATH, SetupExposure::Private)
+    routed_template_sections("impact", IMPACT_JUST, CHECKS_JUST_PATH, SetupExposure::Private)
 }
 
 /// Generic local-development recipe files.
@@ -822,6 +822,23 @@ mod tests {
     }
 
     #[test]
+    fn helpers_file_contains_only_private_recipes() {
+        for artifact in Catalog::anvil().artifacts() {
+            let Artifact::OwnedFileSection(section) = artifact else {
+                continue;
+            };
+            if section.path != HELPERS_JUST_PATH || !section.id.starts_with("recipe:") {
+                continue;
+            }
+            assert!(
+                section.body.lines().any(|line| line == "[private]"),
+                "{} must be private in helpers.just",
+                section.id
+            );
+        }
+    }
+
+    #[test]
     fn checks_just_template_includes_all_catalog_checks() {
         let checks = all_check_bodies();
         for needle in [
@@ -905,9 +922,10 @@ mod tests {
             "careful must isolate Cargo artifacts by compiler and tool identity"
         );
         for needle in [
-            r#"anvil_mutants_diff_file := ".anvil-mutants-diff-" + just_pid() + ".diff""#,
+            r#"anvil_mutants_diff_dir := env("RUNNER_TEMP", env("AGENT_TEMPDIRECTORY", env("TEMP", env("TMPDIR", "."))))"#,
+            r#"anvil_mutants_diff_file := anvil_mutants_diff_dir / ("anvil-mutants-diff-" + just_pid() + ".diff")"#,
             r#"trim(read(anvil_impact_input_dir + "/affected.packages")) == """#,
-            "git diff {{ quote(anvil_base_ref) }} --output={{ quote(anvil_mutants_diff_file) }}",
+            "git diff --src-prefix=a/ --dst-prefix=b/ {{ quote(anvil_base_ref) }} --output={{ quote(anvil_mutants_diff_file) }}",
             "mutants --in-diff {{ quote(anvil_mutants_diff_file) }}",
             "rm {{ quote(anvil_mutants_diff_file) }}",
         ] {

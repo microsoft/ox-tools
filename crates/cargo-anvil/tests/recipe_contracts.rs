@@ -230,12 +230,12 @@ fn generated_recipes_are_split_by_responsibility() {
     assert!(generated.checks.contains("anvil-clippy:"));
     assert!(generated.checks.contains("anvil-build package="));
     assert!(generated.checks.contains("anvil-readme fix="));
+    assert!(generated.checks.contains("anvil-impact:"));
     assert!(!generated.checks.contains("anvil-pr-fast:"));
-    assert!(!generated.checks.contains("anvil-impact:"));
     assert!(!generated.checks.lines().any(|line| line.starts_with("_anvil-readme ")));
     assert!(generated.groups.contains("anvil-pr-fast:"));
     assert!(!generated.groups.lines().any(|line| line.starts_with("_anvil-unscoped ")));
-    assert!(generated.helpers.contains("anvil-impact:"));
+    assert!(!generated.helpers.contains("anvil-impact:"));
     assert!(generated.helpers.lines().any(|line| line.starts_with("_anvil-readme ")));
     assert!(generated.helpers.lines().any(|line| line.starts_with("_anvil-unscoped ")));
     assert!(!generated.checks.contains("anvil-clippy-setup"));
@@ -534,6 +534,7 @@ fn mutants_diff_includes_committed_and_uncommitted_changes() {
         .env("CARGO", &real_cargo)
         .env("ANVIL_IMPACT", "off")
         .env("BASE_REF", base)
+        .env("RUNNER_TEMP", root)
         .env("FAKE_MUTANTS_EXIT", "17")
         .output()
         .unwrap();
@@ -550,7 +551,7 @@ fn mutants_diff_includes_committed_and_uncommitted_changes() {
             entry
                 .file_name()
                 .to_string_lossy()
-                .starts_with(".anvil-mutants-diff-")
+                .starts_with("anvil-mutants-diff-")
                 .then_some(entry.path())
         })
         .unwrap_or_else(|| {
@@ -571,6 +572,7 @@ fn mutants_diff_includes_committed_and_uncommitted_changes() {
         .env("CARGO", &real_cargo)
         .env("ANVIL_IMPACT", "off")
         .env("BASE_REF", base)
+        .env("RUNNER_TEMP", root)
         .env("FAKE_CARGO_LOG", &log)
         .output()
         .unwrap();
@@ -584,7 +586,7 @@ fn mutants_diff_includes_committed_and_uncommitted_changes() {
     assert!(
         std::fs::read_dir(root)
             .unwrap()
-            .all(|entry| !entry.unwrap().file_name().to_string_lossy().starts_with(".anvil-mutants-diff-")),
+            .all(|entry| !entry.unwrap().file_name().to_string_lossy().starts_with("anvil-mutants-diff-")),
         "successful mutation runs must remove their diff handoff"
     );
 }

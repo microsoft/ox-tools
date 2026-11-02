@@ -22,9 +22,9 @@ repo/
 └── .anvil/
     ├── manifest.toml
     ├── anvil.just                 small import hub and aliases
-    ├── checks.just                checks and developer utilities
+    ├── checks.just                checks, developer utilities, and impact command
     ├── groups.just                public groups and tiers
-    ├── helpers.just               private recipes, impact, and shared definitions
+    ├── helpers.just               private recipes and shared definitions
     ├── setup.just                 pins and setup/validation recipes
     ├── container.just             container recipes and private helpers
     └── container/
@@ -86,7 +86,8 @@ runners and do not own generic package iteration.
 
 Developer utilities such as `anvil-build` and `anvil-readme` live in
 `checks.just`: like checks, they directly perform work rather than orchestrating
-other generated recipes.
+other generated recipes. The public `anvil-impact` command also lives there;
+its shared selection expressions remain in `helpers.just`.
 
 Recipe help is repository-neutral and focused on information useful at the
 command line. It may span multiple comment lines when that improves clarity, but

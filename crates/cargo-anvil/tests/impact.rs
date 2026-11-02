@@ -86,15 +86,16 @@ fn stderr(output: &Output) -> String {
 #[test]
 fn impact_recipe_delegates_to_cargo_delta_package_outputs() {
     let temp = generated_workspace();
-    let recipes = std::fs::read_to_string(temp.path().join(".anvil/helpers.just")).unwrap();
+    let checks = std::fs::read_to_string(temp.path().join(".anvil/checks.just")).unwrap();
+    let helpers = std::fs::read_to_string(temp.path().join(".anvil/helpers.just")).unwrap();
 
     for tier in ["modified", "affected", "required"] {
-        assert!(recipes.contains(&format!("--{tier} --format packages")));
-        assert!(recipes.contains(&format!("--output target/anvil/impact/{tier}.packages")));
-        assert!(recipes.contains(&format!("anvil_{tier}_selection")));
+        assert!(checks.contains(&format!("--{tier} --format packages")));
+        assert!(checks.contains(&format!("--output target/anvil/impact/{tier}.packages")));
+        assert!(helpers.contains(&format!("anvil_{tier}_selection")));
     }
-    assert!(recipes.contains("delta --config .delta.toml impact --base-ref"));
-    assert!(!recipes.contains("_anvil-impact-format"));
+    assert!(checks.contains("delta --config .delta.toml impact --base-ref"));
+    assert!(!checks.contains("_anvil-impact-format"));
 }
 
 #[test]

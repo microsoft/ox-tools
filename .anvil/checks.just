@@ -4,6 +4,13 @@
 # Update cargo-anvil and regenerate; repository-specific edits stop automatic updates.
 # Regenerate with cargo-anvil to update this file.
 
+# Compute modified, affected, and required package files with cargo-delta.
+[group("anvil")]
+anvil-impact:
+    {{ anvil_impact_compute_prefix }}cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} delta --config .delta.toml impact --base-ref {{ quote(anvil_base_ref) }} --modified --format packages --output target/anvil/impact/modified.packages
+    {{ anvil_impact_compute_prefix }}cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} delta --config .delta.toml impact --base-ref {{ quote(anvil_base_ref) }} --affected --format packages --output target/anvil/impact/affected.packages
+    {{ anvil_impact_compute_prefix }}cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} delta --config .delta.toml impact --base-ref {{ quote(anvil_base_ref) }} --required --format packages --output target/anvil/impact/required.packages
+
 # Build all workspace targets and features, optionally for one package or profile.
 [arg("package", long, pattern='(?:[A-Za-z0-9_.-]+)?')]
 [arg("profile", long, pattern='(?:[A-Za-z0-9_.-]+)?')]
@@ -123,7 +130,7 @@ anvil-msrv-test: anvil-msrv-test-validate-prereqs anvil-impact
 
 # Mutation-test code changed from the selected base branch.
 anvil-mutants-diff: anvil-mutants-diff-validate-prereqs anvil-impact
-    {{ anvil_mutants_diff_prefix }}git diff {{ quote(anvil_base_ref) }} --output={{ quote(anvil_mutants_diff_file) }}
+    {{ anvil_mutants_diff_prefix }}git diff --src-prefix=a/ --dst-prefix=b/ {{ quote(anvil_base_ref) }} --output={{ quote(anvil_mutants_diff_file) }}
     {{ anvil_mutants_diff_prefix }}cargo each {{ anvil_affected_selection }} --once -- cargo {{ anvil_stable_toolchain_arg }} mutants --in-diff {{ quote(anvil_mutants_diff_file) }} --no-shuffle --jobs 0 {{_anvil_mutants_config_arg}}
     {{ anvil_mutants_diff_prefix }}rm {{ quote(anvil_mutants_diff_file) }}
 
