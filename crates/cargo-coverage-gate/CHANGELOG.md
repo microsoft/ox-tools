@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-11-02
+
+- 🐛 Bug Fixes
+
+  - cargo-coverage-gate: preserve workspace package source identities
+
 ## [0.7.3] - 2026-10-29
 
 - 🐛 Bug Fixes
