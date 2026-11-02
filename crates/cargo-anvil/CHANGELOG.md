@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-## [0.22.0] - 2026-10-30
+## [0.22.0] - 2026-11-02
 
 - ⚠️ Breaking
 
@@ -11,7 +11,6 @@
 
 - ✨ Features
 
-  - cargo-anvil: release v0.22.0
   - cargo-anvil: split generated recipe roles
   - cargo-anvil: release v0.20.0
   - cargo-anvil: consolidate generated infrastructure
@@ -21,6 +20,7 @@
   - cargo-anvil: allow rich recipe help
   - cargo-anvil: collapse unreleased version bumps
   - cargo-anvil: retain consolidated impact action path
+  - cargo-anvil: isolate mutation diffs and normalize Git prefixes ([#323](https://github.com/microsoft/ox-tools/pull/323))
   - cargo-anvil: require cargo-each 0.7.0
   - cargo-anvil: reconcile consolidation with current main
 
@@ -30,6 +30,7 @@
 
 - ♻️ Code Refactoring
 
+  - cargo-anvil: keep helpers recipes private
   - cargo-anvil: mark hidden recipes private
   - cargo-anvil: unify example target selection
   - cargo-anvil: make README checks shell-free
