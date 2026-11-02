@@ -20,6 +20,8 @@ trait Processes {
     fn stop(&mut self, group: i32) -> io::Result<()>;
     fn resume(&mut self, group: i32) -> io::Result<()>;
     fn kill(&mut self, group: i32) -> io::Result<()>;
+    fn stop_process(&mut self, pid: i32) -> io::Result<()>;
+    fn kill_process(&mut self, pid: i32) -> io::Result<()>;
 }
 
 struct Native;
@@ -48,6 +50,14 @@ impl Processes for Native {
     fn kill(&mut self, group: i32) -> io::Result<()> {
         group::kill(group)
     }
+
+    fn stop_process(&mut self, pid: i32) -> io::Result<()> {
+        group::stop_process(pid)
+    }
+
+    fn kill_process(&mut self, pid: i32) -> io::Result<()> {
+        group::kill_process(pid)
+    }
 }
 
 /// Lists a group's members and every process descended from one of them.
@@ -58,36 +68,44 @@ impl Processes for Native {
 ///
 /// Returns the operating system's reason when a listing fails.
 pub(crate) fn tree(group: i32) -> io::Result<Vec<i32>> {
-    tree_with(&mut Native, group)
+    Ok(walk(&mut Native, group, |_processes, _pid| {})?
+        .into_iter()
+        .map(|(pid, _member)| pid)
+        .collect())
 }
 
-/// Ends the groups that descendants of `group` lead, then `group` itself through `kill_group`.
+/// Ends every descendant of `group` outside it, then `group` itself through `kill_group`.
 ///
-/// `group` is stopped first. A stopped process can neither start a child nor reap one, so the
-/// walk sees every child of the group's members, and a killed child of a member stays a zombie,
-/// keeping its group id reserved, until `kill_group` ends that member. A descendant's own group
-/// is ended only when the descendant leads it, so a process that joins an unrelated group cannot
-/// steer the sweep there. A group that ends only zombies or a process this user cannot signal
-/// reports `EPERM`; like the sampler, which skips such processes, the sweep does not count it as
-/// a failure.
+/// The whole tree is stopped before anything is killed: `group` first, then each descendant
+/// outside it before its children are listed. A stopped process can neither start a child nor
+/// reap one, so every listed process keeps its pid and group id until the sweep has signalled it.
+/// Descendants are then killed children first, so a killed child stays a zombie of a stopped
+/// parent rather than being reparented and reaped. A descendant that leads its group is killed
+/// with that group; any other is killed alone, so a process that joins an unrelated group cannot
+/// steer the sweep there.
 ///
 /// # Errors
 ///
-/// Returns the error from `kill_group` first, then a listing failure, then the first other failure
-/// to end a descendant's group. `group` is resumed when `kill_group` fails, so a failed sweep does
-/// not leave it stopped.
+/// Returns the error from `kill_group` first, then a listing failure, then the first failure to
+/// kill a descendant, including `EPERM` for a process this user cannot signal. `group` is resumed
+/// when `kill_group` fails, so a failed sweep does not leave it stopped.
 pub(crate) fn sweep(group: i32, kill_group: impl FnOnce() -> io::Result<()>) -> io::Result<()> {
     sweep_with(&mut Native, group, kill_group)
 }
 
-fn tree_with(processes: &mut impl Processes, group: i32) -> io::Result<Vec<i32>> {
-    let mut pending = VecDeque::from(processes.members(group)?);
+/// Walks a group's members and their descendants, calling `before_children` on each descendant
+/// outside the group before listing its children. Each entry says whether it is a group member.
+fn walk<P: Processes>(processes: &mut P, group: i32, mut before_children: impl FnMut(&mut P, i32)) -> io::Result<Vec<(i32, bool)>> {
+    let mut pending: VecDeque<_> = processes.members(group)?.into_iter().map(|pid| (pid, true)).collect();
     let mut seen = BTreeSet::new();
     let mut tree = Vec::new();
-    while let Some(pid) = pending.pop_front() {
+    while let Some((pid, member)) = pending.pop_front() {
         if seen.insert(pid) {
-            tree.push(pid);
-            pending.extend(processes.children(pid)?);
+            if !member {
+                before_children(processes, pid);
+            }
+            tree.push((pid, member));
+            pending.extend(processes.children(pid)?.into_iter().map(|child| (child, false)));
         }
     }
     Ok(tree)
@@ -97,15 +115,17 @@ fn sweep_with(processes: &mut impl Processes, group: i32, kill_group: impl FnOnc
     // A group whose leader has exited can hold only that zombie, which macOS refuses to signal.
     // Such a group starts no children, so a failed stop costs the walk nothing.
     let _stopped = processes.stop(group);
-    let ended = tree_with(processes, group).and_then(|tree| {
+    let ended = walk(processes, group, |processes, pid| {
+        // A process this user cannot stop cannot be killed either; that kill reports it below.
+        let _stopped = processes.stop_process(pid);
+    })
+    .and_then(|tree| {
         let mut ended = Ok(());
-        for pid in tree {
-            if pid == group || processes.group_of(pid) != Some(pid) {
-                continue;
-            }
-            let killed = match processes.kill(pid) {
-                Err(cause) if cause.raw_os_error() == Some(libc::EPERM) => Ok(()),
-                killed => killed,
+        for (pid, _member) in tree.into_iter().rev().filter(|(_pid, member)| !member) {
+            let killed = if processes.group_of(pid) == Some(pid) {
+                processes.kill(pid)
+            } else {
+                processes.kill_process(pid)
             };
             ended = ended.and(killed);
         }
@@ -121,11 +141,15 @@ fn sweep_with(processes: &mut impl Processes, group: i32, kill_group: impl FnOnc
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use std::cell::RefCell;
     use std::collections::BTreeMap;
+    use std::rc::Rc;
 
     use super::*;
 
-    /// A scripted process table that records the signals a sweep sends.
+    type Log = Rc<RefCell<Vec<(&'static str, i32)>>>;
+
+    /// A scripted process table that records every listing and signal in one chronological log.
     #[derive(Default)]
     struct Table {
         members: Vec<i32>,
@@ -133,7 +157,20 @@ mod tests {
         groups: BTreeMap<i32, i32>,
         kill_errors: BTreeMap<i32, i32>,
         failing_listing: Option<i32>,
-        signals: Vec<(&'static str, i32)>,
+        log: Log,
+    }
+
+    impl Table {
+        fn record(&self, event: &'static str, id: i32) {
+            self.log.borrow_mut().push((event, id));
+        }
+
+        fn killed(&self, event: &'static str, id: i32) -> io::Result<()> {
+            self.record(event, id);
+            self.kill_errors
+                .get(&id)
+                .map_or(Ok(()), |error| Err(io::Error::from_raw_os_error(*error)))
+        }
     }
 
     impl Processes for Table {
@@ -142,6 +179,7 @@ mod tests {
         }
 
         fn children(&mut self, parent: i32) -> io::Result<Vec<i32>> {
+            self.record("children", parent);
             if self.failing_listing == Some(parent) {
                 return Err(io::Error::from_raw_os_error(libc::EIO));
             }
@@ -153,20 +191,26 @@ mod tests {
         }
 
         fn stop(&mut self, group: i32) -> io::Result<()> {
-            self.signals.push(("stop", group));
+            self.record("stop", group);
             Ok(())
         }
 
         fn resume(&mut self, group: i32) -> io::Result<()> {
-            self.signals.push(("resume", group));
+            self.record("resume", group);
             Ok(())
         }
 
         fn kill(&mut self, group: i32) -> io::Result<()> {
-            self.signals.push(("kill", group));
-            self.kill_errors
-                .get(&group)
-                .map_or(Ok(()), |error| Err(io::Error::from_raw_os_error(*error)))
+            self.killed("kill", group)
+        }
+
+        fn stop_process(&mut self, pid: i32) -> io::Result<()> {
+            self.record("stop_process", pid);
+            Ok(())
+        }
+
+        fn kill_process(&mut self, pid: i32) -> io::Result<()> {
+            self.killed("kill_process", pid)
         }
     }
 
@@ -181,36 +225,66 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_tree_adds_descendants_outside_the_group_once_each_after_its_members() {
-        let mut table = nextest();
-        assert_eq!(tree_with(&mut table, 10).unwrap(), [10, 11, 20, 30, 21]);
+    /// Kills the group through the same log, as the real group kill would follow the sweep.
+    fn kill_group(log: &Log, result: io::Result<()>) -> impl FnOnce() -> io::Result<()> {
+        let log = Rc::clone(log);
+        move || {
+            log.borrow_mut().push(("kill", 10));
+            result
+        }
+    }
+
+    fn events(table: &Table) -> Vec<(&'static str, i32)> {
+        table.log.borrow().clone()
     }
 
     #[test]
-    fn a_failed_child_listing_fails_the_tree() {
+    fn the_tree_adds_descendants_outside_the_group_once_each_after_its_members() {
+        let mut table = nextest();
+        let tree = walk(&mut table, 10, |_processes, _pid| {}).unwrap();
+        assert_eq!(tree, [(10, true), (11, true), (20, false), (30, false), (21, false)]);
+    }
+
+    #[test]
+    fn a_failed_child_listing_fails_the_walk() {
         let mut table = Table {
             failing_listing: Some(11),
             ..nextest()
         };
-        assert_eq!(tree_with(&mut table, 10).unwrap_err().raw_os_error(), Some(libc::EIO));
+        let error = walk(&mut table, 10, |_processes, _pid| {}).unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::EIO));
     }
 
     #[test]
-    fn a_sweep_stops_the_group_then_kills_descendant_led_groups_before_the_group() {
+    fn a_sweep_stops_the_whole_tree_then_kills_children_before_parents_and_the_group_last() {
         let mut table = nextest();
-        let mut signals = Vec::new();
-        sweep_with(&mut table, 10, || {
-            signals.push(("kill", 10));
-            Ok(())
-        })
-        .unwrap();
-        table.signals.extend(signals);
-        assert_eq!(table.signals, [("stop", 10), ("kill", 20), ("kill", 30), ("kill", 10)]);
+        let log = Rc::clone(&table.log);
+        sweep_with(&mut table, 10, kill_group(&log, Ok(()))).unwrap();
+        assert_eq!(
+            events(&table),
+            [
+                ("stop", 10),
+                ("children", 10),
+                ("children", 11),
+                // Each descendant is stopped before its children are listed, so none of them can
+                // be reaped and its id reused while the sweep is still to signal it.
+                ("stop_process", 20),
+                ("children", 20),
+                ("stop_process", 30),
+                ("children", 30),
+                ("stop_process", 21),
+                ("children", 21),
+                // Children first; 21 only belongs to 20's group and is killed alone.
+                ("kill_process", 21),
+                ("kill", 30),
+                ("kill", 20),
+                ("kill", 10),
+            ]
+        );
     }
 
     #[test]
-    fn a_sweep_ignores_groups_a_descendant_joined_but_does_not_lead() {
+    fn a_descendant_in_a_group_it_does_not_lead_is_killed_alone() {
         let mut table = Table {
             members: vec![10],
             children: BTreeMap::from([(10, vec![11])]),
@@ -218,30 +292,37 @@ mod tests {
             groups: BTreeMap::from([(10, 10), (11, 5)]),
             ..Table::default()
         };
-        sweep_with(&mut table, 10, || Ok(())).unwrap();
-        assert_eq!(table.signals, [("stop", 10)]);
+        let log = Rc::clone(&table.log);
+        sweep_with(&mut table, 10, kill_group(&log, Ok(()))).unwrap();
+        assert_eq!(
+            events(&table),
+            [
+                ("stop", 10),
+                ("children", 10),
+                ("stop_process", 11),
+                ("children", 11),
+                ("kill_process", 11),
+                ("kill", 10),
+            ]
+        );
     }
 
     #[test]
-    fn a_descendant_group_that_cannot_be_signalled_is_skipped_but_other_failures_are_reported() {
-        let mut table = Table {
-            kill_errors: BTreeMap::from([(20, libc::EPERM)]),
-            ..nextest()
-        };
-        sweep_with(&mut table, 10, || Ok(())).unwrap();
-        assert_eq!(table.signals, [("stop", 10), ("kill", 20), ("kill", 30)]);
-
-        let mut table = Table {
-            kill_errors: BTreeMap::from([(20, libc::EINVAL)]),
-            ..nextest()
-        };
-        let error = sweep_with(&mut table, 10, || Ok(())).unwrap_err();
-        assert_eq!(error.raw_os_error(), Some(libc::EINVAL));
-        assert_eq!(
-            table.signals,
-            [("stop", 10), ("kill", 20), ("kill", 30)],
-            "one failure does not stop the sweep"
-        );
+    fn a_descendant_that_cannot_be_killed_fails_the_sweep_without_stopping_it() {
+        for error in [libc::EPERM, libc::EINVAL] {
+            let mut table = Table {
+                kill_errors: BTreeMap::from([(30, error)]),
+                ..nextest()
+            };
+            let log = Rc::clone(&table.log);
+            let failure = sweep_with(&mut table, 10, kill_group(&log, Ok(()))).unwrap_err();
+            assert_eq!(failure.raw_os_error(), Some(error));
+            assert_eq!(
+                events(&table)[9..],
+                [("kill_process", 21), ("kill", 30), ("kill", 20), ("kill", 10)],
+                "one failure does not stop the sweep"
+            );
+        }
     }
 
     #[test]
@@ -250,28 +331,26 @@ mod tests {
             failing_listing: Some(11),
             ..nextest()
         };
-        let mut killed = false;
-        let error = sweep_with(&mut table, 10, || {
-            killed = true;
-            Ok(())
-        })
-        .unwrap_err();
-        assert!(killed);
+        let log = Rc::clone(&table.log);
+        let error = sweep_with(&mut table, 10, kill_group(&log, Ok(()))).unwrap_err();
         assert_eq!(error.raw_os_error(), Some(libc::EIO));
+        assert_eq!(events(&table).last(), Some(&("kill", 10)));
 
         let mut table = Table {
             failing_listing: Some(11),
             ..nextest()
         };
-        let error = sweep_with(&mut table, 10, || Err(io::Error::from_raw_os_error(libc::EPERM))).unwrap_err();
+        let log = Rc::clone(&table.log);
+        let error = sweep_with(&mut table, 10, kill_group(&log, Err(io::Error::from_raw_os_error(libc::EPERM)))).unwrap_err();
         assert_eq!(error.raw_os_error(), Some(libc::EPERM), "the group's own failure takes precedence");
     }
 
     #[test]
     fn a_failed_group_kill_resumes_the_stopped_group() {
         let mut table = nextest();
-        let error = sweep_with(&mut table, 10, || Err(io::Error::from_raw_os_error(libc::EPERM))).unwrap_err();
+        let log = Rc::clone(&table.log);
+        let error = sweep_with(&mut table, 10, kill_group(&log, Err(io::Error::from_raw_os_error(libc::EPERM)))).unwrap_err();
         assert_eq!(error.raw_os_error(), Some(libc::EPERM));
-        assert_eq!(table.signals, [("stop", 10), ("kill", 20), ("kill", 30), ("resume", 10)]);
+        assert_eq!(events(&table)[events(&table).len() - 2..], [("kill", 10), ("resume", 10)]);
     }
 }

@@ -96,6 +96,50 @@ pub fn resume(group: i32) -> io::Result<()> {
     signal(group, libc::SIGCONT)
 }
 
+/// Stops one process without ending it.
+///
+/// While stopped, the process cannot reap its children, so their ids stay reserved. A process
+/// that has already exited is treated as successfully gone.
+///
+/// # Errors
+///
+/// Rejects identifiers less than or equal to one without making a system call. Other errors are
+/// the operating system's reason the process could not be signalled.
+#[cfg(target_os = "macos")]
+pub fn stop_process(pid: i32) -> io::Result<()> {
+    signal_process(pid, libc::SIGSTOP)
+}
+
+/// Kills one process.
+///
+/// # Errors
+///
+/// As for [`stop_process`].
+#[cfg(target_os = "macos")]
+pub fn kill_process(pid: i32) -> io::Result<()> {
+    signal_process(pid, libc::SIGKILL)
+}
+
+#[cfg(target_os = "macos")]
+fn signal_process(pid: i32, number: libc::c_int) -> io::Result<()> {
+    if pid <= 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "process identifiers must be greater than one",
+        ));
+    }
+
+    // SAFETY: `kill` is handed two integers and dereferences no caller pointer, so no value of
+    // `pid` or of the signal can make it read or write memory it should not. Rejecting values up
+    // to one above keeps the call away from the broadcast and group forms. Whose process `pid`
+    // names is a correctness obligation on the caller, not a soundness one.
+    if unsafe { libc::kill(pid, number) } == 0 {
+        return Ok(());
+    }
+
+    map_killpg_error(io::Error::last_os_error())
+}
+
 fn signal(group: i32, number: libc::c_int) -> io::Result<()> {
     if group <= 1 {
         return Err(io::Error::new(

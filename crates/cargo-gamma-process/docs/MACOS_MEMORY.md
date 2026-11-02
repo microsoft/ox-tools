@@ -319,22 +319,25 @@ the group's members, each process's children are listed with
 `proc_listpids(PROC_PPID_ONLY)`, transitively. The sampler sums every process
 found. The sweep runs in this order:
 
-1. Stop the launch's group with `SIGSTOP`. A stopped runner can neither start
-   another test nor reap one that has ended.
-2. Walk the tree, and kill each group whose leader is a descendant, which is
-   each test's group.
+1. Stop the launch's group with `SIGSTOP`, then stop each descendant outside
+   it before listing that descendant's children. A stopped process can neither
+   start a child nor reap one, so the whole tree is frozen and every listed
+   process keeps its pid and group id until the sweep has signalled it.
+2. Kill the descendants, children before parents, so a killed child stays a
+   zombie of a stopped parent instead of being reparented to `launchd` and
+   reaped. A descendant that leads its group, such as each test, is killed
+   with its group; any other is killed alone, so a process that joins an
+   unrelated group, such as this run's own, does not steer the sweep there.
 3. Kill the launch's group, as before. `SIGKILL` ends stopped processes.
 
-Because the runner is stopped while its tests are killed, a killed test stays
-a zombie and keeps its pid and group id reserved, so no signal can reach a
-process that reused them. Only a group led by a descendant is killed: a
-process that joins an unrelated group, such as this run's own, does not steer
-the sweep there. A test group that holds only zombies, or a process this user
-cannot signal, reports `EPERM`; that is skipped, like an unreadable member when
-sampling. If the launch's group cannot be killed, it is resumed, so a failed
+A descendant that cannot be killed, including one owned by another user
+(`EPERM`), fails the sweep, so cleanup is reported as unproven rather than
+complete. If the launch's group cannot be killed, it is resumed, so a failed
 sweep does not leave it stopped. Stopping a group whose leader has already
-exited can fail the same way; that group starts no children, so the walk does
-not need it stopped.
+exited can fail because macOS refuses to signal a group of zombies; that group
+starts no children, so the walk does not need it stopped. A descendant that is
+already a zombie has no readable group, and is killed alone, which macOS
+accepts.
 
 A breach ends the runner along with the test, so the runner exits by signal
 instead of reporting a failed test. A nextest signal exit is otherwise not a
@@ -372,11 +375,12 @@ processes:
   are skipped, not treated as errors; and a measuring but not enforcing policy
   never kills.
 - The walk by parentage and the sweep's order are driven by a scripted process
-  table. Tests cover the following: descendants in groups of their own are
-  found once each; the group is stopped before any kill, descendant-led groups
-  are killed before the group, and a group the descendant only joined is left
-  alone; `EPERM` from a descendant group is skipped while other failures are
-  reported; and a failed group kill resumes the group.
+  table that records listings and signals in one chronological log. Tests
+  cover the following: descendants in groups of their own are found once
+  each; every descendant is stopped before its children are listed; kills run
+  children first and end with the group; a descendant in a group it does not
+  lead is killed alone; a descendant that cannot be killed, including `EPERM`,
+  fails the sweep; and a failed group kill resumes the group.
 - A single macOS-only integration test, ignored by default and failing when
   requested by name on a host that cannot run it, launches a real runaway
   allocator under a small explicit ceiling. It asserts that the outcome is

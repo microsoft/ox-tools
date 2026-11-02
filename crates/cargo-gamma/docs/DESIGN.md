@@ -1044,7 +1044,7 @@ Platform containment uses the strongest suitable primitive:
 
 A process group is escapable: one unprivileged `setsid` or `setpgid` call removes a descendant from
 it, and every later signal to the group misses that descendant. cargo-nextest does this for every
-test. On macOS, cleanup therefore also ends each group led by a descendant found through its
+test. On macOS, cleanup therefore also stops and ends every descendant found through its
 parent; a descendant that has outlived its parent is no longer found. Containment is therefore not
 conditional on whether memory is being measured. Every launch enters a cgroup leaf on Linux and a
 job object on Windows, including launches that request no accounting at all, such as test listing;

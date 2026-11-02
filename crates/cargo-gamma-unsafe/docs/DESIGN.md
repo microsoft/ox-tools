@@ -39,6 +39,8 @@ crate's dependency graph and must remain dependency-free.
   as gone, not as an error. The sampling policy lives in
   `cargo-gamma-process`; see its
   [macOS memory design](../../cargo-gamma-process/docs/MACOS_MEMORY.md).
+  For cleanup, it can also stop or resume a group and stop or kill a single
+  process, so that a supervisor can freeze a tree before ending it.
 - On Linux, terminal interrupts kill both the process group and the cgroup, so
   descendants that create a new session or process group remain reachable.
   This covers accidental process-group/session escape, not hostile same-credential
