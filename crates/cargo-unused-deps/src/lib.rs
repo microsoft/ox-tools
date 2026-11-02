@@ -341,11 +341,6 @@ fn run_with(
 }
 
 /// Whether the caller requested compiler-backed package checks.
-///
-/// Mutating this predicate in either direction makes a selector-free catalog
-/// run compile the entire workspace, which is an unbounded timeout rather than
-/// a useful mutation-test result. CLI integration tests cover both outcomes.
-#[mutants::skip]
 fn package_checks_selected(packages: &[String], workspace: bool) -> bool {
     !packages.is_empty() || workspace
 }
