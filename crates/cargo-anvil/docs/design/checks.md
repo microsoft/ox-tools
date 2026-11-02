@@ -192,8 +192,47 @@ while paired prerequisite validation remains read-only.
 | `deny`                         | `cargo deny check`                                        | all |
 | `audit`                        | `cargo audit`                                             | oxidizer |
 | `udeps`                        | `cargo +<pinned-nightly> udeps --workspace --all-features` run **twice** — once with default targets (lib + bins) and once with `--all-targets`. cargo-udeps only analyzes the targets it's told to, and each run catches a variant the other masks: the default-targets run surfaces a dep in `[dependencies]` referenced only by tests/benches/examples (it should be a dev-dep; `--all-targets` would see it as "used"), while the `--all-targets` run surfaces unused `[dev-dependencies]` (never compiled by the default-targets run). Together they cover unused deps, unused dev-deps, and deps that should be dev-deps. | oxidizer, oxidizer-github |
-| `semver-check`                 | `cargo semver-checks --baseline-rev <baseline>` per affected publishable library crate. Crates with `publish = false` and bin-only crates are skipped. The PR target is the baseline. Exit 100 is a completed check with deny-level findings; exit 101 or another nonzero status means the comparison was inconclusive. Both outcomes write `target/anvil/comments/semver.md` and remain advisory, matching the repository's native `semver` job (`continue-on-error: true`). Proven rename and bin→lib transitions with no comparable baseline, and dependencies proven to be yanked only in the checked-out baseline tree, are skipped without a comment. Anvil preflight failures such as invalid current-workspace metadata or an unavailable baseline ref still fail because the recipe cannot establish what to compare. | oxidizer-github |
+| `semver-check`                 | Generate current and PR-target rustdoc JSON with `cargo rustdoc --locked --lib`, then compare with `cargo semver-checks --current-rustdoc <current.json> --baseline-rustdoc <baseline.json>` per affected publishable library crate. Each revision uses its own lockfile with the same compiler and target. Crates with `publish = false`, bin-only crates, and new/moved/renamed crates or bin-to-library transitions without a comparable baseline are skipped. Exit 100 is a completed check with deny-level findings; build failures and other nonzero checker statuses are inconclusive. Both outcomes write `target/anvil/comments/semver.md` and remain advisory. Invalid current metadata or an unavailable baseline ref still fail preflight. | oxidizer-github |
 | `external-types`               | `cargo each <affected packages> --filter lib --keep-going -- cargo +<catalog-nightly-rustdoc-schema> check-external-types --manifest-path {manifest}` (per-manifest because the tool has no `--workspace`/`--package`; bin-only crates have no public API surface and are filtered out). Setup installs the catalog version but validation accepts newer installed tools. The selected nightly is tested with the catalog version; an incompatible newer tool fails closed with a tool/nightly compatibility diagnostic rather than silently selecting a different schema. | oxidizer-github |
+
+#### Locked SemVer snapshots
+
+The comparison measures the API built by each revision's checked-in dependency
+graph. It does not resolve historical manifests against today's registry:
+`cargo-semver-checks --baseline-rev` builds a separate consumer workspace and
+updates its dependencies, so a newly published incompatible transitive dependency
+can otherwise prevent a previously buildable baseline from being compared.
+
+Anvil makes one temporary, local shared Git clone, checks out the resolved PR
+target commit, and removes that clone in `finally`. The original repository and
+historical manifests are not modified. Both snapshots use the current checkout's
+selected stable compiler, overriding any obsolete baseline toolchain selection.
+The current Cargo build target is used for both arms; an unset target selects the
+compiler's host. A multi-target configuration must select one target with
+`CARGO_BUILD_TARGET`. Build artifacts live under `target/anvil/semver/`, separately
+for current and baseline, irrespective of an inherited `CARGO_TARGET_DIR`.
+
+Each package is built separately using its source-qualified metadata ID. Default
+features remain enabled, and feature selection retains the checker's heuristic:
+enable declared and implicit optional-dependency features except `unstable`,
+`nightly`, `bench`, `no_std`, and names beginning with `_`, `unstable-`, or
+`unstable_`. Each revision supplies its own feature list. Rustdoc includes hidden
+and private items, as required by the checker, and the unstable JSON output uses
+`RUSTC_BOOTSTRAP=1`, matching the checker's own generation path. The file-input
+checker uses its built-in lint policy rather than Cargo metadata lint overrides;
+Anvil warns if such overrides are present.
+
+The lockfiles must be present and usable; a missing or stale lockfile is never
+replaced by fresh resolution. A failed build, missing JSON artifact, or failed
+comparison is reported as inconclusive, not clean. Package absence, renames, and
+library-target absence are established from baseline metadata rather than
+matching compiler-error strings. A genuinely unusable baseline dependency is
+also inconclusive; yanked versions still present in a usable lockfile can build
+without being reselected.
+
+The graphs may legitimately differ between revisions. Dependency-induced API
+changes can therefore appear in the advisory alongside source changes; this is
+intentional, unlike comparing both sources against a newly resolved graph.
 
 #### Package-isolated all-target compilation
 
@@ -573,15 +612,15 @@ commits are normal, and forcing every breaking-API PR to bump the major version 
 on a release) would push enforcement to the wrong moment in the lifecycle. The change is
 verifiable at release time, not per PR.
 
-The SemVer comparison is also inconclusive when `cargo-semver-checks` cannot materialize
-or build the target-branch baseline, for example because that baseline resolves a yanked
-dependency. Such an operational failure is reported in the same advisory comment and does
+The SemVer comparison is also inconclusive when a locked rustdoc build or
+`cargo-semver-checks` comparison cannot complete, for example because a historical
+lockfile is unusable. Such an operational failure is reported in the same advisory comment and does
 not block the PR: a broken baseline is not evidence that the PR broke the public API, and
 blocking would prevent the PR that repairs the baseline from merging. This deliberately
 matches the repository's native `semver` job, whose comparison step uses
-`continue-on-error: true`. Failures in Anvil's own preflight (before invoking
-`cargo-semver-checks`) remain enforcing because they indicate that the recipe cannot
-identify the current packages or requested baseline.
+`continue-on-error: true`. Failures in Anvil's own preflight remain enforcing
+because they indicate that the recipe cannot identify the current packages,
+compiler, build target, or requested baseline.
 
 To carry this signal without making the recipe non-zero, anvil uses a single shared
 convention:

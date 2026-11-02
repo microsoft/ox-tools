@@ -54,6 +54,31 @@ const CONTAINER_DOCKERIGNORE: &str = include_str!("../templates/anvil/container/
 // Any nonzero value works; naming it prevents tests from implying an external exit-code contract.
 const ARBITRARY_FAILURE_EXIT: &str = "23";
 
+#[test]
+fn semver_compares_locked_workspace_snapshots() {
+    let generation = SEMVER
+        .split("function Get-RustdocSnapshot")
+        .nth(1)
+        .unwrap()
+        .split("    $include =")
+        .next()
+        .unwrap();
+    assert!(generation.contains("rustdoc --locked --lib"));
+    assert!(generation.contains("--package $package.id"));
+    assert!(generation.contains("--target $target --target-dir $targetDir"));
+    for option in ["--output-format=json", "--document-private-items", "--document-hidden-items"] {
+        assert!(generation.contains(option), "rustdoc must retain {option}");
+    }
+    assert!(generation.contains("'unstable', 'nightly', 'bench', 'no_std'"));
+    assert!(generation.contains("'^(_|unstable[-_])'"));
+    assert!(generation.contains("Remove-Item -LiteralPath $json"));
+    assert!(SEMVER.contains("Get-RustdocSnapshot $currentPackage $meta.workspace_root"));
+    assert!(SEMVER.contains("Get-RustdocSnapshot $old $baselineMeta.workspace_root"));
+    assert!(SEMVER.contains("--current-rustdoc $current.Path --baseline-rustdoc $baseline.Path"));
+    assert!(!SEMVER.contains("semver-checks --package $p --baseline-rev"));
+    assert!(!SEMVER.contains("cargo @stableArgs update"));
+}
+
 /// Serializes PowerShell interpreter startup within this libtest process.
 ///
 /// PowerShell#26940 can corrupt assembly-name parsing when constrained runners
@@ -206,8 +231,19 @@ if ($args -contains 'metadata') {
         Write-Output '{invalid metadata'
         exit 0
     }
-    $root = $env:FAKE_WORKSPACE_ROOT
-    $packageName = if ($env:FAKE_PACKAGE_NAME) { $env:FAKE_PACKAGE_NAME } else { 'fixture' }
+    $root = if ($args -contains '--manifest-path') {
+        Split-Path -Parent $args[([array]::IndexOf($args, '--manifest-path') + 1)]
+    } else {
+        $env:FAKE_WORKSPACE_ROOT
+    }
+    $isBaseline = $root -ne $env:FAKE_WORKSPACE_ROOT
+    $packageName = if ($isBaseline -and $env:FAKE_SEMVER_BASELINE_RENAMED) {
+        'old-name'
+    } elseif ($env:FAKE_PACKAGE_NAME) {
+        $env:FAKE_PACKAGE_NAME
+    } else {
+        'fixture'
+    }
     $packageId = if ($env:FAKE_PACKAGE_ID) { $env:FAKE_PACKAGE_ID } else { "$packageName 0.1.0" }
     $libName = if ($env:FAKE_LIB_NAME) { $env:FAKE_LIB_NAME } else { 'fixture' }
     $manifestPath = if ($env:FAKE_PACKAGE_DIR_LEAF) {
@@ -231,7 +267,13 @@ if ($args -contains 'metadata') {
             manifest_path = $manifestPath
             targets = @([pscustomobject]@{
                 name = $libName
-                kind = if ($env:FAKE_FIRST_RLIB) { @('rlib') } else { @('lib') }
+                kind = if ($isBaseline -and $env:FAKE_SEMVER_BASELINE_BIN) {
+                    @('bin')
+                } elseif ($env:FAKE_FIRST_RLIB) {
+                    @('rlib')
+                } else {
+                    @('lib')
+                }
                 doctest = -not [bool]$env:FAKE_FIRST_DOCTEST_FALSE
             })
             publish = if ($env:FAKE_PUBLISH_FALSE) {
@@ -391,6 +433,24 @@ if ($args -contains 'miri') {
         exit [int]$env:FAKE_MIRI_BUILD_EXIT
     }
 }
+if ($args -contains 'config') {
+    Write-Output '"fixture-target"'
+    exit 0
+}
+if ($args -contains 'rustdoc') {
+    if ($env:FAKE_RUSTDOC_EXIT) {
+        Write-Output 'locked rustdoc build failed'
+        exit [int]$env:FAKE_RUSTDOC_EXIT
+    }
+    $targetDir = $args[([array]::IndexOf($args, '--target-dir') + 1)]
+    $target = $args[([array]::IndexOf($args, '--target') + 1)]
+    $packageName = ($args[([array]::IndexOf($args, '--package') + 1)] -split ' ')[0]
+    $libName = if ($packageName -eq 'fixture') { 'fixture' } else { $packageName.Replace('-', '_') }
+    $docDir = [System.IO.Path]::Combine($targetDir, $target, 'doc')
+    [System.IO.Directory]::CreateDirectory($docDir) | Out-Null
+    Set-Content -LiteralPath (Join-Path $docDir "$libName.json") -Value '{}'
+    exit 0
+}
 if ($args -contains 'semver-checks') {
     if ($env:FAKE_SEMVER_OUTPUT) { Write-Output $env:FAKE_SEMVER_OUTPUT }
     exit [int]$env:FAKE_SEMVER_EXIT
@@ -507,7 +567,22 @@ _anvil-impact-exclude tier:
     let bin = tmp.path().join("fake-bin");
     fs::create_dir_all(&bin).unwrap();
     write(&bin.join("cargo.ps1"), FAKE_CARGO_PS1);
-    write(&bin.join("git.ps1"), "exit 0\n");
+    write(
+        &bin.join("git.ps1"),
+        r"
+if ($args -contains 'rev-parse') {
+    if ($args -contains '--show-toplevel') {
+        Write-Output $env:FAKE_WORKSPACE_ROOT
+    } else {
+        Write-Output 'baseline-fixture'
+    }
+}
+if ($args -contains 'clone') {
+    [System.IO.Directory]::CreateDirectory($args[-1]) | Out-Null
+}
+exit 0
+",
+    );
     write(
         &bin.join("rustc.ps1"),
         r"
@@ -2244,44 +2319,24 @@ fn semver_exit_code_contract_is_executed() {
     let findings_comment = fs::read_to_string(tmp.path().join("target/anvil/comments/semver.md")).unwrap();
     assert!(findings_comment.contains("Potential breaking changes"));
     assert!(findings_comment.contains("breaking change"));
+    let calls = fs::read_to_string(&log).unwrap();
+    assert_eq!(calls.lines().filter(|line| line.starts_with("rustdoc --locked --lib")).count(), 2);
+    assert!(calls.contains("semver-checks --package fixture --current-rustdoc"));
+    assert!(calls.contains("--baseline-rustdoc"));
+    assert!(!calls.contains("--baseline-rev"));
 
-    let renamed = run_just(
-        tmp.path(),
-        &["anvil-semver-check"],
-        &[
-            common[0],
-            common[1],
-            ("FAKE_SEMVER_EXIT", OsStr::new("101")),
-            ("FAKE_SEMVER_OUTPUT", OsStr::new("package `fixture` not found in the baseline")),
-        ],
-    );
-    assert!(
-        renamed.status.success(),
-        "accepted exit 101 should succeed:\n{}",
-        String::from_utf8_lossy(&renamed.stderr)
-    );
-    assert!(!tmp.path().join("target/anvil/comments/semver.md").exists());
-
-    for output in [
-        "has no lib target",
-        "no library targets found",
-        "version 1.0.0 is yanked: target/semver-checks/git-origin_main/crates/fixture",
-    ] {
-        let bin_to_lib = run_just(
+    for condition in ["FAKE_SEMVER_BASELINE_RENAMED", "FAKE_SEMVER_BASELINE_BIN"] {
+        let absent_baseline = run_just(
             tmp.path(),
             &["anvil-semver-check"],
-            &[
-                common[0],
-                common[1],
-                ("FAKE_SEMVER_EXIT", OsStr::new("101")),
-                ("FAKE_SEMVER_OUTPUT", OsStr::new(output)),
-            ],
+            &[common[0], common[1], (condition, OsStr::new("1"))],
         );
         assert!(
-            bin_to_lib.status.success(),
-            "bin-to-lib exit 101 wording '{output}' should succeed:\n{}",
-            String::from_utf8_lossy(&bin_to_lib.stderr)
+            absent_baseline.status.success(),
+            "metadata-proven absent baseline should succeed ({condition}):\n{}",
+            String::from_utf8_lossy(&absent_baseline.stderr)
         );
+        assert!(!tmp.path().join("target/anvil/comments/semver.md").exists());
     }
 
     for (exit, output) in [("101", "operational failure"), ("42", "unexpected failure")] {
@@ -2305,6 +2360,17 @@ fn semver_exit_code_contract_is_executed() {
         assert!(comment.contains(&format!("exit {exit}")));
         assert!(comment.contains(output));
     }
+
+    let build_failure = run_just(
+        tmp.path(),
+        &["anvil-semver-check"],
+        &[common[0], common[1], ("FAKE_RUSTDOC_EXIT", OsStr::new("101"))],
+    );
+    assert!(build_failure.status.success(), "locked build failures remain advisory");
+    let comment = fs::read_to_string(tmp.path().join("target/anvil/comments/semver.md")).unwrap();
+    assert!(comment.contains("Inconclusive comparisons"));
+    assert!(comment.contains("current rustdoc (exit 101)"));
+    assert!(comment.contains("locked rustdoc build failed"));
 }
 
 #[test]
@@ -3123,7 +3189,7 @@ fn semver_includes_libraries_restricted_to_named_registries() {
     assert!(
         fs::read_to_string(log)
             .unwrap()
-            .contains("semver-checks --package named-registry --baseline-rev base")
+            .contains("semver-checks --package named-registry --current-rustdoc")
     );
 }
 
