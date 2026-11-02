@@ -17,6 +17,7 @@
 
 - 🐛 Bug Fixes
 
+  - cargo-anvil: decouple tool installs from workspace toolchain
   - cargo-anvil: bootstrap cargo-each before recipe evaluation
   - cargo-anvil: allow rich recipe help
   - cargo-anvil: collapse unreleased version bumps
