@@ -2,15 +2,34 @@
 
 ## [Unreleased]
 
-## [0.21.2] - 2026-10-30
+## [0.22.1] - 2026-11-02
 
 - 🐛 Bug Fixes
 
+  - cargo-anvil: isolate mutation diffs and normalize Git prefixes ([#323](https://github.com/microsoft/ox-tools/pull/323))
   - cargo-anvil: prepare the Miri sysroot during setup
 
 - ✔️ Tasks
 
   - cargo-anvil: refresh release notes for 0.21.1
+
+- 🧩 Miscellaneous
+
+  - Merge main and synchronize cargo-anvil 0.21.2 metadata
+
+## [0.22.0] - 2026-11-02
+
+- ✨ Features
+
+  - cargo-anvil: pin coverage-gate 0.7.3
+
+- 🐛 Bug Fixes
+
+  - cargo-anvil: isolate mutation diffs and normalize Git prefixes ([#323](https://github.com/microsoft/ox-tools/pull/323))
+
+- ✔️ Tasks
+
+  - cargo-anvil: refresh 0.23.0 changelog
 
 ## [0.21.1] - 2026-10-30
 
