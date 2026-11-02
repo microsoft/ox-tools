@@ -433,7 +433,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-anvil"
-version = "0.22.0"
+version = "0.22.1"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -527,6 +527,7 @@ dependencies = [
  "toml",
  "tracing",
  "unicode-ident",
+ "unicode-properties",
  "unicode-width",
  "url",
  "vu128",
@@ -554,6 +555,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "unicode-ident",
+ "unicode-properties",
 ]
 
 [[package]]
