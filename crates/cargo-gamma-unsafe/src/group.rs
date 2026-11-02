@@ -69,6 +69,34 @@ pub fn is_no_child_to_wait_for(cause: &io::Error) -> bool {
 /// broadcast operation. Other errors are the operating system's reason the group could not be
 /// signalled.
 pub fn kill(group: i32) -> io::Result<()> {
+    signal(group, libc::SIGKILL)
+}
+
+/// Stops every process in a group without ending it.
+///
+/// A stopped process can neither start a child nor reap one that has exited, so the ids of its
+/// children stay reserved while the caller signals them. `SIGKILL` still ends a stopped process.
+/// A group that has already exited is treated as successfully gone.
+///
+/// # Errors
+///
+/// As for [`kill`].
+#[cfg(target_os = "macos")]
+pub fn stop(group: i32) -> io::Result<()> {
+    signal(group, libc::SIGSTOP)
+}
+
+/// Resumes every process in a group that [`stop`] stopped.
+///
+/// # Errors
+///
+/// As for [`kill`].
+#[cfg(target_os = "macos")]
+pub fn resume(group: i32) -> io::Result<()> {
+    signal(group, libc::SIGCONT)
+}
+
+fn signal(group: i32, number: libc::c_int) -> io::Result<()> {
     if group <= 1 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -85,7 +113,7 @@ pub fn kill(group: i32) -> io::Result<()> {
     // correctness obligation on the caller — see `ProcessTree::observe` in
     // `cargo-gamma-process` — not a
     // soundness one, because a wrong id can only signal the wrong group, not corrupt this process.
-    if unsafe { libc::killpg(group, libc::SIGKILL) } == 0 {
+    if unsafe { libc::killpg(group, number) } == 0 {
         return Ok(());
     }
 
@@ -187,8 +215,8 @@ pub fn exists(pid: i32) -> bool {
 
 /// The process group a process belongs to, or `None` if it could not be read.
 ///
-/// Test support for the process-tree tests in `cargo-gamma-process`, which assert that a contained
-/// child leads a group of its own rather than sharing this run's.
+/// The process-tree tests in `cargo-gamma-process` use it to assert that a contained child leads a
+/// group of its own; on macOS, cleanup uses it to find descendants that lead groups of their own.
 #[must_use]
 pub fn group_of(pid: i32) -> Option<i32> {
     // SAFETY: there is no memory-safety precondition to discharge — `getpgid` receives one integer

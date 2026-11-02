@@ -1197,6 +1197,10 @@ fn supervise(
                 // report is the more useful of the two: a named test is somewhere a reader can go,
                 // and a memory verdict that pre-empted it would leave them with a number and no
                 // idea which of the suite's tests to open.
+                if let Some(verdict) = stopped_by_ceiling(under_nextest, code, usage.peak, ceiling) {
+                    return (verdict, usage, evidence);
+                }
+
                 let (verdict, usage) = settle_collected(under_nextest, active, code, &collected, usage);
 
                 return (prefer_named(verdict, usage.peak, ceiling), usage, evidence);
@@ -1502,6 +1506,17 @@ fn prefer_named(verdict: Verdict, peak: Option<u64>, ceiling: Option<u64>) -> Ve
         // Not a verdict about the mutant at all, and a ceiling does not make it one.
         other => other,
     }
+}
+
+/// The verdict for a runner that its memory ceiling stopped before it could report a test.
+///
+/// On macOS the sampler ends cargo-nextest together with the test that passed the ceiling, so the
+/// runner exits by signal instead of reporting a failed test. Without a ceiling breach, a signal
+/// from nextest is still not a verdict about the mutant.
+fn stopped_by_ceiling(under_nextest: bool, code: Option<i32>, peak: Option<u64>, ceiling: Option<u64>) -> Option<Verdict> {
+    ceiling
+        .filter(|_limit| under_nextest && code.is_none())
+        .map(|limit| Verdict::MemoryLimit { peak, limit })
 }
 
 /// The verdict a run cut short by a failure the harness announced reaches.
@@ -3339,6 +3354,29 @@ mod final_survivor_tests {
         let progress = recorded_failures(false);
         assert_eq!(unfinished_nextest_failure(false, &progress), None);
         assert!(matches!(unfinished_nextest_failure(true, &progress), Some(Verdict::Unmetered(_))));
+    }
+
+    #[test]
+    fn a_nextest_runner_ended_by_signal_after_a_breach_is_out_of_memory() {
+        assert_eq!(
+            stopped_by_ceiling(true, None, Some(7), Some(5)),
+            Some(Verdict::MemoryLimit { peak: Some(7), limit: 5 })
+        );
+        assert_eq!(
+            stopped_by_ceiling(true, None, Some(7), None),
+            None,
+            "a signal without a breach is not a verdict"
+        );
+        assert_eq!(
+            stopped_by_ceiling(true, Some(100), Some(7), Some(5)),
+            None,
+            "an exit code is settled by nextest's meaning"
+        );
+        assert_eq!(
+            stopped_by_ceiling(false, None, Some(7), Some(5)),
+            None,
+            "a direct binary keeps the existing path"
+        );
     }
 
     #[test]

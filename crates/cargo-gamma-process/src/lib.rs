@@ -54,7 +54,7 @@
 //! rejected because an inherited job cannot be opened later to terminate its descendants. A peak
 //! that reached the limit is therefore enforced by the kernel rather than inferred after the fact.
 //! macOS enforcement is sampled and soft: allocation can overshoot between readings, and a
-//! descendant that leaves the group escapes both accounting and termination.
+//! descendant that leaves the group and outlives its parent escapes both accounting and termination.
 //!
 //! Because the Linux boundary is installed as a pre-exec step naming one particular leaf, and a
 //! [`Command`](std::process::Command) accumulates every such step it is given, a command can only
@@ -89,6 +89,8 @@ pub use memory_usage::MemoryUsage;
 #[doc(inline)]
 pub use process_tree::{OutputError, PreparedCommand, ProcessTree, SpawnFailure, SpawnedCommand, capacity, containment, output, prepare};
 
+#[cfg(target_os = "macos")]
+mod descendants;
 mod memory_request;
 mod memory_usage;
 mod process_tree;

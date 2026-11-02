@@ -33,8 +33,8 @@ crate's dependency graph and must remain dependency-free.
   where descendants can change credentials or leave the group.
 - Linux cgroups and Windows job objects provide process-tree memory limits.
   macOS has no such boundary. This crate exposes only the readings a
-  supervisor needs to sample one: the members of a process group
-  (`proc_listpids`) and each member's physical footprint
+  supervisor needs to sample one: the members of a process group and the
+  children of a process (`proc_listpids`), and each member's physical footprint
   (`proc_pid_rusage`). A member that exits between the two calls is reported
   as gone, not as an error. The sampling policy lives in
   `cargo-gamma-process`; see its
