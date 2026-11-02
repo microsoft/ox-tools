@@ -203,6 +203,12 @@ The catalog emits the actual recipe with formatting suitable for the generated
 file; the example shows the semantic contract. `cargo install --list` is the
 only shell-launched probe and contains no shell-specific syntax.
 
+Cargo tools are installed with the Cargo available to the setup caller. They
+are independent applications with their own compiler requirements, so their
+install recipes neither select nor provision the repository's workspace
+toolchain. Workspace toolchain policy applies when checks compile or analyze
+workspace code.
+
 `set lazy` means the inventory is captured only when a setup or validation
 recipe references it. Within one Just process all tool checks share that
 capture. The decision remains:

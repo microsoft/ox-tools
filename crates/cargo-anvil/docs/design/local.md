@@ -133,8 +133,10 @@ inventory.
 `installer=binstall` prefers a prebuilt artifact through `cargo binstall` and
 allows cargo-binstall's compile strategy when no binary source has the pinned
 release. This keeps newly published tools installable before binary indexes
-catch up. The selected installer is forwarded unchanged through group, tier,
-stable-toolchain, and cargo-each bootstrap setup.
+catch up. Cargo tools are independent applications, so their installation uses
+the Cargo available to the setup caller and does not provision or select the
+repository's workspace compiler. The selected installer is forwarded unchanged
+through group and tier setup.
 
 The public setup surface is intentionally narrow:
 
@@ -147,9 +149,8 @@ private implementation details. Checks still depend on their private validation
 recipes, so invoking one check directly remains fail-fast without exposing its
 prerequisite graph as a supported command surface.
 
-`cargo-each` is the bootstrap Cargo tool. It installs with Cargo already
-available to the caller, then resolves `{workspace-rust-version}` for the
-stable fallback. `RUSTUP_TOOLCHAIN` or root `rust-toolchain[.toml]` takes
+`cargo-each` resolves `{workspace-rust-version}` when setup needs the stable
+workspace fallback. `RUSTUP_TOOLCHAIN` or root `rust-toolchain[.toml]` takes
 precedence. Pinned nightly toolchains and components are direct `rustup`
 invocations. An absent root declaration is an empty optional value: dedicated
 MSRV recipes are cargo-each `--none` no-ops, while ordinary stable commands use

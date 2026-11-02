@@ -301,11 +301,14 @@ fn setup_uses_lazy_inventory_and_exact_install_policy() {
         "semver_matches(installed, \">=\" + minimum)",
         "cargo install --locked --version =",
         "cargo binstall --no-confirm --locked --version =",
-        r#"anvil-tool-cargo-each-install installer="install": (_install-bootstrap-tool "cargo-each" cargo_each_version installer)"#,
+        r#"anvil-tool-cargo-each-install installer="install": (_install-tool "cargo-each" cargo_each_version installer)"#,
         "anvil-toolchain-stable-install installer=\"install\": (anvil-tool-cargo-each-install installer)",
     ] {
         assert!(recipes.contains(contract), "missing setup contract: {contract}");
     }
+    assert!(!recipes.contains("_install-bootstrap-tool"));
+    assert!(!recipes.contains(r#"anvil-tool-cargo-delta-install installer="install": (anvil-toolchain-stable-install installer)"#));
+    assert!(!recipes.contains(r#"source_command=(if name == "cargo-each""#));
     assert!(generated.setup.contains("set lazy"));
     assert!(!recipes.contains("--disable-strategies compile"));
 }

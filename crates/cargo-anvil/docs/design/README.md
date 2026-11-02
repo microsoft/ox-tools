@@ -93,9 +93,9 @@ missed, and onboarding new Rust repos requires copying-and-praying.
   existing override, a repository toolchain file, or the repository MSRV. GitHub setup and
   container construction install a missing public channel through rustup; caller-provisioned
   and path toolchains remain the execution environment's responsibility.
-- Provisioning a separate compiler for Cargo-installed tools or stable analyzers. They use the
-  same repository-selected compiler as ordinary checks; nightly-only checks retain their
-  catalog pins.
+- Selecting a compiler for Cargo-installed tools. Setup installs these independent
+  applications with the Cargo available to the caller; repository toolchain selection
+  applies when checks compile or analyze workspace code.
 - Managing exact tool versions on the user's behalf — we enforce minimums only. See
   [local.md §3](./local.md#3-tool-versions-and-installation).
 - Supporting Cargo older than 1.93, the minimum supported version for every toolchain an

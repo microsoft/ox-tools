@@ -26,19 +26,6 @@ _install-tool name minimum installer="install" \
     found=(if extracted == installed_cargo_tools { "false" } else { "true" }) \
     installed=(if found == "true" { extracted } else { "" }) \
     satisfied=(if found == "true" { semver_matches(installed, ">=" + minimum) } else { "false" }) \
-    source_command=(if name == "cargo-each" { "cargo install --locked --version =" + minimum + " " + name } else if anvil_stable_toolchain_arg == "" { "cargo install --locked --version =" + minimum + " " + name } else { "cargo each --workspace --once -- cargo " + anvil_stable_toolchain_arg + " install --locked --version =" + minimum + " " + name }) \
-    binary_command=(if name == "cargo-each" { "cargo binstall --no-confirm --locked --version =" + minimum + " " + name } else if anvil_stable_toolchain_arg == "" { "cargo binstall --no-confirm --locked --version =" + minimum + " " + name } else { "cargo each --workspace --once -- cargo " + anvil_stable_toolchain_arg + " binstall --no-confirm --locked --version =" + minimum + " " + name }):
-    {{ if satisfied == "true" { "# cargo-binstall not needed" } else if installer == "binstall" { if cargo_binstall_found == "true" { "# cargo-binstall already available" } else { "cargo install --locked cargo-binstall" } } else { "# cargo-binstall not needed" } }}
-    {{ if satisfied == "true" { "# " + name + " " + installed + " satisfies >= " + minimum } else if installer == "install" { source_command } else { binary_command } }}
-
-# Install a bootstrap Cargo tool without consulting cargo-each-derived values.
-[arg("installer", pattern="^(install|binstall)$")]
-[private]
-_install-bootstrap-tool name minimum installer="install" \
-    extracted=(replace_regex(installed_cargo_tools, ('(?ms)\A.*^' + name + ' v([^:\r\n]+):\r?$.*\z'), '$1')) \
-    found=(if extracted == installed_cargo_tools { "false" } else { "true" }) \
-    installed=(if found == "true" { extracted } else { "" }) \
-    satisfied=(if found == "true" { semver_matches(installed, ">=" + minimum) } else { "false" }) \
     source_command=("cargo install --locked --version =" + minimum + " " + name) \
     binary_command=("cargo binstall --no-confirm --locked --version =" + minimum + " " + name):
     {{ if satisfied == "true" { "# cargo-binstall not needed" } else if installer == "binstall" { if cargo_binstall_found == "true" { "# cargo-binstall already available" } else { "cargo install --locked cargo-binstall" } } else { "# cargo-binstall not needed" } }}
@@ -53,11 +40,9 @@ _check-tool name minimum \
     satisfied=(if found == "true" { semver_matches(installed, ">=" + minimum) } else { "false" }):
     {{ if satisfied == "true" { "# " + name + " " + installed + " satisfies >= " + minimum } else { error(name + " >= " + minimum + " is required; run its setup recipe") } }}
 
-# cargo-each is the bootstrap tool. It installs with the Cargo already
-# available to the caller, then resolves the workspace rust-version fallback
-# used to provision and run the remaining tools.
+# Install cargo-each with the Cargo available to the setup caller.
 [group("anvil-setup")]
-anvil-tool-cargo-each-install installer="install": (_install-bootstrap-tool "cargo-each" cargo_each_version installer)
+anvil-tool-cargo-each-install installer="install": (_install-tool "cargo-each" cargo_each_version installer)
 
 [group("anvil-setup")]
 anvil-tool-cargo-each-validate-prereqs: (_check-tool "cargo-each" cargo_each_version)
@@ -141,100 +126,100 @@ anvil-component-nightly-llvm-tools-validate-prereqs: anvil-toolchain-nightly-val
 
 # Cargo subcommands.
 [group("anvil-setup")]
-anvil-tool-cargo-aprz-install installer="install": (anvil-toolchain-stable-install installer) (_install-tool "cargo-aprz" cargo_aprz_version installer)
+anvil-tool-cargo-aprz-install installer="install": (_install-tool "cargo-aprz" cargo_aprz_version installer)
 [group("anvil-setup")]
 anvil-tool-cargo-aprz-validate-prereqs: (_check-tool "cargo-aprz" cargo_aprz_version)
 
 [group("anvil-setup")]
-anvil-tool-cargo-audit-install installer="install": (anvil-toolchain-stable-install installer) (_install-tool "cargo-audit" cargo_audit_version installer)
+anvil-tool-cargo-audit-install installer="install": (_install-tool "cargo-audit" cargo_audit_version installer)
 [group("anvil-setup")]
 anvil-tool-cargo-audit-validate-prereqs: (_check-tool "cargo-audit" cargo_audit_version)
 
 [group("anvil-setup")]
-anvil-tool-cargo-bolero-install installer="install": (anvil-toolchain-stable-install installer)
+anvil-tool-cargo-bolero-install installer="install":
     {{ bolero_command_prefix }}{{ just_executable() }} _install-tool cargo-bolero {{ cargo_bolero_version }} {{ installer }}
 [group("anvil-setup")]
 anvil-tool-cargo-bolero-validate-prereqs:
     {{ bolero_command_prefix }}{{ just_executable() }} _check-tool cargo-bolero {{ cargo_bolero_version }}
 
 [group("anvil-setup")]
-anvil-tool-cargo-careful-install installer="install": (anvil-toolchain-stable-install installer) (_install-tool "cargo-careful" cargo_careful_version installer)
+anvil-tool-cargo-careful-install installer="install": (_install-tool "cargo-careful" cargo_careful_version installer)
 [group("anvil-setup")]
 anvil-tool-cargo-careful-validate-prereqs: (_check-tool "cargo-careful" cargo_careful_version)
 
 [group("anvil-setup")]
-anvil-tool-cargo-check-external-types-install installer="install": (anvil-toolchain-stable-install installer) (_install-tool "cargo-check-external-types" cargo_check_external_types_version installer)
+anvil-tool-cargo-check-external-types-install installer="install": (_install-tool "cargo-check-external-types" cargo_check_external_types_version installer)
 [group("anvil-setup")]
 anvil-tool-cargo-check-external-types-validate-prereqs: (_check-tool "cargo-check-external-types" cargo_check_external_types_version)
 
 [group("anvil-setup")]
-anvil-tool-cargo-coverage-gate-install installer="install": (anvil-toolchain-stable-install installer) (_install-tool "cargo-coverage-gate" cargo_coverage_gate_version installer)
+anvil-tool-cargo-coverage-gate-install installer="install": (_install-tool "cargo-coverage-gate" cargo_coverage_gate_version installer)
 [group("anvil-setup")]
 anvil-tool-cargo-coverage-gate-validate-prereqs: (_check-tool "cargo-coverage-gate" cargo_coverage_gate_version)
 
 [group("anvil-setup")]
-anvil-tool-cargo-delta-install installer="install": (anvil-toolchain-stable-install installer) (_install-tool "cargo-delta" cargo_delta_version installer)
+anvil-tool-cargo-delta-install installer="install": (_install-tool "cargo-delta" cargo_delta_version installer)
 [group("anvil-setup")]
 anvil-tool-cargo-delta-validate-prereqs: (_check-tool "cargo-delta" cargo_delta_version)
 
 [group("anvil-setup")]
-anvil-tool-cargo-deny-install installer="install": (anvil-toolchain-stable-install installer) (_install-tool "cargo-deny" cargo_deny_version installer)
+anvil-tool-cargo-deny-install installer="install": (_install-tool "cargo-deny" cargo_deny_version installer)
 [group("anvil-setup")]
 anvil-tool-cargo-deny-validate-prereqs: (_check-tool "cargo-deny" cargo_deny_version)
 
 [group("anvil-setup")]
-anvil-tool-cargo-doc2readme-install installer="install": (anvil-toolchain-stable-install installer) (_install-tool "cargo-doc2readme" cargo_doc2readme_version installer)
+anvil-tool-cargo-doc2readme-install installer="install": (_install-tool "cargo-doc2readme" cargo_doc2readme_version installer)
 [group("anvil-setup")]
 anvil-tool-cargo-doc2readme-validate-prereqs: (_check-tool "cargo-doc2readme" cargo_doc2readme_version)
 
 [group("anvil-setup")]
-anvil-tool-cargo-ensure-no-cyclic-deps-install installer="install": (anvil-toolchain-stable-install installer) (_install-tool "cargo-ensure-no-cyclic-deps" cargo_ensure_no_cyclic_deps_version installer)
+anvil-tool-cargo-ensure-no-cyclic-deps-install installer="install": (_install-tool "cargo-ensure-no-cyclic-deps" cargo_ensure_no_cyclic_deps_version installer)
 [group("anvil-setup")]
 anvil-tool-cargo-ensure-no-cyclic-deps-validate-prereqs: (_check-tool "cargo-ensure-no-cyclic-deps" cargo_ensure_no_cyclic_deps_version)
 
 [group("anvil-setup")]
-anvil-tool-cargo-ensure-no-default-features-install installer="install": (anvil-toolchain-stable-install installer) (_install-tool "cargo-ensure-no-default-features" cargo_ensure_no_default_features_version installer)
+anvil-tool-cargo-ensure-no-default-features-install installer="install": (_install-tool "cargo-ensure-no-default-features" cargo_ensure_no_default_features_version installer)
 [group("anvil-setup")]
 anvil-tool-cargo-ensure-no-default-features-validate-prereqs: (_check-tool "cargo-ensure-no-default-features" cargo_ensure_no_default_features_version)
 
 [group("anvil-setup")]
-anvil-tool-cargo-hack-install installer="install": (anvil-toolchain-stable-install installer) (_install-tool "cargo-hack" cargo_hack_version installer)
+anvil-tool-cargo-hack-install installer="install": (_install-tool "cargo-hack" cargo_hack_version installer)
 [group("anvil-setup")]
 anvil-tool-cargo-hack-validate-prereqs: (_check-tool "cargo-hack" cargo_hack_version)
 
 [group("anvil-setup")]
-anvil-tool-cargo-heather-install installer="install": (anvil-toolchain-stable-install installer) (_install-tool "cargo-heather" cargo_heather_version installer)
+anvil-tool-cargo-heather-install installer="install": (_install-tool "cargo-heather" cargo_heather_version installer)
 [group("anvil-setup")]
 anvil-tool-cargo-heather-validate-prereqs: (_check-tool "cargo-heather" cargo_heather_version)
 
 [group("anvil-setup")]
-anvil-tool-cargo-llvm-cov-install installer="install": (anvil-toolchain-stable-install installer) (_install-tool "cargo-llvm-cov" cargo_llvm_cov_version installer)
+anvil-tool-cargo-llvm-cov-install installer="install": (_install-tool "cargo-llvm-cov" cargo_llvm_cov_version installer)
 [group("anvil-setup")]
 anvil-tool-cargo-llvm-cov-validate-prereqs: (_check-tool "cargo-llvm-cov" cargo_llvm_cov_version)
 
 [group("anvil-setup")]
-anvil-tool-cargo-mutants-install installer="install": (anvil-toolchain-stable-install installer)
+anvil-tool-cargo-mutants-install installer="install":
     {{ mutants_command_prefix }}{{ just_executable() }} _install-tool cargo-mutants {{ cargo_mutants_version }} {{ installer }}
 [group("anvil-setup")]
 anvil-tool-cargo-mutants-validate-prereqs:
     {{ mutants_command_prefix }}{{ just_executable() }} _check-tool cargo-mutants {{ cargo_mutants_version }}
 
 [group("anvil-setup")]
-anvil-tool-cargo-nextest-install installer="install": (anvil-toolchain-stable-install installer) (_install-tool "cargo-nextest" cargo_nextest_version installer)
+anvil-tool-cargo-nextest-install installer="install": (_install-tool "cargo-nextest" cargo_nextest_version installer)
 [group("anvil-setup")]
 anvil-tool-cargo-nextest-validate-prereqs: (_check-tool "cargo-nextest" cargo_nextest_version)
 
 [group("anvil-setup")]
-anvil-tool-cargo-sort-install installer="install": (anvil-toolchain-stable-install installer) (_install-tool "cargo-sort" cargo_sort_version installer)
+anvil-tool-cargo-sort-install installer="install": (_install-tool "cargo-sort" cargo_sort_version installer)
 [group("anvil-setup")]
 anvil-tool-cargo-sort-validate-prereqs: (_check-tool "cargo-sort" cargo_sort_version)
 
 [group("anvil-setup")]
-anvil-tool-cargo-spellcheck-install installer="install": (anvil-toolchain-stable-install installer) (_install-tool "cargo-spellcheck" cargo_spellcheck_version installer)
+anvil-tool-cargo-spellcheck-install installer="install": (_install-tool "cargo-spellcheck" cargo_spellcheck_version installer)
 [group("anvil-setup")]
 anvil-tool-cargo-spellcheck-validate-prereqs: (_check-tool "cargo-spellcheck" cargo_spellcheck_version)
 
 [group("anvil-setup")]
-anvil-tool-cargo-udeps-install installer="install": (anvil-toolchain-stable-install installer) (_install-tool "cargo-udeps" cargo_udeps_version installer)
+anvil-tool-cargo-udeps-install installer="install": (_install-tool "cargo-udeps" cargo_udeps_version installer)
 [group("anvil-setup")]
 anvil-tool-cargo-udeps-validate-prereqs: (_check-tool "cargo-udeps" cargo_udeps_version)
