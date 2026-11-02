@@ -111,16 +111,20 @@ leaving errors and summary-file rendering intact.
 The deterministic command regression supplies metadata containing local and
 registry copies of the same name/version, and checks subset and full-workspace
 arguments across both feature configurations and all three command builders.
-The opt-in CLI regression additionally proves that the old selector fails in
-the real llvm-cov -> nextest -> Cargo chain, then collects both reports with the
-fixed selector, rejects accidental scope widening with an unbuildable omitted
-member, runs the plain-nextest path, and collects the full workspace. Run it
-with the nightly pinned in `justfiles/anvil/versions.just`, llvm-tools,
-cargo-llvm-cov, cargo-nextest, and registry access:
-
-```text
-cargo +<pinned-nightly> test -p cargo-coverage-gate --test cli real_collection_disambiguates_registry_and_workspace_packages -- --ignored
-```
+An ordinary, always-run regression also builds the generated collection
+arguments with real Cargo. Its private directory source supplies a registry
+package offline, alongside a workspace member of the same name and version.
+The registry package has a different API, so compilation verifies source
+identity as well as selector acceptance. The old selector must fail as
+ambiguous. Both feature configurations and the instrumented/plain command
+builders must compile the selected subset without building an intentionally
+broken omitted member, then compile implicit and explicit full-workspace
+selections. Only nextest-specific options are removed before passing the
+generated arguments to `cargo test --lib --no-run --offline`; neither LLVM
+nor nextest is needed. This tests Cargo's real selection behavior, not LLVM
+instrumentation or report contents. The existing CLI tests with fake tools
+cover collection/report forwarding, and the in-memory regression checks the
+exact source-qualified report arguments.
 
 ## Diagnostic pipeline
 
