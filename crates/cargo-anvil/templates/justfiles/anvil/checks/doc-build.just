@@ -11,7 +11,7 @@ anvil-doc-build open="false": anvil-doc-build-validate-prereqs anvil-impact
 
 # Install prerequisites for the `anvil-doc-build` recipe.
 [group("anvil-setup")]
-anvil-doc-build-setup installer="install": (anvil-toolchain-stable-install installer)
+anvil-doc-build-setup installer="install": (anvil-tool-cargo-each-install installer)
 
 # Validate prerequisites for the `anvil-doc-build` recipe.
 [group("anvil-setup")]

@@ -37,7 +37,7 @@ anvil-bolero: anvil-bolero-validate-prereqs _ensure-target-dir
 
 # Run affected tests with cargo-careful runtime checks.
 anvil-careful: anvil-careful-validate-prereqs anvil-impact
-    {{ just_executable() }} --justfile {{ quote(justfile()) }} _anvil-careful
+    {{ anvil_careful_prefix }}cargo +{{ rust_nightly }} each {{ anvil_affected_selection }} --once -- cargo +{{ rust_nightly }} careful test '{packages}' --all-features --locked --target-dir {{ quote(anvil_careful_target_dir) }}
 
 # Check required packages across bounded feature combinations.
 anvil-cargo-hack: anvil-cargo-hack-validate-prereqs anvil-impact

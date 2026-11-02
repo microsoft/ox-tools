@@ -77,7 +77,6 @@ anvil_stable_toolchain_arg := if env("RUSTUP_TOOLCHAIN", "") == "" {
     ""
 }
 
-anvil_workspace_toolchain_selection := if anvil_stable_toolchain_arg == "" { "--none" } else { "--workspace" }
 anvil_msrv_selection := if workspace_rust_version == "" { "--none" } else { anvil_affected_selection }
 anvil_msrv_workspace_selection := if workspace_rust_version == "" { "--none" } else { "--workspace" }
 # Compute modified, affected, and required package files with cargo-delta.

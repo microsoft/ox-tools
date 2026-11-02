@@ -10,7 +10,7 @@ anvil-loom: anvil-loom-validate-prereqs anvil-impact
 
 # Install prerequisites for the `anvil-loom` recipe.
 [group("anvil-setup")]
-anvil-loom-setup installer="install": (anvil-toolchain-stable-install installer)
+anvil-loom-setup installer="install": (anvil-tool-cargo-each-install installer)
 
 # Validate prerequisites for the `anvil-loom` recipe.
 [group("anvil-setup")]

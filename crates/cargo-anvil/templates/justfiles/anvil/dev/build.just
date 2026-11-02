@@ -12,7 +12,7 @@ anvil-build package="" profile="": anvil-build-validate-prereqs
 
 # Install prerequisites for the `anvil-build` recipe.
 [group("anvil-setup")]
-anvil-build-setup installer="install": (anvil-toolchain-stable-install installer)
+anvil-build-setup installer="install": (anvil-tool-cargo-each-install installer)
 
 # Validate prerequisites for the `anvil-build` recipe.
 [group("anvil-setup")]

@@ -497,7 +497,6 @@ mod tests {
         assert!(TOOLS_JUST.contains("anvil-tool-cargo-deny-install"));
         assert!(TOOLS_JUST.contains("anvil-tool-cargo-deny-validate-prereqs"));
         assert!(TOOLS_JUST.contains("anvil-component-default-clippy-install"));
-        assert!(TOOLS_JUST.contains("anvil-toolchain-stable-install"));
         assert!(TOOLS_JUST.contains("anvil-toolchain-nightly-install"));
     }
 
@@ -892,18 +891,6 @@ mod tests {
             "bolero discovery must not pass repeated --package arguments"
         );
         assert!(!checks.contains("bolero list failed; assuming no targets"));
-        assert!(
-            checks.contains(r#"anvil_careful_executable_hash := sha256_file(which("cargo-careful"))"#),
-            "careful identity must include the resolved executable contents"
-        );
-        assert!(
-            checks.contains(r#"anvil_careful_rustc_identity := shell("rustup run " + rust_nightly + " rustc -vV")"#),
-            "careful identity must include the complete nightly compiler identity"
-        );
-        assert!(
-            checks.contains("--target-dir {{ quote(anvil_careful_target_dir) }}"),
-            "careful must isolate Cargo artifacts by compiler and tool identity"
-        );
         for needle in [
             r#"anvil_mutants_diff_dir := env("RUNNER_TEMP", env("AGENT_TEMPDIRECTORY", env("TEMP", env("TMPDIR", "."))))"#,
             r#"anvil_mutants_diff_file := anvil_mutants_diff_dir / ("anvil-mutants-diff-" + just_pid() + ".diff")"#,
@@ -940,6 +927,16 @@ mod tests {
         ] {
             assert!(!checks.contains(retired), "retired careful behavior survived: {retired}");
         }
+    }
+
+    #[test]
+    fn careful_skips_empty_selections_before_resolving_its_cache_identity() {
+        let checks = all_check_bodies();
+        assert!(checks.contains(r#"+ sha256_file(which("cargo-careful"))"#));
+        assert!(checks.contains(r#"shell("rustup run " + rust_nightly + " rustc -vV")"#));
+        assert!(checks.contains(r#"trim(read(anvil_impact_input_dir + "/affected.packages")) == """#));
+        assert!(checks.contains("--target-dir {{ quote(anvil_careful_target_dir) }}"));
+        assert!(!checks.contains("justfile() }} _anvil-careful"));
     }
 
     #[test]
@@ -1358,17 +1355,9 @@ mod tests {
         ignore = "native and cargo-careful retain exhaustive generated-recipe contract scans; focused recipe tests preserve Miri coverage"
     )]
     #[test]
-    fn setup_graph_owns_stable_toolchain_provisioning() {
-        assert!(
-            TOOLS_JUST.contains("anvil-toolchain-stable-install installer=\"install\": (anvil-tool-cargo-each-install installer)"),
-            "cargo-each must bootstrap stable provisioning"
-        );
-        assert!(
-            TOOLS_JUST.contains(
-                "cargo each {{ anvil_workspace_toolchain_selection }} --once -- rustup toolchain install '{workspace-rust-version}'"
-            ),
-            "stable fallback must delegate workspace rust-version resolution to cargo-each"
-        );
+    fn setup_graph_does_not_provision_the_workspace_toolchain() {
+        assert!(!TOOLS_JUST.contains("anvil-toolchain-stable-install"));
+        assert!(!TOOLS_JUST.contains("rustup toolchain install '{workspace-rust-version}'"));
         assert!(
             TOOLS_JUST.contains("bolero_command_prefix"),
             "Bolero's platform gate must be a Just-time condition"
@@ -1379,38 +1368,37 @@ mod tests {
         );
         for component in ["clippy", "rustfmt"] {
             let expected =
-                format!("anvil-component-default-{component}-install installer=\"install\": (anvil-toolchain-stable-install installer)");
+                format!("anvil-component-default-{component}-install installer=\"install\": (anvil-tool-cargo-each-install installer)");
             assert!(
                 TOOLS_JUST.contains(&expected),
-                "default component '{component}' must provision stable first"
+                "default component '{component}' setup must install cargo-each without selecting a workspace compiler"
             );
         }
         let checks = all_check_bodies();
         for check in ["bench", "doc-build", "doc-test", "examples", "loom"] {
-            let setup = format!("anvil-{check}-setup installer=\"install\": (anvil-toolchain-stable-install installer)");
+            let setup = format!("anvil-{check}-setup installer=\"install\": (anvil-tool-cargo-each-install installer)");
             let validation = format!("anvil-{check}-validate-prereqs: anvil-tool-rustc-validate-prereqs");
-            assert!(checks.contains(&setup), "{check} setup must provision stable");
+            assert!(
+                checks.contains(&setup),
+                "{check} setup must install cargo-each without provisioning stable"
+            );
             assert!(
                 checks.contains(&validation),
                 "{check} validation must remain read-only prerequisite validation"
             );
         }
-        assert!(
-            !checks.contains("validate-prereqs: anvil-toolchain-stable-install"),
-            "validate-prereqs recipes must never install stable"
-        );
         assert!(TOOLS_JUST.contains("semver_matches(installed, \">=\" + minimum)"));
 
         let groups = all_group_bodies();
         assert!(
             groups.contains("(anvil-tool-cargo-delta-install installer)") && groups.contains("(anvil-bench-setup installer)"),
-            "representative group setup paths must reach stable provisioning through Cargo-tool or stable-only leaf setup"
+            "representative group setup paths must retain tool installation"
         );
         assert!(
             TIERS_JUST.contains("anvil-full-setup installer=\"install\":")
                 && TIERS_JUST.contains("(anvil-pr-setup installer)")
                 && TIERS_JUST.contains("anvil-setup installer=\"install\": (anvil-full-setup installer)"),
-            "full and global setup must retain their transitive path to stable provisioning"
+            "full and global setup must retain their transitive tool setup"
         );
     }
 

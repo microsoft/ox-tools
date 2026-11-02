@@ -106,11 +106,11 @@ available and can receive `ANVIL_RUST_VERSION` when manifests are outside the
 build context.
 
 Setup dependencies, rather than the cloud templates, route provisioning.
-Cargo-tool installers, default-component installers, and stable-only setup
-leaves depend on `anvil-toolchain-stable-install`; group and tier fan-out lets
-Just deduplicate that prerequisite. GitHub and ADO setup restore Cargo home,
-bootstrap Just, and invoke the selected catalog setup recipe. Neither backend
-adds a duplicate standalone stable-provisioning step.
+Cargo-tool installers use the caller's Cargo; default-component installers act
+on rustup's selected toolchain; stable-only setup leaves install cargo-each but
+do not provision the manifest-selected workspace compiler. Group and tier
+fan-out lets Just deduplicate those prerequisites. GitHub and ADO setup restore
+Cargo home, bootstrap Just, and invoke the selected catalog setup recipe.
 
 Cloud Cargo-home keys include `.cargo/config.toml`, both repository
 toolchain-file spellings, and `versions.just`. They deliberately exclude

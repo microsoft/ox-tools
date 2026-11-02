@@ -48,14 +48,6 @@ anvil-tool-cargo-each-install installer="install": (_install-tool "cargo-each" c
 anvil-tool-cargo-each-validate-prereqs: (_check-tool "cargo-each" cargo_each_version)
 
 [group("anvil-setup")]
-anvil-toolchain-stable-install installer="install": (anvil-tool-cargo-each-install installer)
-    {{ just_executable() }} --justfile {{ quote(justfile()) }} _anvil-toolchain-stable-install
-
-[private]
-_anvil-toolchain-stable-install:
-    cargo each {{ anvil_workspace_toolchain_selection }} --once -- rustup toolchain install '{workspace-rust-version}' --profile minimal
-
-[group("anvil-setup")]
 anvil-tool-rustc-validate-prereqs: anvil-tool-cargo-each-validate-prereqs
     cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} --version
 
@@ -76,21 +68,20 @@ anvil-toolchain-nightly-external-types-install:
 anvil-toolchain-nightly-external-types-validate-prereqs:
     rustup run {{ rust_nightly_external_types }} rustc --version
 
-# Rustup components. Stable components honor RUSTUP_TOOLCHAIN or a repository
-# toolchain file; repositories with neither use the workspace rust-version.
+# Rustup components. Default components use the toolchain selected by rustup.
 [private]
 _install-component toolchain component:
-    {{ if toolchain == "default" { if anvil_stable_toolchain_arg == "" { "rustup component add " + component } else { "rustup component add --toolchain " + quote(workspace_rust_version) + " " + component } } else { "rustup component add --toolchain " + toolchain + " " + component } }}
+    {{ if toolchain == "default" { "rustup component add " + component } else { "rustup component add --toolchain " + toolchain + " " + component } }}
 
 [group("anvil-setup")]
-anvil-component-default-clippy-install installer="install": (anvil-toolchain-stable-install installer) (_install-component "default" "clippy")
+anvil-component-default-clippy-install installer="install": (anvil-tool-cargo-each-install installer) (_install-component "default" "clippy")
 
 [group("anvil-setup")]
 anvil-component-default-clippy-validate-prereqs: anvil-tool-cargo-each-validate-prereqs
     cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} clippy --version
 
 [group("anvil-setup")]
-anvil-component-default-rustfmt-install installer="install": (anvil-toolchain-stable-install installer) (_install-component "default" "rustfmt")
+anvil-component-default-rustfmt-install installer="install": (anvil-tool-cargo-each-install installer) (_install-component "default" "rustfmt")
 
 [group("anvil-setup")]
 anvil-component-default-rustfmt-validate-prereqs: anvil-tool-cargo-each-validate-prereqs

@@ -51,15 +51,6 @@ anvil-tool-cargo-each-validate-prereqs: (_check-tool "cargo-each" cargo_each_ver
 
 [group("anvil-setup")]
 [private]
-anvil-toolchain-stable-install installer="install": (anvil-tool-cargo-each-install installer)
-    {{ just_executable() }} --justfile {{ quote(justfile()) }} _anvil-toolchain-stable-install
-
-[private]
-_anvil-toolchain-stable-install:
-    cargo each {{ anvil_workspace_toolchain_selection }} --once -- rustup toolchain install '{workspace-rust-version}' --profile minimal
-
-[group("anvil-setup")]
-[private]
 anvil-tool-rustc-validate-prereqs: anvil-tool-cargo-each-validate-prereqs
     cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} --version
 
@@ -84,15 +75,14 @@ anvil-toolchain-nightly-external-types-install:
 anvil-toolchain-nightly-external-types-validate-prereqs:
     rustup run {{ rust_nightly_external_types }} rustc --version
 
-# Rustup components. Stable components honor RUSTUP_TOOLCHAIN or a repository
-# toolchain file; repositories with neither use the workspace rust-version.
+# Rustup components. Default components use the toolchain selected by rustup.
 [private]
 _install-component toolchain component:
-    {{ if toolchain == "default" { if anvil_stable_toolchain_arg == "" { "rustup component add " + component } else { "rustup component add --toolchain " + quote(workspace_rust_version) + " " + component } } else { "rustup component add --toolchain " + toolchain + " " + component } }}
+    {{ if toolchain == "default" { "rustup component add " + component } else { "rustup component add --toolchain " + toolchain + " " + component } }}
 
 [group("anvil-setup")]
 [private]
-anvil-component-default-clippy-install installer="install": (anvil-toolchain-stable-install installer) (_install-component "default" "clippy")
+anvil-component-default-clippy-install installer="install": (anvil-tool-cargo-each-install installer) (_install-component "default" "clippy")
 
 [group("anvil-setup")]
 [private]
@@ -101,7 +91,7 @@ anvil-component-default-clippy-validate-prereqs: anvil-tool-cargo-each-validate-
 
 [group("anvil-setup")]
 [private]
-anvil-component-default-rustfmt-install installer="install": (anvil-toolchain-stable-install installer) (_install-component "default" "rustfmt")
+anvil-component-default-rustfmt-install installer="install": (anvil-tool-cargo-each-install installer) (_install-component "default" "rustfmt")
 
 [group("anvil-setup")]
 [private]
@@ -449,7 +439,7 @@ anvil-validate-prereqs: anvil-full-validate-prereqs anvil-tool-cargo-delta-valid
 # Install prerequisites for the `anvil-build` recipe.
 [group("anvil-setup")]
 [private]
-anvil-build-setup installer="install": (anvil-toolchain-stable-install installer)
+anvil-build-setup installer="install": (anvil-tool-cargo-each-install installer)
 
 # Validate prerequisites for the `anvil-build` recipe.
 [group("anvil-setup")]
@@ -479,7 +469,7 @@ anvil-audit-validate-prereqs: anvil-tool-cargo-audit-validate-prereqs anvil-tool
 # Install prerequisites for the `anvil-bench` recipe.
 [group("anvil-setup")]
 [private]
-anvil-bench-setup installer="install": (anvil-toolchain-stable-install installer)
+anvil-bench-setup installer="install": (anvil-tool-cargo-each-install installer)
 
 # Validate prerequisites for the `anvil-bench` recipe.
 [group("anvil-setup")]
@@ -529,7 +519,7 @@ anvil-cargo-sort-validate-prereqs: anvil-tool-cargo-sort-validate-prereqs anvil-
 # Install prerequisites for the `anvil-check-all-targets` recipe.
 [group("anvil-setup")]
 [private]
-anvil-check-all-targets-setup installer="install": anvil-toolchain-stable-install (anvil-tool-cargo-each-install installer)
+anvil-check-all-targets-setup installer="install": (anvil-tool-cargo-each-install installer)
 
 # Validate prerequisites for the `anvil-check-all-targets` recipe.
 [group("anvil-setup")]
@@ -559,7 +549,7 @@ anvil-deny-validate-prereqs: anvil-tool-cargo-deny-validate-prereqs anvil-tool-c
 # Install prerequisites for the `anvil-doc-build` recipe.
 [group("anvil-setup")]
 [private]
-anvil-doc-build-setup installer="install": (anvil-toolchain-stable-install installer)
+anvil-doc-build-setup installer="install": (anvil-tool-cargo-each-install installer)
 
 # Validate prerequisites for the `anvil-doc-build` recipe.
 [group("anvil-setup")]
@@ -569,7 +559,7 @@ anvil-doc-build-validate-prereqs: anvil-tool-rustc-validate-prereqs anvil-tool-c
 # Install prerequisites for the `anvil-doc-test` recipe.
 [group("anvil-setup")]
 [private]
-anvil-doc-test-setup installer="install": (anvil-toolchain-stable-install installer)
+anvil-doc-test-setup installer="install": (anvil-tool-cargo-each-install installer)
 
 # Validate prerequisites for the `anvil-doc-test` recipe.
 [group("anvil-setup")]
@@ -599,7 +589,7 @@ anvil-ensure-no-default-features-validate-prereqs: anvil-tool-cargo-ensure-no-de
 # Install prerequisites for the `anvil-examples` recipe.
 [group("anvil-setup")]
 [private]
-anvil-examples-setup installer="install": (anvil-toolchain-stable-install installer)
+anvil-examples-setup installer="install": (anvil-tool-cargo-each-install installer)
 
 # Validate prerequisites for the `anvil-examples` recipe.
 [group("anvil-setup")]
@@ -647,7 +637,7 @@ anvil-llvm-cov-validate-prereqs: anvil-component-nightly-llvm-tools-validate-pre
 # Install prerequisites for the `anvil-loom` recipe.
 [group("anvil-setup")]
 [private]
-anvil-loom-setup installer="install": (anvil-toolchain-stable-install installer)
+anvil-loom-setup installer="install": (anvil-tool-cargo-each-install installer)
 
 # Validate prerequisites for the `anvil-loom` recipe.
 [group("anvil-setup")]

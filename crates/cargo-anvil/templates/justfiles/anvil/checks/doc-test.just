@@ -11,7 +11,7 @@ anvil-doc-test: anvil-doc-test-validate-prereqs anvil-impact
 
 # Install prerequisites for the `anvil-doc-test` recipe.
 [group("anvil-setup")]
-anvil-doc-test-setup installer="install": (anvil-toolchain-stable-install installer)
+anvil-doc-test-setup installer="install": (anvil-tool-cargo-each-install installer)
 
 # Validate prerequisites for the `anvil-doc-test` recipe.
 [group("anvil-setup")]

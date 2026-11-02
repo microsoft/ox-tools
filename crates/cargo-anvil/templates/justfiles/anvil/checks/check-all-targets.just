@@ -11,7 +11,7 @@ anvil-check-all-targets: anvil-check-all-targets-validate-prereqs anvil-impact
 
 # Install prerequisites for the `anvil-check-all-targets` recipe.
 [group("anvil-setup")]
-anvil-check-all-targets-setup installer="install": anvil-toolchain-stable-install (anvil-tool-cargo-each-install installer)
+anvil-check-all-targets-setup installer="install": (anvil-tool-cargo-each-install installer)
 
 # Validate prerequisites for the `anvil-check-all-targets` recipe.
 [group("anvil-setup")]

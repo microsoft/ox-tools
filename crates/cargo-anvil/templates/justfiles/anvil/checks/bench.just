@@ -10,7 +10,7 @@ anvil-bench: anvil-bench-validate-prereqs anvil-impact
 
 # Install prerequisites for the `anvil-bench` recipe.
 [group("anvil-setup")]
-anvil-bench-setup installer="install": (anvil-toolchain-stable-install installer)
+anvil-bench-setup installer="install": (anvil-tool-cargo-each-install installer)
 
 # Validate prerequisites for the `anvil-bench` recipe.
 [group("anvil-setup")]

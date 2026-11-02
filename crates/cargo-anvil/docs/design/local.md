@@ -149,12 +149,14 @@ private implementation details. Checks still depend on their private validation
 recipes, so invoking one check directly remains fail-fast without exposing its
 prerequisite graph as a supported command surface.
 
-`cargo-each` resolves `{workspace-rust-version}` when setup needs the stable
-workspace fallback. `RUSTUP_TOOLCHAIN` or root `rust-toolchain[.toml]` takes
-precedence. Pinned nightly toolchains and components are direct `rustup`
-invocations. An absent root declaration is an empty optional value: dedicated
-MSRV recipes are cargo-each `--none` no-ops, while ordinary stable commands use
-Cargo's default toolchain selection.
+Setup does not install the manifest-selected workspace compiler. It installs
+Cargo tools with the caller's Cargo, pinned nightly toolchains directly through
+rustup, and default components for rustup's already-selected toolchain.
+`RUSTUP_TOOLCHAIN` or root `rust-toolchain[.toml]` takes precedence when checks
+run; otherwise cargo-each resolves `{workspace-rust-version}` for ordinary
+stable commands. An absent root declaration is an empty optional value:
+dedicated MSRV recipes are cargo-each `--none` no-ops, while ordinary stable
+commands use Cargo's default toolchain selection.
 
 ## 4. Impact scoping
 
@@ -239,15 +241,18 @@ the pinned nightly or cargo-careful executable changes, cargo-careful replaces
 the sysroot in place while workspace artifacts can remain apparently fresh;
 the next build may then fail with rustc metadata-version mismatches.
 
-The recipe hashes the complete pinned-nightly `rustc -vV` output together with
-the SHA-256 of the resolved cargo-careful executable, using Just's `which`,
-`sha256_file`, and `sha256` functions. It forwards
+For a nonempty affected selection, the recipe hashes the complete pinned-nightly
+`rustc -vV` output together with the SHA-256 of the resolved cargo-careful
+executable, using Just's `which`, `sha256_file`, and `sha256` functions. It forwards
 `--target-dir target/anvil/careful/<identity>` through cargo-careful to its final
 Cargo invocation. A compiler or tool change therefore gets a fresh artifact
 directory instead of reusing binaries built against the previous contents of
 the stable sysroot path. No marker file, conditional `cargo clean`, or
-PowerShell state machine is required. Old identity directories remain ordinary
-Cargo cache entries under `target/` and are removed by normal target cleanup.
+PowerShell state machine is required. An empty affected package file comments
+out the direct cargo-each invocation and leaves the guarded identity expression
+unevaluated, so no tool lookup or cache path is touched. Old identity
+directories remain ordinary Cargo cache entries under `target/` and are removed
+by normal target cleanup.
 
 ## 7. Daily use
 

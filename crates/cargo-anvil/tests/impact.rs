@@ -388,10 +388,6 @@ fn empty_affected_selection_skips_careful_and_mutants_before_side_effects() {
             "{recipe} must skip before tool/base/cache work:\n{}",
             stderr(&output)
         );
-        if recipe == "anvil-careful" {
-            let combined = format!("{}{}", stdout(&output), stderr(&output));
-            assert!(combined.contains("selection resolved to no work; nothing to do"), "{combined}");
-        }
     }
     assert!(
         !temp.path().join("target/anvil/careful").exists(),

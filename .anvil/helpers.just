@@ -89,7 +89,6 @@ anvil_stable_toolchain_arg := if env("RUSTUP_TOOLCHAIN", "") == "" {
     ""
 }
 
-anvil_workspace_toolchain_selection := if anvil_stable_toolchain_arg == "" { "--none" } else { "--workspace" }
 anvil_msrv_selection := if workspace_rust_version == "" { "--none" } else { anvil_affected_selection }
 anvil_msrv_workspace_selection := if workspace_rust_version == "" { "--none" } else { "--workspace" }
 
@@ -113,15 +112,22 @@ anvil_bolero_targets_file := "target" / ("bolero-list-" + just_pid() + ".jsonl")
 _ensure-target-dir: anvil-impact
     {{ if path_exists("target") { "# target directory already exists" } else { "mkdir target" } }}
 
-anvil_careful_rustc_identity := shell("rustup run " + rust_nightly + " rustc -vV")
-anvil_careful_executable_hash := sha256_file(which("cargo-careful"))
-anvil_careful_identity := sha256(anvil_careful_rustc_identity + "\n" + anvil_careful_executable_hash)
-anvil_careful_target_dir := "target" / "anvil" / "careful" / anvil_careful_identity
-
-# Used by anvil-careful to run the affected selection with an isolated target directory.
-[private]
-_anvil-careful:
-    cargo +{{ rust_nightly }} each {{ anvil_affected_selection }} --once -- cargo +{{ rust_nightly }} careful test '{packages}' --all-features --locked --target-dir {{ quote(anvil_careful_target_dir) }}
+anvil_careful_prefix := if anvil_impact_mode == "off" {
+    ""
+} else if trim(read(anvil_impact_input_dir + "/affected.packages")) == "" {
+    "# "
+} else {
+    ""
+}
+anvil_careful_target_dir := if anvil_careful_prefix == "" {
+    "target" / "anvil" / "careful" / sha256(
+        shell("rustup run " + rust_nightly + " rustc -vV")
+        + "\n"
+        + sha256_file(which("cargo-careful"))
+    )
+} else {
+    ""
+}
 
 anvil_miri_jobs := env("ANVIL_MIRI_JOBS", "auto")
 anvil_miri_profile := "standard"

@@ -90,9 +90,10 @@ missed, and onboarding new Rust repos requires copying-and-praying.
 - Owning `.cargo/config.toml`, `rust-toolchain`, `rust-toolchain.toml`, or workspace layout in
   `Cargo.toml`.
 - Owning how private or path toolchains are provisioned. Anvil deterministically selects an
-  existing override, a repository toolchain file, or the repository MSRV. GitHub setup and
-  container construction install a missing public channel through rustup; caller-provisioned
-  and path toolchains remain the execution environment's responsibility.
+  existing override, a repository toolchain file, or the repository MSRV when checks run.
+  Generic setup does not provision that workspace compiler. Container construction names its
+  explicit compiler separately; other caller-provisioned and path toolchains remain the
+  execution environment's responsibility.
 - Selecting a compiler for Cargo-installed tools. Setup installs these independent
   applications with the Cargo available to the caller; repository toolchain selection
   applies when checks compile or analyze workspace code.

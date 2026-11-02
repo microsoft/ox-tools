@@ -302,13 +302,13 @@ fn setup_uses_lazy_inventory_and_exact_install_policy() {
         "cargo install --locked --version =",
         "cargo binstall --no-confirm --locked --version =",
         r#"anvil-tool-cargo-each-install installer="install": (_install-tool "cargo-each" cargo_each_version installer)"#,
-        "anvil-toolchain-stable-install installer=\"install\": (anvil-tool-cargo-each-install installer)",
     ] {
         assert!(recipes.contains(contract), "missing setup contract: {contract}");
     }
     assert!(!recipes.contains("_install-bootstrap-tool"));
     assert!(!recipes.contains(r#"anvil-tool-cargo-delta-install installer="install": (anvil-toolchain-stable-install installer)"#));
     assert!(!recipes.contains(r#"source_command=(if name == "cargo-each""#));
+    assert!(!recipes.contains("anvil-toolchain-stable-install"));
     assert!(generated.setup.contains("set lazy"));
     assert!(!recipes.contains("--disable-strategies compile"));
 }
@@ -706,48 +706,26 @@ fn stable_toolchain_selection_preserves_override_and_fallback_precedence() {
 }
 
 #[test]
-fn default_component_install_targets_the_effective_stable_selection() {
+fn default_component_install_defers_to_rustup_selection() {
     let generated = generated();
     let root = generated.temp.path();
     let fake_bin = install_fake_cargo(root);
     install_fake_rustup(&fake_bin);
     let rustup_log = root.join("component-rustup.log");
-    let run = |environment: &[(&str, &str)]| {
-        let mut command = Command::new("just");
-        command
-            .args(["--set", "workspace_rust_version", "1.95", "_install-component", "default", "clippy"])
-            .current_dir(root)
-            .env("PATH", prepend_path(&fake_bin))
-            .env("FAKE_RUSTUP_LOG", &rustup_log)
-            .env_remove("RUSTUP_TOOLCHAIN");
-        for (name, value) in environment {
-            command.env(name, value);
-        }
-        command.output().unwrap()
-    };
+    let output = Command::new("just")
+        .args(["--set", "workspace_rust_version", "1.95", "_install-component", "default", "clippy"])
+        .current_dir(root)
+        .env("PATH", prepend_path(&fake_bin))
+        .env("FAKE_RUSTUP_LOG", &rustup_log)
+        .env("RUSTUP_TOOLCHAIN", "selected")
+        .output()
+        .unwrap();
 
-    let fallback = run(&[]);
-    assert!(fallback.status.success());
-    let fallback_stdout = std::fs::read_to_string(&rustup_log).unwrap();
-    assert!(
-        fallback_stdout.contains("component add --toolchain 1.95 clippy"),
-        "unexpected fallback plan: {fallback_stdout}"
-    );
-
-    std::fs::write(&rustup_log, "").unwrap();
-    let selected = run(&[("RUSTUP_TOOLCHAIN", "selected")]);
-    assert!(selected.status.success());
-    let selected_output = std::fs::read_to_string(&rustup_log).unwrap();
-    assert!(selected_output.contains("component add clippy"));
-    assert!(!selected_output.contains("--toolchain"));
-
-    write(&root.join("rust-toolchain.toml"), "[toolchain]\nchannel = \"stable\"\n");
-    std::fs::write(&rustup_log, "").unwrap();
-    let file_selected = run(&[]);
-    assert!(file_selected.status.success());
-    let file_output = std::fs::read_to_string(&rustup_log).unwrap();
-    assert!(file_output.contains("component add clippy"));
-    assert!(!file_output.contains("--toolchain"));
+    assert!(output.status.success());
+    let invocation = std::fs::read_to_string(&rustup_log).unwrap();
+    assert!(invocation.contains("component add clippy"), "{invocation}");
+    assert!(!invocation.contains("--toolchain"), "{invocation}");
+    assert!(!invocation.contains("1.95"), "{invocation}");
 }
 
 #[test]

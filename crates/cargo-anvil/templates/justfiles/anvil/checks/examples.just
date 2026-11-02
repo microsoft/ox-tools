@@ -14,7 +14,7 @@ anvil-examples package="" example="" timeout="30": anvil-examples-validate-prere
 
 # Install prerequisites for the `anvil-examples` recipe.
 [group("anvil-setup")]
-anvil-examples-setup installer="install": (anvil-toolchain-stable-install installer)
+anvil-examples-setup installer="install": (anvil-tool-cargo-each-install installer)
 
 # Validate prerequisites for the `anvil-examples` recipe.
 [group("anvil-setup")]

@@ -4,17 +4,25 @@
 # Update cargo-anvil and regenerate; repository-specific edits stop automatic updates.
 # Regenerate with cargo-anvil to update this file.
 
-anvil_careful_rustc_identity := shell("rustup run " + rust_nightly + " rustc -vV")
-anvil_careful_executable_hash := sha256_file(which("cargo-careful"))
-anvil_careful_identity := sha256(anvil_careful_rustc_identity + "\n" + anvil_careful_executable_hash)
-anvil_careful_target_dir := "target" / "anvil" / "careful" / anvil_careful_identity
+anvil_careful_prefix := if anvil_impact_mode == "off" {
+    ""
+} else if trim(read(anvil_impact_input_dir + "/affected.packages")) == "" {
+    "# "
+} else {
+    ""
+}
+anvil_careful_target_dir := if anvil_careful_prefix == "" {
+    "target" / "anvil" / "careful" / sha256(
+        shell("rustup run " + rust_nightly + " rustc -vV")
+        + "\n"
+        + sha256_file(which("cargo-careful"))
+    )
+} else {
+    ""
+}
 # Run affected tests with cargo-careful runtime checks.
 anvil-careful: anvil-careful-validate-prereqs anvil-impact
-    {{ just_executable() }} --justfile {{ quote(justfile()) }} _anvil-careful
-# Used by anvil-careful to run the affected selection with an isolated target directory.
-[private]
-_anvil-careful:
-    cargo +{{ rust_nightly }} each {{ anvil_affected_selection }} --once -- cargo +{{ rust_nightly }} careful test '{packages}' --all-features --locked --target-dir {{ quote(anvil_careful_target_dir) }}
+    {{ anvil_careful_prefix }}cargo +{{ rust_nightly }} each {{ anvil_affected_selection }} --once -- cargo +{{ rust_nightly }} careful test '{packages}' --all-features --locked --target-dir {{ quote(anvil_careful_target_dir) }}
 
 # Install prerequisites for the `anvil-careful` recipe.
 [group("anvil-setup")]
