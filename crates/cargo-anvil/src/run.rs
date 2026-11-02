@@ -9090,6 +9090,7 @@ mod tests {
             ".pipelines/anvil/steps/pr-test.yml",
             ".pipelines/anvil/steps/pr-msrv.yml",
             ".pipelines/anvil/steps/pr-runtime-analysis.yml",
+            ".pipelines/anvil/steps/pr-fuzzing.yml",
             ".pipelines/anvil/steps/pr-mutants.yml",
             ".pipelines/anvil/steps/scheduled-test.yml",
             ".pipelines/anvil/steps/scheduled-advisories.yml",

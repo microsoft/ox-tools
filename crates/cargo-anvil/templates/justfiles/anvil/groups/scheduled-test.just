@@ -21,6 +21,7 @@ anvil-scheduled-test: (_anvil-unscoped "scheduled-test")
 
 [private]
 _anvil-scheduled-test: anvil-scheduled-test-validate-prereqs \
+    anvil-check-all-targets \
     anvil-llvm-cov \
     anvil-doc-test \
     anvil-examples
@@ -28,6 +29,7 @@ _anvil-scheduled-test: anvil-scheduled-test-validate-prereqs \
 # Install prerequisites for the `anvil-scheduled-test` recipe.
 [private]
 anvil-scheduled-test-setup installer="install": \
+    (anvil-check-all-targets-setup installer) \
     (anvil-llvm-cov-setup installer) \
     (anvil-doc-test-setup installer) \
     (anvil-examples-setup installer)
@@ -35,6 +37,7 @@ anvil-scheduled-test-setup installer="install": \
 # Validate prerequisites for the `anvil-scheduled-test` recipe.
 [private]
 anvil-scheduled-test-validate-prereqs: \
+    anvil-check-all-targets-validate-prereqs \
     anvil-llvm-cov-validate-prereqs \
     anvil-doc-test-validate-prereqs \
     anvil-examples-validate-prereqs

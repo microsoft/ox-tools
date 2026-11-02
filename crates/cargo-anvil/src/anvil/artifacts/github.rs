@@ -156,7 +156,7 @@ mod tests {
 
     use super::*;
 
-    const PR_GROUPS: &[&str] = &["pr-fast", "pr-test", "pr-msrv", "pr-runtime-analysis", "pr-mutants"];
+    const PR_GROUPS: &[&str] = &["pr-fast", "pr-test", "pr-msrv", "pr-runtime-analysis", "pr-fuzzing", "pr-mutants"];
     const SCHEDULED_GROUPS: &[&str] = &[
         "scheduled-test",
         "scheduled-advisories",
@@ -557,6 +557,7 @@ export -f just
             "pr-test:",
             "pr-msrv:",
             "pr-runtime-analysis:",
+            "pr-fuzzing:",
             "pr-mutants:",
         ] {
             assert!(PR_IMPL_WORKFLOW.contains(needle), "PR impl workflow missing job '{needle}'");
@@ -589,14 +590,11 @@ export -f just
             "Check Group: Fast Checks (${{ matrix.os }})",
             "Check Group: Tests and Coverage (${{ matrix.os }})",
             "Check Group: Runtime Analysis (${{ matrix.os }})",
+            "Check Group: Fuzzing (${{ matrix.os }})",
             "Check Group: Mutation Testing (${{ matrix.os }})",
         ] {
             assert!(PR_IMPL_WORKFLOW.contains(name), "PR impl workflow missing display name '{name}'");
         }
-        assert!(
-            PR_IMPL_WORKFLOW.contains("if: matrix.os == 'windows'") && PR_IMPL_WORKFLOW.contains("if: matrix.os != 'windows'"),
-            "the mutation matrix must run on Windows and no-op every compatibility context"
-        );
         assert!(PR_IMPL_WORKFLOW.contains("publish_commit_statuses:"));
         assert_eq!(
             PR_IMPL_WORKFLOW.matches("BASE_REF: ${{ inputs.base_ref }}").count(),
@@ -681,6 +679,55 @@ export -f just
         assert_eq!(PR_IMPL_WORKFLOW.matches("security-events: write").count(), 1);
         assert_eq!(PR_IMPL_WORKFLOW.matches("actions: read").count(), 1);
         assert_eq!(PR_IMPL_WORKFLOW.matches("pull-requests: write").count(), 1);
+    }
+
+    #[test]
+    fn pr_fuzzing_runs_only_on_linux_and_gates_required_checks() {
+        let job = PR_IMPL_WORKFLOW
+            .split_once("\n  pr-fuzzing:\n")
+            .expect("the PR workflow declares the pr-fuzzing job")
+            .1
+            .split_once("\n  pr-mutants:\n")
+            .expect("the mutation job follows fuzzing")
+            .0;
+
+        assert!(job.contains("os: [linux, linux-arm]"));
+        assert!(job.contains("needs: [impact-linux]"));
+        assert!(!job.contains("windows"));
+        assert!(job.contains("group: pr-fuzzing"));
+        assert!(job.contains("name: anvil-impact-Linux"));
+        assert!(job.contains("impact_mode: consume"));
+
+        let gate = PR_IMPL_WORKFLOW
+            .split_once("\n  required-checks:\n")
+            .expect("the PR workflow declares the required-checks job")
+            .1;
+        assert!(gate.contains("\n      - pr-fuzzing\n"));
+        assert!(gate.contains("PR_FUZZING: ${{ needs.pr-fuzzing.result }}"));
+        assert!(gate.contains("\"pr-fuzzing=$PR_FUZZING\""));
+    }
+
+    #[test]
+    fn pr_mutants_retains_windows_only_campaigns() {
+        let job = PR_IMPL_WORKFLOW
+            .split_once("\n  pr-mutants:\n")
+            .expect("the PR workflow declares the pr-mutants job")
+            .1
+            .split_once("\n  required-checks:\n")
+            .expect("the required-checks job follows pr-mutants")
+            .0;
+
+        assert!(job.contains("os: [linux, windows, linux-arm, windows-arm]"));
+        assert_eq!(
+            job.matches("if: matrix.os == 'windows'").count(),
+            3,
+            "checkout, impact download, and mutation execution must remain Windows x64 only"
+        );
+        assert!(job.contains("name: anvil-impact-Windows"));
+        assert!(job.contains("group: pr-mutants"));
+        assert!(job.contains("impact_mode: consume"));
+        assert!(job.contains("BASE_REF: ${{ inputs.base_ref }}"));
+        assert!(job.contains("if: matrix.os != 'windows'"));
     }
 
     #[test]

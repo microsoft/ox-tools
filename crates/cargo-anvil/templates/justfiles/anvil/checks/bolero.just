@@ -7,20 +7,22 @@
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Affected tier. Smoke-only fuzz pass via [bolero](https://crates.io/crates/bolero):
-# each fuzz target gets a 60-second libfuzzer run, just enough to
+# each fuzz target gets a 45-second libfuzzer run, just enough to
 # surface obvious crashes/hangs introduced by a PR without paying for
 # a long fuzzing campaign.
 #
 # Linux-only: cargo-bolero's libfuzzer engine (and its bolero-afl
 # build dependency) only builds on Linux, so the recipe self-skips on
-# non-Linux hosts -- the pr-runtime-analysis Windows/ARM legs treat
-# bolero as a no-op rather than a failure. This matches oxidizer's
-# reference workflow, whose bolero job runs exclusively on ubuntu.
+# non-Linux hosts -- local non-Linux invocations treat bolero as a
+# no-op rather than a failure. CI schedules pr-fuzzing on Linux only.
+# This matches oxidizer's reference workflow, whose bolero job runs
+# exclusively on ubuntu.
 # Crates that ship bolero harnesses still get them compiled and
 # exercised as ordinary tests by anvil-llvm-cov on every leg; the
 # libfuzzer campaign is the Linux-only extra.
 #
-# Target discovery is `cargo +<nightly> bolero list --profile release` over the affected packages.
+# Discovery and execution use the pinned nightly's host target and release profile.
+# This avoids inheriting a prebuilt cargo-bolero binary's musl build target.
 # Crates with no bolero harness print zero targets and the recipe
 # no-ops. The libfuzzer engine requires nightly, so the test
 # invocation uses the pinned rust_nightly. Adopters who want longer
@@ -113,7 +115,7 @@ anvil-bolero: anvil-bolero-validate-prereqs anvil-impact
             exit 1
         }
         Write-Host "anvil-bolero: $($t.anvilPackageSpec)::${testName}"
-        & cargo {{_anvil_stable_toolchain_args}} each --package $t.anvilPackageSpec '--' cargo '+{{ rust_nightly }}' bolero test --profile release --target $hostTarget --engine libfuzzer -T 60s --package '{cargo-spec}' $testName
+        & cargo {{_anvil_stable_toolchain_args}} each --package $t.anvilPackageSpec '--' cargo '+{{ rust_nightly }}' bolero test --profile release --target $hostTarget --engine libfuzzer -T 45s --package '{cargo-spec}' $testName
         if ($LASTEXITCODE -ne 0) { $failed = $true }
     }
     if ($failed) { exit 1 }

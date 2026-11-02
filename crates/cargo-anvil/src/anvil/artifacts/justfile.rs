@@ -140,6 +140,7 @@ const GROUP_FILES: &[(&str, &str)] = split_recipe_files!(
         "pr-slow",
         "pr-test",
         "pr-runtime-analysis",
+        "pr-fuzzing",
         "pr-mutants",
         "scheduled-test",
         "scheduled-advisories",
@@ -394,7 +395,7 @@ mod tests {
         // one failing target does not stop the remaining targets.
         for needle in [
             "$target | Add-Member -NotePropertyName anvilPackageSpec -NotePropertyValue $packageSpec",
-            "each --package $t.anvilPackageSpec '--' cargo '+{{ rust_nightly }}' bolero test --profile release --target $hostTarget --engine libfuzzer -T 60s --package '{cargo-spec}' $testName",
+            "each --package $t.anvilPackageSpec '--' cargo '+{{ rust_nightly }}' bolero test --profile release --target $hostTarget --engine libfuzzer -T 45s --package '{cargo-spec}' $testName",
             "if ($LASTEXITCODE -ne 0) { $failed = $true }",
             "if ($failed) { exit 1 }",
         ] {
@@ -827,6 +828,7 @@ mod tests {
             "anvil-pr-test:",
             "anvil-pr-msrv:",
             "anvil-pr-runtime-analysis:",
+            "anvil-pr-fuzzing:",
             "anvil-pr-mutants:",
             "anvil-scheduled-test:",
             "anvil-scheduled-advisories:",
@@ -838,7 +840,7 @@ mod tests {
             assert!(!groups.contains(needle), "groups tree still contains stale '{needle}'");
         }
         assert!(groups.contains(
-            "anvil-pr-slow: anvil-pr-slow-validate-prereqs anvil-pr-test anvil-pr-msrv anvil-pr-runtime-analysis anvil-pr-mutants"
+            "anvil-pr-slow: anvil-pr-slow-validate-prereqs anvil-pr-test anvil-pr-msrv anvil-pr-runtime-analysis anvil-pr-fuzzing anvil-pr-mutants"
         ));
         // PR group recipes list their own validate-prereqs aggregate first so
         // all tool checks run up front (just dedups the per-check ones).
@@ -847,6 +849,7 @@ mod tests {
             "anvil-pr-test: anvil-pr-test-validate-prereqs",
             "anvil-pr-msrv: anvil-pr-msrv-validate-prereqs",
             "anvil-pr-runtime-analysis: anvil-pr-runtime-analysis-validate-prereqs",
+            "anvil-pr-fuzzing: anvil-pr-fuzzing-validate-prereqs",
             "anvil-pr-mutants: anvil-pr-mutants-validate-prereqs",
         ] {
             assert!(
@@ -883,12 +886,12 @@ mod tests {
         // validate-prereqs must therefore install / verify cargo-delta, so a
         // missing tool fails fast at setup rather than mid-run. (pr-slow is an
         // umbrella and inherits this via pr-test / pr-msrv /
-        // pr-runtime-analysis / pr-mutants.) Scheduled groups force
+        // pr-runtime-analysis / pr-fuzzing / pr-mutants.) Scheduled groups force
         // ANVIL_IMPACT=off and never
         // recompute the impact set, so they deliberately do NOT depend on
         // cargo-delta.
         let groups = all_group_bodies();
-        for g in ["pr-fast", "pr-test", "pr-msrv", "pr-runtime-analysis", "pr-mutants"] {
+        for g in ["pr-fast", "pr-test", "pr-msrv", "pr-runtime-analysis", "pr-fuzzing", "pr-mutants"] {
             assert!(
                 groups.contains(&format!(
                     "anvil-{g}-setup installer=\"install\": \\\n    (anvil-tool-cargo-delta-install installer)"

@@ -114,7 +114,7 @@ stages:
             - template: steps/pr-fast.yml
 
   # The PR-tier slow checks are split into four independent stages
-  # (pr_test, pr_msrv, pr_runtime_analysis, pr_mutants) so they run in
+  # (pr_test, pr_msrv, pr_runtime_analysis, pr_fuzzing, pr_mutants) so they run in
   # parallel rather than sequentially in one job. Each stage owns its own
   # dependsOn link to
   # the impact stage and downloads the per-OS impact artifact. ADO has no
@@ -198,7 +198,7 @@ stages:
             - template: steps/pr-msrv.yml
 
   - stage: pr_runtime_analysis
-    displayName: anvil pr-runtime-analysis (miri + careful)
+    displayName: anvil pr-runtime-analysis (miri + careful + loom)
     dependsOn: [impact]
     jobs:
       - template: steps/job.yml
@@ -221,6 +221,21 @@ stages:
               path: target/anvil/impact
           steps:
             - template: steps/pr-runtime-analysis.yml
+
+  - stage: pr_fuzzing
+    displayName: anvil pr-fuzzing (bolero)
+    dependsOn: [impact]
+    jobs:
+      - template: steps/job.yml
+        parameters:
+          name: linux
+          stage: pr_fuzzing
+          pool: ${{ parameters.linuxPool }}
+          inputArtifacts:
+            - name: anvil-impact-linux
+              path: target/anvil/impact
+          steps:
+            - template: steps/pr-fuzzing.yml
 
   - stage: pr_mutants
     displayName: anvil pr-mutants (cargo-gamma)

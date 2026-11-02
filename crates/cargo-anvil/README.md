@@ -140,8 +140,8 @@ the generated cloud workflow:
   example compilation, and execution of selected examples;
 * **MSRV tests** execute affected tests with the repository’s declared
   minimum supported Rust version;
-* **runtime analysis** runs Miri, cargo-careful, Loom, and a short Bolero
-  fuzzing pass;
+* **runtime analysis** runs Miri, cargo-careful, and Loom;
+* **fuzzing** runs a short Bolero fuzzing pass on Linux;
 * **mutation testing** tests mutants in the pull-request diff.
 
 The scheduled tier runs full-workspace backstops and expensive checks that
@@ -463,7 +463,7 @@ More detailed design and operational guidance is available in the
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQb_Bv3TPI9bGwbpUvROfTgheYbvQjOLsdqwcsb5ZXX0rM7ZS1hZIGDa2NhcmdvLWFudmlsZjAuMjQuMGtjYXJnb19hbnZpbA
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbH0-cuopID70bo-mb5dV3gXwbQze916l8QEkbJrG28YyukvFhZIGDa2NhcmdvLWFudmlsZjAuMjQuMGtjYXJnb19hbnZpbA
  [__link0]: https://github.com/casey/just
  [__link1]: https://rust-lang.github.io/rustfmt/
  [__link10]: https://www.conventionalcommits.org/

@@ -140,8 +140,8 @@
 //!   example compilation, and execution of selected examples;
 //! - **MSRV tests** execute affected tests with the repository's declared
 //!   minimum supported Rust version;
-//! - **runtime analysis** runs Miri, cargo-careful, Loom, and a short Bolero
-//!   fuzzing pass;
+//! - **runtime analysis** runs Miri, cargo-careful, and Loom;
+//! - **fuzzing** runs a short Bolero fuzzing pass on Linux;
 //! - **mutation testing** tests mutants in the pull-request diff.
 //!
 //! The scheduled tier runs full-workspace backstops and expensive checks that

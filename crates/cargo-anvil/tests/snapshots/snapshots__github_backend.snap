@@ -961,6 +961,7 @@ its failures first. Examples:
 - `just anvil-pr-test`
 - `just anvil-pr-msrv`
 - `just anvil-pr-runtime-analysis`
+- `just anvil-pr-fuzzing`
 - `just anvil-pr-mutants`
 
 When a check fails, fix the root cause and rerun that specific recipe instead of
@@ -1628,9 +1629,9 @@ jobs:
     permissions:
       contents: read
       statuses: write
-    # Stricter-runtime correctness: miri + careful.
-    # 4-leg matrix -- both checks compile per host target and can
-    # surface OS/arch-specific UB. Both are impact-scoped so the
+    # Stricter-runtime correctness: miri + careful + loom.
+    # 4-leg matrix -- these checks compile per host target and can
+    # surface OS/arch-specific bugs. All are impact-scoped so the
     # wall-clock is proportional to the PR's blast radius.
     needs: [impact-linux, impact-windows]
     strategy:
@@ -1655,6 +1656,32 @@ jobs:
       - uses: ./.github/actions/anvil-run-group
         with:
           group: pr-runtime-analysis
+          publish_commit_statuses: ${{ inputs.publish_commit_statuses }}
+          impact_mode: consume
+
+  pr-fuzzing:
+    name: "Check Group: Fuzzing (${{ matrix.os }})"
+    permissions:
+      contents: read
+      statuses: write
+    needs: [impact-linux]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [linux, linux-arm]
+    runs-on: ${{ matrix.os == 'linux' && inputs.linux_runner || inputs.linux_arm_runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          lfs: true
+      - name: Download impact artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: anvil-impact-Linux
+          path: target/anvil/impact
+      - uses: ./.github/actions/anvil-run-group
+        with:
+          group: pr-fuzzing
           publish_commit_statuses: ${{ inputs.publish_commit_statuses }}
           impact_mode: consume
 
@@ -1717,6 +1744,7 @@ jobs:
       - pr-test
       - pr-msrv
       - pr-runtime-analysis
+      - pr-fuzzing
       - pr-mutants
     runs-on: ${{ inputs.linux_runner }}
     steps:
@@ -1729,6 +1757,7 @@ jobs:
           PR_TEST: ${{ needs.pr-test.result }}
           PR_MSRV: ${{ needs.pr-msrv.result }}
           PR_RUNTIME_ANALYSIS: ${{ needs.pr-runtime-analysis.result }}
+          PR_FUZZING: ${{ needs.pr-fuzzing.result }}
           PR_MUTANTS: ${{ needs.pr-mutants.result }}
         run: |
           status=0
@@ -1739,6 +1768,7 @@ jobs:
             "pr-test=$PR_TEST" \
             "pr-msrv=$PR_MSRV" \
             "pr-runtime-analysis=$PR_RUNTIME_ANALYSIS" \
+            "pr-fuzzing=$PR_FUZZING" \
             "pr-mutants=$PR_MUTANTS"
           do
             name="${result%%=*}"
@@ -2356,20 +2386,22 @@ anvil-bench-validate-prereqs: anvil-tool-rustc-validate-prereqs
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Affected tier. Smoke-only fuzz pass via [bolero](https://crates.io/crates/bolero):
-# each fuzz target gets a 60-second libfuzzer run, just enough to
+# each fuzz target gets a 45-second libfuzzer run, just enough to
 # surface obvious crashes/hangs introduced by a PR without paying for
 # a long fuzzing campaign.
 #
 # Linux-only: cargo-bolero's libfuzzer engine (and its bolero-afl
 # build dependency) only builds on Linux, so the recipe self-skips on
-# non-Linux hosts -- the pr-runtime-analysis Windows/ARM legs treat
-# bolero as a no-op rather than a failure. This matches oxidizer's
-# reference workflow, whose bolero job runs exclusively on ubuntu.
+# non-Linux hosts -- local non-Linux invocations treat bolero as a
+# no-op rather than a failure. CI schedules pr-fuzzing on Linux only.
+# This matches oxidizer's reference workflow, whose bolero job runs
+# exclusively on ubuntu.
 # Crates that ship bolero harnesses still get them compiled and
 # exercised as ordinary tests by anvil-llvm-cov on every leg; the
 # libfuzzer campaign is the Linux-only extra.
 #
-# Target discovery is `cargo +<nightly> bolero list --profile release` over the affected packages.
+# Discovery and execution use the pinned nightly's host target and release profile.
+# This avoids inheriting a prebuilt cargo-bolero binary's musl build target.
 # Crates with no bolero harness print zero targets and the recipe
 # no-ops. The libfuzzer engine requires nightly, so the test
 # invocation uses the pinned rust_nightly. Adopters who want longer
@@ -2462,7 +2494,7 @@ anvil-bolero: anvil-bolero-validate-prereqs anvil-impact
             exit 1
         }
         Write-Host "anvil-bolero: $($t.anvilPackageSpec)::${testName}"
-        & cargo {{_anvil_stable_toolchain_args}} each --package $t.anvilPackageSpec '--' cargo '+{{ rust_nightly }}' bolero test --profile release --target $hostTarget --engine libfuzzer -T 60s --package '{cargo-spec}' $testName
+        & cargo {{_anvil_stable_toolchain_args}} each --package $t.anvilPackageSpec '--' cargo '+{{ rust_nightly }}' bolero test --profile release --target $hostTarget --engine libfuzzer -T 45s --package '{cargo-spec}' $testName
         if ($LASTEXITCODE -ne 0) { $failed = $true }
     }
     if ($failed) { exit 1 }
@@ -5958,7 +5990,6 @@ anvil-build-validate-prereqs: anvil-tool-rustc-validate-prereqs
 anvil-pr-fast: anvil-pr-fast-validate-prereqs \
     anvil-fmt \
     anvil-clippy \
-    anvil-check-all-targets \
     anvil-cargo-sort \
     anvil-license-headers \
     anvil-ensure-no-cyclic-deps \
@@ -5985,7 +6016,6 @@ anvil-pr-fast-setup installer="install": \
     (anvil-tool-cargo-delta-install installer) \
     (anvil-fmt-setup installer) \
     (anvil-clippy-setup installer) \
-    (anvil-check-all-targets-setup installer) \
     (anvil-cargo-sort-setup installer) \
     (anvil-license-headers-setup installer) \
     (anvil-ensure-no-cyclic-deps-setup installer) \
@@ -6006,7 +6036,6 @@ anvil-pr-fast-validate-prereqs: \
     anvil-tool-cargo-delta-validate-prereqs \
     anvil-fmt-validate-prereqs \
     anvil-clippy-validate-prereqs \
-    anvil-check-all-targets-validate-prereqs \
     anvil-cargo-sort-validate-prereqs \
     anvil-license-headers-validate-prereqs \
     anvil-ensure-no-cyclic-deps-validate-prereqs \
@@ -6020,6 +6049,32 @@ anvil-pr-fast-validate-prereqs: \
     anvil-udeps-validate-prereqs \
     anvil-semver-check-validate-prereqs \
     anvil-external-types-validate-prereqs
+
+=== justfiles/anvil/groups/pr-fuzzing.just ===
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# GENERATED BY cargo-anvil. DO NOT EDIT DIRECTLY.
+# Update cargo-anvil and regenerate; repository-specific edits stop automatic updates.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
+
+# Run the pull request fuzzing smoke checks.
+[group("anvil")]
+anvil-pr-fuzzing: anvil-pr-fuzzing-validate-prereqs \
+    anvil-bolero
+
+# Install prerequisites for the `anvil-pr-fuzzing` recipe.
+[private]
+anvil-pr-fuzzing-setup installer="install": \
+    (anvil-tool-cargo-delta-install installer) \
+    (anvil-bolero-setup installer)
+
+# Validate prerequisites for the `anvil-pr-fuzzing` recipe.
+[private]
+anvil-pr-fuzzing-validate-prereqs: \
+    anvil-tool-cargo-delta-validate-prereqs \
+    anvil-bolero-validate-prereqs
 
 === justfiles/anvil/groups/pr-msrv.just ===
 # Copyright (c) Microsoft Corporation.
@@ -6085,8 +6140,7 @@ anvil-pr-mutants-validate-prereqs: \
 anvil-pr-runtime-analysis: anvil-pr-runtime-analysis-validate-prereqs \
     anvil-miri \
     anvil-careful \
-    anvil-loom \
-    anvil-bolero
+    anvil-loom
 
 # Install prerequisites for the `anvil-pr-runtime-analysis` recipe.
 [private]
@@ -6094,8 +6148,7 @@ anvil-pr-runtime-analysis-setup installer="install": \
     (anvil-tool-cargo-delta-install installer) \
     (anvil-miri-setup installer) \
     (anvil-careful-setup installer) \
-    (anvil-loom-setup installer) \
-    (anvil-bolero-setup installer)
+    (anvil-loom-setup installer)
 
 # Validate prerequisites for the `anvil-pr-runtime-analysis` recipe.
 [private]
@@ -6103,8 +6156,7 @@ anvil-pr-runtime-analysis-validate-prereqs: \
     anvil-tool-cargo-delta-validate-prereqs \
     anvil-miri-validate-prereqs \
     anvil-careful-validate-prereqs \
-    anvil-loom-validate-prereqs \
-    anvil-bolero-validate-prereqs
+    anvil-loom-validate-prereqs
 
 === justfiles/anvil/groups/pr-slow.just ===
 # Copyright (c) Microsoft Corporation.
@@ -6116,12 +6168,13 @@ anvil-pr-runtime-analysis-validate-prereqs: \
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # pr-slow is the local umbrella for everything that takes more than ~30s
-# per crate (tests, MSRV tests, stricter runtimes, mutation testing). Its
+# per crate (tests, MSRV tests, stricter runtimes, mutation testing, fuzzing). Its
 # groups can be invoked individually without invoking the other groups:
 #
 #   pr-test: tests + coverage
 #   pr-msrv: all-target tests under the declared MSRV
-#   pr-runtime-analysis: stricter-runtime correctness (miri, careful)
+#   pr-runtime-analysis: stricter-runtime correctness (miri, careful, loom)
+#   pr-fuzzing: fuzzing smoke checks
 #   pr-mutants: mutation testing
 #
 # Cloud workflows run these groups as independent parallel jobs.
@@ -6129,12 +6182,13 @@ anvil-pr-runtime-analysis-validate-prereqs: \
 #
 #   $ just anvil-pr-test   # tests + coverage only
 #   $ just anvil-pr-msrv   # MSRV all-target tests only
-#   $ just anvil-pr-runtime-analysis   # miri + careful only
+#   $ just anvil-pr-runtime-analysis   # miri + careful + loom only
+#   $ just anvil-pr-fuzzing   # bolero only
 #   $ just anvil-pr-mutants   # mutants only
 
 # Run the slow pull request checks.
 [group("anvil")]
-anvil-pr-slow: anvil-pr-slow-validate-prereqs anvil-pr-test anvil-pr-msrv anvil-pr-runtime-analysis anvil-pr-mutants
+anvil-pr-slow: anvil-pr-slow-validate-prereqs anvil-pr-test anvil-pr-msrv anvil-pr-runtime-analysis anvil-pr-fuzzing anvil-pr-mutants
 
 # Install prerequisites for the `anvil-pr-slow` recipe.
 [private]
@@ -6142,6 +6196,7 @@ anvil-pr-slow-setup installer="install": \
     (anvil-pr-test-setup installer) \
     (anvil-pr-msrv-setup installer) \
     (anvil-pr-runtime-analysis-setup installer) \
+    (anvil-pr-fuzzing-setup installer) \
     (anvil-pr-mutants-setup installer)
 
 # Validate prerequisites for the `anvil-pr-slow` recipe.
@@ -6150,6 +6205,7 @@ anvil-pr-slow-validate-prereqs: \
     anvil-pr-test-validate-prereqs \
     anvil-pr-msrv-validate-prereqs \
     anvil-pr-runtime-analysis-validate-prereqs \
+    anvil-pr-fuzzing-validate-prereqs \
     anvil-pr-mutants-validate-prereqs
 
 === justfiles/anvil/groups/pr-test.just ===
@@ -6334,6 +6390,7 @@ anvil-scheduled-test: (_anvil-unscoped "scheduled-test")
 
 [private]
 _anvil-scheduled-test: anvil-scheduled-test-validate-prereqs \
+    anvil-check-all-targets \
     anvil-llvm-cov \
     anvil-doc-test \
     anvil-examples
@@ -6341,6 +6398,7 @@ _anvil-scheduled-test: anvil-scheduled-test-validate-prereqs \
 # Install prerequisites for the `anvil-scheduled-test` recipe.
 [private]
 anvil-scheduled-test-setup installer="install": \
+    (anvil-check-all-targets-setup installer) \
     (anvil-llvm-cov-setup installer) \
     (anvil-doc-test-setup installer) \
     (anvil-examples-setup installer)
@@ -6348,6 +6406,7 @@ anvil-scheduled-test-setup installer="install": \
 # Validate prerequisites for the `anvil-scheduled-test` recipe.
 [private]
 anvil-scheduled-test-validate-prereqs: \
+    anvil-check-all-targets-validate-prereqs \
     anvil-llvm-cov-validate-prereqs \
     anvil-doc-test-validate-prereqs \
     anvil-examples-validate-prereqs
@@ -7333,6 +7392,7 @@ import 'groups/pr-msrv.just'
 import 'groups/pr-slow.just'
 import 'groups/pr-test.just'
 import 'groups/pr-runtime-analysis.just'
+import 'groups/pr-fuzzing.just'
 import 'groups/pr-mutants.just'
 import 'groups/scheduled-test.just'
 import 'groups/scheduled-advisories.just'
@@ -8373,8 +8433,8 @@ anvil-tool-cargo-audit-validate-prereqs: (_check-tool "cargo-audit" cargo_audit_
 # is likewise Linux-only. oxidizer's reference workflow runs bolero
 # exclusively on ubuntu, so anvil follows suit: the install/validate
 # pair and the anvil-bolero check self-skip on non-Linux hosts.
-# The pr-runtime-analysis Windows/ARM legs therefore
-# treat bolero as a no-op rather than a setup failure.
+# Local non-Linux invocations therefore treat bolero
+# as a no-op rather than a setup failure; CI schedules pr-fuzzing on Linux only.
 
 # Install the pinned `cargo-bolero` tool.
 [private]

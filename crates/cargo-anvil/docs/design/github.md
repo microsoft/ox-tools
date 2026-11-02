@@ -61,6 +61,7 @@ flowchart LR
     pr_test_job["pr-test<br/>matrix: linux, windows,<br/>linux-arm, windows-arm"]:::job
     pr_msrv_job["pr-msrv<br/>matrix: linux, windows,<br/>linux-arm, windows-arm"]:::job
     pr_runtime_analysis_job["pr-runtime-analysis<br/>matrix: linux, windows,<br/>linux-arm, windows-arm"]:::job
+    pr_fuzzing_job["pr-fuzzing<br/>matrix: linux, linux-arm"]:::job
     pr_mutants_job["pr-mutants<br/>matrix: linux, windows,<br/>linux-arm, windows-arm"]:::job
     required_checks["required-checks<br/>(single branch-protection context)"]:::job
     impact_act[".github/actions/<br/>anvil-impact"]:::action
@@ -72,6 +73,7 @@ flowchart LR
     test_just["just anvil-pr-test"]:::recipe
     msrv_just["just anvil-pr-msrv"]:::recipe
     runtime_just["just anvil-pr-runtime-analysis"]:::recipe
+    fuzzing_just["just anvil-pr-fuzzing"]:::recipe
     mutants_just["just anvil-pr-mutants"]:::recipe
     setup_just["just anvil-&lt;group&gt;-setup"]:::recipe
 
@@ -82,12 +84,14 @@ flowchart LR
     pr_impl --> pr_test_job
     pr_impl --> pr_msrv_job
     pr_impl --> pr_runtime_analysis_job
+    pr_impl --> pr_fuzzing_job
     pr_impl --> pr_mutants_job
     impact --> required_checks
     pr_fast_job --> required_checks
     pr_test_job --> required_checks
     pr_msrv_job --> required_checks
     pr_runtime_analysis_job --> required_checks
+    pr_fuzzing_job --> required_checks
     pr_mutants_job --> required_checks
 
     impact ==> impact_act
@@ -96,6 +100,7 @@ flowchart LR
     pr_msrv_job ==> run_group_act
     pr_test_job ==> codecov_act
     pr_runtime_analysis_job ==> run_group_act
+    pr_fuzzing_job ==> run_group_act
     pr_mutants_job ==> run_group_act
 
     impact_act ==> setup_act
@@ -105,6 +110,7 @@ flowchart LR
     run_group_act ==> test_just
     run_group_act ==> msrv_just
     run_group_act ==> runtime_just
+    run_group_act ==> fuzzing_just
     run_group_act ==> mutants_just
     setup_act ==> setup_just
 
@@ -469,9 +475,12 @@ jobs:
           impact_mode: consume
           free-disk-space: true
 
-  # pr-runtime-analysis (miri + careful) and pr-mutants (cargo-gamma) follow the
-  # multi-OS shape; pr-mutants additionally sets `env: BASE_REF` for
-  # diff-scoped cargo-gamma.
+  # pr-runtime-analysis (miri + careful + loom) follows the multi-OS shape.
+  # pr-fuzzing (bolero) has only linux + linux-arm legs, depends only on
+  # impact-linux, and downloads anvil-impact-Linux. It runs in parallel with
+  # runtime analysis and is included in the required-check aggregator.
+  # pr-mutants runs on Windows x64; the other three stable ruleset contexts
+  # remain explicit no-ops. It sets `env: BASE_REF` for diff-scoped cargo-gamma.
 ```
 
 Every multi-OS job hardcodes its OS axis as an inline YAML array. Per-leg runner

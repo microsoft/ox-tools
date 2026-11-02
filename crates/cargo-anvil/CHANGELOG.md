@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-11-04
+
+- ✨ Features
+
+  - cargo-anvil: split Bolero PR and scheduled campaigns
+
+- 🐛 Bug Fixes
+
+  - cargo-anvil: address PR review feedback
+
+- ⚡ Performance
+
+  - cargo-anvil: streamline PR checks and isolate Linux fuzzing ([#336](https://github.com/microsoft/ox-tools/pull/336))
+
+- 📚 Documentation
+
+  - cargo-anvil: clarify Bolero campaign rationale
 ## [0.23.5] - 2026-11-04
 
 - 🐛 Bug Fixes
