@@ -527,6 +527,7 @@ dependencies = [
  "toml",
  "tracing",
  "unicode-ident",
+ "unicode-properties",
  "unicode-width",
  "url",
  "vu128",
@@ -554,6 +555,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "unicode-ident",
+ "unicode-properties",
 ]
 
 [[package]]

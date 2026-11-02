@@ -26,13 +26,12 @@ all-features = true
 # we are forced to re-expose.
 allowed_external_types = ["ohno::*"]
 
-# `unicode-ident` is a deliberate compatibility bound, never referenced from this crate's
-# code. See the dependency comment below.
+# These dependencies constrain transitive versions without being used directly.
 [package.metadata.cargo-udeps.ignore]
-normal = ["unicode-ident"]
+normal = ["unicode-ident", "unicode-properties"]
 
 [package.metadata.unused-deps]
-allowed = ["unicode-ident"]
+allowed = ["unicode-ident", "unicode-properties"]
 
 # The gate filters test-only source regions and non-release Cargo targets before measuring this
 # crate. The pre-0.7 floor is retained and validated by the cross-platform released-surface CI
@@ -55,9 +54,10 @@ ohno = { workspace = true, features = ["app-err"] }
 ra_ap_syntax = { workspace = true }
 semver = { workspace = true, features = ["std"] }
 serde_json = { workspace = true, features = ["std"] }
-# Never named in this crate's code. It bounds the `unicode-ident` selected by
-# `ra_ap_syntax` -> `ra-ap-rustc_lexer`; see the workspace dependency comment.
+# Compatibility bounds for `ra_ap_syntax` -> `ra-ap-rustc_lexer`; keep the Unicode
+# versions matched in fresh consumer builds. See the workspace dependency comment.
 unicode-ident = { workspace = true }
+unicode-properties = { workspace = true }
 [dev-dependencies]
 assert_cmd = { workspace = true }
 predicates = { workspace = true }
