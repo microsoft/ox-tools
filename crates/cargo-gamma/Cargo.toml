@@ -20,6 +20,10 @@ exclude = ["docs/TODO.md"]
 [package.metadata.docs.rs]
 all-features = true
 
+# cargo-udeps does not detect dependencies used only by doctests.
+[package.metadata.cargo-udeps.ignore]
+development = ["cargo-gamma-attrs"]
+
 # The terminal adapter and entry point already exclude themselves from coverage.
 # Excluding test code leaves no coverage records for this crate.
 # Anvil runs tests through plain nextest for explicit package selections;
@@ -35,6 +39,7 @@ terminal_size = { workspace = true }
 rallocator = { workspace = true }
 
 [dev-dependencies]
+cargo-gamma-attrs = { workspace = true }
 cargo-gamma-lib = { workspace = true, features = ["internals"] }
 clap = { workspace = true }
 

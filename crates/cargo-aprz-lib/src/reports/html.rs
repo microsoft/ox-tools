@@ -70,7 +70,7 @@ pub fn generate<W: Write>(crates: &[ReportableCrate], timestamp: DateTime<Local>
                 )
             })
             .collect();
-        v.sort_by(|a, b| a.3.partial_cmp(&b.3).unwrap_or(core::cmp::Ordering::Equal));
+        v.sort_by(|a, b| a.3.total_cmp(&b.3));
         v
     };
     let high_risk_crates = crates_by_risk(Risk::High);

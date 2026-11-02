@@ -89,6 +89,7 @@ bolero-engine = { workspace = true, features = ["any"] }
 cargo-gamma-attrs-impl = { path = "../cargo-gamma-attrs-impl", features = ["agreement"] }
 cargo-gamma-process = { workspace = true, features = ["fault-injection"] }
 chrono = { workspace = true, features = ["std"] }
+quote = { workspace = true }
 tempfile = { workspace = true }
 tick = { workspace = true, features = ["test-util"] }
 

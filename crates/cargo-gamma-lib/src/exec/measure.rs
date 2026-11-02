@@ -755,16 +755,16 @@ fn measure_with_locks(
         });
     }
 
-    // Check the complete schema to convergence, then generate its test binaries. The successful
-    // build's artifact stream is retained for the baseline, so convergence does not end with a
-    // redundant cache-hit Cargo invocation.
-    // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
-    begin_schema_build(events, converger.historical_exclusions);
-
     // Build only packages whose tests can actually be selected: the rest would be compiled,
     // baselined and never consulted. All target packages have already been instrumented, so this
     // one convergence sees every mutation that can affect those test targets.
     let select = build_packages(&plan, &scope);
+    // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
+    begin_schema_build(events, converger.historical_exclusions.saturating_add(converger.census.len()));
+
+    // Check the complete schema to convergence, then generate its test binaries. The successful
+    // build's artifact stream is retained for the baseline, so convergence does not end with a
+    // redundant cache-hit Cargo invocation.
     let mut build = converger.finish(&work, &mut plan, select.as_deref(), config.build, events)?;
     // From this point onward compiler convergence has produced durable score-neutral learning.
     // If a later preparation step fails, move the plan into `failed` on that error path so the
@@ -1574,7 +1574,7 @@ mod tests {
         assert_eq!(failure.message(), "owned runtime link refusal");
         assert_eq!(
             from_slice::<Value>(&std::fs::read(base.join("compiler-exclusions.json")).unwrap()).unwrap(),
-            json!({"version": 1, "mutants": {}})
+            json!({"version": 1, "evidence_revision": 2, "mutants": {}})
         );
     }
 
@@ -3862,8 +3862,12 @@ mod tests {
             panic!("one admitted target is one warning, got {:?}", events.warnings);
         };
 
-        assert!(warning.contains("router_compile_fail"), "{warning}");
-        assert!(warning.contains("--exclude-test router_compile_fail"), "{warning}");
+        assert_eq!(
+            warning,
+            "1 test binary may have test cases that invoke the Rust compiler, which may lead to very long mutation test runs:\n  \
+             `router_compile_fail` in routerama (trybuild)\n\
+             Consider omitting the specific test cases using `--skip` harness filters."
+        );
     }
 
     /// A caller who has already acted on the advice must not be given it again, or the warning
@@ -3917,7 +3921,7 @@ mod tests {
 
         assert!(warning.contains("router_compile_fail"), "{warning}");
         assert!(!warning.contains("internity"), "{warning}");
-        assert!(!warning.contains("--exclude-test compile_fail"), "{warning}");
+        assert!(!warning.contains("`compile_fail` in internity"), "{warning}");
     }
 
     #[test]
@@ -3935,7 +3939,12 @@ mod tests {
         let [warning] = events.warnings.as_slice() else {
             panic!("a workspace-wide oracle must include the external compile-fail target");
         };
-        assert!(warning.contains("--exclude-test external_compile_fail"), "{warning}");
+        assert!(warning.contains("`external_compile_fail` in external"), "{warning}");
+        assert!(
+            warning.contains("Consider omitting the specific test cases using `--skip` harness filters."),
+            "{warning}"
+        );
+        assert!(!warning.contains("--exclude-test"), "{warning}");
     }
 
     /// The ordinary case is a workspace with no such target at all, which must say nothing.

@@ -352,7 +352,7 @@ fn relaunch_for_memory_control<H: Host>(host: &H, args: &super::cli::RunArgs) ->
 pub(super) fn dispatch<H: Host>(host: &mut H, cli: Cli, styler: Styler) -> crate::Result<i32> {
     match cli.command {
         Command::Run(mut args) => {
-            configure(host, &mut args, styler)?;
+            configure(&mut args)?;
             check_run_shard(&args)?;
 
             #[cfg(target_os = "linux")]

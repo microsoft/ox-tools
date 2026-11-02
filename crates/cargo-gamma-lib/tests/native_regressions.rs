@@ -422,14 +422,13 @@ fn recovered_resumed_report_contents_reads_the_captured_root_instead_of_the_chan
 
 #[test]
 fn recovered_configuration_returns_reporting_read_and_duplicate_resource_errors_without_panicking() {
-    let mut host = Sink::default();
     let mut args = RunArgs {
         resume_testing: true,
         ..RunArgs::default()
     };
     args.select.dir = "invalid\0workspace".into();
     args.select.config.path = Some("invalid\0gamma.toml".into());
-    let failure = configure(&mut host, &mut args, Styler::new(false)).unwrap_err();
+    let failure = configure(&mut args).unwrap_err();
     assert!(failure.to_string().contains("could not read `invalid"), "{failure}");
     let mut args = RunArgs::default();
     args.select.dir = "invalid\0workspace".into();
@@ -438,13 +437,11 @@ fn recovered_configuration_returns_reporting_read_and_duplicate_resource_errors_
         exec::ResourceLimit::new("database", 1).unwrap(),
         exec::ResourceLimit::new("database", 2).unwrap(),
     ];
-    let failure = configure(&mut host, &mut args, Styler::new(false)).unwrap_err();
+    let failure = configure(&mut args).unwrap_err();
     assert_eq!(
         failure.message(),
         "`--resource-concurrency` specifies `database` more than once; each resource may have only one command-line capacity"
     );
-    assert_eq!(host.out, [] as [u8; 0]);
-    assert_eq!(host.err, [] as [u8; 0]);
 }
 
 #[test]

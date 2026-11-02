@@ -9,7 +9,7 @@ use syn::visit::{self, Visit};
 use syn::{GenericArgument, GenericParam, Generics, Path, PathArguments, ReturnType, Type, TypeParamBound, WherePredicate};
 
 use super::super::defaults::{DefaultPaths, standard_defaulted_parameters};
-use super::indexes::ABSOLUTE_ROOT;
+use super::indexes::{ABSOLUTE_ROOT, EXTERN_ROOT_PREFIX};
 use super::predicates::payload;
 use super::values::{Kind, primitive_kind, resolve_type, strip, type_argument_values, type_arguments, type_name};
 use crate::ops::collect::Defaults;
@@ -247,12 +247,18 @@ pub(super) struct Types<'a> {
 
 impl Types<'_> {
     fn source_path(&self, ty: &Type) -> Option<(&str, &[String], Vec<String>)> {
-        if self.imports.contains_key("*") || matches!(strip(ty), Type::Path(path) if path.path.leading_colon.is_some()) {
+        if matches!(strip(ty), Type::Path(path) if path.path.leading_colon.is_some()) {
             return
             // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
             None;
         }
         let path = resolved_type_path(ty, self.imports)?;
+        // A glob cannot replace an explicit local root or an explicit named import.
+        if self.imports.contains_key("*") && !matches!(path.first().map(String::as_str), Some("crate" | "self" | "super")) {
+            return
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "This return is None with inferred Option type, exactly Option::default().")]
+            None;
+        }
         if self
             .imports
             .get(BLOCK_TYPES)
@@ -799,10 +805,22 @@ impl Types<'_> {
             .concrete_self_type(ty)
             .or_else(|| self.concrete_self_associated_type(ty))
             .unwrap_or(ty);
-        let kind = self.value_kind(concrete);
         if matches!(strip(concrete), Type::Path(path)
             if path.path.get_ident().is_some_and(|ident| self.defaulted.contains(&ident.to_string())))
         {
+            return true;
+        }
+        if self.has_generic_root(concrete) {
+            return
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "The inferred bool default is already false.")]
+            false;
+        }
+        let kind = self.value_kind(concrete);
+        // Resolved declaration identities can prove an alias-target impl that the by-name index
+        // deliberately marks uncertain.
+        if
+        // #[gamma::skip(logical.and_remove_left, tag = "equivalent", reason = "has_labeled_sources reads Sources::bound. Sources::resolve needs a contexts entry, and only Sources::bind populates contexts while setting bound=true. Before binding, source_default necessarily returns None; deleting this prefilter cannot turn the right conjunct true.")]
+        self.defaults.has_labeled_sources() && self.source_default(concrete) == Some(true) {
             return true;
         }
         if self
@@ -838,6 +856,14 @@ impl Types<'_> {
 
         match kind {
             kind @ (Kind::Bool | Kind::Signed | Kind::Unsigned | Kind::Float) => self.supports_primitive_kind(concrete, kind),
+            Kind::Collection | Kind::Map => {
+                // #[gamma::skip(logical.and_remove_left, tag = "equivalent", reason = "The earlier Collection/Map && !supports_collection_api branch returns for every unsupported collection. This repeated supports_collection_api query is therefore true whenever this match arm is reached.")]
+                self.supports_collection_api(concrete)
+                    && self
+                        .collection_hasher_index(concrete)
+                        .and_then(|index| self.payload(concrete, index))
+                        .is_none_or(|hasher| self.has_proven_default(&hasher))
+            }
             Kind::String =>
             // #[gamma::skip(logical.or_remove_right, reason = "has_proven_default already returned true whenever package_declares_default(concrete) or local_generic_default(concrete) was true. At this later repeated clause both pure queries are necessarily false; deleting or conjoining them changes no result.", tag = "equivalent")]
             {
@@ -918,7 +944,11 @@ impl Types<'_> {
         };
         let name = match path.as_slice() {
             [name] if !self.defaults.defines(name) && !self.imports.contains_key("*") => name,
-            [root, module, name] if matches!(root.as_str(), "std" | "core") && module == "primitive" => name,
+            [root, module, name]
+                if matches!(root.as_str(), "std" | "core") && module == "primitive" && self.standard_external_root(root) =>
+            {
+                name
+            }
             _ => {
                 return
             // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
@@ -975,6 +1005,7 @@ impl Types<'_> {
             [root, module, name]
                 if matches!(root.as_str(), "std" | "alloc")
                     && matches!(module.as_str(), "vec" | "collections")
+                    && self.standard_external_root(root)
                     && collection_kind(name) == Some(written_kind) =>
             {
                 true
@@ -982,6 +1013,7 @@ impl Types<'_> {
             [root, collections, module, name]
                 if matches!(root.as_str(), "std" | "alloc")
                     && collections == "collections"
+                    && self.standard_external_root(root)
                     && collection_module(name) == Some(module.as_str()) =>
             {
                 true
@@ -991,12 +1023,19 @@ impl Types<'_> {
         }
     }
 
+    fn standard_external_root(&self, root: &str) -> bool {
+        self.imports
+            .get(&format!("{EXTERN_ROOT_PREFIX}{root}"))
+            .is_none_or(|path| matches!(path.as_deref(), Some([absolute, original]) if absolute == ABSOLUTE_ROOT && original == root))
+    }
+
     pub(super) fn supports_collection_constructor(&self, ty: &Type) -> bool {
         if !self.supports_collection_api(ty) {
             return
             // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
             false;
         }
+
         let ty = self.resolve_alias(ty);
         let Type::Path(path) = strip(ty) else {
             unreachable!("supports_collection_api accepted only a resolved Type::Path");
@@ -1068,6 +1107,28 @@ impl Types<'_> {
 
     pub(super) fn supports_result_api(&self, ty: &Type) -> bool {
         self.supports_standard_type(ty, "Result", "result", &["std", "core"]) || self.is_io_result(ty)
+    }
+
+    pub(super) fn supports_control_flow_api(&self, ty: &Type) -> bool {
+        let instantiated = self.instantiate_alias(ty);
+        self.unshadowed_type_path(instantiated.as_ref().unwrap_or(ty)).is_some_and(|path| {
+            matches!(path.as_slice(), [root, module, name]
+                if matches!(root.as_str(), "std" | "core") && module == "ops" && name == "ControlFlow")
+        })
+    }
+
+    pub(super) fn supports_ordering_api(&self, ty: &Type) -> bool {
+        let instantiated = self.instantiate_alias(ty);
+        self.unshadowed_type_path(instantiated.as_ref().unwrap_or(ty)).is_some_and(|path| {
+            matches!(path.as_slice(), [root, module, name]
+                if matches!(root.as_str(), "std" | "core") && module == "cmp" && name == "Ordering")
+        })
+    }
+
+    pub(super) fn control_flow_payload(&self, ty: &Type, index: usize) -> Option<Type> {
+        self.payload(ty, index)
+            .map(Cow::into_owned)
+            .or_else(|| (index == 1 && self.payload(ty, 0).is_some()).then(|| syn::parse_quote!(())))
     }
 
     fn is_io_result(&self, ty: &Type) -> bool {
@@ -1232,22 +1293,25 @@ impl Types<'_> {
             // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
             false;
         };
+        let Some((resolved, absolute)) = resolved_type_path_with_root(ty, self.imports) else {
+            return
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "The inferred bool default is already false.")]
+            false;
+        };
         let name = first.ident.to_string();
-        if self.abstracts.contains(&name)
-            || self.defaulted.contains(&name)
-            || self.defaults.defines(&name)
-            || self.aliases.is_some_and(|aliases| aliases.contains_key(&name))
+        if !absolute
+            && (self.abstracts.contains(&name)
+                || self.defaulted.contains(&name)
+                || self.defaults.defines(&name)
+                || self.aliases.is_some_and(|aliases| aliases.contains_key(&name)))
         {
             return
             // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
             false;
         }
-        let Some(resolved) = resolved_type_path(ty, self.imports) else {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
-        };
-        if !self.standard_root_unshadowed(&resolved) {
+        if
+        // #[gamma::skip(cond.always_false, tag = "equivalent", reason = "The only accepting branches below call supports_string_api or supports_collection_api, which independently require the same genuine external root. Relative opaque roots already fail path resolution; canonical import maps cannot retain expanding self-prefixes.")]
+        !self.standard_path_unshadowed(&resolved, absolute) {
             return
             // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
             false;
@@ -1286,12 +1350,25 @@ impl Types<'_> {
         self.unshadowed_path(self.resolve_alias(ty))
     }
 
+    fn has_generic_root(&self, ty: &Type) -> bool {
+        matches!(strip(ty), Type::Path(written)
+        if written.path.leading_colon.is_none()
+        && written.path.segments.first().is_some_and(|segment| {
+            let name = segment.ident.to_string();
+            self.abstracts.contains(&name) || self.defaulted.contains(&name)
+        }))
+    }
+
     fn unshadowed_path(&self, ty: &Type) -> Option<Vec<String>> {
-        let path = resolved_type_path(ty, self.imports)?;
+        if self.has_generic_root(ty) {
+            return
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "The return type is Option<Vec<String>>; its default is already None.")]
+            None;
+        }
+        let (path, absolute) = resolved_type_path_with_root(ty, self.imports)?;
         let first = path.first()?;
-        if !self.standard_root_unshadowed(&path)
-            || self.abstracts.contains(first)
-            || self.defaulted.contains(first)
+        if !self.standard_path_unshadowed(&path, absolute)
+            || !absolute && (self.abstracts.contains(first) || self.defaulted.contains(first))
             || path.len() == 1 && (self.defaults.defines(first) || self.imports.contains_key("*"))
         {
             return
@@ -1312,21 +1389,18 @@ impl Types<'_> {
             .segments
             .iter()
             .any(|segment| !matches!(segment.arguments, PathArguments::None))
-            || written.path.segments.first().is_some_and(|segment| {
-                let name = segment.ident.to_string();
-                self.abstracts.contains(&name) || self.defaulted.contains(&name)
-            })
+            || self.has_generic_root(ty)
         {
             return
             // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
             false;
         }
-        let Some(path) = resolved_type_path(ty, self.imports) else {
+        let Some((path, absolute)) = resolved_type_path_with_root(ty, self.imports) else {
             return
             // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
             false;
         };
-        if !self.standard_root_unshadowed(&path) {
+        if !self.standard_path_unshadowed(&path, absolute) {
             return
             // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
             false;
@@ -1344,21 +1418,31 @@ impl Types<'_> {
     pub(super) fn supports_bare_default_trait(&self) -> bool {
         if let Some(imported) = self.imports.get("Default") {
             return imported.as_ref().is_some_and(|path| {
-                let path = if path.first().is_some_and(|root| root == ABSOLUTE_ROOT) {
-                    &path[1..]
-                } else {
-                    path.as_slice()
-                };
+                let absolute = path.first().is_some_and(|root| root == ABSOLUTE_ROOT);
+                let path = if absolute { &path[1..] } else { path.as_slice() };
                 matches!(path, [root, module, name]
                     if matches!(root.as_str(), "std" | "core") && module == "default" && name == "Default")
-                    && self.standard_root_unshadowed(path)
+                    && self.standard_path_unshadowed(path, absolute)
             });
         }
         !self.imports.contains_key("*") && !self.defaults.defines("Default")
     }
 
     pub(super) fn standard_constructor_root(&self, ty: &Type) -> bool {
-        resolved_type_path(ty, self.imports).is_some_and(|path| self.standard_root_unshadowed(&path))
+        resolved_type_path_with_root(ty, self.imports).is_some_and(|(path, absolute)| self.standard_path_unshadowed(&path, absolute))
+    }
+
+    /// Chooses a replacement qualifier after positive standard-enum identity has been established.
+    pub(super) fn standard_enum_root(&self) -> &'static str {
+        if self.standard_external_root("core") { "core" } else { "std" }
+    }
+
+    fn standard_path_unshadowed(&self, path: &[String], absolute: bool) -> bool {
+        if absolute {
+            path.first().is_some_and(|root| self.standard_external_root(root))
+        } else {
+            self.standard_root_unshadowed(path)
+        }
     }
 
     fn standard_root_unshadowed(&self, path: &[String]) -> bool {
@@ -1370,16 +1454,17 @@ impl Types<'_> {
         if !matches!(root.as_str(), "std" | "core" | "alloc") {
             return true;
         }
-        self.imports.get(root).is_none_or(|imported| {
-            imported.as_ref().is_some_and(|imported| {
-                let imported = if imported.first().is_some_and(|root| root == ABSOLUTE_ROOT) {
-                    &imported[1..]
-                } else {
-                    imported.as_slice()
-                };
-                matches!(imported, [name] if name == root)
+        self.standard_external_root(root)
+            && self.imports.get(root).is_none_or(|imported| {
+                imported.as_ref().is_some_and(|imported| {
+                    let imported = if imported.first().is_some_and(|root| root == ABSOLUTE_ROOT) {
+                        &imported[1..]
+                    } else {
+                        imported.as_slice()
+                    };
+                    matches!(imported, [name] if name == root)
+                })
             })
-        })
     }
 
     pub(super) fn supports_nonzero_api(&self, ty: &Type) -> bool {
@@ -1417,6 +1502,7 @@ impl Types<'_> {
                 path.as_slice(),
                 [root, module, name]
                     if matches!(root.as_str(), "std" | "core")
+                        && self.standard_external_root(root)
                         && module == "num"
                         && is_nonzero(name)
             )
@@ -1441,6 +1527,7 @@ impl Types<'_> {
                 path.as_slice(),
                 [root, module, name]
                     if roots.contains(&root.as_str())
+                        && self.standard_external_root(root)
                         && module == expected_module
                         && name == expected_name
             )
@@ -1496,26 +1583,6 @@ impl Types<'_> {
         self.supports_primitive_kind(element, Kind::Signed) || self.supports_primitive_kind(element, Kind::Unsigned)
     }
 
-    pub(super) fn array_may_default(&self, ty: &Type) -> bool {
-        let array = array_type(ty);
-        let supported_length = if let syn::Expr::Lit(length) = &array.len
-            && let syn::Lit::Int(length) = &length.lit
-        {
-            length.base10_parse::<usize>().is_ok_and(|length| length <= 32)
-        } else {
-            true
-        };
-
-        supported_length
-            && (self.has_source_independent_reference_default(&array.elem)
-                || !is_abstract_type(&array.elem, self.abstracts)
-                    && !self.lacks_default(&array.elem)
-                    && !matches!(
-                        resolve_type(self.resolve_alias(&array.elem)),
-                        Kind::Result | Kind::Reference | Kind::Iterator | Kind::NonZero | Kind::Cow | Kind::StaticStr | Kind::MutStr
-                    ))
-    }
-
     fn has_source_independent_reference_default(&self, ty: &Type) -> bool {
         let concrete = self.resolve_alias(ty);
         if matches!(resolve_type(concrete), Kind::StaticStr) {
@@ -1562,6 +1629,7 @@ impl Types<'_> {
                 path.as_slice(),
                 [root, module, name]
                     if matches!(root.as_str(), "std" | "alloc")
+                        && self.standard_external_root(root)
                         && matches!(
                             (module.as_str(), name.as_str()),
                             ("boxed", "Box") | ("rc", "Rc") | ("sync", "Arc")
@@ -1716,6 +1784,12 @@ impl Types<'_> {
         match strip(concrete) {
             Type::Path(_) if self.supports_result_api(concrete) => return true,
             Type::Never(_) => return true,
+            Type::Ptr(pointer)
+                if matches!(strip(self.resolve_alias(&pointer.elem)), Type::Slice(_) | Type::TraitObject(_))
+                    || self.is_unsized_str(self.resolve_alias(&pointer.elem)) =>
+            {
+                return true;
+            }
             Type::Tuple(tuple) if tuple.elems.iter().any(|element| self.lacks_default(element)) => return true,
             Type::Array(array) => {
                 if let syn::Expr::Lit(length) = &array.len
@@ -1756,6 +1830,9 @@ impl Types<'_> {
                     && matches!(name.as_str(), "Instant" | "SystemTime"))
                 || matches!(segments.as_slice(), [root, module, name]
                     if matches!(root.as_str(), "std" | "core") && module == "cmp" && name == "Ordering")
+                || matches!(segments.as_slice(), [root, module, name]
+                    if matches!(root.as_str(), "std" | "core")
+                        && (module == "task" && name == "Poll" || module == "ptr" && name == "NonNull"))
                 || matches!(segments.as_slice(), [root, module, name]
                     if root == "std" && module == "process" && matches!(name.as_str(), "Command" | "Stdio" | "Output" | "Child"))
                 || matches!(segments.as_slice(), [root, module, name]
@@ -1848,6 +1925,10 @@ pub(super) fn constructor_argument_count(path: &Path) -> Option<usize> {
 }
 
 fn resolved_type_path(ty: &Type, imports: &HashMap<String, Option<Vec<String>>>) -> Option<Vec<String>> {
+    resolved_type_path_with_root(ty, imports).map(|(path, _absolute)| path)
+}
+
+fn resolved_type_path_with_root(ty: &Type, imports: &HashMap<String, Option<Vec<String>>>) -> Option<(Vec<String>, bool)> {
     let Type::Path(path) = strip(ty) else {
         return
         // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
@@ -1866,11 +1947,13 @@ fn resolved_type_path(ty: &Type, imports: &HashMap<String, Option<Vec<String>>>)
         .map(|segment| segment.ident.to_string())
         .collect::<Vec<_>>();
 
-    if path.path.leading_colon.is_none() {
+    let mut absolute = path.path.leading_colon.is_some();
+    if !absolute {
         for _ in 0..imports.len().saturating_add(1) {
             let first = segments.first()?;
             if first == ABSOLUTE_ROOT {
                 let _absolute = segments.remove(0);
+                absolute = true;
                 break;
             }
             let Some(imported) = imports.get(first) else {
@@ -1904,7 +1987,7 @@ fn resolved_type_path(ty: &Type, imports: &HashMap<String, Option<Vec<String>>>)
         }
     }
 
-    Some(segments)
+    Some((segments, absolute))
 }
 
 /// Exact external error APIs whose `Default` obligations are unavailable.
@@ -1973,9 +2056,8 @@ pub(super) fn returns_undefaultable_error(output: &ReturnType, types: &Types<'_>
 
 /// Returns whether a type is one no concrete `Default` can be assumed for.
 ///
-/// `Default::default()` is the fallback for an unknown concrete type, but a caller's type
-/// parameter, an associated type projected from one, and a trait object or `impl Trait` name no
-/// constructible type unless the signature supplies a `Default` bound.
+/// A caller's type parameter, an associated type projected from one, and a trait object or
+/// `impl Trait` name no constructible type unless the signature supplies a `Default` bound.
 ///
 /// `Self::Value` is deliberately excluded. Inside an `impl` block it resolves to the type chosen
 /// by that block and may implement `Default`.
@@ -2045,6 +2127,22 @@ mod tests {
             self_type: None,
             self_associated: None,
         }
+    }
+
+    #[test]
+    fn control_flow_only_defaults_the_omitted_continuation_after_a_known_break_payload() {
+        let defaults = Defaults::default();
+        let imports = HashMap::default();
+        let types = facts(&defaults, &imports);
+        let flow = parse_quote!(core::ops::ControlFlow<u8>);
+        assert_eq!(types.control_flow_payload(&flow, 0), Some(parse_quote!(u8)));
+        assert_eq!(types.control_flow_payload(&flow, 1), Some(parse_quote!(())));
+        assert_eq!(types.control_flow_payload(&flow, 2), None);
+        let unspecified = parse_quote!(core::ops::ControlFlow);
+        assert_eq!(types.control_flow_payload(&unspecified, 0), None);
+        assert_eq!(types.control_flow_payload(&unspecified, 1), None);
+        let explicit = parse_quote!(core::ops::ControlFlow<u8, bool>);
+        assert_eq!(types.control_flow_payload(&explicit, 1), Some(parse_quote!(bool)));
     }
 
     #[test]
@@ -2368,11 +2466,15 @@ mod tests {
     }
 
     #[test]
-    fn absolute_import_provenance_does_not_hide_a_shadowed_standard_root() {
+    fn absolute_import_provenance_does_not_hide_a_foreign_external_root() {
         let defaults = Defaults::default();
         for shadow in ["std", "core"] {
             let imports = HashMap::from_iter([
                 (shadow.into(), None),
+                (
+                    format!("{EXTERN_ROOT_PREFIX}{shadow}"),
+                    Some(vec![ABSOLUTE_ROOT.into(), "foreign".into()]),
+                ),
                 (
                     "char".into(),
                     Some(vec!["<absolute>".into(), shadow.into(), "primitive".into(), "char".into()]),
@@ -3096,7 +3198,7 @@ mod tests {
         for (text, expected) in [
             ("[u8; 32]", true),
             ("[u8; 33]", false),
-            ("[u8; N]", true),
+            ("[u8; N]", false),
             ("[T; 1]", false),
             ("[Missing; 1]", false),
             ("[&u8; 1]", false),
@@ -3105,7 +3207,7 @@ mod tests {
             ("[&str; 1]", true),
             ("[&[u8]; 1]", true),
         ] {
-            assert_eq!(types.array_may_default(&syn::parse_str(text).unwrap()), expected, "{text}");
+            assert_eq!(types.has_proven_default(&syn::parse_str(text).unwrap()), expected, "{text}");
         }
     }
 

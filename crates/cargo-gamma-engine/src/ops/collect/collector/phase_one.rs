@@ -310,6 +310,7 @@ impl<'ast> Visit<'ast> for PhaseOne<'_> {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use super::super::indexes::ABSOLUTE_ROOT;
     use super::*;
 
     #[test]
@@ -463,7 +464,10 @@ mod tests {
                 Some(&Some(vec!["std".into(), "time".into(), "Duration".into()]))
             );
             assert_eq!(indexes.root_imports.get("*"), Some(&None));
-            assert_eq!(indexes.root_imports.get("imported"), Some(&Some(vec!["external".into()])));
+            assert_eq!(
+                indexes.root_imports.get("imported"),
+                Some(&Some(vec![ABSOLUTE_ROOT.into(), "external".into()]))
+            );
             assert_eq!(indexes.fields.get("kept"), Some(&false));
             assert!(!indexes.fields.contains_key("absent"));
             assert_eq!(indexes.constants.get("ASSOCIATED"), Some(&true));
@@ -560,6 +564,7 @@ mod tests {
     fn fused_and_standalone_indexes_agree_across_gates_and_lexical_scopes() {
         let source = r"
             use std::{time::Duration, vec::Vec};
+            use core::cmp::Ordering::Less;
             type Count = usize;
             struct Record { size: usize, #[cfg(not(unix))] disabled: bool }
             const LIMIT: usize = 4;
@@ -570,6 +575,7 @@ mod tests {
                 let _ = offset.saturating_add(1);
                 let _ = offset + 1;
                 { use core::num::NonZeroU32; let _ = NonZeroU32::new(1); }
+                { const Less: u8 = 7; }
                 for i in 0..LIMIT { scalar(i); }
             }
             mod nested {
@@ -597,6 +603,7 @@ mod tests {
             assert_eq!(fused.imports, standalone.imports, "{selectors}");
             assert_eq!(fused.root_imports, standalone.root_imports, "{selectors}");
             assert_eq!(fused.scope_imports, standalone.scope_imports, "{selectors}");
+            assert_eq!(fused.scope_value_items, standalone.scope_value_items, "{selectors}");
             assert_eq!(fused.constants, standalone.constants, "{selectors}");
             assert_eq!(fused.declared_types, standalone.declared_types, "{selectors}");
             assert_eq!(fused.returns, standalone.returns, "{selectors}");

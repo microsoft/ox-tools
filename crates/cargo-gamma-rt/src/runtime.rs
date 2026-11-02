@@ -1690,11 +1690,13 @@ static INSTALL: extern "C" fn() = install;
 #[unsafe(link_section = "__DATA,__mod_init_func")]
 static INSTALL: extern "C" fn() = install;
 
-/// Puts [`install`] in the CRT initialiser section, which the C runtime walks before `main`, for
-/// the same reason as the ELF entry above.
+/// Runs [`install`] before ordinary `.CRT$XCU` user constructors can execute guards.
+///
+/// The Windows linker sorts CRT subsections alphabetically; `.CRT$XCT` is still in the
+/// C++ initializer range, after CRT initialization but before those user constructors.
 #[cfg(all(windows, not(miri)))]
 #[used]
-#[unsafe(link_section = ".CRT$XCU")]
+#[unsafe(link_section = ".CRT$XCT")]
 static INSTALL: extern "C" fn() = install;
 
 /// Marks a test-binary child that must verify the captured selection before `main`.
@@ -3099,12 +3101,9 @@ mod tests {
         #[test]
         #[cfg(all(any(unix, windows), not(miri)))]
         fn a_guard_reached_before_installation_terminates_instead_of_reporting_baseline() {
-            // Linking a fixture whose own pre-main constructor calls a guard, at varying object
-            // and library order across ELF, Mach-O, and Windows, is beyond what a source-level
-            // regression can drive; this proves the underlying mechanism directly instead. The
-            // child's own `install` constructor already ran before its `main`, exactly like every
-            // other test in this binary, so the sentinel is forced back afterward purely to
-            // simulate a guard that runs in the window before that constructor executes.
+            // This proves the fail-closed mechanism independently of platform constructor order.
+            // The child's `install` already ran before `main`, so force the sentinel back to
+            // simulate a guard that runs before installation.
             //
             // A subprocess of its own, selected by name and admitted by an environment marker: the
             // forcing is one-way, so the inner half would invalidate sibling test results in any

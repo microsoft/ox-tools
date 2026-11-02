@@ -65,19 +65,12 @@ fn alias_parameter_roles_survive_chaining_and_do_not_borrow_the_opposite_payload
     let found = discover(source, "fn_value", "optimistic");
     assert_eq!(
         replacements(&found, "success"),
-        [
-            ("Err(Default::default())".into(), Confidence::Optimistic),
-            ("Ok(false)".into(), Confidence::Proven),
-            ("Ok(true)".into(), Confidence::Proven),
-        ],
+        [("Ok(false)".into(), Confidence::Proven), ("Ok(true)".into(), Confidence::Proven),],
         "{found:?}"
     );
     assert_eq!(
         replacements(&found, "failure"),
-        [
-            ("Err(Default::default())".into(), Confidence::Proven),
-            ("Ok(Default::default())".into(), Confidence::Optimistic),
-        ],
+        [("Err(Default::default())".into(), Confidence::Proven)],
         "{found:?}"
     );
     assert_eq!(
@@ -85,11 +78,7 @@ fn alias_parameter_roles_survive_chaining_and_do_not_borrow_the_opposite_payload
         [("false".into(), Confidence::Proven), ("true".into(), Confidence::Proven)],
         "{found:?}"
     );
-    assert_eq!(
-        replacements(&found, "identity_negative"),
-        [("Default::default()".into(), Confidence::Optimistic)],
-        "{found:?}"
-    );
+    assert!(replacements(&found, "identity_negative").is_empty(), "{found:?}");
 }
 
 #[test]
@@ -124,11 +113,7 @@ fn renamed_standard_containers_preserve_shape_without_borrowing_foreign_identity
             ],
             "{mode}: {found:?}"
         );
-        assert_eq!(
-            replacements(&found, "foreign::result"),
-            [("Default::default()".into(), Confidence::Optimistic)],
-            "{mode}: {found:?}"
-        );
+        assert!(replacements(&found, "foreign::result").is_empty(), "{mode}: {found:?}");
     }
 }
 
@@ -166,18 +151,10 @@ fn alias_declaration_identity_distinguishes_modules_shadows_and_cycles() {
             ],
             "{mode}: {found:?}"
         );
-        assert_eq!(
-            replacements(&found, "cycle"),
-            [("Default::default()".into(), Confidence::Optimistic)],
-            "{mode}: {found:?}"
-        );
+        assert!(replacements(&found, "cycle").is_empty(), "{mode}: {found:?}");
     }
     let found = discover(source, "fn_value", "optimistic");
-    assert_eq!(
-        replacements(&found, "negative"),
-        [("Default::default()".into(), Confidence::Optimistic)],
-        "{found:?}"
-    );
+    assert!(replacements(&found, "negative").is_empty(), "{found:?}");
 }
 
 #[test]
@@ -343,13 +320,10 @@ fn conditional_bounds_and_custom_hashers_keep_the_compiler_oracle_honest() {
     ";
     for mode in ["complete", "labeled"] {
         let found = discover(source, "fn_value", mode);
-        for item in ["uncertain", "conditional", "derived_bad"] {
-            assert_eq!(
-                replacements(&found, item),
-                [("Default::default()".into(), Confidence::Optimistic)],
-                "{mode}, {item}: {found:?}"
-            );
+        for item in ["uncertain", "derived_bad"] {
+            assert!(replacements(&found, item).is_empty(), "{mode}, {item}: {found:?}");
         }
+        assert!(replacements(&found, "conditional").is_empty(), "{mode}: {found:?}");
         assert_eq!(
             replacements(&found, "derived_good"),
             [("Default::default()".into(), Confidence::Proven)],
@@ -368,7 +342,6 @@ fn conditional_bounds_and_custom_hashers_keep_the_compiler_oracle_honest() {
         assert_eq!(
             replacements(&found, "foreign"),
             [
-                ("Default::default()".into(), Confidence::Optimistic),
                 ("core::iter::once(0).collect()".into(), Confidence::Optimistic),
                 ("core::iter::once(1).collect()".into(), Confidence::Optimistic),
             ],

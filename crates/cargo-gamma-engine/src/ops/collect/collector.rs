@@ -32,6 +32,7 @@ use crate::{HashMap, HashSet};
 
 mod api_identity;
 mod calls;
+mod enum_semantics;
 mod indexes;
 mod lexical;
 mod noop;
@@ -162,6 +163,7 @@ pub(super) struct Collector<'a> {
     /// mutant that cannot compile is not a weak test, it is noise, so these are never generated
     /// rather than generated and then rolled back.
     inert_depth: usize,
+    const_guard_depth: usize,
 
     /// Whether the `impl` block being traversed implements `Default`.
     ///
@@ -282,6 +284,7 @@ pub(super) struct Collector<'a> {
     implicit_prelude: bool,
     aliases: HashMap<String, Option<types::Alias>>,
     scope_aliases: HashMap<ScopePath, HashMap<String, Option<types::Alias>>>,
+    scope_value_items: HashMap<ScopePath, HashSet<String>>,
     #[cfg(test)]
     block_scopes: HashSet<ScopePath>,
 
@@ -322,6 +325,9 @@ pub(super) struct Collector<'a> {
     /// be emitted, while this one says whether `T::default()` is exactly the standard fallback
     /// already present in a body.
     defaulted: Vec<String>,
+
+    /// Const-generic names occupying the value namespace.
+    const_parameters: Vec<String>,
 
     /// Type parameters in scope that are known to implement a standard iterator trait.
     iterator_bounded: Vec<String>,
@@ -416,6 +422,7 @@ impl<'a> Collector<'a> {
             candidate_identity_sites: Vec::new(),
             ownership_lifts: HashMap::default(),
             inert_depth: 0,
+            const_guard_depth: 0,
             in_default_impl: false,
             impl_self_type: None,
             impl_self_associated: HashMap::default(),
@@ -454,12 +461,14 @@ impl<'a> Collector<'a> {
                 .any(|attribute| attribute.path().is_ident("no_implicit_prelude")),
             aliases: indexes.scope_aliases.get(&Vec::new()).cloned().unwrap_or_default(),
             scope_aliases: indexes.scope_aliases,
+            scope_value_items: indexes.scope_value_items,
             #[cfg(test)]
             block_scopes: indexes.block_scopes,
             deferred: HashSet::default(),
             undo: Vec::new(),
             generics: Vec::new(),
             defaulted: Vec::new(),
+            const_parameters: Vec::new(),
             iterator_bounded: Vec::new(),
             reader_bounded: Vec::new(),
             function_bound_depth: None,
@@ -644,6 +653,7 @@ impl<'a> Collector<'a> {
 
         let identity_key = self.reserve_identity_occurrence(mutator, &range, identity_span.clone());
         if !included
+            || self.const_guard_depth != 0
             ||
             // #[gamma::skip(iter.remove_rev, reason = "Each LoopProof::omits takes &self and evaluates an independent proof against immutable source/range/replacement inputs. The containing any asks only whether at least one proof omits the edit. Reversing this side-effect-free membership scan preserves its boolean.", tag = "equivalent")]
             self
@@ -1104,6 +1114,8 @@ impl<'a> Collector<'a> {
         // An `impl Iterator` return needs both arms of the guard wrapped so they share a type,
         // which is a different splice from every other return. See `Shape::IterBlock`.
         let shape = iterator_body_shape(return_type(&sig.output), &types).unwrap_or(Shape::Block);
+        let original_ordering = self.constant_ordering_return(sig, body, &types);
+        let original_default_control_flow = self.constant_default_control_flow_return(sig, body, &types);
 
         // The value a function ends on is the one its caller reasons about, so it is one of the
         // positions where being wrong by one is a real fault rather than a compile error — but
@@ -1124,6 +1136,15 @@ impl<'a> Collector<'a> {
 
             if recursive && mutator == "fn_value.default" {
                 // #[gamma::skip(loop.continue_to_break, reason = "values_for produces fn_value.default only in a singleton fallback/default vector. Wrapper/Cow forwarding preserves that singleton; Option/Result/iterator/tuple composition renames nested default entries. Thus skipping a recursive fn_value.default is also skipping the last/only entry, and break leaves the same emitted values.", tag = "equivalent")]
+                continue;
+            }
+            if matches!(
+                (mutator, original_ordering.as_deref()),
+                ("fn_value.less", Some("Less")) | ("fn_value.equal", Some("Equal")) | ("fn_value.greater", Some("Greater"))
+            ) || matches!(
+                (mutator, original_default_control_flow.as_deref()),
+                ("fn_value.break_default", Some("Break")) | ("fn_value.continue_default", Some("Continue"))
+            ) {
                 continue;
             }
 
@@ -1391,12 +1412,15 @@ impl<'a> Collector<'a> {
         // behind a predicate that does not hold is not in the program at all, so relying on it
         // would produce a mutant whose match is no longer exhaustive. Suppression is deliberately
         // not consulted — a suppressed arm is still compiled and still keeps the match exhaustive.
-        let wildcard = node.arms.iter().position(|arm| {
-            (
+        let wildcards = node
+            .arms
+            .iter()
+            .enumerate()
+            .filter(|(_, arm)| {
                 // #[gamma::skip(logical.and_remove_left, reason = "is_catch_all accepts only Wild, a binding-case Ident without subpattern, or parentheses around those forms. It returns false for Pat::Guard. Removing the separate negative Pat::Guard conjunct therefore cannot admit any additional catch-all arm.", tag = "equivalent")]
                 !matches!(&arm.pat, Pat::Guard(_)) && is_catch_all(&arm.pat)
-            ) && self.cfg.holds_for(&arm.attrs)
-        });
+            })
+            .collect::<Vec<_>>();
 
         for (index, arm) in node.arms.iter().enumerate() {
             if self.skipped(&arm.attrs) {
@@ -1417,7 +1441,11 @@ impl<'a> Collector<'a> {
                 continue;
             }
 
-            if wildcard.is_some_and(|at| index < at) {
+            if wildcards
+                .iter()
+                .find(|(_, fallback)| self.cfg.guaranteed_when(&fallback.attrs, &arm.attrs))
+                .is_some_and(|(at, _)| index < *at)
+            {
                 self.emit_shaped("match_arm.never_matches", arm.pat.span(), "", 0, Shape::Arm);
             }
         }
@@ -1659,8 +1687,66 @@ impl<'a> Collector<'a> {
             } else {
                 Shape::Expr
             };
-            self.emit_shaped(mutator, node.span(), format_compact!("{before}{replacement}{after}"), index, shape);
+            self.emit_at_conditionally(
+                mutator,
+                node.span().byte_range(),
+                format_compact!("{before}{replacement}{after}"),
+                index,
+                shape,
+                Confidence::Proven,
+                !self.method_substitution_unsupported(node, replacement),
+            );
         }
+    }
+
+    fn method_substitution_unsupported(&self, node: &ExprMethodCall, replacement: &str) -> bool {
+        if !self.defaults.has_single_source_evidence() {
+            return
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "This return has inferred bool type and is already false, exactly bool::default().")]
+            false;
+        }
+        let Some(receiver) = self.inferred_expression_type(&node.receiver) else {
+            return
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "This return has inferred bool type and is already false, exactly bool::default().")]
+            false;
+        };
+        let types = self.types();
+        let imports = self.current_imports();
+        let receiver = types.resolve_alias(&receiver);
+        if self
+            .calls
+            .method_signature(receiver, &node.method.to_string(), &self.scope_path, imports)
+            .is_none()
+        {
+            return
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "This return has inferred bool type and is already false, exactly bool::default().")]
+            false;
+        }
+        let inline = imports
+            .get(types::LOCAL_MODULE)
+            .and_then(Option::as_ref)
+            .map_or(&[][..], Vec::as_slice);
+        self.defaults.resource_sources().closed_methods_for(self.file.path.as_ref(), inline)
+            && self.defaults.resource_sources().method_imports_closed_for(
+                self.file.path.as_ref(),
+                inline,
+                imports
+                    .iter()
+                    .filter(|(name, _)| {
+                        !matches!(name.as_str(), types::LOCAL_MODULE | types::BLOCK_TYPES | types::SOURCE_FILE)
+                            && !name.starts_with(indexes::EXTERN_ROOT_PREFIX)
+                    })
+                    .map(|(_, path)| {
+                        path.as_deref().map(|path| {
+                            if path.first().is_some_and(|root| root == ABSOLUTE_ROOT) {
+                                &path[1..]
+                            } else {
+                                path
+                            }
+                        })
+                    }),
+            )
+            && self.calls.method_absent(receiver, replacement, &self.scope_path, imports)
     }
 
     fn character_receiver(&self, receiver: &Expr) -> bool {
@@ -1735,7 +1821,31 @@ impl<'a> Collector<'a> {
         }
 
         if let Some(rewritten) = self.rewrite_part(node.span(), node.method.span(), replacement) {
-            self.emit_shaped(mutator, node.span(), rewritten, 0, shape);
+            let shape = if
+            // #[gamma::skip(logical.and_remove_left, tag = "equivalent", reason = "Every rename_method_as caller passes Expr or IterExpr. For Expr both branches yield Expr; for IterExpr this left conjunct is true. No caller passes another shape.")]
+            shape == Shape::IterExpr
+                && self
+                    .inferred_method_type(node)
+                    .is_some_and(|ty| self.types().supports_result_api(&ty) || self.types().supports_option_api(&ty))
+            {
+                Shape::Expr
+            } else {
+                shape
+            };
+            let confidence = if matches!(mutator, "iter.take_to_skip" | "iter.skip_to_take") && !self.is_iterator_receiver(&node.receiver) {
+                Confidence::Optimistic
+            } else {
+                Confidence::Proven
+            };
+            self.emit_at_conditionally(
+                mutator,
+                node.span().byte_range(),
+                rewritten,
+                0,
+                shape,
+                confidence,
+                !self.method_substitution_unsupported(node, replacement),
+            );
         }
     }
 
@@ -2110,11 +2220,19 @@ impl<'a> Collector<'a> {
             let name = ident.ident.to_string();
             let ty = self.text_of(typed.ty.span()).to_owned();
             let mutable = if ident.mutability.is_some() { "mut " } else { "" };
-            let replacement = format_compact!(
-                "{} let {mutable}{name}: {ty} = Default::default();{}",
-                &body_text[..=open],
-                &body_text[open + 1..]
-            );
+            let replacement = if contains_impl_trait(&typed.ty) {
+                format_compact!(
+                    "{} let {mutable}{name} = ::gamma_rt::default_like(&{name});{}",
+                    &body_text[..=open],
+                    &body_text[open + 1..]
+                )
+            } else {
+                format_compact!(
+                    "{} let {mutable}{name}: {ty} = Default::default();{}",
+                    &body_text[..=open],
+                    &body_text[open + 1..]
+                )
+            };
             let shape = iterator_body_shape(return_type(&sig.output), &self.types()).unwrap_or(Shape::Block);
             self.emit_shaped(
                 "parameter.default_shadow",
@@ -2402,6 +2520,26 @@ impl<'a> Collector<'a> {
                 return Some(syn::parse_quote!(#path));
             }
             Expr::Path(path)
+                if !path
+                    .path
+                    .segments
+                    .first()
+                    .is_some_and(|head| self.bindings.contains_key(&head.ident.to_string()))
+                    && self
+                        .types()
+                        .unshadowed_type_path(&Type::Path(syn::TypePath {
+                            attrs: Vec::new(),
+                            qself: path.qself.clone(),
+                            path: path.path.clone(),
+                        }))
+                        .is_some_and(|path| {
+                            matches!(path.as_slice(), [root, module, name]
+                            if root == "std" && module == "time" && name == "UNIX_EPOCH")
+                        }) =>
+            {
+                return Some(syn::parse_quote!(std::time::SystemTime));
+            }
+            Expr::Path(path)
                 if path.qself.is_none()
                     && self.calls.structure(&path.path, &self.scope_path, self.current_imports())
                     && !path
@@ -2480,6 +2618,11 @@ impl<'a> Collector<'a> {
                 let item = types.payload(ty, 0)?.into_owned();
                 Some(syn::parse_quote!(&#item))
             }
+            [root, module, name] if matches!(root.as_str(), "std" | "core") && module == "iter" && name == "Enumerate" => {
+                let inner = types.payload(ty, 0)?;
+                let item = self.inferred_iterator_item(&inner)?;
+                Some(syn::parse_quote!((usize, #item)))
+            }
             _ => None,
         }
     }
@@ -2556,12 +2699,24 @@ impl<'a> Collector<'a> {
         {
             return Some(syn::parse_quote!(std::option::Option<#item>));
         }
+        if call.method == "enumerate" && call.args.is_empty() && self.inferred_iterator_item(&receiver).is_some() {
+            return Some(syn::parse_quote!(std::iter::Enumerate<#receiver>));
+        }
         if types.unshadowed_type_path(&receiver).is_some_and(|path| {
             matches!(path.as_slice(),
                 [root, module, name] if matches!(root.as_str(), "std" | "core") && module == "time" && name == "Instant")
         }) && matches!(
             call.method.to_string().as_str(),
             "elapsed" | "duration_since" | "saturating_duration_since"
+        ) {
+            return Some(syn::parse_quote!(std::time::Duration));
+        }
+        if types.unshadowed_type_path(receiver_type).is_some_and(|path| {
+            matches!(path.as_slice(),
+                [root, module, name] if matches!(root.as_str(), "std" | "core") && module == "time" && name == "Duration")
+        }) && matches!(
+            call.method.to_string().as_str(),
+            "mul_f32" | "mul_f64" | "div_f32" | "div_f64" | "saturating_add" | "saturating_sub" | "saturating_mul"
         ) {
             return Some(syn::parse_quote!(std::time::Duration));
         }
@@ -2613,10 +2768,6 @@ impl<'a> Collector<'a> {
         }
         let imported_from = imported_path(self.current_imports(), qualifier);
         let chrono = imported_from.is_some_and(|path| path.first().is_some_and(|root| root == "chrono"));
-        let standard_time = imported_from
-            .filter(|path| matches!(path, [root, module, _] if matches!(root.as_str(), "std" | "core") && module == "time"))
-            .and_then(|path| path.last());
-
         if qualifier == "Utc" && chrono && method == "now" {
             return syn::parse_str("chrono::DateTime").ok();
         }
@@ -2626,14 +2777,41 @@ impl<'a> Collector<'a> {
         if qualifier == "NaiveDateTime" && chrono {
             return syn::parse_str("chrono::NaiveDateTime").ok();
         }
-        if standard_time.is_some_and(|item| item == "Instant") {
-            return syn::parse_str("std::time::Instant").ok();
-        }
-        if standard_time.is_some_and(|item| item == "SystemTime") {
-            return syn::parse_str("std::time::SystemTime").ok();
-        }
-        if standard_time.is_some_and(|item| item == "Duration") {
-            return syn::parse_str("std::time::Duration").ok();
+        let mut owner = path.clone();
+        let _method = owner.segments.pop();
+        let owner = Type::Path(syn::TypePath {
+            attrs: Vec::new(),
+            qself: None,
+            path: owner,
+        });
+        if let Some(owner) = self.types().unshadowed_type_path(&owner) {
+            match owner.as_slice() {
+                [root, module, name] if root == "std" && module == "time" && name == "Instant" && method == "now" => {
+                    return Some(syn::parse_quote!(std::time::Instant));
+                }
+                [root, module, name] if root == "std" && module == "time" && name == "SystemTime" && method == "now" => {
+                    return Some(syn::parse_quote!(std::time::SystemTime));
+                }
+                [root, module, name]
+                    if matches!(root.as_str(), "std" | "core")
+                        && module == "time"
+                        && name == "Duration"
+                        && matches!(
+                            method.to_string().as_str(),
+                            "new"
+                                | "default"
+                                | "from_secs"
+                                | "from_millis"
+                                | "from_micros"
+                                | "from_nanos"
+                                | "from_secs_f32"
+                                | "from_secs_f64"
+                        ) =>
+                {
+                    return Some(syn::parse_quote!(std::time::Duration));
+                }
+                _ => {}
+            }
         }
 
         None
@@ -3131,12 +3309,15 @@ impl<'a> Collector<'a> {
     /// Runs `body` with type parameters that explicitly implement standard `Default` in scope.
     fn with_defaulted_parameters<T>(&mut self, generics: &Generics, body: impl FnOnce(&mut Self) -> T) -> T {
         let depth = self.defaulted.len();
+        let const_depth = self.const_parameters.len();
         let iterator_depth = self.iterator_bounded.len();
         let reader_depth = self.reader_bounded.len();
         let names = standard_defaulted_parameters(generics, &self.default_paths);
         let iterators = Types::standard_iterator_bounded_parameters(generics, self.current_imports());
 
         self.defaulted.extend(names);
+        self.const_parameters
+            .extend(generics.const_params().map(|parameter| parameter.ident.to_string()));
         self.iterator_bounded.extend(iterators);
         self.reader_bounded
             .extend(Types::standard_reader_bounded_parameters(generics, self.current_imports()));
@@ -3144,6 +3325,7 @@ impl<'a> Collector<'a> {
         let result = body(self);
 
         self.defaulted.truncate(depth);
+        self.const_parameters.truncate(const_depth);
         self.iterator_bounded.truncate(iterator_depth);
         self.reader_bounded.truncate(reader_depth);
         result
@@ -3413,7 +3595,21 @@ impl<'a> Collector<'a> {
     /// Visits a function body with its trailing expression checked against the declared return type.
     fn in_typed_block<T>(&mut self, block: &Block, expected: &Type, body: impl FnOnce(&mut Self) -> T) -> T {
         let Some(Stmt::Expr(tail, None)) = block.stmts.last() else {
-            return body(self);
+            let outer = self.undeletable_statements.len();
+            let types = self.types();
+            let expected = types.resolve_alias(expected);
+            if block
+                .stmts
+                .split_last()
+                .is_some_and(|(_, prefix)| prefix.iter().all(nondiverging_statement))
+                && (matches!(expected, Type::Never(_)) || !matches!(resolve_type(expected), Kind::Unit | Kind::Unknown))
+                && let Some(statement @ Stmt::Expr(_, Some(_))) = block.stmts.last()
+            {
+                self.undeletable_statements.push(statement.span().byte_range());
+            }
+            let result = body(self);
+            self.undeletable_statements.truncate(outer);
+            return result;
         };
 
         self.in_typed_expression(tail, expected, body)
@@ -4062,6 +4258,19 @@ fn admissible_default_spans(expression: &Expr, expected: &Type, types: &Types<'_
             }
             _ => {}
         },
+        Expr::Call(call) if types.supports_control_flow_api(expected) && call.args.len() == 1 => {
+            let destination = match enum_semantics::control_flow_variant(&call.func, types).as_deref() {
+                Some("Break") => Some(1),
+                Some("Continue") => Some(0),
+                _ => None,
+            };
+            if destination
+                .and_then(|index| types.control_flow_payload(expected, index))
+                .is_some_and(|payload| types.has_proven_default(&payload))
+            {
+                spans.push(expression.span().byte_range());
+            }
+        }
         Expr::Paren(paren) =>
         // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
         {
@@ -4257,6 +4466,18 @@ const fn return_type(output: &ReturnType) -> Option<&Type> {
     }
 }
 
+fn contains_impl_trait(ty: &Type) -> bool {
+    struct Opaque(bool);
+    impl<'ast> Visit<'ast> for Opaque {
+        fn visit_type_impl_trait(&mut self, _: &'ast syn::TypeImplTrait) {
+            self.0 = true;
+        }
+    }
+    let mut opaque = Opaque(false);
+    opaque.visit_type(ty);
+    opaque.0
+}
+
 /// Returns a final `continue;` whose deletion changes this block's value from diverging to unit.
 fn trailing_continue(block: &Block) -> Option<Range<usize>> {
     match block.stmts.last() {
@@ -4267,22 +4488,14 @@ fn trailing_continue(block: &Block) -> Option<Range<usize>> {
 
 fn mandatory_tail_statements(expression: &Expr, spans: &mut Vec<Range<usize>>) {
     match expression {
-        Expr::Block(block) => match block.block.stmts.last() {
-            Some(statement @ Stmt::Expr(_, Some(_))) => spans.push(statement.span().byte_range()),
-            Some(Stmt::Expr(tail, None)) =>
-            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
-            {
-                mandatory_tail_statements(tail, spans);
-            }
-            _ => {}
-        },
+        Expr::Block(block) =>
+        // #[gamma::skip(call_result.default, tag = "equivalent", reason = "mandatory_block_tail returns unit. default_after executes the call with all spans effects intact and then returns the same unit value.")]
+        {
+            mandatory_block_tail(&block.block, spans);
+        }
         Expr::If(branch) => {
-            if let Some(statement @ Stmt::Expr(_, Some(_))) = branch.then_branch.stmts.last() {
-                spans.push(statement.span().byte_range());
-            } else if let Some(Stmt::Expr(tail, None)) = branch.then_branch.stmts.last() {
-                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
-                mandatory_tail_statements(tail, spans);
-            }
+            // #[gamma::skip(call_result.default, tag = "equivalent", reason = "mandatory_block_tail returns unit. default_after executes the call with all spans effects intact and then returns the same unit value.")]
+            mandatory_block_tail(&branch.then_branch, spans);
             if let Some((_, otherwise)) = &branch.else_branch {
                 // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                 mandatory_tail_statements(otherwise, spans);
@@ -4303,6 +4516,34 @@ fn mandatory_tail_statements(expression: &Expr, spans: &mut Vec<Range<usize>>) {
         // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
         {
             mandatory_tail_statements(&group.expr, spans);
+        }
+        _ => {}
+    }
+}
+
+fn nondiverging_statement(statement: &Stmt) -> bool {
+    match statement {
+        Stmt::Local(local) => local
+            .init
+            .as_ref()
+            .is_none_or(|init| init.diverge.is_none() && matches!(&*init.expr, Expr::Lit(_))),
+        Stmt::Expr(Expr::Lit(_), Some(_)) => true,
+        _ => false,
+    }
+}
+
+fn mandatory_block_tail(block: &Block, spans: &mut Vec<Range<usize>>) {
+    let Some((tail, prefix)) = block.stmts.split_last() else { return };
+    // Unknown calls or earlier exits may already make the tail unreachable.
+    if !prefix.iter().all(nondiverging_statement) {
+        return;
+    }
+    match tail {
+        statement @ Stmt::Expr(_, Some(_)) => spans.push(statement.span().byte_range()),
+        Stmt::Expr(tail, None) =>
+        // #[gamma::skip(call_result.default, tag = "equivalent", reason = "mandatory_tail_statements returns unit. default_after executes the call with all spans effects intact and then returns the same unit value.")]
+        {
+            mandatory_tail_statements(tail, spans);
         }
         _ => {}
     }
@@ -4619,6 +4860,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
 
         let depth = self.generics.len();
         let defaulted_depth = self.defaulted.len();
+        let const_depth = self.const_parameters.len();
         let iterator_depth = self.iterator_bounded.len();
         let reader_depth = self.reader_bounded.len();
         let outer = self.in_default_impl;
@@ -4649,6 +4891,8 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         self.generics.extend(undefaulted_parameters(&node.generics, &self.default_paths));
         self.defaulted
             .extend(standard_defaulted_parameters(&node.generics, &self.default_paths));
+        self.const_parameters
+            .extend(node.generics.const_params().map(|parameter| parameter.ident.to_string()));
         self.iterator_bounded
             .extend(Types::standard_iterator_bounded_parameters(&node.generics, self.current_imports()));
         self.reader_bounded
@@ -4658,6 +4902,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         self.scoped(scope, |collector| visit::visit_item_impl(collector, node));
         self.generics.truncate(depth);
         self.defaulted.truncate(defaulted_depth);
+        self.const_parameters.truncate(const_depth);
         self.iterator_bounded.truncate(iterator_depth);
         self.reader_bounded.truncate(reader_depth);
         self.in_default_impl = outer;
@@ -4887,6 +5132,19 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         // by building the whole tree.
         // #[gamma::skip(stmt.delete_call, reason = "These continuations run wholly under positive inert_depth, so emission rejects every candidate before identity bookkeeping. Declaration/type/numeric indexes were built before traversal and are not populated here. Nested blocks undo local bindings, nested functions save/restore function maps and contexts, and loop/expected-type stacks are balanced on exit. Any span-keyed ownership/proof work concerns these disjoint const/type sites, not later runtime sites. Omitting this inert-only descent changes no output.", tag = "equivalent")]
         self.inert(|collector| visit::visit_type(collector, node));
+    }
+
+    fn visit_const_param(&mut self, node: &'ast syn::ConstParam) {
+        self.const_guard_depth += 1;
+        visit::visit_const_param(self, node);
+        self.const_guard_depth -= 1;
+    }
+
+    fn visit_expr_const(&mut self, node: &'ast syn::ExprConst) {
+        // Reserve formerly discovered sites before filtering so adjacent runtime IDs stay stable.
+        self.const_guard_depth += 1;
+        visit::visit_expr_const(self, node);
+        self.const_guard_depth -= 1;
     }
 
     // #[gamma::skip(fn_value.unit, reason = "Runtime expressions inside a generic argument or type path can occur only as const arguments, which visit_generic_argument already makes inert. Every nested type is also inert; remaining lifetime, bound, identifier and punctuation visits are no-ops. Treating every generic argument as inert or omitting these type/path continuations therefore changes neither candidates nor retained runtime binding state.", tag = "equivalent")]
@@ -5170,8 +5428,8 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         if node.arms.iter().any(|arm| {
             explicitly_nonunit(&arm.body)
                 || self
-                    .type_of_expression(&arm.body)
-                    .is_some_and(|ty| !matches!(resolve_type(ty), Kind::Unit | Kind::Unknown))
+                    .inferred_expression_type(&arm.body)
+                    .is_some_and(|ty| !matches!(resolve_type(self.types().resolve_alias(&ty)), Kind::Unit | Kind::Unknown))
         }) {
             for arm in &node.arms {
                 // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
@@ -5342,6 +5600,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         self.perturb_arguments(callee_name(&node.func).as_deref(), &node.args);
         self.call_semantics(node);
         self.regex_semantics(node);
+        self.control_flow_constructor(node);
 
         // `Some(v)`, `Ok(v)` and `Err(v)` decide, at the point it is decided, whether a value is
         // present and whether an operation succeeded. Replacing a whole function can only ask that
@@ -5389,6 +5648,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
     }
 
     fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+        self.ordering_variant(node);
         // A bare `None` in expression position. Patterns never reach here, because `visit_pat`
         // stops the traversal before a pattern's interior is examined at all.
         if
@@ -5440,6 +5700,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         self.perturb_arguments(Some(method.as_str()), &node.args);
         self.rename_method(node, &method);
         self.method_semantics(node, &method);
+        self.enum_predicate(node, &method);
 
         // The receiver is ordinary code and is traversed; the message is not descended into at all.
         // Renaming the call itself is still offered above, because `expect` and `unwrap_or_default`

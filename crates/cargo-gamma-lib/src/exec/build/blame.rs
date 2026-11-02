@@ -3,9 +3,9 @@
 
 //! Which mutant a compiler error belongs to.
 //!
-//! Rustc spans first provide direct replacement blame or the deletion-only containment fallback.
-//! A non-empty replacement that remains unresolved is handed back to the parent build coordinator
-//! for proof-build isolation. Every resulting withdrawal is summarized as a bounded
+//! Rustc spans provide direct replacement blame or deletion-only containment candidates.
+//! Unresolved replacements and positional deletion candidates require proof-build isolation.
+//! Every resulting withdrawal is summarized as a bounded
 //! [`CompilerReason`].
 //! Flow-sensitive failures always require proof builds: even a primary replacement span may
 //! describe the consequence of a neighboring guard rather than an invalid individual edit.
@@ -25,6 +25,7 @@ pub enum AttributionEvidence {
     #[default]
     OtherDiagnostic,
     ReplacementPrimary,
+    PositionalCandidate,
     ProofBuild,
 }
 
@@ -55,6 +56,10 @@ impl CompilerReason {
         matches!(self.evidence, AttributionEvidence::ReplacementPrimary)
     }
 
+    pub(super) const fn needs_confirmation(&self) -> bool {
+        matches!(self.evidence, AttributionEvidence::PositionalCandidate)
+    }
+
     pub(super) fn note(&self) -> String {
         let code = if self.code.is_empty() {
             String::new()
@@ -64,6 +69,7 @@ impl CompilerReason {
         let site = match self.evidence {
             AttributionEvidence::ReplacementPrimary => "; primary span identified the replacement site",
             AttributionEvidence::OtherDiagnostic => "; primary span did not identify the replacement site",
+            AttributionEvidence::PositionalCandidate => "; deletion containment requires an independent proof build",
             AttributionEvidence::ProofBuild => "; isolated by proof builds without diagnostic-span attribution",
         };
 
@@ -79,9 +85,8 @@ impl CompilerReason {
 /// replacement text, because notes routinely enclose innocent neighboring guards.
 ///
 /// For positional errors, a diagnostic wholly inside generated replacement text identifies that
-/// branch. A deletion has no replacement text, so the innermost deleted site containing the
-/// diagnostic remains sufficient evidence. Flow-sensitive errors and containment involving a
-/// non-empty replacement require proof-build isolation before reporting individual unviability.
+/// branch. A deletion has no replacement text: containment only identifies candidates for bounded
+/// proof-build isolation, never individual unviability. Flow-sensitive errors also require proofs.
 #[expect(clippy::too_many_lines, reason = "the attribution tiers share one parsed diagnostic walk")]
 pub fn blame(stdout: &str, root: &Utf8Path, guards: &Guards) -> HashMap<u32, CompilerReason> {
     const SECONDARY_ATTRIBUTION_BUDGET: usize = 65_536;
@@ -236,6 +241,8 @@ pub fn blame(stdout: &str, root: &Utf8Path, guards: &Guards) -> HashMap<u32, Com
                     category: category.clone(),
                     evidence: if replacement_sites.contains(&ordinal) {
                         AttributionEvidence::ReplacementPrimary
+                    } else if guards.get(&ordinal).is_some_and(|(_file, guard)| guard.mutated.is_none()) {
+                        AttributionEvidence::PositionalCandidate
                     } else {
                         AttributionEvidence::OtherDiagnostic
                     },
@@ -248,7 +255,7 @@ pub fn blame(stdout: &str, root: &Utf8Path, guards: &Guards) -> HashMap<u32, Com
     // Exact generated-text evidence wins for the whole compiler batch. rustc commonly emits a
     // root diagnostic followed by consequences whose broad spans cover neighboring guards. Taking
     // deletion containment from those follow-ons in the same round would falsely withdraw siblings.
-    // If an independent deletion also fails, the next rollback round will expose and attribute it.
+    // If an independent deletion also fails, the next rollback round exposes it for proof builds.
     if exact_blame.is_empty() { deletion_blame } else { exact_blame }
 }
 
@@ -452,6 +459,48 @@ mod final_survivor_tests {
     use core::num::NonZeroU32;
 
     use super::*;
+
+    #[test]
+    fn compiler_reason_notes_distinguish_direct_diagnostics_suspicions_and_independent_proofs() {
+        for (evidence, suffix, confirmation, replacement) in [
+            (
+                AttributionEvidence::ReplacementPrimary,
+                "; primary span identified the replacement site",
+                false,
+                true,
+            ),
+            (
+                AttributionEvidence::OtherDiagnostic,
+                "; primary span did not identify the replacement site",
+                false,
+                false,
+            ),
+            (
+                AttributionEvidence::PositionalCandidate,
+                "; deletion containment requires an independent proof build",
+                true,
+                false,
+            ),
+            (
+                AttributionEvidence::ProofBuild,
+                "; isolated by proof builds without diagnostic-span attribution",
+                false,
+                false,
+            ),
+        ] {
+            for code in ["", "E0308"] {
+                let reason = CompilerReason {
+                    code: code.to_owned(),
+                    category: "mismatched types".to_owned(),
+                    evidence,
+                };
+                let prefix = if code.is_empty() { "rustc" } else { "rustc E0308" };
+                assert_eq!(reason.note(), format!("{prefix}: mismatched types{suffix}"));
+                assert_eq!(reason.needs_confirmation(), confirmation);
+                assert_eq!(reason.replacement_site(), replacement);
+            }
+        }
+    }
 
     #[test]
     fn recovered_category_leading_whitespace_does_not_spend_the_content_budget() {
@@ -887,7 +936,7 @@ mod final_survivor_tests {
         assert_eq!(blamed.len(), 2);
         for ordinal in [3, 4] {
             assert_eq!(blamed[&ordinal].code, "E0308");
-            assert_eq!(blamed[&ordinal].evidence, AttributionEvidence::OtherDiagnostic);
+            assert_eq!(blamed[&ordinal].evidence, AttributionEvidence::PositionalCandidate);
         }
         let exact = diagnostic("error", "E0308", &[span(Some("workspace/src/lib.rs"), 6, 7, true)]);
         for batch in [format!("{deletion}\n{exact}"), format!("{exact}\n{deletion}")] {

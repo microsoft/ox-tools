@@ -16,8 +16,8 @@ pub fn publication_lock(lock: File) -> crate::Result<Option<File>> {
     .map(|(_, lock)| lock)
 }
 
-pub fn configure<H: Host>(host: &mut H, args: &mut RunArgs, styler: Styler) -> crate::Result<()> {
-    super::configure(host, args, styler)
+pub fn configure(args: &mut RunArgs) -> crate::Result<()> {
+    super::configure(args)
 }
 
 pub fn resumed_publication(

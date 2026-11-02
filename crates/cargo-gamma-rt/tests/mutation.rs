@@ -6,7 +6,7 @@
 
 use core::fmt::Debug;
 
-use gamma_rt::{Boundary, decrement, default_after, increment, panic_on_failure};
+use gamma_rt::{Boundary, decrement, default_after, default_like, increment, panic_on_failure};
 
 fn assert_boundary<T: Boundary + Copy + Debug + PartialEq>(zero: T, one: T, two: T) {
     assert_eq!(increment(zero), one);
@@ -85,4 +85,28 @@ fn propagation_error_panics_without_requiring_debug_for_the_error() {
 #[should_panic(expected = "gamma: propagation replaced by panic")]
 fn propagation_absence_panics_instead_of_returning_none() {
     let _: Option<u32> = panic_on_failure(None);
+}
+
+#[test]
+fn witnessed_default_preserves_opaque_type_and_does_not_consume_the_original() {
+    fn replace(value: Option<impl FnOnce() -> u32>) {
+        let empty = default_like(&value);
+        assert!(empty.is_none());
+        assert_eq!(value.unwrap()(), 17);
+    }
+    replace(Some(|| 17));
+}
+
+#[test]
+fn propagation_continue_preserves_noncopy_payload_without_debug_bounds() {
+    struct Opaque;
+    let value: core::ops::ControlFlow<Opaque, String> = core::ops::ControlFlow::Continue(String::from("retained"));
+    assert!(matches!(panic_on_failure(value), core::ops::ControlFlow::Continue(value) if value == "retained"));
+}
+
+#[test]
+#[should_panic(expected = "gamma: propagation replaced by panic")]
+fn propagation_break_panics_without_debug_bounds() {
+    struct Opaque;
+    let _: core::ops::ControlFlow<Opaque, u32> = panic_on_failure(core::ops::ControlFlow::Break(Opaque));
 }

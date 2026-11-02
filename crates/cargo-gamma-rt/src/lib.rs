@@ -118,6 +118,9 @@
 //! is a startup failure, not an absent one. A read interrupted by a signal is retried rather than
 //! counted as a failure, since an interruption is not evidence of anything.
 //!
+//! On Windows, the runtime installs its captured state before ordinary `.CRT$XCU` user
+//! constructors, so instrumented code in those constructors can use guards normally.
+//!
 //! Two further failure shapes exist because "captured, but wrong" is worse than either of the
 //! above:
 //!
@@ -239,7 +242,7 @@ pub mod embedded {
 #[doc(inline)]
 pub use either::Either;
 #[doc(inline)]
-pub use mutation::{Boundary, PanicOnFailure, decrement, default_after, increment, panic_on_failure};
+pub use mutation::{Boundary, PanicOnFailure, decrement, default_after, default_like, increment, panic_on_failure};
 #[cfg(all(loom, feature = "loom"))]
 #[doc(hidden)]
 pub use runtime::run_loom_models;

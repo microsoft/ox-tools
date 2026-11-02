@@ -19,6 +19,12 @@ pub(super) fn consuming_sites(file: &syn::File) -> HashMap<Range<usize>, Range<u
     }
     #[expect(clippy::renamed_function_params, reason = "visitor parameters use descriptive names")]
     impl<'ast> Visit<'ast> for Walk<'ast> {
+        fn visit_expr_assign(&mut self, assignment: &'ast syn::ExprAssign) {
+            // #[gamma::skip(call_result.default, tag = "equivalent", reason = "assignment_arrays returns unit; default_after executes it with identical sites mutations before returning the same unit value.")]
+            assignment_arrays(&assignment.left, &assignment.span().byte_range(), &mut self.sites);
+            visit::visit_expr_assign(self, assignment);
+        }
+
         fn visit_expr(&mut self, expression: &'ast Expr) {
             let expression_span = expression.span().byte_range();
             let boundary = self
@@ -78,6 +84,38 @@ pub(super) fn consuming_sites(file: &syn::File) -> HashMap<Range<usize>, Range<u
     walk.sites
 }
 
+fn assignment_arrays(expression: &Expr, assignment: &Range<usize>, sites: &mut HashMap<Range<usize>, Range<usize>>) {
+    let elements = match expression {
+        Expr::Array(array) => {
+            let _prior = sites.insert(array.span().byte_range(), assignment.clone());
+            &array.elems
+        }
+        Expr::Tuple(tuple) => &tuple.elems,
+        Expr::Struct(structure) => {
+            for field in &structure.fields {
+                // #[gamma::skip(call_result.default, tag = "equivalent", reason = "assignment_arrays returns unit; default_after executes it with identical sites mutations before returning the same unit value.")]
+                assignment_arrays(&field.expr, assignment, sites);
+            }
+            return;
+        }
+        Expr::Paren(paren) => {
+            return
+            // #[gamma::skip(call_result.default, tag = "equivalent", reason = "assignment_arrays returns unit; default_after executes it with identical sites mutations before returning the same unit value.")]
+            assignment_arrays(&paren.expr, assignment, sites);
+        }
+        Expr::Group(group) => {
+            return
+            // #[gamma::skip(call_result.default, tag = "equivalent", reason = "assignment_arrays returns unit; default_after executes it with identical sites mutations before returning the same unit value.")]
+            assignment_arrays(&group.expr, assignment, sites);
+        }
+        _ => return,
+    };
+    for element in elements {
+        // #[gamma::skip(call_result.default, tag = "equivalent", reason = "assignment_arrays returns unit; default_after executes it with identical sites mutations before returning the same unit value.")]
+        assignment_arrays(element, assignment, sites);
+    }
+}
+
 fn temporary(expression: &Expr) -> bool {
     match expression {
         Expr::Call(_) | Expr::MethodCall(_) | Expr::Struct(_) | Expr::Array(_) | Expr::Tuple(_) => true,
@@ -120,7 +158,8 @@ fn borrows_temporary(expression: &Expr) -> bool {
         Expr::Group(group) => borrows_temporary(&group.expr),
         Expr::Call(call) => {
             matches!(&*call.func, Expr::Path(path)
-            if path.path.get_ident().is_some_and(|name| matches!(name.to_string().as_str(), "Some" | "Ok" | "Err")))
+            if path.path.segments.len() > 1
+                || path.path.get_ident().is_some_and(|name| matches!(name.to_string().as_str(), "Some" | "Ok" | "Err")))
                 && call.args.iter().any(borrows_temporary)
         }
         Expr::Index(index) => borrows_temporary(&index.expr),
@@ -135,6 +174,39 @@ mod tests {
     use syn::{Item, Stmt, parse_file, parse_str};
 
     use super::*;
+
+    #[test]
+    fn nested_assignee_arrays_use_the_assignment_without_visiting_place_computations() {
+        let file = parse_file("fn f() { ([*left, *right], (*other, places[[0, 1][0]])) = values(); }").unwrap();
+        let Item::Fn(function) = &file.items[0] else { unreachable!() };
+        let Stmt::Expr(Expr::Assign(assignment), _) = &function.block.stmts[0] else {
+            unreachable!()
+        };
+        let Expr::Tuple(tuple) = &*assignment.left else { unreachable!() };
+        assert_eq!(
+            consuming_sites(&file),
+            HashMap::from_iter([(tuple.elems[0].span().byte_range(), assignment.span().byte_range())])
+        );
+    }
+
+    #[test]
+    fn struct_parenthesized_and_grouped_assignees_preserve_array_sites() {
+        let expression: Expr = parse_str("Pair { values: ([*left, *right]), place: named[[0, 1][0]] }").unwrap();
+        let Expr::Struct(structure) = &expression else { unreachable!() };
+        let Expr::Paren(paren) = &structure.fields[0].expr else {
+            unreachable!()
+        };
+        let group = Expr::Group(syn::ExprGroup {
+            attrs: Vec::new(),
+            group_token: Group::default(),
+            expr: Box::new(expression.clone()),
+        });
+        for expression in [&expression, &group] {
+            let mut sites = HashMap::default();
+            assignment_arrays(expression, &(0..100), &mut sites);
+            assert_eq!(sites, HashMap::from_iter([(paren.expr.span().byte_range(), 0..100)]));
+        }
+    }
 
     #[test]
     fn borrow_propagation_requires_recognized_wrappers_and_checks_each_argument_and_index_base() {
