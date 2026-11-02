@@ -742,24 +742,38 @@ mod tests {
     }
 
     #[test]
-    fn semver_check_compares_against_the_pr_branch_baseline() {
+    fn semver_check_compares_locked_snapshots_against_the_pr_branch_baseline() {
         let (_, body) = CHECK_FILES
             .iter()
             .find(|(path, _)| *path == "justfiles/anvil/checks/semver-check.just")
-            .expect("semver check template is registered");
+            .expect("CHECK_FILES above always registers the SemVer check template");
 
-        // The recipe must resolve the PR target branch via the shared
-        // resolver _anvil-base-ref, and pass it to cargo-semver-checks
-        // as the baseline rather than comparing against the last crates.io release.
         for needle in [
             "_anvil-base-ref",
             "git rev-parse --verify \"$base^{commit}\"",
-            "git cat-file -e $baselineManifest",
+            "git cat-file -e ('{0}:{1}' -f $baseSha, $manifestPath)",
             "$stableArgs = {{_anvil_stable_toolchain_args}}",
-            "cargo @stableArgs semver-checks --package $p --baseline-rev $base",
+            "git clone --shared --no-checkout --quiet",
+            "-c filter.lfs.process= -c filter.lfs.smudge=",
+            "-c filter.lfs.required=false checkout --quiet --detach $baseSha",
+            "function Get-RustdocSnapshot",
+            "rustdoc --locked --lib",
+            "--package $package.id",
+            "--target $target --target-dir $targetDir",
+            "--output-format=json",
+            "--document-private-items",
+            "--document-hidden-items",
+            "'unstable', 'nightly', 'bench', 'no_std'",
+            "'^(_|unstable[-_])'",
+            "Remove-Item -LiteralPath $json",
+            "Get-RustdocSnapshot $currentPackage $meta.workspace_root",
+            "Get-RustdocSnapshot $old $baselineMeta.workspace_root",
+            "--current-rustdoc $current.Path --baseline-rustdoc $baseline.Path",
         ] {
             assert!(body.contains(needle), "semver check template missing '{needle}'");
         }
+        assert!(!body.contains("semver-checks --package $p --baseline-rev"));
+        assert!(!body.contains("cargo @stableArgs update"));
     }
 
     #[test]

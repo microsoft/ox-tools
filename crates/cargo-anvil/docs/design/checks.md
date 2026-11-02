@@ -204,8 +204,10 @@ updates its dependencies, so a newly published incompatible transitive dependenc
 can otherwise prevent a previously buildable baseline from being compared.
 
 Anvil makes one temporary, local shared Git clone, checks out the resolved PR
-target commit, and removes that clone in `finally`. The original repository and
-historical manifests are not modified. Both snapshots use the current checkout's
+target commit, and removes that clone in `finally`. LFS smudging is disabled for
+that checkout: it uses the committed pointers rather than fetching assets from
+the local origin. The original repository and historical manifests are not
+modified. Both snapshots use the current checkout's
 selected stable compiler, overriding any obsolete baseline toolchain selection.
 The current Cargo build target is used for both arms; an unset target selects the
 compiler's host. A multi-target configuration must select one target with

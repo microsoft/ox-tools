@@ -232,7 +232,9 @@ anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
         if ($LASTEXITCODE -ne 0) {
             throw "anvil-semver-check: failed to create the local baseline clone: $($cloneOutput -join [Environment]::NewLine)"
         }
-        $checkoutOutput = @(& git -C $baselineRoot checkout --quiet --detach $baseSha 2>&1)
+        # A local source snapshot must not fetch LFS assets from the clone's local origin.
+        $checkoutOutput = @(& git -C $baselineRoot -c filter.lfs.process= -c filter.lfs.smudge= `
+            -c filter.lfs.required=false checkout --quiet --detach $baseSha 2>&1)
         if ($LASTEXITCODE -ne 0) {
             throw "anvil-semver-check: failed to check out baseline ${baseSha}: $($checkoutOutput -join [Environment]::NewLine)"
         }

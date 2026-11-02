@@ -54,31 +54,6 @@ const CONTAINER_DOCKERIGNORE: &str = include_str!("../templates/anvil/container/
 // Any nonzero value works; naming it prevents tests from implying an external exit-code contract.
 const ARBITRARY_FAILURE_EXIT: &str = "23";
 
-#[test]
-fn semver_compares_locked_workspace_snapshots() {
-    let generation = SEMVER
-        .split("function Get-RustdocSnapshot")
-        .nth(1)
-        .unwrap()
-        .split("    $include =")
-        .next()
-        .unwrap();
-    assert!(generation.contains("rustdoc --locked --lib"));
-    assert!(generation.contains("--package $package.id"));
-    assert!(generation.contains("--target $target --target-dir $targetDir"));
-    for option in ["--output-format=json", "--document-private-items", "--document-hidden-items"] {
-        assert!(generation.contains(option), "rustdoc must retain {option}");
-    }
-    assert!(generation.contains("'unstable', 'nightly', 'bench', 'no_std'"));
-    assert!(generation.contains("'^(_|unstable[-_])'"));
-    assert!(generation.contains("Remove-Item -LiteralPath $json"));
-    assert!(SEMVER.contains("Get-RustdocSnapshot $currentPackage $meta.workspace_root"));
-    assert!(SEMVER.contains("Get-RustdocSnapshot $old $baselineMeta.workspace_root"));
-    assert!(SEMVER.contains("--current-rustdoc $current.Path --baseline-rustdoc $baseline.Path"));
-    assert!(!SEMVER.contains("semver-checks --package $p --baseline-rev"));
-    assert!(!SEMVER.contains("cargo @stableArgs update"));
-}
-
 /// Serializes PowerShell interpreter startup within this libtest process.
 ///
 /// PowerShell#26940 can corrupt assembly-name parsing when constrained runners
