@@ -493,6 +493,16 @@ function Matches([string[]]$expected) {
         [System.StringComparison]::Ordinal
     )
 }
+$outputPrefix = '--output='
+if ($actual.Count -eq 5 -and $actual[4].StartsWith($outputPrefix, [System.StringComparison]::Ordinal)) {
+    $diff = $actual[4].Substring($outputPrefix.Length)
+    if ([System.IO.Path]::GetDirectoryName($diff) -ceq $env:RUNNER_TEMP -and
+        [System.IO.Path]::GetFileName($diff) -cmatch '^anvil-mutants-diff-[0-9a-f]{32}\.diff$' -and
+        [System.IO.File]::Exists($diff) -and
+        (Matches -expected @('diff', '--src-prefix=a/', '--dst-prefix=b/', $env:BASE_REF, $actual[4]))) {
+        exit 0
+    }
+}
 if (Matches -expected @('rev-parse', '--verify', ($env:BASE_REF + '^{commit}'))) {
     Write-Output 'baseline-fixture'
     exit 0
@@ -3584,6 +3594,15 @@ fn mutants_recipes_select_only_the_host_config_and_preserve_exit_codes() {
                 assert_mutants_diff_cleaned(root);
             }
         }
+    }
+    if cfg!(windows) && cfg!(target_arch = "aarch64") {
+        assert!(!root.join("git.log").exists());
+    } else {
+        assert_eq!(
+            fs::read_to_string(root.join("git.log")).unwrap().lines().count(),
+            4,
+            "only the four diff scenarios should consume the scripted Git operation"
+        );
     }
     seed_include(root, "affected", "--skip");
     write(&log, "");
