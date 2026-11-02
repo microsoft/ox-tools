@@ -76,6 +76,13 @@ on tool availability. These checks protect the emitted artifact contract, not
 runtime PowerShell semantics; recipe execution is validated by the provisioned
 self-hosting pipeline described above.
 
+Bolero candidate selection is also exercised directly in PowerShell by
+`./scripts/test-anvil-bolero.Tests.ps1`, run in the regeneration workflow. It
+loads the production selector from the source template and passes in-memory
+metadata, without spawning processes or creating input fixtures. Cases cover
+no-Bolero packages, direct and transitive dependencies, workspace/registry
+identity collisions, impact selection, graph ordering/cycles, and invalid input.
+
 The formatter alias-rejection and name-collision tests separately execute Just
 and PowerShell against controlled Cargo metadata. These behavior checks run
 with the `internals` feature enabled and require both executables on `PATH`.
