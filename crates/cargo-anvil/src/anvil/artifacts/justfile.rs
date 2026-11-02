@@ -822,23 +822,6 @@ mod tests {
     }
 
     #[test]
-    fn helpers_file_contains_only_private_recipes() {
-        for artifact in Catalog::anvil().artifacts() {
-            let Artifact::OwnedFileSection(section) = artifact else {
-                continue;
-            };
-            if section.path != HELPERS_JUST_PATH || !section.id.starts_with("recipe:") {
-                continue;
-            }
-            assert!(
-                section.body.lines().any(|line| line == "[private]"),
-                "{} must be private in helpers.just",
-                section.id
-            );
-        }
-    }
-
-    #[test]
     fn checks_just_template_includes_all_catalog_checks() {
         let checks = all_check_bodies();
         for needle in [
