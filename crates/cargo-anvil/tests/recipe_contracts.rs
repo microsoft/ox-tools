@@ -482,19 +482,87 @@ if ($args -contains 'install' -and $args -contains '--version') {
 exit [int]$env:FAKE_CARGO_DEFAULT_EXIT
 "#;
 
-const FAKE_GIT_PS1: &str = r"
-if ($args -contains 'rev-parse') {
-    if ($args -contains '--show-toplevel') {
-        Write-Output $env:FAKE_WORKSPACE_ROOT
-    } else {
-        Write-Output 'baseline-fixture'
+const FAKE_GIT_PS1: &str = r#"
+$actual = @($args)
+$actualJson = ConvertTo-Json -InputObject $actual -Compress
+Add-Content -LiteralPath (Join-Path $env:FAKE_WORKSPACE_ROOT 'git.log') -Value $actualJson
+function Matches([string[]]$expected) {
+    [string]::Equals(
+        $actualJson,
+        (ConvertTo-Json -InputObject $expected -Compress),
+        [System.StringComparison]::Ordinal
+    )
+}
+if (Matches -expected @('rev-parse', '--verify', ($env:BASE_REF + '^{commit}'))) {
+    Write-Output 'baseline-fixture'
+    exit 0
+}
+if (Matches -expected @('rev-parse', '--show-toplevel')) {
+    Write-Output $env:FAKE_WORKSPACE_ROOT
+    exit 0
+}
+$manifest = if ($env:FAKE_THIRD_PACKAGE_NAME) {
+    "nested/$($env:FAKE_THIRD_PACKAGE_NAME)/Cargo.toml"
+} else {
+    'Cargo.toml'
+}
+if (Matches -expected @('cat-file', '-e', "baseline-fixture:$manifest")) {
+    exit 0
+}
+if ($actual.Count -eq 7 -and
+    [System.IO.Path]::GetFileName($actual[6]) -cmatch '^anvil-semver-\d+-[0-9a-f]{32}$' -and
+    (Matches -expected @('clone', '--shared', '--no-checkout', '--quiet', '--', $env:FAKE_WORKSPACE_ROOT, $actual[6]))) {
+    [System.IO.Directory]::CreateDirectory($actual[6]) | Out-Null
+    exit 0
+}
+if ($actual.Count -eq 12 -and
+    [System.IO.Directory]::Exists($actual[1]) -and
+    (Matches -expected @('-C', $actual[1], '-c', 'filter.lfs.process=', '-c', 'filter.lfs.smudge=',
+        '-c', 'filter.lfs.required=false', 'checkout', '--quiet', '--detach', 'baseline-fixture'))) {
+    exit 0
+}
+Write-Error "Unexpected Git invocation: $actualJson" -ErrorAction Continue
+exit 97
+"#;
+
+fn assert_semver_git_calls(root: &Path, manifest: &str, invocations: usize) {
+    let calls: Vec<Vec<String>> = fs::read_to_string(root.join("git.log"))
+        .unwrap()
+        .lines()
+        .map(|line| from_str(line).unwrap())
+        .collect();
+    let expected: Vec<Vec<String>> = from_str(&include_str!("fixtures/semver-git-commands.json").replace("<manifest>", manifest)).unwrap();
+    assert_eq!(
+        calls.len(),
+        expected.len() * invocations,
+        "every expected Git call must be consumed"
+    );
+    let workspace = root.to_str().unwrap();
+    for invocation in calls.chunks_exact(expected.len()) {
+        let baseline = &invocation[3][6];
+        let normalized: Vec<Vec<&str>> = invocation
+            .iter()
+            .map(|arguments| {
+                arguments
+                    .iter()
+                    .map(|argument| {
+                        if argument == baseline {
+                            "<baseline>"
+                        } else if argument == workspace {
+                            "<workspace>"
+                        } else {
+                            argument
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            normalized, expected,
+            "Git arguments must match the scripted baseline operations exactly"
+        );
     }
 }
-if ($args -contains 'clone') {
-    [System.IO.Directory]::CreateDirectory($args[-1]) | Out-Null
-}
-exit 0
-";
 
 fn write(path: &Path, contents: &str) {
     if let Some(parent) = path.parent() {
@@ -2386,6 +2454,7 @@ fn semver_exit_code_contract_is_executed() {
     assert!(comment.contains("Inconclusive comparisons"));
     assert!(comment.contains("current rustdoc (exit 101)"));
     assert!(comment.contains("locked rustdoc build failed"));
+    assert_semver_git_calls(tmp.path(), "Cargo.toml", 6);
 }
 
 #[test]
@@ -3168,6 +3237,7 @@ fn semver_skips_non_publishable_libraries() {
     );
     assert!(!fs::read_to_string(log).unwrap().contains("semver-checks"));
     assert!(String::from_utf8_lossy(&output.stdout).contains("no affected publishable library crates"));
+    assert!(!tmp.path().join("git.log").exists(), "non-publishable crates must not invoke Git");
 }
 
 #[test]
@@ -3206,6 +3276,7 @@ fn semver_includes_libraries_restricted_to_named_registries() {
             .unwrap()
             .contains("semver-checks --package named-registry --current-rustdoc")
     );
+    assert_semver_git_calls(tmp.path(), "nested/named-registry/Cargo.toml", 1);
 }
 
 #[test]
