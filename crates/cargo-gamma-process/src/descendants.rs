@@ -78,7 +78,7 @@ pub(crate) fn tree(group: i32) -> io::Result<Vec<i32>> {
 /// outside it before its children are listed. A stopped process can neither start a child nor
 /// reap one, so every listed process keeps its pid and group id until the sweep has signalled it.
 /// Descendants are then killed children first, so a killed child stays a zombie of a stopped
-/// parent rather than being reparented and reaped. A descendant that leads its group is killed
+/// parent rather than passing to `launchd` and being reaped. A descendant that leads its group is killed
 /// with that group; any other is killed alone, so a process that joins an unrelated group cannot
 /// steer the sweep there.
 ///
