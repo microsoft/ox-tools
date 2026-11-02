@@ -68,10 +68,8 @@ impl Processes for Native {
 ///
 /// Returns the operating system's reason when a listing fails.
 pub(crate) fn tree(group: i32) -> io::Result<Vec<i32>> {
-    Ok(walk(&mut Native, group, |_processes, _pid| {})?
-        .into_iter()
-        .map(|(pid, _member)| pid)
-        .collect())
+    let (tree, listed) = walk(&mut Native, group, |_processes, _pid| {});
+    listed.map(|()| tree.into_iter().map(|(pid, _member)| pid).collect())
 }
 
 /// Ends every descendant of `group` outside it, then `group` itself through `kill_group`.
@@ -87,50 +85,58 @@ pub(crate) fn tree(group: i32) -> io::Result<Vec<i32>> {
 /// # Errors
 ///
 /// Returns the error from `kill_group` first, then a listing failure, then the first failure to
-/// kill a descendant, including `EPERM` for a process this user cannot signal. `group` is resumed
-/// when `kill_group` fails, so a failed sweep does not leave it stopped.
+/// kill a descendant, including `EPERM` for a process this user cannot signal. A failed listing
+/// skips only the subtree it would have revealed: every descendant already found, and so already
+/// stopped, is still killed. `group` is resumed when `kill_group` fails, so a failed sweep does
+/// not leave it stopped.
 pub(crate) fn sweep(group: i32, kill_group: impl FnOnce() -> io::Result<()>) -> io::Result<()> {
     sweep_with(&mut Native, group, kill_group)
 }
 
 /// Walks a group's members and their descendants, calling `before_children` on each descendant
 /// outside the group before listing its children. Each entry says whether it is a group member.
-fn walk<P: Processes>(processes: &mut P, group: i32, mut before_children: impl FnMut(&mut P, i32)) -> io::Result<Vec<(i32, bool)>> {
-    let mut pending: VecDeque<_> = processes.members(group)?.into_iter().map(|pid| (pid, true)).collect();
-    let mut seen = BTreeSet::new();
+///
+/// A failed child listing skips that process's subtree, not the rest of the walk, so the caller
+/// still has every process found. The first listing failure is returned beside the tree.
+fn walk<P: Processes>(processes: &mut P, group: i32, mut before_children: impl FnMut(&mut P, i32)) -> (Vec<(i32, bool)>, io::Result<()>) {
     let mut tree = Vec::new();
+    let mut pending: VecDeque<_> = match processes.members(group) {
+        Ok(members) => members.into_iter().map(|pid| (pid, true)).collect(),
+        Err(cause) => return (tree, Err(cause)),
+    };
+    let mut seen = BTreeSet::new();
+    let mut listed = Ok(());
     while let Some((pid, member)) = pending.pop_front() {
         if seen.insert(pid) {
             if !member {
                 before_children(processes, pid);
             }
             tree.push((pid, member));
-            pending.extend(processes.children(pid)?.into_iter().map(|child| (child, false)));
+            match processes.children(pid) {
+                Ok(children) => pending.extend(children.into_iter().map(|child| (child, false))),
+                Err(cause) => listed = listed.and(Err(cause)),
+            }
         }
     }
-    Ok(tree)
+    (tree, listed)
 }
 
 fn sweep_with(processes: &mut impl Processes, group: i32, kill_group: impl FnOnce() -> io::Result<()>) -> io::Result<()> {
     // A group whose leader has exited can hold only that zombie, which macOS refuses to signal.
     // Such a group starts no children, so a failed stop costs the walk nothing.
     let _stopped = processes.stop(group);
-    let ended = walk(processes, group, |processes, pid| {
+    let (tree, mut ended) = walk(processes, group, |processes, pid| {
         // A process this user cannot stop cannot be killed either; that kill reports it below.
         let _stopped = processes.stop_process(pid);
-    })
-    .and_then(|tree| {
-        let mut ended = Ok(());
-        for (pid, _member) in tree.into_iter().rev().filter(|(_pid, member)| !member) {
-            let killed = if processes.group_of(pid) == Some(pid) {
-                processes.kill(pid)
-            } else {
-                processes.kill_process(pid)
-            };
-            ended = ended.and(killed);
-        }
-        ended
     });
+    for (pid, _member) in tree.into_iter().rev().filter(|(_pid, member)| !member) {
+        let killed = if processes.group_of(pid) == Some(pid) {
+            processes.kill(pid)
+        } else {
+            processes.kill_process(pid)
+        };
+        ended = ended.and(killed);
+    }
     let killed = kill_group();
     if killed.is_err() {
         let _resumed = processes.resume(group);
@@ -241,18 +247,47 @@ mod tests {
     #[test]
     fn the_tree_adds_descendants_outside_the_group_once_each_after_its_members() {
         let mut table = nextest();
-        let tree = walk(&mut table, 10, |_processes, _pid| {}).unwrap();
+        let (tree, listed) = walk(&mut table, 10, |_processes, _pid| {});
+        listed.unwrap();
         assert_eq!(tree, [(10, true), (11, true), (20, false), (30, false), (21, false)]);
     }
 
     #[test]
-    fn a_failed_child_listing_fails_the_walk() {
+    fn a_failed_child_listing_skips_only_that_subtree_and_is_returned() {
         let mut table = Table {
-            failing_listing: Some(11),
+            failing_listing: Some(20),
             ..nextest()
         };
-        let error = walk(&mut table, 10, |_processes, _pid| {}).unwrap_err();
+        let (tree, listed) = walk(&mut table, 10, |_processes, _pid| {});
+        assert_eq!(listed.unwrap_err().raw_os_error(), Some(libc::EIO));
+        assert_eq!(tree, [(10, true), (11, true), (20, false), (30, false)]);
+    }
+
+    #[test]
+    fn a_failed_child_listing_still_kills_every_stopped_descendant() {
+        let mut table = Table {
+            failing_listing: Some(20),
+            ..nextest()
+        };
+        let log = Rc::clone(&table.log);
+        let error = sweep_with(&mut table, 10, kill_group(&log, Ok(()))).unwrap_err();
         assert_eq!(error.raw_os_error(), Some(libc::EIO));
+        assert_eq!(
+            events(&table),
+            [
+                ("stop", 10),
+                ("children", 10),
+                ("children", 11),
+                ("stop_process", 20),
+                ("children", 20),
+                ("stop_process", 30),
+                ("children", 30),
+                // 20 was stopped before its listing failed, so it must not be left suspended.
+                ("kill", 30),
+                ("kill", 20),
+                ("kill", 10),
+            ]
+        );
     }
 
     #[test]

@@ -332,7 +332,9 @@ found. The sweep runs in this order:
 
 A descendant that cannot be killed, including one owned by another user
 (`EPERM`), fails the sweep, so cleanup is reported as unproven rather than
-complete. If the launch's group cannot be killed, it is resumed, so a failed
+complete. A failed child listing also fails the sweep, but skips only the
+subtree it would have revealed: every descendant already found, and so already
+stopped, is still killed rather than left suspended. If the launch's group cannot be killed, it is resumed, so a failed
 sweep does not leave it stopped. Stopping a group whose leader has already
 exited can fail because macOS refuses to signal a group of zombies; that group
 starts no children, so the walk does not need it stopped. A descendant that is
@@ -380,7 +382,8 @@ processes:
   each; every descendant is stopped before its children are listed; kills run
   children first and end with the group; a descendant in a group it does not
   lead is killed alone; a descendant that cannot be killed, including `EPERM`,
-  fails the sweep; and a failed group kill resumes the group.
+  fails the sweep; a failed child listing still kills every descendant
+  already stopped; and a failed group kill resumes the group.
 - A single macOS-only integration test, ignored by default and failing when
   requested by name on a host that cannot run it, launches a real runaway
   allocator under a small explicit ceiling. It asserts that the outcome is
