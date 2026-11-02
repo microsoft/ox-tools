@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.21.2] - 2026-11-02
+
+- 🐛 Bug Fixes
+
+  - cargo-anvil: isolate mutation diffs and normalize Git prefixes ([#323](https://github.com/microsoft/ox-tools/pull/323))
+
+- ⚡ Performance
+
+  - cargo-anvil: avoid discovery builds for packages unrelated to Bolero
+
 ## [0.21.1] - 2026-10-30
 
 - 🐛 Bug Fixes
