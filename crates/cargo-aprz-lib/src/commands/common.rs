@@ -231,6 +231,7 @@ pub struct Common<'a, H: super::Host> {
     json: Option<Utf8PathBuf>,
 }
 
+// #[gamma::skip(fn_value.bool_false, fn_value.bool_true, tag = "native", reason = "stderr terminal attachment is host state; initialization policy is tested through diagnostic_terminal")]
 fn diagnostic_is_terminal() -> bool {
     // #[gamma::skip(bool_expr.negate, reason = "The actual stderr terminal query is host state; deterministic command-policy tests use the owned override.", tag = "native")]
     stderr().is_terminal()

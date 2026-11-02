@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode, Output, Stdio};
 use std::{env, fs, io};
 
-use cargo_coverage_gate::filter_lcov_many;
+use cargo_coverage_gate::{CoverageGateError, filter_lcov_many};
 use cargo_metadata::{Metadata, MetadataCommand};
 use ohno::{AppError, EnrichableExt as _, IntoAppError};
 use semver::Version;
@@ -609,8 +609,17 @@ fn collect_configuration(execution: &CollectionExecution<'_>, configuration: Fea
 }
 
 fn filter_and_publish_reports(execution: &CollectionExecution<'_>, collected: &[CollectedReport]) -> Result<Vec<PathBuf>, AppError> {
+    filter_and_publish_reports_using(execution, collected, filter_lcov_many)
+}
+
+/// Adapts the native filter's manifest and typed errors before publication, with a supplied filter.
+fn filter_and_publish_reports_using(
+    execution: &CollectionExecution<'_>,
+    collected: &[CollectedReport],
+    mut filter: impl FnMut(&[&str], Option<&Path>) -> Result<Vec<String>, CoverageGateError>,
+) -> Result<Vec<PathBuf>, AppError> {
     filter_and_publish_reports_with(execution, collected, |raw, manifest| {
-        filter_lcov_many(raw, Some(manifest)).into_app_err("failed to filter LCOV to released Cargo surfaces")
+        filter(raw, Some(manifest)).into_app_err("failed to filter LCOV to released Cargo surfaces")
     })
 }
 
@@ -1006,7 +1015,6 @@ fn quote_windows_argument(argument: &str, output: &mut String) {
 #[cfg(windows)]
 // The spawned-binary integration test covers this fallback, but the outer
 // coverage report cannot include that child binary's coverage object.
-#[mutants::skip] // Thin Windows adapter over the exhaustively tested injected fallback seam.
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn run_windows_report_fallback(
     execution: &CollectionExecution<'_>,
@@ -1113,9 +1121,6 @@ fn configure_windows_export_command(command: &mut Command, workspace_root: &Path
 }
 
 #[cfg(windows)]
-// Linux mutation jobs cannot execute Windows LLVM discovery. The Windows
-// integration fallback covers both the explicit override and discovered tool.
-#[mutants::skip]
 // Exercised through the spawned-binary fallback integration test.
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn discover_llvm_cov(tools: &ToolPrograms) -> Result<PathBuf, AppError> {
@@ -1222,9 +1227,15 @@ impl TemporaryDirectory {
 }
 
 fn cleanup_error_context(path: &Path, error: Option<&io::Error>) -> String {
-    let guidance = if cfg!(windows) && error.is_some_and(|error| error.raw_os_error() == Some(32)) {
+    #[cfg(windows)]
+    let guidance = if error.is_some_and(|error| error.raw_os_error() == Some(32)) {
         "; release any process handles to this directory and retry cleanup"
     } else {
+        ""
+    };
+    #[cfg(not(windows))]
+    let guidance = {
+        let _ = error;
         ""
     };
     format!("failed to remove isolated coverage target `{}`{guidance}", path.display())
@@ -1304,6 +1315,7 @@ mod tests {
     #[test]
     fn survivor_publication_filter_preserves_exact_manifest_and_failure_context_without_outputs() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let malformed = include_str!("../../../tests/fixtures/lcov/malformed.info");
         let workspace = workspace(root);
         let selection = Selection {
             explicit: false,
@@ -1329,18 +1341,25 @@ mod tests {
             &execution,
             &[],
             |execution, collected| {
-                filter_and_publish_reports_with(execution, collected, |raw, manifest| {
+                filter_and_publish_reports_using(execution, collected, |raw, manifest| {
                     assert!(raw.is_empty());
-                    assert_eq!(manifest, root.join("Cargo.toml"));
+                    assert_eq!(manifest, Some(root.join("Cargo.toml").as_path()));
                     calls.set(calls.get() + 1);
-                    Err(app_error("scripted filtering failure")).into_app_err("failed to filter LCOV to released Cargo surfaces")
+                    Err(cargo_coverage_gate::evaluate_unfiltered_many_for_target(&[malformed], None, &[], None).unwrap_err())
                 })
             },
             |_| panic!("failed filtering must never reach gate evaluation"),
         )
-        .unwrap_err()
-        .to_string();
-        assert!(error.contains("failed to filter LCOV to released Cargo surfaces"), "{error}");
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("failed to filter LCOV to released Cargo surfaces"),
+            "{error}"
+        );
+        let expected = lcov::Report::from_reader(lcov::Reader::new(malformed.as_bytes())).unwrap_err();
+        let cause = error
+            .find_source::<lcov::report::ParseError>()
+            .expect("filter adapter must retain the original LCOV parser error");
+        assert_eq!(cause.to_string(), expected.to_string());
         assert_eq!(calls.get(), 1);
     }
 
@@ -3578,20 +3597,45 @@ mod tests {
             Err(io::Error::from_raw_os_error(32))
         });
         assert_eq!((result.is_err(), attempts, path.is_dir()), (true, 1, cfg!(windows)));
+        let error = result.expect_err("failed cleanup must return its removal error");
+        let guidance = if cfg!(windows) {
+            "; release any process handles to this directory and retry cleanup"
+        } else {
+            ""
+        };
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("failed to remove isolated coverage target `{}`{guidance}", path.display())),
+            "{error}"
+        );
+        assert_eq!(
+            error
+                .find_source::<io::Error>()
+                .expect("cleanup must retain the native removal error")
+                .raw_os_error(),
+            Some(32)
+        );
     }
 
     #[test]
     fn cleanup_handle_guidance_requires_a_windows_sharing_violation() {
         let path = Path::new("coverage-target");
-        for code in [5, 13, 32] {
-            let error = io::Error::from_raw_os_error(code);
-            let message = cleanup_error_context(path, Some(&error));
+        let sharing_guidance = if cfg!(windows) {
+            "; release any process handles to this directory and retry cleanup"
+        } else {
+            ""
+        };
+        for (error, guidance) in [
+            (None, ""),
+            (Some(io::Error::other("cleanup failure")), ""),
+            (Some(io::Error::from_raw_os_error(5)), ""),
+            (Some(io::Error::from_raw_os_error(13)), ""),
+            (Some(io::Error::from_raw_os_error(32)), sharing_guidance),
+        ] {
             assert_eq!(
-                (
-                    message.contains(&format!("failed to remove isolated coverage target `{}`", path.display())),
-                    message.contains("release any process handles"),
-                ),
-                (true, cfg!(windows) && code == 32)
+                cleanup_error_context(path, error.as_ref()),
+                format!("failed to remove isolated coverage target `{}`{guidance}", path.display())
             );
         }
     }

@@ -775,7 +775,7 @@ takes a single `group` parameter that controls which recipes run:
   `just anvil-<group>-setup` -- only the tools, components, and toolchains
   that group actually needs. Every per-group step template
   (`.pipelines/anvil/steps/<group>.yml`) passes its own group name here, so a
-  `pr-fast` matrix leg never installs cargo-mutants.
+  `pr-fast` matrix leg never installs cargo-gamma.
 
 The template expects the caller to provide the Rust/rustup bootstrap and
 `cargo` on PATH (see §6). Command steps use `pwsh`, which is already required

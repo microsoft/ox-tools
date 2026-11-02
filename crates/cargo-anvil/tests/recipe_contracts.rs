@@ -13,7 +13,7 @@
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
-use std::fs::{self, read_dir};
+use std::fs;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -795,7 +795,6 @@ fn scoped_check_propagates_missing_consumed_impact_cache() {
     }
 }
 
-#[mutants::skip]
 fn all_targets_fixture() -> TempDir {
     let tmp = fixture(
         &[("check-all-targets.just", CHECK_ALL_TARGETS), ("impact.just", IMPACT)],
@@ -3238,83 +3237,50 @@ fn aprz_without_a_token_warns_and_still_runs() {
     assert!(calls.contains("aprz deps"), "cargo aprz must still be invoked:\n{calls}");
 }
 
-const MUTANTS_SELECTOR_JUSTFILE: &str = r#"set unstable
-set shell := ["anvil-test-no-shell-available"]
-set windows-shell := ["anvil-test-no-shell-available"]
-import 'helpers.just'
-"#;
-
 #[test]
-fn mutants_config_selection_is_shell_independent_and_root_relative() {
-    if Command::new("just").arg("--version").output().is_err() {
-        return;
+fn mutants_recipes_use_gamma_with_strict_gates_and_native_configuration() {
+    for (body, command) in [
+        (
+            MUTANTS_DIFF,
+            "& cargo {{_anvil_stable_toolchain_args}} gamma run --workspace --in-diff $diff_path --min-score 100 --max-flaky 0 @reportArgs",
+        ),
+        (
+            MUTANTS_FULL,
+            "& cargo {{_anvil_stable_toolchain_args}} gamma run --workspace --min-score 100 --max-flaky 0 @reportArgs",
+        ),
+    ] {
+        let commands = body
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with("& cargo "))
+            .collect::<Vec<_>>();
+        assert_eq!(commands, [command, "& cargo {{_anvil_stable_toolchain_args}} gamma hints"]);
+        let normalized = body.lines().map(str::trim).collect::<Vec<_>>().join("\n");
+        assert!(normalized.contains(&format!(
+            "{command}\n\
+             $campaignExit = $LASTEXITCODE\n\
+             & cargo {{{{_anvil_stable_toolchain_args}}}} gamma hints\n\
+             $hintsExit = $LASTEXITCODE"
+        )));
+        assert!(!body.contains("--config"));
+        assert!(!body.contains("PROCESSOR_ARCHITECTURE"));
+        assert!(!body.contains("PROCESSOR_ARCHITEW6432"));
+        assert!(body.contains(
+            "$reportArgs = @()\n    if ($env:GITHUB_ACTIONS -eq 'true') { $reportArgs = @('--artifact-dir', 'target/cargo-gamma') }"
+        ));
     }
-    let tmp = TempDir::new().unwrap();
-    let root = tmp.path().join("workspace with space's");
-    let nested = root.join("nested");
-    fs::create_dir_all(&nested).unwrap();
-    write(&root.join("Justfile"), MUTANTS_SELECTOR_JUSTFILE);
-    write(&root.join("helpers.just"), HELPERS);
-    write(
-        &root.join(".cargo/mutants.toml"),
-        "the selector must not parse native configuration",
-    );
-    let host = Command::new("just")
-        .arg("--justfile")
-        .arg(root.join("Justfile"))
-        .args(["--evaluate", "_anvil_mutants_platform_config"])
-        .current_dir(&nested)
-        .output()
-        .unwrap();
-    assert!(host.status.success(), "{}", String::from_utf8_lossy(&host.stderr));
-    assert_eq!(
-        String::from_utf8_lossy(&host.stdout).trim(),
-        format!(".cargo/mutants.{}.toml", std::env::consts::OS)
-    );
-    for platform in ["windows", "linux", "macos"] {
-        let os_config = format!(".cargo/mutants.{platform}.toml");
-        write(&nested.join(&os_config), "nested config must not select a workspace config");
-        for exists in [false, true] {
-            if exists {
-                write(&root.join(&os_config), "the selector only tests existence");
-            }
-            let selected = Command::new("just")
-                .arg("--justfile")
-                .arg(root.join("Justfile"))
-                .arg("--evaluate")
-                .arg(format!("_anvil_mutants_platform_config={os_config}"))
-                .arg("_anvil_mutants_config_arg")
-                .current_dir(&nested)
-                .output()
-                .unwrap();
-            assert!(selected.status.success(), "{}", String::from_utf8_lossy(&selected.stderr));
-            assert_eq!(
-                String::from_utf8_lossy(&selected.stdout).trim(),
-                if exists { format!("--config={os_config}") } else { String::new() },
-                "selection must not require a shell or depend on the invocation directory"
-            );
-        }
-        fs::remove_file(root.join(os_config)).unwrap();
-    }
+    assert!(!HELPERS.contains("_anvil_mutants_platform_config"));
+    assert!(!HELPERS.contains("_anvil_mutants_config_arg"));
+    assert!(MUTANTS_FULL.contains("if ($campaignExit -ne 0) { exit $campaignExit }\n    exit $hintsExit"));
 }
 
-fn assert_mutants_diff_cleaned(root: &Path) {
-    assert!(
-        read_dir(root)
-            .unwrap()
-            .all(|entry| !entry.unwrap().file_name().to_string_lossy().starts_with("anvil-mutants-diff")),
-        "mutation diff files must be removed after success or failure"
-    );
-}
-
-// Pins emitted allocation source; runtime PowerShell behavior belongs to the provisioned self-hosting pipeline.
 #[test]
 fn mutants_diff_reserves_a_unique_file_before_running_git() {
     let allocation = MUTANTS_DIFF
         .split_once("    $diff_path = ")
         .unwrap()
         .1
-        .split_once("    # Diff the base")
+        .split_once("    # Include uncommitted")
         .unwrap()
         .0;
     assert_eq!(
@@ -3326,7 +3292,6 @@ fn mutants_diff_reserves_a_unique_file_before_running_git() {
     );
 }
 
-// Pins emitted execution and cleanup source, not runtime PowerShell semantics exercised by the provisioned self-hosting pipeline.
 #[test]
 fn mutants_diff_normalizes_prefixes_and_cleans_up_without_masking_native_failures() {
     let execution = MUTANTS_DIFF
@@ -3340,12 +3305,18 @@ fn mutants_diff_normalizes_prefixes_and_cleans_up_without_masking_native_failure
         execution,
         concat!(
             "    $completed = $false\n",
+            "    $reportArgs = @()\n",
+            "    if ($env:GITHUB_ACTIONS -eq 'true') { $reportArgs = @('--artifact-dir', 'target/cargo-gamma') }\n",
             "    try {\n",
             "        git diff --src-prefix=a/ --dst-prefix=b/ \"$base\" --output=$diff_path\n",
             "        $exitCode = $LASTEXITCODE\n",
             "        if ($exitCode -eq 0) {\n",
-            "            & cargo {{_anvil_stable_toolchain_args}} mutants --in-diff $diff_path --no-shuffle --jobs 0 {{_anvil_mutants_config_arg}}\n",
-            "            $exitCode = $LASTEXITCODE\n",
+            "            & cargo {{_anvil_stable_toolchain_args}} gamma run --workspace --in-diff $diff_path --min-score 100 --max-flaky 0 @reportArgs\n",
+            "            $campaignExit = $LASTEXITCODE\n",
+            "            & cargo {{_anvil_stable_toolchain_args}} gamma hints\n",
+            "            $hintsExit = $LASTEXITCODE\n",
+            "            $exitCode = $campaignExit\n",
+            "            if ($exitCode -eq 0) { $exitCode = $hintsExit }\n",
             "        }\n",
             "        $completed = $true\n",
             "    } finally {\n",
@@ -3362,347 +3333,21 @@ fn mutants_diff_normalizes_prefixes_and_cleans_up_without_masking_native_failure
 }
 
 #[test]
-fn mutants_recipes_select_only_the_host_config_and_preserve_exit_codes() {
-    if !tools_available() {
-        return;
+fn mutants_recipes_preserve_diff_scope_and_wire_gamma_prerequisites() {
+    for (name, body) in [("diff", MUTANTS_DIFF), ("full", MUTANTS_FULL)] {
+        assert!(body.contains(&format!(
+            "anvil-mutants-{name}-setup installer=\"install\": (anvil-tool-cargo-gamma-install installer)"
+        )));
+        assert!(body.contains(&format!(
+            "anvil-mutants-{name}-validate-prereqs: anvil-tool-cargo-gamma-validate-prereqs"
+        )));
     }
-    let tmp = fixture(
-        &[
-            ("helpers.just", HELPERS),
-            ("impact.just", IMPACT),
-            ("mutants-diff.just", MUTANTS_DIFF),
-            ("mutants-full.just", MUTANTS_FULL),
-        ],
-        &[
-            "anvil-tool-cargo-mutants-validate-prereqs",
-            "anvil-tool-cargo-mutants-install installer=\"install\"",
-            "anvil-impact",
-        ],
-    );
-    let root = tmp.path();
-    let log = root.join("cargo.log");
-    let os_config = format!(".cargo/mutants.{}.toml", std::env::consts::OS);
-    let other = if cfg!(windows) { "linux" } else { "windows" };
-    write(&root.join(".cargo/mutants.toml"), "");
-    write(&root.join(format!(".cargo/mutants.{other}.toml")), "");
-    for exists in [false, true] {
-        if exists {
-            write(&root.join(&os_config), "");
-        }
-        for recipe in ["anvil-mutants-diff", "anvil-mutants-full"] {
-            for native_exit in ["0", ARBITRARY_FAILURE_EXIT] {
-                write(&log, "");
-                let output = run_just(
-                    root,
-                    &[recipe],
-                    &[
-                        ("FAKE_CARGO_LOG", log.as_os_str()),
-                        ("FAKE_CARGO_DEFAULT_EXIT", OsStr::new(native_exit)),
-                        ("BASE_REF", OsStr::new("fixture-base")),
-                        ("RUNNER_TEMP", root.as_os_str()),
-                    ],
-                );
-                let calls = fs::read_to_string(&log).unwrap();
-                if cfg!(windows) && cfg!(target_arch = "aarch64") {
-                    assert!(output.status.success());
-                    assert!(calls.is_empty(), "Windows ARM must still skip cargo-mutants");
-                    continue;
-                }
-                assert_eq!(
-                    output.status.code(),
-                    Some(native_exit.parse().unwrap()),
-                    "{recipe} must preserve the native exit code: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                );
-                let mutants = calls.lines().filter(|line| line.starts_with("mutants ")).collect::<Vec<_>>();
-                assert_eq!(mutants.len(), 1, "{calls}");
-                assert!(mutants[0].contains("--no-shuffle --jobs 0"), "{calls}");
-                assert!(
-                    mutants[0].contains(if recipe == "anvil-mutants-full" {
-                        "--workspace"
-                    } else {
-                        "--in-diff"
-                    }),
-                    "{calls}"
-                );
-                assert_eq!(mutants[0].contains("--config="), exists, "{calls}");
-                if exists {
-                    assert!(mutants[0].ends_with(&format!("--config={os_config}")), "{calls}");
-                }
-                assert_mutants_diff_cleaned(root);
-            }
-        }
-    }
-    seed_include(root, "affected", "--skip");
-    write(&log, "");
-    let skipped = run_just(root, &["anvil-mutants-diff"], &[("FAKE_CARGO_LOG", log.as_os_str())]);
-    assert!(skipped.status.success(), "{}", String::from_utf8_lossy(&skipped.stderr));
-    assert!(fs::read_to_string(log).unwrap().is_empty(), "an empty impact scope must still skip");
-}
-
-#[test]
-fn mutants_native_platform_config_replaces_common_config_without_merging() {
-    if Command::new("just").arg("--version").output().is_err()
-        || !Command::new("cargo")
-            .args(["mutants", "--version"])
-            .output()
-            .is_ok_and(|output| output.status.success())
-    {
-        eprintln!("skipping native config integration: just or cargo-mutants is unavailable");
-        return;
-    }
-    let tmp = TempDir::new().unwrap();
-    let root = tmp.path();
-    write(&root.join("Justfile"), MUTANTS_SELECTOR_JUSTFILE);
-    write(&root.join("helpers.just"), HELPERS);
-    write(
-        &root.join("Cargo.toml"),
-        "[package]\nname = \"native-config-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[workspace]\n",
-    );
-    write(&root.join("src/lib.rs"), "pub mod common;\npub mod platform;\n");
-    write(&root.join("src/common.rs"), "pub fn common_marker() -> bool { true }\n");
-    write(&root.join("src/platform.rs"), "pub fn platform_marker() -> bool { true }\n");
-    write(&root.join(".cargo/mutants.toml"), "exclude_globs = [\"src/common.rs\"]\n");
-    let os_config = format!(".cargo/mutants.{}.toml", std::env::consts::OS);
-    for (config, common_included, platform_included) in [
-        (None, false, true),
-        (Some("exclude_globs = [\"src/platform.rs\"]\n"), true, false),
-        (Some("exclude_globs = [\"src/common.rs\", \"src/platform.rs\"]\n"), false, false),
-        (Some("invalid TOML {"), false, false),
-    ] {
-        if let Some(config) = config {
-            write(&root.join(&os_config), config);
-        }
-        let selected = Command::new("just")
-            .args(["--justfile", "Justfile", "--evaluate", "_anvil_mutants_config_arg"])
-            .current_dir(root)
-            .output()
-            .unwrap();
-        assert!(selected.status.success(), "{}", String::from_utf8_lossy(&selected.stderr));
-        let argument = String::from_utf8(selected.stdout).unwrap();
-        let mut command = Command::new("cargo");
-        command
-            .args(["mutants", "--list", "--workspace", "--no-shuffle"])
-            .env("CARGO_NET_OFFLINE", "true")
-            .current_dir(root);
-        if !argument.trim().is_empty() {
-            command.arg(argument.trim());
-        }
-        let output = command.output().unwrap();
-        if config == Some("invalid TOML {") {
-            assert_failed(&output, "an invalid selected config must not fall back to the common config");
-        } else {
-            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-            let listing = String::from_utf8_lossy(&output.stdout);
-            assert_eq!(listing.contains("common_marker"), common_included, "{listing}");
-            assert_eq!(listing.contains("platform_marker"), platform_included, "{listing}");
-        }
-    }
-}
-
-/// `anvil-mutants-diff` diffs the base against the WORKING TREE, not against
-/// HEAD. cargo-mutants validates every diff line against the file on disk and
-/// aborts when they disagree, so a commit-to-commit diff fails as soon as
-/// anything is uncommitted -- the normal local state, and the one CI never
-/// exercises because its tree is clean.
-#[test]
-fn mutants_diff_covers_uncommitted_work() {
-    if !tools_available() || Command::new("git").arg("--version").output().is_err() {
-        return;
-    }
-    // On aarch64-pc-windows-msvc the recipe bails out before doing any of this,
-    // because cargo-mutants does not build there -- so there is no `--in-diff`
-    // behavior to assert. The architecture cannot be faked past: Windows
-    // re-derives PROCESSOR_ARCHITECTURE for every new process from its real
-    // architecture, so an override does not survive the spawn. The skip itself
-    // is covered by `mutants_diff_skips_on_arm64_windows`, and this contract is
-    // exercised on the other three legs.
-    if cfg!(windows) && cfg!(target_arch = "aarch64") {
-        return;
-    }
-    let tmp = fixture(
-        &[
-            ("helpers.just", HELPERS),
-            ("impact.just", IMPACT),
-            ("mutants-diff.just", MUTANTS_DIFF),
-        ],
-        &[
-            "anvil-tool-cargo-mutants-validate-prereqs",
-            "anvil-tool-cargo-mutants-install installer=\"install\"",
-        ],
-    );
-    let root = tmp.path();
-    // Real git: the stub the fixture installs would make `git diff` a no-op.
-    std::fs::remove_file(root.join("fake-bin/git.ps1")).unwrap();
-
-    let git = |args: &[&str]| {
-        let status = Command::new("git").args(args).current_dir(root).output().unwrap();
-        assert!(
-            status.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&status.stderr)
-        );
-    };
-    git(&["init", "-q"]);
-    git(&["config", "user.email", "test@example.com"]);
-    git(&["config", "user.name", "test"]);
-    // The host's global config decides line-ending rewriting and commit
-    // signing, and either will stop this fixture: a machine set to autocrlf
-    // rejects the add outright ("LF would be replaced by CRLF"), and one with
-    // commit.gpgsign and no usable key or TTY fails the commit before the
-    // behaviour under test runs. Pin both so the test means the same thing on
-    // every developer's box.
-    git(&["config", "core.autocrlf", "false"]);
-    git(&["config", "core.safecrlf", "false"]);
-    git(&["config", "commit.gpgsign", "false"]);
-    git(&["config", "tag.gpgsign", "false"]);
-    git(&["config", "diff.mnemonicPrefix", "true"]);
-    git(&["config", "diff.noprefix", "true"]);
-    write(&root.join("src/lib.rs"), "pub fn base() {}\n");
-    git(&["add", "-A"]);
-    git(&["commit", "-qm", "base"]);
-    let base = String::from_utf8(
-        Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(root)
-            .output()
-            .unwrap()
-            .stdout,
-    )
-    .unwrap()
-    .trim()
-    .to_owned();
-
-    // One change committed after the base, and one left uncommitted. A
-    // `base..HEAD` diff sees only the first.
-    write(&root.join("src/lib.rs"), "pub fn base() {}\npub fn committed() {}\n");
-    git(&["add", "-A"]);
-    git(&["commit", "-qm", "committed change"]);
-    write(
-        &root.join("src/lib.rs"),
-        "pub fn base() {}\npub fn committed() {}\npub fn uncommitted() {}\n",
-    );
-
-    let log = root.join("cargo.log");
-    let captured = root.join("captured.diff");
-    let output = run_just(
-        root,
-        &["anvil-mutants-diff"],
-        &[
-            ("FAKE_CARGO_LOG", log.as_os_str()),
-            ("BASE_REF", OsStr::new(&base)),
-            ("RUNNER_TEMP", root.as_os_str()),
-            ("FAKE_MUTANTS_DIFF_CAPTURE", captured.as_os_str()),
-            // The other early exit. Impact scoping sets this to `--skip` when a
-            // job has no affected packages, and the value is inherited from
-            // whatever environment the test runs in -- so on a CI leg that
-            // skipped, this test would assert against a recipe that returned
-            // before doing anything. Pin it to a scope that runs.
-            //
-            // The architecture guard is deliberately *not* pinned: Windows
-            // re-derives PROCESSOR_ARCHITECTURE for each new process from the
-            // process's real architecture, so it cannot be overridden across a
-            // spawn. That is why this test returns early on ARM64 above rather
-            // than faking its way past the branch.
-            ("ANVIL_INCLUDE_AFFECTED", OsStr::new("--package fixture@0.1.0")),
-            // The recipe depends on `anvil-impact`, which would otherwise
-            // invoke cargo-delta against this fixture. The scope this test
-            // asserts on is pinned above, so computing an impact set would only
-            // add a tool dependency to a contract that does not exercise it.
-            ("ANVIL_IMPACT", OsStr::new("off")),
-        ],
-    );
-    assert!(
-        output.status.success(),
-        "the recipe must succeed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let calls = std::fs::read_to_string(&log).unwrap_or_default();
-    assert!(
-        calls.contains("--in-diff"),
-        "cargo mutants must be given a diff file.\ncargo log:\n{calls}\nrecipe stdout:\n{}\nrecipe stderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    assert_mutants_diff_cleaned(root);
-    let diff = std::fs::read_to_string(captured).unwrap();
-    assert!(diff.contains("--- a/src/lib.rs\n"), "{diff}");
-    assert!(diff.contains("+++ b/src/lib.rs\n"), "{diff}");
-    assert!(diff.contains("committed"), "the committed change must be in the diff:\n{diff}");
-    assert!(
-        diff.contains("uncommitted"),
-        "the uncommitted change must be in the diff -- a base..HEAD diff would omit it:\n{diff}"
-    );
-}
-
-/// The ARM64 Windows bail-out is a documented behavior, not an accident:
-/// cargo-mutants does not build for `aarch64-pc-windows-msvc`, so the recipe
-/// exits cleanly rather than failing the merged `pr-slow` group on that leg.
-///
-/// This runs only on a real ARM64 Windows host, which CI has. Faking the
-/// architecture is not an option: `PROCESSOR_ARCHITECTURE` is load-bearing for
-/// the Windows loader, and setting it to ARM64 on an x64 host makes spawning
-/// `just` fail outright rather than exercise the branch.
-///
-/// Asserting it here is what keeps the sibling test above honest. That one pins
-/// the architecture to AMD64 so it exercises the real path; without this test
-/// the skip branch would be exercised by nothing.
-#[test]
-fn mutants_diff_skips_on_arm64_windows() {
-    if !tools_available() {
-        return;
-    }
-    if !(cfg!(windows) && cfg!(target_arch = "aarch64")) {
-        return;
-    }
-    let tmp = fixture(
-        &[
-            ("helpers.just", HELPERS),
-            ("impact.just", IMPACT),
-            ("mutants-diff.just", MUTANTS_DIFF),
-        ],
-        &[
-            "anvil-tool-cargo-mutants-validate-prereqs",
-            "anvil-tool-cargo-mutants-install installer=\"install\"",
-        ],
-    );
-    let root = tmp.path();
-
-    let log = root.join("cargo.log");
-    let output = run_just(
-        root,
-        &["anvil-mutants-diff"],
-        &[
-            ("FAKE_CARGO_LOG", log.as_os_str()),
-            ("RUNNER_TEMP", root.as_os_str()),
-            // Not the architecture -- that is the host's, and real here. This
-            // is the *other* early exit, pinned so a skipped impact scope
-            // cannot be mistaken for the architecture bail-out.
-            ("ANVIL_INCLUDE_AFFECTED", OsStr::new("--package fixture@0.1.0")),
-            // Same reason as the sibling contract: `anvil-mutants-diff` depends
-            // on `anvil-impact`, and this test is about the architecture
-            // bail-out, not about computing an impact set.
-            ("ANVIL_IMPACT", OsStr::new("off")),
-        ],
-    );
-
-    assert!(
-        output.status.success(),
-        "the recipe must skip cleanly, not fail, on aarch64-pc-windows-msvc\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("cargo-mutants does not build here"),
-        "the skip must say why, or a silent no-op looks like a passing run:\n{stdout}"
-    );
-    assert!(
-        std::fs::read_to_string(&log).unwrap_or_default().is_empty(),
-        "cargo must not be invoked at all on the skipped leg"
-    );
+    assert!(MUTANTS_DIFF.contains("anvil-mutants-diff: anvil-mutants-diff-validate-prereqs anvil-impact"));
+    assert!(MUTANTS_DIFF.contains("if ($include -eq '--skip') {"));
+    assert!(MUTANTS_DIFF.contains("git diff --src-prefix=a/ --dst-prefix=b/ \"$base\" --output=$diff_path"));
+    assert!(!MUTANTS_DIFF.contains("git diff \"$base\" HEAD"));
+    assert!(!MUTANTS_FULL.contains("anvil-impact"));
+    assert!(!MUTANTS_FULL.contains("--in-diff"));
 }
 
 /// The wrapper that disables impact scoping for the full-workspace tiers is
