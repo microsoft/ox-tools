@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+## [0.23.1] - 2026-11-02
+
+- ✨ Features
+
+  - cargo-anvil: pin cargo-coverage-gate 0.7.3 ([#329](https://github.com/microsoft/ox-tools/pull/329))
+
+- 🐛 Bug Fixes
+
+  - cargo-anvil: regenerate merged release v0.22.1
+  - cargo-anvil: preserve JSON output when Cargo warns
+  - cargo-anvil: release v0.21.2 with locked snapshots
+  - cargo-anvil: compare locked API snapshots
+  - cargo-anvil: isolate mutation diffs and normalize Git prefixes ([#323](https://github.com/microsoft/ox-tools/pull/323))
+
+- 🧩 Miscellaneous
+
+  - Merge latest main into SemVer reliability branch
+  - Adopt cargo-gamma in Anvil and remediate campaign survivors ([#327](https://github.com/microsoft/ox-tools/pull/327))
+  - Merge main into SemVer reliability branch
+
 ## [0.23.0] - 2026-11-02
 
 - ✨ Features

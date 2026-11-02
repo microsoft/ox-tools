@@ -32,10 +32,10 @@ disable = true
 
 # These dependencies constrain transitive versions without being used directly.
 [package.metadata.cargo-udeps.ignore]
-normal = ["constant_time_eq", "unicode-ident"]
+normal = ["constant_time_eq", "unicode-ident", "unicode-properties"]
 
 [package.metadata.unused-deps]
-allowed = ["constant_time_eq", "unicode-ident"]
+allowed = ["constant_time_eq", "unicode-ident", "unicode-properties"]
 
 [package.metadata.coverage-gate]
 # Production-only coverage excludes test modules and scaffolding. The measured
@@ -119,10 +119,10 @@ terminal_size = { workspace = true }
 tick = { workspace = true, features = ["tokio"] }
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "rt-multi-thread", "sync", "process", "time"] }
 toml = { workspace = true, features = ["parse", "serde", "display"] }
-# Never named in this crate's code. It is here only to bound the `unicode-ident` that
-# `ra_ap_syntax` -> `ra-ap-rustc_lexer` resolves; see the catalog entry in the workspace
-# manifest for why. Removing it breaks every consumer that resolves dependencies freshly.
+# Compatibility bounds for `ra_ap_syntax` -> `ra-ap-rustc_lexer`; keep the Unicode
+# versions matched in fresh consumer builds. See the workspace dependency comment.
 unicode-ident = { workspace = true }
+unicode-properties = { workspace = true }
 unicode-width = { workspace = true }
 url = { workspace = true }
 vu128 = { workspace = true }

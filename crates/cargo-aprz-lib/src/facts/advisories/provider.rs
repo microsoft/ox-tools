@@ -1197,12 +1197,19 @@ mod tests {
 
     #[tokio::test]
     async fn cache_lock_waits_on_the_injected_clock_until_released() {
-        let root = tempfile::tempdir().unwrap();
-        let owner = lock_cache(root.path()).await.expect("the first cache user acquires the lock");
+        let attempts = std::cell::RefCell::new(std::collections::VecDeque::from([
+            Err(std::fs::TryLockError::WouldBlock),
+            Err(std::fs::TryLockError::WouldBlock),
+            Ok(()),
+        ]));
         let control = tick::ClockControl::new();
         let clock = control.to_clock();
-        let lock = open_cache_lock(root.path()).await.unwrap();
-        let wait = wait_for_cache_lock(&lock, DATABASE_FETCH_TIMEOUT, &clock);
+        let wait = wait_for_cache_lock_with(DATABASE_FETCH_TIMEOUT, &clock, || {
+            attempts
+                .borrow_mut()
+                .pop_front()
+                .expect("only the three scripted lock attempts may run")
+        });
         let mut wait = std::pin::pin!(wait);
 
         assert!(futures_util::poll!(&mut wait).is_pending());
@@ -1211,24 +1218,22 @@ mod tests {
             futures_util::poll!(&mut wait).is_pending(),
             "a held lock keeps the contender waiting"
         );
-        drop(owner);
         assert!(
             futures_util::poll!(&mut wait).is_pending(),
             "the contender retries only after its poll interval"
         );
+        assert_eq!(attempts.borrow().len(), 1);
         control.advance(Duration::from_millis(50));
 
         assert!(matches!(futures_util::poll!(&mut wait), Poll::Ready(Ok(()))));
+        assert!(attempts.borrow().is_empty(), "every scripted lock attempt must be consumed");
     }
 
     #[tokio::test]
     async fn cache_lock_contention_has_a_bounded_actionable_failure() {
-        let root = tempfile::tempdir().unwrap();
-        let _owner = lock_cache(root.path()).await.expect("the first cache user acquires the lock");
         let control = tick::ClockControl::new();
         let clock = control.to_clock();
-        let lock = open_cache_lock(root.path()).await.unwrap();
-        let wait = wait_for_cache_lock(&lock, DATABASE_FETCH_TIMEOUT, &clock);
+        let wait = wait_for_cache_lock_with(DATABASE_FETCH_TIMEOUT, &clock, || Err(std::fs::TryLockError::WouldBlock));
         let mut wait = std::pin::pin!(wait);
 
         assert!(futures_util::poll!(&mut wait).is_pending());

@@ -1,0 +1,13 @@
+[
+  ["rev-parse", "--verify", "base^{commit}"],
+  ["rev-parse", "--show-toplevel"],
+  ["cat-file", "-e", "baseline-fixture:<manifest>"],
+  ["clone", "--shared", "--no-checkout", "--quiet", "--", "<workspace>", "<baseline>"],
+  [
+    "-C", "<baseline>",
+    "-c", "filter.lfs.process=",
+    "-c", "filter.lfs.smudge=",
+    "-c", "filter.lfs.required=false",
+    "checkout", "--quiet", "--detach", "baseline-fixture"
+  ]
+]
