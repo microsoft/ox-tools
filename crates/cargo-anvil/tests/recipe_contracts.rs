@@ -202,6 +202,9 @@ if ($args -contains 'each') {
 }
 if ($args -contains 'metadata') {
     if ($env:FAKE_METADATA_EXIT) { exit [int]$env:FAKE_METADATA_EXIT }
+    if ($env:FAKE_CARGO_JSON_WARNINGS) {
+        Write-Error 'warning: fixture metadata warning' -ErrorAction Continue
+    }
     if ($env:FAKE_METADATA_INVALID) {
         Write-Output '{invalid metadata'
         exit 0
@@ -212,6 +215,25 @@ if ($args -contains 'metadata') {
         $env:FAKE_WORKSPACE_ROOT
     }
     $isBaseline = $root -ne $env:FAKE_WORKSPACE_ROOT
+    $features = [ordered]@{
+        default = @('std')
+        std = @()
+        serde = @('dep:serde')
+        'Unstable-visible' = @()
+        unstable = @()
+        bench = @()
+        no_std = @()
+        _internal = @()
+        'unstable-hidden' = @()
+        unstable_hidden = @()
+    }
+    if ($isBaseline) {
+        $features['nightly'] = @()
+        $features['baseline-api'] = @()
+    } else {
+        $features['Nightly'] = @()
+        $features['current-api'] = @()
+    }
     $packageName = if ($isBaseline -and $env:FAKE_SEMVER_BASELINE_RENAMED) {
         'old-name'
     } elseif ($env:FAKE_PACKAGE_NAME) {
@@ -240,6 +262,7 @@ if ($args -contains 'metadata') {
             version = '0.1.0'
             id = $packageId
             manifest_path = $manifestPath
+            features = $features
             targets = @([pscustomobject]@{
                 name = $libName
                 kind = if ($isBaseline -and $env:FAKE_SEMVER_BASELINE_BIN) {
@@ -409,6 +432,9 @@ if ($args -contains 'miri') {
     }
 }
 if ($args -contains 'config') {
+    if ($env:FAKE_CARGO_JSON_WARNINGS) {
+        Write-Error 'warning: fixture target configuration warning' -ErrorAction Continue
+    }
     Write-Output '"fixture-target"'
     exit 0
 }
@@ -455,6 +481,20 @@ if ($args -contains 'install' -and $args -contains '--version') {
 }
 exit [int]$env:FAKE_CARGO_DEFAULT_EXIT
 "#;
+
+const FAKE_GIT_PS1: &str = r"
+if ($args -contains 'rev-parse') {
+    if ($args -contains '--show-toplevel') {
+        Write-Output $env:FAKE_WORKSPACE_ROOT
+    } else {
+        Write-Output 'baseline-fixture'
+    }
+}
+if ($args -contains 'clone') {
+    [System.IO.Directory]::CreateDirectory($args[-1]) | Out-Null
+}
+exit 0
+";
 
 fn write(path: &Path, contents: &str) {
     if let Some(parent) = path.parent() {
@@ -542,22 +582,7 @@ _anvil-impact-exclude tier:
     let bin = tmp.path().join("fake-bin");
     fs::create_dir_all(&bin).unwrap();
     write(&bin.join("cargo.ps1"), FAKE_CARGO_PS1);
-    write(
-        &bin.join("git.ps1"),
-        r"
-if ($args -contains 'rev-parse') {
-    if ($args -contains '--show-toplevel') {
-        Write-Output $env:FAKE_WORKSPACE_ROOT
-    } else {
-        Write-Output 'baseline-fixture'
-    }
-}
-if ($args -contains 'clone') {
-    [System.IO.Directory]::CreateDirectory($args[-1]) | Out-Null
-}
-exit 0
-",
-    );
+    write(&bin.join("git.ps1"), FAKE_GIT_PS1);
     write(
         &bin.join("rustc.ps1"),
         r"
@@ -2283,6 +2308,7 @@ fn semver_exit_code_contract_is_executed() {
             common[1],
             ("FAKE_SEMVER_EXIT", OsStr::new("100")),
             ("FAKE_SEMVER_OUTPUT", OsStr::new("breaking change")),
+            ("FAKE_CARGO_JSON_WARNINGS", OsStr::new("1")),
         ],
     );
     assert!(
@@ -2295,7 +2321,21 @@ fn semver_exit_code_contract_is_executed() {
     assert!(findings_comment.contains("Potential breaking changes"));
     assert!(findings_comment.contains("breaking change"));
     let calls = fs::read_to_string(&log).unwrap();
-    assert_eq!(calls.lines().filter(|line| line.starts_with("rustdoc --locked --lib")).count(), 2);
+    assert_eq!(
+        calls
+            .lines()
+            .filter(|line| line.starts_with("rustdoc --locked --lib"))
+            .map(|line| line
+                .split_once(" --features ")
+                .expect("both metadata fixtures declare public features")
+                .1)
+            .collect::<Vec<_>>(),
+        [
+            "default,std,serde,Unstable-visible,Nightly,current-api -- -Z unstable-options --output-format=json --document-private-items --document-hidden-items --cap-lints=allow",
+            "default,std,serde,Unstable-visible,baseline-api -- -Z unstable-options --output-format=json --document-private-items --document-hidden-items --cap-lints=allow",
+        ],
+        "each revision must enable its own public features and exclude only the upstream heuristic names"
+    );
     assert!(calls.contains("semver-checks --package fixture --current-rustdoc"));
     assert!(calls.contains("--baseline-rustdoc"));
     assert!(!calls.contains("--baseline-rev"));

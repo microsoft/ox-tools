@@ -55,6 +55,21 @@ anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
         $lines.Add('') | Out-Null
     }
 
+    function Invoke-CargoJson([string[]]$arguments) {
+        $stderrFile = [System.IO.Path]::GetTempFileName()
+        try {
+            $stdout = @(& cargo @stableArgs @arguments 2> $stderrFile) | Out-String
+            $code = $LASTEXITCODE
+            $stderr = [System.IO.File]::ReadAllText($stderrFile)
+        } finally {
+            Remove-Item -LiteralPath $stderrFile -Force -ErrorAction Stop
+        }
+        if ($code -eq 0 -and -not [string]::IsNullOrWhiteSpace($stderr)) {
+            [Console]::Error.Write($stderr)
+        }
+        [pscustomobject]@{ ExitCode = $code; Stdout = $stdout; Stderr = $stderr }
+    }
+
     function Get-RustdocSnapshot($package, [string]$workspace, [string]$targetDir) {
         $features = @($package.features.PSObject.Properties.Name | Where-Object {
             $_ -and $_ -cnotin @('unstable', 'nightly', 'bench', 'no_std') -and
@@ -105,13 +120,13 @@ anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
     # null, `publish = false` as an empty array, and named-registry restrictions
     # as a nonempty array. Only the empty array is non-publishable.
     $libPkgs = @{}
-    $metadataJson = & cargo @stableArgs metadata --locked --no-deps --format-version 1
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error 'anvil-semver-check: cargo metadata failed'
-        exit $LASTEXITCODE
+    $metadata = Invoke-CargoJson -arguments @('metadata', '--locked', '--no-deps', '--format-version', '1')
+    if ($metadata.ExitCode -ne 0) {
+        Write-Error "anvil-semver-check: cargo metadata failed (exit $($metadata.ExitCode)):`n$($metadata.Stdout)$($metadata.Stderr)"
+        exit $metadata.ExitCode
     }
     try {
-        $meta = $metadataJson | ConvertFrom-Json
+        $meta = $metadata.Stdout | ConvertFrom-Json
     } catch {
         Write-Error "anvil-semver-check: could not parse cargo metadata output: $_"
         exit 1
@@ -193,17 +208,15 @@ anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
     }
     $env:RUSTUP_TOOLCHAIN = $sysroot[0].Trim()
     $env:RUSTC_BOOTSTRAP = '1'
-    $targetLines = @(& cargo @stableArgs config -Z unstable-options get build.target --format=json-value 2>&1)
-    $targetExit = $LASTEXITCODE
-    $targetOutput = $targetLines | Out-String
-    if ($targetExit -eq 0) {
-        $targets = @($targetOutput | ConvertFrom-Json)
+    $targetOutput = Invoke-CargoJson -arguments @('config', '-Z', 'unstable-options', 'get', 'build.target', '--format=json-value')
+    if ($targetOutput.ExitCode -eq 0) {
+        $targets = @($targetOutput.Stdout | ConvertFrom-Json)
         if ($targets.Count -ne 1 -or $targets[0] -isnot [string] -or [string]::IsNullOrWhiteSpace($targets[0])) {
             Write-Error 'anvil-semver-check: select one build target with CARGO_BUILD_TARGET and retry; multi-target comparisons are not supported.'
             exit 1
         }
         $target = $targets[0]
-    } elseif ($targetOutput.Contains('config value `build.target` is not set')) {
+    } elseif ($targetOutput.Stderr.Contains('config value `build.target` is not set')) {
         $hostTarget = @(& rustc @stableArgs --print host-tuple)
         if ($LASTEXITCODE -ne 0 -or $hostTarget.Count -ne 1 -or [string]::IsNullOrWhiteSpace([string]$hostTarget[0])) {
             Write-Error 'anvil-semver-check: rustc could not report the host target; set CARGO_BUILD_TARGET explicitly and retry.'
@@ -211,7 +224,7 @@ anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
         }
         $target = $hostTarget[0].Trim()
     } else {
-        Write-Error "anvil-semver-check: could not read Cargo's build target; fix the Cargo configuration and retry.`n$targetOutput"
+        Write-Error "anvil-semver-check: could not read Cargo's build target; fix the Cargo configuration and retry.`n$($targetOutput.Stdout)$($targetOutput.Stderr)"
         exit 1
     }
     $targetName = $target
@@ -242,23 +255,25 @@ anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
         $baselineWorkspace = Join-Path $baselineRoot $workspacePath
         Push-Location -LiteralPath $baselineWorkspace
         try {
-            $baselineLines = @(& cargo @stableArgs metadata --locked --no-deps --format-version 1 `
-                --manifest-path (Join-Path $baselineWorkspace 'Cargo.toml') 2>&1)
-            $baselineExit = $LASTEXITCODE
+            $baselineMetadata = Invoke-CargoJson -arguments @(
+                'metadata', '--locked', '--no-deps', '--format-version', '1',
+                '--manifest-path', (Join-Path $baselineWorkspace 'Cargo.toml')
+            )
+            $baselineExit = $baselineMetadata.ExitCode
         } finally {
             Pop-Location
         }
         $baselineMeta = $null
         if ($baselineExit -eq 0) {
             try {
-                $baselineMeta = ($baselineLines | Out-String) | ConvertFrom-Json
+                $baselineMeta = $baselineMetadata.Stdout | ConvertFrom-Json
             } catch {
                 $baselineExit = 101
-                $baselineLines += "anvil-semver-check: could not parse baseline metadata: $_"
+                $baselineMetadata.Stderr += "anvil-semver-check: could not parse baseline metadata: $_"
             }
         }
         if ($baselineExit -ne 0) {
-            $output = $baselineLines | Out-String
+            $output = $baselineMetadata.Stdout + $baselineMetadata.Stderr
             Write-Warning "anvil-semver-check: locked baseline metadata failed (exit ${baselineExit}):`n$output"
             Add-Report $inconclusive "#### Baseline metadata (exit $baselineExit)" $output
         } else {

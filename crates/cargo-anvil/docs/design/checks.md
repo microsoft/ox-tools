@@ -207,8 +207,8 @@ Anvil makes one temporary, local shared Git clone, checks out the resolved PR
 target commit, and removes that clone in `finally`. LFS smudging is disabled for
 that checkout: it uses the committed pointers rather than fetching assets from
 the local origin. The original repository and historical manifests are not
-modified. Both snapshots use the current checkout's
-selected stable compiler, overriding any obsolete baseline toolchain selection.
+modified. Both snapshots use the current checkout's selected stable compiler,
+overriding any obsolete baseline toolchain selection.
 The current Cargo build target is used for both arms; an unset target selects the
 compiler's host. A multi-target configuration must select one target with
 `CARGO_BUILD_TARGET`. Build artifacts live under `target/anvil/semver/`, separately
@@ -223,6 +223,10 @@ and private items, as required by the checker, and the unstable JSON output uses
 `RUSTC_BOOTSTRAP=1`, matching the checker's own generation path. The file-input
 checker uses its built-in lint policy rather than Cargo metadata lint overrides;
 Anvil warns if such overrides are present.
+
+Cargo JSON commands parse stdout separately from stderr. Warnings remain visible
+without invalidating valid metadata or target configuration, and stderr is
+retained in failure diagnostics.
 
 The lockfiles must be present and usable; a missing or stale lockfile is never
 replaced by fresh resolution. A failed build, missing JSON artifact, or failed
