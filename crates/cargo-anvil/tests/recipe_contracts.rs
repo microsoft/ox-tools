@@ -317,6 +317,16 @@ if ($args -contains 'metadata') {
             metadata = [pscustomobject]@{}
         }
     }
+    if ($env:FAKE_BOLERO_METADATA) {
+        $metadata | Add-Member -NotePropertyName resolve -NotePropertyValue ([pscustomobject]@{
+            nodes = @($metadata.packages | ForEach-Object {
+                [pscustomobject]@{ id = $_.id; dependencies = @('registry#bolero@0.13.4') }
+            }) + @([pscustomobject]@{ id = 'registry#bolero@0.13.4'; dependencies = @() })
+        })
+        $metadata.packages += [pscustomobject]@{
+            id = 'registry#bolero@0.13.4'; name = 'bolero'; version = '0.13.4'
+        }
+    }
     $metadata | ConvertTo-Json -Depth 8 -Compress
     exit 0
 }
@@ -2128,7 +2138,11 @@ fn bolero_discovery_failure_propagates() {
     let output = run_just(
         tmp.path(),
         &["anvil-bolero"],
-        &[("FAKE_EACH_EXIT", OsStr::new("9")), ("FAKE_CARGO_LOG", log.as_os_str())],
+        &[
+            ("FAKE_EACH_EXIT", OsStr::new("9")),
+            ("FAKE_BOLERO_METADATA", OsStr::new("1")),
+            ("FAKE_CARGO_LOG", log.as_os_str()),
+        ],
     );
 
     assert_failed(&output, "cargo bolero target discovery failure");
@@ -2141,7 +2155,7 @@ fn bolero_discovery_failure_propagates() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn bolero_full_workspace_discovery_enumerates_every_member() {
+fn bolero_full_workspace_discovery_enumerates_every_candidate_member() {
     if !tools_available() {
         return;
     }
@@ -2149,7 +2163,7 @@ fn bolero_full_workspace_discovery_enumerates_every_member() {
     // adopter running `anvil-bolero` directly with no impact cache), the recipe
     // cannot read package specs from the include string -- it must enumerate
     // the workspace via `cargo metadata` and run target discovery for EVERY
-    // member. A regression that only handled the scoped `--package` form, or
+    // candidate member. A regression that only handled the scoped `--package` form, or
     // that dropped members, would silently fuzz nothing. Drive the metadata
     // shim so the workspace has two members and assert both are discovered.
     let tmp = fixture(
@@ -2165,8 +2179,7 @@ fn bolero_full_workspace_discovery_enumerates_every_member() {
         ],
     );
     let log = tmp.path().join("cargo.log");
-    // A whole-workspace affected tier forces the metadata-enumeration branch
-    // (the scoped `--package` branch never calls `cargo metadata`).
+    // All members in this fixture depend on Bolero and must remain candidates.
     seed_include(tmp.path(), "affected", "--workspace");
     let output = run_just(
         tmp.path(),
@@ -2175,6 +2188,7 @@ fn bolero_full_workspace_discovery_enumerates_every_member() {
             // `bolero list` succeeds but reports no targets, so the recipe
             // no-ops after discovery -- exactly the path we want to observe.
             ("FAKE_BOLERO_LIST_EXIT", OsStr::new("0")),
+            ("FAKE_BOLERO_METADATA", OsStr::new("1")),
             ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("other-package")),
             // A package present in metadata but NOT a workspace member must be
             // skipped -- discovery is over members, not every known package.
