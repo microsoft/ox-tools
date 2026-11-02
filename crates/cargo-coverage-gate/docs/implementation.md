@@ -9,9 +9,12 @@ failure diagnostics. The user-visible behavior is defined by the
 The optional `run` mode keeps collection and evaluation separated internally:
 
 1. Cargo metadata resolves every repeated `--package` selector to a concrete
-   workspace member. Exact `name@version` specs are passed to collection tools,
-   while bare names are passed to the evaluator. With no selectors, both
-   collection and evaluation cover the workspace.
+   workspace member. Source-qualified IDs from metadata are passed unchanged
+   through the shared package-selection emitter to collection and report tools,
+   including plain nextest on no-coverage targets. This distinguishes local
+   members from registry dependencies with identical names and versions without
+   reconstructing file URLs. Bare names are passed to the evaluator. With no
+   selectors, both collection and evaluation cover the workspace.
 2. Collection uses the invoking environment's Cargo and rustc, honoring
    inherited `CARGO`, `RUSTC`, `RUSTUP_TOOLCHAIN`, `PATH`, and related
    variables, with the report-only Windows `MSYSTEM` exception described
@@ -104,6 +107,20 @@ no-data diagnostic is consumed and replaced by the collector's empty-report
 message on both ordinary and response-file report paths. Normal collection
 stdout is inherited. `--quiet` redirects or drops each stdout channel while
 leaving errors and summary-file rendering intact.
+
+The deterministic command regression supplies metadata containing local and
+registry copies of the same name/version, and checks subset and full-workspace
+arguments across both feature configurations and all three command builders.
+The opt-in CLI regression additionally proves that the old selector fails in
+the real llvm-cov -> nextest -> Cargo chain, then collects both reports with the
+fixed selector, rejects accidental scope widening with an unbuildable omitted
+member, runs the plain-nextest path, and collects the full workspace. Run it
+with the nightly pinned in `justfiles/anvil/versions.just`, llvm-tools,
+cargo-llvm-cov, cargo-nextest, and registry access:
+
+```text
+cargo +<pinned-nightly> test -p cargo-coverage-gate --test cli real_collection_disambiguates_registry_and_workspace_packages -- --ignored
+```
 
 ## Diagnostic pipeline
 

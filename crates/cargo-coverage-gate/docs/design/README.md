@@ -475,9 +475,13 @@ For each requested feature configuration, `run`:
 6. atomically publishes the filtered report to its stable consumer path under
    `--coverage-dir` and passes that exact path to the evaluator.
 
-The selected package set is resolved to exact `name@version` specs before
-subprocess execution. With no selection options, the collector passes
-`--workspace`.
+Selectors are resolved against workspace members only. Before subprocess
+execution, explicit selections become the source-qualified package IDs supplied
+by Cargo metadata, not just `name@version`: a published dependency can have the
+same name and version as a local member. The shared selection emitter uses these
+IDs for both feature configurations, report export, and plain nextest execution
+on no-coverage targets. No registry package is selected in place of a member.
+With no selection options, the collector passes `--workspace`.
 
 Feature configurations and concurrent invocations never share instrumented
 build/profile state: each configuration uses
@@ -1107,9 +1111,9 @@ Rust with `cargo-llvm-cov ≥ 0.9`**. Four reasons:
   JSON / lcov output even on nightly. Versions 0.7+ fix this. Older
   versions silently report inflated line counts, which then surface
   as low percentages in the gate.
-- cargo-llvm-cov 0.8.0 added support for the exact `name@version` package
-  selectors that `run` resolves from workspace metadata and passes to both
-  test and report commands.
+- cargo-llvm-cov 0.8.0 added support for source-qualified package ID
+  selectors, which `run` takes directly from workspace metadata and passes
+  to both test and report commands.
 - cargo-llvm-cov 0.9.0 added `--workspace` support to the `report` subcommand,
   which `run` uses when no explicit package selection is supplied.
 

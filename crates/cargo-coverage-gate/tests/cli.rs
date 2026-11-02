@@ -779,8 +779,14 @@ fn run_delegates_both_configurations_to_cargo_llvm_cov_report_and_evaluates() {
     assert!(configuration_targets.iter().any(|target| target.ends_with("no-default")), "{log}");
     assert!(log.contains("--all-features"), "{log}");
     assert!(log.contains("--no-default-features"), "{log}");
-    assert!(log.contains("--package\talpha@0.1.0"), "{log}");
-    assert!(log.contains("--package\tbeta@0.1.0"), "{log}");
+    let metadata = cargo_metadata::MetadataCommand::new()
+        .manifest_path(tmp.path().join("Cargo.toml"))
+        .no_deps()
+        .exec()
+        .expect("workspace metadata");
+    for package in metadata.workspace_packages() {
+        assert_eq!(log.matches(&format!("--package\t{}", package.id)).count(), 4, "{log}");
+    }
     assert!(log.contains("--jobs\t3"), "{log}");
     assert!(log.contains("--build-jobs\t3"), "{log}");
     assert!(log.contains("--target\tx86_64-pc-windows-msvc"), "{log}");
@@ -797,6 +803,112 @@ fn run_delegates_both_configurations_to_cargo_llvm_cov_report_and_evaluates() {
             .contains(".rsp")),
         "temporary response files must be removed"
     );
+}
+
+#[test]
+#[ignore = "requires nightly Rust with llvm-tools, cargo-llvm-cov >= 0.9, cargo-nextest, and registry access"]
+fn real_collection_disambiguates_registry_and_workspace_packages() {
+    let tmp = TempDir::new().expect("tempdir");
+    make_workspace(
+        tmp.path(),
+        &[("itoa", Some("0")), ("consumer", Some("0")), ("unselected", Some("0"))],
+        None,
+    );
+    let local_manifest = tmp.path().join("itoa/Cargo.toml");
+    let manifest = fs::read_to_string(&local_manifest).expect("local manifest");
+    fs::write(&local_manifest, manifest.replace("0.1.0", "1.0.18")).expect("duplicate version");
+    fs::write(
+        tmp.path().join("consumer/Cargo.toml"),
+        concat!(
+            "[package]\nname = \"consumer\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+            "[dependencies]\nitoa = \"=1.0.18\"\n",
+            "[package.metadata.coverage-gate]\nmin-lines-percent = 0\n"
+        ),
+    )
+    .expect("registry consumer");
+    fs::write(
+        tmp.path().join("consumer/src/lib.rs"),
+        "pub fn value() -> String { itoa::Buffer::new().format(42).to_owned() }\n\
+         #[test] fn registry_api() { assert_eq!(value(), \"42\"); }\n",
+    )
+    .expect("registry API test");
+    fs::write(
+        tmp.path().join("itoa/src/lib.rs"),
+        "pub fn local_only() -> u32 { 7 }\n#[test] fn local_api() { assert_eq!(local_only(), 7); }\n",
+    )
+    .expect("local API test");
+    fs::write(
+        tmp.path().join("unselected/src/lib.rs"),
+        "compile_error!(\"unselected member was built\");\n",
+    )
+    .expect("excluded member");
+    let metadata = cargo_metadata::MetadataCommand::new()
+        .manifest_path(tmp.path().join("Cargo.toml"))
+        .exec()
+        .expect("resolve registry dependency and create lockfile");
+    assert_eq!(
+        metadata
+            .packages
+            .iter()
+            .filter(|package| package.name == "itoa" && package.version.to_string() == "1.0.18")
+            .count(),
+        2
+    );
+
+    // Prove the old selector fails in the actual llvm-cov -> nextest -> Cargo chain.
+    let old = ProcessCommand::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+        .current_dir(tmp.path())
+        .args(["llvm-cov", "nextest", "--no-report", "--package", "itoa@1.0.18"])
+        .args(["--package", "consumer", "--locked"])
+        .output()
+        .expect("old collection command");
+    assert!(!old.status.success());
+    assert!(String::from_utf8_lossy(&old.stderr).contains("ambiguous"), "{old:?}");
+
+    let coverage_dir = tmp.path().join("coverage");
+    coverage_gate(tmp.path())
+        .args(["run", "--package", "itoa@1.0.18", "--package", "consumer"])
+        .arg("--coverage-dir")
+        .arg(&coverage_dir)
+        .assert()
+        .success();
+    for artifact in ["lcov-all-features.info", "lcov-no-default.info"] {
+        let lcov = fs::read_to_string(coverage_dir.join(artifact))
+            .expect("collected report")
+            .replace('\\', "/");
+        assert!(lcov.contains("/itoa/src/lib.rs"), "{lcov}");
+        assert!(lcov.contains("/consumer/src/lib.rs"), "{lcov}");
+        assert!(!lcov.contains("/unselected/"), "{lcov}");
+    }
+
+    // Exercise the same selection emitter without instrumentation on a no-coverage target.
+    let version = ProcessCommand::new("rustc").arg("-vV").output().expect("rustc host");
+    let version = String::from_utf8(version.stdout).expect("UTF-8 rustc version");
+    let host = version.lines().find_map(|line| line.strip_prefix("host: ")).expect("host triple");
+    coverage_gate(tmp.path())
+        .args(["run", "--package", "itoa", "--package", "consumer", "--no-coverage-target", host])
+        .assert()
+        .success();
+
+    fs::write(
+        tmp.path().join("unselected/src/lib.rs"),
+        "pub fn third() -> u32 { 3 }\n#[test] fn third_api() { assert_eq!(third(), 3); }\n",
+    )
+    .expect("enable full workspace");
+    coverage_gate(tmp.path())
+        .arg("run")
+        .arg("--coverage-dir")
+        .arg(&coverage_dir)
+        .assert()
+        .success();
+    for artifact in ["lcov-all-features.info", "lcov-no-default.info"] {
+        let lcov = fs::read_to_string(coverage_dir.join(artifact))
+            .expect("full-workspace report")
+            .replace('\\', "/");
+        for member in ["itoa", "consumer", "unselected"] {
+            assert!(lcov.contains(&format!("/{member}/src/lib.rs")), "{lcov}");
+        }
+    }
 }
 
 #[test]
