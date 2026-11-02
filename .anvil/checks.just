@@ -7,9 +7,9 @@
 # Compute modified, affected, and required package files with cargo-delta.
 [group("anvil")]
 anvil-impact:
-    {{ anvil_impact_compute_prefix }}cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} delta --config .delta.toml impact --base-ref {{ quote(anvil_base_ref) }} --modified --format packages --output target/anvil/impact/modified.packages
-    {{ anvil_impact_compute_prefix }}cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} delta --config .delta.toml impact --base-ref {{ quote(anvil_base_ref) }} --affected --format packages --output target/anvil/impact/affected.packages
-    {{ anvil_impact_compute_prefix }}cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} delta --config .delta.toml impact --base-ref {{ quote(anvil_base_ref) }} --required --format packages --output target/anvil/impact/required.packages
+    {{ anvil_impact_compute_prefix }}cargo each --workspace --once -- cargo {{ anvil_impact_toolchain_arg }} delta --config .delta.toml impact --base-ref {{ quote(anvil_base_ref) }} --modified --format packages --output target/anvil/impact/modified.packages
+    {{ anvil_impact_compute_prefix }}cargo each --workspace --once -- cargo {{ anvil_impact_toolchain_arg }} delta --config .delta.toml impact --base-ref {{ quote(anvil_base_ref) }} --affected --format packages --output target/anvil/impact/affected.packages
+    {{ anvil_impact_compute_prefix }}cargo each --workspace --once -- cargo {{ anvil_impact_toolchain_arg }} delta --config .delta.toml impact --base-ref {{ quote(anvil_base_ref) }} --required --format packages --output target/anvil/impact/required.packages
 
 # Build all workspace targets and features, optionally for one package or profile.
 [arg("package", long, pattern='(?:[A-Za-z0-9_.-]+)?')]

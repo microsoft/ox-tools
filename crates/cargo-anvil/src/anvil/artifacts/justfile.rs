@@ -746,6 +746,7 @@ mod tests {
             "anvil-check:",
             "_anvil-helper argument:",
             "_install-tool name:",
+            "_install-bootstrap-tool name:",
             "_check-tool name:",
             "anvil-check_with-mixed_bytes:",
         ] {

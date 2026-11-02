@@ -36,6 +36,7 @@ anvil_impact_input_dir := if anvil_impact_mode == "consume" {
 }
 
 anvil_impact_compute_prefix := if anvil_impact_mode == "" { "" } else { "# " }
+anvil_impact_toolchain_arg := if anvil_impact_mode == "" { anvil_stable_toolchain_arg } else { "" }
 
 anvil_base_ref := if env("BASE_REF", "") == "" {
     if env("SYSTEM_PULLREQUEST_TARGETBRANCH", "") == "" {

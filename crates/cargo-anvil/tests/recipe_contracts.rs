@@ -301,6 +301,7 @@ fn setup_uses_lazy_inventory_and_exact_install_policy() {
         "semver_matches(installed, \">=\" + minimum)",
         "cargo install --locked --version =",
         "cargo binstall --no-confirm --locked --version =",
+        r#"anvil-tool-cargo-each-install installer="install": (_install-bootstrap-tool "cargo-each" cargo_each_version installer)"#,
         "anvil-toolchain-stable-install installer=\"install\": (anvil-tool-cargo-each-install installer)",
     ] {
         assert!(recipes.contains(contract), "missing setup contract: {contract}");

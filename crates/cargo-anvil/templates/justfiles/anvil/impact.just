@@ -24,6 +24,7 @@ anvil_impact_input_dir := if anvil_impact_mode == "consume" {
 }
 
 anvil_impact_compute_prefix := if anvil_impact_mode == "" { "" } else { "# " }
+anvil_impact_toolchain_arg := if anvil_impact_mode == "" { anvil_stable_toolchain_arg } else { "" }
 
 anvil_base_ref := if env("BASE_REF", "") == "" {
     if env("SYSTEM_PULLREQUEST_TARGETBRANCH", "") == "" {
@@ -82,6 +83,6 @@ anvil_msrv_workspace_selection := if workspace_rust_version == "" { "--none" } e
 # Compute modified, affected, and required package files with cargo-delta.
 [group("anvil")]
 anvil-impact:
-    {{ anvil_impact_compute_prefix }}cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} delta --config .delta.toml impact --base-ref {{ quote(anvil_base_ref) }} --modified --format packages --output target/anvil/impact/modified.packages
-    {{ anvil_impact_compute_prefix }}cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} delta --config .delta.toml impact --base-ref {{ quote(anvil_base_ref) }} --affected --format packages --output target/anvil/impact/affected.packages
-    {{ anvil_impact_compute_prefix }}cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} delta --config .delta.toml impact --base-ref {{ quote(anvil_base_ref) }} --required --format packages --output target/anvil/impact/required.packages
+    {{ anvil_impact_compute_prefix }}cargo each --workspace --once -- cargo {{ anvil_impact_toolchain_arg }} delta --config .delta.toml impact --base-ref {{ quote(anvil_base_ref) }} --modified --format packages --output target/anvil/impact/modified.packages
+    {{ anvil_impact_compute_prefix }}cargo each --workspace --once -- cargo {{ anvil_impact_toolchain_arg }} delta --config .delta.toml impact --base-ref {{ quote(anvil_base_ref) }} --affected --format packages --output target/anvil/impact/affected.packages
+    {{ anvil_impact_compute_prefix }}cargo each --workspace --once -- cargo {{ anvil_impact_toolchain_arg }} delta --config .delta.toml impact --base-ref {{ quote(anvil_base_ref) }} --required --format packages --output target/anvil/impact/required.packages

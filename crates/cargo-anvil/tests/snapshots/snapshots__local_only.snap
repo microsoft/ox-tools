@@ -32,9 +32,9 @@ alias anvil := anvil-pr
 # Compute modified, affected, and required package files with cargo-delta.
 [group("anvil")]
 anvil-impact:
-    {{ anvil_impact_compute_prefix }}cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} delta --config .delta.toml impact --base-ref {{ quote(anvil_base_ref) }} --modified --format packages --output target/anvil/impact/modified.packages
-    {{ anvil_impact_compute_prefix }}cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} delta --config .delta.toml impact --base-ref {{ quote(anvil_base_ref) }} --affected --format packages --output target/anvil/impact/affected.packages
-    {{ anvil_impact_compute_prefix }}cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} delta --config .delta.toml impact --base-ref {{ quote(anvil_base_ref) }} --required --format packages --output target/anvil/impact/required.packages
+    {{ anvil_impact_compute_prefix }}cargo each --workspace --once -- cargo {{ anvil_impact_toolchain_arg }} delta --config .delta.toml impact --base-ref {{ quote(anvil_base_ref) }} --modified --format packages --output target/anvil/impact/modified.packages
+    {{ anvil_impact_compute_prefix }}cargo each --workspace --once -- cargo {{ anvil_impact_toolchain_arg }} delta --config .delta.toml impact --base-ref {{ quote(anvil_base_ref) }} --affected --format packages --output target/anvil/impact/affected.packages
+    {{ anvil_impact_compute_prefix }}cargo each --workspace --once -- cargo {{ anvil_impact_toolchain_arg }} delta --config .delta.toml impact --base-ref {{ quote(anvil_base_ref) }} --required --format packages --output target/anvil/impact/required.packages
 
 # Build all workspace targets and features, optionally for one package or profile.
 [arg("package", long, pattern='(?:[A-Za-z0-9_.-]+)?')]
@@ -1644,6 +1644,7 @@ anvil_impact_input_dir := if anvil_impact_mode == "consume" {
 }
 
 anvil_impact_compute_prefix := if anvil_impact_mode == "" { "" } else { "# " }
+anvil_impact_toolchain_arg := if anvil_impact_mode == "" { anvil_stable_toolchain_arg } else { "" }
 
 anvil_base_ref := if env("BASE_REF", "") == "" {
     if env("SYSTEM_PULLREQUEST_TARGETBRANCH", "") == "" {
@@ -1866,6 +1867,19 @@ _install-tool name minimum installer="install" \
     {{ if satisfied == "true" { "# cargo-binstall not needed" } else if installer == "binstall" { if cargo_binstall_found == "true" { "# cargo-binstall already available" } else { "cargo install --locked cargo-binstall" } } else { "# cargo-binstall not needed" } }}
     {{ if satisfied == "true" { "# " + name + " " + installed + " satisfies >= " + minimum } else if installer == "install" { source_command } else { binary_command } }}
 
+# Install a bootstrap Cargo tool without consulting cargo-each-derived values.
+[arg("installer", pattern="^(install|binstall)$")]
+[private]
+_install-bootstrap-tool name minimum installer="install" \
+    extracted=(replace_regex(installed_cargo_tools, ('(?ms)\A.*^' + name + ' v([^:\r\n]+):\r?$.*\z'), '$1')) \
+    found=(if extracted == installed_cargo_tools { "false" } else { "true" }) \
+    installed=(if found == "true" { extracted } else { "" }) \
+    satisfied=(if found == "true" { semver_matches(installed, ">=" + minimum) } else { "false" }) \
+    source_command=("cargo install --locked --version =" + minimum + " " + name) \
+    binary_command=("cargo binstall --no-confirm --locked --version =" + minimum + " " + name):
+    {{ if satisfied == "true" { "# cargo-binstall not needed" } else if installer == "binstall" { if cargo_binstall_found == "true" { "# cargo-binstall already available" } else { "cargo install --locked cargo-binstall" } } else { "# cargo-binstall not needed" } }}
+    {{ if satisfied == "true" { "# " + name + " " + installed + " satisfies >= " + minimum } else if installer == "install" { source_command } else { binary_command } }}
+
 # Fail before a check starts when a required Cargo tool is missing or too old.
 [private]
 _check-tool name minimum \
@@ -1880,7 +1894,7 @@ _check-tool name minimum \
 # used to provision and run the remaining tools.
 [group("anvil-setup")]
 [private]
-anvil-tool-cargo-each-install installer="install": (_install-tool "cargo-each" cargo_each_version installer)
+anvil-tool-cargo-each-install installer="install": (_install-bootstrap-tool "cargo-each" cargo_each_version installer)
 
 [group("anvil-setup")]
 [private]

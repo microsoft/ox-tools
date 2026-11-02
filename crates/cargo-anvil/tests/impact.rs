@@ -46,11 +46,141 @@ fn generated_workspace_with(catalog: &Catalog) -> TempDir {
         temp.path(),
     )
     .unwrap();
+    install_fake_cargo_each(temp.path());
     temp
 }
 
 fn generated_workspace() -> TempDir {
     generated_workspace_with(&Catalog::anvil())
+}
+
+const FAKE_CARGO_EACH: &str = r#"
+$eachIndex = -1
+for ($i = 0; $i -lt $args.Count; $i++) {
+    if ($args[$i] -eq 'each') {
+        $eachIndex = $i
+        break
+    }
+}
+if ($eachIndex -lt 0) {
+    & '__REAL_CARGO__' @args
+    exit $LASTEXITCODE
+}
+$options = @($args[($eachIndex + 1)..($args.Count - 1)])
+$selection = @()
+$commandIndex = -1
+for ($i = 0; $i -lt $options.Count; $i++) {
+    if ($options[$i] -eq '--') {
+        $commandIndex = $i
+        break
+    }
+}
+if ($commandIndex -lt 0) {
+    for ($i = 0; $i -lt $options.Count; $i++) {
+        if ($options[$i] -in @('cargo', 'pwsh', 'rustup')) {
+            $commandIndex = $i - 1
+            break
+        }
+    }
+}
+if ($commandIndex -lt 0) {
+    $dryRunIndex = [Array]::IndexOf($options, '--dry-run')
+    if ($dryRunIndex -ge 0 -and ($dryRunIndex + 1) -lt $options.Count) {
+        $commandIndex = $dryRunIndex
+    }
+}
+if ($commandIndex -lt 0) {
+    [Console]::Error.WriteLine('cargo each fixture could not locate the command')
+    exit 2
+}
+if ($options -contains '--none') {
+    [Console]::Error.WriteLine('cargo each: selection resolved to no work; nothing to do')
+    exit 0
+}
+for ($i = 0; $i -lt $commandIndex; $i++) {
+    if ($options[$i] -eq '--package-file') {
+        $path = $options[++$i]
+        while (-not (Test-Path -LiteralPath $path -PathType Leaf) -and
+               ($i + 1) -lt $commandIndex -and
+               -not $options[$i + 1].StartsWith('--')) {
+            $path += ' ' + $options[++$i]
+        }
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            [Console]::Error.WriteLine("could not read package file '$path'")
+            exit 2
+        }
+        $selection += @(Get-Content -LiteralPath $path | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    } elseif ($options[$i] -eq '--workspace') {
+        $selection += 'fixture@0.1.0'
+    }
+}
+if ($selection.Count -eq 0) {
+    [Console]::Error.WriteLine('cargo each: selection resolved to no work; nothing to do')
+    exit 0
+}
+$command = @($options[($commandIndex + 1)..($options.Count - 1)])
+if ($options -contains '--dry-run') {
+    $manifest = Get-Content -LiteralPath (Join-Path (Get-Location) 'Cargo.toml') -Raw
+    $workspaceRustVersion = if ($manifest -match 'rust-version\s*=\s*"([^"]+)"') {
+        $Matches[1]
+    } else {
+        ''
+    }
+    foreach ($argument in $command) {
+        Write-Output ($argument.Replace('{workspace-rust-version}', $workspaceRustVersion))
+    }
+    exit 0
+}
+$expanded = @()
+foreach ($argument in $command) {
+    if ($argument -eq '{packages}') {
+        foreach ($package in $selection) {
+            $expanded += '--package'
+            $expanded += $package
+        }
+    } else {
+        $expanded += $argument
+    }
+}
+& $expanded[0] @($expanded[1..($expanded.Count - 1)])
+exit $LASTEXITCODE
+"#;
+
+fn install_fake_cargo_each(root: &Path) {
+    let bin = root.join("fake-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let real_cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let real_cargo = real_cargo.to_string_lossy().replace('\'', "''");
+    let script = FAKE_CARGO_EACH.replace("__REAL_CARGO__", &real_cargo);
+    write(&bin.join("cargo.ps1"), &script);
+    #[cfg(windows)]
+    write(
+        &bin.join("cargo.cmd"),
+        "@echo off\r\npwsh -NoProfile -File \"%~dp0cargo.ps1\" %*\r\nexit /b %ERRORLEVEL%\r\n",
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let executable = bin.join("cargo");
+        write(
+            &executable,
+            "#!/bin/sh\nexec pwsh -NoProfile -File \"$(dirname \"$0\")/cargo.ps1\" \"$@\"\n",
+        );
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(executable, permissions).unwrap();
+    }
+}
+
+fn fixture_path(root: &Path) -> std::ffi::OsString {
+    std::env::join_paths(
+        std::iter::once(root.join("fake-bin")).chain(
+            std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+                .filter(|path| !path.ends_with("target/debug") && !path.ends_with("target\\debug")),
+        ),
+    )
+    .unwrap()
 }
 
 fn just(root: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
@@ -61,14 +191,7 @@ fn just(root: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
         .env_remove("BASE_REF")
         .env_remove("SYSTEM_PULLREQUEST_TARGETBRANCH")
         .env_remove("GITHUB_BASE_REF")
-        .env(
-            "PATH",
-            std::env::join_paths(
-                std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
-                    .filter(|path| !path.ends_with("target/debug") && !path.ends_with("target\\debug")),
-            )
-            .unwrap(),
-        );
+        .env("PATH", fixture_path(root));
     for (name, value) in env {
         command.env(name, value);
     }
@@ -194,15 +317,10 @@ fn catalog_with_noop_validations(names: &[&str]) -> Catalog {
 fn run_consumed_examples(root: &Path, impact_dir: &Path, log: &Path) -> Output {
     let script = root.join("fake-check.ps1");
     write(&script, "Add-Content -LiteralPath $env:FAKE_CARGO_LOG -Value ($args -join ' ')\n");
-    let path = std::env::join_paths(
-        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
-            .filter(|path| !path.ends_with("target/debug") && !path.ends_with("target\\debug")),
-    )
-    .unwrap();
     Command::new("just")
         .arg("anvil-examples")
         .current_dir(root)
-        .env("PATH", path)
+        .env("PATH", fixture_path(root))
         .env("FAKE_CARGO_LOG", log)
         .env("FAKE_CHECK_SCRIPT", script)
         .env("ANVIL_IMPACT", "consume")
@@ -315,16 +433,11 @@ fn msrv_recipes_are_noops_without_a_root_msrv() {
         vec!["--set", "workspace_rust_version", "", "anvil-msrv-test-validate-prereqs"],
         vec!["--set", "workspace_rust_version", "", "anvil-msrv-test"],
     ] {
-        let path = std::env::join_paths(
-            std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
-                .filter(|path| !path.ends_with("target/debug") && !path.ends_with("target\\debug")),
-        )
-        .unwrap();
         let output = Command::new("just")
             .args(&invocation)
             .current_dir(temp.path())
             .env("ANVIL_IMPACT", "off")
-            .env("PATH", path)
+            .env("PATH", fixture_path(temp.path()))
             .output()
             .unwrap();
         assert!(

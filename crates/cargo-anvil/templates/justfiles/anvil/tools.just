@@ -31,6 +31,19 @@ _install-tool name minimum installer="install" \
     {{ if satisfied == "true" { "# cargo-binstall not needed" } else if installer == "binstall" { if cargo_binstall_found == "true" { "# cargo-binstall already available" } else { "cargo install --locked cargo-binstall" } } else { "# cargo-binstall not needed" } }}
     {{ if satisfied == "true" { "# " + name + " " + installed + " satisfies >= " + minimum } else if installer == "install" { source_command } else { binary_command } }}
 
+# Install a bootstrap Cargo tool without consulting cargo-each-derived values.
+[arg("installer", pattern="^(install|binstall)$")]
+[private]
+_install-bootstrap-tool name minimum installer="install" \
+    extracted=(replace_regex(installed_cargo_tools, ('(?ms)\A.*^' + name + ' v([^:\r\n]+):\r?$.*\z'), '$1')) \
+    found=(if extracted == installed_cargo_tools { "false" } else { "true" }) \
+    installed=(if found == "true" { extracted } else { "" }) \
+    satisfied=(if found == "true" { semver_matches(installed, ">=" + minimum) } else { "false" }) \
+    source_command=("cargo install --locked --version =" + minimum + " " + name) \
+    binary_command=("cargo binstall --no-confirm --locked --version =" + minimum + " " + name):
+    {{ if satisfied == "true" { "# cargo-binstall not needed" } else if installer == "binstall" { if cargo_binstall_found == "true" { "# cargo-binstall already available" } else { "cargo install --locked cargo-binstall" } } else { "# cargo-binstall not needed" } }}
+    {{ if satisfied == "true" { "# " + name + " " + installed + " satisfies >= " + minimum } else if installer == "install" { source_command } else { binary_command } }}
+
 # Fail before a check starts when a required Cargo tool is missing or too old.
 [private]
 _check-tool name minimum \
@@ -44,7 +57,7 @@ _check-tool name minimum \
 # available to the caller, then resolves the workspace rust-version fallback
 # used to provision and run the remaining tools.
 [group("anvil-setup")]
-anvil-tool-cargo-each-install installer="install": (_install-tool "cargo-each" cargo_each_version installer)
+anvil-tool-cargo-each-install installer="install": (_install-bootstrap-tool "cargo-each" cargo_each_version installer)
 
 [group("anvil-setup")]
 anvil-tool-cargo-each-validate-prereqs: (_check-tool "cargo-each" cargo_each_version)
