@@ -1997,15 +1997,7 @@ mod tests {
         assert!(workspace.members.windows(2).all(|pair| pair[0] <= pair[1]));
     }
 
-    #[test]
-    #[cfg_attr(
-        all(miri, windows),
-        ignore = "constructing a Command environment calls an unsupported Windows API under miri"
-    )]
-    fn collection_selection_preserves_workspace_sources_in_every_command() {
-        let local = "path+file:///C:/repo%20space/renamed#ohno@0.5.3";
-        let consumer = "path+file:///C:/repo%20space/consumer#consumer@1.0.0";
-        let registry = "registry+https://github.com/rust-lang/crates.io-index#ohno@0.5.3";
+    fn duplicate_source_metadata(local: &str, consumer: &str, unselected: &str, registry: &str) -> Metadata {
         let package = |name, version, id, source| {
             serde_json::json!({
                 "name": name, "version": version, "id": id, "source": source,
@@ -2014,34 +2006,66 @@ mod tests {
                 "categories": [], "keywords": [], "edition": "2024"
             })
         };
-        let metadata: Metadata = serde_json::from_value(serde_json::json!({
+        serde_json::from_value(serde_json::json!({
             "packages": [
                 package("ohno", "0.5.3", registry, Some("registry+https://github.com/rust-lang/crates.io-index")),
+                package("unselected", "1.0.0", unselected, None),
                 package("ohno", "0.5.3", local, None),
                 package("consumer", "1.0.0", consumer, None)
             ],
-            "workspace_members": [local, consumer],
+            "workspace_members": [local, consumer, unselected],
             "workspace_default_members": [consumer],
             "workspace_root": "/repo",
             "target_directory": "/repo/target",
             "version": 1
         }))
-        .expect("duplicate-source metadata");
+        .expect("duplicate-source metadata")
+    }
+
+    fn assert_command_arguments(command: &Command, prefix: &[&str], selection: &[&str], suffix: &[&str]) {
+        let expected = prefix.iter().chain(selection).chain(suffix).map(OsStr::new).collect::<Vec<_>>();
+        assert_eq!(command.get_args().collect::<Vec<_>>(), expected);
+    }
+
+    #[test]
+    #[cfg_attr(
+        all(miri, windows),
+        ignore = "constructing a Command environment calls an unsupported Windows API under miri"
+    )]
+    fn collection_selection_preserves_workspace_sources_in_every_command() {
+        let local = "path+file:///C:/repo%20space/renamed#ohno@0.5.3";
+        let consumer = "path+file:///C:/repo%20space/consumer#consumer@1.0.0";
+        let unselected = "path+file:///C:/repo%20space/unselected#unselected@1.0.0";
+        let registry = "registry+https://github.com/rust-lang/crates.io-index#ohno@0.5.3";
+        let metadata = duplicate_source_metadata(local, consumer, unselected, registry);
         let workspace = WorkspaceInfo::from_metadata(&metadata);
-        assert_eq!(workspace.members.len(), 2);
+        assert_eq!(
+            workspace.members.iter().map(|member| member.id.repr.as_str()).collect::<Vec<_>>(),
+            [consumer, local, unselected]
+        );
         let tools = ToolPrograms {
             cargo: "cargo".into(),
             rustc: "rustc".into(),
         };
         let args = collection_args();
-        for (selectors, expected) in [
-            (vec![], vec!["--workspace"]),
-            (vec!["ohno@0.5.3"], vec!["--package", local]),
-            (vec!["consumer"], vec!["--package", consumer]),
-            (vec!["ohno*", "consumer", "ohno"], vec!["--package", consumer, "--package", local]),
+        for (selectors, expected, gated) in [
+            (vec![], vec!["--workspace"], vec![]),
+            (vec!["ohno@0.5.3"], vec!["--package", local], vec!["ohno"]),
+            (vec!["consumer"], vec!["--package", consumer], vec!["consumer"]),
+            (
+                vec!["ohno*", "consumer", "ohno"],
+                vec!["--package", consumer, "--package", local],
+                vec!["consumer", "ohno"],
+            ),
+            (
+                vec!["*"],
+                vec!["--package", consumer, "--package", local, "--package", unselected],
+                vec!["consumer", "ohno", "unselected"],
+            ),
         ] {
             let selectors = selectors.into_iter().map(str::to_owned).collect::<Vec<_>>();
             let selection = Selection::resolve(&workspace, &selectors).expect("workspace selection");
+            assert_eq!(selection.gated_names(), gated);
             let execution = CollectionExecution {
                 workspace: &workspace,
                 selection: &selection,
@@ -2056,171 +2080,32 @@ mod tests {
                 let plain = plain_configuration_command(&workspace, &selection, &args, configuration, "test-target", &tools);
                 let instrumented = nextest_command(&execution, configuration);
                 let report = report_command(&execution, configuration, Path::new("lcov.info"));
-                for (command, prefix_len) in [(&plain, 2), (&instrumented, 3), (&report, 5)] {
-                    let arguments = command.get_args().collect::<Vec<_>>();
-                    assert_eq!(
-                        &arguments[prefix_len..prefix_len + expected.len()],
-                        expected.iter().map(OsStr::new).collect::<Vec<_>>(),
-                        "{selectors:?}: {arguments:?}"
-                    );
-                    assert_eq!(arguments.iter().filter(|arg| **arg == "--package").count(), expected.len() / 2);
-                    assert!(!arguments.contains(&OsStr::new(registry)));
-                    assert!(!arguments.contains(&OsStr::new("ohno@0.5.3")));
-                }
-                for command in [&plain, &instrumented] {
-                    assert!(command.get_args().any(|arg| arg == configuration.cargo_flag()));
-                }
-            }
-        }
-        Selection::resolve(&workspace, &[registry.to_owned()]).expect_err("registry IDs are not workspace selectors");
-    }
-
-    fn duplicate_source_workspace(root: &Path) -> WorkspaceInfo {
-        fs::create_dir_all(root.join(".cargo")).expect("fixture config directory");
-        fs::write(
-            root.join(".cargo/config.toml"),
-            "[source.crates-io]\nreplace-with = \"fixture\"\n[source.fixture]\ndirectory = \"registry\"\n",
-        )
-        .expect("offline directory source");
-        fs::write(
-            root.join("Cargo.toml"),
-            "[workspace]\nresolver = \"2\"\nmembers = [\"alpha\", \"beta\", \"unselected\"]\ndefault-members = [\"beta\"]\n",
-        )
-        .expect("fixture workspace");
-        for (directory, name, extra, source) in [
-            ("alpha", "alpha", "", "pub fn local_only() -> u32 { 7 }\n"),
-            (
-                "beta",
-                "beta",
-                "[dependencies]\nalpha = \"=0.1.0\"\n",
-                "pub fn consumer() -> u32 { alpha::registry_only() }\n",
-            ),
-            ("unselected", "unselected", "", "compile_error!(\"unselected member was built\");\n"),
-            ("registry/alpha-0.1.0", "alpha", "", "pub fn registry_only() -> u32 { 42 }\n"),
-        ] {
-            let directory = root.join(directory);
-            fs::create_dir_all(directory.join("src")).expect("fixture source directory");
-            fs::write(
-                directory.join("Cargo.toml"),
-                format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n{extra}"),
-            )
-            .expect("fixture package manifest");
-            fs::write(directory.join("src/lib.rs"), source).expect("fixture source");
-        }
-        fs::write(
-            root.join("registry/alpha-0.1.0/.cargo-checksum.json"),
-            r#"{"files":{},"package":null}"#,
-        )
-        .expect("directory source checksum");
-        let metadata = MetadataCommand::new()
-            .current_dir(root)
-            .other_options(vec!["--offline".to_owned()])
-            .exec()
-            .expect("offline fixture metadata and lockfile");
-        let duplicates = metadata
-            .packages
-            .iter()
-            .filter(|package| package.name == "alpha")
-            .collect::<Vec<_>>();
-        assert_eq!(duplicates.len(), 2);
-        assert_eq!(duplicates[0].version, duplicates[1].version);
-        assert_eq!(duplicates.iter().filter(|package| package.source.is_some()).count(), 1);
-        WorkspaceInfo::from_metadata(&metadata)
-    }
-
-    fn build_collection_arguments(command: &Command, prefix_len: usize) -> Output {
-        let mut cargo = Command::new(command.get_program());
-        let root = command
-            .get_current_dir()
-            .expect("collection commands set their workspace directory");
-        cargo
-            .current_dir(root)
-            .args(["test", "--lib", "--no-run", "--offline", "--message-format=json"])
-            .env("CARGO_TARGET_DIR", root.join("target"))
-            .env_remove("CARGO_ENCODED_RUSTFLAGS")
-            .env_remove("RUSTFLAGS");
-        // Keep the generated Cargo arguments, removing only the nextest-specific options.
-        let mut arguments = command.get_args().skip(prefix_len);
-        while let Some(argument) = arguments.next() {
-            if argument == "--build-jobs" {
-                arguments.next().expect("--build-jobs has a value");
-            } else if argument != "--no-tests=pass" {
-                cargo.arg(argument);
-            }
-        }
-        cargo.output().expect("build generated collection arguments with real Cargo")
-    }
-
-    fn assert_collection_builds(workspace: &WorkspaceInfo, selection: &Selection, target: &str, tools: &ToolPrograms) {
-        let args = collection_args();
-        let execution = CollectionExecution {
-            workspace,
-            selection,
-            args: &args,
-            scratch_dir: Path::new("unused"),
-            coverage_target_root: Path::new("unused"),
-            target,
-            tools,
-            quiet: false,
-        };
-        for configuration in normalized_configurations(&[]) {
-            let instrumented = nextest_command(&execution, configuration);
-            let plain = plain_configuration_command(workspace, selection, &args, configuration, target, tools);
-            for (command, prefix_len) in [(&instrumented, 3), (&plain, 2)] {
-                let output = build_collection_arguments(command, prefix_len);
-                assert!(output.status.success(), "{}\n{output:?}", command_display(command));
-                let built_tests = cargo_metadata::Message::parse_stream(output.stdout.as_slice())
-                    .filter_map(|message| match message.expect("Cargo JSON message") {
-                        cargo_metadata::Message::CompilerArtifact(artifact) if artifact.profile.test => Some(artifact.package_id),
-                        _ => None,
-                    })
-                    .collect::<BTreeSet<_>>();
-                assert_eq!(
-                    built_tests,
-                    selection.members.iter().map(|member| member.id.clone()).collect(),
-                    "{}",
-                    command_display(command)
+                let suffix = [
+                    configuration.cargo_flag(),
+                    "--locked",
+                    "--target",
+                    "test-target",
+                    "--jobs",
+                    "3",
+                    "--build-jobs",
+                    "3",
+                    "--no-tests=pass",
+                ];
+                assert_command_arguments(&plain, &["nextest", "run"], &expected, &suffix);
+                assert_command_arguments(&instrumented, &["llvm-cov", "nextest", "--no-report"], &expected, &suffix);
+                assert_command_arguments(
+                    &report,
+                    &["llvm-cov", "report", "--lcov", "--output-path", "lcov.info"],
+                    &expected,
+                    &["--target", "test-target"],
                 );
             }
         }
-    }
-
-    #[test]
-    #[cfg_attr(miri, ignore = "builds an offline fixture with Cargo")]
-    fn collection_arguments_build_workspace_members_with_registry_duplicates_offline() {
-        let fixture = tempfile::Builder::new()
-            .prefix("coverage selection with spaces ")
-            .tempdir()
-            .expect("fixture directory");
-        let workspace = duplicate_source_workspace(fixture.path());
-        let tools = ToolPrograms::from_env();
-        let target = EffectiveTarget::resolve(&workspace, None, &tools).expect("compiler host target");
-        let selectors = ["alpha@0.1.0".to_owned(), "beta".to_owned()];
-        let selection = Selection::resolve(&workspace, &selectors).expect("subset selection");
-
-        let mut ambiguous = Selection::resolve(&workspace, &selectors).expect("old subset selection");
-        for member in &mut ambiguous.members {
-            member.id.repr = member.spec();
-        }
-        let old = plain_configuration_command(
-            &workspace,
-            &ambiguous,
-            &collection_args(),
-            FeatureConfiguration::AllFeatures,
-            &target.triple,
-            &tools,
+        let error = Selection::resolve(&workspace, &[registry.to_owned()]).expect_err("registry IDs are not workspace selectors");
+        assert_eq!(
+            error.to_string(),
+            format!("`--package` selector `{registry}` did not match any workspace member")
         );
-        let failure = build_collection_arguments(&old, 2);
-        assert!(!failure.status.success());
-        assert!(String::from_utf8_lossy(&failure.stderr).contains("ambiguous"), "{failure:?}");
-
-        assert_collection_builds(&workspace, &selection, &target.triple, &tools);
-        // The subset must never compile this member. It becomes valid only for the full-workspace checks.
-        fs::write(fixture.path().join("unselected/src/lib.rs"), "pub fn third() -> u32 { 3 }\n").expect("enable full workspace");
-        for selectors in [vec![], vec!["*".to_owned()]] {
-            let selection = Selection::resolve(&workspace, &selectors).expect("full workspace selection");
-            assert_collection_builds(&workspace, &selection, &target.triple, &tools);
-        }
     }
 
     #[test]

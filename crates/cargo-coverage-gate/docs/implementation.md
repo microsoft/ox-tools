@@ -108,23 +108,16 @@ message on both ordinary and response-file report paths. Normal collection
 stdout is inherited. `--quiet` redirects or drops each stdout channel while
 leaving errors and summary-file rendering intact.
 
-The deterministic command regression supplies metadata containing local and
-registry copies of the same name/version, and checks subset and full-workspace
-arguments across both feature configurations and all three command builders.
-An ordinary, always-run regression also builds the generated collection
-arguments with real Cargo. Its private directory source supplies a registry
-package offline, alongside a workspace member of the same name and version.
-The registry package has a different API, so compilation verifies source
-identity as well as selector acceptance. The old selector must fail as
-ambiguous. Both feature configurations and the instrumented/plain command
-builders must compile the selected subset without building an intentionally
-broken omitted member, then compile implicit and explicit full-workspace
-selections. Only nextest-specific options are removed before passing the
-generated arguments to `cargo test --lib --no-run --offline`; neither LLVM
-nor nextest is needed. This tests Cargo's real selection behavior, not LLVM
-instrumentation or report contents. The existing CLI tests with fake tools
-cover collection/report forwarding, and the in-memory regression checks the
-exact source-qualified report arguments.
+The package-selection regression uses fixed in-memory metadata containing local
+and registry copies of the same name/version, another selected member, and an
+omitted member. It checks the complete arguments emitted by the production
+instrumented, plain-nextest, and report command builders for both feature
+configurations. Cases include individual members, overlapping selectors,
+subsets, and implicit/explicit full-workspace selections. Exact source IDs,
+gated names, and rejection of registry-only selectors preserve the workspace
+boundary without modeling Cargo's resolver. This ordinary test starts no
+processes and creates no disk fixtures; installed Cargo, nextest, LLVM, and
+registry access are not prerequisites for its verdict.
 
 ## Diagnostic pipeline
 

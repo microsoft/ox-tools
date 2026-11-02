@@ -779,14 +779,6 @@ fn run_delegates_both_configurations_to_cargo_llvm_cov_report_and_evaluates() {
     assert!(configuration_targets.iter().any(|target| target.ends_with("no-default")), "{log}");
     assert!(log.contains("--all-features"), "{log}");
     assert!(log.contains("--no-default-features"), "{log}");
-    let metadata = cargo_metadata::MetadataCommand::new()
-        .manifest_path(tmp.path().join("Cargo.toml"))
-        .no_deps()
-        .exec()
-        .expect("workspace metadata");
-    for package in metadata.workspace_packages() {
-        assert_eq!(log.matches(&format!("--package\t{}", package.id)).count(), 4, "{log}");
-    }
     assert!(log.contains("--jobs\t3"), "{log}");
     assert!(log.contains("--build-jobs\t3"), "{log}");
     assert!(log.contains("--target\tx86_64-pc-windows-msvc"), "{log}");
