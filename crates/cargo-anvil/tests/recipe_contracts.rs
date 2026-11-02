@@ -1689,7 +1689,6 @@ fn container_impact_script() -> String {
     format!(
         "{}\n{recipe}",
         r#"
-if ($PSVersionTable.PSVersion -lt [version]'7.6') { throw 'PowerShell 7.6 or newer is required' }
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
