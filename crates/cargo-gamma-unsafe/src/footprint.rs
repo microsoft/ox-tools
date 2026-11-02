@@ -57,7 +57,7 @@ pub fn children(parent: i32) -> io::Result<Vec<i32>> {
 fn list_pids(selector: u32, id: u32) -> io::Result<Vec<i32>> {
     list_with(|members| {
         let bytes = i32::try_from(size_of_val(members))
-            .map_err(|_too_large| io::Error::other("process-group listing exceeds the platform buffer size"))?;
+            .map_err(|_too_large| io::Error::other("process listing exceeds the platform buffer size"))?;
         // SAFETY: __error has no preconditions and returns this thread's errno cell.
         let errno = unsafe { libc::__error() };
         // SAFETY: errno points to this thread's writable cell. libproc maps a syscall failure
@@ -92,7 +92,7 @@ fn list_with(mut list: impl FnMut(&mut [i32]) -> io::Result<usize>) -> io::Resul
             .len()
             .checked_mul(2)
             .filter(|length| *length <= i32::MAX as usize / size_of::<i32>())
-            .ok_or_else(|| io::Error::other("process-group listing exceeds the platform buffer size"))?;
+            .ok_or_else(|| io::Error::other("process listing exceeds the platform buffer size"))?;
         members.resize(length, 0);
     }
 }

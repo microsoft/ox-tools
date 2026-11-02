@@ -1767,8 +1767,8 @@ fn start_sampler(child: &mut Child, guard: &SpawnGuard, group: i32, slot: usize)
 
 /// Signals the retained group using the existing exited-leader handling.
 ///
-/// On macOS, this first ends the groups that the group's descendants lead, which killing the
-/// group alone would leave running.
+/// On macOS, this first stops and ends every descendant found through its parent, which killing
+/// the group alone would leave running.
 #[cfg(unix)]
 fn sweep_group(group: Option<i32>, leader_exited: bool) -> io::Result<()> {
     group.map_or(Ok(()), |group| {
