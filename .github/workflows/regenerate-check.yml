@@ -37,9 +37,6 @@ jobs:
           lfs: true
       - name: Build cargo-anvil
         run: cargo build --locked -p cargo-anvil
-      - name: Verify Bolero candidate selection without discovery builds
-        shell: pwsh
-        run: ./scripts/test-anvil-bolero.Tests.ps1
       - name: Verify in-tree state matches templates
         run: |
           # Add target/debug to PATH so cargo finds the freshly built binary

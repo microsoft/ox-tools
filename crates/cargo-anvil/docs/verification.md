@@ -77,7 +77,7 @@ runtime PowerShell semantics; recipe execution is validated by the provisioned
 self-hosting pipeline described above.
 
 Bolero candidate selection is also exercised directly in PowerShell by
-`./scripts/test-anvil-bolero.Tests.ps1`, run in the regeneration workflow. It
+`./scripts/test-anvil-bolero.Tests.ps1`, run locally. It
 loads the production selector from the source template and passes in-memory
 metadata, without spawning processes or creating input fixtures. Cases cover
 no-Bolero packages, direct and transitive dependencies, workspace/registry
