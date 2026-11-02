@@ -286,7 +286,6 @@ fn build_plan_with_hosts(
                 && let Err(error) = scanner.validate_marker_scan(&text)
             {
                 let reason = error.to_string();
-                // #[gamma::skip(call_result.default, reason = "refuse_region still records the refusal in plan; its unit return value already equals Default")]
                 refuse_region(&mut plan, host.clone(), &key.id, &reason, RefusalRemedy::IncompleteJsonScan);
                 composed.states.insert(host, ComposedHostState::Unsafe(reason));
                 continue;
@@ -496,6 +495,7 @@ fn validate_array_plan(
         };
         let current_json_spec = array_host.json_specs.get(id);
         let Some(after) = &item.spliced_host else {
+            // #[gamma::skip(cond.always_true, reason = "an ordinary ID has no json_specs entry, so inserting it into the active set cannot cause any spec to be validated")]
             if current_json_spec.is_some() {
                 active_json_region_ids.entry(host).or_default().insert(id.clone());
             }
@@ -558,7 +558,6 @@ fn validate_array_plan(
     Ok(())
 }
 
-#[mutants::skip] // Marker-only repairs and non-structural regions must not activate structural-entry validation.
 fn is_active_json_write(has_json_spec: bool, has_rendered_body: bool) -> bool {
     has_json_spec && has_rendered_body
 }
@@ -583,7 +582,7 @@ fn plan_catalog_artifact(
         Artifact::OwnedFile(spec) => {
             if spec.gate.is_none_or(|gate| backends.contains(&gate)) {
                 let path = (hosts.resolve)(repo_root, spec.path)?;
-                plan.push(plan_owned_file(repo_root, manifest, &path, &spec.body)?);
+                plan.push(plan_owned_file(repo_root, manifest, &path, &spec.body, hosts.read)?);
             }
         }
         Artifact::Region(spec) => {
@@ -990,7 +989,6 @@ fn push_region(
             HostScanner::for_path(&resolved)
         };
         if scanner == HostScanner::Json && spec.syntax != CommentSyntax::SlashSlash {
-            // #[gamma::skip(call_result.default, reason = "refuse_region still records the refusal in plan; its unit return value already equals Default")]
             refuse_region(
                 plan,
                 resolved,
@@ -998,9 +996,9 @@ fn push_region(
                 "this host retains JSON-aware marker scanning, so regions in it must use slash-slash comment markers",
                 RefusalRemedy::SyntaxChange,
             );
-            continue;
+        } else {
+            push_region_at_with_scanner(repo_root, manifest, plan, hosts, composed, host, spec, scanner)?;
         }
-        push_region_at_with_scanner(repo_root, manifest, plan, hosts, composed, host, spec, scanner)?;
     }
     Ok(())
 }
@@ -1043,20 +1041,26 @@ fn push_region_at_with_scanner(
     scanner: HostScanner,
 ) -> Result<(), AppError> {
     let host = (hosts.resolve)(repo_root, host)?;
-    let mut current = hosts.get_or_read(repo_root, &host)?;
+    let current = hosts.get_or_read(repo_root, &host)?;
     if let Some(text) = current.as_deref()
         && let Err(error) = scanner.validate_marker_scan(text)
     {
         if let Some(repaired) = repair_tracked_json_body_for_scan(manifest, &host, spec, scanner, text) {
             hosts.set(&host, repaired.clone());
-            plan.push(PlanItem::repair_region(host.clone(), spec.id.as_str(), repaired.clone()));
-            current = Some(repaired);
+            plan.push(PlanItem::repair_region(host.clone(), spec.id.as_str(), repaired));
         } else {
             refuse_region(plan, host, spec.id.as_str(), &error.to_string(), RefusalRemedy::IncompleteJsonScan);
             return Ok(());
         }
     }
-    if refuse_region_syntax_change(plan, manifest, &host, spec, current.as_deref(), scanner) {
+    if refuse_region_syntax_change(
+        plan,
+        manifest,
+        &host,
+        spec,
+        hosts.texts.get(&host).and_then(Option::as_deref),
+        scanner,
+    ) {
         return Ok(());
     }
     // #[gamma::skip(try.propagate_to_unwrap, reason = "The host is already cached, so repair performs no fallible IO at this call.", tag = "equivalent")]
@@ -1182,11 +1186,9 @@ fn repair_tracked_json_body_for_scan(
     }
     manifest.region_checksum(host, spec.id.as_str())?;
     crate::region::find_region(text, spec.id.as_str(), spec.syntax).ok().flatten()?;
+    // #[gamma::skip(try.propagate_to_unwrap, reason = "find_region above proved an intact pair; upsert_region repeats that same lookup and then performs an infallible splice")]
     let repaired = crate::region::upsert_region(text, spec.id.as_str(), &spec.body, spec.syntax).ok()?;
     if repaired == text {
-        return None;
-    }
-    if scanner.validate_marker_scan(&repaired).is_err() {
         return None;
     }
     scanner.find(&repaired, spec.id.as_str(), spec.syntax).ok().flatten()?;
@@ -1206,7 +1208,6 @@ fn region_placement_or_refuse(
     match region_placement(spec.id.as_str(), spec.syntax, current) {
         Ok(placement) => Some(placement),
         Err(reason) => {
-            // #[gamma::skip(call_result.default, reason = "refuse_region still records the refusal in plan; its unit return value already equals Default")]
             refuse_region(plan, host.to_owned(), spec.id.as_str(), &reason, RefusalRemedy::XmlPlacement);
             None
         }
@@ -2131,7 +2132,6 @@ fn retirement_syntax_or_refuse(
     match infer_recorded_region_syntax(text.as_deref(), scanner, host, id, recorded_checksum) {
         Ok(syntax) => Ok(Some(syntax)),
         Err(reason) => {
-            // #[gamma::skip(call_result.default, reason = "refuse_region still records the refusal in plan; its unit return value already equals Default")]
             refuse_region(plan, host.to_owned(), id, &reason.to_string(), RefusalRemedy::RetirementInference);
             Ok(None)
         }
@@ -2319,6 +2319,422 @@ mod tests {
         assert!(!is_active_json_write(true, false));
         assert!(!is_active_json_write(false, true));
         assert!(!is_active_json_write(false, false));
+    }
+
+    #[test]
+    fn regression_projected_json_placement_returns_resolution_and_read_failures() {
+        let mut manifest = Manifest::default();
+        manifest.json_array_paths.insert(
+            RegionKey {
+                host: "config.json".to_owned(),
+                id: "entries".to_owned(),
+            },
+            vec!["entries".to_owned()],
+        );
+        let mut hosts = HostTextCache {
+            resolve: |_, _| Err(app_err!("projected resolution refused")),
+            read: |_| panic!("resolution failure must stop before reading"),
+            ..HostTextCache::default()
+        };
+        assert_eq!(
+            validate_projected_json_placements(Path::new("memory"), &manifest, &Plan::default(), &mut hosts)
+                .unwrap_err()
+                .to_string(),
+            "projected resolution refused"
+        );
+        hosts.resolve = |_, host| Ok(host.to_owned());
+        hosts.read = |_| Err(app_err!("projected read refused"));
+        assert_eq!(
+            validate_projected_json_placements(Path::new("memory"), &manifest, &Plan::default(), &mut hosts)
+                .unwrap_err()
+                .to_string(),
+            "projected read refused"
+        );
+    }
+
+    #[test]
+    fn regression_json_repair_skips_missing_hosts_but_publishes_all_later_repairs() {
+        let catalog = Catalog::builder(test_cli())
+            .with_artifact(Artifact::region(RegionSpec {
+                host: HostSelector::Path("ordinary.json".to_owned()),
+                id: RegionId::new("ordinary"),
+                body: "/* lexical only */".to_owned(),
+                syntax: CommentSyntax::SlashSlash,
+            }))
+            .with_json_array_region(crate::JsonArrayRegionSpec {
+                region: RegionSpec {
+                    host: HostSelector::Path("z.json".to_owned()),
+                    id: RegionId::new("entries"),
+                    body: "\"managed\",".to_owned(),
+                    syntax: CommentSyntax::SlashSlash,
+                },
+                path: vec!["entries".to_owned()],
+            })
+            .build()
+            .unwrap();
+        let mut manifest = Manifest::default();
+        manifest.json_array_paths.insert(
+            RegionKey {
+                host: "a.json".to_owned(),
+                id: "missing".to_owned(),
+            },
+            vec!["entries".to_owned()],
+        );
+        let mut hosts = HostTextCache {
+            resolve: |_, host| Ok(host.to_owned()),
+            read: |path| {
+                assert!(path.ends_with("a.json"), "ordinary hosts must not be repaired: {path:?}");
+                Ok(None)
+            },
+            ..HostTextCache::default()
+        };
+        let before =
+            "{\"entries\":[\n// >>> anvil-managed: entries\n// >>> anvil-managed: entries\n\"managed\",\n// <<< anvil-managed: entries\n]}";
+        let after = "{\"entries\":[\n// >>> anvil-managed: entries\n\"managed\",\n// <<< anvil-managed: entries\n]}";
+        hosts.set("z.json", before.to_owned());
+        let mut plan = Plan::default();
+        repair_structural_json_markers(
+            Path::new("memory"),
+            &Workspace {
+                members: Vec::new(),
+                has_workspace_table: false,
+            },
+            &manifest,
+            &catalog,
+            &mut hosts,
+            &mut plan,
+        )
+        .unwrap();
+        assert_eq!(hosts.cached("z.json").as_deref(), Some(after));
+        assert_eq!(plan.items().len(), 1);
+        assert_eq!(plan.items()[0].spliced_host.as_deref(), Some(after));
+        assert_eq!(
+            plan.items()[0].target,
+            Target::Region {
+                host: "z.json".to_owned(),
+                id: "entries".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn regression_json_plan_propagates_each_resolution_boundary() {
+        thread_local! {
+            static RESOLUTION: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((usize::MAX, 0)) };
+        }
+        fn resolve(_: &Path, host: &str) -> Result<String, AppError> {
+            let (fail_at, calls) = RESOLUTION.get();
+            RESOLUTION.set((fail_at, calls + 1));
+            if fail_at == calls {
+                Err(app_err!("JSON resolution refused at {calls}"))
+            } else {
+                Ok(host.to_owned())
+            }
+        }
+        let catalog = json_array_catalog();
+        let mut manifest = Manifest::default();
+        manifest.set_region(
+            "CloudBuild.json",
+            "anvil-source-root",
+            checksum_str("\"build\\\\Extensions\\\\Anvil\",\n"),
+        );
+        manifest.json_array_paths.insert(
+            RegionKey {
+                host: "CloudBuild.json".to_owned(),
+                id: "anvil-source-root".to_owned(),
+            },
+            vec!["EnlistmentRootPaths".to_owned(), "SourceRootDirs".to_owned()],
+        );
+        let run = || {
+            let mut hosts = HostTextCache {
+                resolve,
+                read: |_| panic!("all JSON hosts must already be cached"),
+                ..HostTextCache::default()
+            };
+            hosts.set(
+                "CloudBuild.json",
+                "{\"EnlistmentRootPaths\":{\"SourceRootDirs\":[\n// >>> anvil-managed: anvil-source-root\n\"build\\\\Extensions\\\\Anvil\",\n// <<< anvil-managed: anvil-source-root\n]}}".to_owned(),
+            );
+            build_plan_with_hosts(
+                Path::new("memory"),
+                &Workspace {
+                    members: Vec::new(),
+                    has_workspace_table: false,
+                },
+                &manifest,
+                &[],
+                &catalog,
+                &mut hosts,
+            )
+        };
+        RESOLUTION.set((usize::MAX, 0));
+        let plan = run().unwrap();
+        assert!(plan.refusals().is_empty());
+        let calls = RESOLUTION.get().1;
+        assert!(
+            calls > 0,
+            "the failure-injection loop must exercise at least one resolution boundary"
+        );
+        for fail_at in 0..calls {
+            RESOLUTION.set((fail_at, 0));
+            assert_eq!(run().unwrap_err().to_string(), format!("JSON resolution refused at {fail_at}"));
+            assert_eq!(RESOLUTION.get().1, fail_at + 1);
+        }
+    }
+
+    #[test]
+    fn regression_catalog_json_dispatch_returns_uncached_read_failures() {
+        let catalog = json_array_catalog();
+        let mut hosts = HostTextCache {
+            resolve: |_, host| Ok(host.to_owned()),
+            read: |_| Err(app_err!("JSON dispatch read refused")),
+            ..HostTextCache::default()
+        };
+        let mut plan = Plan::default();
+        let error = plan_catalog_artifact(
+            Path::new("memory"),
+            &Workspace {
+                members: Vec::new(),
+                has_workspace_table: false,
+            },
+            &Manifest::default(),
+            &[],
+            &catalog,
+            &catalog.artifacts()[0],
+            &mut plan,
+            &mut hosts,
+            &mut ComposedHosts::default(),
+            &BTreeSet::new(),
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "JSON dispatch read refused");
+        assert!(plan.items().is_empty());
+    }
+
+    #[test]
+    fn regression_json_validation_checks_in_sync_requirements_after_ignored_plan_items() {
+        let spec = crate::JsonArrayRegionSpec {
+            region: RegionSpec {
+                host: HostSelector::Path("config.json".to_owned()),
+                id: RegionId::new("entries"),
+                body: "\"required\",".to_owned(),
+                syntax: CommentSyntax::SlashSlash,
+            },
+            path: vec!["entries".to_owned()],
+        };
+        let before = "{\"entries\":[\n// >>> anvil-managed: entries\n\"required\",\n// <<< anvil-managed: entries\n]}";
+        let after = "{\"entries\":[\n// >>> anvil-managed: entries\n// <<< anvil-managed: entries\n]}";
+        let arrays = BTreeMap::from([(
+            "config.json".to_owned(),
+            ArrayHost {
+                format: ArrayFormat::Json,
+                paths: vec![spec.path.clone()],
+                json_specs: BTreeMap::from([("entries".to_owned(), spec)]),
+            },
+        )]);
+        let mut plan = Plan::default();
+        plan.push(PlanItem::write_file("ignored.txt", "ignored".to_owned(), "checksum".to_owned()));
+        plan.push(PlanItem::repair_region("ordinary.json", "ignored", "{}".to_owned()));
+        plan.push(PlanItem::noop(
+            Target::Region {
+                host: "config.json".to_owned(),
+                id: "ordinary".to_owned(),
+            },
+            Decision::InSync,
+        ));
+        plan.push(PlanItem::insync(
+            Target::Region {
+                host: "config.json".to_owned(),
+                id: "entries".to_owned(),
+            },
+            "checksum".to_owned(),
+        ));
+        plan.push(PlanItem::repair_region("config.json", "ordinary", after.to_owned()));
+        let mut hosts = memory_hosts();
+        hosts.set("config.json", before.to_owned());
+        let error = validate_array_plan(
+            Path::new("memory"),
+            &plan,
+            &mut hosts,
+            &arrays,
+            &mut HashMap::from([("config.json".to_owned(), before.to_owned())]),
+        )
+        .unwrap_err();
+        let expected = "Refused JSON array host config.json: required JSON array entry \"required\" occurs 0 times after composition. No plan was produced; no files were changed. Keep array scaffolding repository-owned and independent of other regions. Ownership migrations are not supported.";
+        assert_eq!(error.to_string(), expected);
+        assert_eq!(hosts.cached("config.json").as_deref(), Some(before));
+        let error = validate_array_plan(
+            Path::new("memory"),
+            &Plan::default(),
+            &mut {
+                let mut hosts = memory_hosts();
+                hosts.set("config.json", after.to_owned());
+                hosts
+            },
+            &arrays,
+            &mut HashMap::new(),
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), expected);
+    }
+
+    #[test]
+    fn regression_json_declared_paths_and_marker_only_writes_keep_validation_order() {
+        let spec = crate::JsonArrayRegionSpec {
+            region: RegionSpec {
+                host: HostSelector::Path("config.json".to_owned()),
+                id: RegionId::new("entries"),
+                body: "\"required\",".to_owned(),
+                syntax: CommentSyntax::SlashSlash,
+            },
+            path: vec!["entries".to_owned()],
+        };
+        let catalog = Catalog::builder(test_cli()).with_json_array_region(spec).build().unwrap();
+        let before = "{\"entries\":[\n// >>> anvil-managed: entries\n// <<< anvil-managed: entries\n]}";
+        let after = "{\"entries\":[\n// >>> anvil-managed: entries\n\"required\",\n// <<< anvil-managed: entries\n]}";
+        let mut hosts = memory_hosts();
+        hosts.set("config.json", "{\"entries\":[]}".to_owned());
+        let (arrays, _) = array_host_inputs(
+            Path::new("memory"),
+            &Workspace {
+                members: Vec::new(),
+                has_workspace_table: false,
+            },
+            &Manifest::default(),
+            &catalog,
+            &mut hosts,
+        )
+        .unwrap();
+        assert_eq!(arrays["config.json"].paths, [vec!["entries".to_owned()]]);
+        let mut plan = Plan::default();
+        plan.push(PlanItem::repair_region("config.json", "entries", before.to_owned()));
+        plan.push(PlanItem::write_region(
+            "config.json",
+            "entries",
+            "\"required\",".to_owned(),
+            after.to_owned(),
+            "checksum".to_owned(),
+        ));
+        hosts.set("config.json", after.to_owned());
+        validate_array_plan(
+            Path::new("memory"),
+            &plan,
+            &mut hosts,
+            &arrays,
+            &mut HashMap::from([("config.json".to_owned(), before.to_owned())]),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn regression_historical_json_inputs_require_a_json_host_even_for_in_memory_metadata() {
+        let mut manifest = Manifest::default();
+        manifest.set_region("config.txt", "entries", "checksum");
+        manifest.json_array_paths.insert(
+            RegionKey {
+                host: "config.txt".to_owned(),
+                id: "entries".to_owned(),
+            },
+            vec!["entries".to_owned()],
+        );
+        let mut paths = BTreeMap::new();
+        let mut candidates = BTreeMap::new();
+        add_historical_array_inputs(Path::new("memory"), &manifest, &memory_hosts(), &mut paths, &mut candidates).unwrap();
+        assert!(paths.is_empty());
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn regression_tracked_json_repair_requires_intact_visible_markers_and_valid_replacement() {
+        let mut spec = RegionSpec {
+            host: HostSelector::Path("config.json".to_owned()),
+            id: RegionId::new("settings"),
+            body: "\"valid\": true,\n".to_owned(),
+            syntax: CommentSyntax::SlashSlash,
+        };
+        let mut manifest = Manifest::default();
+        manifest.set_region("config.json", "settings", "checksum");
+        for text in [
+            "{\n\"unterminated\n}",
+            "// >>> anvil-managed: settings\n\"unterminated\n",
+            "/* outside\n// >>> anvil-managed: settings\nold\n// <<< anvil-managed: settings\n",
+        ] {
+            assert_eq!(
+                repair_tracked_json_body_for_scan(&manifest, "config.json", &spec, HostScanner::Json, text),
+                None,
+                "{text:?}"
+            );
+        }
+        let text = "// >>> anvil-managed: settings\nold\n// <<< anvil-managed: settings\n";
+        spec.body = "\"unterminated".to_owned();
+        assert_eq!(
+            repair_tracked_json_body_for_scan(&manifest, "config.json", &spec, HostScanner::Json, text),
+            None
+        );
+        spec.body = "// >>> anvil-managed: settings\n".to_owned();
+        assert_eq!(
+            repair_tracked_json_body_for_scan(&manifest, "config.json", &spec, HostScanner::Json, text),
+            None
+        );
+        spec.body = "/*\n".to_owned();
+        let text = "// >>> anvil-managed: settings\nold\n// <<< anvil-managed: settings\n*/\n";
+        assert_eq!(
+            repair_tracked_json_body_for_scan(&manifest, "config.json", &spec, HostScanner::Json, text),
+            None
+        );
+    }
+
+    #[test]
+    fn regression_case_renamed_retention_preserves_exact_item_provenance() {
+        for (structural, scanner, checksum_update) in [
+            (true, true, false),
+            (false, true, false),
+            (false, false, false),
+            (false, true, true),
+        ] {
+            let mut previous = Manifest::default();
+            previous.set_region("config.json", "entries", "old-checksum");
+            if structural {
+                previous.json_array_paths.insert(
+                    RegionKey {
+                        host: "config.json".to_owned(),
+                        id: "entries".to_owned(),
+                    },
+                    vec!["items".to_owned()],
+                );
+            }
+            let target = Target::Region {
+                host: "Config.json".to_owned(),
+                id: "entries".to_owned(),
+            };
+            let mut plan = Plan::default();
+            plan.push(if checksum_update {
+                PlanItem::insync(target.clone(), "new-checksum".to_owned())
+            } else {
+                PlanItem::noop(target.clone(), Decision::LeaveAlone)
+            });
+            plan_removals_with_array_hosts(
+                Path::new("memory"),
+                &previous,
+                &mut plan,
+                &mut case_renamed_json_hosts(),
+                &ComposedHosts::default(),
+                &if scanner {
+                    BTreeSet::from(["Config.json".to_owned()])
+                } else {
+                    BTreeSet::new()
+                },
+            )
+            .unwrap();
+            assert_eq!(plan.items().len(), if checksum_update { 2 } else { 3 });
+            if !checksum_update {
+                let retained = &plan.items()[1];
+                assert_eq!(retained.target, target);
+                assert_eq!(retained.rendered_checksum.as_deref(), Some("old-checksum"));
+                assert_eq!(retained.json_scanner, structural || scanner);
+                assert_eq!(retained.json_array_path, structural.then(|| vec!["items".to_owned()]));
+            }
+        }
     }
 
     #[test]
@@ -2853,6 +3269,56 @@ mod tests {
     }
 
     #[test]
+    fn survivor_dependabot_resolution_failures_stop_full_planning_in_spelling_order() {
+        let root = Path::new("in-memory-dependabot-planning");
+        let workspace = Workspace {
+            members: Vec::new(),
+            has_workspace_table: false,
+        };
+        let catalog = Catalog::builder(test_cli())
+            .with_artifact(Artifact::owned_file(".github/workflows/generated.yml", "generated"))
+            .build()
+            .unwrap();
+        let mut hosts = memory_hosts();
+        hosts.resolve = |_, path| {
+            if path.starts_with(".github/dependabot.") {
+                bail!("cannot resolve {path}");
+            }
+            Ok(path.to_owned())
+        };
+        hosts.read = |path| {
+            assert_eq!(path.file_name().unwrap(), "generated.yml");
+            Ok(None)
+        };
+        let error = build_plan_with_hosts(root, &workspace, &Manifest::default(), &[Backend::GitHub], &catalog, &mut hosts).unwrap_err();
+        assert_eq!(error.message(), "cannot resolve .github/dependabot.yml");
+        assert!(!hosts.texts.contains_key(".github/dependabot.yml"));
+        assert!(!hosts.texts.contains_key(".github/dependabot.yaml"));
+    }
+
+    #[test]
+    fn survivor_dependabot_read_failures_leave_the_plan_and_configuration_cache_unchanged() {
+        let root = Path::new("memory");
+        let catalog = Catalog::builder(test_cli())
+            .with_artifact(Artifact::owned_file(".github/workflows/generated.yml", "generated"))
+            .build()
+            .unwrap();
+        for path in [".github/dependabot.yml", ".github/dependabot.yaml"] {
+            let mut hosts = memory_hosts();
+            hosts.texts.insert(".github/dependabot.yml".to_owned(), None);
+            hosts.texts.insert(".github/dependabot.yaml".to_owned(), None);
+            hosts.texts.remove(path);
+            hosts.read = |path| Err(ohno::app_err!("cannot read {}", path.display()));
+            let mut plan = Plan::default();
+            let error = plan_dependabot_exclusions(root, &[Backend::GitHub], &catalog, &mut plan, &mut hosts).unwrap_err();
+            assert_eq!(error.message(), format!("cannot read {}", root.join(path).display()));
+            assert!(plan.items().is_empty());
+            assert!(plan.refusals().is_empty());
+            assert!(!hosts.texts.contains_key(path));
+        }
+    }
+
+    #[test]
     fn dependabot_path_resolution_errors_do_not_plan_partial_patches() {
         let catalog = Catalog::builder(test_cli())
             .with_artifact(artifacts::github::pr_impl_workflow())
@@ -3232,6 +3698,15 @@ mod tests {
 
     #[test]
     fn survivor_every_host_resolution_failure_is_returned_before_publication() {
+        assert_host_resolution_failures(Path::new("in-memory-owned-file-resolution"), true);
+    }
+
+    #[test]
+    fn survivor_region_host_resolution_failures_are_returned_before_publication() {
+        assert_host_resolution_failures(Path::new("in-memory-survivor-resolution"), false);
+    }
+
+    fn assert_host_resolution_failures(repo_root: &Path, include_owned_file: bool) {
         thread_local! {
             static RESOLUTION: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((usize::MAX, 0)) };
         }
@@ -3261,8 +3736,13 @@ mod tests {
             },
             path: vec!["plugins".to_owned(), "default".to_owned()],
         };
-        let catalog = Catalog::builder(test_cli())
-            .with_toml_array_region(array)
+        let catalog = Catalog::builder(test_cli()).with_toml_array_region(array);
+        let catalog = if include_owned_file {
+            catalog.with_artifact(Artifact::owned_file("owned.txt", "owned\n"))
+        } else {
+            catalog
+        };
+        let catalog = catalog
             .with_artifact(Artifact::region(ordinary))
             .with_artifact(Artifact::region(RegionSpec {
                 host: HostSelector::Path("notes.txt".to_owned()),
@@ -3278,6 +3758,7 @@ mod tests {
         let run = || {
             let mut hosts = HostTextCache {
                 resolve,
+                read: |_| Ok(None),
                 ..HostTextCache::default()
             };
             hosts.set(
@@ -3291,7 +3772,7 @@ mod tests {
             );
             hosts.set("notes.txt", String::new());
             build_plan_with_hosts(
-                Path::new("in-memory-survivor-resolution"),
+                repo_root,
                 &Workspace {
                     members: Vec::new(),
                     has_workspace_table: false,
@@ -3306,7 +3787,10 @@ mod tests {
         let baseline = run().unwrap();
         assert!(baseline.refusals().is_empty(), "{:?}", baseline.refusals());
         let calls = RESOLUTION.with(|state| state.get().1);
-        assert!(calls > 10);
+        assert!(
+            calls > 0,
+            "the failure-injection loop must exercise at least one resolution boundary"
+        );
         for fail_at in 0..calls {
             RESOLUTION.with(|state| state.set((fail_at, 0)));
             let error = run().unwrap_err().to_string();
@@ -3316,6 +3800,48 @@ mod tests {
             );
             assert_eq!(RESOLUTION.with(|state| state.get().1), fail_at + 1);
         }
+    }
+
+    #[test]
+    fn owned_file_planning_reads_injected_disk_text_instead_of_composed_region_text() {
+        let catalog = Catalog::builder(test_cli())
+            .with_artifact(Artifact::owned_file("owned.txt", "generated\n"))
+            .build()
+            .unwrap();
+        let mut manifest = Manifest::default();
+        manifest.set_file("owned.txt", checksum_str("generated\n"));
+        let mut hosts = memory_hosts();
+        hosts.set("owned.txt", "generated\n".to_owned());
+        hosts.read = |path| {
+            assert_eq!(path, Path::new("in-memory-owned-planning").join("owned.txt"));
+            Ok(Some("user-edited\n".to_owned()))
+        };
+        let workspace = Workspace {
+            members: Vec::new(),
+            has_workspace_table: false,
+        };
+        let plan = build_plan_with_hosts(
+            Path::new("in-memory-owned-planning"),
+            &workspace,
+            &manifest,
+            &[],
+            &catalog,
+            &mut hosts,
+        )
+        .unwrap();
+        assert_eq!(plan.items().len(), 1);
+        assert_eq!(plan.items()[0].decision, Decision::LeaveAlone);
+        hosts.read = |_| Err(ohno::app_err!("owned file read refused"));
+        let error = build_plan_with_hosts(
+            Path::new("in-memory-owned-planning"),
+            &workspace,
+            &manifest,
+            &[],
+            &catalog,
+            &mut hosts,
+        )
+        .unwrap_err();
+        assert_eq!(error.message(), "owned file read refused");
     }
 
     #[test]
@@ -4021,6 +4547,9 @@ mod tests {
         let repaired = hosts.cached("config.json").unwrap();
 
         assert!(plan.refusals().is_empty(), "{:?}", plan.refusals());
+        assert_eq!(plan.items().len(), 2);
+        assert_eq!(plan.items()[0].spliced_host.as_deref(), Some(repaired.as_str()));
+        assert!(plan.items()[1].json_scanner);
         assert_eq!(repaired.matches("// >>> anvil-managed: settings").count(), 1);
         assert_eq!(repaired.matches("// <<< anvil-managed: settings").count(), 1);
         assert!(repaired.contains("  \"setting\": false,\n"));
@@ -6550,7 +7079,6 @@ mod tests {
         assert!(!tmp.path().join(".anvil.lock").exists());
     }
 
-    #[mutants::skip]
     fn assert_dry_run_detects_manifest_drift(mutate: impl FnOnce(&mut Manifest)) {
         let tmp = empty_workspace();
         let catalog = Catalog::anvil();

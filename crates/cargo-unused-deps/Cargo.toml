@@ -30,7 +30,6 @@ path = "src/main.rs"
 [dependencies]
 cargo_metadata = { workspace = true }
 clap = { workspace = true, features = ["std", "derive", "color", "help", "error-context", "usage"] }
-mutants = { workspace = true }
 ohno = { workspace = true, features = ["app-err"] }
 serde_json = { workspace = true, features = ["std"] }
 tempfile = { workspace = true }

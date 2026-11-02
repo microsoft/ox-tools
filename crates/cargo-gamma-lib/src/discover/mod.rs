@@ -21,7 +21,7 @@ mod survey;
 mod target_file;
 mod workspace_snapshot;
 
-#[cfg(feature = "internals")]
+#[cfg(any(test, feature = "internals"))]
 #[doc(hidden)]
 pub mod acceptance {
     #[doc(hidden)]

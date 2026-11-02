@@ -54,6 +54,7 @@ async fn get_repo_core(repo_path: &Path, repo_url: &Url, timeout: Duration) -> R
 async fn get_repo_core_with_executable(repo_path: &Path, repo_url: &Url, timeout: Duration, git_executable: &Path) -> Result<RepoStatus> {
     let path_str = path_str(repo_path)?;
 
+    // #[gamma::skip(try.propagate_to_unwrap, tag = "native", reason = "this adapter removes a real corrupt cache directory; prepare_cached_repo tests removal errors through its injected remover without changing host permissions")]
     if prepare_cached_repo(
         repo_path,
         Path::exists,

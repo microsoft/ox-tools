@@ -50,7 +50,6 @@ cargo_metadata = { workspace = true }
 clap = { workspace = true, features = ["derive", "std", "help", "usage", "error-context"] }
 glob = { workspace = true }
 lcov = { workspace = true }
-mutants = { workspace = true }
 ohno = { workspace = true, features = ["app-err"] }
 ra_ap_syntax = { workspace = true }
 semver = { workspace = true, features = ["std"] }

@@ -207,7 +207,7 @@ anvil-full: anvil-pr anvil-scheduled
    Component installs depend on the matching toolchain install.
 5. **Per-tool recipes** — `anvil-tool-<bin>-install installer="install"` and
    `anvil-tool-<bin>-validate-prereqs` for every cargo subcommand the catalog needs
-   (`cargo-nextest`, `cargo-llvm-cov`, `cargo-mutants`, …) plus `rustc` and `pwsh`.
+   (`cargo-nextest`, `cargo-llvm-cov`, `cargo-gamma`, …) plus `rustc` and `pwsh`.
    `installer` selects `cargo install` vs `cargo binstall`.
 6. **Per-check / per-group / per-tier / global setup** — composition layer; see §3.3.
 
@@ -288,7 +288,7 @@ already present at or above its pin and fails with a one-line install hint other
   `cargo-clippy` (a default-toolchain component) and `rustc`, and nothing else.
 - `anvil-<group>-setup installer="install"` — depends on every per-check setup
   in the group. cloud workflows matrix jobs call this so a `pr-fast` leg never installs
-  cargo-mutants.
+  cargo-gamma.
 - `anvil-<tier>-setup installer="install"` — depends on every per-group setup
   in the tier. Local "I want to run the whole PR tier" convenience.
 - `anvil-setup installer="install"` — depends on every per-tier setup. The
@@ -867,88 +867,74 @@ Customizing the *contents* of `justfiles/anvil/*.just` is supported — they're 
 so editing them flips them to "dirty" and the next `update` writes a `.anvil-proposed`
 sibling instead of overwriting. See [updates.md](./updates.md) for the lifecycle.
 
-## 9. Platform-specific mutation configuration
+## 9. Mutation testing with cargo-gamma
 
-### Why this is needed
+Anvil requires cargo-gamma 0.4.0 or newer. The public recipes
+`anvil-mutants-diff`, `anvil-mutants-full`, and `anvil-pr-mutants` use Gamma.
 
-Cargo-mutants 27.1.0 discovers and mutates Rust source without evaluating
-platform-conditional compilation. Its [documented limitations][mutants-cfg]
-explicitly warn that functions for other platforms can be reported as missed.
-For example, it can change a function guarded by `#[cfg(windows)]` during a Linux
-run. The source is mutated, but the compiler excludes that function, so the
-change introduces no behavioral mutation into the code under test. The tests
-continue to pass and cargo-mutants reports `MISSED`: a false indication of a
-test gap on that platform, not a mutation those tests could have detected.
-This does not establish test coverage on the platform where the function is
-actually compiled.
+Both recipes invoke `cargo gamma run --workspace --min-score 100 --max-flaky 0`.
+The PR recipe additionally passes `--in-diff` a unified diff of the resolved
+base against the working tree, including uncommitted changes. Impact scoping
+still skips an empty affected-package set; otherwise Gamma filters mutation
+sites by changed lines across the workspace, including non-default members.
+The scheduled recipe runs the whole workspace without a diff.
 
-There is no native platform-conditional exclusion table in that version's
-[configuration schema][mutants-config-source]: `exclude_globs` and `exclude_re`
-are unconditional lists. A conditional skip attribute is not a workaround:
-the [attribute documentation][mutants-attributes] states that cargo-mutants does
-not evaluate the `cfg_attr` condition. Thus
-`#[cfg_attr(windows, mutants::skip)]` suppresses mutations on other platforms too.
+The explicit gates are important: Gamma otherwise permits a completed campaign
+with survivors to exit successfully. A score below 100 or any unresolved flaky
+outcome fails the check. Timeouts and out-of-memory outcomes do not count as
+assertion kills. Native exit codes, including infrastructure and baseline
+failures, propagate unchanged.
 
-Anvil therefore selects a complete native configuration for the current OS,
-using cargo-mutants' existing [`--config` option][mutants-config-file].
-Duplicating common policy is intentional: it avoids both a custom metadata
-schema and an Anvil-owned configuration merger while retaining native matching.
+After every invoked campaign returns, both recipes unconditionally run
+`cargo gamma hints` with the same selected toolchain to update
+`gamma-hints.yaml`. This also happens when score gates or the campaign fail.
+Ordinary hint promotion merges the campaign's knowledge rather than replacing
+hints outside a diff-scoped population. The campaign's nonzero exit code takes
+precedence over a hint-promotion failure; when the campaign succeeds, a
+hint-promotion failure fails the recipe. No hints command runs when impact
+scoping skips the campaign or a prerequisite fails before it starts.
 
-### File selection
+An empty impact scope remains an explicit successful skip. Within an affected
+scope, a diff-scoped campaign with no mutation sites also succeeds, including
+comment-only diffs; hint promotion still runs after Gamma exits. An empty
+full-workspace campaign or a nonempty but wholly ungradeable population fails
+the applicable gates. Empty diff selections never hide infrastructure or
+baseline failures. Anvil does not preflight discovery to change these outcomes.
 
-`anvil-mutants-diff` and `anvil-mutants-full` select an optional native
-cargo-mutants configuration by the executing host OS:
+Gamma reads the workspace's native `gamma.toml`, or uses its defaults when
+that file is absent. Anvil does not generate, merge, or override that policy
+except for the workspace selection, diff scope, strict gates, and GitHub report
+destination described here.
+Mutator selection, Cargo features, build profile, test selection, concurrency,
+and memory policy follow Gamma's configuration and defaults. In particular,
+Anvil does not pass cargo-mutants' `--jobs 0` or `--no-shuffle` flags.
+On GitHub Actions (`GITHUB_ACTIONS=true`), both recipes explicitly pass
+`--artifact-dir target/cargo-gamma`, overriding any native `artifact-dir` so
+report execution and the artifact/SARIF uploads agree. Local and ADO runs
+honor the configured report directory, defaulting to `target/cargo-gamma`.
 
-| Host | Preferred configuration |
-|------|-------------------------|
-| Linux | `.cargo/mutants.linux.toml` |
-| Windows | `.cargo/mutants.windows.toml` |
-| Other hosts | `.cargo/mutants.<os>.toml`, using Just's `os()` name |
+Gamma evaluates conditional compilation and conditional `gamma::skip`
+attributes. Both recipes use the same native configuration on every supported
+host, including Windows ARM. The GitHub PR workflow uses its
+Windows x64 campaign and compatibility contexts, and scheduled exhaustive
+workflows retain their Linux/Windows x64 matrix to bound recurring cost.
+ADO recipes also work on adopters' supported self-hosted ARM pools.
 
-If that file exists at the workspace root, both recipes pass
-`--config=.cargo/mutants.<os>.toml`. Otherwise neither recipe adds a config
-argument: cargo-mutants reads `.cargo/mutants.toml`, or uses its defaults if
-that file is absent. Files for other hosts do not affect selection.
-The same OS configuration applies across architectures.
-A selected file that cannot be read or parsed fails in cargo-mutants; it does
-not fall back to another configuration.
+### Migrating existing repositories
 
-Each platform file is a **complete native configuration**. Cargo-mutants does
-not merge it with `.cargo/mutants.toml`: duplicate shared exclusions, regexes,
-features, test-package settings, and other policy where needed. For example,
-platform files can each retain the common exclusions and add native
-`exclude_globs` for the other platform's packages, directories, or source files.
-There is no Anvil metadata schema, glob matcher, or configuration merger.
+Regenerate with the updated Anvil, then run `just anvil-pr-mutants-setup`.
+Gamma 0.4.0 must be published before releasing an Anvil version that requires
+it or running the updated setup in CI. That release must include diff inventory
+support for nonmutation targets, so PRs changing integration tests are accepted.
+Existing cargo-mutants installations need not be uninstalled.
 
-Selection uses only Just's `os()`, `path_exists()`, and conditional expressions;
-it does not launch PowerShell, Bash, Cargo metadata, or a helper executable.
-The existing recipe wrappers and prerequisites still use PowerShell, but this
-selector does not depend on their interpreter and can remain when they migrate.
-The selected OS is the native host, not a cross-compilation target.
-
-Existing impact and Windows ARM skips, diff scoping, baseline defaults, worker
-counts, and exit-code handling are unchanged. Plain `cargo mutants` and legacy
-recipes do not automatically select these platform filenames. Keep their
-existing `.cargo/mutants.toml` unchanged during side-by-side adoption, and pass
-`--config` explicitly when reproducing a platform-specific run without Anvil.
-
-### Future direction: conditional source attributes
-
-Cargo-gamma's implementation already [covers conditional `gamma::skip`
-attributes][gamma-conditional-skips], including not suppressing a site when its
-`cfg_attr` predicate is false. Once a suitable release is available and adopted
-by Anvil, conditional source attributes such as
-`#[cfg_attr(windows, gamma::skip)]` are expected to be preferable for
-source-local platform exceptions: the policy stays beside the affected code
-and need not be duplicated across OS configuration files.
-
-This is a future migration option, not a backend change in this feature.
-Existing `mutants::skip` annotations would need review because
-[cargo-gamma does not interpret them][gamma-mutants-skips].
-
-[mutants-cfg]: https://github.com/sourcefrog/cargo-mutants/blob/v27.1.0/book/src/limitations.md#limitations-and-known-bugs
-[mutants-config-source]: https://github.com/sourcefrog/cargo-mutants/blob/v27.1.0/src/config.rs
-[mutants-attributes]: https://github.com/sourcefrog/cargo-mutants/blob/v27.1.0/book/src/attrs.md
-[mutants-config-file]: https://github.com/sourcefrog/cargo-mutants/blob/v27.1.0/book/src/config-file.md
-[gamma-conditional-skips]: https://github.com/microsoft/ox-tools/blob/f683d6a9041fe5a32a6f09fa64d82a5000378d55/crates/cargo-gamma-lib/src/suppress/tests.rs#L177-L215
-[gamma-mutants-skips]: https://github.com/microsoft/ox-tools/blob/f683d6a9041fe5a32a6f09fa64d82a5000378d55/crates/cargo-gamma-lib/src/suppress/tests.rs#L35-L61
+The former `.cargo/mutants.toml` and `.cargo/mutants.<os>.toml` files are
+user-owned and are neither deleted nor consumed by the new recipes. Review
+their policy and translate applicable settings into native `gamma.toml` keys,
+such as `exclude-files`, `features`, `all-features`, `profile`, and
+`test-packages`. The mutation catalogs and configuration schemas differ:
+there is no automatic conversion, and historical scores are not comparable.
+Review existing `mutants::skip` annotations explicitly; Gamma does not
+interpret them. Use narrowly justified Gamma suppressions, including
+conditional source attributes where appropriate, rather than copying broad
+platform exclusion lists.
