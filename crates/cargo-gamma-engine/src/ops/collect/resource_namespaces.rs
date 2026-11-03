@@ -2661,7 +2661,7 @@ mod tests {
             .function("consumer\\lib.rs", &[], &path(&["target"]))
             .expect("workspace alias resolves using normalized library root");
         assert_eq!(function.root, "library/lib.rs");
-        assert!(function.module.is_empty());
+        assert_eq!(function.module.len(), 0);
         assert!(function.syntax.contains("'l'"));
         assert!(consumer.closed_methods_for("consumer\\lib.rs", &[]));
         assert!(consumer.function("consumer\\lib.rs", &[], &path(&["absent"])).is_none());

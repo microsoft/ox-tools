@@ -92,7 +92,7 @@ impl<'a> SourceFileAnalyzer<'a> {
         let kind = token.kind();
 
         // Handle comments
-        if matches!(kind, SyntaxKind::COMMENT) {
+        if kind == SyntaxKind::COMMENT {
             self.record_comment_lines_from_token(token);
         }
 
@@ -147,7 +147,7 @@ impl<'a> SourceFileAnalyzer<'a> {
                 .path()
                 .and_then(|path| path.segment())
                 .and_then(|segment| segment.name_ref())
-                .is_some_and(|name| matches!(&*name.text(), "test" | "bench" | "cfg"));
+                .is_some_and(|name| matches!(name.text(), "test" | "bench" | "cfg"));
 
             // #[gamma::skip(logical.and_remove_left, tag = "equivalent", reason = "attribute_marks_test already rejects every name except test, bench, and cfg; the syntax-name check only avoids allocating text for those rejected names")]
             is_candidate && attribute_marks_test(&attr.syntax().text().to_string())
@@ -417,6 +417,21 @@ fn main() {
 
     #[test]
     #[cfg_attr(miri, ignore = "Miri detects UB in external rowan crate")]
+    fn documentation_comments_are_counted() {
+        for (source, expected_lines) in [
+            ("//! Module documentation\nfn main() {}\n", 1),
+            ("/// Function documentation\nfn main() {}\n", 1),
+            ("/*! Module\n documentation */\nfn main() {}\n", 2),
+            ("/** Function\n documentation */\nfn main() {}\n", 2),
+        ] {
+            let stats = analyze_source_file(source);
+            assert_eq!(stats.comment_lines, expected_lines, "{source}");
+            assert!(!stats.has_errors, "{source}");
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri detects UB in external rowan crate")]
     fn test_with_test_code() {
         let source = r#"
 fn production_fn() {
@@ -505,6 +520,7 @@ pub fn production_after_tests() {
         let mut analyzer = SourceFileAnalyzer::new("one\ntwo\nthree");
 
         analyzer.mark_line(1, LINE_COMMENT);
+        analyzer.mark_line(99, LINE_PRODUCTION);
 
         assert_eq!(analyzer.line_flags, vec![0, LINE_COMMENT, 0]);
         assert_eq!(analyzer.count_lines(LINE_COMMENT), 1);

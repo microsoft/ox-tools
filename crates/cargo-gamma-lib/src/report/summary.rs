@@ -540,7 +540,7 @@ mod tests {
             assert!(blocks.iter().all(|(_, rows)| rows.len() == 1));
         }
         population.mutants.clear();
-        assert!(
+        assert_eq!(
             outcome_blocks(
                 &population,
                 Styler::new(false),
@@ -550,7 +550,8 @@ mod tests {
                     ..Listings::default()
                 }
             )
-            .is_empty()
+            .len(),
+            0
         );
     }
 

@@ -119,7 +119,7 @@ mod tests {
         assert!(error.to_string().contains("campaign.jsonl"), "{error}");
         let error = parse_file(std::io::Cursor::new("\n\n{bad\n"), &source, &mut records).expect_err("line three contains invalid JSON");
         assert!(error.to_string().contains("line 3,"), "{error}");
-        assert!(records.is_empty());
+        assert_eq!(records.len(), 0);
         let error = parse_file(std::io::Cursor::new("{}\n\u{feff}{}\n"), &source, &mut records)
             .expect_err("only the first line may start with a BOM");
         assert!(error.to_string().contains("line 2,"), "{error}");

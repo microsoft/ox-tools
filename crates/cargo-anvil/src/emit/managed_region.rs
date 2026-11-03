@@ -515,6 +515,17 @@ mod tests {
     }
 
     #[test]
+    fn adopted_residue_cannot_be_inserted_after_duplicate_generated_markers() {
+        let refusal = splice(
+            HostScanner::Toml,
+            Some("[settings]\nmanaged = true\nuser = 'kept'\n"),
+            request("settings.toml", "r", "# >>> anvil-managed: r\n[settings]\nmanaged = true\n"),
+        )
+        .unwrap_err();
+        assert_eq!(refusal.remedy, RefusalRemedy::MalformedMarkers);
+        assert_eq!(refusal.reason.to_string(), "duplicate opening sentinel for region 'r'");
+    }
+    #[test]
     fn line_scanned_splices_do_not_require_json_style_visible_sentinels() {
         let item = plan_region_with_splice(
             &Manifest::default(),

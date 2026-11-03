@@ -79,12 +79,13 @@ fn unresolved_modules_keep_the_preferred_candidate_and_invalidate_the_complete_l
             (Utf8PathBuf::from("source/tail.rs"), Some(["tail".into()].as_slice()))
         ]
     );
-    assert!(
+    assert_eq!(
         layouts(
             core::slice::from_ref(&root),
             &[(root.clone(), edges), ("source/tail.rs".into(), vec![])]
         )
-        .is_empty()
+        .len(),
+        0
     );
 }
 
@@ -108,7 +109,7 @@ fn different_files_cannot_own_the_same_logical_module() {
         ("a.rs".into(), vec![]),
         ("b.rs".into(), vec![]),
     ];
-    assert!(layouts(core::slice::from_ref(&root), &declarations).is_empty());
+    assert_eq!(layouts(core::slice::from_ref(&root), &declarations).len(), 0);
     let mut disjoint = declarations;
     disjoint[0].1[0].module = Some(vec!["first".into()]);
     disjoint[0].1[1].module = Some(vec!["second".into()]);

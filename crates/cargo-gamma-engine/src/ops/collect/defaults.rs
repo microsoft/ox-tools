@@ -2056,8 +2056,8 @@ mod tests {
 
         assert_eq!(impl_item_attrs(&implementation).len(), 1);
         assert_eq!(trait_item_attrs(&declaration).len(), 1);
-        assert!(impl_item_attrs(&ImplItem::Verbatim(TokenStream::new())).is_empty());
-        assert!(trait_item_attrs(&TraitItem::Verbatim(TokenStream::new())).is_empty());
+        assert_eq!(impl_item_attrs(&ImplItem::Verbatim(TokenStream::new())).len(), 0);
+        assert_eq!(trait_item_attrs(&TraitItem::Verbatim(TokenStream::new())).len(), 0);
     }
 
     /// A `where` clause is read the same way inline bounds are: a plain type bound reports its

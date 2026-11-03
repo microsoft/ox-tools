@@ -73,7 +73,7 @@ fn survivor_metadata_resolution_failures_are_returned_and_empty_reports_do_not_r
         .join("Cargo.toml")
         .join("survivor-absent-parent")
         .join("lib.rs");
-    assert!(filter_lcov_many(&[], Some(&manifest)).unwrap().is_empty());
+    assert_eq!(filter_lcov_many(&[], Some(&manifest)).unwrap(), [] as [std::string::String; 0]);
     let error = filter_lcov("", Some(&manifest)).unwrap_err().to_string();
     assert!(error.contains("failed to resolve Rust source path"), "{error}");
     assert!(error.contains(&missing.display().to_string()), "{error}");

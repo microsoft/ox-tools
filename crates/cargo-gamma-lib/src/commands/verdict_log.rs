@@ -353,9 +353,9 @@ mod tests {
     use camino::Utf8Path;
     use serde_json::{Value, from_slice, from_str, to_vec};
 
-    use super::{
-        MAX_SELECTION_LOG_BYTES, RESUME_POLICY_OBSERVER, SELECTION_TRUNCATION_MARKER, TEST_SELECTION_LOG, TESTING_PROGRESS_LOG, VerdictLog,
-    };
+    #[cfg(feature = "system-tests")]
+    use super::MAX_SELECTION_LOG_BYTES;
+    use super::{RESUME_POLICY_OBSERVER, SELECTION_TRUNCATION_MARKER, TEST_SELECTION_LOG, TESTING_PROGRESS_LOG, VerdictLog};
     use crate::error::error;
     use crate::exec::{SelectionAttempt, SelectionResult, SelectionTier};
 
@@ -559,7 +559,7 @@ mod tests {
         log.record_prepared(&first);
         log.finish().unwrap();
         let prefix = fs::read(scratch.join(TESTING_PROGRESS_LOG)).unwrap();
-        assert!(!prefix.is_empty());
+        assert_ne!(prefix.len(), 0);
         log.resume(scratch).unwrap();
         log.record_prepared(&first);
         assert_eq!(fs::read(scratch.join(TESTING_PROGRESS_LOG)).unwrap(), prefix);

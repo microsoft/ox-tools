@@ -1466,7 +1466,7 @@ mod tests {
         stamped.config.as_mut().expect("config").mutant_id_version = Some(5);
         let merged = merge(&[("unstamped".into(), unstamped), ("stamped".into(), stamped)], 300, None);
 
-        assert!(merged.identity_incompatible.is_empty());
+        assert_eq!(merged.identity_incompatible.len(), 0);
         assert_eq!(merged.valid, 2);
         assert_eq!(merged.detected, 1);
         assert_eq!(identity_version(merged.report.as_ref().unwrap()), 5);

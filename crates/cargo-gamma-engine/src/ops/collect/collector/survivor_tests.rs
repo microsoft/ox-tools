@@ -1436,7 +1436,7 @@ fn iterator_absence_and_mandatory_tail_classification_do_not_confuse_present_val
         if source.contains("return") {
             assert!(!tails.is_empty(), "{source}");
         } else {
-            assert!(tails.is_empty());
+            assert_eq!(tails.len(), 0);
         }
     }
 }
@@ -3159,7 +3159,7 @@ fn resource_aliases_are_lexical_nongeneric_unimported_and_cycle_bounded() {
             }
 
             let nested = collector.block_scopes.iter().max_by_key(|scope| scope.len()).unwrap();
-            assert!(!nested.is_empty());
+            assert_ne!(nested.len(), 0);
             assert_eq!(collector.resource_binding(&parse_quote!(Flag), nested), Some(Binding::Bool));
         },
     );
@@ -3355,7 +3355,7 @@ fn reusable_payloads_choose_the_first_compatible_name_and_reach_wrapped_value_br
         }
         let mut spans = Vec::new();
         super::admissible_default_spans(&parse_quote!(None), &parse_quote!(Vec<u8>), &collector.types(), &mut spans);
-        assert!(spans.is_empty());
+        assert_eq!(spans.len(), 0);
     });
 }
 
@@ -3855,7 +3855,7 @@ fn nested_function_reader_bounds_hide_then_restore_outer_generics_without_leakin
             });
             assert_eq!(collector.reader_bounded, ["Outer"]);
         });
-        assert!(collector.reader_bounded.is_empty());
+        assert_eq!(collector.reader_bounded.len(), 0);
         assert_eq!(collector.function_bound_depth, None);
     });
 }
@@ -3924,8 +3924,8 @@ fn unsigned_constructor_arguments_require_each_namespace_component_type_family_a
 
 #[test]
 fn regex_end_anchors_distinguish_escaped_dollars_and_class_negation_does_not_reenter_nested_classes() {
-    assert!(super::regex_mutations(r"ab\$").is_empty());
-    assert!(super::regex_mutations(r"\*").is_empty());
+    assert_eq!(super::regex_mutations(r"ab\$").len(), 0);
+    assert_eq!(super::regex_mutations(r"\*").len(), 0);
     assert_eq!(super::regex_mutations(r"ab\\$"), [("regex.remove_end_anchor", r"ab\\".to_owned())]);
     for (pattern, replacement) in [(r"\d$", r"\d"), ("x$", "x"), ("\0$", "\0")] {
         assert_eq!(
@@ -4470,7 +4470,7 @@ fn unsigned_body_entry_marks_only_the_final_value_and_is_consumed_before_nested_
             .map(|candidate| candidate.span.start)
             .collect::<Vec<_>>();
         assert_eq!(decrements, [source.find('0').unwrap()]);
-        assert!(collector.unsigned_zeros.is_empty());
+        assert_eq!(collector.unsigned_zeros.len(), 0);
     });
 }
 

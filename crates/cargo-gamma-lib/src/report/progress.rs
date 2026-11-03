@@ -887,7 +887,7 @@ mod tests {
         host.err.clear();
         progress.dirty = false;
         progress.update_phase(&mut host, "retained");
-        assert!(host.err.is_empty());
+        assert_eq!(host.err.len(), 0);
         assert!(progress.dirty);
         progress.dirty = false;
         progress.restore(&mut host);
@@ -1009,11 +1009,11 @@ mod tests {
             let mut progress = Progress::new(true, Styler::new(false), Some(200));
             let mut host = Sink::default();
             progress.phase_progress(&mut host, completed, 25, "binary\nunits");
-            assert!(host.err.is_empty());
+            assert_eq!(host.err.len(), 0);
             progress.begin(&mut host, "Building", "Built", "package");
             host.err.clear();
             progress.phase_progress(&mut host, completed, 0, "binary\nunits");
-            assert!(host.err.is_empty());
+            assert_eq!(host.err.len(), 0);
             assert!(progress.open);
             progress.phase_progress(&mut host, completed, 25, "binary\nunits");
             assert_eq!(
@@ -1149,7 +1149,7 @@ mod tests {
         assert!(progress.last_draw.is_none());
         host.err.clear();
         progress.restore(&mut host);
-        assert!(host.err.is_empty());
+        assert_eq!(host.err.len(), 0);
         progress.borrowed(&mut host, "cargo two");
         host.err.clear();
         progress.dirty = false;
@@ -1164,7 +1164,7 @@ mod tests {
         disabled.restore(&mut host);
         disabled.borrowed(&mut host, "cargo");
         disabled.complete(&mut host, "done");
-        assert!(host.err.is_empty());
+        assert_eq!(host.err.len(), 0);
         assert!(disabled.pending.is_none());
         assert!(!disabled.open);
     }
@@ -1177,7 +1177,7 @@ mod tests {
         progress.set_total(3);
         progress.tick_at(&mut host, base);
         let initial = host.err();
-        assert!(!initial.is_empty());
+        assert_ne!(initial.len(), 0);
         progress.set_total(4);
         progress.tick_at(
             &mut host,
@@ -1317,7 +1317,7 @@ mod tests {
     fn a_narrow_terminal_still_renders_something() {
         let rendered = bar(50, 20);
 
-        assert!(!rendered.is_empty());
+        assert_ne!(rendered.len(), 0);
     }
 
     #[test]
@@ -1839,7 +1839,7 @@ mod tests {
 
     #[test]
     fn abandoning_without_a_phase_at_all_writes_nothing() {
-        assert!(written(Progress::abandon).is_empty());
+        assert_eq!(written(Progress::abandon).len(), 0);
     }
 
     #[test]

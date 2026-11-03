@@ -299,7 +299,7 @@ text for parser and discovery tests. The collector's
 [released-surface rules](../../../cargo-coverage-gate/docs/design/README.md)
 define the accepted layouts.
 
-The generated recipe intentionally omits `--target`.
+The generated recipe intentionally omits the collector's `--target` option.
 `cargo-coverage-gate run` resolves the invoking rustc host and passes that target
 explicitly, overriding `CARGO_BUILD_TARGET` and Cargo `build.target`
 configuration. Each Anvil matrix leg therefore measures its native target,
@@ -307,6 +307,16 @@ rather than inheriting a configured cross-target from the checkout. Repositories
 that require coverage for a non-host target must provide a native runner for
 that target or retain a documented repository-specific check until the catalog
 supports explicit coverage-target configuration.
+
+When the workspace owns a `cargo-coverage-gate` package with a
+`cargo-coverage-gate` binary target, the recipe runs that binary from the
+checkout through the pinned nightly Cargo. This lets the collector validate
+its own changes before publication. Other workspaces continue to use the
+installed collector. Locked metadata identifies the workspace member and
+binary target. Metadata errors stop the check without a fallback.
+The checkout launch resolves the pinned compiler's host and passes it to the
+outer `cargo run --target`, so a configured cross-target cannot affect the
+collector's own build or launch. Host discovery errors also stop the check.
 
 #### `pr-msrv` (minimum-version tests)
 
@@ -357,12 +367,20 @@ available.
 | `miri`    | Compiles the impact-affected packages together once with all features enabled, then runs each compiled Miri test executable concurrently. A Miri test executable is one Cargo test target containing one or more libtest tests. Compiling the selected scope together preserves Cargo feature unification: shared dependencies receive the union of features requested by all selected packages, matching a normal workspace-scoped Cargo invocation. The default is one artifact worker per logical processor, clamped to the executable count; `ANVIL_MIRI_JOBS` accepts a positive integer override. Output is isolated per executable and labelled with its package and test target, then replayed deterministically; every executable completes before failures are aggregated. The selected target set is lib/bin unit tests and integration tests; doctests, benches, examples, build scripts, and ordinary executables do not run. Slow or unsupported individual tests opt out with `#[cfg_attr(miri, ignore)]`. A package can omit all its own Miri targets through `[package.metadata.anvil.miri] exclude = true`; it may still compile as a dependency of a selected consumer. Clean direct and PR invocations are impact-scoped; scheduled/full tiers and dirty local trees run the full workspace. Local callers may use `--package <name>` to override impact scope, `--test <filter>` to select libtest names, or `--example <name>` to run one example instead of the test suite; cloud workflows pass no options. | oxidizer, oxidizer-github |
 | `careful` | `cargo +<catalog-nightly> careful test --all-features --locked` over the impact-affected packages. cargo-careful uses a debug-instrumented std in a stable cache path. Because Cargo fingerprints the sysroot path rather than its contents, the recipe records the actual `rustc -vV` and SHA-256 of the resolved `cargo-careful` executable in `target/anvil/careful-sysroot.id`; either changing triggers `cargo clean`. The executable hash is used because cargo-careful rejects version-only invocations. This remains correct when validation accepts a newer installed cargo-careful. | oxidizer-github |
 | `loom`    | For each `[[test]]` target that declares `required-features = ["loom"]`, `cargo test -p <pkg> --release --all-features --locked --test <target> -- --test-threads=1` with `RUSTFLAGS="--cfg loom"`. [`loom`](https://crates.io/crates/loom) is a permutation-based concurrency model checker that explores thread interleavings. Anvil does not impose a global exploration bound; each model remains responsible for tractable exhaustive exploration. Targets are detected **structurally** from `cargo metadata` (a test target whose `kind` contains `test` and whose `required-features` contains `loom`) -- not via a filename/cfg/comment heuristic -- and only those targets run, so loom never touches a crate's ordinary tests. The `loom` feature selects the target (`required-features`); `--cfg loom` activates loom (source swaps std↔loom atomics on `#[cfg(loom)]`, and `[target.'cfg(loom)'.dependencies] loom` links only under the cfg) -- both are required. Scoped per-package with `-p` (never `--workspace`) so the global cfg never leaks into deps reachable only through other members. **Fail-loud**: a crate that declares loom support (a `loom` feature or a `cfg(loom)` dependency) but exposes no such test target errors out rather than silently no-opping. When no crate ships a loom target the recipe skips (exit 0). | oxidizer-github |
-| `bolero`  | Uses the catalog nightly and release profile consistently to discover targets one package at a time, then runs each affected libfuzzer target for 60 seconds on Linux. Explicitly selecting `release` avoids cargo-bolero's implicit, adopter-defined `fuzz` profile and matches target execution. Adopters that disable `bolero`'s default features must enable its `std` feature for libfuzzer support. Per-package discovery is required because `cargo-bolero list` accepts only one `--package`; local whole-workspace runs enumerate workspace members before discovery. A successful empty discovery is a no-op; metadata, discovery, or parsing failure fails the check. Non-Linux hosts skip because cargo-bolero's native dependencies are unsupported there, while harnesses still run as ordinary tests. | oxidizer-github |
+| `bolero`  | Uses the catalog nightly and release profile consistently to discover targets one package at a time, then runs each affected libfuzzer target for 60 seconds on Linux. Discovery and execution use the catalog compiler's host target from `rustc --print host-tuple`. This avoids selecting the platform that built the installed cargo-bolero binary, such as musl on a GNU Linux host. Explicitly selecting `release` avoids cargo-bolero's implicit, adopter-defined `fuzz` profile and matches target execution. Adopters that disable `bolero`'s default features must enable its `std` feature for libfuzzer support. Per-package discovery is required because `cargo-bolero list` accepts only one `--package`; local whole-workspace runs enumerate workspace members before discovery. A successful empty discovery is a no-op; compiler target lookup, metadata, discovery, or parsing failure fails the check. Non-Linux hosts skip because cargo-bolero's native dependencies are unsupported there, while harnesses still run as ordinary tests. | oxidizer-github |
 
 Miri workloads stay focused on interpreter-relevant behavior. Exhaustive generated-text contract
 scans and Cartesian parser/adoption matrices may remain native and `cargo careful` only when
 focused Miri tests continue through the same implementation paths and each exclusion records that
 coverage tradeoff beside the test.
+
+Windows Miri uses Cargo's temporary
+`__CARGO_TEMPORARY_BUILD_DIR_NEW_LAYOUT_OPT_OUT=1` compatibility switch.
+Cargo 1.100's per-crate build paths make large dependency search lists exceed
+Windows' command-line limit, and the pinned cargo-miri cannot read Cargo's
+argument-file fallback. The compact layout preserves the selected packages,
+features, compiler checks, and Miri execution. Other hosts retain their caller's
+layout setting. Recheck this workaround when updating the pinned nightly.
 
 #### `pr-mutants` (mutation testing)
 

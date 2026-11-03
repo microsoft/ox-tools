@@ -467,7 +467,7 @@ mod tests {
         };
         let result = splices.instrument_active(&work, &empty_plan(&root), &HashSet::default()).unwrap();
         assert!(result.guards.is_empty());
-        assert!(result.written.is_empty());
+        assert_eq!(result.written.len(), 0);
         assert!(splices.guards.is_empty());
         assert_eq!(splices.root, root);
         assert!(splices.sources.is_empty());
@@ -732,7 +732,7 @@ mod tests {
             .expect("an empty plan resets stale caches");
 
         assert!(guards.guards.is_empty());
-        assert!(guards.unavailable.is_empty());
+        assert_eq!(guards.unavailable.len(), 0);
         assert_eq!(splices.root, root);
         assert!(splices.sources.is_empty());
         assert!(splices.placed.is_empty());

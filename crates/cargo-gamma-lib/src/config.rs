@@ -1169,7 +1169,7 @@ mod tests {
         let config = Config::parse("").expect("an empty file is a valid file");
 
         assert!(config.mutators.is_none());
-        assert!(config.files.is_empty());
+        assert_eq!(config.files.len(), 0);
     }
 
     #[test]

@@ -274,7 +274,7 @@ mod tests {
         assert_eq!(detect_from_url("https://github.com/foo/bar.git"), vec![Backend::GitHub]);
         assert_eq!(detect_from_url("git@github.com:foo/bar.git"), vec![Backend::GitHub]);
         assert_eq!(detect_from_url("https://enterprise.github.com/foo/bar.git"), vec![Backend::GitHub]);
-        assert!(detect_from_url("https://github.com.example/foo/bar.git").is_empty());
+        assert_eq!(detect_from_url("https://github.com.example/foo/bar.git").len(), 0);
     }
 
     #[test]
@@ -286,14 +286,14 @@ mod tests {
 
     #[test]
     fn detect_unknown_host() {
-        assert!(detect_from_url("https://gitlab.com/foo/bar.git").is_empty());
-        assert!(detect_from_url("").is_empty());
+        assert_eq!(detect_from_url("https://gitlab.com/foo/bar.git").len(), 0);
+        assert_eq!(detect_from_url("").len(), 0);
     }
 
     #[test]
     fn resolve_no_backends_wins() {
         let result = resolve(&[], true, Path::new(".")).unwrap();
-        assert!(result.is_empty());
+        assert_eq!(result.len(), 0);
     }
 
     #[test]

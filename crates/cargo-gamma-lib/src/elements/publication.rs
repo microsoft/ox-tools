@@ -723,7 +723,7 @@ mod tests {
 
     impl PublicationFilesystem for MemoryFilesystem {
         fn stage(&mut self, scratch: &Utf8Path, contents: &str, destination: &Utf8Path) -> io::Result<()> {
-            assert!(self.calls.is_empty());
+            assert_eq!(self.calls.len(), 0);
             assert_eq!(scratch, self.scratch);
             assert_eq!(destination, self.destination);
             assert_eq!(contents, "replacement");

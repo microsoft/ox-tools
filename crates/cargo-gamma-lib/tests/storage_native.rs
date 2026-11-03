@@ -348,7 +348,7 @@ fn recovered_preparation_returns_the_default_campaign_guard_error_after_workspac
         },
     );
     assert_eq!(calls.get(), 4);
-    assert!(events.calls.is_empty());
+    assert_eq!(events.calls, [] as [std::string::String; 0]);
 }
 
 #[test]

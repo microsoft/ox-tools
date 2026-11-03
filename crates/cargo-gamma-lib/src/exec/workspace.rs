@@ -798,7 +798,7 @@ impl Workspace {
         publish: impl FnOnce(super::session::SweepCost, String) -> Result<()>,
     ) -> Result<()> {
         if let Err(failure) = refreshed {
-            let _updated = failures.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| Some(count.saturating_add(1)));
+            let _updated = failures.try_update(Ordering::Relaxed, Ordering::Relaxed, |count| Some(count.saturating_add(1)));
             let accounting = cost.accounting.get_or_insert_default();
             accounting.live_refresh_failures = accounting.live_refresh_failures.saturating_add(1);
             publish(cost, format!("live sweep diagnostics refresh failed: {failure}"))?;
@@ -1088,6 +1088,13 @@ impl Workspace {
     pub(super) fn configure_test_environment(&self, command: &mut Command, binary: &TestBinary) {
         if let Some(environment) = &self.test_environment {
             environment.configure(command, binary);
+        }
+        #[cfg(any(test, feature = "internals"))]
+        if binary.path.starts_with(&self.target)
+            && let Some(home) = &self.test_cache_home
+        {
+            // Mutation fixtures can be terminated mid-write; they are not workspace coverage.
+            let _ = command.env("LLVM_PROFILE_FILE", home.join("fixture-coverage-%p-%m.profraw").as_std_path());
         }
     }
 
@@ -3435,7 +3442,6 @@ mod testing_resume_tests {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::collections::BTreeMap;
-    use std::error::Error as _;
     #[cfg(unix)]
     use std::os::unix::ffi::OsStringExt as _;
     #[cfg(unix)]
@@ -4583,6 +4589,33 @@ mod tests {
         assert_eq!(command_env(&command, "CARGO_PKG_NAME"), "prepared");
         assert_eq!(command_env(&command, "CARGO_PKG_VERSION"), "2.3.4");
         assert_eq!(command_env(&command, "OUT_DIR"), "generated-output");
+    }
+
+    #[test]
+    fn fixture_profiles_are_isolated_without_retargeting_external_harnesses() {
+        let root = Utf8PathBuf::from("fixture-root");
+        let mut work = unsettled_at(root.clone(), root.join("runtime"));
+        let home = root.join("private-cache");
+        for owned in [false, true] {
+            work.test_cache_home = owned.then(|| home.clone());
+            for generated in [false, true] {
+                let path = if generated {
+                    work.target.join("debug/subject")
+                } else {
+                    root.join("outer-harness")
+                };
+                let binary = crate::testing::test_binary(path.as_str());
+                let mut command = Command::new("not-executed");
+                let _ = command.env("LLVM_PROFILE_FILE", "outer-%p-%m.profraw");
+                work.configure_test_environment(&mut command, &binary);
+                let expected = if owned && generated {
+                    home.join("fixture-coverage-%p-%m.profraw")
+                } else {
+                    "outer-%p-%m.profraw".into()
+                };
+                assert_eq!(command_env(&command, "LLVM_PROFILE_FILE"), expected.as_str());
+            }
+        }
     }
 
     #[test]
@@ -6347,7 +6380,7 @@ mod tests {
         assert!(manifest.contains("name = \"cargo-gamma-rt\""));
         assert!(manifest.contains("[lib]\nname = \"gamma_rt\""));
         assert!(manifest.contains("edition = \"2024\""));
-        assert!(manifest.contains("rust-version = \"1.95\""));
+        assert!(manifest.contains(&format!("rust-version = \"{}\"", gamma_rt::embedded::RUST_VERSION)));
         assert!(manifest.contains("check-cfg = ['cfg(coverage_nightly)', 'cfg(loom)']"));
 
         // The `[workspace]` table keeps it from being adopted by whatever workspace it lands near.
@@ -7509,7 +7542,7 @@ mod tests {
         let failure = Workspace::prepare(source, &source.join("target"), &config, &mut events)
             .expect_err("unsupported Cargo configuration is refused before any preparation");
         assert!(failure.message().contains("is not supported"), "{failure}");
-        assert!(events.calls.is_empty());
+        assert_eq!(events.calls.len(), 0);
         config.cargo.extra.clear();
         events.refuse_log = true;
         let failure = Workspace::prepare(source, &source.join("target"), &config, &mut events)

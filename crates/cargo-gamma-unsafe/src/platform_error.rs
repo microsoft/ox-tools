@@ -190,7 +190,7 @@ mod tests {
     fn a_backtrace_is_captured_at_construction() {
         let error = PlatformError::new_static(Situation::Refused, "refused");
 
-        assert!(!format!("{}", error.backtrace()).is_empty());
+        assert_ne!(format!("{}", error.backtrace()), "");
     }
 
     #[test]

@@ -735,7 +735,7 @@ mod tests {
             calls.set(calls.get() + 1);
             std::iter::empty()
         });
-        assert!(paths.is_empty());
+        assert_eq!(paths, [] as [std::path::PathBuf; 0]);
         assert_eq!(calls.get(), 1);
     }
 

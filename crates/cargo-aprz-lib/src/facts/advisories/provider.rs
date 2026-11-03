@@ -926,10 +926,10 @@ mod tests {
     }
 
     impl DbFetcher for FixtureFetcher {
-        async fn fetch(&self, repo_path: &Path, _database_url: &str) -> Result<()> {
+        fn fetch(&self, repo_path: &Path, _database_url: &str) -> impl Future<Output = Result<()>> {
             let _ = self.calls.fetch_add(1, Ordering::SeqCst);
             write_advisory(repo_path, "fetched-crate", "RUSTSEC-2020-0003", None);
-            Ok(())
+            std::future::ready(Ok(()))
         }
     }
 
@@ -937,8 +937,8 @@ mod tests {
     struct NoOpFetcher;
 
     impl DbFetcher for NoOpFetcher {
-        async fn fetch(&self, _repo_path: &Path, _database_url: &str) -> Result<()> {
-            Ok(())
+        fn fetch(&self, _repo_path: &Path, _database_url: &str) -> impl Future<Output = Result<()>> {
+            std::future::ready(Ok(()))
         }
     }
 
