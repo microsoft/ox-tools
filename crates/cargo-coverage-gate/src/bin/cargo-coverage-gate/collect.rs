@@ -337,6 +337,7 @@ impl WorkspaceInfo {
             .map(|package| WorkspaceMember {
                 name: package.name.to_string(),
                 version: package.version.to_string(),
+                id: package.id.clone(),
             })
             .collect::<Vec<_>>();
         members.sort_by(|left, right| left.name.cmp(&right.name).then_with(|| left.version.cmp(&right.version)));
@@ -352,6 +353,7 @@ impl WorkspaceInfo {
 struct WorkspaceMember {
     name: String,
     version: String,
+    id: cargo_metadata::PackageId,
 }
 
 impl WorkspaceMember {
@@ -727,7 +729,14 @@ fn nextest_command(execution: &CollectionExecution<'_>, configuration: FeatureCo
 fn append_package_selection(command: &mut Command, selection: &Selection) {
     if selection.explicit {
         for member in &selection.members {
-            command.arg("--package").arg(member.spec());
+            let id = &member.id.repr;
+            // llvm-cov 0.9.0 checks package-name prefixes before parsing source-qualified IDs.
+            let spec = if id.starts_with(&member.name) {
+                id.strip_prefix("path+").unwrap_or(id)
+            } else {
+                id
+            };
+            command.arg("--package").arg(spec);
         }
     } else {
         command.arg("--workspace");
@@ -1421,6 +1430,9 @@ mod tests {
         WorkspaceMember {
             name: name.to_owned(),
             version: version.to_owned(),
+            id: cargo_metadata::PackageId {
+                repr: format!("path+file:///repo/{name}#{name}@{version}"),
+            },
         }
     }
 
@@ -2037,6 +2049,172 @@ mod tests {
         assert!(workspace.members.windows(2).all(|pair| pair[0] <= pair[1]));
     }
 
+    fn duplicate_source_metadata(local: &str, consumer: &str, unselected: &str, registry: &str) -> Metadata {
+        let package = |name, version, id, source| {
+            serde_json::json!({
+                "name": name, "version": version, "id": id, "source": source,
+                "authors": [], "dependencies": [], "targets": [], "features": {},
+                "manifest_path": "/repo/Cargo.toml",
+                "categories": [], "keywords": [], "edition": "2024"
+            })
+        };
+        serde_json::from_value(serde_json::json!({
+            "packages": [
+                package("ohno", "0.5.3", registry, Some("registry+https://github.com/rust-lang/crates.io-index")),
+                package("unselected", "1.0.0", unselected, None),
+                package("ohno", "0.5.3", local, None),
+                package("consumer", "1.0.0", consumer, None)
+            ],
+            "workspace_members": [local, consumer, unselected],
+            "workspace_default_members": [consumer],
+            "workspace_root": "/repo",
+            "target_directory": "/repo/target",
+            "version": 1
+        }))
+        .expect("duplicate-source metadata")
+    }
+
+    fn assert_command_arguments(command: &Command, prefix: &[&str], selection: &[&str], suffix: &[&str]) {
+        let expected = prefix.iter().chain(selection).chain(suffix).map(OsStr::new).collect::<Vec<_>>();
+        assert_eq!(command.get_args().collect::<Vec<_>>(), expected);
+    }
+
+    #[test]
+    #[cfg_attr(
+        all(miri, windows),
+        ignore = "constructing a Command environment calls an unsupported Windows API under miri"
+    )]
+    fn collection_selection_preserves_workspace_sources_in_every_command() {
+        let local = "path+file:///C:/repo%20space/renamed#ohno@0.5.3";
+        let consumer = "path+file:///C:/repo%20space/consumer#consumer@1.0.0";
+        let unselected = "path+file:///C:/repo%20space/unselected#unselected@1.0.0";
+        let registry = "registry+https://github.com/rust-lang/crates.io-index#ohno@0.5.3";
+        let metadata = duplicate_source_metadata(local, consumer, unselected, registry);
+        let workspace = WorkspaceInfo::from_metadata(&metadata);
+        assert_eq!(
+            workspace.members.iter().map(|member| member.id.repr.as_str()).collect::<Vec<_>>(),
+            [consumer, local, unselected]
+        );
+        let tools = ToolPrograms {
+            cargo: "cargo".into(),
+            rustc: "rustc".into(),
+        };
+        let args = collection_args();
+        for (selectors, expected, gated) in [
+            (vec![], vec!["--workspace"], vec![]),
+            (vec!["ohno@0.5.3"], vec!["--package", local], vec!["ohno"]),
+            (vec!["consumer"], vec!["--package", consumer], vec!["consumer"]),
+            (
+                vec!["ohno*", "consumer", "ohno"],
+                vec!["--package", consumer, "--package", local],
+                vec!["consumer", "ohno"],
+            ),
+            (
+                vec!["*"],
+                vec!["--package", consumer, "--package", local, "--package", unselected],
+                vec!["consumer", "ohno", "unselected"],
+            ),
+        ] {
+            let selectors = selectors.into_iter().map(str::to_owned).collect::<Vec<_>>();
+            let selection = Selection::resolve(&workspace, &selectors).expect("workspace selection");
+            assert_eq!(selection.gated_names(), gated);
+            let execution = CollectionExecution {
+                workspace: &workspace,
+                selection: &selection,
+                args: &args,
+                scratch_dir: Path::new("scratch"),
+                coverage_target_root: Path::new("coverage-target"),
+                target: "test-target",
+                tools: &tools,
+                quiet: false,
+            };
+            for configuration in normalized_configurations(&[]) {
+                let plain = plain_configuration_command(&workspace, &selection, &args, configuration, "test-target", &tools);
+                let instrumented = nextest_command(&execution, configuration);
+                let report = report_command(&execution, configuration, Path::new("lcov.info"));
+                let suffix = [
+                    configuration.cargo_flag(),
+                    "--locked",
+                    "--target",
+                    "test-target",
+                    "--jobs",
+                    "3",
+                    "--build-jobs",
+                    "3",
+                    "--no-tests=pass",
+                ];
+                assert_command_arguments(&plain, &["nextest", "run"], &expected, &suffix);
+                assert_command_arguments(&instrumented, &["llvm-cov", "nextest", "--no-report"], &expected, &suffix);
+                assert_command_arguments(
+                    &report,
+                    &["llvm-cov", "report", "--lcov", "--output-path", "lcov.info"],
+                    &expected,
+                    &["--target", "test-target"],
+                );
+            }
+        }
+        let error = Selection::resolve(&workspace, &[registry.to_owned()]).expect_err("registry IDs are not workspace selectors");
+        assert_eq!(
+            error.to_string(),
+            format!("`--package` selector `{registry}` did not match any workspace member")
+        );
+    }
+
+    #[test]
+    #[cfg_attr(
+        all(miri, windows),
+        ignore = "constructing a Command environment calls an unsupported Windows API under miri"
+    )]
+    fn collection_selection_avoids_llvm_cov_package_name_prefix_collisions() {
+        for (name, expected) in [
+            ("p", "file:///repo/renamed#p@1.0.0"),
+            ("pa", "file:///repo/renamed#pa@1.0.0"),
+            ("pat", "file:///repo/renamed#pat@1.0.0"),
+            ("path", "file:///repo/path#1.0.0"),
+            ("f", "path+file:///repo/f#1.0.0"),
+            ("fi", "path+file:///repo/fi#1.0.0"),
+            ("fil", "path+file:///repo/fil#1.0.0"),
+            ("file", "path+file:///repo/file#1.0.0"),
+            ("pathology", "path+file:///repo/pathology#1.0.0"),
+        ] {
+            let mut workspace = workspace(Path::new("repo"));
+            let mut member = member(name, "1.0.0");
+            member.id.repr = format!("path+{}", expected.strip_prefix("path+").unwrap_or(expected));
+            workspace.members = vec![member];
+            let selection = Selection::resolve(&workspace, &[name.to_owned()]).expect("workspace member matches its own name");
+            assert_eq!(selection.gated_names(), [name]);
+            let args = collection_args();
+            let tools = ToolPrograms {
+                cargo: "cargo".into(),
+                rustc: "rustc".into(),
+            };
+            let execution = CollectionExecution {
+                workspace: &workspace,
+                selection: &selection,
+                args: &args,
+                scratch_dir: Path::new("scratch"),
+                coverage_target_root: Path::new("coverage-target"),
+                target: "test-target",
+                tools: &tools,
+                quiet: false,
+            };
+            for configuration in normalized_configurations(&[]) {
+                for command in [
+                    plain_configuration_command(&workspace, &selection, &args, configuration, "test-target", &tools),
+                    nextest_command(&execution, configuration),
+                    report_command(&execution, configuration, Path::new("lcov.info")),
+                ] {
+                    let arguments = command.get_args().collect::<Vec<_>>();
+                    let package = arguments
+                        .windows(2)
+                        .find(|pair| pair[0] == "--package")
+                        .expect("explicit package selection");
+                    assert_eq!(package[1], expected, "source-qualified selection for {name}");
+                }
+            }
+        }
+    }
+
     #[test]
     fn effective_target_reader_uses_exact_context_and_host_error() {
         let workspace = workspace(Path::new("repo"));
@@ -2250,7 +2428,7 @@ mod tests {
                 #[cfg(windows)]
                 "--no-rustc-wrapper",
                 "--package",
-                "alpha@1.0.0",
+                "path+file:///repo/alpha#alpha@1.0.0",
                 "--all-features",
                 "--locked",
                 "--target",
@@ -2285,7 +2463,7 @@ mod tests {
                 "--output-path",
                 "coverage/lcov.info",
                 "--package",
-                "alpha@1.0.0",
+                "path+file:///repo/alpha#alpha@1.0.0",
                 "--target",
                 "test-target",
             ]
