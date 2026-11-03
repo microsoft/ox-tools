@@ -379,9 +379,9 @@ would change the tag, build a new image, and still run the old tools — defeati
 Tools and toolchains therefore always come from the image layer the tag names.
 
 `target/` stays on the bind mount, shared with the host and visible from it. A native run and a containerized run write
-incompatible artifacts to the same paths, so switching between them recompiles the workspace. Giving the container its
-own build directory through `CARGO_TARGET_DIR` avoids that but breaks `cargo-semver-checks`, which builds a baseline
-and the current crate and then cannot find its rustdoc output; the recompilation is the lesser cost.
+incompatible artifacts to the same paths, so switching between them recompiles the workspace. SemVer snapshots
+explicitly use separate current/baseline directories under `target/anvil/semver/` and pass their JSON paths to
+`cargo-semver-checks`; an inherited `CARGO_TARGET_DIR` cannot redirect those snapshots or their lookup.
 
 The caller's working directory is mapped to its in-container equivalent, so relative paths resolve when
 `anvil-container` is invoked from a subdirectory.

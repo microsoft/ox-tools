@@ -1301,7 +1301,7 @@ mod tests {
 
         assert_eq!(withdrawal.code, "E0308");
         assert!(withdrawal.package.is_none());
-        assert!(withdrawal.category.is_empty());
+        assert_eq!(withdrawal.category.len(), 0);
         assert_eq!(withdrawal.replacement_site, None);
         assert_eq!(withdrawal.mutants, 3);
     }

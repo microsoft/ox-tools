@@ -191,7 +191,7 @@ mod tests {
                 .map(|definition| (definition.item_path, definition.mutator, definition.id))
                 .collect::<Vec<_>>()
         };
-        assert!(!unrelated(invalid.clone()).is_empty());
+        assert_ne!(unrelated(invalid.clone()).len(), 0);
         assert_eq!(unrelated(invalid), unrelated(corrected));
     }
 

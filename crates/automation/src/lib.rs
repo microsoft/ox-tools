@@ -106,7 +106,7 @@ mod tests {
 
         let automation = packages.iter().find(|p| p.name == "automation");
         assert!(automation.is_some(), "{packages:?}");
-        assert!(!automation.unwrap().manifest_path.is_empty());
+        assert_ne!(automation.unwrap().manifest_path, "");
         assert!(!automation.unwrap().targets.is_empty());
     }
 

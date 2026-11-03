@@ -732,7 +732,7 @@ mod tests {
             .build()
             .unwrap();
 
-        assert!(after.artifacts().is_empty());
+        assert_eq!(after.artifacts().len(), 0);
         assert_eq!(after.json_array_path(&array.region), None);
         assert_ne!(after.checksum(), before.checksum());
     }

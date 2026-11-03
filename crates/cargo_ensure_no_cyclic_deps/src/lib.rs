@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 //! A cargo sub-command that detects cyclic dependencies between crates in a workspace. This is useful if you
 //! want to prevent dev-dependencies from creating dependency cycles as that can cause issues,

@@ -1674,7 +1674,7 @@ mod tests {
         ) -> (Vec<u8>, Vec<Expected>) {
             let mut journal = Vec::new();
             let mut expected = Vec::new();
-            for pair in instructions.chunks_exact(2).take(usize::from(count % 9)) {
+            for pair in instructions.as_chunks::<2>().0.iter().take(usize::from(count % 9)) {
                 let opcode = pair[0] % 8;
                 let value = pair[1];
                 let snapshot = (matches!(opcode, 0 | 1 | 7) || value & 16 != 0).then_some((

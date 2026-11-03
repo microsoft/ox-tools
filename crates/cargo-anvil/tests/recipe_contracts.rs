@@ -191,6 +191,9 @@ if ($env:FAKE_CARGO_TOOLCHAIN_LOG) {
 if ($env:FAKE_CARGO_AUTO_INSTALL_LOG) {
     Add-Content -LiteralPath $env:FAKE_CARGO_AUTO_INSTALL_LOG -Value $env:RUSTUP_AUTO_INSTALL
 }
+if ($env:FAKE_CARGO_BUILD_LAYOUT_LOG) {
+    Add-Content -LiteralPath $env:FAKE_CARGO_BUILD_LAYOUT_LOG -Value $env:__CARGO_TEMPORARY_BUILD_DIR_NEW_LAYOUT_OPT_OUT
+}
 if ($args -contains 'each') {
     $featureExit = if ($args -contains '--no-default-features') {
         $env:FAKE_EACH_NO_DEFAULT_EXIT
@@ -198,16 +201,52 @@ if ($args -contains 'each') {
         $env:FAKE_EACH_DEFAULT_EXIT
     }
     if ($featureExit) { exit [int]$featureExit }
+    if ($args -contains 'bolero' -and $args -contains 'list' -and $env:FAKE_BOLERO_LIST_OUTPUT) {
+        Write-Output $env:FAKE_BOLERO_LIST_OUTPUT
+    }
     exit [int]$env:FAKE_EACH_EXIT
 }
 if ($args -contains 'metadata') {
     if ($env:FAKE_METADATA_EXIT) { exit [int]$env:FAKE_METADATA_EXIT }
+    if ($env:FAKE_CARGO_JSON_WARNINGS) {
+        Write-Error 'warning: fixture metadata warning' -ErrorAction Continue
+    }
     if ($env:FAKE_METADATA_INVALID) {
         Write-Output '{invalid metadata'
         exit 0
     }
-    $root = $env:FAKE_WORKSPACE_ROOT
-    $packageName = if ($env:FAKE_PACKAGE_NAME) { $env:FAKE_PACKAGE_NAME } else { 'fixture' }
+    $root = if ($args -contains '--manifest-path') {
+        Split-Path -Parent $args[([array]::IndexOf($args, '--manifest-path') + 1)]
+    } else {
+        $env:FAKE_WORKSPACE_ROOT
+    }
+    $isBaseline = $root -ne $env:FAKE_WORKSPACE_ROOT
+    $features = [ordered]@{
+        default = @('std')
+        std = @()
+        serde = @('dep:serde')
+        'Unstable-visible' = @()
+        unstable = @()
+        bench = @()
+        no_std = @()
+        _internal = @()
+        'unstable-hidden' = @()
+        unstable_hidden = @()
+    }
+    if ($isBaseline) {
+        $features['nightly'] = @()
+        $features['baseline-api'] = @()
+    } else {
+        $features['Nightly'] = @()
+        $features['current-api'] = @()
+    }
+    $packageName = if ($isBaseline -and $env:FAKE_SEMVER_BASELINE_RENAMED) {
+        'old-name'
+    } elseif ($env:FAKE_PACKAGE_NAME) {
+        $env:FAKE_PACKAGE_NAME
+    } else {
+        'fixture'
+    }
     $packageId = if ($env:FAKE_PACKAGE_ID) { $env:FAKE_PACKAGE_ID } else { "$packageName 0.1.0" }
     $libName = if ($env:FAKE_LIB_NAME) { $env:FAKE_LIB_NAME } else { 'fixture' }
     $manifestPath = if ($env:FAKE_PACKAGE_DIR_LEAF) {
@@ -229,9 +268,18 @@ if ($args -contains 'metadata') {
             version = '0.1.0'
             id = $packageId
             manifest_path = $manifestPath
+            features = $features
             targets = @([pscustomobject]@{
                 name = $libName
-                kind = if ($env:FAKE_FIRST_RLIB) { @('rlib') } else { @('lib') }
+                kind = if ($isBaseline -and $env:FAKE_SEMVER_BASELINE_BIN) {
+                    @('bin')
+                } elseif ($env:FAKE_FIRST_BIN) {
+                    @('bin')
+                } elseif ($env:FAKE_FIRST_RLIB) {
+                    @('rlib')
+                } else {
+                    @('lib')
+                }
                 doctest = -not [bool]$env:FAKE_FIRST_DOCTEST_FALSE
             })
             publish = if ($env:FAKE_PUBLISH_FALSE) {
@@ -311,7 +359,7 @@ if ($args -contains 'metadata') {
             manifest_path = [System.IO.Path]::Combine($root, 'external', 'Cargo.toml')
             targets = @([pscustomobject]@{
                 name = $env:FAKE_NON_MEMBER_PACKAGE_NAME
-                kind = @('lib')
+                kind = if ($env:FAKE_NON_MEMBER_BIN) { @('bin') } else { @('lib') }
                 doctest = -not [bool]$env:FAKE_NON_MEMBER_DOCTEST_FALSE
             })
             metadata = [pscustomobject]@{}
@@ -391,6 +439,27 @@ if ($args -contains 'miri') {
         exit [int]$env:FAKE_MIRI_BUILD_EXIT
     }
 }
+if ($args -contains 'config') {
+    if ($env:FAKE_CARGO_JSON_WARNINGS) {
+        Write-Error 'warning: fixture target configuration warning' -ErrorAction Continue
+    }
+    Write-Output '"fixture-target"'
+    exit 0
+}
+if ($args -contains 'rustdoc') {
+    if ($env:FAKE_RUSTDOC_EXIT) {
+        Write-Output 'locked rustdoc build failed'
+        exit [int]$env:FAKE_RUSTDOC_EXIT
+    }
+    $targetDir = $args[([array]::IndexOf($args, '--target-dir') + 1)]
+    $target = $args[([array]::IndexOf($args, '--target') + 1)]
+    $packageName = ($args[([array]::IndexOf($args, '--package') + 1)] -split ' ')[0]
+    $libName = if ($packageName -eq 'fixture') { 'fixture' } else { $packageName.Replace('-', '_') }
+    $docDir = [System.IO.Path]::Combine($targetDir, $target, 'doc')
+    [System.IO.Directory]::CreateDirectory($docDir) | Out-Null
+    Set-Content -LiteralPath (Join-Path $docDir "$libName.json") -Value '{}'
+    exit 0
+}
 if ($args -contains 'semver-checks') {
     if ($env:FAKE_SEMVER_OUTPUT) { Write-Output $env:FAKE_SEMVER_OUTPUT }
     exit [int]$env:FAKE_SEMVER_EXIT
@@ -420,6 +489,88 @@ if ($args -contains 'install' -and $args -contains '--version') {
 }
 exit [int]$env:FAKE_CARGO_DEFAULT_EXIT
 "#;
+
+const FAKE_GIT_PS1: &str = r#"
+$actual = @($args)
+$actualJson = ConvertTo-Json -InputObject $actual -Compress
+Add-Content -LiteralPath (Join-Path $env:FAKE_WORKSPACE_ROOT 'git.log') -Value $actualJson
+function Matches([string[]]$expected) {
+    [string]::Equals(
+        $actualJson,
+        (ConvertTo-Json -InputObject $expected -Compress),
+        [System.StringComparison]::Ordinal
+    )
+}
+if (Matches -expected @('rev-parse', '--verify', ($env:BASE_REF + '^{commit}'))) {
+    Write-Output 'baseline-fixture'
+    exit 0
+}
+if (Matches -expected @('rev-parse', '--show-toplevel')) {
+    Write-Output $env:FAKE_WORKSPACE_ROOT
+    exit 0
+}
+$manifest = if ($env:FAKE_THIRD_PACKAGE_NAME) {
+    "nested/$($env:FAKE_THIRD_PACKAGE_NAME)/Cargo.toml"
+} else {
+    'Cargo.toml'
+}
+if (Matches -expected @('cat-file', '-e', "baseline-fixture:$manifest")) {
+    exit 0
+}
+if ($actual.Count -eq 7 -and
+    [System.IO.Path]::GetFileName($actual[6]) -cmatch '^anvil-semver-\d+-[0-9a-f]{32}$' -and
+    (Matches -expected @('clone', '--shared', '--no-checkout', '--quiet', '--', $env:FAKE_WORKSPACE_ROOT, $actual[6]))) {
+    [System.IO.Directory]::CreateDirectory($actual[6]) | Out-Null
+    exit 0
+}
+if ($actual.Count -eq 12 -and
+    [System.IO.Directory]::Exists($actual[1]) -and
+    (Matches -expected @('-C', $actual[1], '-c', 'filter.lfs.process=', '-c', 'filter.lfs.smudge=',
+        '-c', 'filter.lfs.required=false', 'checkout', '--quiet', '--detach', 'baseline-fixture'))) {
+    exit 0
+}
+Write-Error "Unexpected Git invocation: $actualJson" -ErrorAction Continue
+exit 97
+"#;
+
+fn assert_semver_git_calls(root: &Path, manifest: &str, invocations: usize) {
+    let calls: Vec<Vec<String>> = fs::read_to_string(root.join("git.log"))
+        .unwrap()
+        .lines()
+        .map(|line| from_str(line).unwrap())
+        .collect();
+    let expected: Vec<Vec<String>> = from_str(&include_str!("fixtures/semver-git-commands.json").replace("<manifest>", manifest)).unwrap();
+    assert_eq!(
+        calls.len(),
+        expected.len() * invocations,
+        "every expected Git call must be consumed"
+    );
+    let workspace = root.to_str().unwrap();
+    for invocation in calls.chunks_exact(expected.len()) {
+        let baseline = &invocation[3][6];
+        let normalized: Vec<Vec<&str>> = invocation
+            .iter()
+            .map(|arguments| {
+                arguments
+                    .iter()
+                    .map(|argument| {
+                        if argument == baseline {
+                            "<baseline>"
+                        } else if argument == workspace {
+                            "<workspace>"
+                        } else {
+                            argument
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            normalized, expected,
+            "Git arguments must match the scripted baseline operations exactly"
+        );
+    }
+}
 
 fn write(path: &Path, contents: &str) {
     if let Some(parent) = path.parent() {
@@ -465,6 +616,30 @@ fn tools_available() -> bool {
     })
 }
 
+const FAKE_RUSTC_PS1: &str = r#"
+if ($args -contains 'host-tuple') {
+    if ($env:FAKE_RUSTC_HOST_EXIT) { exit [int]$env:FAKE_RUSTC_HOST_EXIT }
+    Write-Output $(if ($env:FAKE_RUSTC_HOST) { $env:FAKE_RUSTC_HOST } else { 'x86_64-unknown-linux-gnu' })
+    exit 0
+}
+if ($args -contains 'sysroot') {
+    if ($env:FAKE_RUSTC_PREAMBLE) {
+        Write-Output $env:FAKE_RUSTC_PREAMBLE
+    }
+    Write-Output ([System.IO.Path]::Combine($env:FAKE_WORKSPACE_ROOT, 'fake-toolchain'))
+    exit 0
+}
+if ($args -contains 'target-libdir') {
+    if ($env:FAKE_MIRI_RUN_LOG) {
+        $libraryPathVariable = if ($IsWindows) { 'PATH' } elseif ($IsMacOS) { 'DYLD_FALLBACK_LIBRARY_PATH' } else { 'LD_LIBRARY_PATH' }
+        [Environment]::GetEnvironmentVariable($libraryPathVariable) | Set-Content -LiteralPath "$($env:FAKE_MIRI_RUN_LOG).bootstrap-library-path"
+    }
+    Write-Output ([System.IO.Path]::Combine($env:FAKE_WORKSPACE_ROOT, 'fake-toolchain', 'lib'))
+    exit 0
+}
+exit 1
+"#;
+
 fn fixture(imports: &[(&str, &str)], dependency_recipes: &[&str]) -> TempDir {
     let tmp = TempDir::new().unwrap();
     let mut justfile =
@@ -507,20 +682,8 @@ _anvil-impact-exclude tier:
     let bin = tmp.path().join("fake-bin");
     fs::create_dir_all(&bin).unwrap();
     write(&bin.join("cargo.ps1"), FAKE_CARGO_PS1);
-    write(&bin.join("git.ps1"), "exit 0\n");
-    write(
-        &bin.join("rustc.ps1"),
-        r"
-if ($args -contains 'sysroot') {
-    if ($env:FAKE_RUSTC_PREAMBLE) {
-        Write-Output $env:FAKE_RUSTC_PREAMBLE
-    }
-    Write-Output ([System.IO.Path]::Combine($env:FAKE_WORKSPACE_ROOT, 'fake-toolchain'))
-    exit 0
-}
-exit 1
-",
-    );
+    write(&bin.join("git.ps1"), FAKE_GIT_PS1);
+    write(&bin.join("rustc.ps1"), FAKE_RUSTC_PS1);
     let fake_toolchain_bin = tmp.path().join("fake-toolchain/bin");
     fs::create_dir_all(&fake_toolchain_bin).unwrap();
     write(
@@ -540,6 +703,8 @@ $env:MIRI_SYSROOT | Set-Content -LiteralPath "$prefix.sysroot"
 $env:MIRI_BE_RUSTC | Set-Content -LiteralPath "$prefix.miri-be-rustc"
 $env:MIRIFLAGS | Set-Content -LiteralPath "$prefix.miriflags"
 $env:RUSTFLAGS | Set-Content -LiteralPath "$prefix.rustflags"
+$libraryPathVariable = if ($IsWindows) { 'PATH' } elseif ($IsMacOS) { 'DYLD_FALLBACK_LIBRARY_PATH' } else { 'LD_LIBRARY_PATH' }
+[Environment]::GetEnvironmentVariable($libraryPathVariable) | Set-Content -LiteralPath "$prefix.library-path"
 if ($env:FAKE_MIRI_BARRIER_DIR) {
     $ready = Join-Path $env:FAKE_MIRI_BARRIER_DIR "$artifact.ready"
     $release = Join-Path $env:FAKE_MIRI_BARRIER_DIR 'release'
@@ -997,6 +1162,38 @@ fn assert_miri_cargo_calls(cargo_calls: &str) {
     );
 }
 
+fn assert_miri_runner_context(root: &Path, run_log: &Path, inherited_library_path: &OsStr) {
+    assert!(
+        fs::read_to_string(run_log.with_extension("alpha-test.args"))
+            .unwrap()
+            .trim()
+            .is_empty(),
+        "an unfiltered Miri run must not receive binary arguments"
+    );
+    let recorded_cwd = fs::read_to_string(run_log.with_extension("alpha-test.cwd")).unwrap();
+    assert_eq!(fs::canonicalize(recorded_cwd.trim()).unwrap(), fs::canonicalize(root).unwrap());
+    assert_eq!(
+        fs::read_to_string(run_log.with_extension("alpha-test.sysroot")).unwrap().trim(),
+        root.join("fake-miri-sysroot").to_str().unwrap()
+    );
+    assert_eq!(
+        fs::read_to_string(run_log.with_extension("alpha-test.miri-be-rustc"))
+            .unwrap()
+            .trim(),
+        "host"
+    );
+    let bootstrap = fs::read_to_string(run_log.with_extension("bootstrap-library-path")).unwrap();
+    let bootstrap = std::env::split_paths(bootstrap.trim()).collect::<Vec<_>>();
+    assert!(bootstrap.ends_with(&std::env::split_paths(inherited_library_path).collect::<Vec<_>>()));
+    for artifact in ["alpha-test", "zeta-test"] {
+        let recorded = fs::read_to_string(run_log.with_extension(format!("{artifact}.library-path"))).unwrap();
+        let expected = std::iter::once(root.join("fake-toolchain").join("lib"))
+            .chain(bootstrap.iter().cloned())
+            .collect::<Vec<_>>();
+        assert_eq!(std::env::split_paths(recorded.trim()).collect::<Vec<_>>(), expected);
+    }
+}
+
 #[test]
 fn miri_runner_filters_artifacts_and_runs_in_parallel() {
     if !tools_available() {
@@ -1020,7 +1217,20 @@ fn miri_runner_filters_artifacts_and_runs_in_parallel() {
         "[package]\nname = \"other-package\"\nversion = \"0.1.0\"\n",
     );
     let cargo_log = tmp.path().join("cargo.log");
+    let layout_log = tmp.path().join("cargo-layout.log");
     let run_log = tmp.path().join("miri-run");
+    let library_path_variable = if cfg!(windows) {
+        "PATH"
+    } else if cfg!(target_os = "macos") {
+        "DYLD_FALLBACK_LIBRARY_PATH"
+    } else {
+        "LD_LIBRARY_PATH"
+    };
+    let inherited_library_path = if cfg!(windows) {
+        path_with_fake_bin(tmp.path())
+    } else {
+        std::env::join_paths([tmp.path().join("inherited lib one"), tmp.path().join("inherited lib two")]).unwrap()
+    };
     let barrier = tmp.path().join("miri-barrier");
     fs::create_dir(&barrier).unwrap();
     let artifacts = r#"[
@@ -1035,6 +1245,8 @@ fn miri_runner_filters_artifacts_and_runs_in_parallel() {
         &[
             ("ANVIL_MIRI_JOBS", OsStr::new("2")),
             ("FAKE_CARGO_LOG", cargo_log.as_os_str()),
+            ("FAKE_CARGO_BUILD_LAYOUT_LOG", layout_log.as_os_str()),
+            ("__CARGO_TEMPORARY_BUILD_DIR_NEW_LAYOUT_OPT_OUT", OsStr::new("caller")),
             ("FAKE_MIRI_ARTIFACTS", OsStr::new(artifacts)),
             ("FAKE_MIRI_BARRIER_DIR", barrier.as_os_str()),
             ("FAKE_MIRI_RUN_LOG", run_log.as_os_str()),
@@ -1042,6 +1254,7 @@ fn miri_runner_filters_artifacts_and_runs_in_parallel() {
             ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("other-package")),
             ("FAKE_SECOND_PACKAGE_DIR_LEAF", OsStr::new("other-package")),
             ("FAKE_SECOND_MIRI_EXCLUDE", OsStr::new("1")),
+            (library_path_variable, inherited_library_path.as_os_str()),
         ],
     );
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -1065,6 +1278,11 @@ fn miri_runner_filters_artifacts_and_runs_in_parallel() {
     );
     let cargo_log = fs::read_to_string(cargo_log).unwrap();
     assert_miri_cargo_calls(&cargo_log);
+    let layout_log = fs::read_to_string(layout_log).unwrap();
+    let expected_layout = if cfg!(windows) { "1" } else { "caller" };
+    let mut layout_lines = layout_log.lines();
+    assert_eq!(layout_lines.next(), Some(expected_layout));
+    assert!(layout_lines.all(|line| line == expected_layout));
     assert!(
         both_workers_admitted,
         "both Miri workers must reach the barrier before either is released"
@@ -1072,26 +1290,7 @@ fn miri_runner_filters_artifacts_and_runs_in_parallel() {
     assert!(!barrier.join("ordinary-bin.ready").exists());
     assert!(!barrier.join("excluded-test.ready").exists());
 
-    let recorded_cwd = fs::read_to_string(run_log.with_extension("alpha-test.cwd")).unwrap();
-    let expected_cwd = fs::canonicalize(tmp.path()).unwrap();
-    assert_eq!(fs::canonicalize(recorded_cwd.trim()).unwrap(), expected_cwd);
-    assert!(
-        fs::read_to_string(run_log.with_extension("alpha-test.args"))
-            .unwrap()
-            .trim()
-            .is_empty(),
-        "an unfiltered Miri run must not receive binary arguments"
-    );
-    assert_eq!(
-        fs::read_to_string(run_log.with_extension("alpha-test.sysroot")).unwrap().trim(),
-        tmp.path().join("fake-miri-sysroot").to_str().unwrap()
-    );
-    assert_eq!(
-        fs::read_to_string(run_log.with_extension("alpha-test.miri-be-rustc"))
-            .unwrap()
-            .trim(),
-        "host"
-    );
+    assert_miri_runner_context(tmp.path(), &run_log, &inherited_library_path);
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let alpha_group = stdout.find("=== Miri executable fixture 0.1.0 :: test alpha").unwrap();
@@ -2139,6 +2338,34 @@ fn bolero_discovery_failure_propagates() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn bolero_host_target_failure_prevents_discovery() {
+    assert!(tools_available(), "recipe execution requires `just` and `pwsh` on PATH");
+    let tmp = fixture(
+        &[("bolero.just", BOLERO), ("impact.just", IMPACT)],
+        &[
+            "anvil-toolchain-nightly-validate-prereqs",
+            "anvil-tool-cargo-bolero-validate-prereqs",
+            "anvil-toolchain-nightly-install",
+            "anvil-tool-cargo-bolero-install installer",
+            "anvil-tool-cargo-each-validate-prereqs",
+            "anvil-tool-cargo-each-install installer",
+            "anvil-impact",
+        ],
+    );
+    let log = tmp.path().join("cargo.log");
+    seed_include(tmp.path(), "affected", "--package fixture@0.1.0");
+    let output = run_just(
+        tmp.path(),
+        &["anvil-bolero"],
+        &[("FAKE_RUSTC_HOST_EXIT", OsStr::new("9")), ("FAKE_CARGO_LOG", log.as_os_str())],
+    );
+    assert_failed(&output, "failed pinned compiler host-target query");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("pinned compiler host-target discovery failed"));
+    assert!(!log.exists(), "Cargo discovery must not run after the compiler query fails");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn bolero_full_workspace_discovery_enumerates_every_member() {
     if !tools_available() {
         return;
@@ -2170,9 +2397,8 @@ fn bolero_full_workspace_discovery_enumerates_every_member() {
         tmp.path(),
         &["anvil-bolero"],
         &[
-            // `bolero list` succeeds but reports no targets, so the recipe
-            // no-ops after discovery -- exactly the path we want to observe.
-            ("FAKE_BOLERO_LIST_EXIT", OsStr::new("0")),
+            ("FAKE_RUSTC_HOST", OsStr::new("aarch64-unknown-linux-gnu")),
+            ("FAKE_BOLERO_LIST_OUTPUT", OsStr::new(r#"{"test":"fuzz_target"}"#)),
             ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("other-package")),
             // A package present in metadata but NOT a workspace member must be
             // skipped -- discovery is over members, not every known package.
@@ -2193,17 +2419,23 @@ fn bolero_full_workspace_discovery_enumerates_every_member() {
         "full-workspace discovery must enumerate members via `cargo metadata`, got:\n{calls}"
     );
     assert!(
-        calls.contains("each --package fixture@0.1.0 -- cargo +nightly-test bolero list --profile release --package {cargo-spec}"),
+        calls.contains("each --package fixture@0.1.0 -- cargo +nightly-test bolero list --profile release --target aarch64-unknown-linux-gnu --package {cargo-spec}"),
         "the first workspace member must be discovered, got:\n{calls}"
     );
     assert!(
-        calls.contains("each --package other-package@0.1.0 -- cargo +nightly-test bolero list --profile release --package {cargo-spec}"),
+        calls.contains("each --package other-package@0.1.0 -- cargo +nightly-test bolero list --profile release --target aarch64-unknown-linux-gnu --package {cargo-spec}"),
         "every workspace member must be discovered, not just the first, got:\n{calls}"
     );
     assert!(
         !calls.contains("external-dep"),
         "a non-workspace-member package must NOT be discovered, got:\n{calls}"
     );
+    for package in ["fixture@0.1.0", "other-package@0.1.0"] {
+        assert!(
+            calls.contains(&format!("each --package {package} -- cargo +nightly-test bolero test --profile release --target aarch64-unknown-linux-gnu --engine libfuzzer -T 60s --package {{cargo-spec}} fuzz_target")),
+            "discovery and execution must use the same pinned compiler host target:\n{calls}"
+        );
+    }
 }
 
 #[test]
@@ -2231,6 +2463,7 @@ fn semver_exit_code_contract_is_executed() {
             common[1],
             ("FAKE_SEMVER_EXIT", OsStr::new("100")),
             ("FAKE_SEMVER_OUTPUT", OsStr::new("breaking change")),
+            ("FAKE_CARGO_JSON_WARNINGS", OsStr::new("1")),
         ],
     );
     assert!(
@@ -2242,44 +2475,38 @@ fn semver_exit_code_contract_is_executed() {
     let findings_comment = fs::read_to_string(tmp.path().join("target/anvil/comments/semver.md")).unwrap();
     assert!(findings_comment.contains("Potential breaking changes"));
     assert!(findings_comment.contains("breaking change"));
-
-    let renamed = run_just(
-        tmp.path(),
-        &["anvil-semver-check"],
-        &[
-            common[0],
-            common[1],
-            ("FAKE_SEMVER_EXIT", OsStr::new("101")),
-            ("FAKE_SEMVER_OUTPUT", OsStr::new("package `fixture` not found in the baseline")),
+    let calls = fs::read_to_string(&log).unwrap();
+    assert_eq!(
+        calls
+            .lines()
+            .filter(|line| line.starts_with("rustdoc --locked --lib"))
+            .map(|line| line
+                .split_once(" --features ")
+                .expect("both metadata fixtures declare public features")
+                .1)
+            .collect::<Vec<_>>(),
+        [
+            "default,std,serde,Unstable-visible,Nightly,current-api -- -Z unstable-options --output-format=json --document-private-items --document-hidden-items --cap-lints=allow",
+            "default,std,serde,Unstable-visible,baseline-api -- -Z unstable-options --output-format=json --document-private-items --document-hidden-items --cap-lints=allow",
         ],
+        "each revision must enable its own public features and exclude only the upstream heuristic names"
     );
-    assert!(
-        renamed.status.success(),
-        "accepted exit 101 should succeed:\n{}",
-        String::from_utf8_lossy(&renamed.stderr)
-    );
-    assert!(!tmp.path().join("target/anvil/comments/semver.md").exists());
+    assert!(calls.contains("semver-checks --package fixture --current-rustdoc"));
+    assert!(calls.contains("--baseline-rustdoc"));
+    assert!(!calls.contains("--baseline-rev"));
 
-    for output in [
-        "has no lib target",
-        "no library targets found",
-        "version 1.0.0 is yanked: target/semver-checks/git-origin_main/crates/fixture",
-    ] {
-        let bin_to_lib = run_just(
+    for condition in ["FAKE_SEMVER_BASELINE_RENAMED", "FAKE_SEMVER_BASELINE_BIN"] {
+        let absent_baseline = run_just(
             tmp.path(),
             &["anvil-semver-check"],
-            &[
-                common[0],
-                common[1],
-                ("FAKE_SEMVER_EXIT", OsStr::new("101")),
-                ("FAKE_SEMVER_OUTPUT", OsStr::new(output)),
-            ],
+            &[common[0], common[1], (condition, OsStr::new("1"))],
         );
         assert!(
-            bin_to_lib.status.success(),
-            "bin-to-lib exit 101 wording '{output}' should succeed:\n{}",
-            String::from_utf8_lossy(&bin_to_lib.stderr)
+            absent_baseline.status.success(),
+            "metadata-proven absent baseline should succeed ({condition}):\n{}",
+            String::from_utf8_lossy(&absent_baseline.stderr)
         );
+        assert!(!tmp.path().join("target/anvil/comments/semver.md").exists());
     }
 
     for (exit, output) in [("101", "operational failure"), ("42", "unexpected failure")] {
@@ -2303,6 +2530,18 @@ fn semver_exit_code_contract_is_executed() {
         assert!(comment.contains(&format!("exit {exit}")));
         assert!(comment.contains(output));
     }
+
+    let build_failure = run_just(
+        tmp.path(),
+        &["anvil-semver-check"],
+        &[common[0], common[1], ("FAKE_RUSTDOC_EXIT", OsStr::new("101"))],
+    );
+    assert!(build_failure.status.success(), "locked build failures remain advisory");
+    let comment = fs::read_to_string(tmp.path().join("target/anvil/comments/semver.md")).unwrap();
+    assert!(comment.contains("Inconclusive comparisons"));
+    assert!(comment.contains("current rustdoc (exit 101)"));
+    assert!(comment.contains("locked rustdoc build failed"));
+    assert_semver_git_calls(tmp.path(), "Cargo.toml", 6);
 }
 
 #[test]
@@ -3085,6 +3324,7 @@ fn semver_skips_non_publishable_libraries() {
     );
     assert!(!fs::read_to_string(log).unwrap().contains("semver-checks"));
     assert!(String::from_utf8_lossy(&output.stdout).contains("no affected publishable library crates"));
+    assert!(!tmp.path().join("git.log").exists(), "non-publishable crates must not invoke Git");
 }
 
 #[test]
@@ -3121,46 +3361,119 @@ fn semver_includes_libraries_restricted_to_named_registries() {
     assert!(
         fs::read_to_string(log)
             .unwrap()
-            .contains("semver-checks --package named-registry --baseline-rev base")
+            .contains("semver-checks --package named-registry --current-rustdoc")
     );
+    assert_semver_git_calls(tmp.path(), "nested/named-registry/Cargo.toml", 1);
 }
 
 #[test]
-fn coverage_recipe_delegation_contract_is_exact() {
-    let normalized = LLVM_COV.replace("\r\n", "\n");
-    let start = normalized
-        .find("anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact\n")
-        .expect("coverage recipe declaration");
-    let end = normalized.find("# --- pr-test members").expect("coverage recipe footer");
-    let actual = &normalized[start..end];
-    let expected = r#"anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
-    $ErrorActionPreference = 'Stop'
-    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
-    $impactExit = $LASTEXITCODE
-    if ($impactExit -ne 0) { exit $impactExit }
-    if ($include -eq '--skip') {
-        Write-Host 'anvil-llvm-cov: no affected packages; skipping'
-        exit 0
+fn coverage_recipe_runs_the_owned_collector_or_installed_tool_and_propagates_failures() {
+    if !tools_available() {
+        return;
     }
-    # An empty selector list is cargo-coverage-gate's full-workspace mode.
-    # Impact-selected values remain version-qualified (`name@version`) so
-    # collection resolves the intended workspace member unambiguously.
-    $packageArgs = @(if ($include -and $include -ne '--workspace') { -split $include })
-    $collectionArgs = @(
-        '--configuration', 'all-features',
-        '--configuration', 'no-default-features',
-        '--coverage-dir', 'target/coverage',
-        # LLVM produces unusable coverage profiles on Windows ARM, so
-        # coverage-gate runs that target's tests without measuring coverage.
-        '--no-coverage-target', 'aarch64-pc-windows-msvc'
-    )
-    & cargo '+{{ rust_nightly }}' coverage-gate run @packageArgs @collectionArgs
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    // PowerShell consumes `--` when it binds arguments to the script-based Cargo fixture.
+    let local = "run --locked --package cargo-coverage-gate --bin cargo-coverage-gate --target aarch64-unknown-linux-gnu coverage-gate run";
+    for (name, target_name, binary, member, expected) in [
+        ("fixture", "fixture", false, true, "coverage-gate run"),
+        ("cargo-coverage-gate", "cargo_coverage_gate", false, true, "coverage-gate run"),
+        ("cargo-coverage-gate", "cargo-coverage-gate", true, true, local),
+        ("cargo-coverage-gate", "cargo-coverage-gate", true, false, "coverage-gate run"),
+        ("Cargo-Coverage-Gate", "cargo-coverage-gate", true, true, "coverage-gate run"),
+        ("cargo-coverage-gate", "Cargo-Coverage-Gate", true, true, "coverage-gate run"),
+    ] {
+        for exit in ["0", ARBITRARY_FAILURE_EXIT] {
+            let tmp = fixture(
+                &[("llvm-cov.just", LLVM_COV), ("impact.just", IMPACT)],
+                &[
+                    "anvil-llvm-cov-validate-prereqs",
+                    "anvil-component-nightly-llvm-tools-install",
+                    "anvil-tool-cargo-llvm-cov-install installer",
+                    "anvil-tool-cargo-nextest-install installer",
+                    "anvil-tool-cargo-coverage-gate-install installer",
+                    "anvil-impact",
+                ],
+            );
+            let log = tmp.path().join("cargo.log");
+            seed_include(tmp.path(), "affected", "--package selected@0.1.0");
+            let output = run_just(
+                tmp.path(),
+                &["anvil-llvm-cov"],
+                &[
+                    ("ANVIL_IMPACT", OsStr::new("consume")),
+                    ("FAKE_CARGO_LOG", log.as_os_str()),
+                    ("FAKE_PACKAGE_NAME", OsStr::new(if member { name } else { "fixture" })),
+                    ("FAKE_LIB_NAME", OsStr::new(target_name)),
+                    ("FAKE_FIRST_BIN", OsStr::new(if binary { "1" } else { "" })),
+                    ("FAKE_NON_MEMBER_PACKAGE_NAME", OsStr::new(if member { "" } else { name })),
+                    ("FAKE_NON_MEMBER_BIN", OsStr::new("1")),
+                    ("FAKE_CARGO_DEFAULT_EXIT", OsStr::new(exit)),
+                    ("FAKE_RUSTC_HOST", OsStr::new("aarch64-unknown-linux-gnu")),
+                    ("CARGO_BUILD_TARGET", OsStr::new("wasm32-unknown-unknown")),
+                ],
+            );
+            assert_eq!(
+                output.status.success(),
+                exit == "0",
+                "collector selection for {name}, target={target_name}, binary={binary}, member={member}, exit={exit}\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let calls = fs::read_to_string(log).unwrap();
+            assert_eq!(
+                calls.lines().collect::<Vec<_>>(),
+                [
+                    "+nightly-test metadata --format-version 1 --no-deps --locked",
+                    &format!(
+                        "+nightly-test {expected} --package selected@0.1.0 --configuration all-features --configuration no-default-features --coverage-dir target/coverage --no-coverage-target aarch64-pc-windows-msvc"
+                    ),
+                ]
+            );
+        }
+    }
+}
 
-"#;
-    assert_eq!(actual, expected);
-    assert!(!normalized.contains("Invoke-AnvilLcovReport"));
-    assert!(!normalized.contains("min-lines-percent"));
+#[test]
+fn coverage_recipe_does_not_run_a_collector_when_discovery_fails() {
+    if !tools_available() {
+        return;
+    }
+    for (variable, value, owns_collector) in [
+        ("FAKE_METADATA_EXIT", ARBITRARY_FAILURE_EXIT, false),
+        ("FAKE_METADATA_INVALID", "1", false),
+        ("FAKE_RUSTC_HOST_EXIT", ARBITRARY_FAILURE_EXIT, true),
+    ] {
+        let tmp = fixture(
+            &[("llvm-cov.just", LLVM_COV), ("impact.just", IMPACT)],
+            &[
+                "anvil-llvm-cov-validate-prereqs",
+                "anvil-component-nightly-llvm-tools-install",
+                "anvil-tool-cargo-llvm-cov-install installer",
+                "anvil-tool-cargo-nextest-install installer",
+                "anvil-tool-cargo-coverage-gate-install installer",
+                "anvil-impact",
+            ],
+        );
+        let log = tmp.path().join("cargo.log");
+        let output = run_just(
+            tmp.path(),
+            &["anvil-llvm-cov"],
+            &[
+                ("FAKE_CARGO_LOG", log.as_os_str()),
+                (variable, OsStr::new(value)),
+                (
+                    "FAKE_PACKAGE_NAME",
+                    OsStr::new(if owns_collector { "cargo-coverage-gate" } else { "fixture" }),
+                ),
+                ("FAKE_LIB_NAME", OsStr::new("cargo-coverage-gate")),
+                ("FAKE_FIRST_BIN", OsStr::new(if owns_collector { "1" } else { "" })),
+            ],
+        );
+        assert_failed(&output, "coverage discovery failure");
+        assert_eq!(
+            fs::read_to_string(log).unwrap().trim(),
+            "+nightly-test metadata --format-version 1 --no-deps --locked"
+        );
+    }
 }
 
 // --- container-specific behaviour ------------------------------------------

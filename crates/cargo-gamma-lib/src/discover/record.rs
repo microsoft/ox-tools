@@ -2655,7 +2655,7 @@ mod tests {
         }
         let changed: ContextDigest = serde_json::from_value(all).expect("all stated axes changed");
         assert_eq!(baseline.differences(&changed), Term::ALL);
-        assert!(baseline.differences(&baseline).is_empty());
+        assert_eq!(baseline.differences(&baseline).len(), 0);
         for term in [Term::Target, Term::Config, Term::Environment] {
             let mut value = serde_json::to_value(&baseline).expect("context JSON");
             value[term.name()] = serde_json::Value::Null;
@@ -2663,8 +2663,8 @@ mod tests {
             let mut different = serde_json::to_value(&baseline).expect("context JSON");
             different[term.name()] = serde_json::json!("changed");
             let stated: ContextDigest = serde_json::from_value(different).expect("stated term");
-            assert!(unstated.differences(&stated).is_empty());
-            assert!(stated.differences(&unstated).is_empty());
+            assert_eq!(unstated.differences(&stated).len(), 0);
+            assert_eq!(stated.differences(&unstated).len(), 0);
         }
     }
 
@@ -4949,7 +4949,7 @@ mod tests {
         let saved = ContextDigest::from_environment(&environment);
         let restored: ContextDigest = serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap();
         assert_eq!(saved, restored);
-        assert!(restored.toolchain.is_empty());
+        assert_eq!(restored.toolchain.len(), 0);
         restored.validate_environment(&environment_digest(&environment)).unwrap();
         assert!(
             restored
@@ -5474,7 +5474,7 @@ mod tests {
                 Term::Environment,
             ]
         );
-        assert!(Tier::Ordering.requires().is_empty());
+        assert_eq!(Tier::Ordering.requires().len(), 0);
         assert!(
             Tier::Verdict.requires().contains(&Term::Toolchain),
             "verdicts are rechecked after a compiler change"
@@ -5789,7 +5789,7 @@ mod tests {
         let record = RunRecord::load(&root);
 
         assert_eq!(record.len(), 0);
-        assert!(record.ordering().is_empty());
+        assert_eq!(record.ordering().len(), 0);
         assert!(RunRecord::load(&root).probes().is_empty());
     }
 

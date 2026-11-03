@@ -207,7 +207,7 @@ mod tests {
 
         assert!(merged.shards_seen.is_empty());
         assert!((merged.coverage() - 100.0).abs() < f64::EPSILON);
-        assert!(merged.missing_shards().is_empty());
+        assert_eq!(merged.missing_shards().len(), 0);
     }
 
     /// A count no read path would have accepted still costs a bounded amount to report on.

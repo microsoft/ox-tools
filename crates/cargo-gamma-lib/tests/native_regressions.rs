@@ -199,8 +199,8 @@ fn recovered_native_suppress_returns_physical_path_errors_before_claiming_campai
         suppress(&mut host, &args, When::Never, Styler::new(false)).unwrap_err().message(),
         expected
     );
-    assert!(host.out.is_empty());
-    assert!(host.err.is_empty());
+    assert_eq!(host.out, [] as [u8; 0]);
+    assert_eq!(host.err, [] as [u8; 0]);
 }
 
 #[test]
@@ -443,8 +443,8 @@ fn recovered_configuration_returns_reporting_read_and_duplicate_resource_errors_
         failure.message(),
         "`--resource-concurrency` specifies `database` more than once; each resource may have only one command-line capacity"
     );
-    assert!(host.out.is_empty());
-    assert!(host.err.is_empty());
+    assert_eq!(host.out, [] as [u8; 0]);
+    assert_eq!(host.err, [] as [u8; 0]);
 }
 
 #[test]

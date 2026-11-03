@@ -903,7 +903,7 @@ fn finite_grouping_controls_have_distinct_ordinary_results() {
     assert_eq!(mutated[0].ids, [2, 3, 4, 5]);
     assert_ne!(original, mutated);
     let empty = Input { entries: Vec::new() };
-    assert!(fixture::groups(&empty).is_empty());
+    assert_eq!(fixture::groups(&empty).len(), 0);
     let mut singleton = Input {
         entries: vec![Entry {
             path: "same".into(),

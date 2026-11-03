@@ -384,7 +384,7 @@ mod tests {
 
     #[test]
     fn test_default_config_toml_is_not_empty() {
-        assert!(!DEFAULT_CONFIG_TOML.is_empty());
+        assert_ne!(DEFAULT_CONFIG_TOML, "");
     }
 
     #[test]
@@ -510,7 +510,7 @@ version = "^2.0"
         let workspace_root = Utf8PathBuf::try_from(tmp.path().to_path_buf()).unwrap();
         let config = Config::load(&workspace_root, Some(&config_path)).unwrap();
 
-        assert!(config.bug_labels.is_empty());
+        assert_eq!(config.bug_labels, [] as [std::string::String; 0]);
     }
 
     #[test]

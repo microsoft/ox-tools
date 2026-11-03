@@ -355,7 +355,7 @@ fn comment_directives_without_argument_lists_select_everything() {
     let found = directives(&file(source)).unwrap();
 
     assert!(found[0].selection.contains("arith.add_to_sub"));
-    assert!(found[0].selectors.is_empty());
+    assert_eq!(found[0].selectors.len(), 0);
 }
 
 #[test]
@@ -500,7 +500,7 @@ fn a_skip_that_governs_a_mutant_is_not_named() {
     let _ = suppress(&mut mutants, &found);
     let selection = Selection::parse("arith").unwrap();
 
-    assert!(idle("src/f.rs".into(), &mutants, &found, &selection).is_empty());
+    assert_eq!(idle("src/f.rs".into(), &mutants, &found, &selection).len(), 0);
 }
 
 /// The distinction the feature turns on. `--mutators relational` never offers an `arith` mutant to
@@ -537,7 +537,7 @@ fn an_expectation_that_governs_nothing_is_not_named() {
     let found = directives(&parsed).unwrap();
     let selection = Selection::parse("arith,relational").unwrap();
 
-    assert!(idle("src/f.rs".into(), &mutants, &found, &selection).is_empty());
+    assert_eq!(idle("src/f.rs".into(), &mutants, &found, &selection).len(), 0);
 }
 
 #[test]
@@ -548,7 +548,7 @@ fn a_file_whose_skips_all_still_apply_names_nothing() {
     let _ = suppress(&mut mutants, &found);
     let selection = Selection::parse("arith,relational").unwrap();
 
-    assert!(idle("src/f.rs".into(), &mutants, &found, &selection).is_empty());
+    assert_eq!(idle("src/f.rs".into(), &mutants, &found, &selection).len(), 0);
 }
 
 #[test]

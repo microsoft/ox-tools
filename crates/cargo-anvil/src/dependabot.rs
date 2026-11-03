@@ -308,7 +308,7 @@ impl Node {
             return Err(ExpectedMappingError::new().into());
         }
         let mut fields = BTreeMap::new();
-        for pair in self.children.chunks_exact(2) {
+        for pair in self.children.as_chunks::<2>().0 {
             let key = pair[0].scalar()?;
             if fields.insert(key, &pair[1]).is_some() {
                 return Err(DuplicateKeyError::new(key.to_owned()).into());
@@ -480,7 +480,7 @@ mod tests {
                 "actions/inner/action.yml",
             ]
         );
-        assert!(generated_action_paths(&catalog, &[]).is_empty());
+        assert_eq!(generated_action_paths(&catalog, &[]).len(), 0);
     }
 
     #[test]

@@ -192,8 +192,53 @@ while paired prerequisite validation remains read-only.
 | `deny`                         | `cargo deny check`                                        | all |
 | `audit`                        | `cargo audit`                                             | oxidizer |
 | `udeps`                        | `cargo +<pinned-nightly> udeps --workspace --all-features` run **twice** — once with default targets (lib + bins) and once with `--all-targets`. cargo-udeps only analyzes the targets it's told to, and each run catches a variant the other masks: the default-targets run surfaces a dep in `[dependencies]` referenced only by tests/benches/examples (it should be a dev-dep; `--all-targets` would see it as "used"), while the `--all-targets` run surfaces unused `[dev-dependencies]` (never compiled by the default-targets run). Together they cover unused deps, unused dev-deps, and deps that should be dev-deps. | oxidizer, oxidizer-github |
-| `semver-check`                 | `cargo semver-checks --baseline-rev <baseline>` per affected publishable library crate. Crates with `publish = false` and bin-only crates are skipped. The PR target is the baseline. Exit 100 is a completed check with deny-level findings; exit 101 or another nonzero status means the comparison was inconclusive. Both outcomes write `target/anvil/comments/semver.md` and remain advisory, matching the repository's native `semver` job (`continue-on-error: true`). Proven rename and bin→lib transitions with no comparable baseline, and dependencies proven to be yanked only in the checked-out baseline tree, are skipped without a comment. Anvil preflight failures such as invalid current-workspace metadata or an unavailable baseline ref still fail because the recipe cannot establish what to compare. | oxidizer-github |
+| `semver-check`                 | Generate current and PR-target rustdoc JSON with `cargo rustdoc --locked --lib`, then compare with `cargo semver-checks --current-rustdoc <current.json> --baseline-rustdoc <baseline.json>` per affected publishable library crate. Each revision uses its own lockfile with the same compiler and target. Crates with `publish = false`, bin-only crates, and new/moved/renamed crates or bin-to-library transitions without a comparable baseline are skipped. Exit 100 is a completed check with deny-level findings; build failures and other nonzero checker statuses are inconclusive. Both outcomes write `target/anvil/comments/semver.md` and remain advisory. Invalid current metadata or an unavailable baseline ref still fail preflight. | oxidizer-github |
 | `external-types`               | `cargo each <affected packages> --filter lib --keep-going -- cargo +<catalog-nightly-rustdoc-schema> check-external-types --manifest-path {manifest}` (per-manifest because the tool has no `--workspace`/`--package`; bin-only crates have no public API surface and are filtered out). Setup installs the catalog version but validation accepts newer installed tools. The selected nightly is tested with the catalog version; an incompatible newer tool fails closed with a tool/nightly compatibility diagnostic rather than silently selecting a different schema. | oxidizer-github |
+
+#### Locked SemVer snapshots
+
+The comparison measures the API built by each revision's checked-in dependency
+graph. It does not resolve historical manifests against today's registry:
+`cargo-semver-checks --baseline-rev` builds a separate consumer workspace and
+updates its dependencies, so a newly published incompatible transitive dependency
+can otherwise prevent a previously buildable baseline from being compared.
+
+Anvil makes one temporary, local shared Git clone, checks out the resolved PR
+target commit, and removes that clone in `finally`. LFS smudging is disabled for
+that checkout: it uses the committed pointers rather than fetching assets from
+the local origin. The original repository and historical manifests are not
+modified. Both snapshots use the current checkout's selected stable compiler,
+overriding any obsolete baseline toolchain selection.
+The current Cargo build target is used for both arms; an unset target selects the
+compiler's host. A multi-target configuration must select one target with
+`CARGO_BUILD_TARGET`. Build artifacts live under `target/anvil/semver/`, separately
+for current and baseline, irrespective of an inherited `CARGO_TARGET_DIR`.
+
+Each package is built separately using its source-qualified metadata ID. Default
+features remain enabled, and feature selection retains the checker's heuristic:
+enable declared and implicit optional-dependency features except `unstable`,
+`nightly`, `bench`, `no_std`, and names beginning with `_`, `unstable-`, or
+`unstable_`. Each revision supplies its own feature list. Rustdoc includes hidden
+and private items, as required by the checker, and the unstable JSON output uses
+`RUSTC_BOOTSTRAP=1`, matching the checker's own generation path. The file-input
+checker uses its built-in lint policy rather than Cargo metadata lint overrides;
+Anvil warns if such overrides are present.
+
+Cargo JSON commands parse stdout separately from stderr. Warnings remain visible
+without invalidating valid metadata or target configuration, and stderr is
+retained in failure diagnostics.
+
+The lockfiles must be present and usable; a missing or stale lockfile is never
+replaced by fresh resolution. A failed build, missing JSON artifact, or failed
+comparison is reported as inconclusive, not clean. Package absence, renames, and
+library-target absence are established from baseline metadata rather than
+matching compiler-error strings. A genuinely unusable baseline dependency is
+also inconclusive; yanked versions still present in a usable lockfile can build
+without being reselected.
+
+The graphs may legitimately differ between revisions. Dependency-induced API
+changes can therefore appear in the advisory alongside source changes; this is
+intentional, unlike comparing both sources against a newly resolved graph.
 
 #### Package-isolated all-target compilation
 
@@ -254,7 +299,7 @@ text for parser and discovery tests. The collector's
 [released-surface rules](../../../cargo-coverage-gate/docs/design/README.md)
 define the accepted layouts.
 
-The generated recipe intentionally omits `--target`.
+The generated recipe intentionally omits the collector's `--target` option.
 `cargo-coverage-gate run` resolves the invoking rustc host and passes that target
 explicitly, overriding `CARGO_BUILD_TARGET` and Cargo `build.target`
 configuration. Each Anvil matrix leg therefore measures its native target,
@@ -262,6 +307,16 @@ rather than inheriting a configured cross-target from the checkout. Repositories
 that require coverage for a non-host target must provide a native runner for
 that target or retain a documented repository-specific check until the catalog
 supports explicit coverage-target configuration.
+
+When the workspace owns a `cargo-coverage-gate` package with a
+`cargo-coverage-gate` binary target, the recipe runs that binary from the
+checkout through the pinned nightly Cargo. This lets the collector validate
+its own changes before publication. Other workspaces continue to use the
+installed collector. Locked metadata identifies the workspace member and
+binary target. Metadata errors stop the check without a fallback.
+The checkout launch resolves the pinned compiler's host and passes it to the
+outer `cargo run --target`, so a configured cross-target cannot affect the
+collector's own build or launch. Host discovery errors also stop the check.
 
 #### `pr-msrv` (minimum-version tests)
 
@@ -312,12 +367,20 @@ available.
 | `miri`    | Compiles the impact-affected packages together once with all features enabled, then runs each compiled Miri test executable concurrently. A Miri test executable is one Cargo test target containing one or more libtest tests. Compiling the selected scope together preserves Cargo feature unification: shared dependencies receive the union of features requested by all selected packages, matching a normal workspace-scoped Cargo invocation. The default is one artifact worker per logical processor, clamped to the executable count; `ANVIL_MIRI_JOBS` accepts a positive integer override. Output is isolated per executable and labelled with its package and test target, then replayed deterministically; every executable completes before failures are aggregated. The selected target set is lib/bin unit tests and integration tests; doctests, benches, examples, build scripts, and ordinary executables do not run. Slow or unsupported individual tests opt out with `#[cfg_attr(miri, ignore)]`. A package can omit all its own Miri targets through `[package.metadata.anvil.miri] exclude = true`; it may still compile as a dependency of a selected consumer. Clean direct and PR invocations are impact-scoped; scheduled/full tiers and dirty local trees run the full workspace. Local callers may use `--package <name>` to override impact scope, `--test <filter>` to select libtest names, or `--example <name>` to run one example instead of the test suite; cloud workflows pass no options. | oxidizer, oxidizer-github |
 | `careful` | `cargo +<catalog-nightly> careful test --all-features --locked` over the impact-affected packages. cargo-careful uses a debug-instrumented std in a stable cache path. Because Cargo fingerprints the sysroot path rather than its contents, the recipe records the actual `rustc -vV` and SHA-256 of the resolved `cargo-careful` executable in `target/anvil/careful-sysroot.id`; either changing triggers `cargo clean`. The executable hash is used because cargo-careful rejects version-only invocations. This remains correct when validation accepts a newer installed cargo-careful. | oxidizer-github |
 | `loom`    | For each `[[test]]` target that declares `required-features = ["loom"]`, `cargo test -p <pkg> --release --all-features --locked --test <target> -- --test-threads=1` with `RUSTFLAGS="--cfg loom"`. [`loom`](https://crates.io/crates/loom) is a permutation-based concurrency model checker that explores thread interleavings. Anvil does not impose a global exploration bound; each model remains responsible for tractable exhaustive exploration. Targets are detected **structurally** from `cargo metadata` (a test target whose `kind` contains `test` and whose `required-features` contains `loom`) -- not via a filename/cfg/comment heuristic -- and only those targets run, so loom never touches a crate's ordinary tests. The `loom` feature selects the target (`required-features`); `--cfg loom` activates loom (source swaps std↔loom atomics on `#[cfg(loom)]`, and `[target.'cfg(loom)'.dependencies] loom` links only under the cfg) -- both are required. Scoped per-package with `-p` (never `--workspace`) so the global cfg never leaks into deps reachable only through other members. **Fail-loud**: a crate that declares loom support (a `loom` feature or a `cfg(loom)` dependency) but exposes no such test target errors out rather than silently no-opping. When no crate ships a loom target the recipe skips (exit 0). | oxidizer-github |
-| `bolero`  | Uses the catalog nightly and release profile consistently to discover targets one package at a time, then runs each affected libfuzzer target for 60 seconds on Linux. Explicitly selecting `release` avoids cargo-bolero's implicit, adopter-defined `fuzz` profile and matches target execution. Adopters that disable `bolero`'s default features must enable its `std` feature for libfuzzer support. Per-package discovery is required because `cargo-bolero list` accepts only one `--package`; local whole-workspace runs enumerate workspace members before discovery. A successful empty discovery is a no-op; metadata, discovery, or parsing failure fails the check. Non-Linux hosts skip because cargo-bolero's native dependencies are unsupported there, while harnesses still run as ordinary tests. | oxidizer-github |
+| `bolero`  | Uses the catalog nightly and release profile consistently to discover targets one package at a time, then runs each affected libfuzzer target for 60 seconds on Linux. Discovery and execution use the catalog compiler's host target from `rustc --print host-tuple`. This avoids selecting the platform that built the installed cargo-bolero binary, such as musl on a GNU Linux host. Explicitly selecting `release` avoids cargo-bolero's implicit, adopter-defined `fuzz` profile and matches target execution. Adopters that disable `bolero`'s default features must enable its `std` feature for libfuzzer support. Per-package discovery is required because `cargo-bolero list` accepts only one `--package`; local whole-workspace runs enumerate workspace members before discovery. A successful empty discovery is a no-op; compiler target lookup, metadata, discovery, or parsing failure fails the check. Non-Linux hosts skip because cargo-bolero's native dependencies are unsupported there, while harnesses still run as ordinary tests. | oxidizer-github |
 
 Miri workloads stay focused on interpreter-relevant behavior. Exhaustive generated-text contract
 scans and Cartesian parser/adoption matrices may remain native and `cargo careful` only when
 focused Miri tests continue through the same implementation paths and each exclusion records that
 coverage tradeoff beside the test.
+
+Windows Miri uses Cargo's temporary
+`__CARGO_TEMPORARY_BUILD_DIR_NEW_LAYOUT_OPT_OUT=1` compatibility switch.
+Cargo 1.100's per-crate build paths make large dependency search lists exceed
+Windows' command-line limit, and the pinned cargo-miri cannot read Cargo's
+argument-file fallback. The compact layout preserves the selected packages,
+features, compiler checks, and Miri execution. Other hosts retain their caller's
+layout setting. Recheck this workaround when updating the pinned nightly.
 
 #### `pr-mutants` (mutation testing)
 
@@ -576,15 +639,15 @@ commits are normal, and forcing every breaking-API PR to bump the major version 
 on a release) would push enforcement to the wrong moment in the lifecycle. The change is
 verifiable at release time, not per PR.
 
-The SemVer comparison is also inconclusive when `cargo-semver-checks` cannot materialize
-or build the target-branch baseline, for example because that baseline resolves a yanked
-dependency. Such an operational failure is reported in the same advisory comment and does
+The SemVer comparison is also inconclusive when a locked rustdoc build or
+`cargo-semver-checks` comparison cannot complete, for example because a historical
+lockfile is unusable. Such an operational failure is reported in the same advisory comment and does
 not block the PR: a broken baseline is not evidence that the PR broke the public API, and
 blocking would prevent the PR that repairs the baseline from merging. This deliberately
 matches the repository's native `semver` job, whose comparison step uses
-`continue-on-error: true`. Failures in Anvil's own preflight (before invoking
-`cargo-semver-checks`) remain enforcing because they indicate that the recipe cannot
-identify the current packages or requested baseline.
+`continue-on-error: true`. Failures in Anvil's own preflight remain enforcing
+because they indicate that the recipe cannot identify the current packages,
+compiler, build target, or requested baseline.
 
 To carry this signal without making the recipe non-zero, anvil uses a single shared
 convention:
