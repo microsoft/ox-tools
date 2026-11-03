@@ -168,7 +168,11 @@ fn selected_entry_with_context(selected: Result<Option<String>, Vec<String>>, di
     selected.map_err(|matches| {
         app_err!(
             "cannot resolve path segment '{name}' in {} because these entries differ only by ASCII case: {}",
-            dir.display(),
+            if dir.as_os_str().is_empty() {
+                "the repository root".to_owned()
+            } else {
+                dir.display().to_string()
+            },
             matches.join(", ")
         )
     })

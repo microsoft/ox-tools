@@ -374,9 +374,56 @@ fn workspace_member_read_and_enumeration_failures_do_not_mutate() {
 }
 
 #[test]
+fn artifact_reads_reject_directories_and_file_parents_before_mutation() {
+    for (artifact, obstruction, expected) in [
+        ("owned.just", "owned.just/notes.txt", "is a directory"),
+        ("nested/owned.just", "nested", "parent 'nested' is a file"),
+    ] {
+        let mut io = repository();
+        io.insert(obstruction, "repository content\n");
+        let before = io.files.clone();
+        let catalog = Catalog::builder(CliMeta::new("anvil"))
+            .with_artifact(Artifact::owned_file(artifact, "generated\n"))
+            .build()
+            .unwrap();
+        let error = update(&catalog, &UpdateOptions::default(), &mut io).unwrap_err();
+        assert!(error.to_string().contains(expected), "{error}");
+        assert!(error.to_string().contains(artifact), "{error}");
+        assert_eq!(io.files, before);
+        assert_eq!(io.mutations, Vec::<String>::new());
+    }
+}
+
+#[test]
+fn artifact_writes_reject_file_directory_collisions_before_lock_publication() {
+    for (first, second, expected) in [
+        ("generated", "generated/owned.just", "parent 'generated' is a file"),
+        ("generated/owned.just", "generated", "is a directory"),
+    ] {
+        let mut io = repository();
+        let catalog = Catalog::builder(CliMeta::new("anvil"))
+            .with_artifact(Artifact::owned_file(first, "first\n"))
+            .with_artifact(Artifact::owned_file(second, "second\n"))
+            .build()
+            .unwrap();
+        let error = update(&catalog, &UpdateOptions::default(), &mut io).unwrap_err();
+        assert!(error.to_string().contains(expected), "{error}");
+        assert_eq!(io.files[first], "first\n");
+        assert!(!io.files.contains_key(second));
+        assert!(!io.files.contains_key(".anvil.lock"));
+        assert_eq!(io.mutations, vec![format!("write {first}")]);
+    }
+}
+
+#[test]
 fn invalid_manifests_and_ambiguous_casing_fail_without_mutation() {
     for (path, content, expected) in [
         ("Cargo.toml", "not TOML", "failed to parse Cargo.toml as TOML"),
+        (
+            "Cargo.toml",
+            "[workspace]\nmembers = []\n",
+            "workspace at the repository root resolved to zero members",
+        ),
         (".anvil.lock", "not valid manifest TOML", "failed to parse manifest at .anvil.lock"),
         (
             ".anvil.lock",
@@ -399,5 +446,6 @@ fn invalid_manifests_and_ambiguous_casing_fail_without_mutation() {
     io.insert("Owned.just", "two");
     let error = update(&upgraded_catalog(), &UpdateOptions::default(), &mut io).unwrap_err();
     assert!(error.to_string().contains("differ only by ASCII case"));
-    assert!(io.mutations.is_empty());
+    assert!(error.to_string().contains("in the repository root because"), "{error}");
+    assert_eq!(io.mutations, Vec::<String>::new());
 }

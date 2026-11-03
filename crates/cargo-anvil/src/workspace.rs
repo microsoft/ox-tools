@@ -139,7 +139,11 @@ fn parse_workspace(
         if resolved.is_empty() {
             bail!(
                 "workspace at {} resolved to zero members; check `members` in {}",
-                root.display(),
+                if root.as_os_str().is_empty() {
+                    "the repository root".to_owned()
+                } else {
+                    root.display().to_string()
+                },
                 manifest_path.display()
             );
         }

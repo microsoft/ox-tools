@@ -467,6 +467,8 @@ sorts and deduplicates them); set `dry_run` to inspect without mutation, or
 reads argv, the environment, the current directory, or Git remotes, and does not
 initialize tracing or print. The CLI retains workspace-root discovery and
 backend autodetection and then uses the same injected update flow.
+CLI errors include the discovered absolute repository root as context.
+In-process root diagnostics use "the repository root" instead of an empty path.
 
 `UpdateIo` provides four external operations: read UTF-8 file contents, enumerate
 immediate directory entries (`RepositoryEntry { name, is_directory }`), replace
@@ -507,8 +509,9 @@ fake/mock package are required. Trait implementations name the existing public
 error type, `ohno::AppError`; depend on `ohno` 0.5 with `app-err` when constructing
 scripted errors with `ohno::app_err!` (as in the regression tests).
 The `test-util` feature and `test_support` module remain unsupported
-for downstream use. Version 0.20.1 does not contain this seam; downstream
-adoption depends on a later upstream release, not a local-path dependency.
+for downstream use. This API is available only from the first upstream release
+containing `update`; earlier releases do not expose it. Downstream adoption
+depends on that release, not a local-path dependency.
 
 Public-API integration tests run without `test-util` and retain their input
 state in memory. The committed `tests/fixtures/update-0.20.1/` fixture preserves

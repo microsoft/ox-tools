@@ -88,6 +88,7 @@ pub fn run_update(catalog: &Catalog, args: &Cli, start_dir: &Path) -> Result<Run
         );
         Ok(backends)
     })
+    .into_app_err_with(|| format!("in repository {}", root.display()))
 }
 
 pub(crate) fn update_with_io(

@@ -100,7 +100,9 @@ pub struct UpdateResult {
     pub applied: bool,
     /// Whether the inspected input needs file or lock metadata updates.
     pub has_changes: bool,
-    /// Whether a drift gate on the inspected input succeeds, including refusals.
+    /// True when the inspected input has no drift and no refusals.
+    ///
+    /// The CLI `--dry-run` would exit with status 0 for this input.
     pub in_sync: bool,
     /// Stable human-readable plan summary.
     pub summary: String,

@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use cargo_anvil::{RepositoryEntry, UpdateIo};
-use ohno::AppError;
+use ohno::{AppError, bail};
 
 #[derive(Debug, Default)]
 pub struct MemoryRepository {
@@ -23,15 +23,33 @@ impl MemoryRepository {
     fn key(path: &Path) -> String {
         path.to_string_lossy().replace('\\', "/")
     }
+
+    fn file_key(&self, path: &Path) -> Result<String, AppError> {
+        let key = Self::key(path);
+        let prefix = format!("{key}/");
+        if key.is_empty() || self.files.keys().any(|file| file.starts_with(&prefix)) {
+            bail!("cannot access '{key}' as a file: it is a directory");
+        }
+        for parent in Path::new(&key).ancestors().skip(1) {
+            let parent = Self::key(parent);
+            if self.files.contains_key(&parent) {
+                bail!("cannot access '{key}': parent '{parent}' is a file");
+            }
+        }
+        Ok(key)
+    }
 }
 
 impl UpdateIo for MemoryRepository {
     fn read_file(&self, path: &Path) -> Result<Option<String>, AppError> {
-        Ok(self.files.get(&Self::key(path)).cloned())
+        Ok(self.files.get(&self.file_key(path)?).cloned())
     }
 
     fn read_directory(&self, path: &Path) -> Result<Option<Vec<RepositoryEntry>>, AppError> {
         let directory = Self::key(path);
+        if self.files.contains_key(&directory) {
+            return Ok(None);
+        }
         let prefix = if directory.is_empty() {
             String::new()
         } else {
@@ -57,7 +75,7 @@ impl UpdateIo for MemoryRepository {
     }
 
     fn write_file(&mut self, path: &Path, content: &str) -> Result<(), AppError> {
-        let key = Self::key(path);
+        let key = self.file_key(path)?;
         self.mutations.push(format!("write {key}"));
         self.files.insert(key, content.to_owned());
         Ok(())
