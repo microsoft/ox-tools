@@ -123,10 +123,14 @@ fn walk<P: Processes>(processes: &mut P, group: i32, mut before_children: impl F
 
 fn sweep_with(processes: &mut impl Processes, group: i32, kill_group: impl FnOnce() -> io::Result<()>) -> io::Result<()> {
     // A group whose leader has exited can hold only that zombie, which macOS refuses to signal.
-    // Such a group starts no children, so a failed stop costs the walk nothing.
+    // Such a group starts and reaps no children, so a failed stop costs the walk nothing.
     let _stopped = processes.stop(group);
     let (tree, mut ended) = walk(processes, group, |processes, pid| {
         // A process this user cannot stop cannot be killed either; that kill reports it below.
+        // Its children are still listed: they may belong to this user, as under `sudo -u`, and
+        // skipping them would leave a runaway allocation running. Each child is stopped as soon
+        // as it is listed, and a stopped child cannot exit, so its running parent cannot reap it
+        // and free its pid before the sweep kills it.
         let _stopped = processes.stop_process(pid);
     });
     for (pid, _member) in tree.into_iter().rev().filter(|(_pid, member)| !member) {
