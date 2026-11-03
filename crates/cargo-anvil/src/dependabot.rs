@@ -975,7 +975,11 @@ mod tests {
     fn configuration_refusals_retain_specific_causes_and_fields() {
         let error = update("", PATHS).unwrap_err();
         error_cause::<EmptyConfigurationError>(&error);
-        for (source, expected) in [("version: 1\nupdates: []\n", "1"), ("updates: []\n", "<missing>")] {
+        for (source, expected) in [
+            ("version: 1\nupdates: []\n", "1"),
+            ("updates: []\n", "<missing>"),
+            ("xversion: 2\nupdates: []\n", "<missing>"),
+        ] {
             let error = update(source, PATHS).unwrap_err();
             assert_eq!(error_cause::<UnsupportedVersionError>(&error).actual, expected);
         }
@@ -1033,7 +1037,11 @@ mod tests {
 
     #[test]
     fn malformed_yaml_retains_the_parser_error_cause() {
-        for source in ["version: 2\nupdates: [".to_owned(), format!("{JOB}  - *missing\n")] {
+        for source in [
+            "version: 2\nupdates: [".to_owned(),
+            format!("{JOB}  - *missing\n"),
+            "\0version: 2\nupdates: []\n".to_owned(),
+        ] {
             let error = update(&source, PATHS).unwrap_err();
             let diagnostic = error.to_string();
             let context = diagnostic.lines().nth(1).unwrap().split_once(" (at ").unwrap().0;
