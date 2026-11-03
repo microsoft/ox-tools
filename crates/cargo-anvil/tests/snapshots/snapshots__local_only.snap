@@ -13,20 +13,20 @@ expression: render_tree(tmp.path())
 #
 # Re-declare BASE_IMAGE in the gap below to build on another base; a later ARG
 # wins, and the pins anvil maintains stay current.
-ARG BASE_IMAGE=docker.io/library/ubuntu:24.04@sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c538ea
+ARG BASE_IMAGE=docker.io/library/ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852
 # <<< anvil-managed: anvil-container-base-image
 
 # >>> anvil-managed: anvil-container-base
 FROM ${BASE_IMAGE}
 
-ARG JUST_VERSION=1.56.0
-ARG JUST_SHA256=fa2a8ec1015d9df5330941ade12437488fc40d33f9c9f8cd4eb70a26de11b639
-ARG POWERSHELL_VERSION=7.6.3
-ARG POWERSHELL_SHA256=856d0765d2332377f9d7a4aea76efdfde4de51446e7738dde2dfda41dba9e2a7
-ARG RUSTUP_VERSION=1.29.0
-ARG RUSTUP_SHA256=4acc9acc76d5079515b46346a485974457b5a79893cfb01112423c89aeb5aa10
-ARG CARGO_BINSTALL_VERSION=1.21.1
-ARG CARGO_BINSTALL_SHA256=630c8f8803a686aa6779497f0f0fb51d49822fb5fc3c514d8ced33b34e338e6e
+ARG JUST_VERSION=1.59.0
+ARG JUST_SHA256=409044617b6f06517c1035e55ca38c8c856ff8b650e41bc2aa1ef82d5903a23e
+ARG POWERSHELL_VERSION=7.6.9
+ARG POWERSHELL_SHA256=1da6d6d6035d651f20e70ddee7c4c15ac6ab8b9fb40ee92240d91263f28a884b
+ARG RUSTUP_VERSION=1.29.2
+ARG RUSTUP_SHA256=5be191e8c70a5007074254cb74d78dbfdd25cd5a61c27de7b8e5410122ec24f4
+ARG CARGO_BINSTALL_VERSION=1.26.2
+ARG CARGO_BINSTALL_SHA256=9e0e064f189a9abb9f8df5fb93c3c810ef5cc19e7212d998c7a64c9e4d3527d5
 
 ENV DEBIAN_FRONTEND=noninteractive \
     CARGO_HOME=/usr/local/cargo \
@@ -808,6 +808,11 @@ anvil-bolero: anvil-bolero-validate-prereqs anvil-impact
         Write-Host 'anvil-bolero: no affected packages; skipping'
         exit 0
     }
+    $hostTarget = & rustc '+{{ rust_nightly }}' --print host-tuple
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error 'anvil-bolero: pinned compiler host-target discovery failed'
+        exit $LASTEXITCODE
+    }
     $packageSpecs = [System.Collections.Generic.List[string]]::new()
     if ($include -and $include -ne '--workspace') {
         $pkgArgs = @(-split $include)
@@ -844,7 +849,7 @@ anvil-bolero: anvil-bolero-validate-prereqs anvil-impact
     # registry dependency shares the member's name and version.
     $targets = [System.Collections.Generic.List[object]]::new()
     foreach ($packageSpec in $packageSpecs) {
-        $targetsJson = & cargo {{_anvil_stable_toolchain_args}} each --package $packageSpec '--' cargo '+{{ rust_nightly }}' bolero list --profile release --package '{cargo-spec}'
+        $targetsJson = & cargo {{_anvil_stable_toolchain_args}} each --package $packageSpec '--' cargo '+{{ rust_nightly }}' bolero list --profile release --target $hostTarget --package '{cargo-spec}'
         if ($LASTEXITCODE -ne 0) {
             Write-Error "anvil-bolero: target discovery failed for package '$packageSpec'"
             exit $LASTEXITCODE
@@ -872,7 +877,7 @@ anvil-bolero: anvil-bolero-validate-prereqs anvil-impact
             exit 1
         }
         Write-Host "anvil-bolero: $($t.anvilPackageSpec)::${testName}"
-        & cargo {{_anvil_stable_toolchain_args}} each --package $t.anvilPackageSpec '--' cargo '+{{ rust_nightly }}' bolero test --profile release --engine libfuzzer -T 60s --package '{cargo-spec}' $testName
+        & cargo {{_anvil_stable_toolchain_args}} each --package $t.anvilPackageSpec '--' cargo '+{{ rust_nightly }}' bolero test --profile release --target $hostTarget --engine libfuzzer -T 60s --package '{cargo-spec}' $testName
         if ($LASTEXITCODE -ne 0) { $failed = $true }
     }
     if ($failed) { exit 1 }
@@ -1642,7 +1647,22 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
         # coverage-gate runs that target's tests without measuring coverage.
         '--no-coverage-target', 'aarch64-pc-windows-msvc'
     )
-    & cargo '+{{ rust_nightly }}' coverage-gate run @packageArgs @collectionArgs
+    $metadataOutput = (& cargo '+{{ rust_nightly }}' metadata --format-version 1 --no-deps --locked | Out-String)
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $metadata = ConvertFrom-Json -InputObject $metadataOutput
+    $ownsCollector = @(
+        $metadata.packages |
+            Where-Object { $_.name -ceq 'cargo-coverage-gate' -and $_.id -cin $metadata.workspace_members } |
+            ForEach-Object { $_.targets } |
+            Where-Object { $_.name -ceq 'cargo-coverage-gate' -and 'bin' -cin $_.kind }
+    ).Count -gt 0
+    if ($ownsCollector) {
+        $hostTarget = & rustc '+{{ rust_nightly }}' --print host-tuple
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & cargo '+{{ rust_nightly }}' run --locked --package cargo-coverage-gate --bin cargo-coverage-gate --target $hostTarget -- coverage-gate run @packageArgs @collectionArgs
+    } else {
+        & cargo '+{{ rust_nightly }}' coverage-gate run @packageArgs @collectionArgs
+    }
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # --- pr-test members (shared with scheduled-test) ---
@@ -1963,6 +1983,11 @@ _anvil-miri-test profile package="" test_filter="" example="": anvil-impact
     }
 
     $env:RUSTUP_TOOLCHAIN = '{{ rust_nightly }}'
+    if ($IsWindows) {
+        # Cargo 1.100's per-crate dependency paths exceed Windows' command limit.
+        # Pinned cargo-miri cannot read Cargo's argument-file fallback.
+        $env:__CARGO_TEMPORARY_BUILD_DIR_NEW_LAYOUT_OPT_OUT = '1'
+    }
     $include = (& "{{ just_executable() }}" _anvil-impact-exclude affected)
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
@@ -2148,6 +2173,27 @@ _anvil-miri-test profile package="" test_filter="" example="": anvil-impact
             Write-Error "anvil miri: cargo-miri was not found under '$toolchainBin'"
             exit 1
         }
+        $targetLibdirOutput = @(& rustc $toolchain --print target-libdir)
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        $targetLibdir = @(
+            $targetLibdirOutput |
+                Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }
+        ) | Select-Object -Last 1
+        if ([string]::IsNullOrWhiteSpace([string]$targetLibdir)) {
+            Write-Error "anvil miri: could not resolve the $toolchain target library directory"
+            exit 1
+        }
+        # Native proc-macro tests need the library search path Cargo normally supplies.
+        $libraryPathVariable = if ($IsWindows) { 'PATH' } elseif ($IsMacOS) { 'DYLD_FALLBACK_LIBRARY_PATH' } else { 'LD_LIBRARY_PATH' }
+        $inheritedLibraryPath = [Environment]::GetEnvironmentVariable($libraryPathVariable)
+        $libraryPaths = @(([string]$targetLibdir).Trim())
+        if ($inheritedLibraryPath) {
+            $libraryPaths += $inheritedLibraryPath
+        } elseif ($IsMacOS) {
+            if ($env:HOME) { $libraryPaths += Join-Path $env:HOME 'lib' }
+            $libraryPaths += '/usr/local/lib', '/usr/lib'
+        }
+        [Environment]::SetEnvironmentVariable($libraryPathVariable, ($libraryPaths -join [IO.Path]::PathSeparator))
         # Matching the recorded sentinel lets the runner suppress it before
         # launching Miri for interpretation.
         $env:MIRI_BE_RUSTC = 'host'
@@ -7000,7 +7046,7 @@ Write-Output ('+' + $msrv)
 # nightly-dependent check. Bumped on a regular cadence (monthly is a
 # reasonable default) when an adopter has time to absorb formatting /
 # lint / API-surface drift. Pin only -- do not use bare `nightly` here.
-rust_nightly := "nightly-2026-05-30"
+rust_nightly := "nightly-2026-10-31"
 
 # Pinned narrowly to the rustdoc JSON schema version that the currently
 # selected cargo-check-external-types release accepts. cargo-check-
@@ -7009,30 +7055,30 @@ rust_nightly := "nightly-2026-05-30"
 # with "produces JSON format version X, but this tool requires
 # format version Y" -- which is a tooling-incompat, not a real API
 # violation. Bump this alongside any cargo-check-external-types upgrade.
-rust_nightly_external_types := "nightly-2026-03-20"
+rust_nightly_external_types := "nightly-2026-06-22"
 
 # ============================================================================
 # Cargo subcommands
 # ============================================================================
 
-cargo_aprz_version := "1.2.1"
+cargo_aprz_version := "1.2.2"
 cargo_audit_version := "0.22.2"
-cargo_bolero_version := "0.13.4"
+cargo_bolero_version := "0.13.5"
 cargo_careful_version := "0.4.10"
 cargo_check_external_types_version := "0.5.0"
 cargo_coverage_gate_version := "0.7.3"
 cargo_delta_version := "0.5.0"
 cargo_deny_version := "0.20.2"
 cargo_doc2readme_version := "0.7.3"
-cargo_each_version := "0.6.0"
+cargo_each_version := "0.7.0"
 cargo_ensure_no_cyclic_deps_version := "0.2.0"
-cargo_ensure_no_default_features_version := "1.1.0"
+cargo_ensure_no_default_features_version := "1.1.1"
 cargo_gamma_version := "0.4.0"
 cargo_hack_version := "0.6.45"
 cargo_heather_version := "0.3.0"
-cargo_llvm_cov_version := "0.9.0"
-cargo_nextest_version := "0.9.143"
-cargo_semver_checks_version := "0.50.0"
+cargo_llvm_cov_version := "0.9.1"
+cargo_nextest_version := "0.9.150"
+cargo_semver_checks_version := "0.51.0"
 cargo_sort_version := "2.1.4"
 cargo_spellcheck_version := "0.15.7"
 cargo_udeps_version := "0.1.61"

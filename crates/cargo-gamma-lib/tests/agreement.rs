@@ -373,7 +373,7 @@ mod corpus {
         const LITERALS: [&str; 4] = ["true", "0", "\"[!;]\"", "r#\"/*[!?;]*/\"#"];
         const COMMENTS: [&str; 4] = [" ", " /* [(!;)] */ ", " // [(!;)]\n ", " /* [ /* ! */ ; ] */ "];
         let mut text = LITERALS[usize::from(choices[0] % 4)].to_owned();
-        for pair in choices.chunks_exact(2) {
+        for pair in choices.as_chunks::<2>().0 {
             let shape = pair[0];
             let detail = pair[1];
             let (open, close, separator) = match shape % 3 {

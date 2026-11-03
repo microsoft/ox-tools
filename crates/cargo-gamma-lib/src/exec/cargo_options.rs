@@ -401,7 +401,7 @@ mod tests {
 
             options.extend_build_args(&mut Vec::new());
 
-            assert!(crate::notes::drain().is_empty());
+            assert_eq!(crate::notes::drain().len(), 0);
         });
     }
 }

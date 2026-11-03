@@ -538,6 +538,10 @@ mod tests {
                 &manifest.to_string_lossy(),
             ]
         );
+        assert_eq!(
+            metadata_command(None).cargo_command().get_args().collect::<Vec<_>>(),
+            ["metadata", "--format-version", "1", "--no-deps"]
+        );
     }
 
     #[test]

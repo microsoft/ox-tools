@@ -1930,7 +1930,6 @@ fn parse_report(input: &str) -> Result<lcov::Report, CoverageGateError> {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use std::fmt::Write as _;
     #[cfg(unix)]
     use std::os::unix::process::ExitStatusExt as _;
     #[cfg(windows)]
@@ -2880,6 +2879,21 @@ mod tests {
     fn mixed_lines_remain_released_while_pure_test_lines_are_excluded() {
         let pure = analyze(Path::new("pure.rs"), "#[cfg(test)] fn test_only() {}\n");
         assert_eq!(pure.test_only_lines, BTreeSet::from([1]));
+
+        for comment in ["/** Docs */", "/// Docs"] {
+            let source_path = Path::new("doc-comment.rs");
+            let source = format!("#[cfg(test)] fn test_only() {{}} {comment}\npub fn released() {{}}\n");
+            let analysis = analyze(source_path, &source);
+            let filtered = filter_report_with(parse_lcov("TN:\nSF:doc-comment.rs\nDA:1,0\nDA:2,1\nend_of_record\n"), None, |_| {
+                Ok(SourceDisposition::Include {
+                    source_file: source_path.to_path_buf(),
+                    line_count: analysis.line_count,
+                    test_only_lines: &analysis.test_only_lines,
+                })
+            })
+            .expect("doc comments must not retain test-only counters");
+            assert_eq!(filtered, "TN:\nSF:doc-comment.rs\nDA:2,1\nLF:1\nLH:1\nend_of_record\n");
+        }
 
         let mixed = analyze(Path::new("mixed.rs"), "#[cfg(test)] fn test_only() {} pub fn released() {}\n");
         assert!(mixed.test_only_lines.is_empty());
@@ -4017,7 +4031,7 @@ mod tests {
         assert_eq!(value.checksum.as_deref(), Some("checksum"));
         let empty = filter_report_with(parse_lcov(""), None, |_| panic!("empty input has no source sections"))
             .expect("without graph-gap provenance an empty report stays empty");
-        assert!(empty.is_empty());
+        assert_eq!(empty.len(), 0);
     }
 
     #[test]
@@ -5869,7 +5883,7 @@ mod tests {
         .to_string();
         assert!(error.contains("injected target resolution failure"), "{error}");
         let mut absent = source_index_fixture_metadata(&root.join("absent"));
-        assert!(filter_reports_with_metadata(Vec::new(), &absent).unwrap().is_empty());
+        assert_eq!(filter_reports_with_metadata(Vec::new(), &absent).unwrap().len(), 0);
         absent.packages[0].targets[0].src_path = missing_source_path().try_into().unwrap();
         let parent = absent.packages[0].targets[0].src_path.parent().unwrap().to_path_buf();
         let error = SourceIndex::from_metadata_with_source_reader(

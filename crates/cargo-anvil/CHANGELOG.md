@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-## [0.23.2] - 2026-11-03
+## [0.23.3] - 2026-11-03
 
 - ✨ Features
 
@@ -12,6 +12,29 @@
 
   - make SemVer checks reproducible with locked API snapshots ([#334](https://github.com/microsoft/ox-tools/pull/334))
   - cargo-anvil: isolate mutation diffs and normalize Git prefixes ([#323](https://github.com/microsoft/ox-tools/pull/323))
+
+- ♻️ Code Refactoring
+
+  - cargo-anvil: clarify locked SemVer snapshot policy
+
+- 🧩 Miscellaneous
+
+  - Adopt cargo-gamma in Anvil and remediate campaign survivors ([#327](https://github.com/microsoft/ox-tools/pull/327))
+
+## [0.23.2] - 2026-11-02
+
+- ✨ Features
+
+  - cargo-anvil: pin cargo-coverage-gate 0.7.3 ([#329](https://github.com/microsoft/ox-tools/pull/329))
+
+- 🐛 Bug Fixes
+
+  - make SemVer checks reproducible with locked API snapshots ([#334](https://github.com/microsoft/ox-tools/pull/334))
+  - cargo-anvil: isolate mutation diffs and normalize Git prefixes ([#323](https://github.com/microsoft/ox-tools/pull/323))
+
+- ✔️ Tasks
+
+  - update dependencies, build tools, actions, and Rust
 
 - 🧩 Miscellaneous
 

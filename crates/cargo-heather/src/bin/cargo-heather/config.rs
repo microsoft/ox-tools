@@ -347,10 +347,10 @@ mod tests {
             exclude: None,
         };
         let cfg = resolve_config(raw).unwrap();
-        assert!(!cfg.header_text.is_empty());
+        assert_ne!(cfg.header_text, "");
         assert!(cfg.scripts); // default true
         assert!(!cfg.dot_toml); // default false
-        assert!(cfg.exclude.is_empty());
+        assert_eq!(cfg.exclude, [] as [std::string::String; 0]);
     }
 
     #[test]
@@ -374,7 +374,7 @@ mod tests {
 
         assert!(cfg.scripts);
         assert!(!cfg.dot_toml);
-        assert!(cfg.exclude.is_empty());
+        assert_eq!(cfg.exclude, [] as [std::string::String; 0]);
     }
 
     #[test]
@@ -407,7 +407,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         write(tmp.path(), "Cargo.toml", "[package]\nname = \"x\"\nlicense = \"MIT\"\n");
         let cfg = load_config(tmp.path()).unwrap();
-        assert!(!cfg.header_text.is_empty());
+        assert_ne!(cfg.header_text, "");
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
@@ -454,7 +454,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let p = write(tmp.path(), "Cargo.toml", "[workspace.package]\nlicense = \"MIT\"\n");
         let cfg = try_load_from_cargo_toml(&p).unwrap().unwrap();
-        assert!(!cfg.header_text.is_empty());
+        assert_ne!(cfg.header_text, "");
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
@@ -495,7 +495,7 @@ mod tests {
             "[package]\nname = \"m\"\nlicense.workspace = true\n",
         );
         let cfg = try_load_from_cargo_toml(&member).unwrap().unwrap();
-        assert!(!cfg.header_text.is_empty());
+        assert_ne!(cfg.header_text, "");
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]

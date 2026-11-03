@@ -91,7 +91,7 @@
 //! in case on a case-insensitive filesystem. Both are recorded in the crate's
 //! design document.
 
-#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 mod collisions;
 
@@ -383,6 +383,10 @@ mod campaign_tests {
         assert_eq!(
             command.get_args().collect::<Vec<_>>(),
             ["metadata", "--format-version", "1", "--no-deps", "--manifest-path", "Cargo.toml"]
+        );
+        assert_eq!(
+            metadata_command(None).cargo_command().get_args().collect::<Vec<_>>(),
+            ["metadata", "--format-version", "1", "--no-deps"]
         );
     }
 

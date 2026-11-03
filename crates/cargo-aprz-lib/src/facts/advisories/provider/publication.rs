@@ -40,19 +40,17 @@ impl SnapshotIo {
             .stage
             .as_ref()
             .expect("publication retains the stage only after publishing its marker");
-        // #[gamma::skip(try.propagate_to_unwrap, reason = "The tempfile builder supplies an ASCII basename; parent encoding is excluded by file_name.", tag = "equivalent")]
         let directory = stage
             .path()
             .file_name()
             .and_then(|name| name.to_str())
-            .ok_or_else(|| ohno::app_err!("advisory snapshot directory name is not UTF-8"))?;
+            .expect("the snapshot tempfile builder supplies an ASCII basename, independently of its parent encoding");
         let marker = create_snapshot_marker(self.cache.dir())?;
-        // #[gamma::skip(try.propagate_to_unwrap, reason = "The tempfile builder supplies an ASCII basename; parent encoding is excluded by file_name.", tag = "equivalent")]
         let filename = marker
             .path()
             .file_name()
             .and_then(|name| name.to_str())
-            .ok_or_else(|| ohno::app_err!("advisory marker filename is not UTF-8"))?;
+            .expect("the marker tempfile builder supplies an ASCII basename, independently of its parent encoding");
         save_snapshot_marker(&self.cache, filename, &(archive_identity(url), directory))?;
         persist_snapshot_marker(marker, &self.cache.dir().join("last_synced.bin"))
             .into_app_err("publishing the advisory cache synchronization marker")?;
@@ -303,7 +301,7 @@ mod tests {
         let state = state.lock().expect("no test panics while holding the state lock");
         assert_eq!(state.marker, (archive_identity("old-url"), OLD.to_owned()));
         assert_eq!(state.snapshots, [OLD, "repo"].map(|name| Path::new("cache").join(name)).into());
-        assert!(state.removals.is_empty());
+        assert_eq!(state.removals, [] as [std::path::PathBuf; 0]);
     }
 
     #[test]

@@ -25,11 +25,7 @@ use tempfile::TempDir;
 
 /// Path to the binary under test.
 fn binary() -> PathBuf {
-    let test = std::env::current_exe().expect("failed to locate the test executable");
-    test.parent()
-        .and_then(Path::parent)
-        .expect("integration tests run from the profile's deps directory")
-        .join(format!("cargo-unused-deps{}", std::env::consts::EXE_SUFFIX))
+    PathBuf::from(env!("CARGO_BIN_EXE_cargo-unused-deps"))
 }
 
 /// The rustdoc beside the active rustc, found without assuming rustup manages it.

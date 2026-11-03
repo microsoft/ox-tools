@@ -3356,10 +3356,7 @@ mod tests {
 
             assert_eq!(bytes.len() % 4, 0, "an observation is whole four-byte records");
 
-            let mut records: Vec<u32> = bytes
-                .chunks_exact(4)
-                .map(|record| u32::from_le_bytes(record.try_into().expect("a chunk of four is four bytes")))
-                .collect();
+            let mut records: Vec<u32> = bytes.as_chunks::<4>().0.iter().map(|record| u32::from_le_bytes(*record)).collect();
 
             // Every clean observation ends with the seal that vouches it is whole. The reader requires it,
             // and so does every assertion below, which is about the records written *before* it.
@@ -3424,8 +3421,10 @@ mod tests {
             assert_eq!(bytes.len() % 4, 0, "the test seam never writes a partial record");
             assert!(
                 !bytes
-                    .chunks_exact(4)
-                    .map(|record| u32::from_le_bytes(record.try_into().expect("a chunk of four is four bytes")))
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|record| u32::from_le_bytes(*record))
                     .any(|record| record == SEAL),
                 "a short exit write must prevent the seal"
             );

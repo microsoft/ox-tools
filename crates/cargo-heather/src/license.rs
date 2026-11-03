@@ -257,7 +257,7 @@ mod tests {
     #[test]
     fn supported_licenses_contains_known_ids() {
         let ids = supported_licenses();
-        assert!(!ids.is_empty());
+        assert_ne!(ids, [] as [&str; 0]);
         assert!(ids.contains(&"MIT"));
         assert!(ids.contains(&"Apache-2.0"));
     }

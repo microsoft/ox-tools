@@ -372,7 +372,9 @@ mod tests {
     use core::fmt::Write as _;
     use std::fs;
 
-    use serde_json::{from_slice, from_str, json, to_value};
+    #[cfg(feature = "system-tests")]
+    use serde_json::from_slice;
+    use serde_json::{from_str, json, to_value};
 
     use super::*;
     use crate::commands::{ListFilesArgs, ListKind, ListMutantsArgs, ListRegistryArgs};
@@ -458,7 +460,7 @@ mod tests {
                     config.get("shard"),
                     shard.map(|(count, index)| json!({"count": count, "index": index})).as_ref()
                 );
-                assert!(host.out().is_empty());
+                assert_eq!(host.out().len(), 0);
                 assert_eq!(host.err(), format!("Wrote {path}\n"));
             }
         }
@@ -491,8 +493,8 @@ mod tests {
         );
         let failure = result.expect_err("the retained inline source is syntactically incomplete");
         assert!(failure.to_string().contains("broken.rs"), "{failure}");
-        assert!(host.out().is_empty());
-        assert!(host.err().is_empty());
+        assert_eq!(host.out().len(), 0);
+        assert_eq!(host.err().len(), 0);
     }
 
     fn crate_dir(name: &str) -> tempfile::TempDir {
@@ -753,7 +755,7 @@ mod tests {
         select.shard_index = Some(0);
         list_files(&mut host, &select, false, styler, &cargo).expect_err("zero shard count must reject the file listing");
         list_mutants(&mut host, &select, false, None, styler, &cargo).expect_err("zero shard count must reject the mutant listing");
-        assert!(host.out.is_empty());
+        assert_eq!(host.out.len(), 0);
     }
 
     struct Limited<'a>(&'a mut usize);

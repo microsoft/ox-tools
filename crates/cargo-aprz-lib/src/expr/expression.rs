@@ -192,12 +192,23 @@ mod tests {
         type SerializeStructVariant = serde::ser::Impossible<Shape, Self::Error>;
 
         reject_shapes!(
-            serialize_bool(_value: bool), serialize_i8(_value: i8), serialize_i16(_value: i16),
-            serialize_i32(_value: i32), serialize_i64(_value: i64), serialize_u8(_value: u8),
-            serialize_u16(_value: u16), serialize_u32(_value: u32), serialize_u64(_value: u64),
-            serialize_f32(_value: f32), serialize_f64(_value: f64), serialize_char(_value: char),
-            serialize_str(_value: &str), serialize_bytes(_value: &[u8]), serialize_none(),
-            serialize_unit(), serialize_unit_struct(_name: &'static str),
+            serialize_bool(_value: bool),
+            serialize_i8(_value: i8),
+            serialize_i16(_value: i16),
+            serialize_i32(_value: i32),
+            serialize_i64(_value: i64),
+            serialize_u8(_value: u8),
+            serialize_u16(_value: u16),
+            serialize_u32(_value: u32),
+            serialize_u64(_value: u64),
+            serialize_f32(_value: f32),
+            serialize_f64(_value: f64),
+            serialize_char(_value: char),
+            serialize_str(_value: &str),
+            serialize_bytes(_value: &[u8]),
+            serialize_none(),
+            serialize_unit(),
+            serialize_unit_struct(_name: &'static str),
             serialize_unit_variant(_name: &'static str, _index: u32, _variant: &'static str),
         );
 

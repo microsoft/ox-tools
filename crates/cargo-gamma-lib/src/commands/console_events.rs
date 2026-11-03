@@ -343,7 +343,7 @@ mod tests {
             events.host.err.clear();
             events.sync_testing_status();
             assert_eq!(events.dashboard.testing_status_for_test(), expected);
-            assert!(events.host.err.is_empty());
+            assert_eq!(events.host.err.len(), 0);
         }
     }
 

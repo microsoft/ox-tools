@@ -221,7 +221,7 @@ fn campaign_open_options_propagate_file_payloads_without_defaulting_unknown_tupl
             }
         }
     "#;
-    assert!(mutators(source, "loop.break_value_default", &CfgSet::unconditional()).is_empty());
+    assert_eq!(mutators(source, "loop.break_value_default", &CfgSet::unconditional()).len(), 0);
     let control = "struct OpenOptions; fn f() { loop { break (unknown(), OpenOptions::new().open(\"file\")); } }";
     assert_eq!(
         mutators(control, "loop.break_value_default", &CfgSet::unconditional()),
@@ -1324,7 +1324,7 @@ fn binding_evidence_undo_restores_import_provenance_and_each_unsigned_transition
     });
     assert_eq!(collector.binding_types["outer"].ty, syn::parse_quote!(Clock));
     assert_eq!(collector.binding_types["outer"].imports, original_imports);
-    assert!(collector.binding_types["outer"].scope.is_empty());
+    assert_eq!(collector.binding_types["outer"].scope.len(), 0);
     assert!(collector.binding_types["outer"].resource_trusted);
     assert!(!collector.inferred_unsigned.contains("outer"));
     assert!(!collector.binding_types.contains_key("unsigned"));
@@ -1937,7 +1937,7 @@ fn resource_filters_bound_proof_work_and_restore_iterator_evidence() {
         ["loop.delete_break"]
     );
     let source = "fn f(text: &str) { let mut chars = text.chars().peekable(); { let chars = custom(); } while chars.peek().is_some() { chars.next(); } }";
-    assert!(mutators(source, "cond.negate", &CfgSet::unconditional()).is_empty());
+    assert_eq!(mutators(source, "cond.negate", &CfgSet::unconditional()).len(), 0);
 }
 
 #[test]
@@ -3861,13 +3861,14 @@ fn struct_field_and_method_rewrites_preserve_nonzero_offsets_and_original_spelli
             .iter()
             .all(|candidate| file.slice(&candidate.span) == "S { a: 11, b: 22, ..base }" && candidate.shape == Shape::Expr)
     );
-    assert!(
+    assert_eq!(
         mutators(
             "struct S{a:u8} fn f(){let _=S{a:1};}",
             "struct_field.omit",
             &CfgSet::unconditional()
         )
-        .is_empty()
+        .len(),
+        0
     );
     for (source, selector, expected) in [
         ("fn f(items:Vec<u8>){items.last()}", "iter.last_to_first", Some("items.first()")),
@@ -4459,7 +4460,7 @@ fn only_standard_default_implementations_suppress_recursive_replacements() {
     let aliased_custom = "mod custom { pub trait Default { fn default() -> Self; } } use custom::Default as Alias; struct S; impl Alias for S { fn default() -> Self { S } }";
     let aliased_standard_with_a_bare_custom_trait = "trait Default { fn default() -> Self; } use core::default::Default as StdDefault; struct S; impl Default for S { fn default() -> Self { S } } impl StdDefault for S { fn default() -> Self { S } }";
 
-    assert!(mutators(standard, "fn_value.default", &CfgSet::unconditional()).is_empty());
+    assert_eq!(mutators(standard, "fn_value.default", &CfgSet::unconditional()).len(), 0);
     assert!(
         mutators(bare_custom, "fn_value.default", &CfgSet::unconditional()).is_empty(),
         "the fallback's bare spelling would recurse through the local trait"
@@ -4527,9 +4528,9 @@ fn only_standard_default_bounds_make_generic_fallbacks_available() {
     let custom = "mod custom { pub trait Default {} } fn f<T: custom::Default>() -> &'static mut T { g() }";
     let aliased_custom = "mod custom { pub trait Default {} } use custom::Default as Alias; fn f<T: Alias>() -> &'static mut T { g() }";
 
-    assert!(mutators(standard, "fn_value", &CfgSet::unconditional()).is_empty());
-    assert!(mutators(custom, "fn_value", &CfgSet::unconditional()).is_empty());
-    assert!(mutators(aliased_custom, "fn_value", &CfgSet::unconditional()).is_empty());
+    assert_eq!(mutators(standard, "fn_value", &CfgSet::unconditional()).len(), 0);
+    assert_eq!(mutators(custom, "fn_value", &CfgSet::unconditional()).len(), 0);
+    assert_eq!(mutators(aliased_custom, "fn_value", &CfgSet::unconditional()).len(), 0);
 }
 
 #[test]
@@ -4796,7 +4797,7 @@ fn every_iterator_trait_that_either_satisfies_is_served_iterator_values() {
         );
     }
 
-    assert!(values_for_return("impl Clone").is_empty());
+    assert_eq!(values_for_return("impl Clone").len(), 0);
 }
 
 #[test]

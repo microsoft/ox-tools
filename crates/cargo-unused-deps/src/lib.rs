@@ -1017,7 +1017,7 @@ mod source_campaign_tests {
             ("unrelated", SUBCOMMAND, "run"),
         ] {
             let args = ["binary", subcommand, "last"].map(OsString::from);
-            dispatch_with(
+            let status = dispatch_with(
                 &args,
                 |key| (key == marker).then(|| "capture".into()),
                 |forwarded| {
@@ -1042,6 +1042,7 @@ mod source_campaign_tests {
                 },
             )
             .expect("the selected dispatch branch succeeds");
+            assert_eq!(status, ExitCode::SUCCESS);
         }
     }
 
@@ -1084,7 +1085,7 @@ mod source_campaign_tests {
                     assert_eq!(path, Path::new("resolved.toml"));
                     assert_eq!(flags, [OsString::from("--package"), OsString::from("fixture")]);
                     assert_eq!(selected, &BTreeSet::from([workspace.packages[0].manifest_path.clone()]));
-                    assert!(checks.is_empty());
+                    assert_eq!(checks, []);
                     Err(ohno::app_err!("source failed"))
                 },
             );

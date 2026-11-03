@@ -999,17 +999,13 @@ impl Types<'_> {
         }
         let ty = self.resolve_alias(ty);
         let Type::Path(path) = strip(ty) else {
-            return
-            // #[gamma::skip(literal.bool_flip, reason = "supports_collection_api already succeeded on the same resolved alias. Its accepted path patterns require Type::Path with at least one segment, so both constructor fallback branches are unreachable.", tag = "equivalent")]
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            unreachable!("supports_collection_api accepted only a resolved Type::Path");
         };
-        let Some(segment) = path.path.segments.last() else {
-            return
-            // #[gamma::skip(literal.bool_flip, reason = "supports_collection_api already succeeded on the same resolved alias. Its accepted path patterns require Type::Path with at least one segment, so both constructor fallback branches are unreachable.", tag = "equivalent")]
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
-        };
+        let segment = path
+            .path
+            .segments
+            .last()
+            .expect("supports_collection_api accepted a nonempty resolved collection path");
         let base_arity = if resolve_type(ty) == Kind::Map { 2 } else { 1 };
 
         type_arguments(segment) == base_arity
@@ -1131,12 +1127,11 @@ impl Types<'_> {
             // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
             false;
         }
-        let Some(segment) = path.path.segments.last() else {
-            return
-            // #[gamma::skip(literal.bool_flip, reason = "supports_peekable_chars_with already resolved and matched exactly std/core::iter::Peekable before the changed segments.last() fallback. A source path that resolved to those three segments cannot have an empty segment list. The old family tests reject nonpeekable/empty shapes earlier.", tag = "equivalent")]
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
-        };
+        let segment = path
+            .path
+            .segments
+            .last()
+            .expect("the resolved source path matched std/core::iter::Peekable above");
         let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
             return
             // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
@@ -1257,12 +1252,9 @@ impl Types<'_> {
             // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
             false;
         }
-        let Some(name) = resolved.last() else {
-            return
-            // #[gamma::skip(literal.bool_flip, reason = "The preceding standard_root_unshadowed(resolved) check rejects an empty resolved path; therefore the subsequent last-segment missing branch cannot be reached.", tag = "equivalent")]
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
-        };
+        let name = resolved
+            .last()
+            .expect("standard_root_unshadowed rejected an empty resolved path above");
         if resolved.len() == 1 && !matches!(name.as_str(), "Vec" | "String") {
             return
             // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]

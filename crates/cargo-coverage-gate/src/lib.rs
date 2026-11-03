@@ -828,7 +828,7 @@ mod tests {
     fn empty_filter_batch_skips_workspace_discovery() {
         let filtered =
             filter_lcov_many(&[], Some(Path::new("missing-workspace/Cargo.toml"))).expect("empty filtering is a documented no-op");
-        assert!(filtered.is_empty());
+        assert_eq!(filtered.len(), 0);
     }
 
     #[test]

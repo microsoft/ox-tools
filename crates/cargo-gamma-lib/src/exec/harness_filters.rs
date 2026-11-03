@@ -310,6 +310,6 @@ mod tests {
         let raw = args(&["parser", "lexer"]);
         let parsed = HarnessFilters::parse(&raw);
         assert_eq!(parsed.selecting(), ["parser", "lexer"]);
-        assert!(parsed.flags().is_empty());
+        assert_eq!(parsed.flags().len(), 0);
     }
 }

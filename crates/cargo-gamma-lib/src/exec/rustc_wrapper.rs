@@ -396,7 +396,7 @@ mod tests {
             .expect("identity is otherwise complete");
 
         assert!(parsed.opaque_extern);
-        assert!(parsed.externs.is_empty());
+        assert_eq!(parsed.externs.len(), 0);
     }
 
     #[cfg(any(unix, windows))]
@@ -408,7 +408,7 @@ mod tests {
         parse_extern(&non_utf8_extern(), &mut externs, &mut opaque);
 
         assert!(opaque);
-        assert!(externs.is_empty());
+        assert_eq!(externs.len(), 0);
     }
 
     #[cfg(unix)]
