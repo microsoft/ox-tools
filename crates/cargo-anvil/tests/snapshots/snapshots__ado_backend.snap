@@ -3970,6 +3970,9 @@ anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
         [pscustomobject]@{ ExitCode = $code; Stdout = $stdout; Stderr = $stderr }
     }
 
+    # Build one revision's locked API snapshot, keeping defaults enabled and
+    # the checker's case-sensitive feature exclusions so file-input comparisons
+    # cover the same feature-gated API as cargo-semver-checks' own generation.
     function Get-RustdocSnapshot($package, [string]$workspace, [string]$targetDir) {
         $features = @($package.features.PSObject.Properties.Name | Where-Object {
             $_ -and $_ -cnotin @('unstable', 'nightly', 'bench', 'no_std') -and

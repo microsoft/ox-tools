@@ -1,7 +1,7 @@
 version = 2
 tool = "anvil"
-tool_version = "0.23.3"
-catalog_checksum = "sha256:f3feeb7390d2aa6ccf1e7bcc4a5b2df0f2135b7bec3861f58df56333d2ddeaba"
+tool_version = "0.23.4"
+catalog_checksum = "sha256:99870424caced6fc41827a098b3d44d592db4d8a26abe38a148870f53872a08d"
 
 [[file]]
 path = ".anvil/container/Dockerfile.dockerignore"
@@ -177,7 +177,7 @@ checksum = "sha256:9101fbb69c7fa11e9402adcaaf16915378ba0fcd5cfd12c104e114b17c8c2
 
 [[file]]
 path = "justfiles/anvil/checks/semver-check.just"
-checksum = "sha256:2df8505f7b64c2f08fb4fdcd9bf68f93a7fd3de759b202b95534731e8f593baa"
+checksum = "sha256:9e8d4e3bec945814489500ad7470926114a35d732779b7ad1acf6f3061f7acd7"
 
 [[file]]
 path = "justfiles/anvil/checks/spellcheck.just"
