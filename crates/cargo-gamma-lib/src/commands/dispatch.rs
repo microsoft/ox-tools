@@ -11,7 +11,7 @@ use clap::error::ErrorKind;
 
 use super::When;
 use super::clean::clean;
-use super::cli::{Cli, Command, SelectArgs};
+use super::cli::{Cli, Command, HintsArgs, SelectArgs};
 use super::completions::completions;
 use super::explain::explain;
 use super::hints::hints;
@@ -362,7 +362,17 @@ pub(super) fn dispatch<H: Host>(host: &mut H, cli: Cli, styler: Styler) -> crate
                 return Ok(code);
             }
 
-            run_session(host, &args, args.progress, styler)
+            let campaign = run_session(host, &args, args.progress, styler);
+            let promotion = HintsArgs {
+                dir: args.select.dir.clone(),
+                cache_dir: args.measure.cache_dir.clone(),
+                ..HintsArgs::default()
+            };
+            let (code, promotion_error) = finish_campaign(campaign, args.update_hints, || hints(host, &promotion, styler))?;
+            if let Some(error) = promotion_error {
+                let _ = writeln!(host.error(), "{} could not update hints: {error}", styler.error("error:"));
+            }
+            Ok(code)
         }
 
         Command::List(args) => list(host, &args, styler),
@@ -385,6 +395,29 @@ pub(super) fn dispatch<H: Host>(host: &mut H, cli: Cli, styler: Styler) -> crate
         Command::Clean(args) => clean(host, &args, styler),
 
         Command::Completions(args) => Ok(completions(host, &args)),
+    }
+}
+
+/// Promotes learned hints only after a campaign reached a reportable process outcome.
+///
+/// Mutation and gate failures are campaign results rather than operational failures. Their exit
+/// code remains authoritative even if the requested follow-up publication fails.
+fn finish_campaign(
+    campaign: crate::Result<i32>,
+    update_hints: bool,
+    promote: impl FnOnce() -> crate::Result<i32>,
+) -> crate::Result<(i32, Option<crate::error::Error>)> {
+    let campaign_code = campaign?;
+
+    if !update_hints {
+        return Ok((campaign_code, None));
+    }
+
+    match promote() {
+        Ok(promotion_code) if campaign_code == EXIT_OK => Ok((promotion_code, None)),
+        Err(error) if campaign_code == EXIT_OK => Err(error),
+        Ok(_) => Ok((campaign_code, None)),
+        Err(error) => Ok((campaign_code, Some(error))),
     }
 }
 
@@ -695,6 +728,50 @@ mod tests {
         assert!(host.err().contains("\x1b["), "{}", host.err());
         assert_eq!(host.err(), format!("{} leftover report\n", Styler::new(true).warning()));
         assert!(crate::notes::drain().is_empty(), "notes are emitted exactly once");
+    }
+
+    #[test]
+    fn update_hints_runs_only_after_reportable_campaigns_and_preserves_exit_precedence() {
+        use core::cell::Cell;
+
+        let promoted = Cell::new(false);
+        let operational = finish_campaign(Err(crate::error::error!("campaign broke")), true, || {
+            promoted.set(true);
+            Ok(EXIT_OK)
+        })
+        .expect_err("an operational campaign failure must be returned");
+        assert_eq!(operational.message(), "campaign broke");
+        assert!(!promoted.get(), "promotion must not run without a reportable campaign outcome");
+
+        assert_eq!(
+            finish_campaign(Ok(EXIT_OK), true, || Err(crate::error::error!("promotion broke")))
+                .expect_err("promotion failure must fail a successful campaign")
+                .message(),
+            "promotion broke"
+        );
+        let (code, promotion_error) = finish_campaign(Ok(EXIT_GATE_FAILED), true, || Err(crate::error::error!("promotion broke")))
+            .expect("a failed gate remains a reportable campaign outcome");
+        assert_eq!(code, EXIT_GATE_FAILED);
+        assert_eq!(
+            promotion_error
+                .expect("the suppressed promotion failure remains reportable")
+                .message(),
+            "promotion broke"
+        );
+        let (code, promotion_error) =
+            finish_campaign(Ok(EXIT_CANNOT_PROCEED), true, || Ok(EXIT_OK)).expect("a reportable incomplete campaign keeps its status");
+        assert_eq!(code, EXIT_CANNOT_PROCEED);
+        assert!(promotion_error.is_none());
+
+        let promoted = Cell::new(false);
+        let (code, promotion_error) = finish_campaign(Ok(EXIT_OK), false, || {
+            promoted.set(true);
+            Ok(EXIT_OK)
+        })
+        .expect("promotion is optional");
+        assert_eq!(code, EXIT_OK);
+        assert!(promotion_error.is_none());
+        assert!(!promoted.get(), "an ordinary run must not promote hints");
     }
 
     /// A crate small enough to enumerate mutants in, with whatever configuration the test needs.
