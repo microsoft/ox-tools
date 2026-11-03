@@ -107,7 +107,7 @@ fn edited_historical_region_is_refused_not_overwritten() {
     io.insert(".gitattributes", &edited);
     let result = update(&upgraded_catalog(), &UpdateOptions::default(), &mut io).unwrap();
     assert!(!result.in_sync);
-    assert!(!result.refusals.is_empty());
+    assert!(!result.refusals.is_empty(), "{}", result.summary);
     assert_eq!(io.files[".gitattributes"], edited);
     assert!(io.files[".anvil.lock"].contains("b91854c7f0e6d14c74751f607d2c0e3dfcefef55f5178bbafae59d47e577aa1a"));
     assert_eq!(io.files["owned.just"], "new recipe\n");
@@ -146,7 +146,7 @@ fn dry_run_has_identical_planning_without_mutations() {
         assert!(dry.has_changes);
         assert!(!dry.in_sync);
         assert_eq!(io.files, before);
-        assert!(io.mutations.is_empty());
+        assert!(io.mutations.is_empty(), "unexpected mutations: {:?}", io.mutations);
         options.dry_run = false;
         let applied = update(&upgraded_catalog(), &options, &mut io).unwrap();
         assert_eq!(dry.summary, applied.summary);
@@ -162,10 +162,10 @@ fn dry_run_reports_refusals_without_publishing_even_safe_changes() {
     options.dry_run = true;
     let result = update(&upgraded_catalog(), &options, &mut io).unwrap();
     assert!(!result.in_sync);
-    assert!(!result.refusals.is_empty());
+    assert!(!result.refusals.is_empty(), "{}", result.summary);
     assert!(!result.applied);
     assert_eq!(io.files, before);
-    assert!(io.mutations.is_empty());
+    assert!(io.mutations.is_empty(), "unexpected mutations: {:?}", io.mutations);
 }
 
 #[test]
@@ -204,13 +204,26 @@ fn full_catalog_workspace_discovery_and_case_resolution_use_memory() {
 }
 
 #[test]
+fn equivalent_workspace_paths_resolve_to_the_same_memory_files() {
+    for member in ["crates/alpha", "./crates/alpha", "crates/*", "./crates/*"] {
+        let mut io = repository();
+        io.insert("./Cargo.toml", &format!("[workspace]\nmembers = [\"{member}\"]\n"));
+        io.insert("./crates/alpha/./Cargo.toml", "[package]\nname = \"alpha\"\nversion = \"0.1.0\"\n");
+        let result = update(&Catalog::anvil(), &UpdateOptions::default(), &mut io).unwrap();
+        assert!(result.refusals.is_empty(), "{}", result.summary);
+        assert!(io.files["crates/alpha/Cargo.toml"].contains("workspace = true"));
+        assert!(update(&Catalog::anvil(), &UpdateOptions::default(), &mut io).unwrap().in_sync);
+    }
+}
+
+#[test]
 fn ownership_guard_precedes_workspace_reads_and_force_switches_owner() {
     let mut io = historical();
     io.insert(".anvil.lock", &HISTORICAL_LOCK.replace("tool = \"anvil\"", "tool = \"another\""));
     io.insert("Cargo.toml", "invalid TOML");
     let error = update(&upgraded_catalog(), &UpdateOptions::default(), &mut io).unwrap_err();
     assert!(error.to_string().contains("managed by 'another'"));
-    assert!(io.mutations.is_empty());
+    assert!(io.mutations.is_empty(), "unexpected mutations: {:?}", io.mutations);
     io.insert("Cargo.toml", CARGO);
     let mut options = UpdateOptions::default();
     options.force = true;
@@ -286,13 +299,13 @@ impl UpdateIo for FailingIo {
 
 #[test]
 fn read_directory_and_late_lock_failures_stop_before_publication() {
-    for (read, directory, late) in [
-        (Some("Cargo.toml"), None, false),
-        (Some(".anvil.lock"), None, false),
-        (Some(".gitattributes"), None, false),
-        (Some("owned.just"), None, false),
-        (None, Some(""), false),
-        (None, None, true),
+    for (read, directory, late, expected) in [
+        (Some("Cargo.toml"), None, false, "scripted read failure"),
+        (Some(".anvil.lock"), None, false, "scripted read failure"),
+        (Some(".gitattributes"), None, false, "scripted read failure"),
+        (Some("owned.just"), None, false, "scripted read failure"),
+        (None, Some(""), false, "scripted directory failure"),
+        (None, None, true, "late lock read failed"),
     ] {
         let mut io = FailingIo {
             repository: historical(),
@@ -302,9 +315,17 @@ fn read_directory_and_late_lock_failures_stop_before_publication() {
             ..FailingIo::default()
         };
         let before = io.repository.files.clone();
-        update(&upgraded_catalog(), &UpdateOptions::default(), &mut io).unwrap_err();
+        let error = update(&upgraded_catalog(), &UpdateOptions::default(), &mut io).unwrap_err();
+        assert!(error.to_string().contains(expected), "{error}");
+        if late {
+            assert_eq!(io.lock_reads.get(), 2);
+        }
         assert_eq!(io.repository.files, before);
-        assert!(io.repository.mutations.is_empty());
+        assert!(
+            io.repository.mutations.is_empty(),
+            "unexpected mutations: {:?}",
+            io.repository.mutations
+        );
     }
 }
 
@@ -356,7 +377,10 @@ fn proposal_failure_preserves_the_original_and_previous_lock() {
 
 #[test]
 fn workspace_member_read_and_enumeration_failures_do_not_mutate() {
-    for (read, directory) in [(Some("crates/alpha/Cargo.toml"), None), (None, Some("crates"))] {
+    for (read, directory, expected) in [
+        (Some("crates/alpha/Cargo.toml"), None, "scripted read failure"),
+        (None, Some("crates"), "scripted directory failure"),
+    ] {
         let mut io = FailingIo {
             repository: repository(),
             read: read.map(str::to_owned),
@@ -367,9 +391,14 @@ fn workspace_member_read_and_enumeration_failures_do_not_mutate() {
         io.repository
             .insert("crates/alpha/Cargo.toml", "[package]\nname = \"alpha\"\nversion = \"0.1.0\"\n");
         let before = io.repository.files.clone();
-        update(&upgraded_catalog(), &UpdateOptions::default(), &mut io).unwrap_err();
+        let error = update(&upgraded_catalog(), &UpdateOptions::default(), &mut io).unwrap_err();
+        assert!(error.to_string().contains(expected), "{error}");
         assert_eq!(io.repository.files, before);
-        assert!(io.repository.mutations.is_empty());
+        assert!(
+            io.repository.mutations.is_empty(),
+            "unexpected mutations: {:?}",
+            io.repository.mutations
+        );
     }
 }
 
@@ -390,7 +419,7 @@ fn artifact_reads_reject_directories_and_file_parents_before_mutation() {
         assert!(error.to_string().contains(expected), "{error}");
         assert!(error.to_string().contains(artifact), "{error}");
         assert_eq!(io.files, before);
-        assert_eq!(io.mutations, Vec::<String>::new());
+        assert!(io.mutations.is_empty(), "unexpected mutations: {:?}", io.mutations);
     }
 }
 
@@ -438,8 +467,9 @@ fn invalid_manifests_and_ambiguous_casing_fail_without_mutation() {
     ] {
         let mut io = repository();
         io.insert(path, content);
-        update(&upgraded_catalog(), &UpdateOptions::default(), &mut io).unwrap_err();
-        assert!(io.mutations.is_empty());
+        let error = update(&upgraded_catalog(), &UpdateOptions::default(), &mut io).unwrap_err();
+        assert!(error.to_string().contains(expected), "{error}");
+        assert!(io.mutations.is_empty(), "unexpected mutations: {:?}", io.mutations);
     }
     let mut io = repository();
     io.insert("OWNED.JUST", "one");
@@ -447,5 +477,5 @@ fn invalid_manifests_and_ambiguous_casing_fail_without_mutation() {
     let error = update(&upgraded_catalog(), &UpdateOptions::default(), &mut io).unwrap_err();
     assert!(error.to_string().contains("differ only by ASCII case"));
     assert!(error.to_string().contains("in the repository root because"), "{error}");
-    assert_eq!(io.mutations, Vec::<String>::new());
+    assert!(io.mutations.is_empty(), "unexpected mutations: {:?}", io.mutations);
 }
