@@ -158,6 +158,30 @@ fn bolero_uses_the_nightly_host_and_supported_release_profile() {
 }
 
 #[test]
+fn bolero_campaign_policy_defaults_to_fixed_pr_runs() {
+    let declaration = BOLERO
+        .lines()
+        .find(|line| line.starts_with("anvil-bolero "))
+        .expect("the Bolero template declares its parameterized recipe");
+    assert_eq!(declaration.split_once(':').unwrap().0, "anvil-bolero campaign=\"pr\"");
+    let policy = BOLERO
+        .split_once("    $campaignArgs = switch ($campaign) {\n")
+        .expect("the Bolero template selects a campaign argument set")
+        .1
+        .split_once("\n    }\n")
+        .expect("the campaign switch has a closing brace")
+        .0;
+    insta::assert_snapshot!(policy, @r#"
+        'pr' { @('--runs', '30000', '-S', '2027') }
+        'scheduled' { @('-T', '90s') }
+        default {
+            [Console]::Error.WriteLine("anvil-bolero: unknown campaign '$campaign'; expected 'pr' or 'scheduled'.")
+            exit 2
+        }
+    "#);
+}
+
+#[test]
 fn developer_options_are_explicit_and_cloud_defaults_stay_non_interactive() {
     assert!(BUILD.contains("[arg(\"package\", long"));
     assert!(BUILD.contains("anvil-build package=\"\" profile=\"\""));
@@ -2434,7 +2458,7 @@ fn bolero_full_workspace_discovery_enumerates_every_member() {
     );
     for package in ["fixture@0.1.0", "other-package@0.1.0"] {
         assert!(
-            calls.contains(&format!("each --package {package} -- cargo +nightly-test bolero test --profile release --target aarch64-unknown-linux-gnu --engine libfuzzer -T 45s --package {{cargo-spec}} fuzz_target")),
+            calls.contains(&format!("each --package {package} -- cargo +nightly-test bolero test --profile release --target aarch64-unknown-linux-gnu --engine libfuzzer --runs 30000 -S 2027 --package {{cargo-spec}} fuzz_target")),
             "discovery and execution must use the same pinned compiler host target:\n{calls}"
         );
     }

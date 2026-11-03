@@ -6,10 +6,10 @@
 
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
-# Affected tier. Smoke-only fuzz pass via [bolero](https://crates.io/crates/bolero):
-# each fuzz target gets a 45-second libfuzzer run, just enough to
-# surface obvious crashes/hangs introduced by a PR without paying for
-# a long fuzzing campaign.
+# Fuzz passes via [bolero](https://crates.io/crates/bolero):
+# the default PR campaign runs each affected libfuzzer target 30,000 times
+# with a fixed seed. The scheduled campaign runs each workspace target
+# for 90 seconds without specifying a seed.
 #
 # Linux-only: cargo-bolero's libfuzzer engine (and its bolero-afl
 # build dependency) only builds on Linux, so the recipe self-skips on
@@ -25,16 +25,23 @@
 # This avoids inheriting a prebuilt cargo-bolero binary's musl build target.
 # Crates with no bolero harness print zero targets and the recipe
 # no-ops. The libfuzzer engine requires nightly, so the test
-# invocation uses the pinned rust_nightly. Adopters who want longer
-# campaigns wire a separate scheduled job; anvil deliberately does
-# not ship a long-form fuzz tier (the failure surface is too
-# repo-specific to standardize).
+# invocation uses the pinned rust_nightly.
+# Scheduled-test selects the scheduled campaign and full-workspace scope.
 
-# Run Bolero tests for affected workspace packages.
+# Run Bolero tests with the PR or scheduled campaign.
 [group("anvil")]
 [script("pwsh", "-NoProfile")]
-anvil-bolero:
+anvil-bolero campaign="pr":
     $ErrorActionPreference = 'Stop'
+    $campaign = '{{ replace(campaign, "'", "''") }}'
+    $campaignArgs = switch ($campaign) {
+        'pr' { @('--runs', '30000', '-S', '2027') }
+        'scheduled' { @('-T', '90s') }
+        default {
+            [Console]::Error.WriteLine("anvil-bolero: unknown campaign '$campaign'; expected 'pr' or 'scheduled'.")
+            exit 2
+        }
+    }
     if (-not $IsLinux) {
         Write-Host 'anvil-bolero: non-Linux host -- skipping (cargo-bolero/libfuzzer is Linux-only; harnesses still run under anvil-llvm-cov)'
         exit 0
@@ -117,7 +124,7 @@ anvil-bolero:
             exit 1
         }
         Write-Host "anvil-bolero: $($t.anvilPackageSpec)::${testName}"
-        & cargo {{_anvil_stable_toolchain_args}} each --package $t.anvilPackageSpec '--' cargo '+{{ rust_nightly }}' bolero test --profile release --target $hostTarget --engine libfuzzer -T 45s --package '{cargo-spec}' $testName
+        & cargo {{_anvil_stable_toolchain_args}} each --package $t.anvilPackageSpec '--' cargo '+{{ rust_nightly }}' bolero test --profile release --target $hostTarget --engine libfuzzer @campaignArgs --package '{cargo-spec}' $testName
         if ($LASTEXITCODE -ne 0) { $failed = $true }
     }
     if ($failed) { exit 1 }

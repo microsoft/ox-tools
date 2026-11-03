@@ -89,6 +89,7 @@ flowchart LR
     s_test --> s_llvm_cov[llvm-cov]:::check
     s_test --> s_doc_test[doc-test]:::check
     s_test --> s_examples[examples]:::check
+    s_test --> s_bolero["bolero (scheduled)"]:::check
 
     s_adv --> s_deny[deny]:::check
     s_adv --> s_audit[audit]:::check
@@ -357,7 +358,16 @@ layout setting. Recheck this workaround when updating the pinned nightly.
 
 | Check     | Invocation                                                                  | Source |
 |-----------|-----------------------------------------------------------------------------|--------|
-| `bolero`  | Uses the catalog nightly and release profile consistently to discover targets one package at a time, then runs each affected libfuzzer target for 45 seconds on Linux. Discovery and execution use the catalog compiler's host target from `rustc --print host-tuple`. This avoids selecting the platform that built the installed cargo-bolero binary, such as musl on a GNU Linux host. Explicitly selecting `release` avoids cargo-bolero's implicit, adopter-defined `fuzz` profile and matches target execution. Adopters that disable `bolero`'s default features must enable its `std` feature for libfuzzer support. Per-package discovery is required because `cargo-bolero list` accepts only one `--package`; local whole-workspace runs enumerate workspace members before discovery. A successful empty discovery is a no-op; compiler target lookup, metadata, discovery, or parsing failure fails the check. Non-Linux hosts skip because cargo-bolero's native dependencies are unsupported there, while harnesses still run as ordinary tests. | oxidizer-github |
+| `bolero`  | Uses the catalog nightly and release profile consistently to discover targets one package at a time, then runs each affected libfuzzer target with `--runs 30000 -S 2027` on Linux. Discovery and execution use the catalog compiler's host target from `rustc --print host-tuple`. This avoids selecting the platform that built the installed cargo-bolero binary, such as musl on a GNU Linux host. Explicitly selecting `release` avoids cargo-bolero's implicit, adopter-defined `fuzz` profile and matches target execution. Adopters that disable `bolero`'s default features must enable its `std` feature for libfuzzer support. Per-package discovery is required because `cargo-bolero list` accepts only one `--package`; local whole-workspace runs enumerate workspace members before discovery. A successful empty discovery is a no-op; compiler target lookup, metadata, discovery, or parsing failure fails the check. Non-Linux hosts skip because cargo-bolero's native dependencies are unsupported there, while harnesses still run as ordinary tests. | oxidizer-github |
+
+`anvil-bolero` accepts a campaign argument, defaulting to `pr`. The PR campaign
+specifies a fixed run count and nonzero seed, without a campaign time limit.
+`just anvil-bolero scheduled` instead passes `-T 90s`, without a run count or seed
+argument. Libfuzzer generates a seed unless the caller supplies
+`BOLERO_RANDOM_SEED`. Unknown campaign names fail before target discovery.
+Both campaigns share package selection, discovery, and execution; selecting a
+campaign does not change impact scope. In particular, full-workspace local PR
+verification retains the PR campaign.
 
 On non-Linux hosts, the fuzzing group skips its setup and prerequisite validation,
 and Bolero skips before validating prerequisites or calculating impact. Other
@@ -400,10 +410,10 @@ See [Gamma reports and code scanning](./github.md#gamma-reports-and-code-scannin
 ### `scheduled-test`
 
 Runs `check-all-targets` over the full workspace, followed by the same three
-checks as `pr-test` -- `llvm-cov`, `doc-test`, `examples` -- and the same
-recipe invocations, with the same per-config output paths
-(`target/coverage/lcov-<config>.info`).
-The recipe is shared between tiers; only the cloud workflow
+checks as `pr-test` -- `llvm-cov`, `doc-test`, `examples` -- and finally
+`anvil-bolero scheduled`.
+The coverage recipe is shared between tiers, with the same per-config output
+paths (`target/coverage/lcov-<config>.info`); only the cloud workflow
 wiring around it changes (PR uploads LCOV to Codecov / ADO from each
 PR run; scheduled does the same against `main` plus flags the upload as `scheduled` in
 Codecov so the two streams stay distinguishable in the UI). Two purposes for re-running
@@ -413,6 +423,7 @@ publish a full-coverage snapshot for the current state of `main`.
 | Check | Invocation | Source |
 |-------|------------|--------|
 | `check-all-targets` | `cargo each --workspace --keep-going -- cargo check --package '{cargo-spec}' --all-targets --locked`, with default features and again with `--no-default-features`. Checks each package independently with the selected stable compiler; `{cargo-spec}` (cargo-each 0.6.0+) is a source-qualified selector, so a member that shares its name and version with a registry dependency stays unambiguous. | none |
+| `bolero` | Same discovery and target execution as the PR check, but over every workspace member with `-T 90s` per discovered target and no seed argument. Runs last, after examples; an earlier check failure skips the campaign. Non-Linux hosts skip the libfuzzer campaign. | oxidizer-github |
 
 #### Package-isolated all-target compilation
 
@@ -486,7 +497,7 @@ These profiles each cost hours per leg, which is why they live in scheduled rath
 
 Per-test opt-outs live in source via `#[cfg_attr(miri_<profile>, ignore = "<reason>")]`. Each miri-profile recipe sets the matching `--cfg` in `RUSTFLAGS`; the cfg names are also declared in the workspace lints region (`unexpected_cfgs` + `check-cfg`) so non-miri builds don't warn. This keeps the suppression next to the test (and behind code review) rather than in a sidecar file the build system has to parse out-of-band.
 
-The `miri` row above is the one place the catalog deliberately duplicates a check across tiers: PR runs it impact-scoped (fast, narrow), scheduled runs it full-workspace (slow, complete). The single-tier-per-group rule is preserved because the PR copy lives in `pr-runtime-analysis` and the scheduled copy lives in `scheduled-runtime-analysis` -- two different groups.
+The `miri` row above deliberately reuses a check across tiers: PR runs it impact-scoped (fast, narrow), scheduled runs it full-workspace (slow, complete). The single-tier-per-group rule is preserved because the PR copy lives in `pr-runtime-analysis` and the scheduled copy lives in `scheduled-runtime-analysis` -- two different groups.
 
 ### `scheduled-exhaustive`
 

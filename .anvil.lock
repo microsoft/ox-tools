@@ -1,7 +1,7 @@
 version = 2
 tool = "anvil"
 tool_version = "0.24.0"
-catalog_checksum = "sha256:d1caba6b3ca423c7519149a913aa25f4a6f9264f5eaf4c2397e7c8e0004f9bad"
+catalog_checksum = "sha256:b2fe226bb630651c299bd416cc22146ff841daea99e07bd10b8ad709702368d4"
 
 [[file]]
 path = ".anvil/container/Dockerfile.dockerignore"
@@ -73,7 +73,7 @@ checksum = "sha256:69f2cd19cc65bc8ed60d094ed7162cca6890dcf14df2c1a0e7e5840b61ab0
 
 [[file]]
 path = "justfiles/anvil/checks/bolero.just"
-checksum = "sha256:d8ce808f8d8e6f8b47566340fa5ac68370452cef905253007cc6bc3e5b483858"
+checksum = "sha256:9d7fbfbc13bde15234b665648ca788c7e216b8dd4312e760e8a2439184bcb9cd"
 
 [[file]]
 path = "justfiles/anvil/checks/careful.just"
@@ -237,7 +237,7 @@ checksum = "sha256:4f92f1984ac6b17ad0165095801aa6adc74e616abce6cd8982d442f2e85cd
 
 [[file]]
 path = "justfiles/anvil/groups/scheduled-test.just"
-checksum = "sha256:f06243ed3efbb35370a8008fd262b28865d3e6ae795852a82bfa7b7916b08290"
+checksum = "sha256:b33617e33223a377247ea5287f1d65ecd989b0760005e04c2e8cae3ac9cfd15f"
 
 [[file]]
 path = "justfiles/anvil/helpers.just"

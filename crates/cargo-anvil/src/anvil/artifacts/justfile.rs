@@ -403,7 +403,7 @@ mod tests {
         // one failing target does not stop the remaining targets.
         for needle in [
             "$target | Add-Member -NotePropertyName anvilPackageSpec -NotePropertyValue $packageSpec",
-            "each --package $t.anvilPackageSpec '--' cargo '+{{ rust_nightly }}' bolero test --profile release --target $hostTarget --engine libfuzzer -T 45s --package '{cargo-spec}' $testName",
+            "each --package $t.anvilPackageSpec '--' cargo '+{{ rust_nightly }}' bolero test --profile release --target $hostTarget --engine libfuzzer @campaignArgs --package '{cargo-spec}' $testName",
             "if ($LASTEXITCODE -ne 0) { $failed = $true }",
             "if ($failed) { exit 1 }",
         ] {
