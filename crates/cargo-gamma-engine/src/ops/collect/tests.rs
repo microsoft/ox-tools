@@ -636,7 +636,7 @@ fn the_operator_oracle_covers_every_replacement_the_tables_offer() {
 
 #[test]
 fn unselected_mutators_produce_nothing() {
-    assert!(mutators("fn f(a: i32, b: i32) -> bool { a < b }", "arith").is_empty());
+    assert_eq!(mutators("fn f(a: i32, b: i32) -> bool { a < b }", "arith").len(), 0);
 }
 
 #[test]
@@ -5488,7 +5488,7 @@ fn regex_end_anchor_is_active_after_an_even_backslash_run() {
     }
 
     let escaped = r#"struct Regex; impl Regex { fn new(_: &str) {} } fn f() { Regex::new(r"\$"); }"#;
-    assert!(mutators(escaped, "regex.remove_end_anchor").is_empty());
+    assert_eq!(mutators(escaped, "regex.remove_end_anchor").len(), 0);
 }
 
 /// The named error values keep the replacement indices they had before.
@@ -5637,7 +5637,7 @@ fn a_stated_value_is_still_subject_to_the_selection() {
 /// compile for a reason that has nothing to do with what the author stated.
 #[test]
 fn a_stated_value_on_a_const_fn_produces_nothing() {
-    assert!(fn_values("#[gamma::value(9)]\nconst fn f() -> u8 { g() }").is_empty());
+    assert_eq!(fn_values("#[gamma::value(9)]\nconst fn f() -> u8 { g() }").len(), 0);
 }
 
 // ---- Every catalog entry must actually fire. ---------------------------------------------

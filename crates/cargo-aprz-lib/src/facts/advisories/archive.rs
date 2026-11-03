@@ -280,6 +280,14 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_archive_cannot_claim_a_database_root() {
+        assert_eq!(
+            database_root_from_entries(std::iter::empty()).unwrap_err().to_string(),
+            "advisory archive must contain crates/ at its root or under one enclosing directory; check --advisory-archive-url"
+        );
+    }
+
+    #[test]
     fn survivor_optional_rust_publication_uses_the_exact_child_and_propagates_errors() {
         let root = Path::new("validated-database");
         let destination = Path::new("in-memory-extraction-destination");
@@ -335,7 +343,7 @@ mod tests {
         assert_eq!(error, "advisory archive exceeds the 1023-byte uncompressed size limit");
         unpack_with_limits(encoded.as_slice(), destination, 1025, 0).unwrap();
         let error = unpack_with_limits(&b"not gzip"[..], destination, 2048, 10).unwrap_err().to_string();
-        assert!(!error.is_empty());
+        assert_ne!(error, "");
     }
 
     #[test]

@@ -248,7 +248,7 @@ mod tests {
         assert!(!config.test_workspace);
         assert!(!config.whole_test_binaries);
         assert!(!config.nextest);
-        assert!(config.resources.is_empty());
+        assert_eq!(config.resources.len(), 0);
     }
 
     /// The programmatic default is the 50% margin the command default and the documentation promise.

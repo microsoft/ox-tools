@@ -417,7 +417,7 @@ mod tests {
     fn ineligible_outcomes_are_not_planned() {
         let mutants = vec![mutant("aaa", "src/lib.rs", 4, "fn_value.default", Outcome::Killed)];
 
-        assert!(plan(&mutants, &[Eligible::Timeout, Eligible::Unviable]).is_empty());
+        assert_eq!(plan(&mutants, &[Eligible::Timeout, Eligible::Unviable]).len(), 0);
     }
 
     #[test]

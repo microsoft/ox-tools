@@ -688,7 +688,7 @@ fn native_proof_adapter_preserves_limits_population_written_files_and_all_termin
                 assert!(written.is_empty(), "reusing an identical schema does not rewrite a clean file");
             }
         } else {
-            assert!(events.observations.is_empty());
+            assert_eq!(events.observations, [] as [(usize, usize, std::vec::Vec<std::path::PathBuf>); 0]);
         }
     }
 }
@@ -716,7 +716,7 @@ fn native_proof_adapter_propagates_instrumentation_and_compiler_failures_without
     )
     .expect_err("a compiler transport failure must propagate from the proof adapter");
     assert_eq!(failure.message(), "proof transport failed");
-    assert!(events.observations.is_empty());
+    assert_eq!(events.observations, [] as [(usize, usize, std::vec::Vec<std::path::PathBuf>); 0]);
     std::fs::remove_file(work.test_root().join("src/lib.rs")).unwrap();
     let mut converger = Converger::default();
     let failure = with_compiler(
@@ -739,7 +739,7 @@ fn native_proof_adapter_propagates_instrumentation_and_compiler_failures_without
         failure.message(),
         format!("could not read `{}`", work.test_root().join("src/lib.rs"))
     );
-    assert!(events.observations.is_empty());
+    assert_eq!(events.observations, [] as [(usize, usize, std::vec::Vec<std::path::PathBuf>); 0]);
 }
 
 fn error_stream() -> String {

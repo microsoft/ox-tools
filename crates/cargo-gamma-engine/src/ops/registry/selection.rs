@@ -348,7 +348,7 @@ mod tests {
         selection.drop_errors();
 
         assert!(!selection.contains(ERR_WITH));
-        assert!(selection.errors().is_empty());
+        assert_eq!(selection.errors().len(), 0);
     }
 
     #[test]
@@ -359,6 +359,6 @@ mod tests {
         selection.set_errors(Vec::new());
 
         assert!(selection.contains(ERR_WITH));
-        assert!(selection.errors().is_empty());
+        assert_eq!(selection.errors().len(), 0);
     }
 }

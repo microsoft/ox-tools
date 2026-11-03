@@ -487,7 +487,7 @@ mod tests {
         let mut host = crate::testing::Sink::default();
         assert_eq!(run(&mut host, ["cargo-gamma", "--version"]), EXIT_OK);
         assert!(host.out().ends_with(&format!("{}\n", env!("CARGO_PKG_VERSION"))));
-        assert!(host.err().is_empty());
+        assert_eq!(host.err(), "");
         assert_eq!(ERROR_DIALOG_SUPPRESSION_OBSERVER.with(core::cell::Cell::get), Some(1));
     }
 
@@ -1087,7 +1087,7 @@ mod tests {
 
     #[test]
     fn an_empty_argument_list_does_not_panic() {
-        assert!(normalize(Vec::<String>::new()).is_empty());
+        assert_eq!(normalize(Vec::<String>::new()).len(), 0);
     }
 
     #[test]

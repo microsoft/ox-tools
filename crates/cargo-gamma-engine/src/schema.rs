@@ -837,7 +837,7 @@ mod tests {
                 usize::from(replacement.contains("return")) + 1
             );
         }
-        assert!(return_sites("not valid rust !").is_empty());
+        assert_eq!(return_sites("not valid rust !").len(), 0);
         let text = "{ Some(1..3) }";
         let site = mutant(
             0..text.len(),

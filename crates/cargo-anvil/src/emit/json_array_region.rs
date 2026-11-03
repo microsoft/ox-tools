@@ -520,7 +520,7 @@ pub(crate) fn plan_json_array_region(
     })?;
     // #[gamma::skip(range.exclusive_to_inclusive, reason = "marker line offsets cannot equal the byte just after the selected closing bracket")]
     let span = array.range.start..array.range.end;
-    for other in regions {
+    for other in &regions {
         if other.id == spec.region.id.as_str() {
             continue;
         }
@@ -535,12 +535,10 @@ pub(crate) fn plan_json_array_region(
                 RefusalRemedy::EnclosingOwnership,
             ));
         }
-        let without = remove_region_exact(base, &other);
+        let without = remove_region_exact(base, other);
         validate_neighbor_splice(base, &without, std::slice::from_ref(&spec.path))?;
     }
-    // #[gamma::skip(try.propagate_to_unwrap, reason = "validated_regions already proved every marker pair in this unchanged base is well formed")]
-    let region = find_region_in_lines(base, spec.region.id.as_str(), CommentSyntax::SlashSlash, json_comment_lines(base))
-        .map_err(|error| refusal(error, RefusalRemedy::MalformedMarkers))?;
+    let region = regions.into_iter().find(|region| region.id == spec.region.id.as_str());
     if let Some(region) = &region {
         if !span.contains(&region.start_line.start) || !span.contains(&region.end_line.end) {
             return Err(refusal(
@@ -2003,7 +2001,7 @@ mod tests {
             existing_array_paths(source).unwrap(),
             [vec!["outer".to_owned(), "entries".to_owned()]]
         );
-        assert!(existing_array_paths("// comment\n").unwrap().is_empty());
+        assert_eq!(existing_array_paths("// comment\n").unwrap().len(), 0);
         assert_eq!(
             existing_array_paths(r#"{"outer":{"entries":[]},"outer":{}}"#).unwrap_err().remedy,
             RefusalRemedy::ArrayShape
@@ -2068,6 +2066,29 @@ mod tests {
             adopt_entries(owned_separator, array, &spec.region.body).unwrap_err().remedy,
             RefusalRemedy::EnclosingOwnership
         );
+
+        let single_entry = "{\"entries\":[\"managed\"]}";
+        let parsed = parse(single_entry).unwrap();
+        let array = lookup(parsed.value.as_ref().unwrap(), &spec.path)
+            .unwrap()
+            .unwrap()
+            .as_array()
+            .unwrap();
+        assert_eq!(adopt_entries(single_entry, array, &spec.region.body).unwrap(), "{\"entries\":[]}");
+    }
+
+    #[test]
+    fn noncanonical_opening_marker_cannot_be_paired_with_a_canonical_closer() {
+        let refusal = plan(
+            Some("// >>> anvil-managed:entries\n// <<< anvil-managed: entries\n"),
+            &Manifest::default(),
+        )
+        .unwrap_err();
+        assert_eq!(refusal.remedy, RefusalRemedy::MalformedMarkers);
+        assert_eq!(
+            refusal.reason.to_string(),
+            "closing sentinel for region 'entries' before its opener"
+        );
     }
 
     #[test]
@@ -2077,6 +2098,12 @@ mod tests {
         spec.region.id = RegionId::new("entries");
         spec.region.body = "\"managed\",\n".to_owned();
 
+        assert_eq!(
+            validate_required_entries("// >>> anvil-managed: entries\n", &spec)
+                .unwrap_err()
+                .remedy,
+            RefusalRemedy::MalformedMarkers
+        );
         assert_eq!(
             validation_condition(&validate_required_entries("{\"entries\":[]}", &spec).unwrap_err()),
             &JsonValidationCondition::MissingManagedRegion { id: "entries".to_owned() }
@@ -2101,6 +2128,14 @@ mod tests {
             &JsonValidationCondition::SelectedItemNotArray {
                 path: vec!["entries".to_owned()]
             }
+        );
+    }
+
+    #[test]
+    fn rendered_array_body_preserves_internal_blank_lines_and_normalizes_line_endings() {
+        assert_eq!(
+            render_body("\"first\",\r\n \t\r\n\"second\",\r\n", "  ", "\r\n"),
+            "  \"first\",\r\n\r\n  \"second\",\r\n"
         );
     }
 

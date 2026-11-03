@@ -390,7 +390,7 @@ mod tests {
     fn diagnostics_omit_files_without_relevant_lines() {
         let file = make_file("/repo/crates/alpha/src/lib.rs", 0, 0);
         let member = make_member("alpha", "/repo/crates/alpha", Some(80.0));
-        assert!(diagnostics(&[&file], &member, Status::Fail).is_empty());
+        assert_eq!(diagnostics(&[&file], &member, Status::Fail).len(), 0);
     }
 
     #[test]

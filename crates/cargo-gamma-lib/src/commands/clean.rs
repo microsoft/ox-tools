@@ -98,8 +98,8 @@ mod tests {
             "could not read cargo metadata for `scripted-clean-metadata-root`"
         );
         assert_eq!(calls.get(), 1);
-        assert!(host.out().is_empty());
-        assert!(host.err().is_empty());
+        assert_eq!(host.out().len(), 0);
+        assert_eq!(host.err().len(), 0);
     }
 
     fn clean_fixture<H: Host>(host: &mut H, args: &CleanArgs, styler: Styler) -> crate::Result<i32> {

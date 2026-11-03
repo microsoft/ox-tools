@@ -378,12 +378,12 @@ mod tests {
             assert!(checks.contains(needle), "checks tree missing advisory behavior '{needle}'");
         }
         assert!(
-            checks.contains("bolero list --profile release --package '{cargo-spec}'"),
-            "bolero discovery must use the execution profile once per affected package"
+            checks.contains("bolero list --profile release --target $hostTarget --package '{cargo-spec}'"),
+            "bolero discovery must use the execution profile and host target once per affected package"
         );
         assert!(
-            checks.contains("bolero test --profile release --engine libfuzzer"),
-            "bolero execution must use the profile option accepted by the pinned cargo-bolero"
+            checks.contains("bolero test --profile release --target $hostTarget --engine libfuzzer"),
+            "bolero execution must use the supported profile option and explicit host target"
         );
         assert!(
             !checks.contains("bolero list @bareArgs"),
@@ -394,7 +394,7 @@ mod tests {
         // one failing target does not stop the remaining targets.
         for needle in [
             "$target | Add-Member -NotePropertyName anvilPackageSpec -NotePropertyValue $packageSpec",
-            "each --package $t.anvilPackageSpec '--' cargo '+{{ rust_nightly }}' bolero test --profile release --engine libfuzzer -T 60s --package '{cargo-spec}' $testName",
+            "each --package $t.anvilPackageSpec '--' cargo '+{{ rust_nightly }}' bolero test --profile release --target $hostTarget --engine libfuzzer -T 60s --package '{cargo-spec}' $testName",
             "if ($LASTEXITCODE -ne 0) { $failed = $true }",
             "if ($failed) { exit 1 }",
         ] {
@@ -1850,11 +1850,12 @@ mod tests {
                 output.status.success(),
                 "a repository without a declared MSRV must skip the MSRV test"
             );
-            assert!(
+            assert_eq!(
                 String::from_utf8(output.stdout)
                     .expect("resolver output must be UTF-8")
                     .trim()
-                    .is_empty()
+                    .len(),
+                0
             );
 
             let temp = fixture("[workspace.package]\nrust-version = \"1.93\"\n");

@@ -65,7 +65,7 @@ fn converger_state_updates_are_exact_and_repeatable() {
     assert!(!converger.isolation_budget.proof(0));
     converger.begin_convergence();
     assert_eq!(converger.rounds, 0);
-    assert!(converger.per_round.is_empty());
+    assert_eq!(converger.per_round.len(), 0);
     assert_eq!(converger.first_round, None);
     assert_eq!(
         converger.isolation_budget.proof_count(),

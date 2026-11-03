@@ -44,8 +44,10 @@ pub struct RunOutcome {
     /// distinguished, and so stale entries can be enumerated).
     pub previous_manifest: Manifest,
     /// Whether the plan was actually applied to disk.
+    #[cfg(any(test, feature = "internals"))]
     pub applied: bool,
     /// The resolved backend set.
+    #[cfg(any(test, feature = "internals"))]
     pub backends: Vec<Backend>,
 }
 
@@ -130,6 +132,8 @@ fn run_update_with(
     enforce_single_tool_guard(catalog, args, &manifest)?;
 
     let (mut plan, backends) = plan_update(&repo_root, &manifest)?;
+    #[cfg(not(any(test, feature = "internals")))]
+    drop(backends);
     let mut next = plan.projected_manifest(&manifest);
     next.tool = Some(catalog.cli().subcommand.clone());
     next.tool_version = Some(catalog.cli().version.clone());
@@ -147,7 +151,9 @@ fn run_update_with(
     Ok(RunOutcome {
         plan,
         previous_manifest: manifest,
+        #[cfg(any(test, feature = "internals"))]
         applied,
+        #[cfg(any(test, feature = "internals"))]
         backends,
     })
 }
@@ -2469,7 +2475,7 @@ mod tests {
         };
         RESOLUTION.set((usize::MAX, 0));
         let plan = run().unwrap();
-        assert!(plan.refusals().is_empty());
+        assert_eq!(plan.refusals().len(), 0);
         let calls = RESOLUTION.get().1;
         assert!(
             calls > 0,
@@ -2768,7 +2774,7 @@ mod tests {
             &mut hosts,
         )
         .unwrap();
-        assert!(plan.refusals().is_empty());
+        assert_eq!(plan.refusals().len(), 0);
         assert_eq!(plan.items().len(), 1);
         assert_eq!(plan.items()[0].decision, Decision::OrphanedKept);
         assert_eq!(plan.items()[0].spliced_host, None);
@@ -3016,7 +3022,7 @@ mod tests {
                 Some(text),
                 HostScanner::for_path(host)
             ));
-            assert!(plan.refusals().is_empty());
+            assert_eq!(plan.refusals().len(), 0);
             assert!(plan.items().is_empty());
         }
     }
@@ -3240,7 +3246,7 @@ mod tests {
             plan_dependabot_exclusions(Path::new("memory"), &[Backend::GitHub], &catalog, &mut plan, &mut hosts).unwrap();
             assert_eq!(plan.items().len(), 1);
             assert_eq!(plan.items()[0].decision, Decision::Remove);
-            assert!(plan.refusals().is_empty());
+            assert_eq!(plan.refusals().len(), 0);
         }
     }
 
@@ -3313,7 +3319,7 @@ mod tests {
             let error = plan_dependabot_exclusions(root, &[Backend::GitHub], &catalog, &mut plan, &mut hosts).unwrap_err();
             assert_eq!(error.message(), format!("cannot read {}", root.join(path).display()));
             assert!(plan.items().is_empty());
-            assert!(plan.refusals().is_empty());
+            assert_eq!(plan.refusals().len(), 0);
             assert!(!hosts.texts.contains_key(path));
         }
     }
@@ -3500,7 +3506,7 @@ mod tests {
             );
             assert_eq!(plan.items()[1].decision, Decision::Write);
             assert_eq!(plan.items()[1].rendered.as_deref(), Some(expected.as_str()));
-            assert!(plan.refusals().is_empty());
+            assert_eq!(plan.refusals().len(), 0);
         }
     }
 
@@ -4627,7 +4633,7 @@ mod tests {
             .unwrap();
 
             if previous.json_scanner_hosts.is_empty() {
-                assert!(plan.refusals().is_empty());
+                assert_eq!(plan.refusals().len(), 0);
             } else {
                 assert_eq!(plan.refusals().len(), 1);
                 assert!(plan.refusals()[0].contains("must use slash-slash comment markers"));
@@ -4895,7 +4901,7 @@ mod tests {
         let (plan, hosts) = redundant_json_marker_plan(&catalog);
         let output = hosts.cached("config.json").unwrap();
 
-        assert!(plan.refusals().is_empty());
+        assert_eq!(plan.refusals().len(), 0);
         assert_eq!(output.matches("// >>> anvil-managed: entries").count(), 1);
     }
 
@@ -4906,7 +4912,7 @@ mod tests {
         let (plan, hosts) = redundant_json_marker_plan(&empty);
         let output = hosts.cached("config.json").unwrap();
 
-        assert!(plan.refusals().is_empty());
+        assert_eq!(plan.refusals().len(), 0);
         assert!(!output.contains("anvil-managed: entries"));
     }
 
@@ -4968,7 +4974,7 @@ mod tests {
         .unwrap();
         let output = hosts.cached("config.json").unwrap();
 
-        assert!(plan.refusals().is_empty());
+        assert_eq!(plan.refusals().len(), 0);
         assert_eq!(output.matches("// >>> anvil-managed: a").count(), 1);
         assert_eq!(output.matches("// >>> anvil-managed: b").count(), 1);
     }
@@ -5979,7 +5985,7 @@ mod tests {
             "Refused TOML array host config.toml: the managed region contains edits that do not match its last render or the current template. Restore its generated content, or empty its body to regenerate it; keep user settings outside the sentinels. No plan was produced; no files were changed. The body between the sentinels is anvil's to write, and it will not overwrite changes it did not make. Settings that must survive belong outside the sentinels, where anvil never touches them."
         );
         let plan = array_plan(&edited, &manifest, &empty).unwrap();
-        assert!(!plan.refusals().is_empty());
+        assert_ne!(plan.refusals().len(), 0);
         assert_eq!(plan.projected_manifest(&manifest), manifest);
         assert!(plan.items().iter().all(|item| item.spliced_host.is_none()));
     }
@@ -6031,7 +6037,7 @@ mod tests {
                 for array_first in [false, true] {
                     let catalog = array_catalog(Some(neighbor.clone()), array_first);
                     let plan = array_plan(&source, &Manifest::default(), &catalog).unwrap();
-                    assert!(plan.refusals().is_empty());
+                    assert_eq!(plan.refusals().len(), 0);
                     let final_host = plan
                         .items()
                         .iter()
@@ -6095,7 +6101,7 @@ mod tests {
         for array_first in [false, true] {
             let catalog = array_catalog(Some(neighbor.clone()), array_first);
             let plan = array_plan(source, &Manifest::default(), &catalog).unwrap();
-            assert!(plan.refusals().is_empty());
+            assert_eq!(plan.refusals().len(), 0);
             assert_eq!(
                 plan.items().iter().filter_map(|item| item.spliced_host.as_deref()).next_back(),
                 Some(expected)
@@ -7010,7 +7016,7 @@ mod tests {
         };
         let outcome = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
         assert!(outcome.applied);
-        assert!(outcome.backends.is_empty());
+        assert_eq!(outcome.backends.len(), 0);
         assert!(outcome.plan.has_changes());
 
         for expected in [
@@ -7226,7 +7232,7 @@ mod tests {
                 let path = tmp.path().join("host.txt");
                 write(&path, &input);
                 let outcome = run_update(&catalog, &local_only(), tmp.path()).unwrap();
-                assert!(outcome.plan.refusals().is_empty());
+                assert_eq!(outcome.plan.refusals().len(), 0);
                 let output = fs::read_to_string(&path).unwrap();
                 let region = find_region(&output, "repair", syntax).unwrap().unwrap();
                 assert_eq!(region.body_str(), "generated\r\n");
@@ -7254,7 +7260,7 @@ mod tests {
             &spec,
         );
 
-        assert!(plan.refusals().is_empty());
+        assert_eq!(plan.refusals().len(), 0);
         assert_eq!(
             plan.items()[0].spliced_host.as_deref(),
             Some(concat!(
@@ -7462,7 +7468,7 @@ mod tests {
         manifest.set_region("config.xml", "settings", checksum_str(""));
         let (plan, _) = managed_region_plan(Some(host), &manifest, &spec);
 
-        assert!(plan.refusals().is_empty());
+        assert_eq!(plan.refusals().len(), 0);
         assert_eq!(plan.items()[0].decision, Decision::InSync);
     }
 
@@ -7670,7 +7676,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(plan.refusals().is_empty());
+        assert_eq!(plan.refusals().len(), 0);
         assert_eq!(plan.items()[0].decision, Decision::Remove);
         assert_eq!(
             plan.items()[0].spliced_host.as_deref(),
@@ -7928,7 +7934,7 @@ mod tests {
                 upsert_region(&current, "old", recovery, CommentSyntax::Hash).unwrap()
             };
             write(&path, &reconciled);
-            assert!(run_update(&next, &local_only(), tmp.path()).unwrap().plan.refusals().is_empty());
+            assert_eq!(run_update(&next, &local_only(), tmp.path()).unwrap().plan.refusals().len(), 0);
             assert!(!Manifest::load(tmp.path()).unwrap().regions.keys().any(|key| key.id == "old"));
             assert!(!run_update(&next, &local_only(), tmp.path()).unwrap().plan.has_changes());
         }
@@ -8949,7 +8955,7 @@ mod tests {
         assert_eq!(Manifest::load(tmp.path()).unwrap().regions[&key], manifest.regions[&key]);
         fs::write(&path, host).unwrap();
         let reconciled = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
-        assert!(reconciled.plan.refusals().is_empty());
+        assert_eq!(reconciled.plan.refusals().len(), 0);
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]

@@ -504,6 +504,7 @@ members = ["cra*tes"]
     fn normalize_relpath_uses_forward_slashes() {
         assert_eq!(normalize_relpath("a/b/c"), "a/b/c");
         assert_eq!(normalize_relpath("a\\b\\c"), if cfg!(windows) { "a/b/c" } else { "a\\b\\c" });
+        assert_eq!(normalize_relpath("./crates/example/Cargo.toml"), "crates/example/Cargo.toml");
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
@@ -605,7 +606,7 @@ members = ["cra*tes"]
         let mut members = Vec::new();
         let error = expand_member_pattern_with(root, "crates/*", &mut members, |_| true, |_| Ok(vec![member])).unwrap_err();
         assert!(error.to_string().contains("non-UTF-8 directory name"), "{error}");
-        assert!(members.is_empty());
+        assert_eq!(members.len(), 0);
     }
 
     #[test]

@@ -793,7 +793,7 @@ impl Progress for EagerProgress {
     }
 
     fn set_indeterminate(&self, callback: Box<dyn Fn() -> String + Send + Sync + 'static>) {
-        assert!(!callback().is_empty());
+        assert_ne!(callback(), "");
     }
 
     fn println(&self, _msg: &str) {}

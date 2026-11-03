@@ -87,24 +87,35 @@ pub(crate) fn run(args: &CoverageGateArgs, collection: &CollectionArgs) -> Resul
         tools: &tools,
         quiet: args.quiet,
     };
-    let mut collected = Vec::with_capacity(configurations.len());
-    for configuration in configurations {
-        collected.push(collect_configuration(&execution, configuration)?);
-    }
-    let evaluation = filter_then_evaluate(&execution, &collected, |lcov_paths| {
-        crate::run::evaluate_filtered_paths(args, lcov_paths, &selection.gated_names(), Some(&effective_target.triple), |path| {
-            fs::read_to_string(path)
+    let evaluation = (|| {
+        let mut collected = Vec::with_capacity(configurations.len());
+        for configuration in configurations {
+            collected.push(collect_configuration(&execution, configuration)?);
+        }
+        filter_then_evaluate(&execution, &collected, |lcov_paths| {
+            crate::run::evaluate_filtered_paths(args, lcov_paths, &selection.gated_names(), Some(&effective_target.triple), |path| {
+                fs::read_to_string(path)
+            })
         })
-    });
-    complete_collection(evaluation, || coverage_scratch.cleanup())
+    })();
+    complete_collection(evaluation, coverage_scratch)
 }
 
 fn complete_collection(
     evaluation: Result<Result<ExitCode, AppError>, AppError>,
-    cleanup: impl FnOnce() -> Result<(), AppError>,
+    mut scratch: TemporaryDirectory,
 ) -> Result<ExitCode, AppError> {
-    let evaluation = evaluation?;
-    combine_evaluation_and_cleanup(evaluation, cleanup()).complete()
+    let result = match evaluation {
+        Ok(Ok(code)) if code != ExitCode::SUCCESS => Ok(code),
+        Ok(evaluation) => return combine_evaluation_and_cleanup(evaluation, scratch.cleanup()).complete(),
+        Err(error) => Err(error),
+    };
+    scratch.armed = false;
+    eprintln!(
+        "coverage-gate: retained failed coverage run at `{}`; inspect its raw profiles and reports, then remove this directory",
+        diagnostic_path(scratch.path())
+    );
+    result
 }
 
 fn filter_then_evaluate(
@@ -121,7 +132,7 @@ fn filter_then_evaluate_with(
     publish: impl FnOnce(&CollectionExecution<'_>, &[CollectedReport]) -> Result<Vec<PathBuf>, AppError>,
     evaluate: impl FnOnce(&[PathBuf]) -> Result<ExitCode, AppError>,
 ) -> Result<Result<ExitCode, AppError>, AppError> {
-    // Publication failures return before evaluation; gate failures still need explicit scratch cleanup.
+    // Publication failures return before evaluation; gate failures keep the published reports and raw evidence.
     let paths = publish(execution, collected)?;
     Ok(evaluate(&paths))
 }
@@ -702,6 +713,9 @@ fn nextest_command(execution: &CollectionExecution<'_>, configuration: FeatureCo
     let target_dir = configuration_target_dir(execution, configuration);
     let mut command = coverage_command(execution.workspace, &target_dir, execution.tools);
     command.args(["llvm-cov", "nextest", "--no-report"]);
+    // cargo-llvm-cov's wrapper misses flags inside Cargo's Windows response files.
+    #[cfg(windows)]
+    command.arg("--no-rustc-wrapper");
     // #[gamma::skip(call_result.default, reason = "append_package_selection returns unit; all arguments are still appended and () is replaced with ()")]
     append_package_selection(&mut command, execution.selection);
     // #[gamma::skip(call_result.default, reason = "append_nextest_options returns unit; all arguments are still appended and () is replaced with ()")]
@@ -928,9 +942,9 @@ fn parse_windows_command_line(command: &str) -> Result<Vec<String>, AppError> {
             matches!(chars.peek(), Some('"')) {
                 // #[gamma::skip(stmt.delete_call, tag = "timeout", reason = "the parser must consume the opening or escaped quote")]
                 chars.next();
-                let mut pairs = backslashes.as_bytes().chunks_exact(2);
-                argument.extend(pairs.by_ref().map(|_| '\\'));
-                if pairs.remainder().is_empty() {
+                let (pairs, remainder) = backslashes.as_bytes().as_chunks::<2>();
+                argument.extend(pairs.iter().map(|_| '\\'));
+                if remainder.is_empty() {
                     quoted = !quoted;
                 } else {
                     argument.push('"');
@@ -1342,7 +1356,7 @@ mod tests {
             &[],
             |execution, collected| {
                 filter_and_publish_reports_using(execution, collected, |raw, manifest| {
-                    assert!(raw.is_empty());
+                    assert_eq!(raw.len(), 0);
                     assert_eq!(manifest, Some(root.join("Cargo.toml").as_path()));
                     calls.set(calls.get() + 1);
                     Err(cargo_coverage_gate::evaluate_unfiltered_many_for_target(&[malformed], None, &[], None).unwrap_err())
@@ -1364,12 +1378,43 @@ mod tests {
     }
 
     #[test]
-    fn complete_collection_returns_publication_errors_without_evaluating_cleanup() {
-        let error = complete_collection(Err(app_error("publication failed")), || {
-            panic!("publication failures use the scratch owner's fallback cleanup")
-        })
-        .unwrap_err();
+    #[cfg_attr(miri, ignore = "uses temporary directories, which Miri isolation does not support")]
+    fn complete_collection_preserves_failed_collection_and_its_error() {
+        let parent = tempdir().expect("tempdir");
+        let scratch = TemporaryDirectory::create(parent.path()).expect("create owned scratch directory");
+        let path = scratch.path().to_path_buf();
+        let error = complete_collection(Err(app_error("publication failed")), scratch).unwrap_err();
         assert_eq!(error.to_string(), "publication failed");
+        assert!(path.is_dir(), "failed collection must remain available for diagnosis");
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "uses temporary directories, which Miri isolation does not support")]
+    fn complete_collection_preserves_gate_failure_evidence_and_exit_code() {
+        let parent = tempdir().expect("tempdir");
+        for code in [ExitCode::FAILURE, ExitCode::from(2)] {
+            let scratch = TemporaryDirectory::create(parent.path()).expect("create owned scratch directory");
+            let path = scratch.path().to_path_buf();
+            assert_eq!(complete_collection(Ok(Ok(code)), scratch).expect("preserve gate verdict"), code);
+            assert!(
+                path.is_dir(),
+                "failed gates must retain raw evidence before filtering and export can be compared"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "uses temporary directories, which Miri isolation does not support")]
+    fn complete_collection_cleans_up_after_success_or_evaluation_error() {
+        let parent = tempdir().expect("tempdir");
+        for evaluation in [Ok(ExitCode::SUCCESS), Err(app_error("evaluation failed"))] {
+            let scratch = TemporaryDirectory::create(parent.path()).expect("create owned scratch directory");
+            let path = scratch.path().to_path_buf();
+            let expected = evaluation.as_ref().map(|code| *code).map_err(ToString::to_string);
+            let actual = complete_collection(Ok(evaluation), scratch).map_err(|error| error.to_string());
+            assert_eq!(actual, expected);
+            assert!(!path.exists(), "completed collection must still clean up its scratch directory");
+        }
     }
 
     fn member(name: &str, version: &str) -> WorkspaceMember {
@@ -1958,7 +2003,7 @@ mod tests {
         let implicit = Selection { explicit: false, members };
 
         assert_eq!(explicit.gated_names(), ["alpha", "beta"]);
-        assert!(implicit.gated_names().is_empty());
+        assert_eq!(implicit.gated_names().len(), 0);
     }
 
     #[test]
@@ -2202,6 +2247,8 @@ mod tests {
                 "llvm-cov",
                 "nextest",
                 "--no-report",
+                #[cfg(windows)]
+                "--no-rustc-wrapper",
                 "--package",
                 "alpha@1.0.0",
                 "--all-features",

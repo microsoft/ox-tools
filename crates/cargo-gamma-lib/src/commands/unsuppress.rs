@@ -403,8 +403,8 @@ mod tests {
         assert!(failure.message().contains("removing the directives would leave"));
         assert!(failure.message().ends_with("lib.rs unparseable"));
         assert!(written.is_empty());
-        assert!(host.out.is_empty());
-        assert!(host.err.is_empty());
+        assert_eq!(host.out.len(), 0);
+        assert_eq!(host.err.len(), 0);
     }
 
     /// The first line of `source` marked for removal, as `sort_out` would have decided it.

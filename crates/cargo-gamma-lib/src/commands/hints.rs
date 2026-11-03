@@ -212,7 +212,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(exit, EXIT_OK);
-        assert!(host.out().is_empty());
+        assert_eq!(host.out().len(), 0);
         assert_eq!(
             host.err(),
             format!(
@@ -276,8 +276,8 @@ mod tests {
             Styler::new(false),
         );
         assert_eq!(result.unwrap_err().message(), format!("could not write `{}`", hints_path(root)));
-        assert!(host.out().is_empty());
-        assert!(host.err().is_empty());
+        assert_eq!(host.out().len(), 0);
+        assert_eq!(host.err().len(), 0);
     }
 
     #[cfg(all(feature = "system-tests", not(miri)))]
@@ -466,7 +466,7 @@ mod tests {
                     EXIT_OK
                 );
                 assert_eq!(host.err().trim_start(), expected);
-                assert!(host.out().is_empty());
+                assert_eq!(host.out().len(), 0);
                 assert_eq!(path.exists(), replace && !dry_run);
             }
             let (merged, _) = promotion_fixture(root, 'b', Some("deadbeefcafe"));

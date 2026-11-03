@@ -1336,7 +1336,7 @@ mod tests {
     fn an_artifact_with_no_executable_string_contributes_no_binary() {
         let stdout = r#"{"reason":"compiler-artifact","profile":{"test":true},"executable":null}"#;
 
-        assert!(test_binaries(stdout).is_empty());
+        assert_eq!(test_binaries(stdout).len(), 0);
     }
 
     #[test]
@@ -1698,7 +1698,7 @@ mod tests {
 
         apportion(&mut binaries, 1.2, Duration::from_secs(1), true);
 
-        assert!(binaries.is_empty());
+        assert_eq!(binaries.len(), 0);
     }
 
     /// A binary the graph says nothing about is admitted, because a missed optimization is cheap

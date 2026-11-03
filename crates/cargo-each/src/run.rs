@@ -631,11 +631,15 @@ fn add_infrastructure_failure(result: &mut InvocationResult, failure: String) {
 }
 
 fn command_for(invocation: &Invocation) -> Result<(&str, Command), String> {
+    command_for_with_path(invocation, std::env::var_os("PATH"))
+}
+
+fn command_for_with_path(invocation: &Invocation, path: Option<std::ffi::OsString>) -> Result<(&str, Command), String> {
     let Some((program, arguments)) = invocation.argv.split_first() else {
         return Err("internal command-plan error: invocation has an empty argument vector".to_owned());
     };
     let mut command = Command::new(program);
-    if let Some(path) = std::env::var_os("PATH") {
+    if let Some(path) = path {
         command.env("PATH", path);
     }
     command.args(arguments);
@@ -1052,13 +1056,13 @@ mod tests {
         Invocation, InvocationResult, OutputEmitError, PLAN_BUILD_CONTEXT, PROCESS_POLL_INTERVAL, Plan, RunningWorker,
         SELECTION_READ_CONTEXT, SNAPSHOT_EOF_MESSAGE, STDERR_STREAM, STDOUT_STREAM, SnapshotSource, TemporarySnapshot, TreeOutcome,
         WORKER_PANIC_TEST_PROGRAM, WORKER_READY_POLL_INTERVAL, WORKER_SPAWN_ERROR_TEST_PROGRAM, WORKSPACE_RUST_VERSION_CONTEXT,
-        add_infrastructure_failure, combine_captured_output, create_output_capture_with, display_arg, display_duration, display_invocation,
-        effective_worker_count, emit_buffered_to, emit_label_to, execute_parallel, execute_parallel_with, exit_byte,
-        failure_stops_launching, finish_capture, panic_description, parallel_failure_exit_code, parse_package_predicates,
-        parse_target_kinds, parse_target_predicates, record_emitted_failure, run, run_captured, run_captured_with, run_cargo_with,
-        run_streamed, run_streamed_group_control_with, run_streamed_with_timeout, run_streamed_with_timeout_with, shell_join, spawn_group,
-        spawn_worker, spawn_worker_with, terminate_child, terminate_group, validate_json_mode, wait_for_process, wait_for_process_with,
-        wait_for_worker, wait_for_worker_with, with_cleanup_failure,
+        add_infrastructure_failure, combine_captured_output, command_for_with_path, create_output_capture_with, display_arg,
+        display_duration, display_invocation, effective_worker_count, emit_buffered_to, emit_label_to, execute_parallel,
+        execute_parallel_with, exit_byte, failure_stops_launching, finish_capture, panic_description, parallel_failure_exit_code,
+        parse_package_predicates, parse_target_kinds, parse_target_predicates, record_emitted_failure, run, run_captured,
+        run_captured_with, run_cargo_with, run_streamed, run_streamed_group_control_with, run_streamed_with_timeout,
+        run_streamed_with_timeout_with, shell_join, spawn_group, spawn_worker, spawn_worker_with, terminate_child, terminate_group,
+        validate_json_mode, wait_for_process, wait_for_process_with, wait_for_worker, wait_for_worker_with, with_cleanup_failure,
     };
     use crate::cli::CargoCli;
     use crate::workspace::{Member, MemberTarget, Workspace};
@@ -1068,6 +1072,40 @@ mod tests {
         assert_eq!(display_arg("left\u{a0}right"), "\"left\\u{a0}right\"");
         assert_eq!(display_arg("\u{2003}"), "\"\\u{2003}\"");
         assert_eq!(display_arg("a b"), "\"a b\"");
+    }
+
+    #[test]
+    fn invocation_command_preserves_arguments_directory_and_absent_path() {
+        let mut planned = invocation(&["tool", "argument with spaces", ""]);
+        planned.work_dir = Some(PathBuf::from("member"));
+        let (program, command) = command_for_with_path(&planned, None).expect("a nonempty invocation is valid");
+        assert_eq!(program, "tool");
+        assert_eq!(command.get_args().collect::<Vec<_>>(), ["argument with spaces", ""]);
+        assert_eq!(command.get_current_dir(), Some(std::path::Path::new("member")));
+        assert_eq!(command.get_envs().count(), 0);
+        assert_eq!(
+            command_for_with_path(&invocation(&[]), None).expect_err("an empty command plan must fail"),
+            "internal command-plan error: invocation has an empty argument vector"
+        );
+    }
+
+    #[test]
+    #[cfg_attr(
+        all(miri, windows),
+        ignore = "constructing a Command environment calls an unsupported Windows API under miri"
+    )]
+    fn invocation_command_preserves_arguments_directory_and_explicit_path() {
+        let mut planned = invocation(&["tool", "argument with spaces", ""]);
+        planned.work_dir = Some(PathBuf::from("member"));
+        let (program, command) =
+            command_for_with_path(&planned, Some(std::ffi::OsString::from("custom-path"))).expect("a nonempty invocation is valid");
+        assert_eq!(program, "tool");
+        assert_eq!(command.get_args().collect::<Vec<_>>(), ["argument with spaces", ""]);
+        assert_eq!(command.get_current_dir(), Some(std::path::Path::new("member")));
+        assert_eq!(
+            command.get_envs().collect::<Vec<_>>(),
+            [(std::ffi::OsStr::new("PATH"), Some(std::ffi::OsStr::new("custom-path")))]
+        );
     }
 
     fn target_requirement_workspace() -> Workspace {
@@ -2356,7 +2394,7 @@ mod tests {
             };
             let mut stderr = Vec::new();
             emit_buffered_to(&invocation(&["probe"]), &mut diagnostic, &mut Vec::new(), &mut stderr).expect("memory output succeeds");
-            assert!(!stderr.is_empty());
+            assert_ne!(stderr.len(), 0);
         }
 
         for result in [
