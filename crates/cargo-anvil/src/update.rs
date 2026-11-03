@@ -90,7 +90,7 @@ pub struct UpdateOptions {
     pub force: bool,
 }
 
-/// Inspectable result without exposing engine implementation types.
+/// An update result without exposing engine implementation types.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct UpdateResult {

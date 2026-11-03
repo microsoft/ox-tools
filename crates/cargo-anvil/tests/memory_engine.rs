@@ -375,10 +375,19 @@ fn workspace_member_read_and_enumeration_failures_do_not_mutate() {
 
 #[test]
 fn invalid_manifests_and_ambiguous_casing_fail_without_mutation() {
-    for (path, content) in [
-        ("Cargo.toml", "not TOML"),
-        (".anvil.lock", "version = 999\n"),
-        (".anvil.lock", "version = 2\n[[file]]\npath = \"../escape\"\nchecksum = \"old\"\n"),
+    for (path, content, expected) in [
+        ("Cargo.toml", "not TOML", "failed to parse Cargo.toml as TOML"),
+        (".anvil.lock", "not valid manifest TOML", "failed to parse manifest at .anvil.lock"),
+        (
+            ".anvil.lock",
+            "version = 999\n",
+            "manifest schema version 999 is newer than supported",
+        ),
+        (
+            ".anvil.lock",
+            "version = 2\n[[file]]\npath = \"../escape\"\nchecksum = \"old\"\n",
+            "[[file]] entry '../escape' must be a relative path inside the repository",
+        ),
     ] {
         let mut io = repository();
         io.insert(path, content);

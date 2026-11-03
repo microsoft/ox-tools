@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::{env, io};
 
-use ohno::{AppError, app_err, bail};
+use ohno::{AppError, IntoAppError as _, app_err, bail};
 use tracing::info;
 
 use crate::anvil::artifacts;
@@ -118,10 +118,10 @@ fn update_with_backend_resolution(
         args,
         Path::new(""),
         |_| {
-            let manifest = shared
-                .borrow()
-                .read_file(Path::new(".anvil.lock"))?
-                .map_or_else(|| Ok(Manifest::default()), |text| Manifest::parse(&text))?;
+            let manifest = shared.borrow().read_file(Path::new(".anvil.lock"))?.map_or_else(
+                || Ok(Manifest::default()),
+                |text| Manifest::parse(&text).into_app_err("failed to parse manifest at .anvil.lock"),
+            )?;
             Ok((PathBuf::new(), manifest))
         },
         |root, manifest| {
