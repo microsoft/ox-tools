@@ -359,6 +359,10 @@ layout setting. Recheck this workaround when updating the pinned nightly.
 |-----------|-----------------------------------------------------------------------------|--------|
 | `bolero`  | Uses the catalog nightly and release profile consistently to discover targets one package at a time, then runs each affected libfuzzer target for 45 seconds on Linux. Discovery and execution use the catalog compiler's host target from `rustc --print host-tuple`. This avoids selecting the platform that built the installed cargo-bolero binary, such as musl on a GNU Linux host. Explicitly selecting `release` avoids cargo-bolero's implicit, adopter-defined `fuzz` profile and matches target execution. Adopters that disable `bolero`'s default features must enable its `std` feature for libfuzzer support. Per-package discovery is required because `cargo-bolero list` accepts only one `--package`; local whole-workspace runs enumerate workspace members before discovery. A successful empty discovery is a no-op; compiler target lookup, metadata, discovery, or parsing failure fails the check. Non-Linux hosts skip because cargo-bolero's native dependencies are unsupported there, while harnesses still run as ordinary tests. | oxidizer-github |
 
+On non-Linux hosts, the fuzzing group skips its setup and prerequisite validation,
+and Bolero skips before validating prerequisites or calculating impact. Other
+groups in `pr-slow` still perform their own setup and validation.
+
 GitHub creates only Linux x64 and Linux ARM64 jobs for this group. They depend
 only on `impact-linux`, consume its impact artifact, and contribute to the existing
 required-check aggregator. ADO creates a separate `pr_fuzzing` stage containing

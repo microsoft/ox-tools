@@ -113,12 +113,13 @@ stages:
           steps:
             - template: steps/pr-fast.yml
 
-  # The PR-tier slow checks are split into four independent stages
+  # The PR-tier slow checks are split into five independent stages
   # (pr_test, pr_msrv, pr_runtime_analysis, pr_fuzzing, pr_mutants) so they run in
   # parallel rather than sequentially in one job. Each stage owns its own
   # dependsOn link to
   # the impact stage and downloads the per-OS impact artifact. ADO has no
-  # hosted ARM agents, so the matrix stays Linux + Windows x86_64.
+  # hosted ARM agents, so the matrix stays Linux + Windows x86_64 except
+  # for pr_fuzzing, which runs on Linux only.
 
   - stage: pr_test
     displayName: anvil pr-test (tests + coverage)

@@ -33,15 +33,17 @@
 # Run Bolero tests for affected workspace packages.
 [group("anvil")]
 [script("pwsh", "-NoProfile")]
-anvil-bolero: anvil-bolero-validate-prereqs anvil-impact
+anvil-bolero:
     $ErrorActionPreference = 'Stop'
-    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
-    $impactExit = $LASTEXITCODE
-    if ($impactExit -ne 0) { exit $impactExit }
     if (-not $IsLinux) {
         Write-Host 'anvil-bolero: non-Linux host -- skipping (cargo-bolero/libfuzzer is Linux-only; harnesses still run under anvil-llvm-cov)'
         exit 0
     }
+    & "{{ just_executable() }}" anvil-bolero-validate-prereqs anvil-impact
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
+    $impactExit = $LASTEXITCODE
+    if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') {
         Write-Host 'anvil-bolero: no affected packages; skipping'
         exit 0

@@ -322,6 +322,14 @@ mod tests {
         GROUP_FILES.iter().map(|(_, b)| *b).collect::<Vec<_>>().join("\n")
     }
 
+    fn group_body(group: &str) -> &'static str {
+        let suffix = format!("/{group}.just");
+        GROUP_FILES
+            .iter()
+            .find_map(|(path, body)| path.ends_with(&suffix).then_some(*body))
+            .unwrap_or_else(|| panic!("test group '{group}' must be registered in GROUP_FILES"))
+    }
+
     fn defines_recipe(body: &str, recipe: &str) -> bool {
         body.lines().any(|line| {
             line.strip_prefix(recipe)
@@ -730,6 +738,11 @@ mod tests {
                 .filter(|line| !line.starts_with('#') && !line.chars().next().is_some_and(char::is_whitespace))
                 .filter_map(|line| line.split_once(':'))
                 .any(|(_, dependencies)| dependencies.split_whitespace().any(|dependency| dependency == "anvil-impact"));
+            let invokes_impact = execution_body.lines().any(|line| {
+                line.trim_start()
+                    .strip_prefix("& \"{{ just_executable() }}\" ")
+                    .is_some_and(|args| args.split_whitespace().any(|arg| arg == "anvil-impact"))
+            });
 
             match policy.category() {
                 None => {
@@ -738,7 +751,10 @@ mod tests {
                         !execution_body.contains("_anvil-impact-include") && !execution_body.contains("_anvil-impact-exclude"),
                         "{path} is declared Unscoped but calls _anvil-impact-include"
                     );
-                    assert!(!depends_on_impact, "{path} is declared Unscoped but depends on anvil-impact");
+                    assert!(
+                        !depends_on_impact && !invokes_impact,
+                        "{path} is declared Unscoped but runs anvil-impact"
+                    );
                 }
                 Some(category) => {
                     assert_eq!(
@@ -746,12 +762,12 @@ mod tests {
                         &[category],
                         "{path}: declared {policy:?} but its _anvil-impact-include category is {calls:?}"
                     );
-                    // A scoped check must depend on anvil-impact so the cache is
+                    // A scoped check must run anvil-impact so the cache is
                     // fresh, and capture the scope into a local $include -- no
                     // ANVIL_INCLUDE_* env-var indirection.
                     assert!(
-                        depends_on_impact,
-                        "{path} reads the impact cache but does not depend on anvil-impact"
+                        depends_on_impact || invokes_impact,
+                        "{path} reads the impact cache but does not run anvil-impact"
                     );
                     assert!(
                         execution_body.contains("$include = (& \"{{ just_executable() }}\" _anvil-impact-"),
@@ -880,50 +896,29 @@ mod tests {
 
     #[test]
     fn impact_scoped_groups_declare_cargo_delta_prereq() {
-        // Every PR group whose checks are impact-scoped depends (transitively,
-        // via each scoped check) on `anvil-impact`, which invokes cargo-delta
-        // when it (re)computes the impact set. The group's setup +
-        // validate-prereqs must therefore install / verify cargo-delta, so a
-        // missing tool fails fast at setup rather than mid-run. (pr-slow is an
-        // umbrella and inherits this via pr-test / pr-msrv /
-        // pr-runtime-analysis / pr-fuzzing / pr-mutants.) Scheduled groups force
-        // ANVIL_IMPACT=off and never
-        // recompute the impact set, so they deliberately do NOT depend on
-        // cargo-delta.
-        let groups = all_group_bodies();
-        for g in ["pr-fast", "pr-test", "pr-msrv", "pr-runtime-analysis", "pr-fuzzing", "pr-mutants"] {
+        for group in ["pr-fast", "pr-test", "pr-msrv", "pr-runtime-analysis", "pr-fuzzing", "pr-mutants"] {
+            let body = group_body(group);
             assert!(
-                groups.contains(&format!(
-                    "anvil-{g}-setup installer=\"install\": \\\n    (anvil-tool-cargo-delta-install installer)"
-                )),
-                "group {g} setup must install cargo-delta"
+                body.contains("anvil-tool-cargo-delta"),
+                "impact-scoped group '{group}' must require cargo-delta"
             );
-            assert!(
-                groups.contains(&format!(
-                    "anvil-{g}-validate-prereqs: \\\n    anvil-tool-cargo-delta-validate-prereqs"
-                )),
-                "group {g} validate-prereqs must verify cargo-delta"
-            );
+            if group == "pr-fuzzing" {
+                assert!(body.contains("-not $IsLinux"), "pr-fuzzing must skip on non-Linux hosts");
+            }
         }
-        // Scheduled groups force impact off and never recompute, so they must
-        // NOT carry cargo-delta as a prerequisite.
-        for g in [
+    }
+
+    #[test]
+    fn scheduled_groups_do_not_require_cargo_delta() {
+        for group in [
             "scheduled-test",
             "scheduled-advisories",
             "scheduled-runtime-analysis",
             "scheduled-exhaustive",
         ] {
             assert!(
-                !groups.contains(&format!(
-                    "anvil-{g}-setup installer=\"install\": \\\n    (anvil-tool-cargo-delta-install installer)"
-                )),
-                "scheduled group {g} must not install cargo-delta (it forces ANVIL_IMPACT=off and never recomputes)"
-            );
-            assert!(
-                !groups.contains(&format!(
-                    "anvil-{g}-validate-prereqs: \\\n    anvil-tool-cargo-delta-validate-prereqs"
-                )),
-                "scheduled group {g} must not verify cargo-delta (it forces ANVIL_IMPACT=off and never recomputes)"
+                !group_body(group).contains("anvil-tool-cargo-delta"),
+                "scheduled group '{group}' must not require cargo-delta because impact scoping is disabled"
             );
         }
     }

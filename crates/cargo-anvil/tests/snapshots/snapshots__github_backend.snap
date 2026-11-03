@@ -2412,15 +2412,17 @@ anvil-bench-validate-prereqs: anvil-tool-rustc-validate-prereqs
 # Run Bolero tests for affected workspace packages.
 [group("anvil")]
 [script("pwsh", "-NoProfile")]
-anvil-bolero: anvil-bolero-validate-prereqs anvil-impact
+anvil-bolero:
     $ErrorActionPreference = 'Stop'
-    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
-    $impactExit = $LASTEXITCODE
-    if ($impactExit -ne 0) { exit $impactExit }
     if (-not $IsLinux) {
         Write-Host 'anvil-bolero: non-Linux host -- skipping (cargo-bolero/libfuzzer is Linux-only; harnesses still run under anvil-llvm-cov)'
         exit 0
     }
+    & "{{ just_executable() }}" anvil-bolero-validate-prereqs anvil-impact
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
+    $impactExit = $LASTEXITCODE
+    if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') {
         Write-Host 'anvil-bolero: no affected packages; skipping'
         exit 0
@@ -6066,15 +6068,25 @@ anvil-pr-fuzzing: anvil-pr-fuzzing-validate-prereqs \
 
 # Install prerequisites for the `anvil-pr-fuzzing` recipe.
 [private]
-anvil-pr-fuzzing-setup installer="install": \
-    (anvil-tool-cargo-delta-install installer) \
-    (anvil-bolero-setup installer)
+[script("pwsh", "-NoProfile")]
+anvil-pr-fuzzing-setup installer="install":
+    if (-not $IsLinux) {
+        Write-Host 'anvil-pr-fuzzing-setup: non-Linux host -- skipping'
+        exit 0
+    }
+    & "{{ just_executable() }}" anvil-tool-cargo-delta-install '{{installer}}' anvil-bolero-setup '{{installer}}'
+    exit $LASTEXITCODE
 
 # Validate prerequisites for the `anvil-pr-fuzzing` recipe.
 [private]
-anvil-pr-fuzzing-validate-prereqs: \
-    anvil-tool-cargo-delta-validate-prereqs \
-    anvil-bolero-validate-prereqs
+[script("pwsh", "-NoProfile")]
+anvil-pr-fuzzing-validate-prereqs:
+    if (-not $IsLinux) {
+        Write-Host 'anvil-pr-fuzzing-validate-prereqs: non-Linux host -- skipping'
+        exit 0
+    }
+    & "{{ just_executable() }}" anvil-tool-cargo-delta-validate-prereqs anvil-bolero-validate-prereqs
+    exit $LASTEXITCODE
 
 === justfiles/anvil/groups/pr-msrv.just ===
 # Copyright (c) Microsoft Corporation.

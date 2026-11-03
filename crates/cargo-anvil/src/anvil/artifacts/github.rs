@@ -682,7 +682,7 @@ export -f just
     }
 
     #[test]
-    fn pr_fuzzing_runs_only_on_linux_and_gates_required_checks() {
+    fn pr_fuzzing_runs_only_on_linux() {
         let job = PR_IMPL_WORKFLOW
             .split_once("\n  pr-fuzzing:\n")
             .expect("the PR workflow declares the pr-fuzzing job")
@@ -697,7 +697,10 @@ export -f just
         assert!(job.contains("group: pr-fuzzing"));
         assert!(job.contains("name: anvil-impact-Linux"));
         assert!(job.contains("impact_mode: consume"));
+    }
 
+    #[test]
+    fn pr_fuzzing_contributes_to_required_checks() {
         let gate = PR_IMPL_WORKFLOW
             .split_once("\n  required-checks:\n")
             .expect("the PR workflow declares the required-checks job")

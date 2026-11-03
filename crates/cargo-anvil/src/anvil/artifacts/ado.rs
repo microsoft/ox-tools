@@ -592,7 +592,10 @@ mod tests {
         assert!(stage.contains("- template: steps/pr-fuzzing.yml"));
         assert!(!stage.contains("windows"));
         assert!(!stage.contains("pr_runtime_analysis"));
+    }
 
+    #[test]
+    fn pr_fuzzing_step_consumes_impact() {
         let step = render_group_step("pr-fuzzing");
         assert!(step.contains("group: pr-fuzzing"));
         assert!(step.contains("just anvil-pr-fuzzing"));
