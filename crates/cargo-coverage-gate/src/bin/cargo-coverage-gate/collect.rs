@@ -704,20 +704,21 @@ fn configuration_target_dir(execution: &CollectionExecution<'_>, configuration: 
 }
 
 fn run_nextest(execution: &CollectionExecution<'_>, configuration: FeatureConfiguration) -> Result<(), AppError> {
-    let mut command = nextest_command(execution, configuration);
+    let mut command = nextest_command(execution, configuration, cfg!(windows));
     if execution.quiet {
         command.stdout(Stdio::null());
     }
     run_status(&mut command, NEXTEST_DESCRIPTION)
 }
 
-fn nextest_command(execution: &CollectionExecution<'_>, configuration: FeatureConfiguration) -> Command {
+fn nextest_command(execution: &CollectionExecution<'_>, configuration: FeatureConfiguration, windows_host: bool) -> Command {
     let target_dir = configuration_target_dir(execution, configuration);
     let mut command = coverage_command(execution.workspace, &target_dir, execution.tools);
     command.args(["llvm-cov", "nextest", "--no-report"]);
     // cargo-llvm-cov's wrapper misses flags inside Cargo's Windows response files.
-    #[cfg(windows)]
-    command.arg("--no-rustc-wrapper");
+    if windows_host {
+        command.arg("--no-rustc-wrapper");
+    }
     // #[gamma::skip(call_result.default, reason = "append_package_selection returns unit; all arguments are still appended and () is replaced with ()")]
     append_package_selection(&mut command, execution.selection);
     // #[gamma::skip(call_result.default, reason = "append_nextest_options returns unit; all arguments are still appended and () is replaced with ()")]
@@ -766,7 +767,7 @@ enum ReportAction {
 }
 
 fn run_report(execution: &CollectionExecution<'_>, configuration: FeatureConfiguration, lcov_path: &Path) -> Result<(), AppError> {
-    let mut command = report_command(execution, configuration, lcov_path);
+    let mut command = report_command(execution, configuration, lcov_path, cfg!(windows));
     let display = command_display(&command);
     let output = command
         .stdout(Stdio::piped())
@@ -841,11 +842,17 @@ fn handle_report_output_with(
     )))
 }
 
-fn report_command(execution: &CollectionExecution<'_>, configuration: FeatureConfiguration, lcov_path: &Path) -> Command {
+fn report_command(
+    execution: &CollectionExecution<'_>,
+    configuration: FeatureConfiguration,
+    lcov_path: &Path,
+    windows_host: bool,
+) -> Command {
     let target_dir = configuration_target_dir(execution, configuration);
     let mut command = coverage_command(execution.workspace, &target_dir, execution.tools);
-    #[cfg(windows)]
-    command.env_remove("MSYSTEM");
+    if windows_host {
+        command.env_remove("MSYSTEM");
+    }
     command.args(["llvm-cov", "report", "--lcov", "--output-path"]).arg(lcov_path);
     // #[gamma::skip(call_result.default, reason = "append_package_selection returns unit; all arguments are still appended and () is replaced with ()")]
     append_package_selection(&mut command, execution.selection);
@@ -2074,9 +2081,18 @@ mod tests {
         .expect("duplicate-source metadata")
     }
 
-    fn assert_command_arguments(command: &Command, prefix: &[&str], selection: &[&str], suffix: &[&str]) {
-        let expected = prefix.iter().chain(selection).chain(suffix).map(OsStr::new).collect::<Vec<_>>();
-        assert_eq!(command.get_args().collect::<Vec<_>>(), expected);
+    fn assert_command_selection(command: &Command, selection: &[&str]) {
+        let mut arguments = command.get_args();
+        let mut actual = Vec::new();
+        while let Some(argument) = arguments.next() {
+            if argument == "--workspace" {
+                actual.push(argument);
+            } else if argument == "--package" {
+                actual.push(argument);
+                actual.push(arguments.next().expect("--package must have a package ID"));
+            }
+        }
+        assert_eq!(actual, selection.iter().map(OsStr::new).collect::<Vec<_>>());
     }
 
     #[test]
@@ -2130,27 +2146,13 @@ mod tests {
             };
             for configuration in normalized_configurations(&[]) {
                 let plain = plain_configuration_command(&workspace, &selection, &args, configuration, "test-target", &tools);
-                let instrumented = nextest_command(&execution, configuration);
-                let report = report_command(&execution, configuration, Path::new("lcov.info"));
-                let suffix = [
-                    configuration.cargo_flag(),
-                    "--locked",
-                    "--target",
-                    "test-target",
-                    "--jobs",
-                    "3",
-                    "--build-jobs",
-                    "3",
-                    "--no-tests=pass",
-                ];
-                assert_command_arguments(&plain, &["nextest", "run"], &expected, &suffix);
-                assert_command_arguments(&instrumented, &["llvm-cov", "nextest", "--no-report"], &expected, &suffix);
-                assert_command_arguments(
-                    &report,
-                    &["llvm-cov", "report", "--lcov", "--output-path", "lcov.info"],
-                    &expected,
-                    &["--target", "test-target"],
-                );
+                assert_command_selection(&plain, &expected);
+                for windows_host in [false, true] {
+                    let instrumented = nextest_command(&execution, configuration, windows_host);
+                    let report = report_command(&execution, configuration, Path::new("lcov.info"), windows_host);
+                    assert_command_selection(&instrumented, &expected);
+                    assert_command_selection(&report, &expected);
+                }
             }
         }
         let error = Selection::resolve(&workspace, &[registry.to_owned()]).expect_err("registry IDs are not workspace selectors");
@@ -2201,8 +2203,8 @@ mod tests {
             for configuration in normalized_configurations(&[]) {
                 for command in [
                     plain_configuration_command(&workspace, &selection, &args, configuration, "test-target", &tools),
-                    nextest_command(&execution, configuration),
-                    report_command(&execution, configuration, Path::new("lcov.info")),
+                    nextest_command(&execution, configuration, cfg!(windows)),
+                    report_command(&execution, configuration, Path::new("lcov.info"), cfg!(windows)),
                 ] {
                     let arguments = command.get_args().collect::<Vec<_>>();
                     let package = arguments
@@ -2418,57 +2420,65 @@ mod tests {
             tools: &tools,
             quiet: false,
         };
-        let nextest = nextest_command(&execution, FeatureConfiguration::AllFeatures);
-        assert_eq!(
-            nextest.get_args().collect::<Vec<_>>(),
-            [
-                "llvm-cov",
-                "nextest",
-                "--no-report",
-                #[cfg(windows)]
-                "--no-rustc-wrapper",
-                "--package",
-                "path+file:///repo/alpha#alpha@1.0.0",
-                "--all-features",
-                "--locked",
-                "--target",
-                "test-target",
-                "--jobs",
-                "3",
-                "--build-jobs",
-                "3",
-                "--no-tests=pass",
-            ]
-            .map(OsStr::new)
-        );
-        let env = nextest
-            .get_envs()
-            .map(|(key, value)| (key.to_owned(), value.map(OsStr::to_owned)))
-            .collect::<std::collections::BTreeMap<_, _>>();
-        let expected_target = PathBuf::from("coverage-target").join("all-features").into_os_string();
-        assert_eq!(env.get(OsStr::new("CARGO_TARGET_DIR")), Some(&Some(expected_target.clone())));
-        assert_eq!(
-            env.get(OsStr::new("CARGO_LLVM_COV_TARGET_DIR")),
-            Some(&Some(expected_target.clone()))
-        );
-        assert_eq!(env.get(OsStr::new("CARGO_LLVM_COV_BUILD_DIR")), Some(&Some(expected_target)));
+        for windows_host in [false, true] {
+            for configuration in normalized_configurations(&[]) {
+                let nextest = nextest_command(&execution, configuration, windows_host);
+                let mut expected = vec!["llvm-cov", "nextest", "--no-report"];
+                if windows_host {
+                    expected.push("--no-rustc-wrapper");
+                }
+                expected.extend([
+                    "--package",
+                    "path+file:///repo/alpha#alpha@1.0.0",
+                    configuration.cargo_flag(),
+                    "--locked",
+                    "--target",
+                    "test-target",
+                    "--jobs",
+                    "3",
+                    "--build-jobs",
+                    "3",
+                    "--no-tests=pass",
+                ]);
+                assert_eq!(
+                    nextest.get_args().collect::<Vec<_>>(),
+                    expected.iter().map(OsStr::new).collect::<Vec<_>>()
+                );
+                assert_eq!(nextest.get_program(), OsStr::new("cargo-custom"));
+                assert_eq!(nextest.get_current_dir(), Some(Path::new("repo")));
 
-        let report = report_command(&execution, FeatureConfiguration::NoDefaultFeatures, Path::new("coverage/lcov.info"));
-        assert_eq!(
-            report.get_args().collect::<Vec<_>>(),
-            [
-                "llvm-cov",
-                "report",
-                "--lcov",
-                "--output-path",
-                "coverage/lcov.info",
-                "--package",
-                "path+file:///repo/alpha#alpha@1.0.0",
-                "--target",
-                "test-target",
-            ]
-            .map(OsStr::new)
-        );
+                let report = report_command(&execution, configuration, Path::new("coverage/lcov.info"), windows_host);
+                assert_eq!(
+                    report.get_args().collect::<Vec<_>>(),
+                    [
+                        "llvm-cov",
+                        "report",
+                        "--lcov",
+                        "--output-path",
+                        "coverage/lcov.info",
+                        "--package",
+                        "path+file:///repo/alpha#alpha@1.0.0",
+                        "--target",
+                        "test-target",
+                    ]
+                    .map(OsStr::new)
+                );
+                assert_eq!(report.get_program(), OsStr::new("cargo-custom"));
+                assert_eq!(report.get_current_dir(), Some(Path::new("repo")));
+                for (command, removes_msystem) in [(&nextest, false), (&report, windows_host)] {
+                    let env = command
+                        .get_envs()
+                        .map(|(key, value)| (key.to_owned(), value.map(OsStr::to_owned)))
+                        .collect::<std::collections::BTreeMap<_, _>>();
+                    let expected_target = coverage_target_root.join(configuration.artifact_name()).into_os_string();
+                    for key in ["CARGO_TARGET_DIR", "CARGO_LLVM_COV_TARGET_DIR", "CARGO_LLVM_COV_BUILD_DIR"] {
+                        assert_eq!(env.get(OsStr::new(key)), Some(&Some(expected_target.clone())));
+                    }
+                    let expected_msystem = removes_msystem.then_some(&None);
+                    assert_eq!(env.get(OsStr::new("MSYSTEM")), expected_msystem);
+                }
+            }
+        }
     }
 
     #[test]

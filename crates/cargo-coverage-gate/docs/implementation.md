@@ -115,7 +115,7 @@ leaving errors and summary-file rendering intact.
 
 The package-selection regression uses fixed in-memory metadata containing local
 and registry copies of the same name/version, another selected member, and an
-omitted member. It checks the complete arguments emitted by the production
+omitted member. It checks package-selection arguments emitted by the production
 instrumented, plain-nextest, and report command builders for both feature
 configurations. Cases include individual members, overlapping selectors,
 subsets, and implicit/explicit full-workspace selections. Exact source IDs,
@@ -123,6 +123,15 @@ gated names, and rejection of registry-only selectors preserve the workspace
 boundary without modeling Cargo's resolver. This ordinary test starts no
 processes and creates no disk fixtures; installed Cargo, nextest, LLVM, and
 registry access are not prerequisites for its verdict.
+
+Instrumented and report command construction take an explicit Windows-host
+policy; only their native entry points select it with `cfg!(windows)`. It is
+the collector's host, not the requested compilation target, that controls the
+rustc-wrapper workaround and report-only `MSYSTEM` removal. Command-contract
+tests exercise both host policies on every test host, including exact arguments,
+private target directories, and environment removals for both feature modes.
+Package-selection tests exercise both policies too, but assert only their own
+selection contract so unrelated platform flags cannot invalidate them.
 
 ## Diagnostic pipeline
 
