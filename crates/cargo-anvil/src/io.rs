@@ -95,6 +95,61 @@ fn directory_entry_names(dir: &Path) -> Result<Option<Vec<String>>, AppError> {
     })
 }
 
+#[derive(Debug)]
+pub(crate) struct RepositoryIo<'a> {
+    pub root: &'a Path,
+}
+
+impl crate::UpdateIo for RepositoryIo<'_> {
+    fn read_file(&self, path: &Path) -> Result<Option<String>, AppError> {
+        read_file_if_present(&self.root.join(path))
+    }
+
+    fn read_directory(&self, path: &Path) -> Result<Option<Vec<crate::RepositoryEntry>>, AppError> {
+        let absolute = self.root.join(path);
+        let entries = match std::fs::read_dir(&absolute) {
+            Ok(entries) => entries,
+            Err(error) if matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) => {
+                return Ok(None);
+            }
+            Err(error) => return Err::<_, _>(error).into_app_err_with(|| format!("failed to read directory {}", absolute.display())),
+        };
+        let entries = entries
+            .map(|entry| {
+                let entry = entry?;
+                Ok(crate::RepositoryEntry::new(entry.file_name(), entry.path().is_dir()))
+            })
+            .collect::<std::io::Result<Vec<_>>>()
+            .into_app_err_with(|| format!("failed to enumerate directory {}", absolute.display()))?;
+        Ok(Some(entries))
+    }
+
+    fn write_file(&mut self, path: &Path, content: &str) -> Result<(), AppError> {
+        if path == Path::new(crate::manifest::MANIFEST_FILE_NAME) {
+            return crate::manifest::save_text(self.root, content);
+        }
+        let relative = path.to_string_lossy().replace('\\', "/");
+        let destination = crate::plan::contained_path(self.root, &relative)?;
+        crate::plan::write_file(&destination, content)
+    }
+
+    fn remove_file(&mut self, path: &Path) -> std::io::Result<()> {
+        let relative = path.to_string_lossy().replace('\\', "/");
+        let destination = crate::plan::contained_path(self.root, &relative).map_err(std::io::Error::other)?;
+        std::fs::remove_file(destination)
+    }
+}
+
+pub(crate) fn resolve_with_io(io: &dyn crate::UpdateIo, root: &Path, path: &str) -> Result<String, AppError> {
+    resolve_case_insensitive_with(root, path, |dir, name| {
+        find_entry_case_insensitive_with(dir, name, |dir| {
+            Ok(io
+                .read_directory(dir)?
+                .map(|entries| entries.into_iter().map(|entry| entry.name.to_string_lossy().into_owned()).collect()))
+        })
+    })
+}
+
 fn directory_entry_names_with<I: IntoIterator<Item = std::io::Result<String>>>(
     dir: &Path,
     read: impl FnOnce(&Path) -> std::io::Result<I>,
