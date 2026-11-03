@@ -481,6 +481,9 @@ by Cargo metadata, not just `name@version`: a published dependency can have the
 same name and version as a local member. The shared selection emitter uses these
 IDs for both feature configurations, report export, and plain nextest execution
 on no-coverage targets. No registry package is selected in place of a member.
+For compatibility with cargo-llvm-cov's package-name matching, the optional
+`path+` prefix is omitted when the member name is a prefix of its metadata ID
+(for example, `path`); the file URL and package fragment remain source-qualified.
 With no selection options, the collector passes `--workspace`.
 
 Feature configurations and concurrent invocations never share instrumented

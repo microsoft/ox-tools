@@ -715,7 +715,14 @@ fn nextest_command(execution: &CollectionExecution<'_>, configuration: FeatureCo
 fn append_package_selection(command: &mut Command, selection: &Selection) {
     if selection.explicit {
         for member in &selection.members {
-            command.arg("--package").arg(&member.id.repr);
+            let id = &member.id.repr;
+            // llvm-cov 0.9.0 checks package-name prefixes before parsing source-qualified IDs.
+            let spec = if id.starts_with(&member.name) {
+                id.strip_prefix("path+").unwrap_or(id)
+            } else {
+                id
+            };
+            command.arg("--package").arg(spec);
         }
     } else {
         command.arg("--workspace");
@@ -2106,6 +2113,61 @@ mod tests {
             error.to_string(),
             format!("`--package` selector `{registry}` did not match any workspace member")
         );
+    }
+
+    #[test]
+    #[cfg_attr(
+        all(miri, windows),
+        ignore = "constructing a Command environment calls an unsupported Windows API under miri"
+    )]
+    fn collection_selection_avoids_llvm_cov_package_name_prefix_collisions() {
+        for (name, expected) in [
+            ("p", "file:///repo/renamed#p@1.0.0"),
+            ("pa", "file:///repo/renamed#pa@1.0.0"),
+            ("pat", "file:///repo/renamed#pat@1.0.0"),
+            ("path", "file:///repo/path#1.0.0"),
+            ("f", "path+file:///repo/f#1.0.0"),
+            ("fi", "path+file:///repo/fi#1.0.0"),
+            ("fil", "path+file:///repo/fil#1.0.0"),
+            ("file", "path+file:///repo/file#1.0.0"),
+            ("pathology", "path+file:///repo/pathology#1.0.0"),
+        ] {
+            let mut workspace = workspace(Path::new("repo"));
+            let mut member = member(name, "1.0.0");
+            member.id.repr = format!("path+{}", expected.strip_prefix("path+").unwrap_or(expected));
+            workspace.members = vec![member];
+            let selection = Selection::resolve(&workspace, &[name.to_owned()]).expect("workspace member matches its own name");
+            assert_eq!(selection.gated_names(), [name]);
+            let args = collection_args();
+            let tools = ToolPrograms {
+                cargo: "cargo".into(),
+                rustc: "rustc".into(),
+            };
+            let execution = CollectionExecution {
+                workspace: &workspace,
+                selection: &selection,
+                args: &args,
+                scratch_dir: Path::new("scratch"),
+                coverage_target_root: Path::new("coverage-target"),
+                target: "test-target",
+                tools: &tools,
+                quiet: false,
+            };
+            for configuration in normalized_configurations(&[]) {
+                for command in [
+                    plain_configuration_command(&workspace, &selection, &args, configuration, "test-target", &tools),
+                    nextest_command(&execution, configuration),
+                    report_command(&execution, configuration, Path::new("lcov.info")),
+                ] {
+                    let arguments = command.get_args().collect::<Vec<_>>();
+                    let package = arguments
+                        .windows(2)
+                        .find(|pair| pair[0] == "--package")
+                        .expect("explicit package selection");
+                    assert_eq!(package[1], expected, "source-qualified selection for {name}");
+                }
+            }
+        }
     }
 
     #[test]

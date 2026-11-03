@@ -9,12 +9,17 @@ failure diagnostics. The user-visible behavior is defined by the
 The optional `run` mode keeps collection and evaluation separated internally:
 
 1. Cargo metadata resolves every repeated `--package` selector to a concrete
-   workspace member. Source-qualified IDs from metadata are passed unchanged
+   workspace member. Source-qualified IDs from metadata are passed
    through the shared package-selection emitter to collection and report tools,
    including plain nextest on no-coverage targets. This distinguishes local
    members from registry dependencies with identical names and versions without
-   reconstructing file URLs. Bare names are passed to the evaluator. With no
-   selectors, both collection and evaluation cover the workspace.
+   reconstructing file URLs. If a member's name is a prefix of its ID, the
+   emitter removes the optional `path+` source-kind prefix, retaining the file
+   URL and package fragment. This avoids cargo-llvm-cov 0.9.0's name-prefix
+   collision for members named `p`, `pa`, `pat`, or `path`; other IDs remain
+   unchanged, including those for members named `file`. Bare names are passed
+   to the evaluator. With no selectors, both collection and evaluation cover
+   the workspace.
 2. Collection uses the invoking environment's Cargo and rustc, honoring
    inherited `CARGO`, `RUSTC`, `RUSTUP_TOOLCHAIN`, `PATH`, and related
    variables, with the report-only Windows `MSYSTEM` exception described
