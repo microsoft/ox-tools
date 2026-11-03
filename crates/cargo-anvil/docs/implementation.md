@@ -80,6 +80,29 @@ The canonical recipe owns this mapping, baseline availability checks, and
 per-package execution. Focused contract tests cover every publication form,
 while generated copies and snapshots detect drift from the template.
 
+For the [locked snapshot contract](./design/checks.md#locked-semver-snapshots),
+the recipe creates a temporary local shared Git clone and checks out the
+resolved PR target commit. Sharing Git objects avoids copying the repository's
+history, while a separate checkout protects the original repository and its
+historical manifests. LFS smudging is disabled so the local origin need not
+provide LFS assets. A PowerShell `finally` block removes the clone even when
+snapshot generation or comparison fails.
+
+`Get-RustdocSnapshot` invokes `cargo rustdoc --locked --lib` separately for each
+revision, using that revision's source-qualified Cargo metadata package ID to
+avoid ambiguity with same-name dependencies. Both invocations use the current
+checkout's selected compiler and target, with separate target directories.
+`RUSTC_BOOTSTRAP=1` enables unstable rustdoc JSON output on that compiler,
+matching the checker's own generation path. Each revision supplies its own
+metadata feature list; defaults remain enabled and case-sensitive exclusions
+preserve the checker's feature-selection heuristic when using file inputs.
+
+Cargo JSON commands capture stdout separately from stderr so warnings do not
+corrupt metadata or target-configuration parsing. Successful commands replay
+stderr, and failed commands retain it in diagnostics. Snapshot generation
+removes any previous JSON artifact before building so a stale file cannot turn
+a failed or incomplete build into an apparently successful comparison.
+
 ## Stable toolchain selection and setup
 
 The stable selector has two canonical implementation sites because it must run

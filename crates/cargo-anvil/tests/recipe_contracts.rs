@@ -2471,25 +2471,28 @@ fn semver_exit_code_contract_is_executed() {
         "exit 100 should be advisory:\n{}",
         String::from_utf8_lossy(&findings.stderr)
     );
-    assert!(tmp.path().join("target/anvil/comments/semver.md").is_file());
     let findings_comment = fs::read_to_string(tmp.path().join("target/anvil/comments/semver.md")).unwrap();
-    assert!(findings_comment.contains("Potential breaking changes"));
-    assert!(findings_comment.contains("breaking change"));
+    assert!(findings_comment.contains("Potential breaking changes") && findings_comment.contains("breaking change"));
     let calls = fs::read_to_string(&log).unwrap();
-    assert_eq!(
-        calls
-            .lines()
-            .filter(|line| line.starts_with("rustdoc --locked --lib"))
-            .map(|line| line
-                .split_once(" --features ")
-                .expect("both metadata fixtures declare public features")
-                .1)
-            .collect::<Vec<_>>(),
-        [
-            "default,std,serde,Unstable-visible,Nightly,current-api -- -Z unstable-options --output-format=json --document-private-items --document-hidden-items --cap-lints=allow",
-            "default,std,serde,Unstable-visible,baseline-api -- -Z unstable-options --output-format=json --document-private-items --document-hidden-items --cap-lints=allow",
-        ],
-        "each revision must enable its own public features and exclude only the upstream heuristic names"
+    let rustdoc_calls = calls.lines().filter(|line| line.starts_with("rustdoc --locked --lib"));
+    assert_eq!(rustdoc_calls.clone().count(), 2, "expected two snapshots:\n{calls}");
+    assert!(
+        rustdoc_calls
+            .zip([
+                "default,std,serde,Unstable-visible,Nightly,current-api",
+                "default,std,serde,Unstable-visible,baseline-api",
+            ])
+            .all(|(line, expected)| {
+                line.strip_suffix(
+                    " -- -Z unstable-options --output-format=json --document-private-items --document-hidden-items --cap-lints=allow",
+                )
+                .and_then(|args| args.split_once(" --features "))
+                .is_some_and(|(_, features)| {
+                    features.split(',').count() == expected.split(',').count()
+                        && expected.split(',').all(|name| features.split(',').any(|feature| feature == name))
+                })
+            }),
+        "each revision must enable its own public feature set and use the required rustdoc options:\n{calls}"
     );
     assert!(calls.contains("semver-checks --package fixture --current-rustdoc"));
     assert!(calls.contains("--baseline-rustdoc"));
@@ -2539,8 +2542,7 @@ fn semver_exit_code_contract_is_executed() {
     assert!(build_failure.status.success(), "locked build failures remain advisory");
     let comment = fs::read_to_string(tmp.path().join("target/anvil/comments/semver.md")).unwrap();
     assert!(comment.contains("Inconclusive comparisons"));
-    assert!(comment.contains("current rustdoc (exit 101)"));
-    assert!(comment.contains("locked rustdoc build failed"));
+    assert!(comment.contains("current rustdoc (exit 101)") && comment.contains("locked rustdoc build failed"));
     assert_semver_git_calls(tmp.path(), "Cargo.toml", 6);
 }
 
