@@ -111,7 +111,8 @@ pub(crate) fn load_workspace_with_io(io: &dyn crate::UpdateIo) -> Result<Workspa
                     let mut paths = Vec::new();
                     for entry in io.read_directory(parent)?.unwrap_or_default() {
                         let path = parent.join(entry.name);
-                        if entry.is_directory && io.read_file(&path.join("Cargo.toml"))?.is_some() {
+                        let manifest = path.join("Cargo.toml");
+                        if entry.is_directory && io.read_directory(&manifest)?.is_none() && io.read_file(&manifest)?.is_some() {
                             paths.push(path);
                         }
                     }

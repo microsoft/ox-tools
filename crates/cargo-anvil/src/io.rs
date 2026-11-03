@@ -117,7 +117,9 @@ impl crate::UpdateIo for RepositoryIo<'_> {
         let entries = entries
             .map(|entry| {
                 let entry = entry?;
-                Ok(crate::RepositoryEntry::new(entry.file_name(), entry.path().is_dir()))
+                let file_type = entry.file_type()?;
+                let is_directory = file_type.is_dir() || (file_type.is_symlink() && entry.path().is_dir());
+                Ok(crate::RepositoryEntry::new(entry.file_name(), is_directory))
             })
             .collect::<std::io::Result<Vec<_>>>()
             .into_app_err_with(|| format!("failed to enumerate directory {}", absolute.display()))?;

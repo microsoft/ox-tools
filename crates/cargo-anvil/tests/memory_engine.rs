@@ -192,6 +192,7 @@ fn full_catalog_workspace_discovery_and_case_resolution_use_memory() {
     );
     io.insert("crates/alpha/Cargo.toml", "[package]\nname = \"alpha\"\nversion = \"0.1.0\"\n");
     io.insert("crates/not-a-crate/notes.txt", "not a member");
+    io.insert("crates/manifest-directory/Cargo.toml/notes.txt", "not a manifest");
     io.insert("crates/README.txt", "not a directory");
     io.insert("extras", "not a directory either");
     io.insert("justfile", "host:\n    @echo host\n");
@@ -200,6 +201,7 @@ fn full_catalog_workspace_discovery_and_case_resolution_use_memory() {
     assert!(io.files["justfile"].starts_with("host:\n    @echo host\n"));
     assert!(!io.files.contains_key("Justfile"));
     assert!(io.files["crates/alpha/Cargo.toml"].contains("workspace = true"));
+    assert_eq!(io.files["crates/manifest-directory/Cargo.toml/notes.txt"], "not a manifest");
     assert!(update(&Catalog::anvil(), &UpdateOptions::default(), &mut io).unwrap().in_sync);
 }
 
