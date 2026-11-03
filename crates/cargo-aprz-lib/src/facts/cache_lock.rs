@@ -24,7 +24,6 @@ impl Drop for CacheLockGuard {
     // Releasing an advisory lock on a file handle we own cannot fail short of the
     // operating system misbehaving, so the failure arm is unreachable in a test.
     #[cfg_attr(coverage_nightly, coverage(off))]
-    #[mutants::skip] // Dropping the owned file closes it and releases the lock even if this explicit unlock is removed.
     // #[gamma::skip(fn_value.unit, tag = "equivalent", reason = "dropping the owned file handle releases the advisory lock even when the explicit unlock body is replaced with unit")]
     fn drop(&mut self) {
         // Lock is automatically released when the file is closed

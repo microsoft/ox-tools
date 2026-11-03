@@ -135,7 +135,7 @@ recipe that invokes those groups sequentially.
 | `scheduled-test`       | Same default as `pr-test` | Re-runs the test suite on `main` (with coverage instrumentation) to catch flakes/environment-dependent failures and to publish a full coverage snapshot of the current `main`. |
 | `scheduled-advisories` | Same default as `pr-fast` | Runs checks whose outcome can change without a commit to this repo: `deny`, `audit`, `aprz` (external databases), `clippy` (lint set evolves with toolchain). Cross-OS because clippy compiles per host. |
 | `scheduled-runtime-analysis` | Same default as `pr-runtime-analysis` | Whole-workspace runtime correctness under `miri`, tree-borrows, strict-provenance, and race-coverage. One job per OS leg runs the four profiles sequentially so they share setup and cache state; parallelism is across OS legs. |
-| `scheduled-exhaustive` | Linux x86_64 + Windows x86_64 | Full `cargo mutants`, cargo-hack feature powerset, and benchmark compilation. The default matrix is x86-only because cargo-mutants is unsupported on Windows ARM. |
+| `scheduled-exhaustive` | Linux x86_64 + Windows x86_64 | Full `cargo gamma`, cargo-hack feature powerset, and benchmark compilation. The existing x86-only schedule bounds recurring cost. |
 
 **Backend asymmetry on ARM coverage.** The GitHub backend ships a four-leg default matrix
 (Linux/Windows × x86_64/aarch64) because GH has Microsoft-hosted ARM runners
@@ -192,8 +192,53 @@ while paired prerequisite validation remains read-only.
 | `deny`                         | `cargo deny check`                                        | all |
 | `audit`                        | `cargo audit`                                             | oxidizer |
 | `udeps`                        | `cargo +<pinned-nightly> udeps --workspace --all-features` run **twice** — once with default targets (lib + bins) and once with `--all-targets`. cargo-udeps only analyzes the targets it's told to, and each run catches a variant the other masks: the default-targets run surfaces a dep in `[dependencies]` referenced only by tests/benches/examples (it should be a dev-dep; `--all-targets` would see it as "used"), while the `--all-targets` run surfaces unused `[dev-dependencies]` (never compiled by the default-targets run). Together they cover unused deps, unused dev-deps, and deps that should be dev-deps. | oxidizer, oxidizer-github |
-| `semver-check`                 | `cargo semver-checks --baseline-rev <baseline>` per affected publishable library crate. Crates with `publish = false` and bin-only crates are skipped. The PR target is the baseline. Exit 100 is a completed check with deny-level findings; exit 101 or another nonzero status means the comparison was inconclusive. Both outcomes write `target/anvil/comments/semver.md` and remain advisory, matching the repository's native `semver` job (`continue-on-error: true`). Proven rename and bin→lib transitions with no comparable baseline, and dependencies proven to be yanked only in the checked-out baseline tree, are skipped without a comment. Anvil preflight failures such as invalid current-workspace metadata or an unavailable baseline ref still fail because the recipe cannot establish what to compare. | oxidizer-github |
+| `semver-check`                 | Generate current and PR-target rustdoc JSON with `cargo rustdoc --locked --lib`, then compare with `cargo semver-checks --current-rustdoc <current.json> --baseline-rustdoc <baseline.json>` per affected publishable library crate. Each revision uses its own lockfile with the same compiler and target. Crates with `publish = false`, bin-only crates, and new/moved/renamed crates or bin-to-library transitions without a comparable baseline are skipped. Exit 100 is a completed check with deny-level findings; build failures and other nonzero checker statuses are inconclusive. Both outcomes write `target/anvil/comments/semver.md` and remain advisory. Invalid current metadata or an unavailable baseline ref still fail preflight. | oxidizer-github |
 | `external-types`               | `cargo each <affected packages> --filter lib --keep-going -- cargo +<catalog-nightly-rustdoc-schema> check-external-types --manifest-path {manifest}` (per-manifest because the tool has no `--workspace`/`--package`; bin-only crates have no public API surface and are filtered out). Setup installs the catalog version but validation accepts newer installed tools. The selected nightly is tested with the catalog version; an incompatible newer tool fails closed with a tool/nightly compatibility diagnostic rather than silently selecting a different schema. | oxidizer-github |
+
+#### Locked SemVer snapshots
+
+The comparison measures the API built by each revision's checked-in dependency
+graph. It does not resolve historical manifests against today's registry:
+`cargo-semver-checks --baseline-rev` builds a separate consumer workspace and
+updates its dependencies, so a newly published incompatible transitive dependency
+can otherwise prevent a previously buildable baseline from being compared.
+
+Anvil makes one temporary, local shared Git clone, checks out the resolved PR
+target commit, and removes that clone in `finally`. LFS smudging is disabled for
+that checkout: it uses the committed pointers rather than fetching assets from
+the local origin. The original repository and historical manifests are not
+modified. Both snapshots use the current checkout's selected stable compiler,
+overriding any obsolete baseline toolchain selection.
+The current Cargo build target is used for both arms; an unset target selects the
+compiler's host. A multi-target configuration must select one target with
+`CARGO_BUILD_TARGET`. Build artifacts live under `target/anvil/semver/`, separately
+for current and baseline, irrespective of an inherited `CARGO_TARGET_DIR`.
+
+Each package is built separately using its source-qualified metadata ID. Default
+features remain enabled, and feature selection retains the checker's heuristic:
+enable declared and implicit optional-dependency features except `unstable`,
+`nightly`, `bench`, `no_std`, and names beginning with `_`, `unstable-`, or
+`unstable_`. Each revision supplies its own feature list. Rustdoc includes hidden
+and private items, as required by the checker, and the unstable JSON output uses
+`RUSTC_BOOTSTRAP=1`, matching the checker's own generation path. The file-input
+checker uses its built-in lint policy rather than Cargo metadata lint overrides;
+Anvil warns if such overrides are present.
+
+Cargo JSON commands parse stdout separately from stderr. Warnings remain visible
+without invalidating valid metadata or target configuration, and stderr is
+retained in failure diagnostics.
+
+The lockfiles must be present and usable; a missing or stale lockfile is never
+replaced by fresh resolution. A failed build, missing JSON artifact, or failed
+comparison is reported as inconclusive, not clean. Package absence, renames, and
+library-target absence are established from baseline metadata rather than
+matching compiler-error strings. A genuinely unusable baseline dependency is
+also inconclusive; yanked versions still present in a usable lockfile can build
+without being reselected.
+
+The graphs may legitimately differ between revisions. Dependency-induced API
+changes can therefore appear in the advisory alongside source changes; this is
+intentional, unlike comparing both sources against a newly resolved graph.
 
 #### Package-isolated all-target compilation
 
@@ -323,7 +368,7 @@ coverage tradeoff beside the test.
 
 | Check     | Invocation                                                                  | Source |
 |-----------|-----------------------------------------------------------------------------|--------|
-| `mutants` | Resolves the base ref, writes `git diff <base>` against the working tree to a temporary unified-diff file, then runs `cargo mutants --in-diff <file> --no-shuffle --jobs 0`. Self-skips on aarch64-pc-windows-msvc where cargo-mutants doesn't build; other ARM legs run normally. | oxidizer-github |
+| `mutants` | Resolves the base ref, writes `git diff <base>` against the working tree to a temporary unified-diff file, then runs `cargo gamma run --workspace --in-diff <file> --min-score 100 --max-flaky 0`. GitHub Actions pins `--artifact-dir target/cargo-gamma` for report uploads. Empty impact scopes skip; supported ARM hosts execute the campaign. | cargo-gamma |
 
 The mutants check requires a base ref: locally the recipe resolves `BASE_REF` (if set), then `origin/main`, then `origin/master`, then errors out. GitHub passes `${{ github.event.pull_request.base.sha }}` as `BASE_REF`; on ADO the shared resolver reads `$(System.PullRequest.TargetBranch)` from the environment.
 
@@ -332,17 +377,20 @@ Each invocation reserves its own uniquely named diff file in `RUNNER_TEMP`,
 The working-tree diff explicitly requests `a/` and `b/` prefixes, independent
 of Git's mnemonic or no-prefix configuration. A `finally` block removes the
 file after success or failure. Git failures prevent mutation testing, and
-Git/cargo-mutants exit codes and launch errors survive cleanup failures.
+Git/Gamma exit codes and launch errors survive cleanup failures.
 Cleanup failures are fatal only after the main operation completes successfully;
 otherwise they are reported without replacing the primary failure.
 
-Both mutation recipes select `.cargo/mutants.<os>.toml` when it exists, using
-Just's native host OS name, and pass it through cargo-mutants' `--config` option.
-Otherwise they retain cargo-mutants' default configuration discovery. These are
-complete native configurations, not overlays or Cargo metadata. See
-[the rationale and configuration contract](./local.md#9-platform-specific-mutation-configuration):
-cargo-mutants can mutate source that the current platform compiles out, producing
-false `MISSED` results because no behavioral change reaches the tests.
+Both mutation recipes use Gamma's native `gamma.toml` configuration and defaults.
+The full recipe omits `--in-diff`; both enforce a 100% assertion-killed score
+and zero unresolved flaky outcomes, and propagate native exit codes. See
+[the configuration and migration contract](./local.md#9-mutation-testing-with-cargo-gamma).
+After either campaign returns, even unsuccessfully, the recipe runs
+`cargo gamma hints` to merge its learned hints. Campaign failures retain their
+exit code; hint-promotion failures fail an otherwise successful campaign recipe.
+GitHub mutation jobs preserve the reports and resulting hints as 30-day workflow
+artifacts and publish SARIF to code scanning, including after campaign failure.
+See [Gamma reports and code scanning](./github.md#gamma-reports-and-code-scanning).
 
 ### `scheduled-test`
 
@@ -404,7 +452,7 @@ The `miri` row above is the one place the catalog deliberately duplicates a chec
 
 | Check                 | Invocation                                                                                                   | Source |
 |-----------------------|--------------------------------------------------------------------------------------------------------------|--------|
-| `mutants-full`        | `cargo mutants --workspace --no-shuffle --jobs 0`                                                            | oxidizer-github, oxidizer (sharded cross-OS) |
+| `mutants-full`        | `cargo gamma run --workspace --min-score 100 --max-flaky 0`, followed by `cargo gamma hints`                    | cargo-gamma |
 | `cargo-hack` powerset | `cargo hack --workspace --feature-powerset --depth 2 check`                                                  | oxidizer, oxidizer-github |
 | `bench`               | `cargo bench --workspace --all-features --no-run`; benchmark execution is intentionally outside the catalog because runtime requirements are repository-specific | oxidizer |
 
@@ -573,15 +621,15 @@ commits are normal, and forcing every breaking-API PR to bump the major version 
 on a release) would push enforcement to the wrong moment in the lifecycle. The change is
 verifiable at release time, not per PR.
 
-The SemVer comparison is also inconclusive when `cargo-semver-checks` cannot materialize
-or build the target-branch baseline, for example because that baseline resolves a yanked
-dependency. Such an operational failure is reported in the same advisory comment and does
+The SemVer comparison is also inconclusive when a locked rustdoc build or
+`cargo-semver-checks` comparison cannot complete, for example because a historical
+lockfile is unusable. Such an operational failure is reported in the same advisory comment and does
 not block the PR: a broken baseline is not evidence that the PR broke the public API, and
 blocking would prevent the PR that repairs the baseline from merging. This deliberately
 matches the repository's native `semver` job, whose comparison step uses
-`continue-on-error: true`. Failures in Anvil's own preflight (before invoking
-`cargo-semver-checks`) remain enforcing because they indicate that the recipe cannot
-identify the current packages or requested baseline.
+`continue-on-error: true`. Failures in Anvil's own preflight remain enforcing
+because they indicate that the recipe cannot identify the current packages,
+compiler, build target, or requested baseline.
 
 To carry this signal without making the recipe non-zero, anvil uses a single shared
 convention:

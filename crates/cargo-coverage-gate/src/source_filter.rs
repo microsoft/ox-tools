@@ -307,6 +307,7 @@ impl SourceIndex {
             };
             let declarations = source_declarations(&pending.resolution_path, &analysis, pending.role, &pending.guard, &test_attributes)?;
             let released_path = released_source_attributed_path(&member_dirs, &pending)?;
+            // #[gamma::skip(cond.always_true, reason = "Without a released path this set is never read: conservative filtering uses analysis.test_only_lines, and the first released visit replaces it.", tag = "equivalent")]
             let test_only_lines = if released_path.is_some() {
                 test_only_lines_for_guard(&analysis, &pending.guard, &test_attributes)
             } else {
@@ -353,10 +354,21 @@ impl SourceIndex {
     }
 
     fn index_reported_member_sources(&mut self, reports: &[lcov::Report], metadata: &Metadata) -> Result<(), CoverageGateError> {
+        self.index_reported_member_sources_with_reader(reports, metadata, &mut resolve_source_path, &mut |path| fs::read_to_string(path))
+    }
+
+    /// Shares reported-source ownership checks with controllable path resolution and source reads.
+    fn index_reported_member_sources_with_reader(
+        &mut self,
+        reports: &[lcov::Report],
+        metadata: &Metadata,
+        resolve_source: &mut impl FnMut(&Path) -> Result<PathBuf, CoverageGateError>,
+        read_source: &mut impl FnMut(&Path) -> std::io::Result<String>,
+    ) -> Result<(), CoverageGateError> {
         let test_attributes = configured_test_attributes(metadata)?;
         for report in reports {
             for key in report.sections.keys() {
-                let (canonical, source) = self.source_for_lcov(&key.source_file)?;
+                let (canonical, source) = self.source_for_lcov_with_resolver(&key.source_file, &mut *resolve_source)?;
                 if source.is_some() {
                     continue;
                 }
@@ -378,7 +390,7 @@ impl SourceIndex {
                     })
                     .expect("member directories originate from the same Cargo metadata snapshot");
                 let edition = measured_member_edition(package, &canonical)?;
-                let analysis = analyze_source(&canonical, edition, &test_attributes)?;
+                let analysis = analyze_source_with_reader(&canonical, edition, &test_attributes, read_source)?;
                 let _ = self.uncertain_sources.insert(canonical.clone());
                 let _ = self.files.insert(
                     canonical,
@@ -442,6 +454,7 @@ impl SourceIndex {
         .map(Some)
     }
 
+    #[cfg(test)]
     fn source_for_lcov(&self, path: &Path) -> Result<(PathBuf, Option<&IndexedSource>), CoverageGateError> {
         self.source_for_lcov_with_resolver(path, resolve_source_path)
     }
@@ -505,8 +518,11 @@ impl SourceIndex {
 
 fn measured_member_edition(package: &cargo_metadata::Package, source: &Path) -> Result<Edition, CoverageGateError> {
     let mut editions = package.targets.iter().map(|target| syntax_edition(target.edition, source));
-    let first = editions.next().unwrap_or_else(|| syntax_edition(package.edition, source))?;
+    let first =
+    // #[gamma::skip(try.propagate_to_unwrap, reason = "syntax_edition succeeds for every constructible cargo_metadata edition; only a future dependency variant can fail here.", tag = "equivalent")]
+    editions.next().unwrap_or_else(|| syntax_edition(package.edition, source))?;
     for edition in editions {
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "syntax_edition succeeds for every constructible cargo_metadata edition; only a future dependency variant can fail here.", tag = "equivalent")]
         let edition = edition?;
         if first != edition {
             return Err(ConflictingSourceEditionError::new(diagnostic_path(source), format!("{first:?}"), format!("{edition:?}")).into());
@@ -731,10 +747,6 @@ fn diagnostic_path(path: &Path) -> String {
 
 fn resolve_source_path(path: &Path) -> Result<PathBuf, CoverageGateError> {
     fs::canonicalize(path).map_err(|error| ResolveCoverageSourceError::caused_by(diagnostic_path(path), error).into())
-}
-
-fn analyze_source(path: &Path, edition: Edition, test_attributes: &BTreeSet<String>) -> Result<SourceAnalysis, CoverageGateError> {
-    analyze_source_with_reader(path, edition, test_attributes, &mut |path| fs::read_to_string(path))
 }
 
 fn analyze_source_with_reader(
@@ -1602,8 +1614,19 @@ fn filter_report(
     provenance_witness: Option<&Path>,
     is_compiler_source: &mut impl FnMut(&Path) -> Result<bool, CoverageGateError>,
 ) -> Result<String, CoverageGateError> {
+    filter_report_with_source_resolver(report, sources, provenance_witness, is_compiler_source, resolve_source_path)
+}
+
+/// Classifies real indexed ownership using a controllable LCOV path resolver.
+fn filter_report_with_source_resolver(
+    report: lcov::Report,
+    sources: &SourceIndex,
+    provenance_witness: Option<&Path>,
+    is_compiler_source: &mut impl FnMut(&Path) -> Result<bool, CoverageGateError>,
+    mut resolve_source: impl FnMut(&Path) -> Result<PathBuf, CoverageGateError>,
+) -> Result<String, CoverageGateError> {
     filter_report_with(report, provenance_witness, |path| {
-        let (canonical, source) = sources.source_for_lcov(path)?;
+        let (canonical, source) = sources.source_for_lcov_with_resolver(path, &mut resolve_source)?;
         let Some(source) = source else {
             if attributed_path(&sources.member_dirs, &canonical).is_none() && is_compiler_source(&canonical)? {
                 return Ok(SourceDisposition::CompilerLibrary);
@@ -1738,6 +1761,7 @@ fn filter_reports_with_compiler_loader(
     let mut sources = SourceIndex::from_metadata(metadata)?;
     sources.index_reported_member_sources(&reports, metadata)?;
     // A measured graph-gap source must survive even when all its counters are test-only.
+    // #[gamma::skip(try.propagate_to_unwrap, reason = "Empty-visit entries are inserted only for measured sources beneath a member directory; retained_source_path therefore succeeds through attributed_path.", tag = "equivalent")]
     let provenance_witness = sources
         .files
         .iter()
@@ -1770,25 +1794,29 @@ fn filter_reports_with_compiler_loader(
 // Only the real process boundary is excluded; command construction and output
 // validation are exercised through the injected helpers below.
 #[cfg_attr(coverage_nightly, coverage(off))]
-#[mutants::skip]
+// #[gamma::skip(fn_value.ok, reason = "This native adapter launches the selected compiler; command construction and every output/error decision are tested in compiler_library_with and compiler_query_output without subprocesses.", tag = "native")]
 fn discover_compiler_library(workspace_root: &Path) -> Result<Option<PathBuf>, CoverageGateError> {
     compiler_library_with(
         workspace_root,
         |name| env::var_os(name),
         |command| {
             let operation = format!("{} --print sysroot", diagnostic_path(Path::new(command.get_program())));
-            let output = command.output().map_err(|error| {
-                CompilerSourceDiscoveryError::caused_by(operation.clone(), "compiler query could not be executed".to_owned(), error)
-            })?;
-            compiler_sysroot_output(
-                &operation,
-                output.status.success(),
-                &output.status.to_string(),
-                &output.stdout,
-                &output.stderr,
-            )
+            compiler_query_output(&operation, command.output())
         },
         canonical_compiler_library,
+    )
+}
+
+fn compiler_query_output(operation: &str, output: std::io::Result<std::process::Output>) -> Result<PathBuf, CoverageGateError> {
+    let output = output.map_err(|error| {
+        CompilerSourceDiscoveryError::caused_by(operation.to_owned(), "compiler query could not be executed".to_owned(), error)
+    })?;
+    compiler_sysroot_output(
+        operation,
+        output.status.success(),
+        &output.status.to_string(),
+        &output.stdout,
+        &output.stderr,
     )
 }
 
@@ -1903,6 +1931,11 @@ fn parse_report(input: &str) -> Result<lcov::Report, CoverageGateError> {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::fmt::Write as _;
+    #[cfg(unix)]
+    use std::os::unix::process::ExitStatusExt as _;
+    #[cfg(windows)]
+    use std::os::windows::process::ExitStatusExt as _;
+    use std::slice::from_ref;
 
     use ra_ap_syntax::ast::HasModuleItem;
     use serde_json::json;
@@ -2063,6 +2096,227 @@ mod tests {
 
     fn parse_lcov(input: &str) -> lcov::Report {
         parse_report(input).expect("fixture LCOV parses")
+    }
+
+    fn error_cause<E: std::error::Error + 'static>(error: &CoverageGateError) -> &E {
+        std::iter::successors(Some(error as &(dyn std::error::Error + 'static)), |source| source.source())
+            .find_map(<dyn std::error::Error + 'static>::downcast_ref::<E>)
+            .expect("the tested failure must preserve its typed error cause")
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "rowan syntax parsing is not supported by Miri")]
+    fn oct28_nonreleased_revisits_do_not_intersect_released_exclusions() {
+        let path = Path::new("shared.rs");
+        let analysis = analyze(path, "#[cfg(feature = \"x\")]\npub fn helper() {}\n");
+        let released_guard = CfgFormula::not(CfgFormula::Atom("feature=x".to_owned()));
+        let test_only_lines = test_only_lines_for_guard(&analysis, &released_guard, &BTreeSet::new());
+        assert_eq!(test_only_lines, BTreeSet::from([1, 2]));
+        let mut indexed = IndexedSource {
+            analysis,
+            edition: Edition::Edition2024,
+            released_path: Some(path.to_path_buf()),
+            test_only_lines: test_only_lines.clone(),
+            visit_contexts: BTreeSet::new(),
+        };
+        let pending = pending_source(Surface::NonReleased, SourceRole::CrateRoot, path, CfgFormula::Value(true));
+        let declarations = SourceIndex::revisit_indexed_source_with_reader(
+            &mut indexed,
+            &pending,
+            &MemberDirectories {
+                reported_by_canonical: BTreeMap::new(),
+            },
+            &BTreeSet::new(),
+            &mut |_| panic!("an already parsed source must not be read again"),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(declarations.is_empty());
+        assert_eq!(indexed.test_only_lines, test_only_lines);
+        assert_eq!(indexed.released_path.as_deref(), Some(path));
+        assert!(indexed.has_visit(&pending));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "rowan syntax parsing is not supported by Miri")]
+    fn oct28_opaque_macro_uncertainty_requires_any_ordinary_released_visit() {
+        let root = source_index_fixture_root();
+        let mut metadata = source_index_fixture_metadata(&root);
+        let lib = root.join("member/src/lib.rs");
+        metadata.packages[0].targets[1].src_path = lib.clone().try_into().unwrap();
+        let canonical_lib = lib;
+        let index = SourceIndex::from_metadata_with_source_reader(&metadata, &mut |path| Ok(lexical_normalize(path)), &mut |_| {
+            Ok("opaque! {}".to_owned())
+        })
+        .unwrap();
+        assert_eq!(index.files[&canonical_lib].visit_contexts.len(), 2);
+        assert_eq!(index.uncertain_sources, BTreeSet::from([canonical_lib.clone()]));
+
+        let shared = root.join("member/src/shared.rs");
+        metadata.packages[0].targets[1].src_path = shared.clone().try_into().unwrap();
+        let canonical_shared = shared;
+        let index = SourceIndex::from_metadata_with_source_reader(&metadata, &mut |path| Ok(lexical_normalize(path)), &mut |path| {
+            if path == canonical_lib {
+                Ok("include!(\"shared.rs\");".to_owned())
+            } else {
+                assert_eq!(path, canonical_shared);
+                Ok("opaque! {}".to_owned())
+            }
+        })
+        .unwrap();
+        let contexts = &index.files[&canonical_shared].visit_contexts;
+        assert_eq!(contexts.len(), 2);
+        assert!(
+            contexts
+                .iter()
+                .any(|(surface, role, _, _, _)| { *surface == Surface::Released && *role == SourceRole::IncludedSource })
+        );
+        assert!(
+            contexts
+                .iter()
+                .any(|(surface, role, _, _, _)| { *surface == Surface::NonReleased && *role == SourceRole::CrateRoot })
+        );
+        assert_eq!(index.uncertain_sources, BTreeSet::from([canonical_lib]));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "rowan syntax parsing is not supported by Miri")]
+    fn oct28_reported_member_indexing_skips_external_sources_and_returns_policy_and_edition_errors() {
+        let root = source_index_fixture_root();
+        let mut metadata = source_index_fixture_metadata(&root);
+        let mut resolve = |path: &Path| Ok(lexical_normalize(path));
+        let mut read = |_: &Path| Ok("fn released() {}\n\n\nfn reported() {}\n".to_owned());
+        let mut index = SourceIndex::from_metadata_with_source_reader(&metadata, &mut resolve, &mut read).unwrap();
+        let gap = root.join("member/src/macro-backend.rs");
+        let canonical_gap = lexical_normalize(&gap);
+        let external = root.join("external-lib.rs");
+        let report = parse_lcov(&format!("{}{}", lcov_section(&external, &[(4, 0)]), lcov_section(&gap, &[(4, 0)])));
+        assert_eq!(report.sections.keys().next().unwrap().source_file, external);
+        index
+            .index_reported_member_sources_with_reader(&[report], &metadata, &mut resolve, &mut read)
+            .unwrap();
+        assert!(index.files[&canonical_gap].visit_contexts.is_empty());
+        assert!(index.uncertain_sources.contains(&canonical_gap));
+
+        metadata.workspace_metadata = json!({"coverage-gate": {"test-attributes": 17}});
+        let error = index
+            .index_reported_member_sources_with_reader(&[], &metadata, &mut resolve, &mut read)
+            .unwrap_err();
+        let cause = error_cause::<InvalidTestAttributesValueError>(&error);
+        assert_eq!(cause.source, "workspace");
+        assert_eq!(cause.value, json!(17));
+
+        let mut metadata = source_index_fixture_metadata(&root);
+        metadata.packages[0].targets[1].src_path = root.join("member/src/edition-2021.rs").try_into().unwrap();
+        metadata.packages[0].targets[1].edition = CargoEdition::E2021;
+        let mut index = SourceIndex::from_metadata_with_source_reader(&metadata, &mut resolve, &mut read).unwrap();
+        let error = index
+            .index_reported_member_sources_with_reader(&[parse_lcov(&lcov_section(&gap, &[(4, 0)]))], &metadata, &mut resolve, &mut read)
+            .unwrap_err();
+        let cause = error_cause::<ConflictingSourceEditionError>(&error);
+        assert_eq!(cause.path, diagnostic_path(&canonical_gap));
+        assert_eq!(cause.first, "Edition2024");
+        assert_eq!(cause.second, "Edition2021");
+    }
+
+    #[test]
+    fn oct28_conservative_warning_selects_the_first_sorted_source() {
+        let first = PathBuf::from("a.rs");
+        let index = SourceIndex {
+            workspace_root: PathBuf::new(),
+            files: BTreeMap::new(),
+            member_dirs: MemberDirectories {
+                reported_by_canonical: BTreeMap::new(),
+            },
+            uncertain_sources: BTreeSet::from([PathBuf::from("z.rs"), first]),
+        };
+        assert_eq!(
+            index.conservative_warning().as_deref(),
+            Some(
+                "warning: coverage-gate: opaque production macro or incomplete source graph at `a.rs`; \
+                 excluding only file-local test-only ranges and retaining ambiguous source counters. \
+                 Filtered LCOV is conservative, not complete production-only classification; \
+                 use `#[cfg_attr(coverage_nightly, coverage(off))]` for exceptional code only when appropriate"
+            )
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "rowan syntax parsing is not supported by Miri")]
+    fn oct28_builtin_include_qualifiers_preserve_nested_std_and_core_paths() {
+        for (qualifier, builtin) in [
+            ("std", true),
+            ("std::nested", true),
+            ("::std::nested", true),
+            ("core", true),
+            ("core::nested", true),
+            ("::core", true),
+            ("mystd", false),
+            ("other::std", false),
+            ("other", false),
+        ] {
+            let source = analyze(Path::new("qualifier.rs"), &format!("{qualifier}::include!(\"fragment.rs\");"));
+            let call = source.syntax().syntax().descendants().find_map(ast::MacroCall::cast).unwrap();
+            assert_eq!(path_is_builtin_include(&call.path().unwrap()), builtin, "{qualifier}");
+            let found = declarations(Path::new("qualifier.rs"), &source, SourceRole::CrateRoot, &BTreeSet::new()).unwrap();
+            assert_eq!(found.len(), usize::from(builtin), "{qualifier}");
+        }
+    }
+
+    #[test]
+    fn oct28_report_classification_preserves_member_ownership_and_retention_errors() {
+        let root = source_index_fixture_root();
+        let member = root.join("member");
+        let canonical_member = member.clone();
+        let member_source = member.join("src/lib.rs");
+        let mut index = SourceIndex {
+            workspace_root: root.clone(),
+            files: BTreeMap::new(),
+            member_dirs: MemberDirectories {
+                reported_by_canonical: BTreeMap::from([(canonical_member, member)]),
+            },
+            uncertain_sources: BTreeSet::new(),
+        };
+        let error = filter_report_with_source_resolver(
+            parse_lcov(&lcov_section(&member_source, &[(4, 0)])),
+            &index,
+            None,
+            &mut |_| panic!("an unindexed member source must not be classified as compiler code"),
+            |path| Ok(path.to_path_buf()),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error_cause::<UnownedCoverageSourceError>(&error).path,
+            diagnostic_path(&member_source)
+        );
+
+        let external = root.join("external-lib.rs");
+        let canonical = external.clone();
+        let _ = index.uncertain_sources.insert(canonical.clone());
+        let _ = index.files.insert(
+            canonical.clone(),
+            IndexedSource {
+                analysis: SourceAnalysis {
+                    syntax: None,
+                    line_count: 4,
+                    line_starts: vec![0],
+                    test_only_lines: BTreeSet::new(),
+                },
+                edition: Edition::Edition2024,
+                released_path: None,
+                test_only_lines: BTreeSet::new(),
+                visit_contexts: BTreeSet::new(),
+            },
+        );
+        let error = filter_report_with_source_resolver(
+            parse_lcov(&lcov_section(&external, &[(4, 0)])),
+            &index,
+            None,
+            &mut |_| panic!("an indexed source must not require compiler discovery"),
+            |path| Ok(path.to_path_buf()),
+        )
+        .unwrap_err();
+        assert_eq!(error_cause::<UnownedCoverageSourceError>(&error).path, diagnostic_path(&canonical));
     }
 
     #[test]
@@ -3355,7 +3609,7 @@ mod tests {
     }
 
     #[test]
-    fn conservative_retention_preserves_external_attribution_errors() {
+    fn oct28_conservative_retention_preserves_external_attribution_errors() {
         let member = PathBuf::from("/workspace/member");
         let other = PathBuf::from("/workspace/other");
         let path = PathBuf::from("/workspace/shared.rs");
@@ -3383,10 +3637,7 @@ mod tests {
         let error = index
             .retained_source_path(&path, &source)
             .expect_err("a source without any visit has no package attribution");
-        assert!(
-            std::iter::successors(Some(&error as &(dyn std::error::Error + 'static)), |source| source.source())
-                .any(<dyn std::error::Error + 'static>::is::<UnownedCoverageSourceError>)
-        );
+        assert_eq!(error_cause::<UnownedCoverageSourceError>(&error).path, diagnostic_path(&path));
         let pending = PendingSource {
             owning_member: MemberDirectory {
                 canonical: member.clone(),
@@ -3412,9 +3663,12 @@ mod tests {
         let error = index
             .retained_source_path(&path, &source)
             .expect_err("retention cannot invent one package namespace");
-        assert!(
-            std::iter::successors(Some(&error as &(dyn std::error::Error + 'static)), |source| source.source())
-                .any(<dyn std::error::Error + 'static>::is::<ConflictingReleasedSourceAttributionError>)
+        let cause = error_cause::<ConflictingReleasedSourceAttributionError>(&error);
+        assert_eq!(cause.path, diagnostic_path(&path));
+        assert_eq!(cause.first, diagnostic_path(&member.join("..").join("shared.rs")));
+        assert_eq!(
+            cause.second,
+            diagnostic_path(&Path::new("/workspace/other").join("..").join("shared.rs"))
         );
         assert_eq!(
             index
@@ -3431,9 +3685,9 @@ mod tests {
         let error = index
             .retained_source_path(Path::new(r"D:\unrelated.rs"), &source)
             .expect_err("cross-filesystem attribution remains unsupported");
-        assert!(
-            std::iter::successors(Some(&error as &(dyn std::error::Error + 'static)), |source| source.source())
-                .any(<dyn std::error::Error + 'static>::is::<UnattributableReleasedSourceError>)
+        assert_eq!(
+            error_cause::<UnattributableReleasedSourceError>(&error).path,
+            diagnostic_path(Path::new(r"D:\unrelated.rs"))
         );
     }
 
@@ -3797,7 +4051,7 @@ mod tests {
     }
 
     #[test]
-    fn measured_member_source_requires_an_unambiguous_rust_edition() {
+    fn oct28_measured_member_source_requires_an_unambiguous_rust_edition() {
         let root = source_index_fixture_root();
         let mut metadata = source_index_fixture_metadata(&root);
         let source = root.join("member/src/macro-backend.rs");
@@ -3806,7 +4060,12 @@ mod tests {
             Edition::Edition2024
         );
         metadata.packages[0].targets[1].edition = CargoEdition::E2021;
-        measured_member_edition(&metadata.packages[0], &source).expect_err("a missing target edge cannot resolve conflicting editions");
+        let error =
+            measured_member_edition(&metadata.packages[0], &source).expect_err("a missing target edge cannot resolve conflicting editions");
+        let cause = error_cause::<ConflictingSourceEditionError>(&error);
+        assert_eq!(cause.path, diagnostic_path(&source));
+        assert_eq!(cause.first, "Edition2024");
+        assert_eq!(cause.second, "Edition2021");
         metadata.packages[0].targets.clear();
         metadata.packages[0].edition = CargoEdition::E2018;
         assert_eq!(
@@ -3971,7 +4230,45 @@ mod tests {
     }
 
     #[test]
-    fn compiler_sysroot_output_rejects_failed_invalid_or_relative_queries() {
+    #[cfg(any(unix, windows))]
+    fn oct28_compiler_query_output_preserves_execution_failures_and_status() {
+        let operation = "selected-proxy --print sysroot";
+        let error = compiler_query_output(
+            operation,
+            Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "proxy launch denied")),
+        )
+        .unwrap_err();
+        let cause = error_cause::<CompilerSourceDiscoveryError>(&error);
+        assert_eq!(cause.operation, operation);
+        assert_eq!(cause.reason, "compiler query could not be executed");
+        let cause = error_cause::<std::io::Error>(&error);
+        assert_eq!(cause.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(cause.to_string(), "proxy launch denied");
+
+        let sysroot = source_index_fixture_root();
+        for raw_status in [0, 256] {
+            let status = std::process::ExitStatus::from_raw(raw_status);
+            let result = compiler_query_output(
+                operation,
+                Ok(std::process::Output {
+                    status,
+                    stdout: format!("{}\n", sysroot.display()).into_bytes(),
+                    stderr: b"proxy rejected query".to_vec(),
+                }),
+            );
+            if raw_status == 0 {
+                assert_eq!(result.unwrap(), sysroot);
+            } else {
+                let error = result.unwrap_err();
+                let cause = error_cause::<CompilerSourceDiscoveryError>(&error);
+                assert_eq!(cause.operation, operation);
+                assert_eq!(cause.reason, format!("compiler exited with {status}: proxy rejected query"));
+            }
+        }
+    }
+
+    #[test]
+    fn oct28_compiler_sysroot_output_rejects_failed_invalid_or_relative_queries() {
         let root = source_index_fixture_root();
         let stdout = format!("{}\n", root.display());
         assert_eq!(
@@ -3982,13 +4279,27 @@ mod tests {
             .expect_err("failed compiler must not establish provenance");
         assert!(error.to_string().contains("exit status: 7"));
         assert!(error.to_string().contains("proxy failed"));
-        for bytes in [b"".as_slice(), b"relative/path", b"/first\n/second\n", &[0xff]] {
+        let multiline_absolute = format!("{}\n\n", root.display());
+        assert!(Path::new(multiline_absolute.trim()).is_absolute());
+        for bytes in [
+            b"".as_slice(),
+            b"relative/path",
+            b"/first\n/second\n",
+            multiline_absolute.as_bytes(),
+        ] {
             let error = compiler_sysroot_output("proxy", true, "0", bytes, b"").expect_err("invalid source discovery output");
-            assert!(
-                std::iter::successors(Some(&error as &(dyn std::error::Error + 'static)), |source| source.source())
-                    .any(<dyn std::error::Error + 'static>::is::<CompilerSourceDiscoveryError>)
+            let cause = error_cause::<CompilerSourceDiscoveryError>(&error);
+            assert_eq!(cause.operation, "proxy");
+            assert_eq!(
+                cause.reason,
+                "expected one absolute sysroot path; check the selected RUSTC compiler or proxy"
             );
         }
+        let error = compiler_sysroot_output("proxy", true, "0", &[0xff], b"").unwrap_err();
+        let cause = error_cause::<CompilerSourceDiscoveryError>(&error);
+        assert_eq!(cause.operation, "proxy");
+        assert_eq!(cause.reason, "sysroot output is not UTF-8");
+        let _ = error_cause::<std::string::FromUtf8Error>(&error);
     }
 
     #[test]
@@ -4029,21 +4340,18 @@ mod tests {
     }
 
     #[test]
-    fn compiler_source_inspection_failures_do_not_become_missing_optional_sources() {
+    fn oct28_compiler_source_inspection_failures_do_not_become_missing_optional_sources() {
         let path = Path::new("/compiler/library");
+        let canonical = Path::new("/canonical/library");
         let denied = || std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
         let error = canonical_compiler_library_with(path, |_| Err(denied()), |_| panic!("resolution failed"))
             .expect_err("permission failure is not optional absence");
-        assert!(
-            std::iter::successors(Some(&error as &(dyn std::error::Error + 'static)), |source| source.source())
-                .any(<dyn std::error::Error + 'static>::is::<ResolveCoverageSourceError>)
-        );
-        let error = canonical_compiler_library_with(path, |path| Ok(path.to_path_buf()), |_| Err(denied()))
+        assert_eq!(error_cause::<ResolveCoverageSourceError>(&error).path, diagnostic_path(path));
+        assert_eq!(error_cause::<std::io::Error>(&error).kind(), std::io::ErrorKind::PermissionDenied);
+        let error = canonical_compiler_library_with(path, |_| Ok(canonical.to_path_buf()), |_| Err(denied()))
             .expect_err("inspection failure remains explicit");
-        assert!(
-            std::iter::successors(Some(&error as &(dyn std::error::Error + 'static)), |source| source.source())
-                .any(<dyn std::error::Error + 'static>::is::<InspectCoverageSourceError>)
-        );
+        assert_eq!(error_cause::<InspectCoverageSourceError>(&error).path, diagnostic_path(canonical));
+        assert_eq!(error_cause::<std::io::Error>(&error).kind(), std::io::ErrorKind::PermissionDenied);
     }
 
     #[test]
@@ -5431,9 +5739,9 @@ mod tests {
             .source_for_lcov_with_resolver(&missing, |path| {
                 Err(ResolveCoverageSourceError::caused_by(diagnostic_path(path), std::io::Error::from(std::io::ErrorKind::NotFound)).into())
             })
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("failed to resolve Rust source path"), "{error}");
+            .unwrap_err();
+        let cause = error_cause::<ResolveCoverageSourceError>(&error);
+        assert_eq!(cause.path, diagnostic_path(&missing));
         let present = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs");
         let canonical = PathBuf::from("canonical/lib.rs");
         let (resolved, source) = index.source_for_lcov_with_resolver(&present, |_| Ok(canonical.clone())).unwrap();
@@ -5443,6 +5751,92 @@ mod tests {
         let analysis = analyze_included_source_with_reader(&present, &mut |_| Ok(text.to_owned())).unwrap();
         assert_eq!(analysis.line_starts, line_starts(text));
         assert!(analysis.line_starts.len() > 1);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "rowan syntax parsing is not supported by Miri")]
+    fn reported_source_indexing_propagates_controlled_resolution_and_read_errors() {
+        let root = source_index_fixture_root();
+        let metadata = source_index_fixture_metadata(&root);
+        let mut index = SourceIndex::from_metadata_with_source_reader(&metadata, &mut |path| Ok(path.to_path_buf()), &mut |_| {
+            Ok("fn released() {}\n".to_owned())
+        })
+        .unwrap();
+        let gap = root.join("member/src/unlisted.rs");
+        let report = parse_lcov(&lcov_section(&gap, &[(1, 0)]));
+        let error = index
+            .index_reported_member_sources_with_reader(
+                from_ref(&report),
+                &metadata,
+                &mut |path| {
+                    assert_eq!(path, gap);
+                    Err(ResolveCoverageSourceError::caused_by(
+                        diagnostic_path(path),
+                        std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+                    )
+                    .into())
+                },
+                &mut |_| panic!("failed resolution must precede reading"),
+            )
+            .unwrap_err();
+        assert_eq!(error_cause::<ResolveCoverageSourceError>(&error).path, diagnostic_path(&gap));
+        assert!(!index.files.contains_key(&gap));
+        let error = index
+            .index_reported_member_sources_with_reader(&[report], &metadata, &mut |path| Ok(path.to_path_buf()), &mut |path| {
+                assert_eq!(path, gap);
+                Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+            })
+            .unwrap_err();
+        assert_eq!(error_cause::<std::io::Error>(&error).kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(!index.files.contains_key(&gap));
+    }
+
+    #[test]
+    fn report_filtering_propagates_controlled_resolution_failure_before_classification() {
+        let missing = PathBuf::from("synthetic-missing.rs");
+        let index = SourceIndex {
+            workspace_root: source_index_fixture_root(),
+            files: BTreeMap::new(),
+            member_dirs: MemberDirectories {
+                reported_by_canonical: BTreeMap::new(),
+            },
+            uncertain_sources: BTreeSet::new(),
+        };
+        let error = filter_report_with_source_resolver(
+            parse_lcov(&lcov_section(&missing, &[(1, 0)])),
+            &index,
+            None,
+            &mut |_| panic!("failed source resolution must precede compiler classification"),
+            |path| {
+                assert_eq!(path, index.workspace_root.join(&missing));
+                Err(ResolveCoverageSourceError::caused_by(diagnostic_path(path), std::io::Error::from(std::io::ErrorKind::NotFound)).into())
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            error_cause::<ResolveCoverageSourceError>(&error).path,
+            diagnostic_path(&index.workspace_root.join(&missing))
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "native source resolution canonicalizes paths; Miri isolation forbids it")]
+    fn survivor_missing_sources_fail_native_report_filtering_before_classification() {
+        let missing = missing_source_path();
+        let index = SourceIndex {
+            workspace_root: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+            files: BTreeMap::new(),
+            member_dirs: MemberDirectories {
+                reported_by_canonical: BTreeMap::new(),
+            },
+            uncertain_sources: BTreeSet::new(),
+        };
+        let error = filter_report(parse_lcov(&lcov_section(&missing, &[(1, 0)])), &index, None, &mut |_| {
+            panic!("an unresolved source must fail before compiler-source classification")
+        })
+        .unwrap_err();
+        let cause = error_cause::<ResolveCoverageSourceError>(&error);
+        assert_eq!(cause.path, diagnostic_path(&missing));
     }
 
     #[test]

@@ -211,7 +211,7 @@
 //!   [`Loom`](https://crates.io/crates/loom), and
 //!   [`Bolero`](https://crates.io/crates/bolero).
 //! - **Broader validation:** diff-scoped and full
-//!   [`cargo-mutants`](https://mutants.rs/) runs,
+//!   [`cargo-gamma`](https://crates.io/crates/cargo-gamma) runs,
 //!   [`cargo-hack`](https://crates.io/crates/cargo-hack) feature-powerset
 //!   checks, and benchmark compilation.
 //!
@@ -515,7 +515,6 @@ pub use region::CommentSyntax;
 /// ```
 #[must_use]
 #[cfg_attr(coverage_nightly, coverage(off))]
-#[mutants::skip] // Entry point: tracing/clap setup + dispatch to run; behavior is integration-tested via run_update.
 #[expect(
     clippy::needless_pass_by_value,
     reason = "public one-call entry point that owns the catalog for the process lifetime by design"

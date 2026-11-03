@@ -540,7 +540,6 @@ pub(crate) fn toml_comment_lines(text: &str) -> impl Iterator<Item = ByteRange> 
 
 /// Full JSONC line comments retain original byte bounds; string contents and
 /// block comments never qualify as ownership sentinels.
-#[mutants::skip] // Byte-level JSONC lexical state machine; marker/string/block-comment behavior is covered exhaustively by json_array_region tests.
 pub(crate) fn json_comment_lines(text: &str) -> impl Iterator<Item = ByteRange> + '_ {
     iterate_lines(text)
         .scan((None, false, false), move |(string, escaped, block_comment), line| {
@@ -582,7 +581,6 @@ pub(crate) fn json_comment_lines(text: &str) -> impl Iterator<Item = ByteRange> 
         .flatten()
 }
 
-#[mutants::skip] // Byte-level JSONC lexical state machine; malformed strings/comments and valid scanner hosts are covered through planner behavior.
 fn validate_json_comment_scan(text: &str) -> Result<(), AppError> {
     let bytes = text.as_bytes();
     let mut quote = None;
@@ -594,7 +592,9 @@ fn validate_json_comment_scan(text: &str) -> Result<(), AppError> {
         let byte = bytes[index];
         if line_comment {
             if matches!(byte, b'\r' | b'\n') {
-                line_comment = false;
+                line_comment =
+                // #[gamma::skip(assign_value.default, reason = "bool Default is false, identical to the assigned value")]
+                false;
             }
         } else if let Some(active_quote) = quote {
             if escaped {
@@ -613,13 +613,16 @@ fn validate_json_comment_scan(text: &str) -> Result<(), AppError> {
             }
         } else if block_comment {
             if byte == b'*' && bytes.get(index + 1) == Some(&b'/') {
-                block_comment = false;
+                block_comment =
+                // #[gamma::skip(assign_value.default, reason = "bool Default is false, identical to the assigned value")]
+                false;
                 index += 1;
             }
         } else if matches!(byte, b'"' | b'\'') {
             quote = Some(byte);
         } else if byte == b'/' && bytes.get(index + 1) == Some(&b'/') {
             line_comment = true;
+            // #[gamma::skip(stmt.delete_assign, literal.int_decrement, reason = "rescanning the second opening slash while already in a line comment does not affect its newline boundary")]
             index += 1;
         } else if byte == b'/' && bytes.get(index + 1) == Some(&b'*') {
             block_comment = true;
@@ -810,7 +813,6 @@ pub(crate) fn upsert_located_region_with_newline(
 
         // #[gamma::skip(stmt.delete_call, reason = "This reserves String capacity only; automatic growth preserves every appended byte.", tag = "perf")]
         out.reserve(rendered.len());
-        // #[gamma::skip(call_result.default, reason = "separate_region is evaluated for its mutations and returns unit; default unit is identical")]
         separate_region(&mut out, newline);
         out.push_str(&rendered);
         if !after.is_empty() && leading_newline_len(after) == 0 {
@@ -826,7 +828,6 @@ pub(crate) fn upsert_located_region_with_newline(
 
     // #[gamma::skip(stmt.delete_call, reason = "This reserves String capacity only; automatic growth preserves every appended byte.", tag = "perf")]
     out.reserve(rendered.len());
-    // #[gamma::skip(call_result.default, reason = "separate_region is evaluated for its mutations and returns unit; default unit is identical")]
     separate_region(&mut out, newline);
     out.push_str(&rendered);
     out
@@ -851,7 +852,6 @@ fn prepend_region(text: &str, rendered: &str, syntax: CommentSyntax, newline: &s
     // #[gamma::skip(arith.add_to_mul, literal.int_decrement, reason = "changing this nonnegative capacity estimate leaves every appended header, sentinel and host byte unchanged")]
     let mut out = String::with_capacity(header.len() + text.len() + rendered.len() + 1);
     out.push_str(header);
-    // #[gamma::skip(call_result.default, reason = "separate_region is evaluated for its mutations and returns unit; default unit is identical")]
     separate_region(&mut out, newline);
     out.push_str(rendered);
     if !text.is_empty() && leading_newline_len(text) == 0 {
@@ -885,10 +885,9 @@ fn leading_newline_len(text: &str) -> usize {
     }
 }
 
-#[mutants::skip] // The surviving comparison mutation is equivalent when `last == 0`; newline preservation is covered by byte-exact region tests.
 fn trailing_blank_line_len(text: &str) -> usize {
     let last = trailing_newline_len(text);
-    if last > 0 && trailing_newline_len(&text[..text.len() - last]) > 0 {
+    if trailing_newline_len(&text[..text.len() - last]) > 0 {
         last
     } else {
         0
@@ -899,7 +898,10 @@ fn trailing_newline_len(text: &str) -> usize {
     if text.ends_with("\r\n") {
         2
     } else {
-        usize::from(text.ends_with(['\r', '\n']))
+        usize::from(text.ends_with(
+            // #[gamma::skip(collection.reverse_array, reason = "ends_with treats the character array as an unordered set")]
+            ['\r', '\n'],
+        ))
     }
 }
 
@@ -1170,7 +1172,6 @@ fn adopt_unmanaged_toml_tables_impl(text: &str, body: &str, syntax: CommentSynta
         let mut legacy_boundaries: Vec<usize> = legacy_candidates.iter().map(|table| table.header.start).collect();
         // #[gamma::skip(stmt.delete_call, tag = "timeout", reason = "removing protected boundaries drives legacy adoption through an intentionally exhaustive malformed-input path that exceeds the campaign budget")]
         legacy_boundaries.extend(protected.iter().map(|range| range.start));
-        // #[gamma::skip(call_result.default, reason = "sorting is still evaluated and mutates the vector; its unit return value already equals Default")]
         sort_boundaries(&mut legacy_boundaries);
         if let Some(adoption) = adopt_dotted_child_assignments_with_deletions(
             text,
@@ -1277,9 +1278,7 @@ fn mask_legacy_lint_region_to_header(text: &str, syntax: CommentSyntax) -> Strin
     // hidden. An empty retiring region has no original header to restore, so
     // synthesize it there; malformed non-empty bodies stay masked.
     let mut masked = mask_managed_regions(text, syntax).into_bytes();
-    // #[gamma::skip(call_result.default, reason = "header restoration still mutates masked; its unit return value already equals Default")]
     restore_legacy_lint_header(&mut masked, text, "anvil-workspace-lints", "[workspace.lints]", syntax);
-    // #[gamma::skip(call_result.default, reason = "header restoration still mutates masked; its unit return value already equals Default")]
     restore_legacy_lint_header(&mut masked, text, "anvil-lints", "[lints]", syntax);
     String::from_utf8(masked).expect("masking preserves UTF-8 and only restores original UTF-8 slices")
 }
@@ -1683,7 +1682,6 @@ fn collect_headed_tables(table: &Table, path: &mut Vec<String>, text: &str, out:
 /// a candidate in its own right rather than part of this one.
 fn table_values(table: &Table) -> TableValues {
     let mut values = TableValues::new();
-    // #[gamma::skip(call_result.default, reason = "collection still populates values; its unit return value already equals Default")]
     collect_values(table, &mut Vec::new(), &mut values);
     values
 }
@@ -1762,7 +1760,6 @@ fn collect_values(table: &Table, path: &mut Vec<String>, values: &mut TableValue
                 values.insert(path.clone(), canonical_value(value));
             }
             Item::Table(child) if child.is_dotted() => {
-                // #[gamma::skip(call_result.default, reason = "recursive collection still populates values; its unit return value already equals Default")]
                 collect_values(child, path, values);
             }
             _ => {}
@@ -1781,7 +1778,6 @@ fn collect_values(table: &Table, path: &mut Vec<String>, values: &mut TableValue
 /// the caller clamps to the next header.
 fn table_entries(table: &Table, text: &str) -> Vec<TableEntry> {
     let mut starts: Vec<(Vec<String>, String, usize)> = Vec::new();
-    // #[gamma::skip(call_result.default, reason = "collection still populates starts; its unit return value already equals Default")]
     collect_entry_starts(table, text, &mut Vec::new(), &mut starts);
     starts.sort_by_key(|(_, _, start)| *start);
 
@@ -1818,7 +1814,6 @@ fn collect_entry_starts(table: &Table, text: &str, path: &mut Vec<String>, out: 
         match item {
             Item::Value(value) => out.push((path.clone(), canonical_value(value), entry_start(key, text))),
             Item::Table(child) if child.is_dotted() => {
-                // #[gamma::skip(call_result.default, reason = "recursive collection still populates out; its unit return value already equals Default")]
                 collect_entry_starts(child, text, path, out);
             }
             _ => {}
@@ -4414,5 +4409,75 @@ mod tests {
                 assert_eq!(boundary_after(&boundaries, start, 12), expected);
             }
         }
+    }
+    #[test]
+    fn regression_json_comment_boundaries_preserve_exact_physical_lines() {
+        for (text, expected) in [
+            ("\"\"\n// actual\n", vec!["// actual\n"]),
+            ("'a\\'b'\n// actual\n", vec!["// actual\n"]),
+            ("\"\\\\\"\n// actual\n", vec!["// actual\n"]),
+            ("\"a\\\n// hidden\nb\"\n// actual\n", vec!["// actual\n"]),
+            ("/* *x\n// hidden\n*/\n// actual\n", vec!["// actual\n"]),
+            ("/**/\"x\n// hidden\n\"\n// actual\n", vec!["// actual\n"]),
+            ("/**//*\n// hidden\n*/\n// actual\n", vec!["// actual\n"]),
+            ("/* */'x\n// hidden\n'\n// actual\n", vec!["// actual\n"]),
+            ("// \" /*\n// actual\n", vec!["// \" /*\n", "// actual\n"]),
+            ("x/ x* \n// actual\n", vec!["// actual\n"]),
+            ("//\n// actual\n", vec!["//\n", "// actual\n"]),
+            (" /\n// actual\n", vec!["// actual\n"]),
+            (" /*/\n// hidden\n*/\n// actual\n", vec!["// actual\n"]),
+            ("/* * /\n// hidden\n*/\n// actual\n", vec!["// actual\n"]),
+            ("not a comment\n", vec![]),
+        ] {
+            assert_eq!(
+                json_comment_lines(text)
+                    .map(|range| &text[range.start..range.end])
+                    .collect::<Vec<_>>(),
+                expected,
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn regression_json_validation_handles_adjacent_lexical_delimiters() {
+        for text in [
+            "\"a\\\r\n\"",
+            "\"a\\\rb\"",
+            "\"a\\\r\"",
+            "\"\\\\\"",
+            "/**/x",
+            "//\r\n",
+            "/* * / */",
+            "//\"",
+        ] {
+            validate_json_comment_scan(text).unwrap_or_else(|error| panic!("{text:?}: {error}"));
+        }
+        let unterminated_quote = "JSON-like host contains an unterminated quoted string; close it before managing regions";
+        for (text, expected) in [
+            ("/**/\"", unterminated_quote),
+            ("/**//\"", unterminated_quote),
+            ("//\n\"", unterminated_quote),
+            ("\"a\\\r\n\"\n\"", unterminated_quote),
+            (
+                "\"a\\x\n\"",
+                "JSON-like host contains an unescaped line ending inside a quoted string; escape it or close the string",
+            ),
+            (
+                "/* * /",
+                "JSON-like host contains an unterminated block comment; close it before managing regions",
+            ),
+            ("'a\\'", unterminated_quote),
+        ] {
+            let error = validate_json_comment_scan(text).unwrap_err();
+            assert_eq!(error.to_string(), expected, "{text:?}");
+        }
+        let error = HostScanner::Json
+            .remove("/* unfinished", "id", CommentSyntax::SlashSlash)
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "JSON-like host contains an unterminated block comment; close it before managing regions"
+        );
     }
 }

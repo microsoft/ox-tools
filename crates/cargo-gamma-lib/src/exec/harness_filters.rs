@@ -144,6 +144,7 @@ impl<'args> HarnessFilters<'args> {
 
             // #[gamma::skip(stmt.delete_assign, arith.add_to_mul, tag = "timeout", reason = "the argument cursor must advance even for valueless flags")]
             // #[gamma::skip(arith.add_to_sub, literal.int_decrement, tag = "outofmemory", reason = "a zero cursor step repeatedly accumulates the same argument")]
+            // #[gamma::skip(assign.add_to_mul, tag = "outofmem", reason = "multiplication leaves the initially zero argument cursor at zero, repeatedly accumulating the same flag and value")]
             index += 1 + usize::from(value.is_some());
         }
 
@@ -167,6 +168,7 @@ fn without_test_threads<'args>(flags: &[&'args str]) -> Vec<&'args str> {
         }
         // #[gamma::skip(stmt.delete_assign, arith.add_to_mul, arith.add_to_sub, tag = "timeout", reason = "the argument cursor must advance past the flag and any value")]
         // #[gamma::skip(literal.int_decrement, tag = "outofmemory", reason = "a zero cursor step repeatedly accumulates the same argument")]
+        // #[gamma::skip(assign.add_to_mul, tag = "timeout", reason = "multiplication leaves the initially zero cursor at zero instead of advancing past the flag and any value")]
         index += 1 + usize::from(value.is_some());
     }
 

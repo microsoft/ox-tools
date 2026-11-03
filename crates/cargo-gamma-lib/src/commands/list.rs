@@ -176,9 +176,20 @@ fn list_files<H: Host>(
     let selection = select.selection()?;
     let plan = crate::discover::plan_for_build(select, &selection, select.shard()?, cargo, &mut |_| {})?;
 
-    crate::report::skipped(host, &plan, styler)?;
+    list_file_population(host, select, json, styler, &plan)
+}
 
-    let files = selected_files(&plan, !select.name_patterns.is_empty());
+/// Reports and renders files from an already-discovered plan without rediscovery.
+fn list_file_population<H: Host>(
+    host: &mut H,
+    select: &super::cli::SelectArgs,
+    json: bool,
+    styler: Styler,
+    plan: &crate::discover::Plan,
+) -> crate::Result<i32> {
+    crate::report::skipped(host, plan, styler)?;
+
+    let files = selected_files(plan, !select.name_patterns.is_empty());
 
     let mut stream = host.results();
 
@@ -1214,8 +1225,47 @@ mod tests {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod name_filter_tests {
-    use super::selected_files;
+    use super::*;
     use crate::discover::{Plan, TargetFile};
+    use crate::testing::Sink;
+
+    #[test]
+    fn oct29_file_command_renders_only_files_in_a_name_filtered_population() {
+        let mut plan = crate::fixtures::plan(vec![crate::fixtures::mutant()]);
+        plan.files = ["src/lib.rs", "src/unmatched.rs"]
+            .map(|path| TargetFile {
+                path: path.into(),
+                absolute: path.into(),
+                package: "subject".into(),
+                source: None,
+            })
+            .into();
+        for filtered in [false, true] {
+            let mut select = super::super::cli::SelectArgs::default();
+            if filtered {
+                select.name_patterns.push("less".into());
+            }
+            for json in [false, true] {
+                let mut host = Sink::default();
+                assert_eq!(
+                    list_file_population(&mut host, &select, json, Styler::new(false), &plan).unwrap(),
+                    EXIT_OK
+                );
+                let expected = if filtered {
+                    vec!["src/lib.rs"]
+                } else {
+                    vec!["src/lib.rs", "src/unmatched.rs"]
+                };
+                let actual: Vec<String> = if json {
+                    serde_json::from_str(&host.out()).unwrap()
+                } else {
+                    host.out().lines().map(str::to_owned).collect()
+                };
+                assert_eq!(actual, expected);
+                assert_eq!(host.err(), "");
+            }
+        }
+    }
 
     #[test]
     fn listed_name_and_selected_files_follow_the_filtered_population() {
