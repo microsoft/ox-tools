@@ -374,6 +374,14 @@ scans and Cartesian parser/adoption matrices may remain native and `cargo carefu
 focused Miri tests continue through the same implementation paths and each exclusion records that
 coverage tradeoff beside the test.
 
+For Anvil itself, repeated substring scans of embedded pipeline and recipe text are
+native/`cargo careful` contracts, not execution of the generated scripts. Expensive
+instances have individual Miri ignores; artifact construction, rendering, and focused
+recipe checks remain interpreted. Parser byte boundaries, Unicode handling, region
+splicing, and in-memory update planning retain Miri coverage in every profile.
+These exclusions do not disable native tests, mutation testing, or any unsafe/concurrency
+tests in the workspace.
+
 Windows Miri uses Cargo's temporary
 `__CARGO_TEMPORARY_BUILD_DIR_NEW_LAYOUT_OPT_OUT=1` compatibility switch.
 Cargo 1.100's per-crate build paths make large dependency search lists exceed

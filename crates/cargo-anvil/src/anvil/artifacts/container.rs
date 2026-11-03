@@ -448,6 +448,10 @@ mod tests {
         assert!(DOCKERIGNORE.contains("!rust-toolchain\n"));
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "native and cargo-careful retain generated-container recipe text contracts; focused recipe tests preserve Miri coverage"
+    )]
     #[test]
     fn recipe_has_no_generation_time_placeholders() {
         // Every value is a literal or resolved at run time; nothing is
@@ -477,6 +481,10 @@ mod tests {
         assert!(!RECIPE.contains("anvil-container-rebuild:"));
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "native and cargo-careful retain generated-container recipe text contracts; focused recipe tests preserve Miri coverage"
+    )]
     #[test]
     fn every_public_recipe_lists_with_a_whole_sentence() {
         // `just --list` takes the last comment line before the attributes as
@@ -528,6 +536,10 @@ mod tests {
         );
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "native and cargo-careful retain generated-container recipe text contracts; focused recipe tests preserve Miri coverage"
+    )]
     #[test]
     fn resolution_is_attempted_before_building_and_never_fatal() {
         // Order: local image, then the hook, then a build. Resolving sits
@@ -596,6 +608,10 @@ mod tests {
         assert!(RECIPE.contains("$env:ANVIL_CONTAINER_NO_RESOLVE -ne '1'"));
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "native and cargo-careful retain generated-container recipe text contracts; focused recipe tests preserve Miri coverage"
+    )]
     #[test]
     fn every_interpolation_into_powershell_is_escaped() {
         // A `just` value pasted raw into a '…' literal ends the string on an
@@ -653,6 +669,10 @@ mod tests {
         assert!(RECIPE.contains(r#"replace_regex(lowercase(file_name(justfile_directory())), '[^a-z0-9]+', "-")"#));
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "native and cargo-careful retain generated-container recipe text contracts; focused recipe tests preserve Miri coverage"
+    )]
     #[test]
     fn an_argument_survives_as_its_own_word() {
         // `*command` joins with spaces, so passing it through as one string
@@ -738,6 +758,10 @@ mod tests {
         assert!(RECIPE.contains("anvil: container image input is missing: .anvil/container/Dockerfile"));
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "native and cargo-careful retain generated-container recipe text contracts; focused recipe tests preserve Miri coverage"
+    )]
     #[test]
     fn hook_values_are_passed_by_name_never_by_value() {
         // NAME=VALUE on a command line is recorded by endpoint telemetry and
@@ -920,6 +944,10 @@ mod tests {
         assert!(RECIPE.contains("if ($indexMode.ContainsKey($rel)) {"));
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "native and cargo-careful retain generated-container recipe text contracts; focused recipe tests preserve Miri coverage"
+    )]
     #[test]
     fn the_credential_phases_are_fail_closed() {
         // Unlike resolution, these must stop the run: a container that starts

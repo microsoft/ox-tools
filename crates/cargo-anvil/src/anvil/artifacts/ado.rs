@@ -414,6 +414,10 @@ mod tests {
         }
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "native and cargo-careful retain generated-pipeline text contracts; focused artifact rendering tests preserve Miri coverage"
+    )]
     #[test]
     fn ado_artifacts_do_not_require_bash() {
         for artifact in all() {
@@ -463,6 +467,10 @@ mod tests {
     /// into a stages template has to fail here, which a literal list copied
     /// alongside it cannot do. `impact` is the one stage with no check group
     /// of its own, so it is the only literal.
+    #[cfg_attr(
+        miri,
+        ignore = "native and cargo-careful retain generated-pipeline text contracts; focused artifact rendering tests preserve Miri coverage"
+    )]
     #[test]
     fn stages_identify_the_stage_for_every_job() {
         let mut pr_stages = vec!["impact".to_owned()];
@@ -569,6 +577,10 @@ mod tests {
         assert_eq!(group_step_path("scheduled-test"), ".pipelines/anvil/steps/scheduled-test.yml");
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "native and cargo-careful retain generated-pipeline text contracts; focused artifact rendering tests preserve Miri coverage"
+    )]
     #[test]
     fn pr_stages_has_impact_and_group_stages() {
         for needle in [
