@@ -203,30 +203,27 @@ graph. It does not resolve historical manifests against today's registry:
 updates its dependencies, so a newly published incompatible transitive dependency
 can otherwise prevent a previously buildable baseline from being compared.
 
-Anvil makes one temporary, local shared Git clone, checks out the resolved PR
-target commit, and removes that clone in `finally`. LFS smudging is disabled for
-that checkout: it uses the committed pointers rather than fetching assets from
-the local origin. The original repository and historical manifests are not
-modified. Both snapshots use the current checkout's selected stable compiler,
+Anvil isolates the resolved PR target commit in a temporary checkout and cleans
+it up afterward, leaving the original repository and historical manifests
+unmodified. The baseline uses committed LFS pointers without fetching assets.
+Both snapshots use the current checkout's selected stable compiler,
 overriding any obsolete baseline toolchain selection.
 The current Cargo build target is used for both arms; an unset target selects the
 compiler's host. A multi-target configuration must select one target with
 `CARGO_BUILD_TARGET`. Build artifacts live under `target/anvil/semver/`, separately
 for current and baseline, irrespective of an inherited `CARGO_TARGET_DIR`.
 
-Each package is built separately using its source-qualified metadata ID. Default
-features remain enabled, and feature selection retains the checker's heuristic:
+Each package is built separately. Default features remain enabled, and feature
+selection retains the checker's case-sensitive heuristic:
 enable declared and implicit optional-dependency features except `unstable`,
 `nightly`, `bench`, `no_std`, and names beginning with `_`, `unstable-`, or
 `unstable_`. Each revision supplies its own feature list. Rustdoc includes hidden
-and private items, as required by the checker, and the unstable JSON output uses
-`RUSTC_BOOTSTRAP=1`, matching the checker's own generation path. The file-input
-checker uses its built-in lint policy rather than Cargo metadata lint overrides;
+and private items, as required by the checker. The file-input checker uses its
+built-in lint policy rather than Cargo metadata lint overrides;
 Anvil warns if such overrides are present.
 
-Cargo JSON commands parse stdout separately from stderr. Warnings remain visible
-without invalidating valid metadata or target configuration, and stderr is
-retained in failure diagnostics.
+Cargo warnings remain visible without invalidating valid metadata or target
+configuration, and stderr is retained in failure diagnostics.
 
 The lockfiles must be present and usable; a missing or stale lockfile is never
 replaced by fresh resolution. A failed build, missing JSON artifact, or failed
@@ -239,6 +236,9 @@ without being reselected.
 The graphs may legitimately differ between revisions. Dependency-induced API
 changes can therefore appear in the advisory alongside source changes; this is
 intentional, unlike comparing both sources against a newly resolved graph.
+
+Snapshot execution mechanics and rationale are covered in the
+[implementation guide](../implementation.md#semantic-version-candidate-selection).
 
 #### Package-isolated all-target compilation
 

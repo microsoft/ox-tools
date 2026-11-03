@@ -2388,20 +2388,35 @@ fn semver_exit_code_contract_is_executed() {
     assert!(findings_comment.contains("Potential breaking changes"));
     assert!(findings_comment.contains("breaking change"));
     let calls = fs::read_to_string(&log).unwrap();
-    assert_eq!(
-        calls
-            .lines()
-            .filter(|line| line.starts_with("rustdoc --locked --lib"))
-            .map(|line| line
-                .split_once(" --features ")
-                .expect("both metadata fixtures declare public features")
-                .1)
-            .collect::<Vec<_>>(),
-        [
-            "default,std,serde,Unstable-visible,Nightly,current-api -- -Z unstable-options --output-format=json --document-private-items --document-hidden-items --cap-lints=allow",
-            "default,std,serde,Unstable-visible,baseline-api -- -Z unstable-options --output-format=json --document-private-items --document-hidden-items --cap-lints=allow",
-        ],
-        "each revision must enable its own public features and exclude only the upstream heuristic names"
+    let mut rustdoc_calls = calls.lines().filter(|line| line.starts_with("rustdoc --locked --lib"));
+    for expected_features in [
+        ["default", "std", "serde", "Unstable-visible", "Nightly", "current-api"].as_slice(),
+        ["default", "std", "serde", "Unstable-visible", "baseline-api"].as_slice(),
+    ] {
+        let line = rustdoc_calls
+            .next()
+            .unwrap_or_else(|| panic!("each revision must generate a locked rustdoc snapshot:\n{calls}"));
+        let (features, options) = line
+            .split_once(" --features ")
+            .expect("both metadata fixtures declare public features")
+            .1
+            .split_once(" -- ")
+            .expect("rustdoc options follow the Cargo features");
+        assert!(
+            features.split(',').count() == expected_features.len()
+                && expected_features
+                    .iter()
+                    .all(|expected| features.split(',').any(|feature| feature == *expected)),
+            "each revision must enable its own public features and exclude only the upstream heuristic names:\n{calls}"
+        );
+        assert_eq!(
+            options, "-Z unstable-options --output-format=json --document-private-items --document-hidden-items --cap-lints=allow",
+            "each snapshot must use the required rustdoc options:\n{calls}"
+        );
+    }
+    assert!(
+        rustdoc_calls.next().is_none(),
+        "only the current and baseline snapshots should be generated:\n{calls}"
     );
     assert!(calls.contains("semver-checks --package fixture --current-rustdoc"));
     assert!(calls.contains("--baseline-rustdoc"));
