@@ -9,9 +9,17 @@ failure diagnostics. The user-visible behavior is defined by the
 The optional `run` mode keeps collection and evaluation separated internally:
 
 1. Cargo metadata resolves every repeated `--package` selector to a concrete
-   workspace member. Exact `name@version` specs are passed to collection tools,
-   while bare names are passed to the evaluator. With no selectors, both
-   collection and evaluation cover the workspace.
+   workspace member. Source-qualified IDs from metadata are passed
+   through the shared package-selection emitter to collection and report tools,
+   including plain nextest on no-coverage targets. This distinguishes local
+   members from registry dependencies with identical names and versions without
+   reconstructing file URLs. If a member's name is a prefix of its ID, the
+   emitter removes the optional `path+` source-kind prefix, retaining the file
+   URL and package fragment. This avoids cargo-llvm-cov 0.9.0's name-prefix
+   collision for members named `p`, `pa`, `pat`, or `path`; other IDs remain
+   unchanged, including those for members named `file`. Bare names are passed
+   to the evaluator. With no selectors, both collection and evaluation cover
+   the workspace.
 2. Collection uses the invoking environment's Cargo and rustc, honoring
    inherited `CARGO`, `RUSTC`, `RUSTUP_TOOLCHAIN`, `PATH`, and related
    variables, with the report-only Windows `MSYSTEM` exception described
@@ -104,6 +112,28 @@ no-data diagnostic is consumed and replaced by the collector's empty-report
 message on both ordinary and response-file report paths. Normal collection
 stdout is inherited. `--quiet` redirects or drops each stdout channel while
 leaving errors and summary-file rendering intact.
+
+The package-selection regression uses fixed in-memory metadata containing local
+and registry copies of the same name/version, another selected member, and an
+omitted member. It checks package-selection arguments emitted by the production
+instrumented, plain-nextest, and report command builders for both feature
+configurations. Cases include individual members, overlapping selectors,
+subsets, and implicit/explicit full-workspace selections. Exact source IDs,
+gated names, and rejection of registry-only selectors preserve the workspace
+boundary without modeling Cargo's resolver. This ordinary test starts no
+processes and creates no disk fixtures; installed Cargo, nextest, LLVM, and
+registry access are not prerequisites for its verdict.
+
+Instrumented and report command construction take an explicit Windows-host
+policy; only their native command adapters select it with `cfg!(windows)`. It is
+the collector's host, not the requested compilation target, that controls the
+rustc-wrapper workaround and report-only `MSYSTEM` removal. Command-contract
+tests exercise both host policies on every test host, including exact arguments,
+private target directories, and environment removals for both feature modes.
+The same tests check that native command adapters select the running host's
+policy, so reversing host detection cannot silently select the other mode.
+Package-selection tests exercise both policies too, but assert only their own
+selection contract so unrelated platform flags cannot invalidate them.
 
 ## Diagnostic pipeline
 
