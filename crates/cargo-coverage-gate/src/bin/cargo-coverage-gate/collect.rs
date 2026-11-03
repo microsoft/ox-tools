@@ -2144,7 +2144,18 @@ mod tests {
                     "--no-tests=pass",
                 ];
                 assert_command_arguments(&plain, &["nextest", "run"], &expected, &suffix);
-                assert_command_arguments(&instrumented, &["llvm-cov", "nextest", "--no-report"], &expected, &suffix);
+                assert_command_arguments(
+                    &instrumented,
+                    &[
+                        "llvm-cov",
+                        "nextest",
+                        "--no-report",
+                        #[cfg(windows)]
+                        "--no-rustc-wrapper",
+                    ],
+                    &expected,
+                    &suffix,
+                );
                 assert_command_arguments(
                     &report,
                     &["llvm-cov", "report", "--lcov", "--output-path", "lcov.info"],
