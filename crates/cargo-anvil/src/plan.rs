@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use ohno::{AppError, IntoAppError as _, bail};
 
 use crate::decision::Decision;
-#[cfg(any(test, feature = "internals"))]
+#[cfg(any(test, feature = "test-util"))]
 use crate::io::resolve_existing_case_insensitive;
 use crate::manifest::{Manifest, RegionKey};
 
@@ -479,7 +479,7 @@ impl Plan {
     /// items must carry a spliced host. These invariants are enforced
     /// by the `PlanItem::*` constructors, so violations only happen if
     /// callers build `PlanItem` directly with inconsistent fields.
-    #[cfg(any(test, feature = "internals"))]
+    #[cfg(any(test, feature = "test-util"))]
     pub fn apply(&self, repo_root: &Path, previous_manifest: &Manifest) -> Result<Manifest, AppError> {
         self.apply_files(repo_root)?;
         Ok(self.projected_manifest(previous_manifest))
@@ -489,7 +489,7 @@ impl Plan {
     ///
     /// Manifest projection is deliberately separate so dry-run and real
     /// application calculate the same next `.anvil.lock`.
-    #[cfg(any(test, feature = "internals"))]
+    #[cfg(any(test, feature = "test-util"))]
     pub(crate) fn apply_files(&self, repo_root: &Path) -> Result<(), AppError> {
         self.apply_files_with(
             repo_root,

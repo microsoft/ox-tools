@@ -159,7 +159,7 @@ impl Manifest {
     ///
     /// Returns an error if the file exists but can't be read, can't be
     /// parsed, or declares an unsupported schema version.
-    #[cfg(any(test, feature = "internals"))]
+    #[cfg(any(test, feature = "test-util"))]
     pub fn load(repo_root: &Path) -> Result<Self, AppError> {
         let path = Self::path_for(repo_root);
         if !path.exists() {
@@ -373,7 +373,7 @@ impl Manifest {
     /// # Errors
     ///
     /// Returns an error if the write fails.
-    #[cfg(any(test, feature = "internals"))]
+    #[cfg(any(test, feature = "test-util"))]
     pub fn save(&self, repo_root: &Path) -> Result<(), AppError> {
         save_text(repo_root, &self.to_toml())
     }

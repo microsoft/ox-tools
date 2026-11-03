@@ -449,7 +449,7 @@ Use `dry_run` to perform the same planning without writes or deletions.
 An empty backend set explicitly selects local-only generation.
 
 These APIs are supported without any dependency feature, including with
-`default-features = false`; do not enable `internals` or use `test_support`.
+`default-features = false`; do not enable `test-util` or use `test_support`.
 The `memory_catalog` example includes a complete downstream catalog and
 an in-memory `UpdateIo` implementation. Historical fixtures can be loaded
 using `include_str!` rather than read or copied at test runtime.
@@ -463,7 +463,7 @@ More detailed design and operational guidance is available in the
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbNKFuuWswzLobBGyuRjCnVwAbKc1bHILwX4wbyDvhT4zJ2NRhZIGDa2NhcmdvLWFudmlsZjAuMjMuNWtjYXJnb19hbnZpbA
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQb_Bv3TPI9bGwbpUvROfTgheYbvQjOLsdqwcsb5ZXX0rM7ZS1hZIGDa2NhcmdvLWFudmlsZjAuMjMuNWtjYXJnb19hbnZpbA
  [__link0]: https://github.com/casey/just
  [__link1]: https://rust-lang.github.io/rustfmt/
  [__link10]: https://www.conventionalcommits.org/

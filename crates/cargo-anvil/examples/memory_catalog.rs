@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 //! Run with `cargo run -p cargo-anvil --example memory_catalog`.
-//! Downstream catalogs need no `internals` or test-support feature.
+//! Downstream catalogs need no `test-util` feature.
 
 #[path = "support/memory.rs"]
 mod memory;

@@ -449,7 +449,7 @@
 //! An empty backend set explicitly selects local-only generation.
 //!
 //! These APIs are supported without any dependency feature, including with
-//! `default-features = false`; do not enable `internals` or use `test_support`.
+//! `default-features = false`; do not enable `test-util` or use `test_support`.
 //! The `memory_catalog` example includes a complete downstream catalog and
 //! an in-memory `UpdateIo` implementation. Historical fixtures can be loaded
 //! using `include_str!` rather than read or copied at test runtime.
@@ -481,7 +481,7 @@ pub(crate) mod workspace;
 /// must not depend on it — use the crate-root surface (`Catalog`, `Artifact`,
 /// `artifacts`, `run_app`, …) instead.
 #[doc(hidden)]
-#[cfg(any(test, feature = "internals"))]
+#[cfg(any(test, feature = "test-util"))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub mod test_support {
     pub use crate::checksum::checksum_str;

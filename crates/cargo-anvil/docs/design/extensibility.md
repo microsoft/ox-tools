@@ -506,11 +506,11 @@ API**, optionally with `default-features = false`. No features or additional
 fake/mock package are required. Trait implementations name the existing public
 error type, `ohno::AppError`; depend on `ohno` 0.5 with `app-err` when constructing
 scripted errors with `ohno::app_err!` (as in the regression tests).
-`internals` and `test_support` remain unsupported
+The `test-util` feature and `test_support` module remain unsupported
 for downstream use. Version 0.20.1 does not contain this seam; downstream
 adoption depends on a later upstream release, not a local-path dependency.
 
-Public-API integration tests run without `internals` and retain their input
+Public-API integration tests run without `test-util` and retain their input
 state in memory. The committed `tests/fixtures/update-0.20.1/` fixture preserves
 the public `cargo-anvil-v0.20.1` gitattributes region body and its checksum,
 surrounded by repository-owned content; its lock is the minimal schema-2
