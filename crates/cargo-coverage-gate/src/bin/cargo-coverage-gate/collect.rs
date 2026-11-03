@@ -704,14 +704,18 @@ fn configuration_target_dir(execution: &CollectionExecution<'_>, configuration: 
 }
 
 fn run_nextest(execution: &CollectionExecution<'_>, configuration: FeatureConfiguration) -> Result<(), AppError> {
-    let mut command = nextest_command(execution, configuration, cfg!(windows));
+    let mut command = nextest_command(execution, configuration);
     if execution.quiet {
         command.stdout(Stdio::null());
     }
     run_status(&mut command, NEXTEST_DESCRIPTION)
 }
 
-fn nextest_command(execution: &CollectionExecution<'_>, configuration: FeatureConfiguration, windows_host: bool) -> Command {
+fn nextest_command(execution: &CollectionExecution<'_>, configuration: FeatureConfiguration) -> Command {
+    nextest_command_for_host(execution, configuration, cfg!(windows))
+}
+
+fn nextest_command_for_host(execution: &CollectionExecution<'_>, configuration: FeatureConfiguration, windows_host: bool) -> Command {
     let target_dir = configuration_target_dir(execution, configuration);
     let mut command = coverage_command(execution.workspace, &target_dir, execution.tools);
     command.args(["llvm-cov", "nextest", "--no-report"]);
@@ -767,7 +771,7 @@ enum ReportAction {
 }
 
 fn run_report(execution: &CollectionExecution<'_>, configuration: FeatureConfiguration, lcov_path: &Path) -> Result<(), AppError> {
-    let mut command = report_command(execution, configuration, lcov_path, cfg!(windows));
+    let mut command = report_command(execution, configuration, lcov_path);
     let display = command_display(&command);
     let output = command
         .stdout(Stdio::piped())
@@ -842,7 +846,11 @@ fn handle_report_output_with(
     )))
 }
 
-fn report_command(
+fn report_command(execution: &CollectionExecution<'_>, configuration: FeatureConfiguration, lcov_path: &Path) -> Command {
+    report_command_for_host(execution, configuration, lcov_path, cfg!(windows))
+}
+
+fn report_command_for_host(
     execution: &CollectionExecution<'_>,
     configuration: FeatureConfiguration,
     lcov_path: &Path,
@@ -2148,8 +2156,8 @@ mod tests {
                 let plain = plain_configuration_command(&workspace, &selection, &args, configuration, "test-target", &tools);
                 assert_command_selection(&plain, &expected);
                 for windows_host in [false, true] {
-                    let instrumented = nextest_command(&execution, configuration, windows_host);
-                    let report = report_command(&execution, configuration, Path::new("lcov.info"), windows_host);
+                    let instrumented = nextest_command_for_host(&execution, configuration, windows_host);
+                    let report = report_command_for_host(&execution, configuration, Path::new("lcov.info"), windows_host);
                     assert_command_selection(&instrumented, &expected);
                     assert_command_selection(&report, &expected);
                 }
@@ -2203,8 +2211,8 @@ mod tests {
             for configuration in normalized_configurations(&[]) {
                 for command in [
                     plain_configuration_command(&workspace, &selection, &args, configuration, "test-target", &tools),
-                    nextest_command(&execution, configuration, cfg!(windows)),
-                    report_command(&execution, configuration, Path::new("lcov.info"), cfg!(windows)),
+                    nextest_command(&execution, configuration),
+                    report_command(&execution, configuration, Path::new("lcov.info")),
                 ] {
                     let arguments = command.get_args().collect::<Vec<_>>();
                     let package = arguments
@@ -2422,7 +2430,7 @@ mod tests {
         };
         for windows_host in [false, true] {
             for configuration in normalized_configurations(&[]) {
-                let nextest = nextest_command(&execution, configuration, windows_host);
+                let nextest = nextest_command_for_host(&execution, configuration, windows_host);
                 let mut expected = vec!["llvm-cov", "nextest", "--no-report"];
                 if windows_host {
                     expected.push("--no-rustc-wrapper");
@@ -2447,7 +2455,7 @@ mod tests {
                 assert_eq!(nextest.get_program(), OsStr::new("cargo-custom"));
                 assert_eq!(nextest.get_current_dir(), Some(Path::new("repo")));
 
-                let report = report_command(&execution, configuration, Path::new("coverage/lcov.info"), windows_host);
+                let report = report_command_for_host(&execution, configuration, Path::new("coverage/lcov.info"), windows_host);
                 assert_eq!(
                     report.get_args().collect::<Vec<_>>(),
                     [
@@ -2476,6 +2484,14 @@ mod tests {
                     }
                     let expected_msystem = removes_msystem.then_some(&None);
                     assert_eq!(env.get(OsStr::new("MSYSTEM")), expected_msystem);
+                }
+                if windows_host == cfg!(windows) {
+                    let native_nextest = nextest_command(&execution, configuration);
+                    let native_report = report_command(&execution, configuration, Path::new("coverage/lcov.info"));
+                    for (native, expected) in [(&native_nextest, &nextest), (&native_report, &report)] {
+                        assert_eq!(native.get_args().collect::<Vec<_>>(), expected.get_args().collect::<Vec<_>>());
+                        assert_eq!(native.get_envs().collect::<Vec<_>>(), expected.get_envs().collect::<Vec<_>>());
+                    }
                 }
             }
         }

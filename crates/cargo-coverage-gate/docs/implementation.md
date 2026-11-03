@@ -125,11 +125,13 @@ processes and creates no disk fixtures; installed Cargo, nextest, LLVM, and
 registry access are not prerequisites for its verdict.
 
 Instrumented and report command construction take an explicit Windows-host
-policy; only their native entry points select it with `cfg!(windows)`. It is
+policy; only their native command adapters select it with `cfg!(windows)`. It is
 the collector's host, not the requested compilation target, that controls the
 rustc-wrapper workaround and report-only `MSYSTEM` removal. Command-contract
 tests exercise both host policies on every test host, including exact arguments,
 private target directories, and environment removals for both feature modes.
+The same tests check that native command adapters select the running host's
+policy, so reversing host detection cannot silently select the other mode.
 Package-selection tests exercise both policies too, but assert only their own
 selection contract so unrelated platform flags cannot invalidate them.
 
