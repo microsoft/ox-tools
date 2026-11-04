@@ -89,6 +89,7 @@ fn unchanged_historical_region_upgrades_and_preserves_surrounding_content() {
         io.insert(".gitattributes", &HISTORICAL_HOST.replace("\r\n", "\n").replace('\n', newline));
         let result = update(&upgraded_catalog(), &UpdateOptions::default(), &mut io).unwrap();
         assert!(result.refusals.is_empty(), "{}", result.summary);
+        assert!(result.summary.contains("Will update: 1 item(s)"), "{}", result.summary);
         let expected = "*.png binary\n\n# >>> anvil-managed: anvil-gitattributes\n*.rs text eol=lf\n*.sh text eol=lf\n*.ps1 text eol=lf\n# <<< anvil-managed: anvil-gitattributes\n\n# repository-owned suffix\n";
         assert_eq!(io.files[".gitattributes"], expected.replace('\n', newline));
         assert_ne!(io.files[".anvil.lock"], HISTORICAL_LOCK);
@@ -378,10 +379,21 @@ fn proposal_failure_preserves_the_original_and_previous_lock() {
 }
 
 #[test]
+fn missing_root_manifest_returns_an_error_without_mutation() {
+    let mut io = MemoryRepository::default();
+    let error = update(&upgraded_catalog(), &UpdateOptions::default(), &mut io).unwrap_err();
+    assert!(error.to_string().contains("no Cargo.toml at the repository root"), "{error}");
+    assert!(io.files.is_empty(), "unexpected files: {:?}", io.files);
+    assert!(io.mutations.is_empty(), "unexpected mutations: {:?}", io.mutations);
+}
+
+#[test]
 fn workspace_member_read_and_enumeration_failures_do_not_mutate() {
-    for (read, directory, expected) in [
-        (Some("crates/alpha/Cargo.toml"), None, "scripted read failure"),
-        (None, Some("crates"), "scripted directory failure"),
+    for (member, read, directory, expected) in [
+        ("crates/*", Some("crates/alpha/Cargo.toml"), None, "scripted read failure"),
+        ("crates/alpha", Some("crates/alpha/Cargo.toml"), None, "scripted read failure"),
+        ("crates/*", None, Some("crates"), "scripted directory failure"),
+        ("crates/*", None, Some("crates/alpha/Cargo.toml"), "scripted directory failure"),
     ] {
         let mut io = FailingIo {
             repository: repository(),
@@ -389,7 +401,8 @@ fn workspace_member_read_and_enumeration_failures_do_not_mutate() {
             directory: directory.map(str::to_owned),
             ..FailingIo::default()
         };
-        io.repository.insert("Cargo.toml", "[workspace]\nmembers = [\"crates/*\"]\n");
+        io.repository
+            .insert("Cargo.toml", &format!("[workspace]\nmembers = [\"{member}\"]\n"));
         io.repository
             .insert("crates/alpha/Cargo.toml", "[package]\nname = \"alpha\"\nversion = \"0.1.0\"\n");
         let before = io.repository.files.clone();

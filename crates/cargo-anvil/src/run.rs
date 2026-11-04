@@ -114,16 +114,17 @@ fn update_with_backend_resolution(
     backends: impl FnOnce() -> Result<Vec<Backend>, AppError>,
 ) -> Result<RunOutcome, AppError> {
     let shared = std::cell::RefCell::new(io);
+    let root = PathBuf::new();
     run_update_with(
         catalog,
         args,
-        Path::new(""),
+        &root,
         |_| {
             let manifest = shared.borrow().read_file(Path::new(".anvil.lock"))?.map_or_else(
                 || Ok(Manifest::default()),
                 |text| Manifest::parse(&text).into_app_err("failed to parse manifest at .anvil.lock"),
             )?;
-            Ok((PathBuf::new(), manifest))
+            Ok((root.clone(), manifest))
         },
         |root, manifest| {
             let io = shared.borrow();
