@@ -93,8 +93,10 @@ pub(crate) fn sweep(group: i32, kill_group: impl FnOnce() -> io::Result<()>) -> 
     sweep_with(&mut Native, group, kill_group)
 }
 
-/// Walks a group's members and their descendants, calling `before_children` on each descendant
-/// outside the group before listing its children. Each entry says whether it is a group member.
+/// Walks a group's members and their descendants.
+///
+/// `before_children` is called on each descendant outside the group before its children are
+/// listed. Each entry says whether it is a group member.
 ///
 /// A failed child listing skips that process's subtree, not the rest of the walk, so the caller
 /// still has every process found. The first listing failure is returned beside the tree.
@@ -224,6 +226,8 @@ mod tests {
         }
     }
 
+    /// A cargo-nextest launch with two tests, one of which has a child.
+    ///
     /// cargo (10) leads the group and runs cargo-nextest (11), which runs each test (20, 30) in a
     /// group of its own. Test 20 has a child (21) in its group.
     fn nextest() -> Table {
@@ -356,8 +360,12 @@ mod tests {
             let log = Rc::clone(&table.log);
             let failure = sweep_with(&mut table, 10, kill_group(&log, Ok(()))).unwrap_err();
             assert_eq!(failure.raw_os_error(), Some(error));
+            let kills: Vec<_> = events(&table)
+                .into_iter()
+                .filter(|(event, _id)| event.starts_with("kill"))
+                .collect();
             assert_eq!(
-                events(&table)[9..],
+                kills,
                 [("kill_process", 21), ("kill", 30), ("kill", 20), ("kill", 10)],
                 "one failure does not stop the sweep"
             );

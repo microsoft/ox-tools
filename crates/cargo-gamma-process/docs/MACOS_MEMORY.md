@@ -328,7 +328,7 @@ found. The sweep runs in this order:
    reaped. A descendant that leads its group, such as each test, is killed
    with its group; any other is killed alone, so a process that joins an
    unrelated group, such as this run's own, does not steer the sweep there.
-3. Kill the launch's group, as before. `SIGKILL` ends stopped processes.
+3. Kill the launch's group last. `SIGKILL` ends stopped processes.
 
 A descendant that cannot be killed, including one owned by another user
 (`EPERM`), fails the sweep, so cleanup is reported as unproven rather than
