@@ -772,9 +772,8 @@ anvil-bench-validate-prereqs: anvil-tool-rustc-validate-prereqs
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Fuzz passes via [bolero](https://crates.io/crates/bolero):
-# the default PR campaign runs each affected libfuzzer target 30,000 times
-# with a fixed seed. The scheduled campaign runs each workspace target
-# for 90 seconds without specifying a seed.
+# the default PR campaign uses a fixed run count and seed. The scheduled
+# campaign uses a time budget without specifying a seed.
 #
 # Linux-only: cargo-bolero's libfuzzer engine (and its bolero-afl
 # build dependency) only builds on Linux, so the recipe self-skips on

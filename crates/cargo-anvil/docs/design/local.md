@@ -169,7 +169,8 @@ anvil-pr-runtime-analysis: anvil-miri anvil-careful anvil-loom
 anvil-pr-fuzzing: anvil-bolero
 anvil-pr-mutants: anvil-mutants-diff
 
-anvil-scheduled-test: anvil-check-all-targets anvil-llvm-cov anvil-doc-test anvil-examples
+anvil-scheduled-test: anvil-check-all-targets anvil-llvm-cov anvil-doc-test anvil-examples \
+                      (anvil-bolero "scheduled")
 anvil-scheduled-advisories: anvil-deny anvil-audit anvil-aprz anvil-clippy
 anvil-scheduled-runtime-analysis: anvil-miri anvil-miri-tree-borrows \
                                   anvil-miri-strict-provenance anvil-miri-race-coverage

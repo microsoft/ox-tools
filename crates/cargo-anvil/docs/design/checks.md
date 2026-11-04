@@ -369,6 +369,15 @@ Both campaigns share package selection, discovery, and execution; selecting a
 campaign does not change impact scope. In particular, full-workspace local PR
 verification retains the PR campaign.
 
+The fixed PR run budget is based on measurements of `microsoft/oxidizer` and
+`microsoft/ox-tools` available as of November 4, 2026, in an attempt to balance
+runtime and source-line coverage
+([budget selection discussion](https://github.com/microsoft/ox-tools/pull/336#discussion_r4459898079)).
+This evidence applies to the tested targets and seeds, not to coverage or defect
+detection in other workspaces. The fixed run count and seed make the required
+campaign's engine policy repeatable; the scheduled campaign provides additional
+exploration outside the required PR gate.
+
 On non-Linux hosts, the fuzzing group skips its setup and prerequisite validation,
 and Bolero skips before validating prerequisites or calculating impact. Other
 groups in `pr-slow` still perform their own setup and validation.
@@ -539,6 +548,9 @@ What that means concretely:
 - **Re-run in scheduled** (in addition to PR):
   - `llvm-cov`, `doc-test`, `examples` (in `scheduled-test`) -- non-determinism, environment
     sensitivity, runner drift can produce flakes that the PR run missed.
+  - `bolero` (in `scheduled-test`) -- a full-workspace, time-budgeted campaign
+    without a seed argument can explore inputs beyond the impact-scoped,
+    fixed-count PR campaign.
   - `deny`, `audit`, `clippy` (in `scheduled-advisories`) -- see §2.
   - `miri` (in `scheduled-runtime-analysis`) -- the PR-tier run is impact-scoped, so
     crates not touched by a given PR can go indefinitely without miri coverage; the
@@ -549,7 +561,7 @@ What that means concretely:
   the pinned tool versions, so re-running on the same `main` commit can't surface anything
   new: `fmt`, `cargo-sort`, `license-headers`, `ensure-no-cyclic-deps`,
   `ensure-no-default-features`, `doc-build`, `readme-check`, `spellcheck`, `pr-title`,
-  `udeps`, `semver-check`, `external-types`, `careful`, `loom`, `bolero`,
+  `udeps`, `semver-check`, `external-types`, `careful`, `loom`,
   diff-scoped `mutants`.
 - **Run only in scheduled** -- the expensive whole-workspace work that doesn't fit a PR
   budget: package-isolated `check-all-targets` (in `scheduled-test`);
