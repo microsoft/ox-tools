@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.23.5] - 2026-11-04
+
+- 🐛 Bug Fixes
+
+  - cargo-anvil: pin cargo-coverage-gate 0.7.4 to preserve workspace package source identities.
+
 ## [0.23.4] - 2026-11-03
 
 - ✨ Features
