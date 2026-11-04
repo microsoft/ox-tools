@@ -1,6 +1,6 @@
 version = 2
 tool = "anvil"
-tool_version = "0.23.5"
+tool_version = "0.24.0"
 catalog_checksum = "sha256:b31e17caa9b0c0645876e31732c286594d8c987fb06c8933a9b476aeec7efd83"
 
 [[file]]
