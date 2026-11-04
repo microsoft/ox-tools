@@ -18,6 +18,7 @@
 - 🐛 Bug Fixes
 
   - cargo-anvil: preserve merged recipe behavior
+  - cargo-anvil: prepare the Miri sysroot during setup ([#328](https://github.com/microsoft/ox-tools/pull/328))
   - cargo-anvil: keep setup independent of workspace tools
   - cargo-anvil: decouple tool installs from workspace toolchain
   - cargo-anvil: bootstrap cargo-each before recipe evaluation
@@ -43,6 +44,7 @@
 
 - 🧩 Miscellaneous
 
+  - Merge current main into cargo-anvil consolidation
   - Merge current main into cargo-anvil consolidation
   - Merge current main into cargo-anvil consolidation
   - Merge current main into cargo-anvil consolidation
