@@ -1040,10 +1040,12 @@ Platform containment uses the strongest suitable primitive:
   accounting and enforcement;
 - Windows job objects provide descendant lifetime and memory control;
 - on macOS, which has no process-tree memory boundary, memory is accounted and enforced by sampling
-  the process group's physical footprint.
+  the physical footprint of the process group and of its descendants by parentage.
 
 A process group is escapable: one unprivileged `setsid` or `setpgid` call removes a descendant from
-it, and every later signal to the group misses that descendant. Containment is therefore not
+it, and every later signal to the group misses that descendant. cargo-nextest does this for every
+test. On macOS, cleanup therefore also stops and ends every descendant found through its
+parent; a descendant that has outlived its parent is no longer found. Containment is therefore not
 conditional on whether memory is being measured. Every launch enters a cgroup leaf on Linux and a
 job object on Windows, including launches that request no accounting at all, such as test listing;
 the memory request decides only whether that boundary's readings are reported.
@@ -1104,8 +1106,8 @@ explicitly, while a user-requested guarantee fails rather than pretending to be 
 Enforcement is either kernel-enforced (a Linux cgroup or a Windows job) or sampled (macOS). A time
 budget cannot stand in for either. A mutant that breaks a loop's termination while the loop
 allocates can grow by gigabytes per second and exhaust a workstation long before any reasonable
-timeout. Sampled enforcement on macOS checks the process group's footprint every 10 ms and stops
-the group past its ceiling. It reports the same `outofmem` outcome, and the run says once that its
+timeout. Sampled enforcement on macOS checks the footprint of the process group and its
+descendants every 10 ms and stops them past their ceiling. It reports the same `outofmem` outcome, and the run says once that its
 bound is soft. The incident that motivated it and the measured overshoot are recorded in the
 [macOS memory design](../../cargo-gamma-process/docs/MACOS_MEMORY.md).
 
@@ -1692,7 +1694,8 @@ The mutant-schema design makes large campaigns practical, but it is not free.
 - **Resource containment depends on the host.** Linux and Windows provide strong process-tree
   facilities; other environments may provide less, and requested guarantees are refused when they
   cannot be honored. Where no sealed boundary exists, containment silently falls back to best
-  effort, and a descendant that deliberately leaves its process group can still outlive the run.
+  effort, and a descendant that deliberately leaves its process group can still outlive the run
+(on macOS, only once it has also outlived its parent).
   Linux additionally treats the memory interface as part of the same capability, so a kernel too
   old to expose it falls back to best effort even though its cgroup could have held the subtree.
 - **The workspace environment must be sound on platforms without an immutable startup image.**
