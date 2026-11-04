@@ -382,6 +382,13 @@ splicing, and in-memory update planning retain Miri coverage in every profile.
 These exclusions do not disable native tests, mutation testing, or any unsafe/concurrency
 tests in the workspace.
 
+The planner's exhaustive resolver-failure tests keep a complete successful plan
+and first, middle, and last injected failures under Miri; native/`cargo careful`
+runs still inject at every resolver call. The multi-deletion TOML adoption matrix
+pairs LF/CRLF with opposite artifact orders under Miri for both table and dotted-key
+inputs, retaining Unicode preservation and settling checks. Its complete Cartesian
+product remains native/`cargo careful` coverage.
+
 Windows Miri uses Cargo's temporary
 `__CARGO_TEMPORARY_BUILD_DIR_NEW_LAYOUT_OPT_OUT=1` compatibility switch.
 Cargo 1.100's per-crate build paths make large dependency search lists exceed

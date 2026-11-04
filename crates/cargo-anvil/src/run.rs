@@ -3798,6 +3798,11 @@ mod tests {
             "the failure-injection loop must exercise at least one resolution boundary"
         );
         for fail_at in 0..calls {
+            // Native/cargo-careful cover every boundary; Miri retains early,
+            // intermediate, and late errors plus the complete successful plan.
+            if cfg!(miri) && fail_at != 0 && fail_at != calls / 2 && fail_at != calls - 1 {
+                continue;
+            }
             RESOLUTION.with(|state| state.set((fail_at, 0)));
             let error = run().unwrap_err().to_string();
             assert!(
@@ -6035,6 +6040,11 @@ mod tests {
                     syntax: CommentSyntax::Hash,
                 };
                 for array_first in [false, true] {
+                    // Native/cargo-careful retain the Cartesian matrix; Miri
+                    // pairs LF/CRLF with opposite orders for both TOML shapes.
+                    if cfg!(miri) && array_first != (newline == "\r\n") {
+                        continue;
+                    }
                     let catalog = array_catalog(Some(neighbor.clone()), array_first);
                     let plan = array_plan(&source, &Manifest::default(), &catalog).unwrap();
                     assert_eq!(plan.refusals().len(), 0);
