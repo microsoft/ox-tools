@@ -6,12 +6,12 @@
 
 # Run exhaustive mutation testing across the workspace.
 anvil-mutants-full: anvil-mutants-full-validate-prereqs
-    {{ mutants_command_prefix }}cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} mutants --workspace --no-shuffle --jobs 0 {{_anvil_mutants_config_arg}}
+    cargo {{ anvil_stable_toolchain_arg }} gamma run --workspace --min-score 100 --max-flaky 0 --update-hints {{ if env("GITHUB_ACTIONS", "") == "true" { "--artifact-dir target/cargo-gamma" } else { "" } }}
 
 # Install prerequisites for the `anvil-mutants-full` recipe.
 [group("anvil-setup")]
-anvil-mutants-full-setup installer="install": (anvil-tool-cargo-mutants-install installer) (anvil-tool-cargo-each-install installer)
+anvil-mutants-full-setup installer="install": (anvil-tool-cargo-gamma-install installer)
 
 # Validate prerequisites for the `anvil-mutants-full` recipe.
 [group("anvil-setup")]
-anvil-mutants-full-validate-prereqs: anvil-tool-cargo-mutants-validate-prereqs anvil-tool-cargo-each-validate-prereqs
+anvil-mutants-full-validate-prereqs: anvil-tool-cargo-gamma-validate-prereqs

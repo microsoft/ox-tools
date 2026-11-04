@@ -30,12 +30,12 @@ allowed_external_types = []
 # public rustdoc for cargo-doc2readme to turn into a README.
 disable = true
 
-# These dependencies constrain transitive versions without being used directly.
+# This dependency constrains a transitive version without being used directly.
 [package.metadata.cargo-udeps.ignore]
-normal = ["constant_time_eq", "unicode-ident"]
+normal = ["constant_time_eq"]
 
 [package.metadata.unused-deps]
-allowed = ["constant_time_eq", "unicode-ident"]
+allowed = ["constant_time_eq"]
 
 [package.metadata.coverage-gate]
 # Production-only coverage excludes test modules and scaffolding. The measured
@@ -89,7 +89,6 @@ indicatif = { workspace = true }
 layered = { workspace = true }
 log = { workspace = true }
 mmap-rs = { workspace = true }
-mutants = { workspace = true }
 ohno = { workspace = true, features = ["app-err"] }
 owo-colors = { workspace = true }
 pastey = { workspace = true }
@@ -120,10 +119,6 @@ terminal_size = { workspace = true }
 tick = { workspace = true, features = ["tokio"] }
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "rt-multi-thread", "sync", "process", "time"] }
 toml = { workspace = true, features = ["parse", "serde", "display"] }
-# Never named in this crate's code. It is here only to bound the `unicode-ident` that
-# `ra_ap_syntax` -> `ra-ap-rustc_lexer` resolves; see the catalog entry in the workspace
-# manifest for why. Removing it breaks every consumer that resolves dependencies freshly.
-unicode-ident = { workspace = true }
 unicode-width = { workspace = true }
 url = { workspace = true }
 vu128 = { workspace = true }

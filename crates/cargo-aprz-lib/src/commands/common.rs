@@ -231,6 +231,7 @@ pub struct Common<'a, H: super::Host> {
     json: Option<Utf8PathBuf>,
 }
 
+// #[gamma::skip(fn_value.bool_false, fn_value.bool_true, tag = "native", reason = "stderr terminal attachment is host state; initialization policy is tested through diagnostic_terminal")]
 fn diagnostic_is_terminal() -> bool {
     // #[gamma::skip(bool_expr.negate, reason = "The actual stderr terminal query is host state; deterministic command-policy tests use the owned override.", tag = "native")]
     stderr().is_terminal()
@@ -936,7 +937,7 @@ mod tests {
         let mut reporting = survivor_reporting(&config, &mut host);
         reporting.error_if_medium_risk = true;
         reporting.report([survivor_found_crate("quiet-survivor", "1.0.0")]).unwrap();
-        assert!(host.output_buf.is_empty());
+        assert_eq!(host.output_buf, [] as [u8; 0]);
     }
 
     #[test]
@@ -960,7 +961,7 @@ mod tests {
                     |path, contents| {
                         assert_ne!(extension, "xlsx", "Excel must use its binary writer");
                         assert_eq!(Some(path), filename.as_deref());
-                        assert!(!contents.is_empty());
+                        assert_ne!(contents, "");
                         calls.set(calls.get() + 1);
                         Err(Error::new(ErrorKind::PermissionDenied, "scripted report write failure").into())
                     },
@@ -977,7 +978,7 @@ mod tests {
             assert_eq!(source.kind(), ErrorKind::PermissionDenied);
             assert_eq!(source.to_string(), "scripted report write failure");
             assert_eq!(calls.get(), 1);
-            assert!(host.output_buf.is_empty());
+            assert_eq!(host.output_buf, [] as [u8; 0]);
         }
     }
 
@@ -1277,12 +1278,12 @@ mod tests {
             );
         }
 
-        async fn credentials(&mut self, _args: &CommonArgs, _endpoints: &Endpoints) -> Option<GitHubToken> {
+        fn credentials(&mut self, _args: &CommonArgs, _endpoints: &Endpoints) -> impl Future<Output = Option<GitHubToken>> {
             self.calls.push("credentials");
-            Some("controlled-token".parse().unwrap())
+            std::future::ready(Some("controlled-token".parse().unwrap()))
         }
 
-        async fn collector(
+        fn collector(
             &mut self,
             _args: &CommonArgs,
             _config: &Config,
@@ -1290,13 +1291,15 @@ mod tests {
             progress: ProgressReporter,
             _endpoints: &Endpoints,
             token: Option<&GitHubToken>,
-        ) -> Result<Collector> {
+        ) -> impl Future<Output = Result<Collector>> {
             self.calls.push("collector");
             assert_eq!(cache_dir, Path::new("scripted-cache"));
             assert_eq!(token.unwrap().expose_secret(), "controlled-token");
             assert_eq!(crate::facts::Progress::use_colors(&progress), self.expected_colors.unwrap());
             crate::facts::Progress::done(&progress);
-            Err(Error::new(ErrorKind::PermissionDenied, "scripted collector failure")).into_app_err("creating collector")
+            std::future::ready(
+                Err(Error::new(ErrorKind::PermissionDenied, "scripted collector failure")).into_app_err("creating collector"),
+            )
         }
     }
 

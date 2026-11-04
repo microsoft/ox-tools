@@ -13,7 +13,6 @@ installed_cargo_tools := `cargo install --list`
 cargo_binstall_version := replace_regex(installed_cargo_tools, '(?ms)\A.*^cargo-binstall v([^:\r\n]+):\r?$.*\z', '$1')
 cargo_binstall_found := if cargo_binstall_version == installed_cargo_tools { "false" } else { "true" }
 bolero_command_prefix := if os() == "linux" { "" } else { "# " }
-mutants_command_prefix := if os() == "windows" { if arch() == "aarch64" { "# " } else { "" } } else { "" }
 
 # Install exactly the catalog version when the installed version is too old.
 # A newer local version is accepted. `binstall` prefers a prebuilt binary and
@@ -251,13 +250,11 @@ anvil-tool-cargo-llvm-cov-validate-prereqs: (_check-tool "cargo-llvm-cov" cargo_
 
 [group("anvil-setup")]
 [private]
-anvil-tool-cargo-mutants-install installer="install":
-    {{ mutants_command_prefix }}{{ just_executable() }} _install-tool cargo-mutants {{ cargo_mutants_version }} {{ installer }}
+anvil-tool-cargo-gamma-install installer="install": (_install-tool "cargo-gamma" cargo_gamma_version installer)
 
 [group("anvil-setup")]
 [private]
-anvil-tool-cargo-mutants-validate-prereqs:
-    {{ mutants_command_prefix }}{{ just_executable() }} _check-tool cargo-mutants {{ cargo_mutants_version }}
+anvil-tool-cargo-gamma-validate-prereqs: (_check-tool "cargo-gamma" cargo_gamma_version)
 
 [group("anvil-setup")]
 [private]
@@ -323,7 +320,7 @@ anvil-tool-cargo-udeps-validate-prereqs: (_check-tool "cargo-udeps" cargo_udeps_
 # nightly-dependent check. Bumped on a regular cadence (monthly is a
 # reasonable default) when an adopter has time to absorb formatting /
 # lint / API-surface drift. Pin only -- do not use bare `nightly` here.
-rust_nightly := "nightly-2026-05-30"
+rust_nightly := "nightly-2026-10-31"
 
 # Pinned narrowly to the rustdoc JSON schema version that the currently
 # selected cargo-check-external-types release accepts. cargo-check-
@@ -332,15 +329,15 @@ rust_nightly := "nightly-2026-05-30"
 # with "produces JSON format version X, but this tool requires
 # format version Y" -- which is a tooling-incompat, not a real API
 # violation. Bump this alongside any cargo-check-external-types upgrade.
-rust_nightly_external_types := "nightly-2026-03-20"
+rust_nightly_external_types := "nightly-2026-06-22"
 
 # ============================================================================
 # Cargo subcommands
 # ============================================================================
 
-cargo_aprz_version := "1.2.1"
+cargo_aprz_version := "1.2.2"
 cargo_audit_version := "0.22.2"
-cargo_bolero_version := "0.13.4"
+cargo_bolero_version := "0.13.5"
 cargo_careful_version := "0.4.10"
 cargo_check_external_types_version := "0.5.0"
 cargo_coverage_gate_version := "0.7.3"
@@ -349,12 +346,12 @@ cargo_deny_version := "0.20.2"
 cargo_doc2readme_version := "0.7.3"
 cargo_each_version := "0.7.0"
 cargo_ensure_no_cyclic_deps_version := "0.2.0"
-cargo_ensure_no_default_features_version := "1.1.0"
+cargo_ensure_no_default_features_version := "1.1.1"
 cargo_hack_version := "0.6.45"
 cargo_heather_version := "0.3.0"
-cargo_llvm_cov_version := "0.9.0"
-cargo_mutants_version := "27.1.0"
-cargo_nextest_version := "0.9.143"
+cargo_gamma_version := "0.4.0"
+cargo_llvm_cov_version := "0.9.1"
+cargo_nextest_version := "0.9.150"
 cargo_sort_version := "2.1.4"
 cargo_spellcheck_version := "0.15.7"
 cargo_udeps_version := "0.1.61"
@@ -644,15 +641,15 @@ anvil-loom-setup installer="install": (anvil-tool-cargo-each-install installer)
 [private]
 anvil-loom-validate-prereqs: anvil-tool-rustc-validate-prereqs anvil-tool-cargo-each-validate-prereqs
 
+# --- pr-runtime-analysis members ---
+
 # Install prerequisites for the `anvil-miri` recipe.
-[group("anvil-setup")]
 [private]
-anvil-miri-setup installer="install": anvil-component-nightly-miri-install anvil-component-nightly-rust-src-install (anvil-tool-cargo-each-install installer)
+anvil-miri-setup installer="install": anvil-component-nightly-miri-install anvil-component-nightly-rust-src-install
 
 # Validate prerequisites for the `anvil-miri` recipe.
-[group("anvil-setup")]
 [private]
-anvil-miri-validate-prereqs: anvil-component-nightly-miri-validate-prereqs anvil-component-nightly-rust-src-validate-prereqs anvil-tool-cargo-each-validate-prereqs
+anvil-miri-validate-prereqs: anvil-component-nightly-miri-validate-prereqs anvil-component-nightly-rust-src-validate-prereqs
 
 # Install prerequisites for the `anvil-miri-race-coverage` recipe.
 [group("anvil-setup")]
@@ -703,22 +700,22 @@ anvil-msrv-test-validate-prereqs: anvil-tool-cargo-each-validate-prereqs
 # Install prerequisites for the `anvil-mutants-diff` recipe.
 [group("anvil-setup")]
 [private]
-anvil-mutants-diff-setup installer="install": (anvil-tool-cargo-mutants-install installer) (anvil-tool-cargo-each-install installer)
+anvil-mutants-diff-setup installer="install": (anvil-tool-cargo-gamma-install installer)
 
 # Validate prerequisites for the `anvil-mutants-diff` recipe.
 [group("anvil-setup")]
 [private]
-anvil-mutants-diff-validate-prereqs: anvil-tool-cargo-mutants-validate-prereqs anvil-tool-cargo-each-validate-prereqs
+anvil-mutants-diff-validate-prereqs: anvil-tool-cargo-gamma-validate-prereqs
 
 # Install prerequisites for the `anvil-mutants-full` recipe.
 [group("anvil-setup")]
 [private]
-anvil-mutants-full-setup installer="install": (anvil-tool-cargo-mutants-install installer) (anvil-tool-cargo-each-install installer)
+anvil-mutants-full-setup installer="install": (anvil-tool-cargo-gamma-install installer)
 
 # Validate prerequisites for the `anvil-mutants-full` recipe.
 [group("anvil-setup")]
 [private]
-anvil-mutants-full-validate-prereqs: anvil-tool-cargo-mutants-validate-prereqs anvil-tool-cargo-each-validate-prereqs
+anvil-mutants-full-validate-prereqs: anvil-tool-cargo-gamma-validate-prereqs
 
 # PR-title validation is a Just expression; there is no tool to install.
 [group("anvil-setup")]

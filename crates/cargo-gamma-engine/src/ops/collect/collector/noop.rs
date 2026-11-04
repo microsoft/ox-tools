@@ -71,16 +71,10 @@ pub(super) fn is_standard_default_constructor(expression: &Expr, expected: &Type
         // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
         false;
     }
-    let constructor = Type::Path(syn::TypePath {
+    let constructor_path = syn::TypePath {
         attrs: Vec::new(),
         qself: None,
         path,
-    });
-    let Type::Path(constructor_path) = &constructor else {
-        return
-        // #[gamma::skip(literal.bool_flip, reason = "The constructor value was immediately built as Type::Path. The changed let-else branch is unreachable.", tag = "equivalent")]
-        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-        false;
     };
     let Some(arguments) = constructor_argument_count(&constructor_path.path) else {
         return
@@ -103,6 +97,7 @@ pub(super) fn is_standard_default_constructor(expression: &Expr, expected: &Type
         false;
     }
     let expected = types.resolve_alias(expected);
+    let constructor = Type::Path(constructor_path);
     if !types.standard_constructor_root(&constructor) || !types.standard_constructor_root(expected) {
         return
         // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]

@@ -185,8 +185,13 @@ These focused operations are not substitutes for either verification tier.
   and the local cargo-coverage-gate verdict enforces each package's configured
   threshold.
 
-- **Mutation Testing**. We use [`cargo-mutants`](https://crates.io/crates/cargo-mutants) to help maintain
-  high test quality.
+- **Mutation Testing**. Anvil uses [`cargo-gamma`](./crates/cargo-gamma/README.md)
+  0.4.0 or newer for diff-scoped PR checks and full scheduled campaigns.
+  Repository policy lives in `gamma.toml`, retaining all-feature testing and the
+  existing `mutants` build profile. Campaigns must meet a 100% assertion-killed
+  score with no unresolved flaky outcomes. Empty diff selections succeed;
+  nonempty populations with no gradeable mutations and empty full campaigns
+  fail the applicable gates. The former `.cargo/mutants.toml` is not used by Anvil.
 
 - **Source Linting**. We run Clippy with most warnings enabled and all treated as errors.
 

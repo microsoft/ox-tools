@@ -984,7 +984,7 @@ mod tests {
             let record = record_for(&root, &mutants);
             let (plan, stale) =
                 plan_from_record(&root, &record, &[crate::fix::Eligible::Timeout]).expect("all persisted identities still exist");
-            assert!(stale.is_empty());
+            assert_eq!(stale.len(), 0);
             let names: Vec<_> = plan.files.iter().map(|file| file.path.as_str()).collect();
             assert_eq!(
                 names,
@@ -1276,7 +1276,7 @@ mod tests {
         assert_eq!(code, EXIT_OK);
         assert!(err.contains("Suppressed 0 directives"), "{err}");
         assert!(err.contains("grep for `cargo gamma suppress`"), "{err}");
-        assert!(host.out.is_empty());
+        assert_eq!(host.out.len(), 0);
     }
 
     #[test]
@@ -1744,7 +1744,7 @@ mod tests {
         let (plan, stale) =
             plan_from_record(&root, &record, &crate::fix::Eligible::parse("timeout").expect("eligible")).expect("ledger reconstruction");
 
-        assert!(stale.is_empty());
+        assert_eq!(stale.len(), 0);
         assert_eq!(plan.mutants.len(), 2_000);
         assert_eq!(
             plan.mutants.iter().map(|mutant| mutant.id.clone()).collect::<BTreeSet<_>>().len(),
@@ -2571,7 +2571,7 @@ mod tests {
             );
         }
         let (plan, stale) = plan_from_record(&root, &record, &[crate::fix::Eligible::Timeout]).expect("unaltered identity");
-        assert!(stale.is_empty());
+        assert_eq!(stale.len(), 0);
         assert_eq!(plan.mutants.len(), 2);
         assert!(
             plan.mutants
@@ -2709,7 +2709,7 @@ mod tests {
         timeout.note = Some("old runtime observation".to_owned());
         let record = record_for(&root, &[ignored.clone(), timeout.clone()]);
         let (plan, stale) = plan_from_record(&root, &record, &[crate::fix::Eligible::Timeout]).expect("current identities");
-        assert!(stale.is_empty());
+        assert_eq!(stale.len(), 0);
         assert_eq!(plan.mutants.len(), 2);
         let ignored_now = plan
             .mutants
@@ -2858,7 +2858,7 @@ mod tests {
         let record = record_for(&root, &[mutant]);
         let eligible = [crate::fix::Eligible::Timeout];
         let (plan, stale) = plan_from_record(&root, &record, &eligible).expect("current plan");
-        assert!(stale.is_empty());
+        assert_eq!(stale.len(), 0);
         let mut args = dry_args(&root, "timeout");
         args.apply = false;
         args.allow_dirty = true;

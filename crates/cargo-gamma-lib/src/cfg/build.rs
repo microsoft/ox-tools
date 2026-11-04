@@ -336,7 +336,7 @@ thread_local! {
     static AMBIENT_ENVIRONMENT: core::cell::RefCell<Option<Environment>> = const { core::cell::RefCell::new(None) };
 }
 
-#[cfg(feature = "internals")]
+#[cfg(any(test, feature = "internals"))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub fn with_empty_environment<T>(operation: impl FnOnce() -> T) -> T {
     struct Reset(Option<Environment>);
@@ -1008,6 +1008,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn oct29_empty_environment_restores_the_enclosing_scope_after_success_and_unwind() {
+        for unwind in [false, true] {
+            AMBIENT_ENVIRONMENT.with_borrow_mut(|slot| {
+                assert!(slot.is_none());
+                *slot = Some(Environment {
+                    target: Some("enclosing-target".into()),
+                    rustflags: Some("--cfg enclosing".into()),
+                    ..Environment::default()
+                });
+            });
+            let result = std::panic::catch_unwind(|| {
+                with_empty_environment(|| {
+                    let empty = Environment::ambient();
+                    assert_eq!(empty.target, None);
+                    assert_eq!(empty.rustflags, None);
+                    assert!(!unwind, "exercise scoped environment restoration");
+                });
+            });
+            assert_eq!(result.is_err(), unwind);
+            let enclosing = Environment::ambient();
+            assert_eq!(enclosing.target.as_deref(), Some("enclosing-target"));
+            assert_eq!(enclosing.rustflags.as_deref(), Some("--cfg enclosing"));
+            assert!(AMBIENT_ENVIRONMENT.with_borrow(Option::is_none));
+        }
+        with_empty_environment(|| {});
+        assert!(AMBIENT_ENVIRONMENT.with_borrow(Option::is_none));
+    }
+
+    #[test]
     fn recovered_hyphenated_debug_assertions_take_precedence_over_the_legacy_alias() {
         for (preferred, legacy) in [(true, false), (false, true)] {
             let config = CargoConfig {
@@ -1082,7 +1111,7 @@ mod tests {
         }
         let (flags, undecided) = rustflags(&Environment::default(), &config, Some("fixture-target"));
         assert_eq!(flags, ["--cfg", "from_table", "-Cpanic=abort"]);
-        assert!(undecided.is_empty());
+        assert_eq!(undecided.len(), 0);
     }
 
     #[test]
@@ -1296,7 +1325,7 @@ mod tests {
     fn an_unconfigured_workspace_holds_no_settings() {
         let (_directory, root) = tree(&[]);
 
-        assert!(Build::settings_in(&root, &empty(&root)).is_empty());
+        assert_eq!(Build::settings_in(&root, &empty(&root)).len(), 0);
     }
 
     #[test]
@@ -1615,7 +1644,7 @@ mod tests {
         let config = CargoConfig::load(&root.join("member"), &empty(&root));
 
         assert_eq!(config.keys(&["target"]), vec!["a", "m", "z"]);
-        assert!(config.keys(&["missing"]).is_empty());
+        assert_eq!(config.keys(&["missing"]).len(), 0);
     }
 
     #[test]
@@ -1625,8 +1654,8 @@ mod tests {
         let mut config = CargoConfig::default();
 
         assert!(!config.include(&root.join("missing.toml")));
-        assert!(config.sources.is_empty());
-        assert!(config.tables.is_empty());
+        assert_eq!(config.sources.len(), 0);
+        assert_eq!(config.tables.len(), 0);
     }
 
     #[test]
@@ -1638,7 +1667,7 @@ mod tests {
         assert!(config.include(&root));
         assert_eq!(config.sources.len(), 1);
         assert!(config.sources[0].contains("unreadable"), "{}", config.sources[0]);
-        assert!(config.tables.is_empty());
+        assert_eq!(config.tables.len(), 0);
     }
 
     #[test]

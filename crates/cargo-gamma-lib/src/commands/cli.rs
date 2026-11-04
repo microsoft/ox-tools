@@ -626,6 +626,13 @@ pub struct RunArgs {
     #[arg(long, conflicts_with_all = ["dry_run", "only_survivors", "mutants"], help_heading = "Run control")]
     pub resume_testing: bool,
 
+    /// Promote the campaign's learned hints after it reaches a reportable outcome.
+    ///
+    /// Uses the same incremental merge and publication behavior as `cargo gamma hints`. A failed
+    /// mutation or score gate keeps its campaign exit code even if promotion fails.
+    #[arg(long, help_heading = "Run control")]
+    pub update_hints: bool,
+
     /// Which mutants to consider.
     #[command(flatten)]
     pub select: SelectArgs,
@@ -1308,7 +1315,7 @@ mod tests {
             ..SelectArgs::default()
         };
 
-        assert!(args.selection().unwrap().errors().is_empty());
+        assert_eq!(args.selection().unwrap().errors().len(), 0);
     }
 
     #[test]
@@ -1338,7 +1345,7 @@ mod tests {
 
     #[test]
     fn no_feature_arguments_render_as_nothing() {
-        assert!(FeatureArgs::default().to_cargo_args().is_empty());
+        assert_eq!(FeatureArgs::default().to_cargo_args().len(), 0);
     }
 
     #[test]
@@ -1578,6 +1585,16 @@ mod tests {
 
         match cli.command {
             Command::Run(args) => assert_eq!(args.measure.cache_dir.unwrap(), "cache"),
+            _ => panic!("expected run"),
+        }
+    }
+
+    #[test]
+    fn run_update_hints_is_an_explicit_cli_flag() {
+        let cli = Cli::try_parse_from(["cargo gamma", "run", "--update-hints"]).expect("the promotion flag parses");
+
+        match cli.command {
+            Command::Run(args) => assert!(args.update_hints),
             _ => panic!("expected run"),
         }
     }

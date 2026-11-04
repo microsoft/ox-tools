@@ -346,7 +346,7 @@ fn json_mutants_carry_a_stable_id() {
 
     let identifiers = ids(&left);
 
-    assert!(!identifiers.is_empty());
+    assert_ne!(identifiers, [] as [std::string::String; 0]);
     assert_eq!(identifiers, ids(&right));
 }
 
@@ -524,7 +524,7 @@ fn results_go_to_stdout_and_progress_goes_to_stderr() {
     let dir = workspace(SUBJECT);
     let (_, host) = invoke(&dir, &["list", "mutants"]);
 
-    assert!(!host.out().is_empty());
+    assert_ne!(host.out(), "");
     assert!(!host.out().contains("Scanning"), "{}", host.out());
 }
 
@@ -671,7 +671,7 @@ fn an_unknown_flag_goes_to_stderr_and_exits_one() {
     let code = run(&mut host, ["cargo-gamma", "gamma", "--not-a-flag"]);
 
     assert_eq!(code, EXIT_USAGE);
-    assert!(!host.err().is_empty());
+    assert_ne!(host.err(), "");
     assert!(host.out().is_empty(), "{}", host.out());
 }
 
@@ -712,7 +712,7 @@ fn an_empty_library_yields_no_mutants() {
     let (code, host) = invoke(&dir, &["list", "mutants"]);
 
     assert_eq!(code, EXIT_OK, "{}", host.err());
-    assert!(host.out().trim().is_empty());
+    assert_eq!(host.out().trim(), "");
 }
 
 /// A redirected runtime dependency must keep the `features` it already carried.

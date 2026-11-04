@@ -5,7 +5,7 @@
 # Regenerate with cargo-anvil to update this file.
 
 # Run affected Miri tests with strict provenance checks.
-anvil-miri-strict-provenance: anvil-miri-strict-provenance-validate-prereqs (_anvil-miri-profile "strict-provenance")
+anvil-miri-strict-provenance: anvil-miri-strict-provenance-validate-prereqs (_anvil-miri-test "strict-provenance" "" "" "")
 
 # Install prerequisites for the `anvil-miri-strict-provenance` recipe.
 [group("anvil-setup")]

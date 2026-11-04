@@ -14,7 +14,6 @@ use ohno::{AppError, IntoAppError as _, app_err};
 ///
 /// Returns an error if reading the file fails for a reason other than
 /// `NotFound` (e.g., permissions, invalid UTF-8).
-#[mutants::skip] // Trivial `fs::read_to_string` + `NotFound` passthrough; mutations on its match guard / Ok arms are not behavior-meaningful and exhaustively exercised via every plan/emit path.
 pub fn read_file_if_present(path: &Path) -> Result<Option<String>, AppError> {
     match std::fs::read_to_string(path) {
         Ok(s) => Ok(Some(s)),

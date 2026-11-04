@@ -376,7 +376,7 @@ fn decode(encoded: &str) -> Option<String> {
     // #[gamma::skip(literal.int_decrement, literal.int_increment, reason = "Only private initial allocation capacity changes; subsequent pushes/writes determine identical output contents.", tag = "equivalent")]
     2,
     );
-    for pair in encoded.as_bytes().chunks_exact(2) {
+    for pair in encoded.as_bytes().as_chunks::<2>().0 {
         let high = digit(pair[0])?;
         let low = digit(pair[1])?;
         bytes.push((high << 4) | low);
@@ -502,7 +502,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(only_test_resources.required(&binary, Only::All), [Arc::<str>::from("io")]);
-        assert!(only_test_resources.required(&binary, Only::One("unknown")).is_empty());
+        assert_eq!(only_test_resources.required(&binary, Only::One("unknown")).len(), 0);
     }
 
     #[test]
@@ -917,7 +917,7 @@ mod tests {
             assert_eq!(permit.names, vec![Arc::clone(&cargo), Arc::clone(&network)]);
         }
         let unknown = test_binary("unknown");
-        assert!(resources.acquire(&unknown, Only::All).names.is_empty());
+        assert_eq!(resources.acquire(&unknown, Only::All).names.len(), 0);
     }
 
     #[test]

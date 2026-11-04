@@ -3,7 +3,7 @@
 
 [package]
 name = "cargo-anvil"
-version = "0.22.0"
+version = "0.24.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -11,7 +11,6 @@ authors = ["The Oxidizer Project Authors"]
 description = "Opinionated, unified Rust build and cloud-workflow scaffolding for GitHub Actions and Azure DevOps"
 readme = "README.md"
 repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil"
-homepage = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil"
 keywords = ["cargo", "subcommand", "workflows", "just", "github-actions"]
 categories = ["development-tools::cargo-plugins"]
 
@@ -43,7 +42,6 @@ internals = []
 [dependencies]
 clap = { workspace = true, features = ["derive", "std", "help", "usage", "error-context", "string"] }
 jsonc-parser.workspace = true
-mutants = { workspace = true }
 ohno = { workspace = true, features = ["app-err"] }
 saphyr-parser = { workspace = true }
 serde_json = { workspace = true, features = ["std"] }

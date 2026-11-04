@@ -461,9 +461,9 @@ jobs:
           impact_mode: consume
           free-disk-space: true
 
-  # pr-runtime-analysis (miri + careful) and pr-mutants (mutants) follow the
+  # pr-runtime-analysis and pr-mutants (cargo-gamma) follow the
   # multi-OS shape; pr-mutants additionally sets `env: BASE_REF` for
-  # diff-scoped cargo-mutants.
+  # diff-scoped cargo-gamma.
 ```
 
 Every multi-OS job hardcodes its OS axis as an inline YAML array. Per-leg runner
@@ -680,6 +680,21 @@ check needs which env var."
 The shared action is an implementation detail of Anvil's generated reusable
 workflows. Anvil does not emit or support public per-group action paths.
 
+### Gamma reports and code scanning
+
+After `pr-mutants` or `scheduled-exhaustive`, the shared run-group action
+preserves completed Gamma reports even when the group fails. The downloadable
+artifact is named
+`gamma-<group>-<runner.os>-<runner.arch>-<run_attempt>` and contains the JSON,
+HTML, SARIF, diagnostics, and performance-advice outputs from
+`target/cargo-gamma/`, plus `gamma-hints.yaml`. Scratch directories and compiled
+targets are not uploaded.
+
+When `gamma-report.sarif` exists, a separate upload publishes it to GitHub code
+scanning under a group/OS/architecture category. Root workflow callers grant
+`actions: read` and `security-events: write`; reusable jobs restore those
+permissions only for mutation groups. Upload failures remain visible failures.
+
 ### Failure attribution and commit statuses
 
 GitHub fixes workflow job names before a job runs, so a matrix check named
@@ -826,7 +841,7 @@ prerequisites provision the selected compiler and tools. Its
   `just anvil-<group>-setup binstall` -- only the tools, components, and
   toolchains that group actually needs. Ordinary group names contain only
   lowercase letters, digits, and hyphens. `anvil-run-group` passes its group
-  input here, so a `pr-fast` matrix leg never installs cargo-mutants.
+  input here, so a `pr-fast` matrix leg never installs cargo-gamma.
 
 Before invoking Just, the action registers the generated
 `just-problem-matcher.json`. Just already prints the exact failed dependency

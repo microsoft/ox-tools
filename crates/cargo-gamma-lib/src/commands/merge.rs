@@ -476,9 +476,9 @@ fn report_merge<H: Host>(host: &mut H, args: &MergeArgs, merged: &crate::merge::
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::collections::BTreeMap;
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "system-tests"))]
     use std::os::unix::ffi::OsStringExt as _;
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "system-tests"))]
     use std::os::windows::ffi::OsStringExt as _;
 
     use super::*;
@@ -486,6 +486,39 @@ mod tests {
     use crate::fixtures;
     use crate::fixtures::mutant_result_at as mutant;
     use crate::testing::{Sink, fails_at_every_line, workdir};
+
+    #[test]
+    fn oct29_merge_refuses_one_or_many_unpresentable_filtered_verdicts_before_publication() {
+        // The unfiltered source wins but cannot present the filtered verdicts.
+        // Invalid destinations distinguish that semantic refusal from publication errors.
+        for count in [1, 2] {
+            let mut filtered = fixtures::report_with(
+                None,
+                100,
+                (0..count)
+                    .map(|index| mutant(&format!("filtered-{index}"), index + 1, "Killed"))
+                    .collect(),
+            );
+            filtered.config.as_mut().unwrap().name_filtered = true;
+            let mut current = fixtures::report_with(Some((0, 2)), 200, vec![mutant("current", 1, "Survived")]);
+            current.files.get_mut("src/lib.rs").unwrap().source = "different source\n".into();
+            let inputs = vec![("filtered".into(), filtered), ("current".into(), current)];
+            let mut args = survivor_args("unused-in-memory-input".into());
+            args.json_report = Some("invalid\0must-not-publish.json".into());
+            args.html_report = Some("invalid\0must-not-publish.html".into());
+            let mut host = Sink::default();
+            let failure = merge_reports_at(&mut host, &args, Styler::new(false), Some(300), &inputs).unwrap_err();
+            let noun = if count == 1 { "mutant" } else { "mutants" };
+            assert_eq!(
+                failure.message(),
+                format!(
+                    "{count} name-filtered {noun} cannot be rendered in the selected source; include an unfiltered listing from the current source before merging so the verdicts are preserved"
+                )
+            );
+            assert_eq!(host.out(), "");
+            assert_eq!(host.err(), "");
+        }
+    }
 
     #[test]
     fn recovered_native_merge_returns_the_html_destination_error_before_announcing_a_written_report() {
@@ -685,7 +718,7 @@ mod tests {
         }
         let mut host = Sink::default();
         assert!(!report_incomplete_gate(&mut host, &crate::merge::Merged::default(), "score gate", Styler::new(false)).unwrap());
-        assert!(host.err.is_empty());
+        assert_eq!(host.err.len(), 0);
     }
 
     fn survivor_args(input: Utf8PathBuf) -> MergeArgs {
@@ -939,7 +972,7 @@ mod tests {
         assert!(err.contains("shards never run"), "{err}");
         assert!(err.contains("different shard count"), "{err}");
         assert!(err.contains("cannot evaluate a complete shard rotation"), "{err}");
-        assert!(host.out.is_empty());
+        assert_eq!(host.out.len(), 0);
     }
 
     #[test]

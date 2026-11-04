@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 #![cfg(not(all(test, miri)))]
-#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(all(coverage_nightly, any(test, feature = "agreement")), feature(coverage_attribute))]
 #![doc(hidden)]
 #![forbid(
     unsafe_code,

@@ -112,7 +112,6 @@ fn extract_host(url: &str) -> Option<&str> {
 /// Returns an error if `git` is not on PATH, the command exits non-zero, or
 /// no `origin` remote is configured.
 #[cfg_attr(coverage_nightly, coverage(off))]
-#[mutants::skip] // Shells out to `git config`; behavior tested via backend autodetect integration paths, not unit-mutatable.
 pub fn read_origin_url(repo_root: &Path) -> Result<String, AppError> {
     let output = Command::new("git")
         .args(["config", "--get", "remote.origin.url"])
@@ -275,7 +274,7 @@ mod tests {
         assert_eq!(detect_from_url("https://github.com/foo/bar.git"), vec![Backend::GitHub]);
         assert_eq!(detect_from_url("git@github.com:foo/bar.git"), vec![Backend::GitHub]);
         assert_eq!(detect_from_url("https://enterprise.github.com/foo/bar.git"), vec![Backend::GitHub]);
-        assert!(detect_from_url("https://github.com.example/foo/bar.git").is_empty());
+        assert_eq!(detect_from_url("https://github.com.example/foo/bar.git").len(), 0);
     }
 
     #[test]
@@ -287,14 +286,14 @@ mod tests {
 
     #[test]
     fn detect_unknown_host() {
-        assert!(detect_from_url("https://gitlab.com/foo/bar.git").is_empty());
-        assert!(detect_from_url("").is_empty());
+        assert_eq!(detect_from_url("https://gitlab.com/foo/bar.git").len(), 0);
+        assert_eq!(detect_from_url("").len(), 0);
     }
 
     #[test]
     fn resolve_no_backends_wins() {
         let result = resolve(&[], true, Path::new(".")).unwrap();
-        assert!(result.is_empty());
+        assert_eq!(result.len(), 0);
     }
 
     #[test]

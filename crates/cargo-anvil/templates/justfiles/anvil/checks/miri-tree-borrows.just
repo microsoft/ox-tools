@@ -5,7 +5,7 @@
 # Regenerate with cargo-anvil to update this file.
 
 # Run affected Miri tests with the Tree Borrows model.
-anvil-miri-tree-borrows: anvil-miri-tree-borrows-validate-prereqs (_anvil-miri-profile "tree-borrows")
+anvil-miri-tree-borrows: anvil-miri-tree-borrows-validate-prereqs (_anvil-miri-test "tree-borrows" "" "" "")
 
 # Install prerequisites for the `anvil-miri-tree-borrows` recipe.
 [group("anvil-setup")]

@@ -161,7 +161,7 @@ mod tests {
     fn nothing_survived_means_nothing_to_annotate() {
         let mutants = vec![mutant("/w/src/a.rs", 1, "relational.gt_to_ge", Outcome::Killed)];
 
-        assert!(annotations(&mutants, &root()).is_empty());
+        assert_eq!(annotations(&mutants, &root()).len(), 0);
     }
 
     #[test]

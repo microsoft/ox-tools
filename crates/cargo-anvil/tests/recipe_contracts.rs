@@ -172,15 +172,6 @@ if ($env:FAKE_CARGO_EXIT) { exit [int]$env:FAKE_CARGO_EXIT }
     bin
 }
 
-fn install_fake_cargo_mutants(root: &Path) -> PathBuf {
-    let bin = install_fake_cargo(root);
-    #[cfg(windows)]
-    std::fs::rename(bin.join("cargo.cmd"), bin.join("cargo-mutants.cmd")).unwrap();
-    #[cfg(unix)]
-    std::fs::rename(bin.join("cargo"), bin.join("cargo-mutants")).unwrap();
-    bin
-}
-
 fn install_fake_rustup(bin: &Path) {
     write(
         &bin.join("rustup.ps1"),
@@ -283,11 +274,11 @@ fn common_checks_are_direct_cargo_each_invocations() {
 #[test]
 fn coverage_is_one_domain_tool_invocation() {
     let recipes = generated().checks;
-    assert!(recipes.contains(
-        "cargo +{{ rust_nightly }} each {{ anvil_affected_selection }} --once -- \
-         cargo +{{ rust_nightly }} coverage-gate {{ anvil_explicit_package_args }} run \
-         --no-coverage-target aarch64-pc-windows-msvc"
-    ));
+    assert!(recipes.contains("cargo +{{ rust_nightly }} each {{ anvil_affected_selection }} --once --"));
+    assert!(recipes.contains("{{ anvil_coverage_gate_command }} {{ anvil_explicit_package_args }} run"));
+    assert!(recipes.contains("--configuration all-features --configuration no-default-features"));
+    assert!(recipes.contains("--coverage-dir target/coverage"));
+    assert!(recipes.contains("--no-coverage-target aarch64-pc-windows-msvc"));
     assert!(!recipes.contains("Invoke-AnvilLcovReport"));
     assert!(!recipes.contains("llvm-cov.rsp"));
 }
@@ -390,7 +381,7 @@ fn released_domain_tool_versions_are_pinned() {
     let generated = generated();
     let recipes = &generated.setup;
     for pin in [
-        "cargo_aprz_version := \"1.2.1\"",
+        "cargo_aprz_version := \"1.2.2\"",
         "cargo_coverage_gate_version := \"0.7.3\"",
         "cargo_delta_version := \"0.5.0\"",
         "cargo_each_version := \"0.7.0\"",
@@ -458,7 +449,6 @@ fn shell_scripts_are_limited_to_domain_exceptions() {
         assert!(recipe_names.contains(portable));
     }
     for retired in [
-        "_anvil-impact-include",
         "_anvil-impact-format",
         "_anvil-impact-snapshot",
         "_anvil-resolve-stable",
@@ -527,7 +517,7 @@ fn mutants_diff_includes_committed_and_uncommitted_changes() {
         "pub fn value() -> u8 { 1 }\npub fn committed() {}\npub fn uncommitted() {}\n",
     );
 
-    let fake_bin = install_fake_cargo_mutants(root);
+    let fake_bin = install_fake_cargo(root);
     let log = root.join("mutants.log");
     let real_cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
 
@@ -586,7 +576,7 @@ fn mutants_diff_includes_committed_and_uncommitted_changes() {
         String::from_utf8_lossy(&output.stderr)
     );
     let invocation = std::fs::read_to_string(log).unwrap();
-    assert!(invocation.contains("mutants --in-diff"), "{invocation}");
+    assert!(invocation.contains("gamma run --workspace --in-diff"), "{invocation}");
     assert!(
         std::fs::read_dir(root)
             .unwrap()
@@ -654,17 +644,9 @@ fn miri_profiles_set_their_distinct_environment() {
         assert!(invocation.contains("miri test"), "{invocation}");
     }
 
-    let range = run_just(
-        root,
-        &["--set", "anvil_miri_race_day", "7", "--evaluate", "anvil_miri_race_seed_range"],
-        &[],
-    );
-    assert!(range.status.success(), "stderr:\n{}", String::from_utf8_lossy(&range.stderr));
-    assert_eq!(String::from_utf8(range.stdout).unwrap().trim(), "70..72");
-
     for args in [
-        ["_anvil-miri-test", "fixture", "test-name", "example-name"],
-        ["_anvil-miri-test", "", "", "example-name"],
+        ["_anvil-miri-test", "standard", "fixture", "test-name", "example-name"],
+        ["_anvil-miri-test", "standard", "", "", "example-name"],
     ] {
         let invalid = run_just(root, &args, &[("ANVIL_IMPACT", "off")]);
         assert!(!invalid.status.success(), "{args:?} must fail");

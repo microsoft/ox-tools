@@ -983,6 +983,14 @@ async function scenario(items) {
         assert!(validation_caller.contains("\n    permissions:\n      contents: read"));
         assert!(validation_caller.contains("statuses: write"));
         assert!(!validation_caller.contains("pull-requests: write"));
+        for root in [PR_ROOT_WORKFLOW, SCHEDULED_ROOT_WORKFLOW] {
+            let caller_permissions = root
+                .split_once("\n    permissions:")
+                .expect("reusable workflow caller must grant upload permissions")
+                .1;
+            assert!(caller_permissions.contains("actions: read"));
+            assert!(caller_permissions.contains("security-events: write"));
+        }
         assert!(SCHEDULED_ROOT_WORKFLOW.contains("uses: ./.github/workflows/anvil-scheduled-impl.yml"));
         assert!(SCHEDULED_ROOT_WORKFLOW.contains("schedule:"));
         assert!(SCHEDULED_ROOT_WORKFLOW.contains("issues: write"));

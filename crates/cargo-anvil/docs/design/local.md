@@ -187,38 +187,35 @@ directory. Missing files fail closed through cargo-each. PR backends upload and
 consume this directory; scheduled jobs use `off` as the full-workspace
 backstop.
 
-## 5. Platform-specific cargo-mutants configuration
+## 5. Mutation testing with cargo-gamma
 
-Cargo-mutants does not evaluate platform cfgs while discovering mutants, so a
-Linux run can otherwise report a Windows-only mutation as missed. Anvil selects
-an optional native cargo-mutants configuration:
+Diff and full mutation recipes use cargo-gamma and its repository-native
+`gamma.toml` configuration. Pull-request runs write a normalized working-tree
+diff to a PID-scoped temporary file and pass it through `--in-diff`; scheduled
+exhaustive runs select the complete workspace. Both require a 100% killed score
+and zero unresolved flaky outcomes.
 
-| Host | Preferred file |
-| --- | --- |
-| Linux | `.cargo/mutants.linux.toml` |
-| Windows | `.cargo/mutants.windows.toml` |
-| Other | `.cargo/mutants.<just-os-name>.toml` |
-
-When present, both diff and full mutation recipes pass the file through
-cargo-mutants' native `--config` option. Platform files replace cargo-mutants'
-default configuration; they do not overlay it. Repositories duplicate shared
-policy intentionally rather than introducing an Anvil-specific merger.
+`--update-hints` promotes scheduling knowledge from reportable campaigns into
+`gamma-hints.yaml`. A failed mutation gate remains failed even when promotion
+succeeds; promotion failure fails an otherwise successful campaign. GitHub runs
+also write reports and SARIF under `target/cargo-gamma`.
 
 ## 6. Remaining shell-backed check boundaries
 
 ### Bolero
 
 For each affected package the recipe runs
-`cargo bolero list --profile release --package <name>` and redirects the
+`cargo bolero list --profile release --target <nightly-host> --package <name>` and redirects the
 combined stdout to `target/bolero-list-<just-pid>.jsonl`. The private
 `_ensure-target-dir` recipe runs after `anvil-impact` and creates `target/` only
 when it is still absent, so clean `ANVIL_IMPACT=off` checkouts work without
 shell-specific directory flags. The Just process ID isolates concurrent local
-runs. Pinned cargo-bolero 0.13.4 emits one
+runs. Pinned cargo-bolero 0.13.5 emits one
 `{"package":"…","test":"…"}` record per target on stdout; Cargo build output and
 diagnostics use stderr. A second direct invocation passes that file to
 `cargo each --json-lines-file`, which expands `{json:package}` and `{json:test}`
-into bounded `cargo bolero test --profile release --engine libfuzzer -T 60s`
+into bounded `cargo bolero test --profile release --target <nightly-host>
+--engine libfuzzer -T 60s`
 commands. `--keep-going` preserves aggregate failure behavior, and an empty file
 is cargo-each's successful no-op. A successful run removes the JSONL file.
 Failed discovery or execution leaves the PID-scoped file in place for

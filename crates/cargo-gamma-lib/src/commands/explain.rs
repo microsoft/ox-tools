@@ -319,6 +319,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "system-tests")]
     fn source_plan(root: &Utf8Path) -> crate::discover::Plan {
         let parsed = crate::parse::SourceFile::parse("src/lib.rs", "pub fn answer() -> i32 { 42 }\n".to_owned()).unwrap();
         let candidates = crate::ops::collect_candidates(&parsed, &crate::ops::Selection::everything());
@@ -588,7 +589,7 @@ mod tests {
                     "mutant deadbeefcafe\n  identity version: 97\n  current: no (the current discovery no longer produces this mutant)\n  report: {path}\n  reported location: source.rs:2:7\n  reported source: expected second line\n  reported replacement: <not recorded>\n  verdict: Killed\n  reason: assertion rejected the change\n  killed by: first, second\n"
                 )
             );
-            assert!(host.err.is_empty());
+            assert_eq!(host.err.len(), 0);
             assert_eq!(default_report_path(root, None), root.join("target/cargo-gamma/gamma-report.json"));
             for remaining in 0..host.out().lines().count() {
                 let mut denied = LineLimitedHost {
@@ -615,7 +616,7 @@ mod tests {
             args.report = Some(path);
             let mut host = Sink::default();
             explain(&mut host, &args).expect_err("malformed explicit report must be rejected");
-            assert!(host.out.is_empty());
+            assert_eq!(host.out.len(), 0);
         }
     }
 

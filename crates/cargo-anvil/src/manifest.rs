@@ -437,11 +437,13 @@ impl Manifest {
     }
 
     /// Insert or update one file entry.
+    #[cfg(any(test, feature = "internals"))]
     pub fn set_file(&mut self, path: impl Into<String>, checksum: impl Into<String>) {
         self.files.insert(path.into(), checksum.into());
     }
 
     /// Insert or update one region entry.
+    #[cfg(any(test, feature = "internals"))]
     pub fn set_region(&mut self, host: impl Into<String>, id: impl Into<String>, checksum: impl Into<String>) {
         self.regions.insert(
             RegionKey {

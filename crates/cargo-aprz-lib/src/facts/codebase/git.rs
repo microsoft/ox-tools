@@ -54,6 +54,7 @@ async fn get_repo_core(repo_path: &Path, repo_url: &Url, timeout: Duration) -> R
 async fn get_repo_core_with_executable(repo_path: &Path, repo_url: &Url, timeout: Duration, git_executable: &Path) -> Result<RepoStatus> {
     let path_str = path_str(repo_path)?;
 
+    // #[gamma::skip(try.propagate_to_unwrap, tag = "native", reason = "this adapter removes a real corrupt cache directory; prepare_cached_repo tests removal errors through its injected remover without changing host permissions")]
     if prepare_cached_repo(
         repo_path,
         Path::exists,
@@ -676,7 +677,7 @@ mod tests {
         let (_tmp, repo_path) = create_test_repo();
         let stats = get_commit_stats(&repo_path, &[], GIT_TIMEOUT).await.unwrap();
         assert_eq!(stats.commit_count, 2);
-        assert!(stats.commits_per_window.is_empty());
+        assert_eq!(stats.commits_per_window, [] as [u64; 0]);
     }
 
     #[tokio::test]

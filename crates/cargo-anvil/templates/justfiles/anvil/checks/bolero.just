@@ -5,14 +5,15 @@
 # Regenerate with cargo-anvil to update this file.
 
 anvil_bolero_targets_file := "target" / ("bolero-list-" + just_pid() + ".jsonl")
+anvil_bolero_host_target := `rustc +{{ rust_nightly }} --print host-tuple`
 # Used by anvil-bolero to create its JSONL output directory after impact analysis.
 [private]
 _ensure-target-dir: anvil-impact
     {{ if path_exists("target") { "# target directory already exists" } else { "mkdir target" } }}
 # Discover and fuzz affected Bolero targets for 60 seconds each.
 anvil-bolero: anvil-bolero-validate-prereqs _ensure-target-dir
-    {{ bolero_command_prefix }}cargo +{{ rust_nightly }} each {{ anvil_affected_selection }} -- cargo +{{ rust_nightly }} bolero list --profile release --package '{name}' > {{ quote(anvil_bolero_targets_file) }}
-    {{ bolero_command_prefix }}cargo +{{ rust_nightly }} each --json-lines-file {{ quote(anvil_bolero_targets_file) }} --keep-going -- cargo +{{ rust_nightly }} bolero test --profile release --engine libfuzzer -T 60s --package '{json:package}' '{json:test}'
+    {{ bolero_command_prefix }}cargo +{{ rust_nightly }} each {{ anvil_affected_selection }} -- cargo +{{ rust_nightly }} bolero list --profile release --target {{ quote(anvil_bolero_host_target) }} --package '{name}' > {{ quote(anvil_bolero_targets_file) }}
+    {{ bolero_command_prefix }}cargo +{{ rust_nightly }} each --json-lines-file {{ quote(anvil_bolero_targets_file) }} --keep-going -- cargo +{{ rust_nightly }} bolero test --profile release --target {{ quote(anvil_bolero_host_target) }} --engine libfuzzer -T 60s --package '{json:package}' '{json:test}'
     {{ bolero_command_prefix }}rm {{ quote(anvil_bolero_targets_file) }}
 
 # Install prerequisites for the `anvil-bolero` recipe.

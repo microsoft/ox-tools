@@ -4,12 +4,6 @@
 # Update cargo-anvil and regenerate; repository-specific edits stop automatic updates.
 # Regenerate with cargo-anvil to update this file.
 
-_anvil_mutants_platform_config := ".cargo/mutants." + os() + ".toml"
-_anvil_mutants_config_arg := if path_exists(justfile_directory() / _anvil_mutants_platform_config) == "true" {
-    "--config=" + _anvil_mutants_platform_config
-} else {
-    ""
-}
 # Used by _anvil-msrv-test-setup to read the root MSRV without rustup resolution.
 [private]
 [script("pwsh", "-NoProfile")]

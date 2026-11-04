@@ -459,86 +459,86 @@ pub(super) fn read_pipe_with_limits<R: Read + Send + 'static>(
         // #[gamma::skip(all, reason = "the private reader thread name is never read and cannot affect scheduling or output")]
         .name("cargo-gamma-build-output".to_owned())
         .spawn(move || {
-        let mut text = Vec::new();
-        // #[gamma::skip(literal.int_increment, reason = "read buffer capacity changes chunk boundaries only; retained bytes and line splitting are explicitly chunk-independent")]
-        let mut buffer = [0_u8; 8192];
-        let mut line = Vec::new();
-        let mut complete = true;
-        let mut within_limits = true;
-        let mut line_limited = false;
+            let mut text = Vec::new();
+            // #[gamma::skip(literal.int_increment, reason = "read buffer capacity changes chunk boundaries only; retained bytes and line splitting are explicitly chunk-independent")]
+            let mut buffer = [0_u8; 8192];
+            let mut line = Vec::new();
+            let mut complete = true;
+            let mut within_limits = true;
+            let mut line_limited = false;
 
-        loop {
-            let read = match pipe.read(&mut buffer) {
-                Ok(0) => break,
-                Ok(read) => read,
-                Err(cause) => {
-                    // Retried rather than given up on, since an interrupted read has not lost
-                    // anything: nothing was taken out of the pipe, and the next read gets it.
-                    if cause.kind() == io::ErrorKind::Interrupted {
-                        continue;
+            loop {
+                let read = match pipe.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(read) => read,
+                    Err(cause) => {
+                        // Retried rather than given up on, since an interrupted read has not lost
+                        // anything: nothing was taken out of the pipe, and the next read gets it.
+                        if cause.kind() == io::ErrorKind::Interrupted {
+                            continue;
+                        }
+
+                        // #[gamma::skip(assign_value.default, reason = "`complete` is bool, whose `Default::default()` is exactly false")]
+                        complete = false;
+
+                        break;
                     }
+                };
 
-                    // #[gamma::skip(assign_value.default, reason = "`complete` is bool, whose `Default::default()` is exactly false")]
-                    complete = false;
+                let room = limits.retained.saturating_sub(text.len());
+                let kept = read.min(room);
 
-                    break;
-                }
-            };
+                text.extend_from_slice(&buffer[..kept]);
 
-            let room = limits.retained.saturating_sub(text.len());
-            let kept = read.min(room);
-
-            text.extend_from_slice(&buffer[..kept]);
-
-            if kept < read {
-                // #[gamma::skip(assign_value.default, reason = "`within_limits` is bool, whose `Default::default()` is exactly false")]
-                within_limits = false;
-            }
-
-            for byte in &buffer[..read] {
-                if matches!(*byte, b'\n' | b'\r') {
-                    if !line_limited
-                        && !line.is_empty()
-                        && let Ok(line) = str::from_utf8(&line)
-                    {
-                        // The bounded synchronous channel makes a fast compiler wait for the
-                        // supervisor to narrate output, rather than retaining an unbounded queue.
-                        let _sent = sink.send((stream, line.to_owned()));
-                    }
-
-                    line.clear();
-                    // #[gamma::skip(all, reason = "this resource mutant prevents the bounded supervision loop from terminating and is suppressed rather than weakening production synchronization or limits")]
-                    line_limited = false;
-
-                    continue;
-                }
-
-                if line.len() < limits.line {
-                    line.push(*byte);
-                } else {
-                    // A line's owned copy is part of the queue bound. Refuse a result built from
-                    // output that cannot be held within that bound, while continuing to drain.
-                    line_limited = true;
+                if kept < read {
                     // #[gamma::skip(assign_value.default, reason = "`within_limits` is bool, whose `Default::default()` is exactly false")]
                     within_limits = false;
                 }
+
+                for byte in &buffer[..read] {
+                    if matches!(*byte, b'\n' | b'\r') {
+                        if !line_limited
+                            && !line.is_empty()
+                            && let Ok(line) = str::from_utf8(&line)
+                        {
+                            // The bounded synchronous channel makes a fast compiler wait for the
+                            // supervisor to narrate output, rather than retaining an unbounded queue.
+                            let _sent = sink.send((stream, line.to_owned()));
+                        }
+
+                        line.clear();
+                        // #[gamma::skip(all, reason = "this resource mutant prevents the bounded supervision loop from terminating and is suppressed rather than weakening production synchronization or limits")]
+                        line_limited = false;
+
+                        continue;
+                    }
+
+                    if line.len() < limits.line {
+                        line.push(*byte);
+                    } else {
+                        // A line's owned copy is part of the queue bound. Refuse a result built from
+                        // output that cannot be held within that bound, while continuing to drain.
+                        line_limited = true;
+                        // #[gamma::skip(assign_value.default, reason = "`within_limits` is bool, whose `Default::default()` is exactly false")]
+                        within_limits = false;
+                    }
+                }
             }
-        }
 
-        // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
-        if !line_limited
-            && !line.is_empty()
-            && let Ok(line) = str::from_utf8(&line)
-        {
-            let _ = sink.send((stream, line.to_owned()));
-        }
+            // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
+            if !line_limited
+                && !line.is_empty()
+                && let Ok(line) = str::from_utf8(&line)
+            {
+                let _ = sink.send((stream, line.to_owned()));
+            }
 
-        Pipe {
-            text,
-            complete,
-            within_limits,
-        }
-    })
+            Pipe {
+                text,
+                complete,
+                within_limits,
+            }
+        })
 }
 
 /// Which of cargo's two streams a line arrived on.
@@ -868,8 +868,8 @@ mod mutation_tests {
                 encode_controls(root.as_str())
             )));
             assert_eq!(events.finished, usize::from(matches!(fault, ProcessFault::Adopt)));
-            assert!(events.progress.is_empty());
-            assert!(events.output.is_empty());
+            assert_eq!(events.progress.len(), 0);
+            assert_eq!(events.output.len(), 0);
         }
     }
 
@@ -971,7 +971,7 @@ mod mutation_tests {
                 let output = output.unwrap().unwrap();
                 assert!(output.status.success());
                 assert!(output.stdout.len() <= 64);
-                assert!(output.stderr.is_empty());
+                assert_eq!(output.stderr.len(), 0);
             }
             assert_eq!(events.finished, 1);
         }
@@ -1132,7 +1132,7 @@ mod mutation_tests {
 
         for pipe in <[_; 2]>::from((stdout, stderr)) {
             let pipe = pipe.expect("an absent OS pipe is a complete empty stream");
-            assert!(pipe.text.is_empty());
+            assert_eq!(pipe.text.len(), 0);
             assert!(pipe.complete);
             assert!(pipe.within_limits);
         }

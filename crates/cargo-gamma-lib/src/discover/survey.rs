@@ -444,14 +444,19 @@ impl Survey {
         let mut walked: Vec<Utf8PathBuf> = Vec::new();
         let mut diff_only_directories = HashSet::default();
         let mut diff_only_exclusions = Vec::new();
+        // #[gamma::skip(cond.always_true, reason = "Without a diff this exclusion vector is never passed to walk: its sole consumer is guarded by diff.is_some(). Populating it eagerly only allocates unused paths.", tag = "equivalent")]
         if diff.is_some() {
+            // #[gamma::skip(collection.reverse_array, reason = "These paths are used only by an any-equality directory exclusion predicate; reversing them changes no excluded directory.", tag = "equivalent")]
             diff_only_exclusions.extend([target.clone(), root.join("target"), root.join(".git")]);
             for package in metadata.workspace_packages() {
                 if let Some(directory) = package.manifest_path.parent() {
+                    // #[gamma::skip(collection.reverse_array, reason = "These paths are used only by an any-equality directory exclusion predicate; reversing them changes no excluded directory.", tag = "equivalent")]
                     diff_only_exclusions.extend([directory.join("target"), directory.join(".git")]);
                 }
             }
+            // #[gamma::skip(iter.remove_sort, reason = "The directory walker tests exclusion membership with any equality, independent of order. Adjacent duplicates left by dedup without sorting repeat a pure predicate only.", tag = "equivalent")]
             diff_only_exclusions.sort();
+            // #[gamma::skip(iter.remove_dedup, reason = "The directory walker tests exclusion membership with any equality; repeating an identical excluded path changes neither traversal nor errors.", tag = "equivalent")]
             diff_only_exclusions.dedup();
         }
 
@@ -862,6 +867,7 @@ impl Survey {
         }
 
         if let Some(patterns) = self.name_patterns.as_ref() {
+            // #[gamma::skip(call_result.default, reason = "retain_name_matches returns unit; default_after still executes its filtering side effects and replaces only () with ().", tag = "equivalent")]
             retain_name_matches(&mut mutants, patterns);
         }
 
@@ -2801,6 +2807,193 @@ mod tests {
         metadata
     }
 
+    fn inventory_survey(
+        metadata: &Metadata,
+        args: &SelectArgs,
+        walk: impl FnMut(&Utf8Path, &[Utf8PathBuf]) -> Result<Vec<Utf8PathBuf>>,
+        read_diff: impl FnOnce(&Utf8Path) -> Result<Diff>,
+    ) -> Result<Survey> {
+        Survey::for_build_with_metadata(
+            args,
+            None,
+            None,
+            &CargoOptions::default(),
+            &FeatureArgs::default(),
+            metadata,
+            ExternalPathInputs::default(),
+            false,
+            |_, _, _| Cfgs::unconditional(),
+            walk,
+            |_, _, _| Ok(()),
+            read_diff,
+        )
+    }
+
+    #[test]
+    fn oct29_nonmutable_inventory_requires_a_diff_and_a_validation_scope() {
+        // Patterns or trait exclusions request workspace-wide validation. Beta remains unselected,
+        // so recognizing its test diff must not add that source to the mutation population.
+        for (in_diff, patterns, exclusions, recognize_test) in [
+            (false, false, false, false),
+            (true, false, false, false),
+            (true, true, false, true),
+            (true, false, true, true),
+        ] {
+            let mut metadata = selection_metadata();
+            for package in &mut metadata.packages[..2] {
+                let mut target = package.targets[0].clone();
+                target.kind = vec![TargetKind::Test];
+                target.src_path = package.manifest_path.parent().unwrap().join("tests/regression.rs");
+                package.targets.push(target);
+            }
+            let args = SelectArgs {
+                dir: metadata.workspace_root.clone(),
+                packages: vec!["alpha".into()],
+                in_diff: in_diff.then(|| "inventory-diff".into()),
+                files: if patterns { vec!["alpha/**/*.rs".into()] } else { Vec::new() },
+                exclude_trait_impls: if exclusions { vec!["Debug".into()] } else { Vec::new() },
+                ..SelectArgs::default()
+            };
+            let mut beta_walks = 0;
+            let surveyed = inventory_survey(
+                &metadata,
+                &args,
+                |directory, _| {
+                    if directory.file_name() == Some("tests") {
+                        assert!(in_diff, "without a diff, test inventory must not introduce walk failures");
+                        if directory == Utf8Path::new("C:/fixture/beta/tests") {
+                            assert!(recognize_test, "resource evidence alone must not inventory unselected tests");
+                            beta_walks += 1;
+                        }
+                        Ok(vec![directory.join("regression.rs")])
+                    } else {
+                        Ok(vec![directory.join("lib.rs")])
+                    }
+                },
+                |_| {
+                    Ok(Diff::parse(if recognize_test {
+                        "--- a/beta/tests/regression.rs\n+++ b/beta/tests/regression.rs\n@@ -0,0 +1 @@\n+changed\n"
+                    } else {
+                        "--- a/alpha/src/lib.rs\n+++ b/alpha/src/lib.rs\n@@ -0,0 +1 @@\n+changed\n"
+                    }))
+                },
+            )
+            .unwrap();
+            assert_eq!(beta_walks, usize::from(recognize_test));
+            if recognize_test {
+                assert!(surveyed.diff.unwrap().touches_file(Utf8Path::new("beta/tests/regression.rs")));
+                assert!(surveyed.files.is_empty(), "recognizing tests must not select them for mutation");
+            } else {
+                assert_eq!(
+                    surveyed.files.iter().map(|file| file.path.as_str()).collect::<Vec<_>>(),
+                    ["alpha/src/lib.rs"]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn oct29_nonmutable_inventory_reports_source_walk_and_helper_failures() {
+        for stage in ["source", "walk", "helper"] {
+            let mut metadata = selection_metadata();
+            let mut target = metadata.packages[0].targets[0].clone();
+            target.kind = vec![TargetKind::Test];
+            target.src_path = if stage == "source" {
+                "C:/outside/regression.rs".into()
+            } else {
+                "C:/fixture/alpha/tests/regression.rs".into()
+            };
+            metadata.packages[0].targets.push(target);
+            let args = SelectArgs {
+                dir: metadata.workspace_root.clone(),
+                packages: vec!["alpha".into()],
+                in_diff: Some("inventory-diff".into()),
+                ..SelectArgs::default()
+            };
+            let failure = inventory_survey(
+                &metadata,
+                &args,
+                |directory, _| {
+                    if directory.file_name() == Some("tests") {
+                        if stage == "walk" {
+                            Err(error!("inventory walk denied"))
+                        } else {
+                            Ok(vec!["C:/outside/helper.rs".into()])
+                        }
+                    } else {
+                        Ok(vec![directory.join("lib.rs")])
+                    }
+                },
+                |_| Ok(Diff::parse("")),
+            )
+            .unwrap_err();
+            if stage == "walk" {
+                assert_eq!(failure.message(), "inventory walk denied");
+            } else {
+                let path = if stage == "source" { "regression.rs" } else { "helper.rs" };
+                assert_eq!(
+                    failure.message(),
+                    format!(
+                        "package `alpha` has the source file `C:/outside/{path}`, which lies outside the workspace root `C:/fixture`; \
+                         gamma cannot mutate a file it cannot place inside its scratch copy"
+                    )
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn oct29_metadata_name_patterns_filter_the_scanned_population() {
+        // Metadata and walking are scripted; scanning intentionally reads this immutable Rust fixture.
+        let root = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let source = root.join("tests/fixtures/completed-recovery/lib.rs");
+        let mut metadata = selection_metadata();
+        metadata.workspace_root = root.clone();
+        metadata.packages[0].manifest_path = root.join("Cargo.toml");
+        metadata.packages[0].targets.truncate(1);
+        metadata.packages[0].targets[0].src_path = source.clone();
+        let args = SelectArgs {
+            dir: root,
+            packages: vec!["alpha".into()],
+            ..SelectArgs::default()
+        };
+        let mut survey = Survey::for_build_with_metadata(
+            &args,
+            Some(RegexSet::new([r"\[relational\.lt_to_le\]"]).unwrap()),
+            None,
+            &CargoOptions::default(),
+            &FeatureArgs::default(),
+            &metadata,
+            ExternalPathInputs::default(),
+            true,
+            |_, _, _| Cfgs::unconditional(),
+            |_, _| Ok(vec![source.clone()]),
+            |_, _, _| Ok(()),
+            |_| unreachable!("no diff was requested"),
+        )
+        .unwrap();
+        let selection = Selection::parse("all").unwrap();
+        let filtered = survey.scan(None, &selection, &mut 0).unwrap();
+        assert!(!filtered.mutants.is_empty());
+        assert!(
+            filtered
+                .mutants
+                .iter()
+                .all(|mutant| mutant.mutator.as_ref() == "relational.lt_to_le"),
+            "{:?}",
+            filtered.mutants
+        );
+        survey.name_patterns = None;
+        let unfiltered = survey.scan(None, &selection, &mut 0).unwrap();
+        assert!(unfiltered.mutants.len() > filtered.mutants.len());
+        assert!(
+            unfiltered
+                .mutants
+                .iter()
+                .any(|mutant| mutant.mutator.as_ref() != "relational.lt_to_le")
+        );
+    }
+
     #[test]
     fn diff_recognizes_nonmutated_targets_and_their_helpers_without_mutating_them() {
         let mut metadata = selection_metadata();
@@ -2853,7 +3046,7 @@ mod tests {
                     }
                 }
                 match directory.file_name() {
-                    Some("src") => Ok(vec![directory.join("lib.rs")]),
+                    Some("src") => Ok(["lib.rs", "extra.rs", "lib.rs"].map(|path| directory.join(path)).to_vec()),
                     Some("tests") => Ok(vec![directory.join("regression.rs"), directory.join("common/mod.rs")]),
                     Some("examples") => Ok(vec![directory.join("demo.rs")]),
                     Some("alpha") => Ok(["regression.rs", "demo.rs", "support/helper.rs"].map(|path| directory.join(path)).to_vec()),
@@ -2864,7 +3057,7 @@ mod tests {
             |path| {
                 assert_eq!(path, Utf8Path::new("scripted-diff"));
                 Ok(Diff::parse(concat!(
-                    "--- a/alpha/src/lib.rs\n+++ b/alpha/src/lib.rs\n@@ -0,0 +1 @@\n+changed\n",
+                    "--- /other/checkout/alpha/src/lib.rs\n+++ /other/checkout/alpha/src/lib.rs\n@@ -0,0 +1 @@\n+changed\n",
                     "--- /other/checkout/alpha/tests/regression.rs\n+++ /other/checkout/alpha/tests/regression.rs\n@@ -0,0 +1 @@\n+changed\n",
                     "--- a/alpha/tests/common/mod.rs\n+++ b/alpha/tests/common/mod.rs\n@@ -0,0 +1 @@\n+changed\n",
                     "--- /other/checkout/alpha/examples/demo.rs\n+++ /other/checkout/alpha/examples/demo.rs\n@@ -0,0 +1 @@\n+changed\n",
@@ -2887,7 +3080,7 @@ mod tests {
         assert_eq!(survey.by_package["alpha"], [0]);
         assert_eq!(
             survey.declaration_files["alpha"],
-            [Utf8PathBuf::from("C:/fixture/alpha/src/lib.rs")]
+            ["extra.rs", "lib.rs"].map(|path| Utf8Path::new("C:/fixture/alpha/src").join(path))
         );
         let diff = survey.diff.unwrap();
         for path in [
@@ -2907,7 +3100,7 @@ mod tests {
     #[test]
     fn validation_walk_prunes_excluded_subtrees_without_losing_helper_sources() {
         let root = Utf8Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/isolation-graph");
-        let listed = walk_rust_files_excluding(&root, &[root.join("ordinary")]).unwrap();
+        let listed = walk_rust_files_excluding(&root, &[root.join("ordinary"), root.join("application/src/lib.rs")]).unwrap();
         assert_eq!(
             listed,
             [
@@ -2950,7 +3143,7 @@ mod tests {
             false,
             |_, _, _| Cfgs::unconditional(),
             |directory, excluded| {
-                assert!(excluded.is_empty());
+                assert_eq!(excluded.len(), 0);
                 if directory == Utf8Path::new("C:/fixture/gamma/src") {
                     return Err(error!("the unselected package must not introduce a walk failure"));
                 }
@@ -3013,7 +3206,7 @@ mod tests {
                 cache_inputs,
                 |_, _, _| Cfgs::unconditional(),
                 |directory, excluded| {
-                    assert!(excluded.is_empty());
+                    assert_eq!(excluded.len(), 0);
                     directories.push(directory.to_owned());
                     Ok(vec![directory.join("lib.rs")])
                 },
@@ -3054,7 +3247,7 @@ mod tests {
             false,
             |_, _, _| Cfgs::unconditional(),
             |directory, excluded| {
-                assert!(excluded.is_empty());
+                assert_eq!(excluded.len(), 0);
                 directories.push(directory.to_owned());
                 Ok(vec![directory.join("lib.rs")])
             },
@@ -3111,7 +3304,7 @@ mod tests {
             false,
             |_, _, _| Cfgs::unconditional(),
             |directory, excluded| {
-                assert!(excluded.is_empty());
+                assert_eq!(excluded.len(), 0);
                 directories.push(directory.to_owned());
                 Ok(vec![directory.join("lib.rs")])
             },
@@ -3175,7 +3368,7 @@ mod tests {
                 false,
                 |_, _, _| Cfgs::unconditional(),
                 |directory, excluded| {
-                    assert!(excluded.is_empty());
+                    assert_eq!(excluded.len(), 0);
                     Ok(vec![directory.join("lib.rs")])
                 },
                 |_, _, _| Ok(()),
@@ -3221,7 +3414,7 @@ mod tests {
             false,
             |_, _, _| panic!("configuration must not run after a failed walk"),
             |directory, excluded| {
-                assert!(excluded.is_empty());
+                assert_eq!(excluded.len(), 0);
                 assert_eq!(directory, Utf8Path::new("C:/fixture/alpha/src"));
                 Err(error!("scripted source inventory failure"))
             },
@@ -3285,7 +3478,7 @@ mod tests {
             population_roots(&files.iter().collect::<Vec<_>>(), &declarations, &roots),
             [Utf8PathBuf::from("lib.rs"), Utf8PathBuf::from("selected.rs")]
         );
-        assert!(population_roots(&[], &declarations, &roots).is_empty());
+        assert_eq!(population_roots(&[], &declarations, &roots).len(), 0);
     }
 
     #[test]
@@ -3305,7 +3498,7 @@ mod tests {
         )
         .unwrap();
         assert!(parsed.declared.is_empty());
-        assert!(parsed.skipped.is_empty());
+        assert_eq!(parsed.skipped.len(), 0);
         assert!(parsed.defaults.is_empty());
     }
 
@@ -3596,7 +3789,7 @@ mod tests {
             };
             assert_eq!(result.declared.iter().map(|(path, _)| path.as_path()).collect::<Vec<_>>(), expected);
             assert_eq!(result.defaults.len(), files.len());
-            assert!(result.skipped.is_empty());
+            assert_eq!(result.skipped.len(), 0);
         }
         let missing = root.join("missing.rs");
         let result = parse_declarations_parallel(&[(a.as_path(), &cfg, "a"), (missing.as_path(), &cfg, "a")]);
@@ -3652,7 +3845,7 @@ mod tests {
                 parsed.declared.iter().map(|(path, _)| path.as_path()).collect::<Vec<_>>(),
                 files[..count].iter().map(|(path, _, _)| *path).collect::<Vec<_>>()
             );
-            assert!(parsed.skipped.is_empty());
+            assert_eq!(parsed.skipped.len(), 0);
             let observed = observed.into_inner().expect("the observer never panics under its lock");
             assert_eq!(observed.len(), count);
             assert!(
@@ -4355,7 +4548,7 @@ mod tests {
         )
         .expect("an ordinary survey does not collect cache provenance");
 
-        assert!(survey.external_inputs().is_empty());
+        assert_eq!(survey.external_inputs().len(), 0);
         assert!(!survey.has_untracked_build_script_inputs());
     }
 
@@ -4390,12 +4583,13 @@ mod tests {
         let roots = |features: FeatureArgs| external_path_inputs(&root, &features, &root).expect("metadata").roots;
 
         assert_eq!(roots(FeatureArgs::default()), [physical(&default_dep)]);
-        assert!(
+        assert_eq!(
             roots(FeatureArgs {
                 no_default_features: true,
                 ..FeatureArgs::default()
             })
-            .is_empty()
+            .len(),
+            0
         );
         assert_eq!(
             roots(FeatureArgs {
@@ -5971,7 +6165,7 @@ mod tests {
 
         let metadata = load_metadata(&root, &FeatureArgs::default()).expect("metadata");
 
-        assert!(library_tests(&metadata).is_empty());
+        assert_eq!(library_tests(&metadata).len(), 0);
     }
 
     #[test]

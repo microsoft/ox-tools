@@ -475,20 +475,55 @@ For each requested feature configuration, `run`:
 6. atomically publishes the filtered report to its stable consumer path under
    `--coverage-dir` and passes that exact path to the evaluator.
 
-The selected package set is resolved to exact `name@version` specs before
-subprocess execution. With no selection options, the collector passes
-`--workspace`.
+Selectors are resolved against workspace members only. Before subprocess
+execution, explicit selections become the source-qualified package IDs supplied
+by Cargo metadata, not just `name@version`: a published dependency can have the
+same name and version as a local member. The shared selection emitter uses these
+IDs for both feature configurations, report export, and plain nextest execution
+on no-coverage targets. No registry package is selected in place of a member.
+For compatibility with cargo-llvm-cov's package-name matching, the optional
+`path+` prefix is omitted when the member name is a prefix of its metadata ID
+(for example, `path`); the file URL and package fragment remain source-qualified.
+With no selection options, the collector passes `--workspace`.
 
 Feature configurations and concurrent invocations never share instrumented
 build/profile state: each configuration uses
 `target/coverage-gate/run-<pid>-<nonce>/cargo-target/<configuration>` (under
 Cargo's resolved target directory). A private target starts empty, so `run`
 does not invoke `cargo llvm-cov clean`; it removes only the enclosing
-per-invocation scratch directory on success or failure. Shared cargo-llvm-cov
+per-invocation scratch directory after a passing evaluation or an evaluation
+error. If collection, publication, or a coverage gate fails, `run` retains that
+directory and prints its path. It preserves raw profiles and reports for
+diagnosis without changing the original error or exit code. Collection and
+publication errors never publish incomplete consumer reports. A gate failure
+keeps both raw evidence and the completed filtered reports so export and
+filtering can be compared. Remove the retained directory after diagnosis.
+Shared cargo-llvm-cov
 HTML/text reports, trybuild targets, UI test targets, and ordinary Cargo target
 state are never cleanup inputs. `CARGO_TARGET_DIR` is set to the same private
 configuration directory as cargo-llvm-cov's target and build overrides, so
 metadata-derived trybuild, UI, and report paths are private as well.
+
+On Windows, collection passes `--no-rustc-wrapper` to cargo-llvm-cov. Cargo can
+retry long compiler commands with response files, but cargo-llvm-cov 0.9's
+wrapper does not inspect those files before it selects coverage flags.
+The option puts instrumentation flags into Cargo's compiler arguments instead.
+With an explicit target, this mode does not instrument host-only proc-macro
+or build-script builds. Coverage thresholds remain unchanged.
+
+This repository's Windows diagnostic workflow also runs the collector from the
+checkout. On failure, it uploads raw
+profiles, merged profiles, profile lists, and LCOV reports for seven days.
+It also uploads the APRZ and Gamma library-test executables to inspect their
+instrumentation, plus their test fingerprint JSON files to inspect compiler
+inputs. Hidden-file upload permits these fingerprints under `.fingerprint`.
+The explicit upload patterns still exclude other executables and Cargo caches. The
+workflow displays output from successful tests so profile-runtime errors remain
+visible when tests pass. After a failure, it runs each captured executable with
+`--list` and LLVM initialization logging. These probes write profiles outside
+the collector's scratch directory. Initialization logging stays disabled during
+the test suite because it changes stderr that CLI tests assert. Normal Anvil
+jobs do not enable these probes or diagnostic uploads.
 
 LCOV consumer paths under `--coverage-dir` remain stable. Instrumented-state
 isolation does not provide concurrent-writer semantics for those paths:
@@ -497,9 +532,9 @@ callers must not run simultaneous invocations against the same
 
 Scratch cleanup has explicit result precedence. An evaluation error remains the
 primary error and carries any cleanup failure as additional context. A rendered
-policy failure keeps exit `1`; cleanup failure is reported as a warning instead
-of replacing the verdict. A passing evaluation cannot claim complete success
-when cleanup fails, so that case exits `2`. Successful cleanup never changes
+policy failure keeps its exit code and retains scratch data without cleanup.
+A passing evaluation cannot claim complete success when cleanup fails, so that
+case exits `2`. Successful cleanup never changes
 the evaluation outcome.
 
 On Windows, explicit scratch cleanup retries only sharing violations (OS error
@@ -651,6 +686,10 @@ Function (`FN:`/`FNDA:`) and branch (`BRDA:`) records are removed from filtered
 LCOV. The filter's proof is line-based and cannot safely disambiguate mixed
 released/test-only syntax that shares one source line. The resulting artifact
 is deliberately line-coverage-only, matching the gate's policy surface.
+
+Comments, including inner and outer documentation comments, do not count as
+released code. A released item's documentation comment on a test-only line does
+not keep that line's counters.
 
 #### Multiple tracefiles
 
@@ -1017,6 +1056,10 @@ Three escape valves, in increasing severity:
 
 ## 10. Cross-cutting Concerns
 
+The minimum supported Rust version is 1.97. The parser stays on `ra_ap_syntax`
+0.0.349 because later releases require Rust 1.98, beyond the supported Azure
+publishing compiler. The development toolchain remains newer.
+
 ### 10.1 Determinism
 
 per-package aggregation must produce the same percentage byte-for-byte given
@@ -1107,9 +1150,9 @@ Rust with `cargo-llvm-cov ≥ 0.9`**. Four reasons:
   JSON / lcov output even on nightly. Versions 0.7+ fix this. Older
   versions silently report inflated line counts, which then surface
   as low percentages in the gate.
-- cargo-llvm-cov 0.8.0 added support for the exact `name@version` package
-  selectors that `run` resolves from workspace metadata and passes to both
-  test and report commands.
+- cargo-llvm-cov 0.8.0 added support for source-qualified package ID
+  selectors, which `run` takes directly from workspace metadata and passes
+  to both test and report commands.
 - cargo-llvm-cov 0.9.0 added `--workspace` support to the `report` subcommand,
   which `run` uses when no explicit package selection is supplied.
 

@@ -38,7 +38,7 @@ fn nearest_module_functions_are_not_redirected_by_same_named_outer_value_imports
 
     let ns = namespaces("fn helper() {} mod helper {}");
     let function = ns.function_in("", &[], &path(&["helper"])).unwrap();
-    assert!(function.module.is_empty());
+    assert_eq!(function.module.len(), 0);
     assert_eq!(function.syntax, "fn helper () { }");
 }
 
@@ -621,7 +621,7 @@ fn enum_character_constructors_require_inert_single_char_payloads_and_keep_the_e
         if let Some(function) = function {
             assert!(function.char_constructor);
             assert_eq!(function.syntax, "fn value (character : char) -> char { character }");
-            assert!(function.module.is_empty());
+            assert_eq!(function.module.len(), 0);
         }
     }
 }

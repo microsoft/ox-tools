@@ -185,6 +185,25 @@ mod tests {
         assert_eq!(reads.get(), 1);
     }
 
+    #[test]
+    fn filtered_evaluation_returns_malformed_lcov_with_its_operation_context() {
+        let input = PathBuf::from("scripted-malformed.info");
+        let error = evaluate_filtered_paths(&args(), std::slice::from_ref(&input), &[], None, |path| {
+            assert_eq!(path, input);
+            Ok(include_str!("../../../tests/fixtures/lcov/malformed.info").to_owned())
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("failed to evaluate coverage"), "{error}");
+        let expected = lcov::Report::from_reader(lcov::Reader::new(
+            include_bytes!("../../../tests/fixtures/lcov/malformed.info").as_slice(),
+        ))
+        .unwrap_err();
+        let cause = error
+            .find_source::<lcov::report::ParseError>()
+            .expect("evaluation must retain the original LCOV parser error");
+        assert_eq!(cause.to_string(), expected.to_string());
+    }
+
     fn zero_threshold_report() -> (tempfile::TempDir, cargo_coverage_gate::EvaluatedReport) {
         let tmp = tempdir().expect("tempdir");
         fs::create_dir_all(tmp.path().join("alpha/src")).expect("create member");

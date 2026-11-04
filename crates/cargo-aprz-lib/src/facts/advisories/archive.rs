@@ -94,6 +94,7 @@ pub fn extract_archive(archive: &tempfile::NamedTempFile, destination: &Path) ->
 pub async fn write_archive(response: fetch::HttpResponse, destination: std::path::PathBuf) -> Result<Result<tempfile::NamedTempFile>> {
     write_archive_with(response, destination, |destination| {
         let archive = tempfile::NamedTempFile::new_in(destination)?;
+        // #[gamma::skip(try.propagate_to_unwrap, tag = "native", reason = "reopening the just-created owned temporary file can fail only through native IO or external interference; write_archive_with tests creation errors without exhausting host resources")]
         let output = archive.reopen()?;
         Ok((archive, output))
     })
@@ -279,6 +280,14 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_archive_cannot_claim_a_database_root() {
+        assert_eq!(
+            database_root_from_entries(std::iter::empty()).unwrap_err().to_string(),
+            "advisory archive must contain crates/ at its root or under one enclosing directory; check --advisory-archive-url"
+        );
+    }
+
+    #[test]
     fn survivor_optional_rust_publication_uses_the_exact_child_and_propagates_errors() {
         let root = Path::new("validated-database");
         let destination = Path::new("in-memory-extraction-destination");
@@ -334,7 +343,7 @@ mod tests {
         assert_eq!(error, "advisory archive exceeds the 1023-byte uncompressed size limit");
         unpack_with_limits(encoded.as_slice(), destination, 1025, 0).unwrap();
         let error = unpack_with_limits(&b"not gzip"[..], destination, 2048, 10).unwrap_err().to_string();
-        assert!(!error.is_empty());
+        assert_ne!(error, "");
     }
 
     #[test]

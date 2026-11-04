@@ -391,7 +391,6 @@ mod tests {
     use std::fs;
     use std::io::{Cursor, Error, ErrorKind};
 
-    use chrono::TimeZone as _;
     use serde::Deserialize;
     use tempfile::TempDir;
 
@@ -732,13 +731,16 @@ mod tests {
     }
 
     #[test]
-    fn loaded_table_bytes_do_not_depend_on_the_backing_file_after_open() {
-        let file = tempfile::tempfile().expect("temporary file");
-        file.set_len(4).expect("size temporary file");
-        (&file).write_all(b"data").expect("write temporary file");
+    fn loaded_table_bytes_do_not_depend_on_the_input_after_open() {
+        let mut bytes = *b"data";
+        let mut reader = Cursor::new(bytes.as_mut_slice());
+        reader.set_position(4);
 
-        let mmap = map_table_file(&file, 4).expect("load table bytes");
-        file.set_len(0).expect("truncate backing file");
+        let mmap = map_table_file_with(Ok(reader), 4, MmapOptions::new, MmapOptions::map_mut, |mmap| {
+            mmap.make_read_only().map_err(|(_mmap, cause)| cause)
+        })
+        .expect("load table bytes from the in-memory reader");
+        bytes.fill(0);
 
         assert_eq!(&*mmap, b"data");
     }

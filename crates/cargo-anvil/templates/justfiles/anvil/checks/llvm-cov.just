@@ -4,9 +4,23 @@
 # Update cargo-anvil and regenerate; repository-specific edits stop automatic updates.
 # Regenerate with cargo-anvil to update this file.
 
+anvil_coverage_gate_host_target := shell("rustc +" + rust_nightly + " --print host-tuple")
+anvil_coverage_gate_local_command := shell(
+    "cargo each --workspace --filter metadata:anvil.catalog-tool=cargo-coverage-gate --once --dry-run -- cargo +"
+    + rust_nightly
+    + " run --locked --package cargo-coverage-gate --bin cargo-coverage-gate --target="
+    + anvil_coverage_gate_host_target
+    + " -- coverage-gate"
+)
+anvil_coverage_gate_command := if anvil_coverage_gate_local_command == "" {
+    "cargo +" + rust_nightly + " coverage-gate"
+} else {
+    anvil_coverage_gate_local_command
+}
+
 # Run affected tests and enforce coverage policy in supported feature modes.
 anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
-    cargo +{{ rust_nightly }} each {{ anvil_affected_selection }} --once -- cargo +{{ rust_nightly }} coverage-gate {{ anvil_explicit_package_args }} run --no-coverage-target aarch64-pc-windows-msvc
+    cargo +{{ rust_nightly }} each {{ anvil_affected_selection }} --once -- {{ anvil_coverage_gate_command }} {{ anvil_explicit_package_args }} run --configuration all-features --configuration no-default-features --coverage-dir target/coverage --no-coverage-target aarch64-pc-windows-msvc
 
 # Install prerequisites for the `anvil-llvm-cov` recipe.
 [group("anvil-setup")]

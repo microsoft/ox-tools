@@ -48,7 +48,6 @@ pub(crate) trait SynchronizedWrite: io::Write {
 }
 
 impl SynchronizedWrite for fs::File {
-    #[mutants::skip] // Trivial File delegation; the injected writer test double covers synchronization failures.
     fn sync_all(&self) -> io::Result<()> {
         Self::sync_all(self)
     }

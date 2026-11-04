@@ -4,7 +4,7 @@
 [package]
 name = "cargo-coverage-gate"
 description = "A cargo subcommand that gates pull requests on per-package line coverage measured by cargo-llvm-cov"
-version = "0.7.3"
+version = "0.7.4"
 readme = "README.md"
 keywords = ["oxidizer", "cargo", "subcommand", "coverage", "ci"]
 categories = ["command-line-utilities", "development-tools::cargo-plugins"]
@@ -19,20 +19,15 @@ repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-cover
 [package.metadata.docs.rs]
 all-features = true
 
+[package.metadata.anvil]
+catalog-tool = "cargo-coverage-gate"
+
 [package.metadata.cargo_check_external_types]
 # The `#[ohno::error]` attribute on `CoverageGateError` implements
 # traits in `ohno` that transitively appear in the public API. Allow
 # the whole `ohno` namespace rather than tracking individual items
 # we are forced to re-expose.
 allowed_external_types = ["ohno::*"]
-
-# `unicode-ident` is a deliberate compatibility bound, never referenced from this crate's
-# code. See the dependency comment below.
-[package.metadata.cargo-udeps.ignore]
-normal = ["unicode-ident"]
-
-[package.metadata.unused-deps]
-allowed = ["unicode-ident"]
 
 # The gate filters test-only source regions and non-release Cargo targets before measuring this
 # crate. The pre-0.7 floor is retained and validated by the cross-platform released-surface CI
@@ -50,14 +45,11 @@ cargo_metadata = { workspace = true }
 clap = { workspace = true, features = ["derive", "std", "help", "usage", "error-context"] }
 glob = { workspace = true }
 lcov = { workspace = true }
-mutants = { workspace = true }
 ohno = { workspace = true, features = ["app-err"] }
 ra_ap_syntax = { workspace = true }
 semver = { workspace = true, features = ["std"] }
 serde_json = { workspace = true, features = ["std"] }
-# Never named in this crate's code. It bounds the `unicode-ident` selected by
-# `ra_ap_syntax` -> `ra-ap-rustc_lexer`; see the workspace dependency comment.
-unicode-ident = { workspace = true }
+
 [dev-dependencies]
 assert_cmd = { workspace = true }
 predicates = { workspace = true }

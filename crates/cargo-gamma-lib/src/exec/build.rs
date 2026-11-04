@@ -265,10 +265,51 @@ mod final_survivor_tests {
         assert_eq!(failure.message(), expected);
         assert!(converger.withdrawn.is_empty());
         assert!(converger.census.is_empty());
-        assert!(converger.per_round.is_empty());
+        assert_eq!(converger.per_round.len(), 0);
         assert_eq!(converger.rounds, 1);
-        assert!(events.progress.is_empty());
+        assert_eq!(events.progress.len(), 0);
         assert_eq!(events.activity, [(1, 7, 0)]);
+    }
+
+    #[test]
+    fn convergence_propagates_native_exclusion_store_failures_without_panicking() {
+        // Keep the native store's exact platform error, including the unchanged withdrawal state.
+        let root = Utf8Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("isolation-graph")
+            .join("application");
+        let work = Workspace::adopt(root.clone(), root.join("Cargo.toml/target"));
+        let (plan, mut converger) = seeded_convergence_plan(&root);
+        converger.compiler_exclusions = Some(from_value(json!({"version": 1, "mutants": {}})).unwrap());
+        let expected = converger
+            .compiler_exclusions
+            .as_ref()
+            .unwrap()
+            .store(work.base())
+            .expect_err("an immutable manifest file cannot contain the exclusion inventory");
+        let result = with_compiler(
+            |_work, _args, _budget, _events| Ok(Some(memory_compiler_output(false, memory_diagnostic(1)))),
+            || {
+                converger.converge_scoped(
+                    &work,
+                    &plan,
+                    BuildScope {
+                        roots: None,
+                        mutants: None,
+                        publish_progress: true,
+                    },
+                    &["check", "--tests"],
+                    BuildLimits::default(),
+                    &mut RecordedConvergence::default(),
+                )
+            },
+        );
+        let Err(failure) = result else {
+            panic!("an immutable manifest file cannot contain the exclusion inventory");
+        };
+        assert_eq!(failure.to_string(), expected.to_string());
+        assert!(converger.withdrawn.is_empty());
     }
 
     #[test]

@@ -487,7 +487,7 @@ fn preserves_a_crlf_host() {
     assert!(!after.replace("\r\n", "").contains('\n'), "the whole host must stay CRLF");
 
     let repeated = run(&tmp);
-    assert!(repeated.plan.refusals().is_empty());
+    assert_eq!(repeated.plan.refusals().len(), 0);
     for item in repeated.plan.items() {
         if matches!(&item.target, Target::Region { host, .. } if host == "deny.toml") {
             assert_eq!(item.decision, cargo_anvil::test_support::Decision::InSync);

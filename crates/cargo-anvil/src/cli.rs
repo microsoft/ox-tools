@@ -111,8 +111,6 @@ impl Cli {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use clap::Parser as _;
-
     use super::*;
 
     /// A minimal catalog (no artifacts) for exercising the parse path. Its
@@ -130,7 +128,7 @@ mod tests {
     #[test]
     fn parse_no_args() {
         let cli = Cli::parse_from(["cargo-anvil"]);
-        assert!(cli.backends.is_empty());
+        assert_eq!(cli.backends.len(), 0);
         assert!(!cli.no_backends);
         assert!(!cli.dry_run);
     }

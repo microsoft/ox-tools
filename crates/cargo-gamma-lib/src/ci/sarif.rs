@@ -343,11 +343,9 @@ mod tests {
         let (text, truncation) = sarif_fitting(&population, &root(), Level::Warning, |bytes| bytes <= budget)
             .expect("bounded fitting uses the same real serializer");
         let document: Value = from_str(&text).expect("the rendered document is valid JSON");
-        assert!(
-            document["runs"][0]["results"]
-                .as_array()
-                .expect("SARIF results are an array")
-                .is_empty()
+        assert_eq!(
+            document["runs"][0]["results"].as_array().expect("SARIF results are an array").len(),
+            0
         );
         let truncation = truncation.expect("the single omitted result must be announced");
         assert_eq!(truncation.found, 1);

@@ -6,9 +6,7 @@
 
 anvil_mutants_diff_dir := env("RUNNER_TEMP", env("AGENT_TEMPDIRECTORY", env("TEMP", env("TMPDIR", "."))))
 anvil_mutants_diff_file := anvil_mutants_diff_dir / ("anvil-mutants-diff-" + just_pid() + ".diff")
-anvil_mutants_diff_prefix := if mutants_command_prefix != "" {
-    mutants_command_prefix
-} else if anvil_impact_mode == "off" {
+anvil_mutants_diff_prefix := if anvil_impact_mode == "off" {
     ""
 } else if trim(read(anvil_impact_input_dir + "/affected.packages")) == "" {
     "# "
@@ -18,13 +16,13 @@ anvil_mutants_diff_prefix := if mutants_command_prefix != "" {
 # Mutation-test code changed from the selected base branch.
 anvil-mutants-diff: anvil-mutants-diff-validate-prereqs anvil-impact
     {{ anvil_mutants_diff_prefix }}git diff --src-prefix=a/ --dst-prefix=b/ {{ quote(anvil_base_ref) }} --output={{ quote(anvil_mutants_diff_file) }}
-    {{ anvil_mutants_diff_prefix }}cargo each {{ anvil_affected_selection }} --once -- cargo {{ anvil_stable_toolchain_arg }} mutants --in-diff {{ quote(anvil_mutants_diff_file) }} --no-shuffle --jobs 0 {{_anvil_mutants_config_arg}}
+    {{ anvil_mutants_diff_prefix }}cargo {{ anvil_stable_toolchain_arg }} gamma run --workspace --in-diff {{ quote(anvil_mutants_diff_file) }} --min-score 100 --max-flaky 0 --update-hints {{ if env("GITHUB_ACTIONS", "") == "true" { "--artifact-dir target/cargo-gamma" } else { "" } }}
     {{ anvil_mutants_diff_prefix }}rm {{ quote(anvil_mutants_diff_file) }}
 
 # Install prerequisites for the `anvil-mutants-diff` recipe.
 [group("anvil-setup")]
-anvil-mutants-diff-setup installer="install": (anvil-tool-cargo-mutants-install installer) (anvil-tool-cargo-each-install installer)
+anvil-mutants-diff-setup installer="install": (anvil-tool-cargo-gamma-install installer)
 
 # Validate prerequisites for the `anvil-mutants-diff` recipe.
 [group("anvil-setup")]
-anvil-mutants-diff-validate-prereqs: anvil-tool-cargo-mutants-validate-prereqs anvil-tool-cargo-each-validate-prereqs
+anvil-mutants-diff-validate-prereqs: anvil-tool-cargo-gamma-validate-prereqs

@@ -126,11 +126,13 @@ backends. After a canonical change, run cargo-anvil against this repository to
 refresh owned mirrors and `.anvil/manifest.toml`; regenerate crate README content from
 `src/lib.rs`, never by editing `README.md`.
 
-## Miri package scheduler
+## Miri compile-once runner
 
-The public Miri contract delegates package selection, concurrency, process-tree
-cleanup, deterministic output, and aggregate failure to cargo-each. Anvil owns
-only the Miri-specific profile environment and command shape.
+The Miri recipes compile the selected package scope together, preserving
+workspace feature unification, and then run the emitted Miri test executables
+concurrently. Anvil owns artifact discovery, the cargo-miri runner environment,
+package-root working directories, deterministic log replay, and aggregate
+failure.
 
 ### Ownership and recipe graph
 
@@ -141,10 +143,10 @@ The canonical recipe set comprises
 `templates/justfiles/anvil/checks/miri-race-coverage.just`. `miri.just` owns the
 shared implementation, while the three stricter profile templates contain only
 their public recipe and setup leaves. Each public recipe uses a parameterized
-`_anvil-miri-test` dependency, keeping the main execution path and failure
-propagation in Just's dependency graph. The shared recipe maps the profile to
-`MIRIFLAGS` and `RUSTFLAGS`, validates explicit test/example arguments, and
-invokes cargo-each.
+`_anvil-miri-test` dependency, keeping one shared execution path. The shared
+recipe maps the profile to `MIRIFLAGS` and `RUSTFLAGS`, validates explicit
+test/example arguments, resolves impact-selected packages, and performs the
+compile-and-execute protocol.
 
 `src/anvil/artifacts/justfile.rs` registers these templates and structurally
 pins the public-to-private delegation. Full emitted-tree snapshots pin the
@@ -153,26 +155,26 @@ copies and `.anvil/manifest.toml`.
 
 ### Scope and execution
 
-The shared recipe gives `affected.packages` directly to cargo-each after
-`anvil-impact` has refreshed the cache. A local `--package` replaces that
-selection. `[package.metadata.anvil.miri] exclude = true` is expressed as a
-cargo-each metadata filter, so excluded members remain available as
-dependencies while receiving no Miri invocation of their own.
+After `anvil-impact` refreshes the cache, the shared recipe reads
+`affected.packages` and converts each source-qualified member into a Cargo
+`--package` argument. A local `--package` replaces that selection, and
+`ANVIL_IMPACT=off` selects the workspace. Metadata-based Miri exclusions remove
+only a member's own targets, leaving it available as a dependency.
 
-For tests, cargo-each starts one
-`cargo +<nightly> miri test --package <spec> --tests --all-features --locked`
-process per selected package. `ANVIL_MIRI_JOBS` controls package-level
-parallelism; `--keep-going` lets independent packages finish before cargo-each
-returns aggregate failure. A libtest filter is appended after `--`. An explicit
-example uses `cargo miri run --package <spec> --example <name>` and requires an
-explicit package.
+For tests, one `cargo miri test --no-run --message-format=json-render-diagnostics`
+invocation emits the runnable libtest artifacts. The recipe restores the
+prepared cargo-miri sysroot and runner environment, then runs artifacts from
+their package roots. `ANVIL_MIRI_JOBS` controls artifact concurrency; logs are
+buffered independently and replayed in stable artifact order before failures
+are aggregated. A libtest filter is forwarded to each executable. Explicit
+examples still use `cargo miri run` and require an explicit package.
 
 ### Verification boundaries
 
 Three layers guard different parts of the subsystem:
 
 - structural tests in `src/anvil/artifacts/justfile.rs` pin parameterized
-  delegation and the cargo-each command shape;
+  delegation and the compile-once protocol;
 - executable contracts in `tests/recipe_contracts.rs` verify profile-specific
   `MIRIFLAGS` and `RUSTFLAGS` at the child-command boundary;
 - backend snapshots pin every emitted recipe copy, while the regeneration

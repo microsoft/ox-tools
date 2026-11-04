@@ -266,7 +266,6 @@ fn create_cache_dir_with(
 
 /// Disable NTFS compression for a newly created crates cache.
 #[cfg(windows)]
-#[mutants::skip] // Windows-only optimization; Linux mutation runners cannot compile or observe this code.
 // #[gamma::skip(all, reason = "NTFS compression is an opportunistic Windows filesystem optimization whose success depends on the host volume and privileges")]
 fn configure_windows_cache_directory(cache_path: &Path, name: &str, needs_creation: bool) {
     #[cfg(all(test, not(miri)))]
@@ -295,7 +294,6 @@ fn should_disable_cache_compression(name: &str, needs_creation: bool) -> bool {
 ///
 /// This function is completely opportunistic - if it fails for any reason, it fails silently.
 #[cfg(windows)]
-#[mutants::skip] // Windows-only optimization; Linux mutation runners cannot compile or observe this code.
 // #[gamma::skip(all, reason = "raw Windows handle and DeviceIoControl behavior is an OS adapter whose results depend on the filesystem, volume policy, and process privileges")]
 fn disable_directory_compression(path: impl AsRef<Path>) -> bool {
     use std::ffi::OsStr;
@@ -441,6 +439,33 @@ mod tests {
         assert!(created.get());
         CONFIGURATION_REQUESTS.with_borrow(|requests| {
             assert_eq!(requests.as_ref().unwrap(), &[(expected, "crates".to_owned(), false)]);
+        });
+    }
+
+    #[test]
+    fn native_cache_wrapper_forwards_creation_and_existing_directory_requests() {
+        struct Restore;
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                CONFIGURATION_REQUESTS.with_borrow_mut(|requests| *requests = None);
+            }
+        }
+        let _restore = Restore;
+        CONFIGURATION_REQUESTS.with_borrow_mut(|requests| {
+            assert!(requests.is_none());
+            *requests = Some(Vec::new());
+        });
+        let directory = TempDir::new().unwrap();
+        let root = directory.path();
+        let expected = root.join("src");
+        assert_eq!(super::create_cache_dir(root, "src").unwrap(), expected);
+        assert!(expected.is_dir());
+        assert_eq!(super::create_cache_dir(root, "src").unwrap(), expected);
+        CONFIGURATION_REQUESTS.with_borrow(|requests| {
+            assert_eq!(
+                requests.as_ref().unwrap(),
+                &[(expected.clone(), "src".to_owned(), true), (expected, "src".to_owned(), false)]
+            );
         });
     }
 

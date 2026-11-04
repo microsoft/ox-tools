@@ -87,6 +87,12 @@ they pin the public groups, alias target, and private prerequisite signatures
 without invoking Just or writing input fixtures. Actual recipe listing and
 execution remain part of provisioned self-hosting validation.
 
+Mutation recipe contracts inspect the emitted Gamma commands, strict score and
+flake gates, workspace/diff selection, native exit-code propagation, and shared
+tool prerequisites in-process. They also reject the retired OS configuration
+selector and Windows ARM guard. Real campaign execution belongs to provisioned
+CI rather than these tests.
+
 ### 2.3 Fixture-based integration tests
 
 Alongside the snapshot tests, a `tests/fixtures/` corpus covers

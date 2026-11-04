@@ -31,8 +31,8 @@ anvil-bench: anvil-bench-validate-prereqs anvil-impact
 
 # Discover and fuzz affected Bolero targets for 60 seconds each.
 anvil-bolero: anvil-bolero-validate-prereqs _ensure-target-dir
-    {{ bolero_command_prefix }}cargo +{{ rust_nightly }} each {{ anvil_affected_selection }} -- cargo +{{ rust_nightly }} bolero list --profile release --package '{name}' > {{ quote(anvil_bolero_targets_file) }}
-    {{ bolero_command_prefix }}cargo +{{ rust_nightly }} each --json-lines-file {{ quote(anvil_bolero_targets_file) }} --keep-going -- cargo +{{ rust_nightly }} bolero test --profile release --engine libfuzzer -T 60s --package '{json:package}' '{json:test}'
+    {{ bolero_command_prefix }}cargo +{{ rust_nightly }} each {{ anvil_affected_selection }} -- cargo +{{ rust_nightly }} bolero list --profile release --target {{ quote(anvil_bolero_host_target) }} --package '{name}' > {{ quote(anvil_bolero_targets_file) }}
+    {{ bolero_command_prefix }}cargo +{{ rust_nightly }} each --json-lines-file {{ quote(anvil_bolero_targets_file) }} --keep-going -- cargo +{{ rust_nightly }} bolero test --profile release --target {{ quote(anvil_bolero_host_target) }} --engine libfuzzer -T 60s --package '{json:package}' '{json:test}'
     {{ bolero_command_prefix }}rm {{ quote(anvil_bolero_targets_file) }}
 
 # Run affected tests with cargo-careful runtime checks.
@@ -102,26 +102,52 @@ anvil-license-headers: anvil-license-headers-validate-prereqs anvil-impact
 
 # Run affected tests and enforce coverage policy in supported feature modes.
 anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
-    cargo +{{ rust_nightly }} each {{ anvil_affected_selection }} --once -- cargo +{{ rust_nightly }} coverage-gate {{ anvil_explicit_package_args }} run --no-coverage-target aarch64-pc-windows-msvc
+    cargo +{{ rust_nightly }} each {{ anvil_affected_selection }} --once -- {{ anvil_coverage_gate_command }} {{ anvil_explicit_package_args }} run --configuration all-features --configuration no-default-features --coverage-dir target/coverage --no-coverage-target aarch64-pc-windows-msvc
 
 # Run affected Loom test targets with the Loom configuration.
 anvil-loom: anvil-loom-validate-prereqs anvil-impact
     cargo each {{ anvil_affected_selection }} --filter feature:loom --each-target test --target-filter required-feature:loom --require-target-per-package -- cargo {{ anvil_stable_toolchain_arg }} test --config {{ quote('build.rustflags=["--cfg","loom"]') }} --package '{cargo-spec}' --release --all-features --locked --test '{target}' -- --test-threads=1
 
-# Run affected tests or one selected example under Miri.
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
+
+# Scope: a clean direct or PR invocation is impact-scoped -- anvil-impact
+# computes the cache and _anvil-impact-include returns the affected set, so
+# unaffected packages are skipped. Full-workspace runs come from the
+# scheduled/full tiers (which force ANVIL_IMPACT=off) or a dirty local tree
+# (which widens for safety).
+
+# Compile all selected packages together, then run their Miri test executables in
+# parallel. The single Cargo invocation preserves workspace feature unification,
+# while executable-level parallelism uses host logical processors that
+# `cargo miri test` otherwise leaves idle.
+#
+# Packages can opt their own test targets out through:
+#
+# [package.metadata.anvil.miri]
+# exclude = true
+#
+# They can still compile as dependencies of selected consumers. Selection is
+# `--workspace --exclude ...` (unambiguous even when a registry dependency
+# shares a member's name and version); opted-out packages are added to the
+# `--exclude` list.
+#
+# ANVIL_MIRI_JOBS overrides the default of one artifact worker per logical processor.
+
+# Run Miri tests for affected workspace packages.
+[group("anvil")]
 [arg("package", long, pattern='(?:[A-Za-z0-9_.-]+)?')]
 [arg("test", long, pattern='(?:[A-Za-z0-9_.:-]+)?')]
 [arg("example", long, pattern='(?:[A-Za-z0-9_.-]+)?')]
-anvil-miri package="" test="" example="": anvil-miri-validate-prereqs (_anvil-miri-profile "standard" package test example)
+anvil-miri package="" test="" example="": anvil-miri-validate-prereqs (_anvil-miri-test "standard" package test example)
 
 # Run affected Miri tests across a rotating seed range.
-anvil-miri-race-coverage: anvil-miri-race-coverage-validate-prereqs (_anvil-miri-profile "race-coverage")
+anvil-miri-race-coverage: anvil-miri-race-coverage-validate-prereqs (_anvil-miri-test "race-coverage" "" "" "")
 
 # Run affected Miri tests with strict provenance checks.
-anvil-miri-strict-provenance: anvil-miri-strict-provenance-validate-prereqs (_anvil-miri-profile "strict-provenance")
+anvil-miri-strict-provenance: anvil-miri-strict-provenance-validate-prereqs (_anvil-miri-test "strict-provenance" "" "" "")
 
 # Run affected Miri tests with the Tree Borrows model.
-anvil-miri-tree-borrows: anvil-miri-tree-borrows-validate-prereqs (_anvil-miri-profile "tree-borrows")
+anvil-miri-tree-borrows: anvil-miri-tree-borrows-validate-prereqs (_anvil-miri-test "tree-borrows" "" "" "")
 
 # Run affected tests under the declared workspace MSRV; no MSRV is a no-op.
 anvil-msrv-test: anvil-msrv-test-validate-prereqs anvil-impact
@@ -131,12 +157,12 @@ anvil-msrv-test: anvil-msrv-test-validate-prereqs anvil-impact
 # Mutation-test code changed from the selected base branch.
 anvil-mutants-diff: anvil-mutants-diff-validate-prereqs anvil-impact
     {{ anvil_mutants_diff_prefix }}git diff --src-prefix=a/ --dst-prefix=b/ {{ quote(anvil_base_ref) }} --output={{ quote(anvil_mutants_diff_file) }}
-    {{ anvil_mutants_diff_prefix }}cargo each {{ anvil_affected_selection }} --once -- cargo {{ anvil_stable_toolchain_arg }} mutants --in-diff {{ quote(anvil_mutants_diff_file) }} --no-shuffle --jobs 0 {{_anvil_mutants_config_arg}}
+    {{ anvil_mutants_diff_prefix }}cargo {{ anvil_stable_toolchain_arg }} gamma run --workspace --in-diff {{ quote(anvil_mutants_diff_file) }} --min-score 100 --max-flaky 0 --update-hints {{ if env("GITHUB_ACTIONS", "") == "true" { "--artifact-dir target/cargo-gamma" } else { "" } }}
     {{ anvil_mutants_diff_prefix }}rm {{ quote(anvil_mutants_diff_file) }}
 
 # Run exhaustive mutation testing across the workspace.
 anvil-mutants-full: anvil-mutants-full-validate-prereqs
-    {{ mutants_command_prefix }}cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} mutants --workspace --no-shuffle --jobs 0 {{_anvil_mutants_config_arg}}
+    cargo {{ anvil_stable_toolchain_arg }} gamma run --workspace --min-score 100 --max-flaky 0 --update-hints {{ if env("GITHUB_ACTIONS", "") == "true" { "--artifact-dir target/cargo-gamma" } else { "" } }}
 
 # Validate the current pull request title against repository policy.
 anvil-pr-title: anvil-pr-title-validate-prereqs

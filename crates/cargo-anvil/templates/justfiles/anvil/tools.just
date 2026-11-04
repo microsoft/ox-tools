@@ -13,7 +13,6 @@ installed_cargo_tools := `cargo install --list`
 cargo_binstall_version := replace_regex(installed_cargo_tools, '(?ms)\A.*^cargo-binstall v([^:\r\n]+):\r?$.*\z', '$1')
 cargo_binstall_found := if cargo_binstall_version == installed_cargo_tools { "false" } else { "true" }
 bolero_command_prefix := if os() == "linux" { "" } else { "# " }
-mutants_command_prefix := if os() == "windows" { if arch() == "aarch64" { "# " } else { "" } } else { "" }
 
 # Install exactly the catalog version when the installed version is too old.
 # A newer local version is accepted. `binstall` prefers a prebuilt binary and
@@ -189,11 +188,9 @@ anvil-tool-cargo-llvm-cov-install installer="install": (_install-tool "cargo-llv
 anvil-tool-cargo-llvm-cov-validate-prereqs: (_check-tool "cargo-llvm-cov" cargo_llvm_cov_version)
 
 [group("anvil-setup")]
-anvil-tool-cargo-mutants-install installer="install":
-    {{ mutants_command_prefix }}{{ just_executable() }} _install-tool cargo-mutants {{ cargo_mutants_version }} {{ installer }}
+anvil-tool-cargo-gamma-install installer="install": (_install-tool "cargo-gamma" cargo_gamma_version installer)
 [group("anvil-setup")]
-anvil-tool-cargo-mutants-validate-prereqs:
-    {{ mutants_command_prefix }}{{ just_executable() }} _check-tool cargo-mutants {{ cargo_mutants_version }}
+anvil-tool-cargo-gamma-validate-prereqs: (_check-tool "cargo-gamma" cargo_gamma_version)
 
 [group("anvil-setup")]
 anvil-tool-cargo-nextest-install installer="install": (_install-tool "cargo-nextest" cargo_nextest_version installer)

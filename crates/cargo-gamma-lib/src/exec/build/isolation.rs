@@ -1135,7 +1135,7 @@ mod tests {
                 );
             } else {
                 assert!(results.is_empty());
-                assert!(events.warnings.is_empty());
+                assert_eq!(events.warnings.len(), 0);
             }
         }
     }
@@ -1399,7 +1399,7 @@ mod tests {
         );
         assert_eq!(result.unwrap_err().message(), "the in-memory proof compiler refuses execution");
         assert_eq!(events.activity, [(11, 9, 13)]);
-        assert!(events.observations.is_empty());
+        assert_eq!(events.observations.len(), 0);
         assert_eq!(converger.proof_active, HashSet::from_iter([1, 2]));
     }
 
@@ -2627,7 +2627,7 @@ mod tests {
                 .expect("diagnostic-local and partition proofs are bounded");
             assert!(matches!(results.as_slice(), [Isolation::Blamed(ordinals)] if ordinals == &[19_000]));
             assert!(converger.isolation_budget.proofs <= 8);
-            assert!(events.warnings.is_empty());
+            assert_eq!(events.warnings.len(), 0);
             assert!(converger.abandoned.is_empty());
         }
     }

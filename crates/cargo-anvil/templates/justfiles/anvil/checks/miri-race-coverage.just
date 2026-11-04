@@ -5,7 +5,7 @@
 # Regenerate with cargo-anvil to update this file.
 
 # Run affected Miri tests across a rotating seed range.
-anvil-miri-race-coverage: anvil-miri-race-coverage-validate-prereqs (_anvil-miri-profile "race-coverage")
+anvil-miri-race-coverage: anvil-miri-race-coverage-validate-prereqs (_anvil-miri-test "race-coverage" "" "" "")
 
 # Install prerequisites for the `anvil-miri-race-coverage` recipe.
 [group("anvil-setup")]

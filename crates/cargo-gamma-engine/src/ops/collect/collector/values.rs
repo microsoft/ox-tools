@@ -1019,7 +1019,7 @@ mod tests {
             ),
         ] {
             let types = test_types(&abstracts, &imports, &defaults);
-            assert!(values_for(&parse_quote!(u8), 2, &types).is_empty());
+            assert_eq!(values_for(&parse_quote!(u8), 2, &types).len(), 0);
             assert_eq!(
                 values_for(&parse_quote!(Option<u8>), 3, &types),
                 [
@@ -1439,12 +1439,12 @@ mod tests {
         let foreign_error: Type = parse_quote!(std::io::Error);
         let plain: Type = parse_quote!(String);
 
-        assert!(values_for(&foreign_error, RETURN_DEPTH, &types).is_empty());
+        assert_eq!(values_for(&foreign_error, RETURN_DEPTH, &types).len(), 0);
         assert_eq!(
             texts(tuple_values(&plain, RETURN_DEPTH, &types)),
             ["fn_value.default:Default::default()"]
         );
-        assert!(literal_values(Kind::Option, &parse_quote!(Option<bool>)).is_empty());
+        assert_eq!(literal_values(Kind::Option, &parse_quote!(Option<bool>)).len(), 0);
     }
 
     #[test]
@@ -1508,8 +1508,8 @@ mod tests {
             self_associated: None,
         };
 
-        assert!(values_for(&parse_quote!(Set), RETURN_DEPTH, &types).is_empty());
-        assert!(values_for(&parse_quote!(&str), 0, &types).is_empty());
+        assert_eq!(values_for(&parse_quote!(Set), RETURN_DEPTH, &types).len(), 0);
+        assert_eq!(values_for(&parse_quote!(&str), 0, &types).len(), 0);
         assert_eq!(
             texts(values_for(&parse_quote!(Option<T>), RETURN_DEPTH, &types)),
             ["fn_value.none:None", "fn_value.some_default:Some(Default::default())"]
@@ -1527,14 +1527,18 @@ mod tests {
         let defaults = Defaults::of(&syn::parse_file("struct NoDefault;").expect("the default fixture parses"));
         let types = test_types(&abstracts, &imports, &defaults);
 
-        assert!(values_for(&parse_quote!(std::collections::HashSet<bool, NoDefault>), RETURN_DEPTH, &types).is_empty());
-        assert!(
+        assert_eq!(
+            values_for(&parse_quote!(std::collections::HashSet<bool, NoDefault>), RETURN_DEPTH, &types).len(),
+            0
+        );
+        assert_eq!(
             values_for(
                 &parse_quote!(std::collections::HashMap<bool, bool, NoDefault>),
                 RETURN_DEPTH,
                 &types
             )
-            .is_empty()
+            .len(),
+            0
         );
         let renamed_imports = HashMap::from_iter([
             (
@@ -1547,8 +1551,11 @@ mod tests {
             ),
         ]);
         let renamed = test_types(&abstracts, &renamed_imports, &defaults);
-        assert!(values_for(&parse_quote!(Set<bool, NoDefault>), RETURN_DEPTH, &renamed).is_empty());
-        assert!(values_for(&parse_quote!(Map<bool, bool, NoDefault>), RETURN_DEPTH, &renamed).is_empty());
+        assert_eq!(values_for(&parse_quote!(Set<bool, NoDefault>), RETURN_DEPTH, &renamed).len(), 0);
+        assert_eq!(
+            values_for(&parse_quote!(Map<bool, bool, NoDefault>), RETURN_DEPTH, &renamed).len(),
+            0
+        );
         for ty in [
             parse_quote!(std::collections::HashSet<bool, UnknownHasher>),
             parse_quote!(std::collections::HashMap<bool, bool, UnknownHasher>),
@@ -1684,7 +1691,7 @@ mod tests {
             texts(values_for(&parse_quote!(Self::Value), RETURN_DEPTH, &known)),
             ["fn_value.bool_true:true", "fn_value.bool_false:false"]
         );
-        assert!(values_for(&parse_quote!(Self::Value), RETURN_DEPTH, &unresolved).is_empty());
+        assert_eq!(values_for(&parse_quote!(Self::Value), RETURN_DEPTH, &unresolved).len(), 0);
     }
 
     #[test]
@@ -1731,7 +1738,7 @@ mod tests {
         let tuple: Type = parse_quote!((bool,));
         let reference: Type = parse_quote!(&str);
 
-        assert!(reference_values(&plain, RETURN_DEPTH, &types).is_empty());
+        assert_eq!(reference_values(&plain, RETURN_DEPTH, &types).len(), 0);
         assert_eq!(reference_elem(&plain), None);
         assert_eq!(type_argument(&reference, 0), None);
         assert_eq!(type_argument(&bare_collection, 0), None);
@@ -1876,14 +1883,14 @@ mod tests {
         let iterator = values_for(&parse_quote!(impl Iterator<Item = bool>), RETURN_DEPTH, &types);
 
         assert!(iterator.iter().all(|value| value.2 == Confidence::Optimistic));
-        assert!(values_for(&parse_quote!([std::num::NonZeroU8; 1]), RETURN_DEPTH, &types).is_empty());
+        assert_eq!(values_for(&parse_quote!([std::num::NonZeroU8; 1]), RETURN_DEPTH, &types).len(), 0);
         for depth in [0, RETURN_DEPTH] {
             assert_eq!(
                 values_for(&parse_quote!([dependency::Box<bool>; 1]), depth, &types),
                 vec![optimistic("fn_value.default", "Default::default()")]
             );
         }
-        assert!(type_argument_values(&parse_quote!(impl Send)).is_empty());
+        assert_eq!(type_argument_values(&parse_quote!(impl Send)).len(), 0);
     }
 
     #[test]

@@ -40,7 +40,7 @@ const VERSIONS_JUST: &str = include_str!("../../../templates/justfiles/anvil/ver
 const TOOLS_JUST: &str = include_str!("../../../templates/justfiles/anvil/tools.just");
 
 /// Contents of `justfiles/anvil/helpers.just` baked into the binary.
-/// Holds shared MSRV, cargo-mutants, and unscoped-tier helpers.
+/// Holds shared MSRV and unscoped-tier helpers.
 const HELPERS_JUST: &str = include_str!("../../../templates/justfiles/anvil/helpers.just");
 
 /// Contents of `justfiles/anvil/impact.just` baked into the binary.
@@ -703,7 +703,6 @@ mod tests {
             })
             .expect("tools preamble must be independently addressable");
         assert!(preamble.body().contains("bolero_command_prefix :="));
-        assert!(preamble.body().contains("mutants_command_prefix :="));
         assert!(
             !recipe("anvil-tool-cargo-audit-validate-prereqs")
                 .unwrap()
@@ -714,7 +713,7 @@ mod tests {
             !recipe("anvil-tool-cargo-llvm-cov-validate-prereqs")
                 .unwrap()
                 .body()
-                .contains("mutants_command_prefix :=")
+                .contains("bolero_command_prefix :=")
         );
     }
 
@@ -847,11 +846,14 @@ mod tests {
     #[test]
     fn checks_fail_closed_and_preserve_opted_out_tests() {
         let checks = all_check_bodies();
-        for needle in ["coverage-gate {{ anvil_explicit_package_args }} run", "mutants_command_prefix"] {
+        for needle in [
+            "{{ anvil_coverage_gate_command }} {{ anvil_explicit_package_args }} run",
+            "gamma run --workspace --min-score 100 --max-flaky 0 --update-hints",
+        ] {
             assert!(checks.contains(needle), "checks tree missing safety behavior '{needle}'");
         }
         assert!(
-            checks.contains("bolero list --profile release --package '{name}'"),
+            checks.contains("bolero list --profile release --target {{ quote(anvil_bolero_host_target) }} --package '{name}'"),
             "bolero discovery must use the execution profile through cargo-each"
         );
         assert!(
@@ -879,7 +881,9 @@ mod tests {
             "successful Bolero runs must remove their JSONL handoff file"
         );
         assert!(
-            checks.contains("bolero test --profile release --engine libfuzzer -T 60s --package '{json:package}' '{json:test}'"),
+            checks.contains(
+                "bolero test --profile release --target {{ quote(anvil_bolero_host_target) }} --engine libfuzzer -T 60s --package '{json:package}' '{json:test}'"
+            ),
             "bolero execution must use the profile option accepted by the pinned cargo-bolero"
         );
         assert!(
@@ -896,7 +900,7 @@ mod tests {
             r#"anvil_mutants_diff_file := anvil_mutants_diff_dir / ("anvil-mutants-diff-" + just_pid() + ".diff")"#,
             r#"trim(read(anvil_impact_input_dir + "/affected.packages")) == """#,
             "git diff --src-prefix=a/ --dst-prefix=b/ {{ quote(anvil_base_ref) }} --output={{ quote(anvil_mutants_diff_file) }}",
-            "mutants --in-diff {{ quote(anvil_mutants_diff_file) }}",
+            "gamma run --workspace --in-diff {{ quote(anvil_mutants_diff_file) }}",
             "rm {{ quote(anvil_mutants_diff_file) }}",
         ] {
             assert!(checks.contains(needle), "mutants-diff is missing '{needle}'");
@@ -994,31 +998,25 @@ mod tests {
                 );
             }
         }
-        assert_eq!(scoped, 21, "every direct impact-scoped check must be covered");
+        assert_eq!(scoped, 19, "every cargo-each impact-scoped check must be covered");
     }
 
     #[test]
-    fn miri_profiles_inherit_the_cargo_each_runner() {
+    fn miri_profiles_share_the_compile_once_runner() {
         let miri = CHECK_FILES
             .iter()
             .find_map(|(path, body)| path.ends_with("/miri.just").then_some(*body))
             .expect("miri.just is registered in CHECK_FILES");
         for needle in [
-            "_anvil-miri-profile profile package=\"\" test_filter=\"\" example=\"\": anvil-impact",
-            "[env(\"MIRIFLAGS\", anvil_miri_flags)]",
-            "[env(\"RUSTFLAGS\", anvil_miri_rustflags)]",
-            "_anvil-miri-test package=\"\" test_filter=\"\" example=\"\":",
-            "cargo +{{ rust_nightly }} each",
-            "--filter 'not metadata:anvil.miri.exclude=true'",
-            "--jobs {{ anvil_miri_jobs }}",
-            "--keep-going",
-            "miri test --package '{cargo-spec}'",
-            "anvil_miri_race_seed_range := anvil_miri_race_day + \"0..\" + anvil_miri_race_day + \"2\"",
+            "_anvil-miri-test profile package=\"\" test_filter=\"\" example=\"\": anvil-impact",
+            "[script(\"pwsh\", \"-NoProfile\")]",
+            "miri test --all-features --tests --no-run --message-format=json-render-diagnostics",
+            "ForEach-Object -Parallel",
+            "$env:MIRIFLAGS",
+            "$env:RUSTFLAGS",
         ] {
             assert!(miri.contains(needle), "miri runner is missing '{needle}'");
         }
-        assert!(!miri.contains("[script(\"pwsh\""), "Miri must not require PowerShell");
-
         for (check, profile) in [
             ("miri", "standard"),
             ("miri-tree-borrows", "tree-borrows"),
@@ -1030,9 +1028,9 @@ mod tests {
                 .find_map(|(path, body)| path.ends_with(&format!("/{check}.just")).then_some(*body))
                 .unwrap_or_else(|| panic!("{check}.just is registered in CHECK_FILES"));
             let dependency = if check == "miri" {
-                format!("(_anvil-miri-profile \"{profile}\" package test example)")
+                format!("(_anvil-miri-test \"{profile}\" package test example)")
             } else {
-                format!("(_anvil-miri-profile \"{profile}\")")
+                format!("(_anvil-miri-test \"{profile}\" \"\" \"\" \"\")")
             };
             assert!(
                 body.contains(&dependency),
@@ -1086,7 +1084,8 @@ mod tests {
             let policy = *expected
                 .get(stem)
                 .unwrap_or_else(|| panic!("check '{stem}' is missing from EXPECTED_CHECK_POLICY; classify it explicitly"));
-            let execution_body = if body.contains("(_anvil-miri-profile \"") {
+            let is_miri_profile = body.contains("(_anvil-miri-test \"");
+            let execution_body = if is_miri_profile {
                 miri_runner
             } else {
                 body
@@ -1130,8 +1129,10 @@ mod tests {
                         "{path} reads the impact cache but does not depend on anvil-impact"
                     );
                     assert!(
-                        execution_body.contains(" each "),
-                        "{path} must delegate the selection to cargo-each"
+                        execution_body.contains(" each ")
+                            || (is_miri_profile && execution_body.contains("affected.packages"))
+                            || (stem == "mutants-diff" && execution_body.contains("affected.packages")),
+                        "{path} must use an owned package-file consumer"
                     );
                 }
             }
@@ -1327,7 +1328,7 @@ mod tests {
             "cargo_llvm_cov_version",
             "cargo_deny_version",
             "cargo_each_version",
-            "cargo_mutants_version",
+            "cargo_gamma_version",
         ] {
             assert!(VERSIONS_JUST.contains(needle), "versions.just missing variable '{needle}'");
         }
@@ -1362,10 +1363,7 @@ mod tests {
             TOOLS_JUST.contains("bolero_command_prefix"),
             "Bolero's platform gate must be a Just-time condition"
         );
-        assert!(
-            TOOLS_JUST.contains("mutants_command_prefix"),
-            "cargo-mutants' platform gate must be a Just-time condition"
-        );
+        assert!(TOOLS_JUST.contains("anvil-tool-cargo-gamma-install"));
         for component in ["clippy", "rustfmt"] {
             let expected =
                 format!("anvil-component-default-{component}-install installer=\"install\": (anvil-tool-cargo-each-install installer)");
