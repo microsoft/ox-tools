@@ -2931,6 +2931,7 @@ fn a_build_inside_its_budget_is_collected() {
 /// The descendant here is the shape that survives: spawned by the build, holding its pipes, and
 /// due to write a file well after the budget runs out. Reaching that write is what a surviving
 /// subtree looks like from outside.
+#[cfg(feature = "system-tests")]
 #[test]
 fn a_build_stopped_by_its_budget_takes_its_descendants_with_it() {
     crate::testing::within(crate::testing::WATCHDOG, "a build with a descendant", || {
@@ -2950,19 +2951,29 @@ fn a_build_stopped_by_its_budget_takes_its_descendants_with_it() {
 
         let work = Workspace::adopt(root.clone(), root.join("target"));
 
-        let outcome = supervise(
-            command,
+        let prepared = cargo_gamma_process::prepare(command, cargo_gamma_process::MemoryRequest::default())
+            .expect("the native acceptance process is contained");
+        let spawned = prepared.spawn().expect("the native acceptance process starts");
+        let mut subtree = cargo_gamma_process::ProcessTree::adopt(spawned).expect("the native acceptance tree is adopted");
+        let readiness_deadline = Instant::now() + Duration::from_secs(30);
+        while !running.as_std_path().exists() {
+            if Instant::now() >= readiness_deadline {
+                subtree.terminate().expect("the unreadied acceptance tree can be terminated");
+                panic!("the descendant did not reach its startup marker before the readiness safety bound");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        let outcome = super::invoke::supervise_tree(
+            subtree,
             &work,
-            Some(Duration::from_millis(750)),
+            Some(Duration::ZERO),
             &mut crate::testing::Recorder::default(),
+            super::invoke::OUTPUT_LIMITS,
         )
         .expect("the build was supervised");
 
         assert!(outcome.is_none(), "a build past its budget reports no output");
-        assert!(
-            running.as_std_path().exists(),
-            "the descendant never started, so this test proves nothing about killing it"
-        );
 
         // Past the descendant's sleep, so anything still alive has had its chance to write.
         thread::sleep(Duration::from_millis(3500));
