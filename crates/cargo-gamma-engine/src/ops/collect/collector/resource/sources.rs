@@ -211,12 +211,12 @@ mod tests {
 
     #[test]
     fn subpatterns_remove_stale_initializer_and_nonzero_evidence() {
-        assert!(sources("fn f(){ let n=1; let n @ _=input; while ready{} }").locals.is_empty());
+        assert_eq!(sources("fn f(){ let n=1; let n @ _=input; while ready{} }").locals.len(), 0);
         let found = sources("fn f(n:NonZeroU32){ let n=n.get(); { let n @ _=input; while ready{} } }");
-        assert!(found.locals.is_empty());
+        assert_eq!(found.locals.len(), 0);
         assert!(found.nonzero_get.is_none());
         let found = sources("fn f(n:NonZeroU32){ let n=n.get(); let (left,right)=input; while ready{} }");
-        assert!(found.locals.is_empty());
+        assert_eq!(found.locals.len(), 0);
         assert!(found.nonzero_get.is_none());
         assert_eq!(sources("fn f(){let n=7;while ready{}}").locals, vec![("n".into(), parse_quote!(7))]);
     }

@@ -589,7 +589,7 @@ mod tests {
             remaining: 0,
         };
         calls.visit_expr(&syn::parse_quote!(helper()));
-        assert!(calls.sites.is_empty());
+        assert_eq!(calls.sites.len(), 0);
     }
 
     #[test]

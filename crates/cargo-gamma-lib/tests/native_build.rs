@@ -663,7 +663,7 @@ fn convergence_propagates_its_first_native_transport_refusal_without_publishing_
     assert!(converger.history.is_empty());
     assert!(converger.withdrawn.is_empty());
     assert!(converger.census.is_empty());
-    assert!(events.progress.is_empty());
+    assert_eq!(events.progress, [] as [usize; 0]);
 }
 
 #[test]
@@ -872,7 +872,7 @@ fn convergence_propagates_native_instrumentation_and_compiler_transport_failures
         assert_eq!(converger.total_rounds, 1);
         assert!(converger.history.is_empty());
         assert!(converger.withdrawn.is_empty());
-        assert!(events.progress.is_empty());
+        assert_eq!(events.progress, [] as [usize; 0]);
     }
 }
 
@@ -927,7 +927,7 @@ fn a_native_attribution_at_the_rollback_limit_is_recorded_but_never_applied_and_
         }
         assert!(converger.withdrawn.is_empty());
         assert!(converger.census.is_empty());
-        assert!(events.progress.is_empty());
+        assert_eq!(events.progress, [] as [usize; 0]);
         assert_eq!(converger.total_rounds, 1);
     }
 }
@@ -1041,11 +1041,11 @@ fn both_schema_adapters_record_every_unavailable_mutant_in_all_three_retirement_
             let written = converger
                 .instrument_active_schema(&work, &plan, &HashSet::from_iter([1, 2]))
                 .unwrap();
-            assert!(written.is_empty());
+            assert_eq!(written, [] as [camino::Utf8PathBuf; 0]);
         } else {
             let (guards, written) = converger.instrument_schema(&work, &plan, &HashSet::default()).unwrap();
             assert!(guards.is_empty());
-            assert!(written.is_empty());
+            assert_eq!(written, [] as [camino::Utf8PathBuf; 0]);
         }
         let expected = HashSet::from_iter([1, 2]);
         assert_eq!(converger.withdrawn, expected);
@@ -1279,7 +1279,7 @@ fn enclosing_type_consequences_keep_guard_interactions_out_of_the_unviable_censu
     assert_eq!(converger.abandoned, HashSet::from_iter([1]));
     assert_eq!(converger.interactions.get(&1), Some(&vec![1, 2]));
     assert!(converger.census.is_empty());
-    assert!(events.progress.is_empty());
+    assert_eq!(events.progress, [] as [usize; 0]);
     assert_eq!(observed.last(), Some(&HashSet::from_iter([2, 3])));
     converger.settle(&mut plan);
     assert_eq!(
@@ -1353,7 +1353,7 @@ fn an_ownership_primary_inside_a_viable_replacement_isolates_the_guard_interacti
         converger.census.is_empty(),
         "neither a guarding artifact nor its consequence is individually unviable"
     );
-    assert!(events.progress.is_empty());
+    assert_eq!(events.progress, [] as [usize; 0]);
     converger.settle(&mut plan);
     assert_eq!(
         population(&plan),

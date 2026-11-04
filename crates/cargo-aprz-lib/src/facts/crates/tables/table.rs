@@ -391,7 +391,6 @@ mod tests {
     use std::fs;
     use std::io::{Cursor, Error, ErrorKind};
 
-    use chrono::TimeZone as _;
     use serde::Deserialize;
     use tempfile::TempDir;
 

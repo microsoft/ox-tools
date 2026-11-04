@@ -1111,7 +1111,7 @@ mod tests {
         }
         let (flags, undecided) = rustflags(&Environment::default(), &config, Some("fixture-target"));
         assert_eq!(flags, ["--cfg", "from_table", "-Cpanic=abort"]);
-        assert!(undecided.is_empty());
+        assert_eq!(undecided.len(), 0);
     }
 
     #[test]
@@ -1325,7 +1325,7 @@ mod tests {
     fn an_unconfigured_workspace_holds_no_settings() {
         let (_directory, root) = tree(&[]);
 
-        assert!(Build::settings_in(&root, &empty(&root)).is_empty());
+        assert_eq!(Build::settings_in(&root, &empty(&root)).len(), 0);
     }
 
     #[test]
@@ -1644,7 +1644,7 @@ mod tests {
         let config = CargoConfig::load(&root.join("member"), &empty(&root));
 
         assert_eq!(config.keys(&["target"]), vec!["a", "m", "z"]);
-        assert!(config.keys(&["missing"]).is_empty());
+        assert_eq!(config.keys(&["missing"]).len(), 0);
     }
 
     #[test]
@@ -1654,8 +1654,8 @@ mod tests {
         let mut config = CargoConfig::default();
 
         assert!(!config.include(&root.join("missing.toml")));
-        assert!(config.sources.is_empty());
-        assert!(config.tables.is_empty());
+        assert_eq!(config.sources.len(), 0);
+        assert_eq!(config.tables.len(), 0);
     }
 
     #[test]
@@ -1667,7 +1667,7 @@ mod tests {
         assert!(config.include(&root));
         assert_eq!(config.sources.len(), 1);
         assert!(config.sources[0].contains("unreadable"), "{}", config.sources[0]);
-        assert!(config.tables.is_empty());
+        assert_eq!(config.tables.len(), 0);
     }
 
     #[test]

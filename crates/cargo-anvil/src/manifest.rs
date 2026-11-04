@@ -159,6 +159,7 @@ impl Manifest {
     ///
     /// Returns an error if the file exists but can't be read, can't be
     /// parsed, or declares an unsupported schema version.
+    #[cfg(any(test, feature = "test-util"))]
     pub fn load(repo_root: &Path) -> Result<Self, AppError> {
         let path = Self::path_for(repo_root);
         if !path.exists() {
@@ -372,34 +373,19 @@ impl Manifest {
     /// # Errors
     ///
     /// Returns an error if the write fails.
+    #[cfg(any(test, feature = "test-util"))]
     pub fn save(&self, repo_root: &Path) -> Result<(), AppError> {
-        let path = Self::path_for(repo_root);
-        let text = self.to_toml();
-        let tmp = path.with_extension("lock.tmp");
-        // The write lands on this sibling before the rename, and `fs::write`
-        // opens with create+truncate, which follows a symlink. A checkout can
-        // carry `.anvil.lock.tmp` as a link out of the tree just as easily as
-        // any other name. Clearing it first turns a followed link into a
-        // replaced link; the name is anvil's own, so nothing that belongs to
-        // the repository is at stake. Only a missing file is absorbed.
-        match std::fs::remove_file(&tmp) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                return Err(e).into_app_err_with(|| format!("failed to clear the temporary file {}", tmp.display()));
-            }
-        }
-        std::fs::write(&tmp, text.as_bytes()).into_app_err_with(|| format!("failed to write {}", tmp.display()))?;
-        std::fs::rename(&tmp, &path).into_app_err_with(|| format!("failed to rename {} -> {}", tmp.display(), path.display()))?;
-        Ok(())
+        save_text(repo_root, &self.to_toml())
     }
 
     /// Insert or update one file entry.
+    #[cfg(any(test, feature = "test-util"))]
     pub fn set_file(&mut self, path: impl Into<String>, checksum: impl Into<String>) {
         self.files.insert(path.into(), checksum.into());
     }
 
     /// Insert or update one region entry.
+    #[cfg(any(test, feature = "test-util"))]
     pub fn set_region(&mut self, host: impl Into<String>, id: impl Into<String>, checksum: impl Into<String>) {
         self.regions.insert(
             RegionKey {
@@ -464,8 +450,22 @@ impl Manifest {
     }
 }
 
-// Suppress an unused-import lint when no callers reference `Array`/`Value`
-// yet (they will once writers gain inline-table support in later commits).
+pub(crate) fn save_text(repo_root: &Path, text: &str) -> Result<(), AppError> {
+    let path = Manifest::path_for(repo_root);
+    let tmp = path.with_extension("lock.tmp");
+    // Clear the staging name before writing so a stale symlink cannot redirect
+    // the write outside the repository.
+    match std::fs::remove_file(&tmp) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(e).into_app_err_with(|| format!("failed to clear the temporary file {}", tmp.display()));
+        }
+    }
+    std::fs::write(&tmp, text.as_bytes()).into_app_err_with(|| format!("failed to write {}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).into_app_err_with(|| format!("failed to rename {} -> {}", tmp.display(), path.display()))?;
+    Ok(())
+}
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]

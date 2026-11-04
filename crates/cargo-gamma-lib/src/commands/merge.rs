@@ -476,9 +476,9 @@ fn report_merge<H: Host>(host: &mut H, args: &MergeArgs, merged: &crate::merge::
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::collections::BTreeMap;
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "system-tests"))]
     use std::os::unix::ffi::OsStringExt as _;
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "system-tests"))]
     use std::os::windows::ffi::OsStringExt as _;
 
     use super::*;
@@ -718,7 +718,7 @@ mod tests {
         }
         let mut host = Sink::default();
         assert!(!report_incomplete_gate(&mut host, &crate::merge::Merged::default(), "score gate", Styler::new(false)).unwrap());
-        assert!(host.err.is_empty());
+        assert_eq!(host.err.len(), 0);
     }
 
     fn survivor_args(input: Utf8PathBuf) -> MergeArgs {
@@ -972,7 +972,7 @@ mod tests {
         assert!(err.contains("shards never run"), "{err}");
         assert!(err.contains("different shard count"), "{err}");
         assert!(err.contains("cannot evaluate a complete shard rotation"), "{err}");
-        assert!(host.out.is_empty());
+        assert_eq!(host.out.len(), 0);
     }
 
     #[test]

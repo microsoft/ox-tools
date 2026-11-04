@@ -4161,7 +4161,7 @@ mod tests {
             matches!(failed.cause().kind(), io::ErrorKind::NotFound | io::ErrorKind::NotADirectory),
             "the missing working directory should prevent the spawn: {failed}"
         );
-        assert!(!failed.to_string().is_empty());
+        assert_ne!(failed.to_string(), "");
         let source = failed
             .source()
             .and_then(|cause| cause.downcast_ref::<io::Error>())

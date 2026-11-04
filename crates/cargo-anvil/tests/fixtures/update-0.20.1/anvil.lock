@@ -1,0 +1,8 @@
+version = 2
+tool = "anvil"
+tool_version = "0.20.1"
+
+[[region]]
+host = ".gitattributes"
+id = "anvil-gitattributes"
+checksum = "sha256:b91854c7f0e6d14c74751f607d2c0e3dfcefef55f5178bbafae59d47e577aa1a"

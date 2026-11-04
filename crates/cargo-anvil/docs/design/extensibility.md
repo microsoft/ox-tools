@@ -423,15 +423,8 @@ impl Artifact {
     pub fn member_region(id: RegionId, body: impl Into<String>) -> Artifact; // EachMemberManifest + Hash sugar
 }
 
-// Drive the engine.
-impl Cli {
-    /// Parse argv against a catalog, stripping the `catalog.cli.subcommand`
-    /// token cargo injects, and rendering help/version/about from `CliMeta`.
-    pub fn parse_from_cargo_args(catalog: &Catalog, args: I) -> Result<Cli, clap::Error>;
-}
-
-pub fn run(catalog: &Catalog, cli: &Cli) -> Result<i32, AppError>;
-pub fn run_update(catalog: &Catalog, cli: &Cli, start_dir: &Path) -> Result<RunOutcome, AppError>;
+// Drive the engine without process-global setup.
+pub fn update(catalog: &Catalog, options: &UpdateOptions, io: &mut dyn UpdateIo) -> Result<UpdateResult, AppError>;
 
 /// One-call entry point: tracing init + parse + run + ExitCode mapping.
 /// This is the body of today's `main.rs`, generalized over a catalog.
@@ -450,7 +443,41 @@ the plan's nonzero dry-run status in `Ok`; `run_app` maps that successful status
 `fn main() -> ExitCode { cargo_anvil::run_app(Catalog::anvil()) }`, proving the seam by
 dogfooding it.
 
-### 5.1 Tool identity, catalog checksum, and the single-tool guard
+`Cli`, `run`, `run_update`, and `RunOutcome` are engine internals, not supported
+downstream entry points. Use `update` for in-process execution.
+
+### 5.1 Supported in-process updates
+
+Downstream catalogs can execute the real update algorithm against caller-owned
+repository state without invoking their binary or touching the host filesystem.
+Only external repository effects are replaceable: parsing, planning, checksum
+comparisons, region reconciliation, preservation decisions, and application
+remain the production algorithm. This lets a catalog test complete upgrades
+against in-memory state, including committed historical fixtures, rather than
+mocking the generator's result.
+
+Callers choose backends explicitly and can inspect drift, refusals, and generated
+content or perform a dry run without mutation. Execution needs no process
+arguments, environment changes, working-directory changes, or global tracing
+setup. The CLI retains workspace discovery, backend autodetection, repository
+context in errors, and its filesystem containment and atomic-publication
+protections while using the same engine.
+
+The safety model is unchanged: customized content is preserved, independent safe
+changes may still apply despite refusals, and I/O failures propagate. Results
+describe the inspected input, not a second scan after application. Application
+is not a repository-wide transaction; earlier writes can remain after a later
+failure, but the lock is published only after all artifact operations succeed.
+
+See the [public API reference on docs.rs](https://docs.rs/cargo-anvil/latest/cargo_anvil/)
+for signatures, options, results, and adapter contracts, and
+[`examples/memory_catalog.rs`](../../examples/memory_catalog.rs) for a downstream
+catalog running entirely in memory. Adoption requires the first upstream release
+containing this API; earlier releases do not expose it. No optional features are
+required, including with default features disabled. The `test-util` feature and
+`test_support` module remain unsupported for downstream use.
+
+### 5.2 Tool identity, catalog checksum, and the single-tool guard
 
 The lock file's provenance fields (see [updates.md §1](./updates.md#1-the-manifest)) come straight
 from the catalog:

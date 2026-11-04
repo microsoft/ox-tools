@@ -657,7 +657,7 @@ impl S {
 
         collector.record_attributed_function_head(&item.attrs, item.sig.fn_token.span, item.span());
 
-        assert!(collector.scopes.spans.is_empty());
+        assert_eq!(collector.scopes.spans.len(), 0);
     }
 
     #[test]

@@ -526,7 +526,7 @@ mod tests {
 
         assert_eq!(killers.generalized(), &generalized);
         assert_eq!(killers.reach_hints(&known_site), vec![expected]);
-        assert!(killers.reach_hints(&site("unknown")).is_empty());
+        assert_eq!(killers.reach_hints(&site("unknown")).len(), 0);
     }
 
     #[test]

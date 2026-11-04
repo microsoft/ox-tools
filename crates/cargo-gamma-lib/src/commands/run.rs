@@ -2341,10 +2341,12 @@ mod miri_tests {
 #[cfg(not(miri))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "system-tests"))]
     use std::os::unix::fs::PermissionsExt as _;
 
-    use serde_json::{Value, from_slice, from_str, json, to_value, to_vec};
+    use serde_json::{Value, from_str, json, to_value};
+    #[cfg(feature = "system-tests")]
+    use serde_json::{from_slice, to_vec};
 
     use super::super::cli::MeasureArgs;
     use super::*;
@@ -2515,7 +2517,7 @@ mod tests {
         let mut host = Sink::default();
         finish_resumed_reporting(&mut host, &[], &[], None, styler, || Err(error!("named teardown refusal"))).unwrap();
         assert_eq!(host.err, format!("{} named teardown refusal\n", styler.warning()).as_bytes());
-        assert!(host.out.is_empty());
+        assert_eq!(host.out.len(), 0);
     }
 
     #[test]
@@ -2758,7 +2760,7 @@ mod tests {
                     (true, true) => String::new(),
                 };
                 assert_eq!(host.err, expected.as_bytes());
-                assert!(host.out.is_empty());
+                assert_eq!(host.out.len(), 0);
             }
         }
     }
@@ -3161,8 +3163,8 @@ mod tests {
         assert!(emit_diag_bundle(&mut host, &args, &plan, Some(&session), started, styler).is_err());
         assert!(emit_diag_bundle_to(&mut host, &args, &plan, None, started, styler, &blocked.join("diag")).is_err());
         assert!(emit_advice(&mut host, &args, &plan, &session, Duration::from_secs(1), styler).is_err());
-        assert!(host.err.is_empty());
-        assert!(host.out.is_empty());
+        assert_eq!(host.err.len(), 0);
+        assert_eq!(host.out.len(), 0);
         assert_eq!(fs::read_to_string(blocked).unwrap(), "preserved");
     }
 
@@ -3205,12 +3207,12 @@ mod tests {
             format!("{}\nDISTINCT ADVICE", crate::ci::summary(&plan.mutants, &plan.root))
         );
         assert!(host.err().contains('\u{1b}'));
-        assert!(!host.out.is_empty());
+        assert_ne!(host.out.len(), 0);
         fs::remove_file(&path).unwrap();
         host.out.clear();
         args.annotations = crate::ci::Annotations::None;
         emit_ci(&mut host, &args, &plan, Some("SHOULD NOT BE APPENDED"), Styler::new(false)).unwrap();
-        assert!(host.out.is_empty());
+        assert_eq!(host.out.len(), 0);
         assert!(!path.exists());
     }
 
@@ -3885,7 +3887,7 @@ mod tests {
             args.measure.jobs, None,
             "resumption reads reporting gates, not current execution configuration"
         );
-        assert!(args.select.features.features.is_empty());
+        assert_eq!(args.select.features.features.len(), 0);
         fs::write(root.join("gamma.toml"), "[").unwrap();
         args.resume_testing = false;
         configure(&mut Sink::default(), &mut args, Styler::new(false)).expect_err("malformed ordinary configuration must return an error");
@@ -4163,7 +4165,7 @@ mod tests {
             Instant::now(),
         );
         assert_eq!(failure.message(), "baseline failed before any test outcome");
-        assert!(host.err().is_empty());
+        assert_eq!(host.err().len(), 0);
         assert!(!Documents::resolve(&args, &plan.root).diag.exists());
     }
 
@@ -4641,7 +4643,7 @@ mod tests {
         let uncached = crate::discover::Survey::for_build_with_cache_inputs(&select, None, &cargo, false).expect("uncached survey");
         let cached = crate::discover::Survey::for_build_with_cache_inputs(&select, None, &cargo, true).expect("cached survey");
 
-        assert!(uncached.external_inputs().is_empty());
+        assert_eq!(uncached.external_inputs().len(), 0);
         assert_eq!(
             cached.external_inputs(),
             &[crate::paths::physical(&dependency).expect("dependency path")]
@@ -5547,7 +5549,7 @@ mod tests {
     fn unavailable_cache_context_still_records_environment_without_enabling_reuse() {
         let (record_context, reusable) = postprocessing_contexts(&RunArgs::default(), None).unwrap();
         assert!(record_context.states(crate::discover::Term::Environment));
-        assert!(record_context.term(crate::discover::Term::Toolchain).is_empty());
+        assert_eq!(record_context.term(crate::discover::Term::Toolchain).len(), 0);
         assert!(reusable.is_none());
         assert!(
             postprocessing_contexts(

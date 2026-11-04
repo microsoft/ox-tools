@@ -967,9 +967,7 @@ pub(crate) fn remove_toml_region(text: &str, id: &str, syntax: CommentSyntax) ->
     }
     let region = find_toml_region(text, id, syntax)?;
     if let Some(region) = &region
-        && toml_edit::Document::parse(text)
-            .ok()
-            .is_some_and(|document| inside_array(document.as_item(), region.start_line.start))
+        && toml_edit::Document::parse(text).is_ok_and(|document| inside_array(document.as_item(), region.start_line.start))
     {
         // Array insertion adds no separator blank line: all adjacent whitespace is repository-owned.
         return Ok(format!("{}{}", &text[..region.start_line.start], &text[region.end_line.end..]));
@@ -2134,7 +2132,7 @@ mod tests {
         );
         let cdata =
             "<root>\n<![CDATA[\n<!-- >>> anvil-managed: survivor -->\n<body />\n<!-- <<< anvil-managed: survivor -->\n]]>\n</root>\n";
-        assert!(managed_region_ranges_with_ids(cdata, CommentSyntax::Xml).is_empty());
+        assert_eq!(managed_region_ranges_with_ids(cdata, CommentSyntax::Xml).len(), 0);
         assert_eq!(
             repair_markers(cdata, "survivor", CommentSyntax::Xml),
             MarkerRepair::Repaired(cdata.to_owned())
@@ -2355,7 +2353,7 @@ mod tests {
         let TomlAdoption::Adopted { text, residue } = adopt_unmanaged_toml_tables(text, body, CommentSyntax::Hash) else {
             panic!("equivalent parsed values should be emitted once");
         };
-        assert!(text.trim().is_empty());
+        assert_eq!(text.trim().len(), 0);
         assert_eq!(residue, "keep = 'ours'\n");
         let parsed = format!("{body}{residue}").parse::<toml_edit::DocumentMut>().unwrap();
         assert_eq!(parsed["settings"]["keep"].as_str(), Some("ours"));

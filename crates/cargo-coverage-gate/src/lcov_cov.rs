@@ -330,7 +330,7 @@ end_of_record
         let file = &report.files[0];
         assert_eq!(file.lines_total, 2);
         assert_eq!(file.lines_covered, 2, "a hit in either named section covers the source line");
-        assert!(file.uncovered_lines.is_empty());
+        assert_eq!(file.uncovered_lines.len(), 0);
     }
 
     #[test]

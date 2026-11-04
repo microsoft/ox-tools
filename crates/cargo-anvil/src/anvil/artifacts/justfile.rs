@@ -378,12 +378,12 @@ mod tests {
             assert!(checks.contains(needle), "checks tree missing advisory behavior '{needle}'");
         }
         assert!(
-            checks.contains("bolero list --profile release --package '{cargo-spec}'"),
-            "bolero discovery must use the execution profile once per affected package"
+            checks.contains("bolero list --profile release --target $hostTarget --package '{cargo-spec}'"),
+            "bolero discovery must use the execution profile and host target once per affected package"
         );
         assert!(
-            checks.contains("bolero test --profile release --engine libfuzzer"),
-            "bolero execution must use the profile option accepted by the pinned cargo-bolero"
+            checks.contains("bolero test --profile release --target $hostTarget --engine libfuzzer"),
+            "bolero execution must use the supported profile option and explicit host target"
         );
         assert!(
             !checks.contains("bolero list @bareArgs"),
@@ -394,7 +394,7 @@ mod tests {
         // one failing target does not stop the remaining targets.
         for needle in [
             "$target | Add-Member -NotePropertyName anvilPackageSpec -NotePropertyValue $packageSpec",
-            "each --package $t.anvilPackageSpec '--' cargo '+{{ rust_nightly }}' bolero test --profile release --engine libfuzzer -T 60s --package '{cargo-spec}' $testName",
+            "each --package $t.anvilPackageSpec '--' cargo '+{{ rust_nightly }}' bolero test --profile release --target $hostTarget --engine libfuzzer -T 60s --package '{cargo-spec}' $testName",
             "if ($LASTEXITCODE -ne 0) { $failed = $true }",
             "if ($failed) { exit 1 }",
         ] {
@@ -449,6 +449,48 @@ mod tests {
             .split_once("    $include = (& \"{{ just_executable() }}\" _anvil-impact-exclude affected)")
             .expect("Miri resolves affected packages through workspace exclusions");
         assert!(before_selection.contains("    $env:RUSTUP_TOOLCHAIN = '{{ rust_nightly }}'"));
+    }
+
+    // Protect setup dependencies, the pinned command, and exit-forwarding syntax in memory;
+    // this does not execute setup or verify the prepared standard library.
+    #[test]
+    fn miri_setup_template_wires_pinned_sysroot_preparation() {
+        let miri = CHECK_FILES
+            .iter()
+            .find_map(|(path, body)| path.ends_with("/miri.just").then_some(*body))
+            .expect("miri.just is registered in CHECK_FILES");
+
+        let lines: Vec<_> = miri
+            .lines()
+            .filter(|line| !line.trim().is_empty() && !line.trim_start().starts_with('#'))
+            .collect();
+        let declaration = lines
+            .iter()
+            .position(|line| line.starts_with("anvil-miri-setup "))
+            .expect("miri.just must declare its setup recipe");
+        let start = lines[..declaration]
+            .iter()
+            .rposition(|line| !line.starts_with('['))
+            .map_or(0, |index| index + 1);
+        let end = lines[declaration + 1..]
+            .iter()
+            .position(|line| !line.starts_with("    "))
+            .map_or(lines.len(), |index| declaration + 1 + index);
+
+        assert_eq!(
+            &lines[start..end],
+            &[
+                "[private]",
+                "[script(\"pwsh\", \"-NoProfile\")]",
+                concat!(
+                    "anvil-miri-setup installer=\"install\": anvil-component-nightly-miri-install ",
+                    "anvil-component-nightly-rust-src-install",
+                ),
+                "    $ErrorActionPreference = 'Stop'",
+                "    & cargo '+{{ rust_nightly }}' miri setup",
+                "    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }",
+            ]
+        );
     }
 
     // A missing MSRV skips without discovery; otherwise discovery inherits the validated compiler.
@@ -1808,11 +1850,12 @@ mod tests {
                 output.status.success(),
                 "a repository without a declared MSRV must skip the MSRV test"
             );
-            assert!(
+            assert_eq!(
                 String::from_utf8(output.stdout)
                     .expect("resolver output must be UTF-8")
                     .trim()
-                    .is_empty()
+                    .len(),
+                0
             );
 
             let temp = fixture("[workspace.package]\nrust-version = \"1.93\"\n");

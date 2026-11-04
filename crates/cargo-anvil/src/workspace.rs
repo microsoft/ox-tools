@@ -90,20 +90,61 @@ pub fn find_workspace_root(start: &Path) -> Result<PathBuf, AppError> {
 ///
 /// Returns an error if the manifest can't be read, parsed, or its
 /// `[workspace] members` glob list can't be resolved.
+#[cfg(test)]
 pub fn load_workspace(root: &Path) -> Result<Workspace, AppError> {
+    load_workspace_with_io(&crate::io::RepositoryIo { root })
+}
+
+pub(crate) fn load_workspace_with_io(io: &dyn crate::UpdateIo) -> Result<Workspace, AppError> {
+    let root = Path::new("");
+    let text = io
+        .read_file(Path::new("Cargo.toml"))?
+        .ok_or_else(|| app_err!("no Cargo.toml at the repository root; provide a Cargo workspace"))?;
+    parse_workspace(root, &text, |doc| {
+        resolve_workspace_members_with(doc, |pattern, out| {
+            expand_member_pattern_using(
+                root,
+                pattern,
+                out,
+                |_| true,
+                |parent| {
+                    let mut paths = Vec::new();
+                    for entry in io.read_directory(parent)?.unwrap_or_default() {
+                        let path = parent.join(entry.name);
+                        let manifest = path.join("Cargo.toml");
+                        if entry.is_directory && io.read_directory(&manifest)?.is_none() && io.read_file(&manifest)?.is_some() {
+                            paths.push(path);
+                        }
+                    }
+                    Ok(paths)
+                },
+                |path| Ok(io.read_file(path)?.is_some()),
+            )
+        })
+    })
+}
+
+fn parse_workspace(
+    root: &Path,
+    text: &str,
+    resolve_members: impl FnOnce(&DocumentMut) -> Result<Vec<WorkspaceMember>, AppError>,
+) -> Result<Workspace, AppError> {
     let manifest_path = root.join("Cargo.toml");
-    let text = std::fs::read_to_string(&manifest_path).into_app_err_with(|| format!("failed to read {}", manifest_path.display()))?;
     let doc: DocumentMut = text
         .parse::<DocumentMut>()
         .into_app_err_with(|| format!("failed to parse {} as TOML", manifest_path.display()))?;
 
     let has_workspace_table = doc.get("workspace").is_some();
     let members = if has_workspace_table {
-        let resolved = resolve_workspace_members(root, &doc)?;
+        let resolved = resolve_members(&doc)?;
         if resolved.is_empty() {
             bail!(
                 "workspace at {} resolved to zero members; check `members` in {}",
-                root.display(),
+                if root.as_os_str().is_empty() {
+                    "the repository root".to_owned()
+                } else {
+                    root.display().to_string()
+                },
                 manifest_path.display()
             );
         }
@@ -126,7 +167,10 @@ pub fn load_workspace(root: &Path) -> Result<Workspace, AppError> {
     })
 }
 
-fn resolve_workspace_members(root: &Path, doc: &DocumentMut) -> Result<Vec<WorkspaceMember>, AppError> {
+fn resolve_workspace_members_with(
+    doc: &DocumentMut,
+    mut expand: impl FnMut(&str, &mut Vec<WorkspaceMember>) -> Result<(), AppError>,
+) -> Result<Vec<WorkspaceMember>, AppError> {
     let members_item = doc
         .get("workspace")
         .and_then(|w| w.get("members"))
@@ -139,7 +183,7 @@ fn resolve_workspace_members(root: &Path, doc: &DocumentMut) -> Result<Vec<Works
     let mut out = Vec::new();
     for entry in array {
         let pattern = entry.as_str().ok_or_else(|| app_err!("`members` entries must be strings"))?;
-        expand_member_pattern(root, pattern, &mut out)?;
+        expand(pattern, &mut out)?;
     }
 
     // De-duplicate by relpath while preserving discovery order.
@@ -148,18 +192,7 @@ fn resolve_workspace_members(root: &Path, doc: &DocumentMut) -> Result<Vec<Works
     Ok(out)
 }
 
-/// Expand one entry from `members = [...]`.
-///
-/// Supports literal directory names and a single trailing `*` glob in the
-/// last path segment (the form Cargo uses in the surveyed repos: `crates/*`).
-/// More elaborate globbing isn't observed in the wild and can be added
-/// later if needed.
-fn expand_member_pattern(root: &Path, pattern: &str, out: &mut Vec<WorkspaceMember>) -> Result<(), AppError> {
-    expand_member_pattern_with(root, pattern, out, Path::is_dir, |parent_path| {
-        member_directory_entries(std::fs::read_dir(parent_path), parent_path)
-    })
-}
-
+#[cfg(test)]
 fn member_directory_entries(entries: std::io::Result<std::fs::ReadDir>, parent_path: &Path) -> Result<Vec<std::path::PathBuf>, AppError> {
     member_paths(
         entries
@@ -169,6 +202,7 @@ fn member_directory_entries(entries: std::io::Result<std::fs::ReadDir>, parent_p
     )
 }
 
+#[cfg(test)]
 fn member_paths(
     entries: impl IntoIterator<Item = std::io::Result<std::path::PathBuf>>,
     parent_path: &Path,
@@ -184,12 +218,25 @@ fn member_paths(
         .collect())
 }
 
+#[cfg(test)]
 fn expand_member_pattern_with(
     root: &Path,
     pattern: &str,
     out: &mut Vec<WorkspaceMember>,
     is_dir: impl FnOnce(&Path) -> bool,
     entries: impl FnOnce(&Path) -> Result<Vec<std::path::PathBuf>, AppError>,
+) -> Result<(), AppError> {
+    expand_member_pattern_using(root, pattern, out, is_dir, entries, |path| Ok(path.is_file()))
+}
+
+/// Expand a literal member or a single trailing `/*`, using injected I/O.
+fn expand_member_pattern_using(
+    root: &Path,
+    pattern: &str,
+    out: &mut Vec<WorkspaceMember>,
+    is_dir: impl FnOnce(&Path) -> bool,
+    entries: impl FnOnce(&Path) -> Result<Vec<PathBuf>, AppError>,
+    is_manifest: impl FnOnce(&Path) -> Result<bool, AppError>,
 ) -> Result<(), AppError> {
     let pattern = pattern.trim_end_matches('/');
     if pattern.is_empty() {
@@ -220,7 +267,7 @@ fn expand_member_pattern_with(
     }
 
     let manifest = root.join(pattern).join("Cargo.toml");
-    if !manifest.is_file() {
+    if !is_manifest(&manifest)? {
         bail!("workspace member '{pattern}' has no Cargo.toml at {}", manifest.display());
     }
     out.push(WorkspaceMember {
@@ -504,6 +551,7 @@ members = ["cra*tes"]
     fn normalize_relpath_uses_forward_slashes() {
         assert_eq!(normalize_relpath("a/b/c"), "a/b/c");
         assert_eq!(normalize_relpath("a\\b\\c"), if cfg!(windows) { "a/b/c" } else { "a\\b\\c" });
+        assert_eq!(normalize_relpath("./crates/example/Cargo.toml"), "crates/example/Cargo.toml");
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
@@ -605,7 +653,7 @@ members = ["cra*tes"]
         let mut members = Vec::new();
         let error = expand_member_pattern_with(root, "crates/*", &mut members, |_| true, |_| Ok(vec![member])).unwrap_err();
         assert!(error.to_string().contains("non-UTF-8 directory name"), "{error}");
-        assert!(members.is_empty());
+        assert_eq!(members.len(), 0);
     }
 
     #[test]

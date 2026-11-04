@@ -367,7 +367,7 @@ mod tests {
         assert_eq!(remaining[0].import_name, "leaf");
         assert_eq!(remaining[0].crate_root, "C:/fixture/beta/src/lib.rs");
         metadata.resolve = None;
-        assert!(of(&metadata).is_empty());
+        assert_eq!(of(&metadata).len(), 0);
     }
 
     #[test]

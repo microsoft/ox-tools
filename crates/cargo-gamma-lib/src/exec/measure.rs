@@ -2030,8 +2030,8 @@ mod tests {
             .unwrap();
             assert_eq!(result.plan.mutants.len(), 1);
             assert!(result.learning.is_none());
-            assert!(result.stuck.is_empty());
-            assert!(result.dropped.is_empty());
+            assert_eq!(result.stuck.len(), 0);
+            assert_eq!(result.dropped.len(), 0);
             let built = result
                 .built
                 .expect("one viable mutation and its test artifact must retain a measured workspace");
@@ -2094,7 +2094,7 @@ mod tests {
         assert!(result.plan.mutants.is_empty());
         assert!(result.built.is_none());
         assert!(result.learning.is_none());
-        assert!(result.stuck.is_empty());
+        assert_eq!(result.stuck.len(), 0);
         assert!(!events.phases.iter().any(|(verb, _)| verb == "Excluding"));
         assert!(events.phases.iter().any(|(_, detail)| detail == ", 0 mutants"));
     }
@@ -2191,7 +2191,7 @@ mod tests {
         )
         .unwrap();
         let built = result.built.expect("a viable nonlibrary population still has a measured run");
-        assert!(built.session.binaries.is_empty());
+        assert_eq!(built.session.binaries.len(), 0);
         assert!(result.learning.is_none());
     }
 
@@ -2602,7 +2602,7 @@ mod tests {
         )
         .unwrap();
         let built = measured.built.unwrap();
-        assert!(!built.work.required_resources(&built.session.binaries[0], Only::All).is_empty());
+        assert_ne!(built.work.required_resources(&built.session.binaries[0], Only::All).len(), 0);
     }
 
     #[test]
@@ -3117,7 +3117,7 @@ mod tests {
             .expect("an ordinary preflight keeps its request");
         assert_eq!(ordinary.packages, ["a"]);
         assert!(!ordinary.whole_workspace);
-        assert!(ordinary.dropped.is_empty());
+        assert_eq!(ordinary.dropped.len(), 0);
         let retreated = finish_preflight(
             vec!["a".to_owned(), "b".to_owned()],
             vec!["a".to_owned(), "b".to_owned()],
@@ -3598,7 +3598,7 @@ mod tests {
         assert_eq!(without.tests, None);
         assert_eq!(without.peak, None);
         assert_eq!(disabled.phases, vec![(String::new(), "no baseline was measured".to_owned())]);
-        assert!(disabled.progress.is_empty());
+        assert_eq!(disabled.progress.len(), 0);
 
         let mut empty = BaselineEvents::default();
         let measured = take_baseline(

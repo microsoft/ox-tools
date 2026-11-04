@@ -498,14 +498,17 @@ a group's `*-setup` recipe). There is no env-file duplicate.
 **Two pins, not one.** `rust_nightly` is the general-purpose nightly used by udeps, miri,
 careful. `rust_nightly_external_types` is intentionally narrower: it's tied to the rustdoc
 JSON schema version that the currently-selected `cargo-check-external-types` release
-accepts. Bump it alongside `cargo-check-external-types` upgrades, not on the general
-cadence. When the two pins resolve to the same date the setup composite installs only one
+accepts. Bump it alongside `cargo-check-external-types` upgrades or to support the
+workspace's minimum Rust version, not on the general cadence. When the two pins resolve to the same date the setup composite installs only one
 toolchain.
 
 **Bump policy.** The general `rust_nightly` is intended to move on a regular cadence
 (monthly is a reasonable default) so adopters absorb nightly drift in predictable chunks.
-`rust_nightly_external_types` moves only when `cargo-check-external-types` releases a new
-version that targets a newer rustdoc JSON schema. Both bumps are normal `cargo anvil
+`rust_nightly_external_types` moves when `cargo-check-external-types` releases a new
+version that targets a newer rustdoc JSON schema. It can also move within the accepted
+schema version when the workspace's minimum Rust version requires a newer nightly.
+Make sure that the selected nightly uses the accepted schema. Run the external-types
+check before retaining that schema-preserving update. Both bumps are normal `cargo anvil
 update` operations: edit `versions.just`, regenerate, validate, commit. Adopters are free
 to override either pin in their `versions.just` (it's an owned file) — the next run sees
 the dirt and emits a `.anvil-proposed` sibling instead of overwriting.
@@ -726,6 +729,18 @@ baseline — so an environment without the base ref must either provide it, run 
 
 ## 5. Miri execution customization
 
+`anvil-miri-setup` installs the Miri and rust-src components for the catalog's
+pinned nightly, then runs `cargo +<nightly> miri setup` to prepare its sysroot:
+the standard-library artifacts Miri uses to interpret tests.
+Setup is not complete until sysroot preparation succeeds; Cargo's failure exit
+code is preserved. This also applies when setup is reached through a group,
+tier, or the global `anvil-setup` recipe. Preparing a missing sysroot can compile
+standard-library dependencies and require registry access; component installation
+alone does not make Miri ready to run. Repeated setup reuses Miri's cached sysroot.
+Container catalogs remain responsible for sysroot location, credentials,
+permissions, and cleanup. The test runner still invokes setup with
+`--print-sysroot` to locate or prepare the sysroot at execution time.
+
 Miri compiles the selected package scope once, then executes each compiled Miri
 test executable concurrently. `ANVIL_MIRI_JOBS` overrides the default of one
 artifact worker per logical processor and must be a positive integer. The worker
@@ -736,6 +751,13 @@ setting unchanged.
 The standard, Tree Borrows, strict-provenance, and race-coverage recipes share
 this compile-once execution behavior. Each stricter profile applies its
 documented Miri flags and matching `miri_<profile>` cfg before compilation.
+
+Direct execution uses the matching nightly's Miri sysroot, runner, and package
+working directory. Native proc-macro tests also need that toolchain's target
+library directory. The recipes prepend it to `PATH` on Windows,
+`DYLD_FALLBACK_LIBRARY_PATH` on macOS, or `LD_LIBRARY_PATH` on Linux.
+They preserve caller entries and retain the default macOS search directories
+when the caller supplies none.
 
 Packages whose own test targets are inherently unsuitable or unproductive under
 Miri can declare:

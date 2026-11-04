@@ -1290,7 +1290,7 @@ mod tests {
             ),
         ]);
         let (ordered, unresolved) = alias_order(&aliases, &["Alias".into(), "T".into()], &HashMap::default());
-        assert!(ordered.is_empty());
+        assert_eq!(ordered.len(), 0);
         assert_eq!(unresolved, HashSet::from_iter(["Alias".into(), "T".into()]));
         let imports = HashMap::from_iter([("T".into(), Some(vec!["external".into(), "T".into()]))]);
         let (ordered, unresolved) = alias_order(&aliases, &["Alias".into(), "T".into()], &imports);

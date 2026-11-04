@@ -1133,11 +1133,17 @@ mod tests {
             executable_names(OsStr::new("gh.EXE"), Some(OsStr::new(".COM"))),
             vec![OsString::from("gh.EXE")]
         );
-        assert!(executable_names(OsStr::new("gh.CMD"), Some(OsStr::new(".EXE"))).is_empty());
+        assert_eq!(executable_names(OsStr::new("gh.CMD"), Some(OsStr::new(".EXE"))).len(), 0);
         assert_eq!(
             executable_names(OsStr::new("gh"), Some(OsStr::new(";.EXE;COM"))),
             vec![OsString::from("gh.EXE"), OsString::from("gh.COM")]
         );
+        for path_ext in [None, Some(OsStr::new(""))] {
+            assert_eq!(
+                executable_names(OsStr::new("gh"), path_ext),
+                vec![OsString::from("gh.COM"), OsString::from("gh.EXE")]
+            );
+        }
     }
 
     #[cfg(windows)]

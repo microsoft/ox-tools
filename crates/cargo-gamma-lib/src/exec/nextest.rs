@@ -644,8 +644,8 @@ mod tests {
 
     #[test]
     fn nextest_metadata_files_are_distinct_nonempty_json_names() {
-        assert!(!BINARIES_METADATA_FILE.is_empty());
-        assert!(!CARGO_METADATA_FILE.is_empty());
+        assert_ne!(BINARIES_METADATA_FILE.len(), 0);
+        assert_ne!(CARGO_METADATA_FILE.len(), 0);
         assert_ne!(BINARIES_METADATA_FILE, CARGO_METADATA_FILE);
         assert!(
             std::path::Path::new(BINARIES_METADATA_FILE)

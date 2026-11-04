@@ -164,7 +164,7 @@ fn preflight_wrapper_forwards_nondefault_limits_selection_and_both_success_and_t
             if success {
                 let preflight = result.unwrap();
                 assert!(!preflight.whole_workspace);
-                assert!(preflight.dropped.is_empty());
+                assert_eq!(preflight.dropped.len(), 0);
             } else {
                 assert_eq!(result.unwrap_err().message(), "wrapper transport refusal");
             }
@@ -443,7 +443,7 @@ fn fixed_finish_stops_at_the_original_failure_without_retrying_other_scopes() {
         assert_eq!(built.rounds, expected_rounds);
         assert_eq!(built.history.len(), usize::try_from(expected_rounds).unwrap());
         assert!(!built.widened);
-        assert!(built.binaries.is_empty());
+        assert_eq!(built.binaries.len(), 0);
         if !check_fails && !build_fails {
             assert!(built.stuck.is_none());
             assert_eq!(built.artifacts, "built");
@@ -461,7 +461,7 @@ fn fixed_finish_stops_at_the_original_failure_without_retrying_other_scopes() {
             );
             assert_eq!(stuck.ordinals, [plan.mutants[0].ordinal]);
             assert_eq!(plan.mutants[0].outcome, Outcome::NotBuilt);
-            assert!(built.artifacts.is_empty());
+            assert_eq!(built.artifacts.len(), 0);
         }
         assert_eq!(built.withdrawn, 0);
     }
@@ -621,8 +621,8 @@ fn campaign_scale_transcript_decoding_counts_each_artifact_once() {
 
     assert_eq!(evidence.fresh, MESSAGES);
     assert_eq!(evidence.rebuilt, 0);
-    assert!(evidence.rebuilt_targets.is_empty());
-    assert!(evidence.failed_targets.is_empty());
+    assert_eq!(evidence.rebuilt_targets.len(), 0);
+    assert_eq!(evidence.failed_targets.len(), 0);
 }
 
 #[test]
@@ -2449,7 +2449,7 @@ fn each_build_calibrates_its_own_timeout_reference() {
     converger.begin_convergence();
 
     assert_eq!(converger.rounds, 0);
-    assert!(converger.per_round.is_empty());
+    assert_eq!(converger.per_round.len(), 0);
     assert_eq!(converger.first_round, None);
 }
 
@@ -2661,7 +2661,7 @@ fn a_mutant_from_another_source_generation_receives_a_non_internal_outcome() {
         .expect("a generation mismatch is a recorded outcome, not an instrumentation error");
 
     assert!(guards.is_empty());
-    assert!(written.is_empty());
+    assert_eq!(written.len(), 0);
 
     converger.settle(&mut plan);
 
@@ -2774,7 +2774,7 @@ fn sorting_a_staged_plan_reindexes_mutants_before_the_baseline_splice() {
 
     assert_eq!(guards.guards.get(&2).map(|(path, _guard)| path.as_str()), Some("src/a.rs"));
     assert!(!guards.guards.contains_key(&1), "the withdrawn b mutant has no guard");
-    assert!(guards.unavailable.is_empty());
+    assert_eq!(guards.unavailable.len(), 0);
 }
 
 /// Instrumentation reads the synchronized scratch generation rather than falling back to the live
@@ -3635,7 +3635,7 @@ fn dependency_tokenization_ignores_empty_separators_and_flushes_the_final_path()
         super::messages::dependencies("  src/one.rs\t src/my\\ file.rs  C:\\src\\two.rs"),
         ["src/one.rs", "src/my file.rs", "C:\\src\\two.rs"]
     );
-    assert!(super::messages::dependencies(" \t ").is_empty());
+    assert_eq!(super::messages::dependencies(" \t ").len(), 0);
     assert_eq!(super::messages::dependencies("last.rs"), ["last.rs"]);
 }
 
@@ -4331,7 +4331,7 @@ fn a_line_that_is_not_json_does_not_stop_dep_file_discovery() {
 fn messages_with_a_different_reason_are_not_read_as_artifacts() {
     let stdout = r#"{"reason":"build-script-executed","filenames":["/gamma/deps/libmine-aaaa.rmeta"]}"#;
 
-    assert!(dep_files(stdout).is_empty());
+    assert_eq!(dep_files(stdout).len(), 0);
 }
 
 /// A filename with no file stem — such as one that is only an extension — cannot be paired
@@ -4340,7 +4340,7 @@ fn messages_with_a_different_reason_are_not_read_as_artifacts() {
 fn a_filename_with_no_parent_or_stem_is_skipped() {
     let stdout = r#"{"reason":"compiler-artifact","filenames":[".rlib"]}"#;
 
-    assert!(dep_files(stdout).is_empty());
+    assert_eq!(dep_files(stdout).len(), 0);
 }
 
 /// An entirely empty filename has neither a parent directory nor a name to hash from; cargo
@@ -4350,7 +4350,7 @@ fn a_filename_with_no_parent_or_stem_is_skipped() {
 fn a_completely_empty_filename_is_skipped() {
     let stdout = r#"{"reason":"compiler-artifact","filenames":[""]}"#;
 
-    assert!(dep_files(stdout).is_empty());
+    assert_eq!(dep_files(stdout).len(), 0);
 }
 
 /// A directory that vanished between the build finishing and this scan running must not abort
@@ -4359,7 +4359,7 @@ fn a_completely_empty_filename_is_skipped() {
 fn a_dep_info_directory_that_does_not_exist_is_skipped() {
     let stdout = r#"{"reason":"compiler-artifact","filenames":["/gamma/definitely/not/a/directory/libmine-aaaa.rmeta"]}"#;
 
-    assert!(dep_files(stdout).is_empty());
+    assert_eq!(dep_files(stdout).len(), 0);
 }
 
 /// A filesystem is not obliged to hand back valid UTF-8 names, even though cargo's own output
@@ -4474,7 +4474,7 @@ fn a_second_round_rewrites_only_the_files_it_withdrew_from() {
         .expect("the first round splices");
 
     assert_eq!(first.guards.len(), 2, "both mutants were guarded");
-    assert!(first.unavailable.is_empty());
+    assert_eq!(first.unavailable.len(), 0);
     assert_eq!(
         HashSet::from_iter(first.written),
         HashSet::from_iter([Utf8PathBuf::from("src/a.rs"), Utf8PathBuf::from("src/b.rs")])
@@ -4505,7 +4505,7 @@ fn a_second_round_rewrites_only_the_files_it_withdrew_from() {
     // is still in the tree and a diagnostic can still land in it.
     assert!(second.guards.contains_key(&2));
     assert!(!second.guards.contains_key(&1));
-    assert!(second.unavailable.is_empty());
+    assert_eq!(second.unavailable.len(), 0);
     assert_eq!(second.written, [Utf8PathBuf::from("src/a.rs")]);
 }
 

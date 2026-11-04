@@ -1076,7 +1076,7 @@ mod tests {
 
     #[test]
     fn low_yield_honours_both_inclusive_thresholds_and_zero_execution() {
-        assert!(low_yield(&[], Duration::ZERO).is_empty());
+        assert_eq!(low_yield(&[], Duration::ZERO).len(), 0);
         let mutants = vec![
             mutant("a.rs", "literal.bump", Outcome::Killed, 60_000),
             mutant("a.rs", "other.bump", Outcome::Survived, 1_140_000),
@@ -1084,7 +1084,7 @@ mod tests {
         let findings = low_yield(&mutants, Duration::from_mins(20));
         assert_eq!(findings.len(), 1);
         assert!(findings[0].headline.contains("literal"));
-        assert!(low_yield(&mutants, Duration::from_secs(1201)).is_empty());
+        assert_eq!(low_yield(&mutants, Duration::from_secs(1201)).len(), 0);
     }
 
     #[test]

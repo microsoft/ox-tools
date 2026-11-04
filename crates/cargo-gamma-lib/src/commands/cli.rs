@@ -1308,7 +1308,7 @@ mod tests {
             ..SelectArgs::default()
         };
 
-        assert!(args.selection().unwrap().errors().is_empty());
+        assert_eq!(args.selection().unwrap().errors().len(), 0);
     }
 
     #[test]
@@ -1338,7 +1338,7 @@ mod tests {
 
     #[test]
     fn no_feature_arguments_render_as_nothing() {
-        assert!(FeatureArgs::default().to_cargo_args().is_empty());
+        assert_eq!(FeatureArgs::default().to_cargo_args().len(), 0);
     }
 
     #[test]

@@ -833,7 +833,7 @@ mod tests {
             ..FeatureArgs::default()
         };
 
-        assert!(features_of(&[("Cargo.toml", &manifest)], &args, "alpha").is_empty());
+        assert_eq!(features_of(&[("Cargo.toml", &manifest)], &args, "alpha").len(), 0);
     }
 
     #[test]
@@ -881,7 +881,7 @@ mod tests {
             ..FeatureArgs::default()
         };
 
-        assert!(features_of(&[("Cargo.toml", &manifest)], &args, "alpha").is_empty());
+        assert_eq!(features_of(&[("Cargo.toml", &manifest)], &args, "alpha").len(), 0);
     }
 
     #[test]
@@ -892,7 +892,7 @@ mod tests {
             ..FeatureArgs::default()
         };
 
-        assert!(features_of(&[("Cargo.toml", &manifest)], &args, "alpha").is_empty());
+        assert_eq!(features_of(&[("Cargo.toml", &manifest)], &args, "alpha").len(), 0);
     }
 
     #[test]
@@ -925,7 +925,7 @@ mod tests {
         let found = features_of(&borrowed(&files), &FeatureArgs::default(), "alpha");
 
         assert_eq!(found, vec!["default".to_owned()], "`dep:` activates a crate, not a feature");
-        assert!(features_of(&borrowed(&files), &FeatureArgs::default(), "beta").is_empty());
+        assert_eq!(features_of(&borrowed(&files), &FeatureArgs::default(), "beta").len(), 0);
     }
 
     /// A two-member workspace, where `alpha` relates to `beta` however the caller says.
@@ -1002,7 +1002,7 @@ mod tests {
         metadata.packages[0].dependencies[0].features.clear();
         metadata.packages[1].features.clear();
         metadata.packages[1].features.insert("y".into(), Vec::new());
-        assert!(enabled(&metadata, &FeatureArgs::default())["beta"].is_empty());
+        assert_eq!(enabled(&metadata, &FeatureArgs::default())["beta"].len(), 0);
         metadata.packages[0].features.get_mut("default").unwrap().push("activate".into());
         assert_eq!(enabled(&metadata, &FeatureArgs::default())["beta"], ["y"]);
     }
@@ -1156,7 +1156,7 @@ mod tests {
         let found = enabled(&metadata, &FeatureArgs::default());
 
         assert!(found.contains_key("alpha"), "a missing package would be left unconditional");
-        assert!(found["alpha"].is_empty());
+        assert_eq!(found["alpha"].len(), 0);
     }
 
     /// Every spelling cargo itself accepts, because the vector is passed to cargo verbatim: a

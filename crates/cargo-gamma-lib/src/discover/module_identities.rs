@@ -233,8 +233,8 @@ mod tests {
             module: Some(vec!["child".to_owned()]),
         };
         let roots = core::slice::from_ref(&root);
-        assert!(layouts(roots, &[(root.clone(), vec![edge(child)])]).is_empty());
-        assert!(layouts(roots, &[(root.clone(), vec![]), (root.clone(), vec![])]).is_empty());
-        assert!(layouts(roots, &[(root.clone(), vec![edge(root.clone())])]).is_empty());
+        assert_eq!(layouts(roots, &[(root.clone(), vec![edge(child)])]).len(), 0);
+        assert_eq!(layouts(roots, &[(root.clone(), vec![]), (root.clone(), vec![])]).len(), 0);
+        assert_eq!(layouts(roots, &[(root.clone(), vec![edge(root.clone())])]).len(), 0);
     }
 }

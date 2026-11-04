@@ -93,7 +93,10 @@ mod tests {
                 (log::Level::Error, "outer".to_owned(), "after".to_owned()),
             ]
         );
-        assert!(capture_logs(|| {}).is_empty());
+        assert_eq!(
+            capture_logs(|| {}),
+            [] as [(log::Level, std::string::String, std::string::String); 0]
+        );
     }
 
     #[test]

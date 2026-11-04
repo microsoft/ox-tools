@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::{env, io};
 
-use ohno::{AppError, app_err, bail};
+use ohno::{AppError, IntoAppError as _, app_err, bail};
 use tracing::info;
 
 use crate::anvil::artifacts;
@@ -74,31 +74,80 @@ fn run_with_current_dir(catalog: &Catalog, cli: &Cli, current_dir: io::Result<Pa
 /// Propagates errors from any subsystem (workspace discovery, manifest
 /// I/O, emitter, plan application).
 pub fn run_update(catalog: &Catalog, args: &Cli, start_dir: &Path) -> Result<RunOutcome, AppError> {
+    let root = workspace::find_workspace_root(start_dir)?;
+    let mut io = crate::io::RepositoryIo { root: &root };
+    update_with_backend_resolution(catalog, args, &mut io, || {
+        let backends = backend::resolve(&args.backends, args.no_backends, &root)?;
+        info!(
+            repo_root = %root.display(),
+            backends = ?backends.iter().map(|b| b.name()).collect::<Vec<_>>(),
+            dry_run = args.dry_run,
+            "anvil"
+        );
+        Ok(backends)
+    })
+    .into_app_err_with(|| format!("in repository {}", root.display()))
+}
+
+pub(crate) fn update_with_io(
+    catalog: &Catalog,
+    options: &crate::UpdateOptions,
+    io: &mut dyn crate::UpdateIo,
+) -> Result<RunOutcome, AppError> {
+    let mut backends = options.backends.clone();
+    backends.sort_unstable();
+    backends.dedup();
+    let args = Cli {
+        dry_run: options.dry_run,
+        force: options.force,
+        ..Cli::default()
+    };
+    update_with_backend_resolution(catalog, &args, io, || Ok(backends))
+}
+
+fn update_with_backend_resolution(
+    catalog: &Catalog,
+    args: &Cli,
+    io: &mut dyn crate::UpdateIo,
+    backends: impl FnOnce() -> Result<Vec<Backend>, AppError>,
+) -> Result<RunOutcome, AppError> {
+    let shared = std::cell::RefCell::new(io);
+    let root = PathBuf::new();
     run_update_with(
         catalog,
         args,
-        start_dir,
-        |start| {
-            let root = workspace::find_workspace_root(start)?;
-            let manifest = Manifest::load(&root)?;
-            Ok((root, manifest))
+        &root,
+        |_| {
+            let manifest = shared.borrow().read_file(Path::new(".anvil.lock"))?.map_or_else(
+                || Ok(Manifest::default()),
+                |text| Manifest::parse(&text).into_app_err("failed to parse manifest at .anvil.lock"),
+            )?;
+            Ok((root.clone(), manifest))
         },
         |root, manifest| {
-            let ws = workspace::load_workspace(root)?;
-            let backends = backend::resolve(&args.backends, args.no_backends, root)?;
-            info!(
-                repo_root = %root.display(),
-                backends = ?backends.iter().map(|b| b.name()).collect::<Vec<_>>(),
-                dry_run = args.dry_run,
-                "anvil"
-            );
-            let plan = build_plan(root, &ws, manifest, &backends, catalog)?;
+            let io = shared.borrow();
+            let io = &**io;
+            let workspace = workspace::load_workspace_with_io(io)?;
+            let backends = backends()?;
+            let mut hosts = HostTextCache {
+                io: Some(io),
+                ..HostTextCache::default()
+            };
+            let plan = build_plan_with_hosts(root, &workspace, manifest, &backends, catalog, &mut hosts)?;
             Ok((plan, backends))
         },
-        read_file_if_present,
+        |path| shared.borrow().read_file(path),
         |root, plan, next| {
-            plan.apply_files(root)?;
-            next.save(root)
+            plan.apply_files_with(
+                root,
+                (
+                    |root, path| crate::io::resolve_with_io(&**shared.borrow(), root, path),
+                    |root, path| Ok(root.join(path)),
+                    |path, text| shared.borrow_mut().write_file(path, text),
+                    |path| shared.borrow_mut().remove_file(path),
+                ),
+            )?;
+            shared.borrow_mut().write_file(Path::new(".anvil.lock"), &next.to_toml())
         },
     )
 }
@@ -208,7 +257,7 @@ fn live_region_keys(
             continue;
         };
         for host in region_host_paths(workspace, spec) {
-            let host = (hosts.resolve)(repo_root, host)?;
+            let host = hosts.resolve_path(repo_root, host)?;
             if !identities.insert((
                 // #[gamma::skip(string.lower_to_upper, reason = "ASCII lower- and uppercase induce identical equality classes for this private case-insensitive deduplication key.", tag = "equivalent")]
                 host.to_ascii_lowercase(),
@@ -222,6 +271,7 @@ fn live_region_keys(
     Ok(keys)
 }
 
+#[cfg(test)]
 fn build_plan(
     repo_root: &Path,
     workspace: &Workspace,
@@ -259,7 +309,7 @@ fn build_plan_with_hosts(
             .map(|(host, _)| host)
             .chain(manifest.regions.keys().map(|key| &key.host))
         {
-            let other = (hosts.resolve)(repo_root, other)?;
+            let other = hosts.resolve_path(repo_root, other)?;
             if host != &other && host.eq_ignore_ascii_case(&other) {
                 bail!("ambiguous casing for {} array host: {host} and {other}", array_host.format.name());
             }
@@ -272,7 +322,7 @@ fn build_plan_with_hosts(
     // by `push_region_at` when it plans the region, with that region's declared
     // comment syntax.
     for (key, recorded_checksum) in &manifest.regions {
-        let host = (hosts.resolve)(repo_root, &key.host)?;
+        let host = hosts.resolve_path(repo_root, &key.host)?;
         if !composed.live.contains(&(host.clone(), key.id.clone())) {
             // An unpaired result is left for the path that plans the region:
             // it refuses there, where the region's own id is being handled.
@@ -323,7 +373,7 @@ fn build_plan_with_hosts(
         .cloned()
         .collect();
     for key in manifest.regions.keys() {
-        let resolved = (hosts.resolve)(repo_root, &key.host)?;
+        let resolved = hosts.resolve_path(repo_root, &key.host)?;
         if json_scanner_hosts.contains(&resolved) && !plan.region_tracking_removed(&key.host, &key.id) {
             retained_scanner_hosts.insert(key.host.clone());
         }
@@ -353,17 +403,17 @@ fn plan_dependabot_exclusions(
     for item in plan.items() {
         match (&item.target, item.decision) {
             (Target::File { path }, Decision::Remove) => {
-                retired_files.insert((hosts.resolve)(repo_root, path)?);
+                retired_files.insert(hosts.resolve_path(repo_root, path)?);
             }
             (Target::Region { host, .. }, Decision::LeaveAlone) => {
-                refused_region_hosts.insert((hosts.resolve)(repo_root, host)?);
+                refused_region_hosts.insert(hosts.resolve_path(repo_root, host)?);
             }
             _ => {}
         }
     }
     let mut configurations = Vec::new();
     for path in [".github/dependabot.yml", ".github/dependabot.yaml"] {
-        let path = (hosts.resolve)(repo_root, path)?;
+        let path = hosts.resolve_path(repo_root, path)?;
         if retired_files.contains(&path) {
             continue;
         }
@@ -386,7 +436,7 @@ fn plan_dependabot_exclusions(
     }
     let resolved_paths = paths
         .iter()
-        .map(|path| (hosts.resolve)(repo_root, path))
+        .map(|path| hosts.resolve_path(repo_root, path))
         .collect::<Result<Vec<_>, _>>()?;
     let paths: Vec<_> = resolved_paths.iter().map(String::as_str).collect();
     match crate::dependabot::update(&text, &paths) {
@@ -421,7 +471,7 @@ fn validate_projected_json_placements(
 ) -> Result<(), AppError> {
     let projected = plan.projected_manifest(manifest);
     for (key, path) in &projected.json_array_paths {
-        let host = (hosts.resolve)(repo_root, &key.host)?;
+        let host = hosts.resolve_path(repo_root, &key.host)?;
         let text = hosts.get_or_read(repo_root, &host)?.unwrap_or_default();
         crate::emit::json_array_region::validate_recorded_placement(&text, &key.id, path)
             .map_err(|refusal| json_array_plan_refusal(&host, &refusal))?;
@@ -444,7 +494,7 @@ fn repair_structural_json_markers(
         {
             for host in region_host_paths(workspace, spec) {
                 regions
-                    .entry((hosts.resolve)(repo_root, host)?)
+                    .entry(hosts.resolve_path(repo_root, host)?)
                     .or_default()
                     .insert(spec.id.as_str().to_owned());
             }
@@ -452,7 +502,7 @@ fn repair_structural_json_markers(
     }
     for key in manifest.json_array_paths.keys() {
         regions
-            .entry((hosts.resolve)(repo_root, &key.host)?)
+            .entry(hosts.resolve_path(repo_root, &key.host)?)
             .or_default()
             .insert(key.id.clone());
     }
@@ -489,7 +539,7 @@ fn validate_array_plan(
         let Target::Region { host, id } = &item.target else {
             continue;
         };
-        let host = (hosts.resolve)(repo_root, host)?;
+        let host = hosts.resolve_path(repo_root, host)?;
         let Some(array_host) = array_hosts.get(&host) else {
             continue;
         };
@@ -581,8 +631,10 @@ fn plan_catalog_artifact(
     match artifact {
         Artifact::OwnedFile(spec) => {
             if spec.gate.is_none_or(|gate| backends.contains(&gate)) {
-                let path = (hosts.resolve)(repo_root, spec.path)?;
-                plan.push(plan_owned_file(repo_root, manifest, &path, &spec.body, hosts.read)?);
+                let path = hosts.resolve_path(repo_root, spec.path)?;
+                plan.push(plan_owned_file(repo_root, manifest, &path, &spec.body, |path| {
+                    hosts.read_file(path)
+                })?);
             }
         }
         Artifact::Region(spec) => {
@@ -592,7 +644,7 @@ fn plan_catalog_artifact(
                     path: path.to_vec(),
                 };
                 for host in region_host_paths(workspace, spec) {
-                    let host = (hosts.resolve)(repo_root, host)?;
+                    let host = hosts.resolve_path(repo_root, host)?;
                     let current = hosts.get_or_read(repo_root, &host)?;
                     let item = crate::emit::json_array_region::plan_json_array_region(manifest, current.as_deref(), &host, &array)
                         .map_err(|refusal| json_array_plan_refusal(&host, &refusal))?;
@@ -607,7 +659,7 @@ fn plan_catalog_artifact(
                     path: path.to_vec(),
                 };
                 for host in region_host_paths(workspace, spec) {
-                    let host = (hosts.resolve)(repo_root, host)?;
+                    let host = hosts.resolve_path(repo_root, host)?;
                     // #[gamma::skip(try.propagate_to_unwrap, reason = "array_host_inputs already cached this exact host; this lookup cannot perform new IO.", tag = "equivalent")]
                     let current = hosts.get_or_read(repo_root, &host)?;
                     let item = crate::emit::toml_array_region::plan_toml_array_region(manifest, current.as_deref(), &host, &array)
@@ -675,7 +727,7 @@ fn array_host_inputs(
             {
                 if let Some(path) = path {
                     for host in region_host_paths(workspace, spec) {
-                        let host = (hosts.resolve)(repo_root, host)?;
+                        let host = hosts.resolve_path(repo_root, host)?;
                         let entry = paths.entry(host).or_insert_with(|| ArrayHost {
                             format,
                             paths: Vec::new(),
@@ -704,7 +756,7 @@ fn array_host_inputs(
     let live = live_region_keys(repo_root, workspace, catalog, hosts)?;
     let mut retiring = BTreeSet::new();
     for key in manifest.regions.keys() {
-        let host = (hosts.resolve)(repo_root, &key.host)?;
+        let host = hosts.resolve_path(repo_root, &key.host)?;
         if !live.contains(&(host.clone(), key.id.clone())) {
             retiring.insert((host, key.id.clone()));
         }
@@ -727,7 +779,7 @@ fn array_host_inputs(
                 }
                 if format == ArrayFormat::Json {
                     for (key, path) in &manifest.json_array_paths {
-                        let recorded_host = (hosts.resolve)(repo_root, &key.host)?;
+                        let recorded_host = hosts.resolve_path(repo_root, &key.host)?;
                         if recorded_host.eq_ignore_ascii_case(&host) {
                             crate::emit::json_array_region::validate_recorded_placement(&text, &key.id, path)
                                 .map_err(|refusal| json_array_plan_refusal(&host, &refusal))?;
@@ -776,7 +828,7 @@ fn add_historical_array_inputs(
             None
         };
         if let Some(format) = format {
-            let host = (hosts.resolve)(repo_root, &key.host)?;
+            let host = hosts.resolve_path(repo_root, &key.host)?;
             candidates.insert(host.clone(), format);
             if let Some(path) = manifest.json_array_paths.get(key) {
                 paths
@@ -798,7 +850,7 @@ fn recorded_json_scanner_hosts(repo_root: &Path, manifest: &Manifest, hosts: &Ho
     let mut scanner_hosts = BTreeSet::new();
     for host in &manifest.json_scanner_hosts {
         if crate::emit::json_array_region::is_json_host(host) {
-            scanner_hosts.insert((hosts.resolve)(repo_root, host)?);
+            scanner_hosts.insert(hosts.resolve_path(repo_root, host)?);
         }
     }
     Ok(scanner_hosts)
@@ -828,7 +880,7 @@ fn validate_array_host_overlaps(
     for artifact in catalog.artifacts() {
         if let Artifact::Region(spec) = artifact {
             for host in region_host_paths(workspace, spec) {
-                let host = (hosts.resolve)(repo_root, host)?;
+                let host = hosts.resolve_path(repo_root, host)?;
                 if let Some(array_host) = paths.get(&host)
                     && spec.syntax
                         != match array_host.format {
@@ -845,7 +897,7 @@ fn validate_array_host_overlaps(
             }
         }
         if let Artifact::OwnedFile(spec) = artifact {
-            let path = (hosts.resolve)(repo_root, spec.path)?;
+            let path = hosts.resolve_path(repo_root, spec.path)?;
             if let Some((_, array_host)) = paths.iter().find(|(host, _)| host.eq_ignore_ascii_case(&path)) {
                 bail!(
                     "a {} array host cannot also be an owned file: {}",
@@ -856,7 +908,7 @@ fn validate_array_host_overlaps(
         }
     }
     for file in manifest.files.keys() {
-        let path = (hosts.resolve)(repo_root, file)?;
+        let path = hosts.resolve_path(repo_root, file)?;
         if let Some((_, array_host)) = paths.iter().find(|(host, _)| host.eq_ignore_ascii_case(&path)) {
             bail!(
                 "retire whole-file ownership separately before managing {} array entries: {file}",
@@ -880,25 +932,41 @@ fn validate_array_host_overlaps(
 /// cache from disk; every subsequent region splices against — and, when it
 /// writes, updates — the accumulated in-memory text, so the composed
 /// result preserves every region.
-struct HostTextCache {
+struct HostTextCache<'a> {
     texts: HashMap<String, Option<String>>,
     newlines: HashMap<String, &'static str>,
     resolve: fn(&Path, &str) -> Result<String, AppError>,
     read: fn(&Path) -> Result<Option<String>, AppError>,
+    io: Option<&'a dyn crate::UpdateIo>,
 }
 
-impl Default for HostTextCache {
+impl Default for HostTextCache<'_> {
     fn default() -> Self {
         Self {
             texts: HashMap::new(),
             newlines: HashMap::new(),
             resolve: resolve_existing_case_insensitive,
             read: read_file_if_present,
+            io: None,
         }
     }
 }
 
-impl HostTextCache {
+impl HostTextCache<'_> {
+    fn resolve_path(&self, root: &Path, path: &str) -> Result<String, AppError> {
+        match self.io {
+            Some(io) => crate::io::resolve_with_io(io, root, path),
+            None => (self.resolve)(root, path),
+        }
+    }
+
+    fn read_file(&self, path: &Path) -> Result<Option<String>, AppError> {
+        match self.io {
+            Some(io) => io.read_file(path),
+            None => (self.read)(path),
+        }
+    }
+
     /// The current in-memory text for `host`, reading from disk on first
     /// access. `None` means the host file does not (yet) exist on disk and
     /// no in-memory write has created it.
@@ -906,7 +974,7 @@ impl HostTextCache {
         if let Some(text) = self.texts.get(host) {
             return Ok(text.clone());
         }
-        let text = (self.read)(&repo_root.join(host))?;
+        let text = self.read_file(&repo_root.join(host))?;
         self.newlines.insert(
             host.to_owned(),
             crate::region::text_newline(text.as_deref().unwrap_or(
@@ -982,7 +1050,7 @@ fn push_region(
     spec: &RegionSpec,
 ) -> Result<(), AppError> {
     for host in region_host_paths(workspace, spec) {
-        let resolved = (hosts.resolve)(repo_root, host)?;
+        let resolved = hosts.resolve_path(repo_root, host)?;
         let scanner = if json_scanner_hosts.contains(&resolved) {
             HostScanner::Json
         } else {
@@ -1040,7 +1108,7 @@ fn push_region_at_with_scanner(
     spec: &RegionSpec,
     scanner: HostScanner,
 ) -> Result<(), AppError> {
-    let host = (hosts.resolve)(repo_root, host)?;
+    let host = hosts.resolve_path(repo_root, host)?;
     let current = hosts.get_or_read(repo_root, &host)?;
     if let Some(text) = current.as_deref()
         && let Err(error) = scanner.validate_marker_scan(text)
@@ -1926,7 +1994,7 @@ fn plan_removals_with_array_hosts(
         // the two are compared through the same resolution. Without it a
         // case-only rename makes anvil's own file look retired and the removal
         // below deletes the artifact this very pass just wrote.
-        let resolved = (hosts.resolve)(repo_root, path)?;
+        let resolved = hosts.resolve_path(repo_root, path)?;
         if live_files.contains(&resolved) {
             continue;
         }
@@ -1953,7 +2021,7 @@ fn plan_removals_with_array_hosts(
         // Read under the resolved casing: a lock entry recorded before a
         // case-only rename would otherwise find nothing on disk, classify a
         // file that is still present as `AlreadyGone`, and delete it.
-        let disk = (hosts.read)(&repo_root.join(&resolved))?;
+        let disk = hosts.read_file(&repo_root.join(&resolved))?;
         let disk_checksum = disk.as_deref().map(checksum_str);
         match decide_removal(last, disk_checksum.as_deref()) {
             // A file still matching its last render is safe to delete; an
@@ -1988,7 +2056,7 @@ fn plan_removals_with_array_hosts(
         // No `resolved_host != key.host` guard: the `continue` above has
         // already established that the recorded key is not live, so when the
         // resolution changes nothing this lookup repeats it and fails.
-        let resolved_host = (hosts.resolve)(repo_root, &key.host)?;
+        let resolved_host = hosts.resolve_path(repo_root, &key.host)?;
         // A refused host was not opened, and "nothing was written to it" has to
         // be true of the lock as well as the file -- the same invariant the
         // owned-file loop above keeps. A lock entry naming a region the catalog
@@ -2469,7 +2537,7 @@ mod tests {
         };
         RESOLUTION.set((usize::MAX, 0));
         let plan = run().unwrap();
-        assert!(plan.refusals().is_empty());
+        assert_eq!(plan.refusals().len(), 0);
         let calls = RESOLUTION.get().1;
         assert!(
             calls > 0,
@@ -2768,7 +2836,7 @@ mod tests {
             &mut hosts,
         )
         .unwrap();
-        assert!(plan.refusals().is_empty());
+        assert_eq!(plan.refusals().len(), 0);
         assert_eq!(plan.items().len(), 1);
         assert_eq!(plan.items()[0].decision, Decision::OrphanedKept);
         assert_eq!(plan.items()[0].spliced_host, None);
@@ -3016,7 +3084,7 @@ mod tests {
                 Some(text),
                 HostScanner::for_path(host)
             ));
-            assert!(plan.refusals().is_empty());
+            assert_eq!(plan.refusals().len(), 0);
             assert!(plan.items().is_empty());
         }
     }
@@ -3170,14 +3238,14 @@ mod tests {
         assert!(scanner_hosts.is_empty());
     }
 
-    fn memory_hosts() -> HostTextCache {
+    fn memory_hosts() -> HostTextCache<'static> {
         HostTextCache {
             resolve: |root, path| crate::io::resolve_case_insensitive_with(root, path, |_, _| Ok(None)),
             ..HostTextCache::default()
         }
     }
 
-    fn dependabot_plan(configurations: [Option<&str>; 2], backends: &[Backend]) -> (Plan, HostTextCache) {
+    fn dependabot_plan(configurations: [Option<&str>; 2], backends: &[Backend]) -> (Plan, HostTextCache<'static>) {
         let catalog = Catalog::builder(test_cli())
             .with_artifact(artifacts::github::setup_action())
             .with_artifact(artifacts::github::pr_impl_workflow())
@@ -3240,7 +3308,7 @@ mod tests {
             plan_dependabot_exclusions(Path::new("memory"), &[Backend::GitHub], &catalog, &mut plan, &mut hosts).unwrap();
             assert_eq!(plan.items().len(), 1);
             assert_eq!(plan.items()[0].decision, Decision::Remove);
-            assert!(plan.refusals().is_empty());
+            assert_eq!(plan.refusals().len(), 0);
         }
     }
 
@@ -3313,7 +3381,7 @@ mod tests {
             let error = plan_dependabot_exclusions(root, &[Backend::GitHub], &catalog, &mut plan, &mut hosts).unwrap_err();
             assert_eq!(error.message(), format!("cannot read {}", root.join(path).display()));
             assert!(plan.items().is_empty());
-            assert!(plan.refusals().is_empty());
+            assert_eq!(plan.refusals().len(), 0);
             assert!(!hosts.texts.contains_key(path));
         }
     }
@@ -3500,7 +3568,7 @@ mod tests {
             );
             assert_eq!(plan.items()[1].decision, Decision::Write);
             assert_eq!(plan.items()[1].rendered.as_deref(), Some(expected.as_str()));
-            assert!(plan.refusals().is_empty());
+            assert_eq!(plan.refusals().len(), 0);
         }
     }
 
@@ -3587,7 +3655,7 @@ mod tests {
         }
     }
 
-    fn case_renamed_json_hosts() -> HostTextCache {
+    fn case_renamed_json_hosts() -> HostTextCache<'static> {
         HostTextCache {
             resolve: |root, path| {
                 crate::io::resolve_case_insensitive_with(root, path, |_, name| {
@@ -3909,7 +3977,7 @@ mod tests {
         }
     }
 
-    fn managed_region_plan(text: Option<&str>, manifest: &Manifest, spec: &RegionSpec) -> (Plan, HostTextCache) {
+    fn managed_region_plan(text: Option<&str>, manifest: &Manifest, spec: &RegionSpec) -> (Plan, HostTextCache<'static>) {
         let HostSelector::Path(host) = &spec.host else {
             panic!("the managed-region test helper requires HostSelector::Path");
         };
@@ -4627,7 +4695,7 @@ mod tests {
             .unwrap();
 
             if previous.json_scanner_hosts.is_empty() {
-                assert!(plan.refusals().is_empty());
+                assert_eq!(plan.refusals().len(), 0);
             } else {
                 assert_eq!(plan.refusals().len(), 1);
                 assert!(plan.refusals()[0].contains("must use slash-slash comment markers"));
@@ -4840,7 +4908,7 @@ mod tests {
         assert!(error.contains("No plan was produced; no files were changed"), "{error}");
     }
 
-    fn redundant_json_marker_plan(catalog: &Catalog) -> (Plan, HostTextCache) {
+    fn redundant_json_marker_plan(catalog: &Catalog) -> (Plan, HostTextCache<'static>) {
         let source = concat!(
             "{\n",
             "  \"entries\": [\n",
@@ -4895,7 +4963,7 @@ mod tests {
         let (plan, hosts) = redundant_json_marker_plan(&catalog);
         let output = hosts.cached("config.json").unwrap();
 
-        assert!(plan.refusals().is_empty());
+        assert_eq!(plan.refusals().len(), 0);
         assert_eq!(output.matches("// >>> anvil-managed: entries").count(), 1);
     }
 
@@ -4906,7 +4974,7 @@ mod tests {
         let (plan, hosts) = redundant_json_marker_plan(&empty);
         let output = hosts.cached("config.json").unwrap();
 
-        assert!(plan.refusals().is_empty());
+        assert_eq!(plan.refusals().len(), 0);
         assert!(!output.contains("anvil-managed: entries"));
     }
 
@@ -4968,7 +5036,7 @@ mod tests {
         .unwrap();
         let output = hosts.cached("config.json").unwrap();
 
-        assert!(plan.refusals().is_empty());
+        assert_eq!(plan.refusals().len(), 0);
         assert_eq!(output.matches("// >>> anvil-managed: a").count(), 1);
         assert_eq!(output.matches("// >>> anvil-managed: b").count(), 1);
     }
@@ -5979,7 +6047,7 @@ mod tests {
             "Refused TOML array host config.toml: the managed region contains edits that do not match its last render or the current template. Restore its generated content, or empty its body to regenerate it; keep user settings outside the sentinels. No plan was produced; no files were changed. The body between the sentinels is anvil's to write, and it will not overwrite changes it did not make. Settings that must survive belong outside the sentinels, where anvil never touches them."
         );
         let plan = array_plan(&edited, &manifest, &empty).unwrap();
-        assert!(!plan.refusals().is_empty());
+        assert_ne!(plan.refusals().len(), 0);
         assert_eq!(plan.projected_manifest(&manifest), manifest);
         assert!(plan.items().iter().all(|item| item.spliced_host.is_none()));
     }
@@ -6031,7 +6099,7 @@ mod tests {
                 for array_first in [false, true] {
                     let catalog = array_catalog(Some(neighbor.clone()), array_first);
                     let plan = array_plan(&source, &Manifest::default(), &catalog).unwrap();
-                    assert!(plan.refusals().is_empty());
+                    assert_eq!(plan.refusals().len(), 0);
                     let final_host = plan
                         .items()
                         .iter()
@@ -6095,7 +6163,7 @@ mod tests {
         for array_first in [false, true] {
             let catalog = array_catalog(Some(neighbor.clone()), array_first);
             let plan = array_plan(source, &Manifest::default(), &catalog).unwrap();
-            assert!(plan.refusals().is_empty());
+            assert_eq!(plan.refusals().len(), 0);
             assert_eq!(
                 plan.items().iter().filter_map(|item| item.spliced_host.as_deref()).next_back(),
                 Some(expected)
@@ -7010,7 +7078,7 @@ mod tests {
         };
         let outcome = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
         assert!(outcome.applied);
-        assert!(outcome.backends.is_empty());
+        assert_eq!(outcome.backends.len(), 0);
         assert!(outcome.plan.has_changes());
 
         for expected in [
@@ -7226,7 +7294,7 @@ mod tests {
                 let path = tmp.path().join("host.txt");
                 write(&path, &input);
                 let outcome = run_update(&catalog, &local_only(), tmp.path()).unwrap();
-                assert!(outcome.plan.refusals().is_empty());
+                assert_eq!(outcome.plan.refusals().len(), 0);
                 let output = fs::read_to_string(&path).unwrap();
                 let region = find_region(&output, "repair", syntax).unwrap().unwrap();
                 assert_eq!(region.body_str(), "generated\r\n");
@@ -7254,7 +7322,7 @@ mod tests {
             &spec,
         );
 
-        assert!(plan.refusals().is_empty());
+        assert_eq!(plan.refusals().len(), 0);
         assert_eq!(
             plan.items()[0].spliced_host.as_deref(),
             Some(concat!(
@@ -7462,7 +7530,7 @@ mod tests {
         manifest.set_region("config.xml", "settings", checksum_str(""));
         let (plan, _) = managed_region_plan(Some(host), &manifest, &spec);
 
-        assert!(plan.refusals().is_empty());
+        assert_eq!(plan.refusals().len(), 0);
         assert_eq!(plan.items()[0].decision, Decision::InSync);
     }
 
@@ -7670,7 +7738,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(plan.refusals().is_empty());
+        assert_eq!(plan.refusals().len(), 0);
         assert_eq!(plan.items()[0].decision, Decision::Remove);
         assert_eq!(
             plan.items()[0].spliced_host.as_deref(),
@@ -7928,7 +7996,7 @@ mod tests {
                 upsert_region(&current, "old", recovery, CommentSyntax::Hash).unwrap()
             };
             write(&path, &reconciled);
-            assert!(run_update(&next, &local_only(), tmp.path()).unwrap().plan.refusals().is_empty());
+            assert_eq!(run_update(&next, &local_only(), tmp.path()).unwrap().plan.refusals().len(), 0);
             assert!(!Manifest::load(tmp.path()).unwrap().regions.keys().any(|key| key.id == "old"));
             assert!(!run_update(&next, &local_only(), tmp.path()).unwrap().plan.has_changes());
         }
@@ -8949,7 +9017,7 @@ mod tests {
         assert_eq!(Manifest::load(tmp.path()).unwrap().regions[&key], manifest.regions[&key]);
         fs::write(&path, host).unwrap();
         let reconciled = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
-        assert!(reconciled.plan.refusals().is_empty());
+        assert_eq!(reconciled.plan.refusals().len(), 0);
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
