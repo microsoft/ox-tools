@@ -44,10 +44,8 @@ pub struct RunOutcome {
     /// distinguished, and so stale entries can be enumerated).
     pub previous_manifest: Manifest,
     /// Whether the plan was actually applied to disk.
-    #[cfg(any(test, feature = "internals"))]
     pub applied: bool,
     /// The resolved backend set.
-    #[cfg(any(test, feature = "internals"))]
     pub backends: Vec<Backend>,
 }
 
@@ -181,8 +179,6 @@ fn run_update_with(
     enforce_single_tool_guard(catalog, args, &manifest)?;
 
     let (mut plan, backends) = plan_update(&repo_root, &manifest)?;
-    #[cfg(not(any(test, feature = "internals")))]
-    drop(backends);
     let mut next = plan.projected_manifest(&manifest);
     next.tool = Some(catalog.cli().subcommand.clone());
     next.tool_version = Some(catalog.cli().version.clone());
@@ -200,9 +196,7 @@ fn run_update_with(
     Ok(RunOutcome {
         plan,
         previous_manifest: manifest,
-        #[cfg(any(test, feature = "internals"))]
         applied,
-        #[cfg(any(test, feature = "internals"))]
         backends,
     })
 }

@@ -298,7 +298,6 @@ impl Plan {
     }
 
     /// User-visible diagnostics accumulated while planning.
-    #[cfg(any(test, feature = "internals"))]
     #[must_use]
     pub fn notes(&self) -> &[String] {
         &self.notes
@@ -312,7 +311,6 @@ impl Plan {
     }
 
     /// Artifact-management refusals accumulated while planning.
-    #[cfg(any(test, feature = "internals"))]
     #[must_use]
     pub fn refusals(&self) -> &[String] {
         &self.refusals

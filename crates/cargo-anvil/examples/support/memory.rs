@@ -4,7 +4,7 @@
 //! A caller-owned in-memory repository. No host operations are performed.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 use cargo_anvil::{RepositoryEntry, UpdateIo};
 use ohno::{AppError, bail};
@@ -17,11 +17,15 @@ pub struct MemoryRepository {
 
 impl MemoryRepository {
     pub fn insert(&mut self, path: &str, content: &str) {
-        self.files.insert(path.to_owned(), content.to_owned());
+        self.files.insert(Self::key(Path::new(path)), content.to_owned());
     }
 
     fn key(path: &Path) -> String {
-        path.to_string_lossy().replace('\\', "/")
+        path.components()
+            .filter(|component| *component != Component::CurDir)
+            .collect::<PathBuf>()
+            .to_string_lossy()
+            .replace('\\', "/")
     }
 
     fn file_key(&self, path: &Path) -> Result<String, AppError> {
