@@ -74,15 +74,11 @@ impl<'ast> Visit<'ast> for Enclosing<'_> {
     }
 
     fn visit_item_fn(&mut self, function: &'ast syn::ItemFn) {
-        if function.block.span().byte_range().contains(&self.target.start) {
-            self.visit_block(&function.block);
-        }
+        self.visit_block(&function.block);
     }
 
     fn visit_impl_item_fn(&mut self, function: &'ast syn::ImplItemFn) {
-        if function.block.span().byte_range().contains(&self.target.start) {
-            self.visit_block(&function.block);
-        }
+        self.visit_block(&function.block);
     }
 
     fn visit_pat_ident(&mut self, pattern: &'ast PatIdent) {
@@ -109,7 +105,97 @@ pub(in super::super) fn enclosing_pattern_shadows(file: &syn::File, target: &Ran
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use syn::{ExprCall, File, Item, Pat, Stmt, parse_file, parse_str};
+
     use super::*;
+
+    /// Selects the named fixture call using its parsed byte range, not a synthetic target span.
+    fn target(file: &File) -> Range<usize> {
+        /// Retains the real call span for enclosing-pattern lookup.
+        struct Find(Option<Range<usize>>);
+        impl<'ast> Visit<'ast> for Find {
+            fn visit_expr_call(&mut self, i: &'ast ExprCall) {
+                if matches!(&*i.func, Expr::Path(path) if path.path.is_ident("target")) {
+                    self.0 = Some(i.span().byte_range());
+                }
+                visit::visit_expr_call(self, i);
+            }
+        }
+        let mut find = Find(None);
+        find.visit_file(file);
+        find.0.expect("each fixed fixture contains a target call")
+    }
+
+    #[test]
+    fn exact_enclosing_block_search_does_not_inspect_the_opposite_if_branch() {
+        let file = parse_file("fn run(){if ready {struct String;} else {target();}}").unwrap();
+        assert_eq!(enclosing_pattern_shadows(&file, &target(&file)), Some(HashSet::default()));
+    }
+
+    #[test]
+    fn exact_pattern_site_budget_does_not_rely_on_a_later_body_visit_to_exhaust_work() {
+        for count in [255, 256] {
+            let names = (0..count).map(|at| format!("binding_{at}")).collect::<Vec<_>>();
+            let file = parse_file(&format!("fn run(){{match input{{({})=>{{}}}}}}", names.join(","))).unwrap();
+            let Item::Fn(function) = &file.items[0] else { unreachable!() };
+            let Stmt::Expr(Expr::Match(expression), _) = &function.block.stmts[0] else {
+                unreachable!()
+            };
+            let Pat::Tuple(pattern) = &expression.arms[0].pat else {
+                unreachable!()
+            };
+            let target = pattern.elems.last().unwrap().span().byte_range();
+            assert_eq!(enclosing_pattern_shadows(&file, &target), None, "{count} pattern-site bindings");
+        }
+    }
+
+    #[test]
+    fn enclosing_method_patterns_exclude_other_methods_and_noncontaining_blocks() {
+        let file = parse_file(
+            "struct S; impl S {
+                 fn unrelated() { struct String; }
+                 fn run() {
+                     { struct String; }
+                     match input { Some(selected) => { let hidden = 7; target(); }, other => {} }
+                 }
+             }",
+        )
+        .unwrap();
+        assert_eq!(
+            enclosing_pattern_shadows(&file, &target(&file)),
+            Some(HashSet::from_iter(["selected".into()]))
+        );
+    }
+
+    #[test]
+    fn enclosing_pattern_targets_include_the_binding_at_the_selected_pattern_site() {
+        let file = parse_file("fn run(){match input { selected => {}, other => {} }}").unwrap();
+        let Item::Fn(function) = &file.items[0] else { unreachable!() };
+        let Stmt::Expr(Expr::Match(match_), _) = &function.block.stmts[0] else {
+            unreachable!()
+        };
+        assert_eq!(
+            enclosing_pattern_shadows(&file, &match_.arms[0].pat.span().byte_range()),
+            Some(HashSet::from_iter(["selected".into()]))
+        );
+    }
+
+    #[test]
+    fn enclosing_pattern_work_allowance_counts_expressions_and_binding_visits() {
+        for (count, accepted) in [(253, true), (254, false), (255, false)] {
+            let names = (0..count).map(|index| format!("binding_{index}")).collect::<Vec<_>>();
+            let file = parse_file(&format!(
+                "fn run() {{ match input {{ ({}) => {{ target(); }} }} }}",
+                names.join(",")
+            ))
+            .unwrap();
+            assert_eq!(
+                enclosing_pattern_shadows(&file, &target(&file)),
+                accepted.then(|| names.into_iter().collect()),
+                "{count} enclosing pattern bindings"
+            );
+        }
+    }
 
     #[test]
     fn match_support_requires_a_character_arm_and_no_opaque_pattern_shapes() {
@@ -126,7 +212,7 @@ mod tests {
             ("match value { 'a' => {}, rest @ _ => {} }", false),
             ("match value { 'a' => {}, Some(rest) => {} }", false),
         ] {
-            assert_eq!(supported_match(&syn::parse_str(source).unwrap()), expected, "{source}");
+            assert_eq!(supported_match(&parse_str(source).unwrap()), expected, "{source}");
         }
     }
 
@@ -134,20 +220,40 @@ mod tests {
     fn enclosing_patterns_collect_only_bindings_on_the_target_arm_path() {
         struct Target(Option<Range<usize>>);
         impl<'ast> Visit<'ast> for Target {
-            fn visit_expr_call(&mut self, i: &'ast syn::ExprCall) {
+            fn visit_expr_call(&mut self, i: &'ast ExprCall) {
                 if matches!(&*i.func, Expr::Path(path) if path.path.is_ident("target")) {
                     self.0 = Some(i.span().byte_range());
                 }
                 visit::visit_expr_call(self, i);
             }
         }
-        let file = syn::parse_file(
+        let file = parse_file(
             "fn f(){ match source { Some((outer, other)) => { match nested { inner => { target(); }, sibling => { ignored(); } } }, unrelated => { outside(); } } }"
         ).unwrap();
         let mut target = Target(None);
         target.visit_file(&file);
         let names = enclosing_pattern_shadows(&file, &target.0.unwrap()).unwrap();
         assert_eq!(names, ["outer", "other", "inner"].into_iter().map(str::to_owned).collect());
+    }
+
+    #[test]
+    fn enclosing_patterns_visit_selected_scrutinees_and_nested_identifier_subpatterns() {
+        for (source, expected) in [
+            (
+                "fn f(){match (match input {Some(inner)=>{target();},_=>{}}) {outer=>{}}}",
+                vec!["inner"],
+            ),
+            (
+                "fn f(){match input {outer @ Some(inner)=>{target();},_=>{}}}",
+                vec!["outer", "inner"],
+            ),
+        ] {
+            let file = parse_file(source).unwrap();
+            assert_eq!(
+                enclosing_pattern_shadows(&file, &target(&file)),
+                Some(expected.into_iter().map(str::to_owned).collect())
+            );
+        }
     }
 
     #[test]
@@ -163,9 +269,9 @@ mod tests {
             ("fn f(){ #[cfg(any())] struct Local; target(); }", Some(vec!["Local"])),
             ("fn f(){ #[custom] struct Local; target(); }", None),
         ] {
-            let file = syn::parse_file(source).unwrap();
-            let syn::Item::Fn(function) = &file.items[0] else { unreachable!() };
-            let syn::Stmt::Expr(target, _) = function.block.stmts.last().unwrap() else {
+            let file = parse_file(source).unwrap();
+            let Item::Fn(function) = &file.items[0] else { unreachable!() };
+            let Stmt::Expr(target, _) = function.block.stmts.last().unwrap() else {
                 unreachable!()
             };
             assert_eq!(

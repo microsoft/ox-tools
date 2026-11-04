@@ -82,6 +82,14 @@
 //! cannot be inspected safely. `cargo anvil --force` permits an intentional
 //! switch from another tool built on the cargo-anvil engine.
 //!
+//! With the GitHub backend, Anvil also adds its generated workflow and action
+//! files to existing GitHub Actions Dependabot jobs' `exclude-paths`. It preserves
+//! repository settings and updates for repository-owned workflows; it does not
+//! enable Dependabot or suppress security updates. Catalog source repositories
+//! can retain generated-action update PRs by putting the exact comment
+//! `# anvil: keep-generated-action-updates` in the configuration's leading
+//! comment block. Existing exclusions are never removed.
+//!
 //! ## Running checks
 //!
 //! The generated command interface uses
@@ -132,8 +140,8 @@
 //!   example compilation, and execution of selected examples;
 //! - **MSRV tests** execute affected tests with the repository's declared
 //!   minimum supported Rust version;
-//! - **runtime analysis** runs Miri, cargo-careful, Loom, and a short Bolero
-//!   fuzzing pass;
+//! - **runtime analysis** runs Miri, cargo-careful, and Loom;
+//! - **fuzzing** runs a short Bolero fuzzing pass on Linux;
 //! - **mutation testing** tests mutants in the pull-request diff.
 //!
 //! The scheduled tier runs full-workspace backstops and expensive checks that
@@ -203,7 +211,7 @@
 //!   [`Loom`](https://crates.io/crates/loom), and
 //!   [`Bolero`](https://crates.io/crates/bolero).
 //! - **Broader validation:** diff-scoped and full
-//!   [`cargo-mutants`](https://mutants.rs/) runs,
+//!   [`cargo-gamma`](https://crates.io/crates/cargo-gamma) runs,
 //!   [`cargo-hack`](https://crates.io/crates/cargo-hack) feature-powerset
 //!   checks, and benchmark compilation.
 //!
@@ -425,6 +433,27 @@
 //! The engine format remains `anvil`-named on disk so tools built on it can
 //! coexist safely and share the same update rules.
 //!
+//! ## In-process catalog updates
+//!
+//! [`update`] runs the same update engine as the CLI with explicit
+//! [`UpdateOptions`] and caller-supplied [`UpdateIo`]. It parses the workspace
+//! and lock, plans changes, and applies them through that boundary, without
+//! reading process arguments, initializing tracing, consulting Git, or
+//! accessing the host environment or current directory.
+//!
+//! Implement `UpdateIo` over an in-memory repository to test a downstream
+//! catalog's actual generation and upgrade behavior, not a mocked result.
+//! [`UpdateResult`] reports drift, refusals, diagnostics, and the plan summary;
+//! inspect generated files and `.anvil.lock` in the supplied repository.
+//! Use `dry_run` to perform the same planning without writes or deletions.
+//! An empty backend set explicitly selects local-only generation.
+//!
+//! These APIs are supported without any dependency feature, including with
+//! `default-features = false`; do not enable `test-util` or use `test_support`.
+//! The `memory_catalog` example includes a complete downstream catalog and
+//! an in-memory `UpdateIo` implementation. Historical fixtures can be loaded
+//! using `include_str!` rather than read or copied at test runtime.
+//!
 //! More detailed design and operational guidance is available in the
 //! `docs/design/` folder.
 
@@ -436,12 +465,14 @@ pub(crate) mod catalog;
 pub(crate) mod checksum;
 pub(crate) mod cli;
 pub(crate) mod decision;
+pub(crate) mod dependabot;
 pub(crate) mod emit;
 pub(crate) mod io;
 pub(crate) mod manifest;
 pub(crate) mod plan;
 pub(crate) mod region;
 pub(crate) mod run;
+pub(crate) mod update;
 pub(crate) mod workspace;
 
 /// Engine internals exposed **only** for this crate's own integration tests
@@ -450,7 +481,7 @@ pub(crate) mod workspace;
 /// must not depend on it — use the crate-root surface (`Catalog`, `Artifact`,
 /// `artifacts`, `run_app`, …) instead.
 #[doc(hidden)]
-#[cfg(any(test, feature = "internals"))]
+#[cfg(any(test, feature = "test-util"))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub mod test_support {
     pub use crate::checksum::checksum_str;
@@ -475,9 +506,9 @@ pub mod test_support {
 use std::process::ExitCode;
 
 // Crate-root re-exports are limited to what a downstream tool author needs to
-// describe a catalog and run it (see `docs/design/extensibility.md`):
-// `run_app` (below), the catalog builder surface, the artifact model, the
-// backend enum, and the `artifacts` registry. Everything else — the manifest,
+// describe a catalog and run it: the process-level `run_app`, the in-process
+// update boundary and result, the catalog builder surface, the artifact model,
+// the backend enum, and the `artifacts` registry. Everything else — the manifest,
 // plan, decision table, region splicing, workspace discovery, the CLI parser,
 // and the checksum helpers — is engine internals; it stays crate-private and
 // is deliberately not surfaced at the crate root.
@@ -487,6 +518,7 @@ pub use catalog::{
     Artifact, Catalog, CatalogBuilder, CliMeta, HostSelector, JsonArrayRegionSpec, OwnedFileSpec, RegionId, RegionSpec, TomlArrayRegionSpec,
 };
 pub use region::CommentSyntax;
+pub use update::{RepositoryEntry, UpdateIo, UpdateOptions, UpdateResult, update};
 
 /// One-call entry point for a tool built on the anvil engine.
 ///
@@ -506,7 +538,6 @@ pub use region::CommentSyntax;
 /// ```
 #[must_use]
 #[cfg_attr(coverage_nightly, coverage(off))]
-#[mutants::skip] // Entry point: tracing/clap setup + dispatch to run; behavior is integration-tested via run_update.
 #[expect(
     clippy::needless_pass_by_value,
     reason = "public one-call entry point that owns the catalog for the process lifetime by design"

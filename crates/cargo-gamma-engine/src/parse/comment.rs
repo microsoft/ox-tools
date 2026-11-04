@@ -112,7 +112,11 @@ pub(crate) fn literal_end(text: &str, start: usize) -> Option<usize> {
         b'r' if matches!(bytes.get(start + 1), Some(b'"' | b'#')) => raw_string_end(bytes, start),
         b'\'' => quote_end(bytes, start),
         // #[gamma::skip(option.none_to_some, reason = "claiming ordinary syntax starts a zero-width literal leaves the outer scanner non-progressing")]
-        _ => return None,
+        _ => {
+            return
+        // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+        None;
+        }
     };
 
     (end > start + 1).then_some(end)

@@ -15,15 +15,25 @@ use core::num::NonZeroU32;
 #[must_use]
 pub fn shard_of(id: &str, count: NonZeroU32) -> u32 {
     let count = count.get();
-    if count == 1 {
+    if
+    // #[gamma::skip(cond.always_false, reason = "Removing count==1 fast return executes jump hash normally. First iteration sets candidate=0 and next>=1, so count1 still returns0.", tag = "equivalent")]
+    count ==
+    // #[gamma::skip(literal.int_decrement, reason = "Removing count==1 fast return executes jump hash normally. First iteration sets candidate=0 and next>=1, so count1 still returns0.", tag = "equivalent")]
+    1
+    {
         return 0;
     }
 
     let mut key = fnv1a(id.as_bytes());
-    let mut candidate: i64 = -1;
+    let mut candidate: i64 =
+    // #[gamma::skip(unary.remove_neg, reason = "count is nonzero and next starts0, so the loop always executes once and overwrites candidate with next before reading candidate. Initial candidate=-1,0,1,2 are unobserved.", tag = "equivalent")]
+    -
+    // #[gamma::skip(literal.int_decrement, literal.int_increment, reason = "count is nonzero and next starts0, so the loop always executes once and overwrites candidate with next before reading candidate. Initial candidate=-1,0,1,2 are unobserved.", tag = "equivalent")]
+    1;
     let mut next: i64 = 0;
 
     while next < i64::from(count) {
+        let previous = next;
         candidate = next;
         key = key.wrapping_mul(2_862_933_555_777_941_757).wrapping_add(1);
 
@@ -37,9 +47,16 @@ pub fn shard_of(id: &str, count: NonZeroU32) -> u32 {
         {
             next = scaled as i64;
         }
+        assert!(
+            next > previous,
+            "jump hashing must advance beyond the previous candidate on each iteration"
+        );
     }
 
-    u32::try_from(candidate.max(0)).unwrap_or(0)
+    u32::try_from(candidate.max(0)).unwrap_or(
+        // #[gamma::skip(literal.int_increment, reason = "candidate is selected from nonnegative next<count<=u32::MAX; candidate.max(0) fits u32. unwrap_or fallback0/1 cannot execute.", tag = "equivalent")]
+        0,
+    )
 }
 
 /// FNV-1a, used only to turn an id into a shard key.
@@ -60,6 +77,26 @@ const fn fnv1a(bytes: &[u8]) -> u64 {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oct25_jump_assignments_match_an_integer_quotient_oracle_with_bounded_progress() {
+        for value in 0..512 {
+            let id = format!("{value:012x}");
+            for count in [2, 3, 5, 7, 257, 65_535] {
+                let mut key = id.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+                    (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+                });
+                let mut expected = 0_u64;
+                let mut jump = 0_u64;
+                while jump < u64::from(count) {
+                    expected = jump;
+                    key = key.wrapping_mul(2_862_933_555_777_941_757).wrapping_add(1);
+                    jump = ((expected + 1) << 31) / ((key >> 33) + 1);
+                }
+                assert_eq!(u64::from(shard_of(&id, NonZeroU32::new(count).unwrap())), expected, "{id}/{count}");
+            }
+        }
+    }
 
     #[test]
     fn survivor_jump_hash_assignments_match_fixed_vectors_across_small_and_wide_rotations() {

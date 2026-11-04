@@ -4,7 +4,7 @@
 [package]
 name = "cargo-gamma-lib"
 description = "Internal library for cargo-gamma"
-version = "0.3.0"
+version = "0.4.0"
 readme = "README.md"
 keywords = ["cargo", "mutation-testing", "testing"]
 categories = ["development-tools::testing"]
@@ -126,6 +126,14 @@ required-features = ["loom"]
 
 [[test]]
 name = "native_build"
+required-features = ["internals"]
+
+[[test]]
+name = "native_regressions"
+required-features = ["internals"]
+
+[[test]]
+name = "storage_native"
 required-features = ["internals"]
 
 [[test]]

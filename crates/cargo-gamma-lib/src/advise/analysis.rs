@@ -303,7 +303,7 @@ fn long_run(timing: &Timing) -> Option<Finding> {
         return None;
     }
 
-    let shards = (timing.wall.as_secs_f64() / TARGET_SHARD.as_secs_f64()).ceil().max(2.0);
+    let shards = (timing.wall.as_secs_f64() / TARGET_SHARD.as_secs_f64()).ceil();
 
     #[expect(
         clippy::cast_possible_truncation,
@@ -368,7 +368,7 @@ fn out_of_memory(summary: Summary, mutants: &[Mutant]) -> Option<Finding> {
     let files: HashSet<&Utf8Path> = stopped.iter().map(|mutant| &*mutant.file).collect();
 
     let located = match files.iter().copied().next() {
-        Some(only) if files.len() == 1 && stopped.len() == 1 => format!("the one is in {only}"),
+        Some(only) if stopped.len() == 1 => format!("the one is in {only}"),
         Some(only) if files.len() == 1 => format!("all {} are in {only}", stopped.len()),
         _ => format!("spread across {} files, so no one site explains them", files.len()),
     };
@@ -1076,7 +1076,7 @@ mod tests {
 
     #[test]
     fn low_yield_honours_both_inclusive_thresholds_and_zero_execution() {
-        assert!(low_yield(&[], Duration::ZERO).is_empty());
+        assert_eq!(low_yield(&[], Duration::ZERO).len(), 0);
         let mutants = vec![
             mutant("a.rs", "literal.bump", Outcome::Killed, 60_000),
             mutant("a.rs", "other.bump", Outcome::Survived, 1_140_000),
@@ -1084,7 +1084,7 @@ mod tests {
         let findings = low_yield(&mutants, Duration::from_mins(20));
         assert_eq!(findings.len(), 1);
         assert!(findings[0].headline.contains("literal"));
-        assert!(low_yield(&mutants, Duration::from_secs(1201)).is_empty());
+        assert_eq!(low_yield(&mutants, Duration::from_secs(1201)).len(), 0);
     }
 
     #[test]

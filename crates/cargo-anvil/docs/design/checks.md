@@ -47,6 +47,7 @@ flowchart LR
     pr_slow --> pr_test[anvil-pr-test]:::group
     pr_slow --> pr_msrv[anvil-pr-msrv]:::group
     pr_slow --> pr_runtime_analysis[anvil-pr-runtime-analysis]:::group
+    pr_slow --> pr_fuzzing[anvil-pr-fuzzing]:::group
     pr_slow --> pr_mutants[anvil-pr-mutants]:::group
 
     sched --> s_test[anvil-scheduled-test]:::group
@@ -56,7 +57,6 @@ flowchart LR
 
     pr_fast --> fmt[fmt]:::check
     pr_fast --> clippy[clippy]:::check
-    pr_fast --> check_all_targets[check-all-targets]:::check
     pr_fast --> cargo_sort[cargo-sort]:::check
     pr_fast --> license_headers[license-headers]:::check
     pr_fast --> ensure_no_cyclic_deps[ensure-no-cyclic-deps]:::check
@@ -80,13 +80,16 @@ flowchart LR
     pr_runtime_analysis --> miri[miri]:::check
     pr_runtime_analysis --> careful[careful]:::check
     pr_runtime_analysis --> loom[loom]:::check
-    pr_runtime_analysis --> bolero[bolero]:::check
+
+    pr_fuzzing --> bolero[bolero]:::check
 
     pr_mutants --> mutants_diff[mutants-diff]:::check
 
+    s_test --> check_all_targets[check-all-targets]:::check
     s_test --> s_llvm_cov[llvm-cov]:::check
     s_test --> s_doc_test[doc-test]:::check
     s_test --> s_examples[examples]:::check
+    s_test --> s_bolero["bolero (scheduled)"]:::check
 
     s_adv --> s_deny[deny]:::check
     s_adv --> s_audit[audit]:::check
@@ -120,11 +123,12 @@ jobs/stages. Locally, `just anvil-pr-slow` invokes those groups in order, and
 | `pr-fast`          | Linux x86_64 + Windows x86_64 + Linux aarch64 + Windows aarch64 (GH) / Linux x86_64 + Windows x86_64 (ADO) | All static analysis: clippy, `udeps`, `semver-check`, `external-types`, plus the text/metadata checks (fmt, license-headers, ...). Cross-OS because clippy, doc-build, udeps, semver-check, and external-types all compile per host target. Text/metadata checks run on every leg too; the redundancy cost is negligible compared to a separate job's setup overhead. |
 | `pr-test`         | Same default as `pr-fast`             | Tests + coverage: `llvm-cov` (instrumented `nextest`), `doc-test`, `examples`. GitHub uploads coverage from every leg except Windows ARM; ADO uploads from both x86_64 legs. |
 | `pr-msrv`         | Same default as `pr-test`             | Affected-package all-target tests under the declared MSRV, in all-features and default-features configurations. The recipe is a no-op when no root MSRV is declared. |
-| `pr-runtime-analysis`         | Same default as `pr-fast`             | Stricter-runtime correctness: `miri`, `careful`, `loom` (concurrency model checking), `bolero` (short-duration fuzzing smoke). Impact-scoped to the affected set so wall-clock is proportional to the PR's blast radius; the cheap checks (loom/bolero) self-skip when no affected crate ships their harness. |
+| `pr-runtime-analysis`         | Same default as `pr-fast`             | Stricter-runtime correctness: `miri`, `careful`, `loom` (concurrency model checking). Impact-scoped to the affected set so wall-clock is proportional to the PR's blast radius; loom self-skips when no affected crate ships its harness. |
+| `pr-fuzzing`         | Linux x86_64 + Linux aarch64 (GH) / Linux x86_64 (ADO) | Affected-package Bolero fuzzing smoke checks. Runs independently of runtime analysis and mutation testing. No Windows jobs are created, so Windows incurs no fuzzing setup overhead. |
 | `pr-mutants`         | Windows x86_64 executes on GH; Linux x86_64, Linux aarch64, and Windows aarch64 are compatibility no-ops. ADO: Linux x86_64 + Windows x86_64 | Diff-scoped mutation testing (`mutants --in-diff`). GitHub preserves all four stable ruleset contexts while running the campaign on one reliable Windows runner; scheduled exhaustive checks retain Linux + Windows mutation coverage. |
 
 The `pr-slow` groups are independent: failures in `pr-test` don't block
-`pr-msrv`, `pr-runtime-analysis`, or `pr-mutants`, and overall PR wall-clock is
+`pr-msrv`, `pr-runtime-analysis`, `pr-fuzzing`, or `pr-mutants`, and overall PR wall-clock is
 their maximum rather than their sum. Locally, `just anvil-pr-slow` is an umbrella
 recipe that invokes those groups sequentially.
 
@@ -132,10 +136,10 @@ recipe that invokes those groups sequentially.
 
 | Group                | OS scope                  | Purpose                                                                                                                                |
 |----------------------|---------------------------|----------------------------------------------------------------------------------------------------------------------------------------|
-| `scheduled-test`       | Same default as `pr-test` | Re-runs the test suite on `main` (with coverage instrumentation) to catch flakes/environment-dependent failures and to publish a full coverage snapshot of the current `main`. |
+| `scheduled-test`       | Same default as `pr-test` | Checks every package's targets independently with default and no-default features, then re-runs the test suite on `main` (with coverage instrumentation) to catch flakes/environment-dependent failures and to publish a full coverage snapshot of the current `main`. |
 | `scheduled-advisories` | Same default as `pr-fast` | Runs checks whose outcome can change without a commit to this repo: `deny`, `audit`, `aprz` (external databases), `clippy` (lint set evolves with toolchain). Cross-OS because clippy compiles per host. |
 | `scheduled-runtime-analysis` | Same default as `pr-runtime-analysis` | Whole-workspace runtime correctness under `miri`, tree-borrows, strict-provenance, and race-coverage. One job per OS leg runs the four profiles sequentially so they share setup and cache state; parallelism is across OS legs. |
-| `scheduled-exhaustive` | Linux x86_64 + Windows x86_64 | Full `cargo mutants`, cargo-hack feature powerset, and benchmark compilation. The default matrix is x86-only because cargo-mutants is unsupported on Windows ARM. |
+| `scheduled-exhaustive` | Linux x86_64 + Windows x86_64 | Full `cargo gamma`, cargo-hack feature powerset, and benchmark compilation. The existing x86-only schedule bounds recurring cost. |
 
 **Backend asymmetry on ARM coverage.** The GitHub backend ships a four-leg default matrix
 (Linux/Windows × x86_64/aarch64) because GH has Microsoft-hosted ARM runners
@@ -180,7 +184,6 @@ while paired prerequisite validation remains read-only.
 |--------------------------------|-----------------------------------------------------------|--------|
 | `fmt`                          | `cargo each --workspace --keep-going -- cargo +<pinned-nightly> fmt --manifest-path {manifest} --check`. `cargo-each` resolves workspace membership and invokes rustfmt once per manifest, keeping child commands bounded on every platform while reporting every failing member. Unlike `cargo fmt --all`, local path dependencies outside the workspace are not included. Local `--fix` removes `--check`; cloud workflows never pass it. | all |
 | `clippy`                       | `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` | all |
-| `check-all-targets`            | `cargo each --keep-going <affected packages> -- cargo check --package '{cargo-spec}' --all-targets --locked`, with default features and again with `--no-default-features`. Checks each selected package independently with the selected stable compiler; `{cargo-spec}` (cargo-each 0.6.0+) is a source-qualified selector, so a member that shares its name and version with a registry dependency stays unambiguous. An unscoped run selects every workspace member. | none |
 | `cargo-sort`                   | `cargo sort --workspace --grouped --check --check-format`. Since cargo-sort 2.1.2, formatting-only differences are warnings unless `--check-format` is set; Anvil keeps it load-bearing so dependency ordering and Cargo manifest formatting are both enforced. `--grouped` preserves intentional blank-line-separated dependency groups. | oxidizer-github |
 | `license-headers`              | `cargo heather --workspace`                               | oxidizer (`heather`), oxidizer-github |
 | `ensure-no-cyclic-deps`        | `cargo ensure-no-cyclic-deps --workspace`                 | oxidizer-github (sibling crate in `ox-tools-gh`) |
@@ -192,43 +195,58 @@ while paired prerequisite validation remains read-only.
 | `deny`                         | `cargo deny check`                                        | all |
 | `audit`                        | `cargo audit`                                             | oxidizer |
 | `udeps`                        | `cargo +<pinned-nightly> udeps --workspace --all-features` run **twice** — once with default targets (lib + bins) and once with `--all-targets`. cargo-udeps only analyzes the targets it's told to, and each run catches a variant the other masks: the default-targets run surfaces a dep in `[dependencies]` referenced only by tests/benches/examples (it should be a dev-dep; `--all-targets` would see it as "used"), while the `--all-targets` run surfaces unused `[dev-dependencies]` (never compiled by the default-targets run). Together they cover unused deps, unused dev-deps, and deps that should be dev-deps. | oxidizer, oxidizer-github |
-| `semver-check`                 | `cargo semver-checks --baseline-rev <baseline>` per affected publishable library crate. Crates with `publish = false` and bin-only crates are skipped. The PR target is the baseline. Exit 100 is a completed check with deny-level findings; exit 101 or another nonzero status means the comparison was inconclusive. Both outcomes write `target/anvil/comments/semver.md` and remain advisory, matching the repository's native `semver` job (`continue-on-error: true`). Proven rename and bin→lib transitions with no comparable baseline, and dependencies proven to be yanked only in the checked-out baseline tree, are skipped without a comment. Anvil preflight failures such as invalid current-workspace metadata or an unavailable baseline ref still fail because the recipe cannot establish what to compare. | oxidizer-github |
+| `semver-check`                 | Generate current and PR-target rustdoc JSON with `cargo rustdoc --locked --lib`, then compare with `cargo semver-checks --current-rustdoc <current.json> --baseline-rustdoc <baseline.json>` per affected publishable library crate. Each revision uses its own lockfile with the same compiler and target. Crates with `publish = false`, bin-only crates, and new/moved/renamed crates or bin-to-library transitions without a comparable baseline are skipped. Exit 100 is a completed check with deny-level findings; build failures and other nonzero checker statuses are inconclusive. Both outcomes write `target/anvil/comments/semver.md` and remain advisory. Invalid current metadata or an unavailable baseline ref still fail preflight. | oxidizer-github |
 | `external-types`               | `cargo each <affected packages> --filter lib --keep-going -- cargo +<catalog-nightly-rustdoc-schema> check-external-types --manifest-path {manifest}` (per-manifest because the tool has no `--workspace`/`--package`; bin-only crates have no public API surface and are filtered out). Setup installs the catalog version but validation accepts newer installed tools. The selected nightly is tested with the catalog version; an incompatible newer tool fails closed with a tool/nightly compatibility diagnostic rather than silently selecting a different schema. | oxidizer-github |
 
-#### Package-isolated all-target compilation
+#### Locked SemVer snapshots
 
-Cargo unifies dependency features across packages selected in one invocation.
-A workspace build can therefore pass because another selected package enables
-an optional dependency or feature that a package forgot to declare for its own
-tests or examples. Disabling defaults in a batched workspace invocation does
-not remove that blind spot.
+The comparison measures the API built by each revision's checked-in dependency
+graph. It does not resolve historical manifests against today's registry:
+`cargo-semver-checks --baseline-rev` builds a separate consumer workspace and
+updates its dependencies, so a newly published incompatible transitive dependency
+can otherwise prevent a previously buildable baseline from being compared.
 
-The fast tier checks affected packages one at a time, first with default
-features and then with defaults disabled. Both configurations reuse Cargo's
-normal build cache.
-`--all-targets` includes unit and integration tests, examples, and benchmarks,
-so test-only dependency omissions are checked as well as the library and binaries.
-For example, a module enabled by `cfg(test)` may reference an optional dependency
-that must also be declared as a dev-dependency. A target that only makes sense
-with a package feature enabled -- a test, benchmark, example, or binary alike --
-must declare `required-features` or gate the feature-specific scenario behind
-`cfg(feature = "...")`. Cargo still skips targets whose declared feature
-requirements are not enabled, so declaring them is also the supported way to opt
-a target out of the defaults-disabled pass. `[lib]` has no such escape hatch, so
-a library that does not build without its default features always fails here.
+Anvil isolates the resolved PR target commit in a temporary checkout and cleans
+it up afterward, leaving the original repository and historical manifests
+unmodified. The baseline uses committed LFS pointers without fetching assets.
+Both snapshots use the current checkout's selected stable compiler,
+overriding any obsolete baseline toolchain selection.
+The current Cargo build target is used for both arms; an unset target selects the
+compiler's host. A multi-target configuration must select one target with
+`CARGO_BUILD_TARGET`. Build artifacts live under `target/anvil/semver/`, separately
+for current and baseline, irrespective of an inherited `CARGO_TARGET_DIR`.
 
-This is a compile-time guardrail, not a complete feature matrix or a test runner.
-It complements all-features linting and batched coverage without instrumenting,
-linking, or executing every package's test binaries. Dependency defaults and
-explicitly requested dependency features still apply. Cold runs must compile
-their dependency graph; a warm-cache duration is not a cold-build cost estimate.
-`--keep-going` reports all failing packages within a configuration. A failed
-configuration stops the check before the next configuration runs.
+Each package is built separately. Default features remain enabled, and feature
+selection retains the checker's case-sensitive heuristic:
+enable declared and implicit optional-dependency features except `unstable`,
+`nightly`, `bench`, `no_std`, and names beginning with `_`, `unstable-`, or
+`unstable_`. Each revision supplies its own feature list. Rustdoc includes hidden
+and private items, as required by the checker. The file-input checker uses its
+built-in lint policy rather than Cargo metadata lint overrides;
+Anvil warns if such overrides are present.
+
+Cargo warnings remain visible without invalidating valid metadata or target
+configuration, and stderr is retained in failure diagnostics.
+
+The lockfiles must be present and usable; a missing or stale lockfile is never
+replaced by fresh resolution. A failed build, missing JSON artifact, or failed
+comparison is reported as inconclusive, not clean. Package absence, renames, and
+library-target absence are established from baseline metadata rather than
+matching compiler-error strings. A genuinely unusable baseline dependency is
+also inconclusive; yanked versions still present in a usable lockfile can build
+without being reselected.
+
+The graphs may legitimately differ between revisions. Dependency-induced API
+changes can therefore appear in the advisory alongside source changes; this is
+intentional, unlike comparing both sources against a newly resolved graph.
+
+Snapshot execution mechanics and rationale are covered in the
+[implementation guide](../implementation.md#semantic-version-candidate-selection).
 
 ### `pr-slow` umbrella
 
 The PR-tier slow checks are split into independent cloud-workflow-visible groups —
-`pr-test`, `pr-msrv`, `pr-runtime-analysis`, `pr-mutants` — that each run as their own job (GitHub) or
+`pr-test`, `pr-msrv`, `pr-runtime-analysis`, `pr-fuzzing`, `pr-mutants` — that each run as their own job (GitHub) or
 stage (ADO) in parallel. An umbrella `anvil-pr-slow` recipe is also provided in
 `groups.just` for local use; it invokes those groups sequentially so
 adopters can type one command to run "everything slow" without needing the cloud workflow
@@ -254,7 +272,7 @@ text for parser and discovery tests. The collector's
 [released-surface rules](../../../cargo-coverage-gate/docs/design/README.md)
 define the accepted layouts.
 
-The generated recipe intentionally omits `--target`.
+The generated recipe intentionally omits the collector's `--target` option.
 `cargo-coverage-gate run` resolves the invoking rustc host and passes that target
 explicitly, overriding `CARGO_BUILD_TARGET` and Cargo `build.target`
 configuration. Each Anvil matrix leg therefore measures its native target,
@@ -262,6 +280,16 @@ rather than inheriting a configured cross-target from the checkout. Repositories
 that require coverage for a non-host target must provide a native runner for
 that target or retain a documented repository-specific check until the catalog
 supports explicit coverage-target configuration.
+
+When the workspace owns a `cargo-coverage-gate` package with a
+`cargo-coverage-gate` binary target, the recipe runs that binary from the
+checkout through the pinned nightly Cargo. This lets the collector validate
+its own changes before publication. Other workspaces continue to use the
+installed collector. Locked metadata identifies the workspace member and
+binary target. Metadata errors stop the check without a fallback.
+The checkout launch resolves the pinned compiler's host and passes it to the
+outer `cargo run --target`, so a configured cross-target cannot affect the
+collector's own build or launch. Host discovery errors also stop the check.
 
 #### `pr-msrv` (minimum-version tests)
 
@@ -312,40 +340,129 @@ available.
 | `miri`    | Compiles the impact-affected packages together once with all features enabled, then runs each compiled Miri test executable concurrently. A Miri test executable is one Cargo test target containing one or more libtest tests. Compiling the selected scope together preserves Cargo feature unification: shared dependencies receive the union of features requested by all selected packages, matching a normal workspace-scoped Cargo invocation. The default is one artifact worker per logical processor, clamped to the executable count; `ANVIL_MIRI_JOBS` accepts a positive integer override. Output is isolated per executable and labelled with its package and test target, then replayed deterministically; every executable completes before failures are aggregated. The selected target set is lib/bin unit tests and integration tests; doctests, benches, examples, build scripts, and ordinary executables do not run. Slow or unsupported individual tests opt out with `#[cfg_attr(miri, ignore)]`. A package can omit all its own Miri targets through `[package.metadata.anvil.miri] exclude = true`; it may still compile as a dependency of a selected consumer. Clean direct and PR invocations are impact-scoped; scheduled/full tiers and dirty local trees run the full workspace. Local callers may use `--package <name>` to override impact scope, `--test <filter>` to select libtest names, or `--example <name>` to run one example instead of the test suite; cloud workflows pass no options. | oxidizer, oxidizer-github |
 | `careful` | `cargo +<catalog-nightly> careful test --all-features --locked` over the impact-affected packages. cargo-careful uses a debug-instrumented std in a stable cache path. Because Cargo fingerprints the sysroot path rather than its contents, the recipe records the actual `rustc -vV` and SHA-256 of the resolved `cargo-careful` executable in `target/anvil/careful-sysroot.id`; either changing triggers `cargo clean`. The executable hash is used because cargo-careful rejects version-only invocations. This remains correct when validation accepts a newer installed cargo-careful. | oxidizer-github |
 | `loom`    | For each `[[test]]` target that declares `required-features = ["loom"]`, `cargo test -p <pkg> --release --all-features --locked --test <target> -- --test-threads=1` with `RUSTFLAGS="--cfg loom"`. [`loom`](https://crates.io/crates/loom) is a permutation-based concurrency model checker that explores thread interleavings. Anvil does not impose a global exploration bound; each model remains responsible for tractable exhaustive exploration. Targets are detected **structurally** from `cargo metadata` (a test target whose `kind` contains `test` and whose `required-features` contains `loom`) -- not via a filename/cfg/comment heuristic -- and only those targets run, so loom never touches a crate's ordinary tests. The `loom` feature selects the target (`required-features`); `--cfg loom` activates loom (source swaps std↔loom atomics on `#[cfg(loom)]`, and `[target.'cfg(loom)'.dependencies] loom` links only under the cfg) -- both are required. Scoped per-package with `-p` (never `--workspace`) so the global cfg never leaks into deps reachable only through other members. **Fail-loud**: a crate that declares loom support (a `loom` feature or a `cfg(loom)` dependency) but exposes no such test target errors out rather than silently no-opping. When no crate ships a loom target the recipe skips (exit 0). | oxidizer-github |
-| `bolero`  | Uses the catalog nightly and release profile consistently to discover targets one package at a time, then runs each affected libfuzzer target for 60 seconds on Linux. Explicitly selecting `release` avoids cargo-bolero's implicit, adopter-defined `fuzz` profile and matches target execution. Adopters that disable `bolero`'s default features must enable its `std` feature for libfuzzer support. Per-package discovery is required because `cargo-bolero list` accepts only one `--package`; local whole-workspace runs enumerate workspace members before discovery. A successful empty discovery is a no-op; metadata, discovery, or parsing failure fails the check. Non-Linux hosts skip because cargo-bolero's native dependencies are unsupported there, while harnesses still run as ordinary tests. | oxidizer-github |
 
 Miri workloads stay focused on interpreter-relevant behavior. Exhaustive generated-text contract
 scans and Cartesian parser/adoption matrices may remain native and `cargo careful` only when
 focused Miri tests continue through the same implementation paths and each exclusion records that
 coverage tradeoff beside the test.
 
+Windows Miri uses Cargo's temporary
+`__CARGO_TEMPORARY_BUILD_DIR_NEW_LAYOUT_OPT_OUT=1` compatibility switch.
+Cargo 1.100's per-crate build paths make large dependency search lists exceed
+Windows' command-line limit, and the pinned cargo-miri cannot read Cargo's
+argument-file fallback. The compact layout preserves the selected packages,
+features, compiler checks, and Miri execution. Other hosts retain their caller's
+layout setting. Recheck this workaround when updating the pinned nightly.
+
+#### `pr-fuzzing` (fuzzing smoke checks)
+
+| Check     | Invocation                                                                  | Source |
+|-----------|-----------------------------------------------------------------------------|--------|
+| `bolero`  | Uses the catalog nightly and release profile consistently to discover targets one package at a time, then runs each affected libfuzzer target with `--runs 30000 -S 2027` on Linux. Discovery and execution use the catalog compiler's host target from `rustc --print host-tuple`. This avoids selecting the platform that built the installed cargo-bolero binary, such as musl on a GNU Linux host. Explicitly selecting `release` avoids cargo-bolero's implicit, adopter-defined `fuzz` profile and matches target execution. Adopters that disable `bolero`'s default features must enable its `std` feature for libfuzzer support. Per-package discovery is required because `cargo-bolero list` accepts only one `--package`; local whole-workspace runs enumerate workspace members before discovery. A successful empty discovery is a no-op; compiler target lookup, metadata, discovery, or parsing failure fails the check. Non-Linux hosts skip because cargo-bolero's native dependencies are unsupported there, while harnesses still run as ordinary tests. | oxidizer-github |
+
+`anvil-bolero` accepts a campaign argument, defaulting to `pr`. The PR campaign
+specifies a fixed run count and nonzero seed, without a campaign time limit.
+`just anvil-bolero scheduled` instead passes `-T 90s`, without a run count or seed
+argument. Libfuzzer generates a seed unless the caller supplies
+`BOLERO_RANDOM_SEED`. Unknown campaign names fail before target discovery.
+Both campaigns share package selection, discovery, and execution; selecting a
+campaign does not change impact scope. In particular, full-workspace local PR
+verification retains the PR campaign.
+
+The fixed PR run budget is based on measurements of `microsoft/oxidizer` and
+`microsoft/ox-tools` available as of November 4, 2026, in an attempt to balance
+runtime and source-line coverage
+([budget selection discussion](https://github.com/microsoft/ox-tools/pull/336#discussion_r4459898079)).
+This evidence applies to the tested targets and seeds, not to coverage or defect
+detection in other workspaces. The fixed run count and seed make the required
+campaign's engine policy repeatable; the scheduled campaign provides additional
+exploration outside the required PR gate.
+
+On non-Linux hosts, the fuzzing group skips its setup and prerequisite validation,
+and Bolero skips before validating prerequisites or calculating impact. Other
+groups in `pr-slow` still perform their own setup and validation.
+
+GitHub creates only Linux x64 and Linux ARM64 jobs for this group. They depend
+only on `impact-linux`, consume its impact artifact, and contribute to the existing
+required-check aggregator. ADO creates a separate `pr_fuzzing` stage containing
+one Linux job; like the other PR stages, it depends only on `impact`. Neither
+backend makes fuzzing wait for runtime analysis or mutation testing.
+
 #### `pr-mutants` (mutation testing)
 
 | Check     | Invocation                                                                  | Source |
 |-----------|-----------------------------------------------------------------------------|--------|
-| `mutants` | Resolves the base ref, writes `git diff <base>` against the working tree to a temporary unified-diff file, then runs `cargo mutants --in-diff <file> --no-shuffle --jobs 0`. Self-skips on aarch64-pc-windows-msvc where cargo-mutants doesn't build; other ARM legs run normally. | oxidizer-github |
+| `mutants` | Resolves the base ref, writes `git diff <base>` against the working tree to a temporary unified-diff file, then runs `cargo gamma run --workspace --in-diff <file> --min-score 100 --max-flaky 0`. GitHub Actions pins `--artifact-dir target/cargo-gamma` for report uploads. Empty impact scopes skip; supported ARM hosts execute the campaign. | cargo-gamma |
 
 The mutants check requires a base ref: locally the recipe resolves `BASE_REF` (if set), then `origin/main`, then `origin/master`, then errors out. GitHub passes `${{ github.event.pull_request.base.sha }}` as `BASE_REF`; on ADO the shared resolver reads `$(System.PullRequest.TargetBranch)` from the environment.
 
-Both mutation recipes select `.cargo/mutants.<os>.toml` when it exists, using
-Just's native host OS name, and pass it through cargo-mutants' `--config` option.
-Otherwise they retain cargo-mutants' default configuration discovery. These are
-complete native configurations, not overlays or Cargo metadata. See
-[the rationale and configuration contract](./local.md#9-platform-specific-mutation-configuration):
-cargo-mutants can mutate source that the current platform compiles out, producing
-false `MISSED` results because no behavioral change reaches the tests.
+Each invocation reserves its own uniquely named diff file in `RUNNER_TEMP`,
+`AGENT_TEMPDIRECTORY`, or the system temporary directory (in that order).
+The working-tree diff explicitly requests `a/` and `b/` prefixes, independent
+of Git's mnemonic or no-prefix configuration. A `finally` block removes the
+file after success or failure. Git failures prevent mutation testing, and
+Git/Gamma exit codes and launch errors survive cleanup failures.
+Cleanup failures are fatal only after the main operation completes successfully;
+otherwise they are reported without replacing the primary failure.
+
+Both mutation recipes use Gamma's native `gamma.toml` configuration and defaults.
+The full recipe omits `--in-diff`; both enforce a 100% assertion-killed score
+and zero unresolved flaky outcomes, and propagate native exit codes. See
+[the configuration and migration contract](./local.md#9-mutation-testing-with-cargo-gamma).
+After either campaign returns, even unsuccessfully, the recipe runs
+`cargo gamma hints` to merge its learned hints. Campaign failures retain their
+exit code; hint-promotion failures fail an otherwise successful campaign recipe.
+GitHub mutation jobs preserve the reports and resulting hints as 30-day workflow
+artifacts and publish SARIF to code scanning, including after campaign failure.
+See [Gamma reports and code scanning](./github.md#gamma-reports-and-code-scanning).
 
 ### `scheduled-test`
 
-Same three checks as `pr-test` -- `llvm-cov`, `doc-test`, `examples` -- and the same
-recipe invocations, with the same per-config output paths
-(`target/coverage/lcov-<config>.info`).
-The recipe is shared between tiers; only the cloud workflow
+Runs `check-all-targets` over the full workspace, followed by the same three
+checks as `pr-test` -- `llvm-cov`, `doc-test`, `examples` -- and finally
+`anvil-bolero scheduled`.
+The coverage recipe is shared between tiers, with the same per-config output
+paths (`target/coverage/lcov-<config>.info`); only the cloud workflow
 wiring around it changes (PR uploads LCOV to Codecov / ADO from each
 PR run; scheduled does the same against `main` plus flags the upload as `scheduled` in
 Codecov so the two streams stay distinguishable in the UI). Two purposes for re-running
 on scheduled: catch flakes/environmental sensitivities that didn't trip in PR, and
 publish a full-coverage snapshot for the current state of `main`.
+
+| Check | Invocation | Source |
+|-------|------------|--------|
+| `check-all-targets` | `cargo each --workspace --keep-going -- cargo check --package '{cargo-spec}' --all-targets --locked`, with default features and again with `--no-default-features`. Checks each package independently with the selected stable compiler; `{cargo-spec}` (cargo-each 0.6.0+) is a source-qualified selector, so a member that shares its name and version with a registry dependency stays unambiguous. | none |
+| `bolero` | Same discovery and target execution as the PR check, but over every workspace member with `-T 90s` per discovered target and no seed argument. Runs last, after examples; an earlier check failure skips the campaign. Non-Linux hosts skip the libfuzzer campaign. | oxidizer-github |
+
+#### Package-isolated all-target compilation
+
+Cargo unifies dependency features across packages selected in one invocation.
+A workspace build can therefore pass because another selected package enables
+an optional dependency or feature that a package forgot to declare for its own
+tests or examples. Disabling defaults in a batched workspace invocation does
+not remove that blind spot.
+
+The scheduled group checks every workspace package one at a time, first with
+default features and then with defaults disabled. Both configurations reuse
+Cargo's normal build cache.
+`--all-targets` includes unit and integration tests, examples, and benchmarks,
+so test-only dependency omissions are checked as well as the library and binaries.
+For example, a module enabled by `cfg(test)` may reference an optional dependency
+that must also be declared as a dev-dependency. A target that only makes sense
+with a package feature enabled -- a test, benchmark, example, or binary alike --
+must declare `required-features` or gate the feature-specific scenario behind
+`cfg(feature = "...")`. Cargo still skips targets whose declared feature
+requirements are not enabled, so declaring them is also the supported way to opt
+a target out of the defaults-disabled pass. `[lib]` has no such escape hatch, so
+a library that does not build without its default features always fails here.
+
+This is a compile-time guardrail, not a complete feature matrix or a test runner.
+It complements all-features linting and batched coverage without instrumenting,
+linking, or executing every package's test binaries. Dependency defaults and
+explicitly requested dependency features still apply. Cold runs must compile
+their dependency graph; a warm-cache duration is not a cold-build cost estimate.
+`--keep-going` reports all failing packages within a configuration. A failed
+configuration stops the check before the next configuration runs.
 
 ### `scheduled-advisories`
 
@@ -389,13 +506,13 @@ These profiles each cost hours per leg, which is why they live in scheduled rath
 
 Per-test opt-outs live in source via `#[cfg_attr(miri_<profile>, ignore = "<reason>")]`. Each miri-profile recipe sets the matching `--cfg` in `RUSTFLAGS`; the cfg names are also declared in the workspace lints region (`unexpected_cfgs` + `check-cfg`) so non-miri builds don't warn. This keeps the suppression next to the test (and behind code review) rather than in a sidecar file the build system has to parse out-of-band.
 
-The `miri` row above is the one place the catalog deliberately duplicates a check across tiers: PR runs it impact-scoped (fast, narrow), scheduled runs it full-workspace (slow, complete). The single-tier-per-group rule is preserved because the PR copy lives in `pr-runtime-analysis` and the scheduled copy lives in `scheduled-runtime-analysis` -- two different groups.
+The `miri` row above deliberately reuses a check across tiers: PR runs it impact-scoped (fast, narrow), scheduled runs it full-workspace (slow, complete). The single-tier-per-group rule is preserved because the PR copy lives in `pr-runtime-analysis` and the scheduled copy lives in `scheduled-runtime-analysis` -- two different groups.
 
 ### `scheduled-exhaustive`
 
 | Check                 | Invocation                                                                                                   | Source |
 |-----------------------|--------------------------------------------------------------------------------------------------------------|--------|
-| `mutants-full`        | `cargo mutants --workspace --no-shuffle --jobs 0`                                                            | oxidizer-github, oxidizer (sharded cross-OS) |
+| `mutants-full`        | `cargo gamma run --workspace --min-score 100 --max-flaky 0`, followed by `cargo gamma hints`                    | cargo-gamma |
 | `cargo-hack` powerset | `cargo hack --workspace --feature-powerset --depth 2 check`                                                  | oxidizer, oxidizer-github |
 | `bench`               | `cargo bench --workspace --all-features --no-run`; benchmark execution is intentionally outside the catalog because runtime requirements are repository-specific | oxidizer |
 
@@ -421,15 +538,19 @@ checks are implementation details that can churn.
 
 ## 4. What scheduled does and does not re-run
 
-The rule is simple: **a check belongs in scheduled iff its outcome can change without a
-commit to this repo.** Re-running everything else on the scheduled tier would just burn cloud workflows time
-duplicating PR signal.
+Scheduled checks either provide recurring signal that PR runs cannot guarantee
+or perform expensive whole-workspace work deliberately kept off the PR critical
+path. Deterministic checks already run in PR are not duplicated on the scheduled
+tier without an additional source of signal.
 
 What that means concretely:
 
 - **Re-run in scheduled** (in addition to PR):
   - `llvm-cov`, `doc-test`, `examples` (in `scheduled-test`) -- non-determinism, environment
     sensitivity, runner drift can produce flakes that the PR run missed.
+  - `bolero` (in `scheduled-test`) -- a full-workspace, time-budgeted campaign
+    without a seed argument can explore inputs beyond the impact-scoped,
+    fixed-count PR campaign.
   - `deny`, `audit`, `clippy` (in `scheduled-advisories`) -- see §2.
   - `miri` (in `scheduled-runtime-analysis`) -- the PR-tier run is impact-scoped, so
     crates not touched by a given PR can go indefinitely without miri coverage; the
@@ -439,11 +560,12 @@ What that means concretely:
 - **Run only in PR** -- checks whose outcome is fully determined by the source tree and
   the pinned tool versions, so re-running on the same `main` commit can't surface anything
   new: `fmt`, `cargo-sort`, `license-headers`, `ensure-no-cyclic-deps`,
-  `ensure-no-default-features`, `check-all-targets`, `doc-build`, `readme-check`, `spellcheck`, `pr-title`,
-  `udeps`, `semver-check`, `external-types`, `careful`, `loom`, `bolero`,
+  `ensure-no-default-features`, `doc-build`, `readme-check`, `spellcheck`, `pr-title`,
+  `udeps`, `semver-check`, `external-types`, `careful`, `loom`,
   diff-scoped `mutants`.
 - **Run only in scheduled** -- the expensive whole-workspace work that doesn't fit a PR
-  budget: the non-stacked miri profiles `miri-tree-borrows`, `miri-strict-provenance`,
+  budget: package-isolated `check-all-targets` (in `scheduled-test`);
+  the non-stacked miri profiles `miri-tree-borrows`, `miri-strict-provenance`,
   `miri-race-coverage` (in `scheduled-runtime-analysis`); full `mutants`,
   `cargo-hack --feature-powerset`, `bench` (in `scheduled-exhaustive`).
 
@@ -535,9 +657,9 @@ Impact and target discovery use three outcomes: work found, proven no work, and
 failure. Only the first two may continue successfully. Malformed impact tiers,
 unknown package names, failed Cargo metadata, unavailable PR metadata in a PR
 build, and failed tool discovery are errors; they never collapse to `--skip`.
-When cargo-delta reports a manifest directory leaf instead of a package or library
-name, Anvil accepts it only if it uniquely identifies one workspace package;
-missing or ambiguous aliases fail rather than silently dropping affected work.
+Cargo-delta JSON entries resolve strictly by Cargo package name among workspace
+members. Library target names and manifest directory leaves are not aliases;
+collisions with those names do not make a valid package name ambiguous.
 Advisory checks may report policy findings without failing, but failure to execute
 the advisory tool is still an operational error unless the baseline itself has become
 unusable because one of its dependency versions was subsequently yanked.
@@ -564,15 +686,15 @@ commits are normal, and forcing every breaking-API PR to bump the major version 
 on a release) would push enforcement to the wrong moment in the lifecycle. The change is
 verifiable at release time, not per PR.
 
-The SemVer comparison is also inconclusive when `cargo-semver-checks` cannot materialize
-or build the target-branch baseline, for example because that baseline resolves a yanked
-dependency. Such an operational failure is reported in the same advisory comment and does
+The SemVer comparison is also inconclusive when a locked rustdoc build or
+`cargo-semver-checks` comparison cannot complete, for example because a historical
+lockfile is unusable. Such an operational failure is reported in the same advisory comment and does
 not block the PR: a broken baseline is not evidence that the PR broke the public API, and
 blocking would prevent the PR that repairs the baseline from merging. This deliberately
 matches the repository's native `semver` job, whose comparison step uses
-`continue-on-error: true`. Failures in Anvil's own preflight (before invoking
-`cargo-semver-checks`) remain enforcing because they indicate that the recipe cannot
-identify the current packages or requested baseline.
+`continue-on-error: true`. Failures in Anvil's own preflight remain enforcing
+because they indicate that the recipe cannot identify the current packages,
+compiler, build target, or requested baseline.
 
 To carry this signal without making the recipe non-zero, anvil uses a single shared
 convention:

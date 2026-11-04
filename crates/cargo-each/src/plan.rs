@@ -156,7 +156,6 @@ impl Plan {
 
         let uses_cargo_spec = command.iter().any(|arg| arg.contains("{cargo-spec}"));
 
-        // #[gamma::skip(try.propagate_to_unwrap, reason = "is_empty already ran validate_build on this same immutable command and mode; every substitute repeats only that validated placeholder check, so all collected results and direct substitutions are Ok")]
         let invocations = match mode {
             Mode::PerPackage => members
                 .iter()
@@ -169,13 +168,14 @@ impl Plan {
                         manifest: m.manifest_path.display().to_string(),
                         workspace_rust_version: workspace_rust_version.map(str::to_owned),
                     };
-                    Ok(Invocation {
+                    Invocation {
                         label: Some(m.name.clone()),
-                        argv: substitute(command, &placeholders)?,
+                        argv: substitute(command, &placeholders)
+                            .expect("is_empty validated placeholders for this immutable command and per-package mode"),
                         work_dir: chdir.then(|| m.manifest_dir().to_path_buf()),
-                    })
+                    }
                 })
-                .collect::<Result<Vec<_>, EachError>>()?,
+                .collect::<Vec<_>>(),
             Mode::PerTarget => members
                 .iter()
                 .flat_map(|member| {
@@ -196,14 +196,15 @@ impl Plan {
                                 target: target.name.clone(),
                                 workspace_rust_version: workspace_rust_version.map(str::to_owned),
                             };
-                            Ok(Invocation {
+                            Invocation {
                                 label: Some(format!("{}::{}", member.name, target.name)),
-                                argv: substitute(command, &placeholders)?,
+                                argv: substitute(command, &placeholders)
+                                    .expect("is_empty validated placeholders for this immutable command and per-target mode"),
                                 work_dir: chdir.then(|| member.manifest_dir().to_path_buf()),
-                            })
+                            }
                         })
                 })
-                .collect::<Result<Vec<_>, EachError>>()?,
+                .collect::<Vec<_>>(),
             Mode::Once => {
                 let packages = packages_flags(members, packages);
                 let placeholders = Placeholders::Once {
@@ -212,7 +213,8 @@ impl Plan {
                 };
                 vec![Invocation {
                     label: None,
-                    argv: substitute(command, &placeholders)?,
+                    argv: substitute(command, &placeholders)
+                        .expect("is_empty validated placeholders for this immutable command and once mode"),
                     work_dir: None,
                 }]
             }
@@ -262,7 +264,7 @@ fn validate_target_filters(
 }
 
 fn validate_target_requirement(members: &[&Member], options: BuildOptions<'_>) -> Result<(), EachError> {
-    if !options.require_target_per_package || members.is_empty() {
+    if !options.require_target_per_package {
         return Ok(());
     }
 
@@ -295,7 +297,7 @@ fn packages_flags(members: &[&Member], packages: PackagesExpansion) -> Vec<Strin
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use serde_json::Value;
+    use serde_json::{Value, json};
 
     use super::*;
     use crate::workspace::MemberTarget;
@@ -361,7 +363,7 @@ mod tests {
     #[test]
     fn empty_set_yields_empty_plan() {
         let plan = build(&[], Mode::PerPackage, false, PackagesExpansion::Explicit, &cmd(&["cargo", "test"])).expect("build");
-        assert!(plan.invocations.is_empty());
+        assert_eq!(plan.invocations.len(), 0);
     }
 
     #[test]
@@ -386,7 +388,7 @@ mod tests {
             &cmd(&["cargo", "test", "{packages}"]),
         )
         .expect("build");
-        assert!(plan.invocations.is_empty());
+        assert_eq!(plan.invocations.len(), 0);
     }
 
     #[test]
@@ -651,7 +653,7 @@ mod tests {
         let test_kinds = std::iter::once(TargetKind::Test).collect();
 
         let mut relevant = member("relevant");
-        relevant.metadata = serde_json::json!({"cargo-each": {"excluded-targets": "test"}});
+        relevant.metadata = json!({"cargo-each": {"excluded-targets": "test"}});
         relevant.targets.push(MemberTarget {
             name: "test".to_owned(),
             kinds: std::iter::once(TargetKind::Test).collect(),
@@ -698,6 +700,30 @@ mod tests {
                 },
             )
             .expect("members outside kind selection are outside metadata preflight")
+        );
+    }
+
+    #[test]
+    fn target_metadata_preflight_rejects_invalid_metadata_for_a_later_matching_kind() {
+        let mut member = member("mixed");
+        member.metadata = serde_json::json!({"checks": {"names": false}});
+        member.targets = vec![
+            MemberTarget {
+                name: "example".to_owned(),
+                kinds: BTreeSet::from([TargetKind::Example]),
+                required_features: BTreeSet::new(),
+            },
+            MemberTarget {
+                name: "library".to_owned(),
+                kinds: BTreeSet::from([TargetKind::Lib, TargetKind::RLib]),
+                required_features: BTreeSet::new(),
+            },
+        ];
+        let filters = [TargetPredicate::parse("name-in-metadata:checks.names").unwrap()];
+        let error = validate_target_filters(&[&member], &BTreeSet::from([TargetKind::Lib]), &filters).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "package `mixed` metadata `checks.names` must be an array of strings when used by `name-in-metadata:checks.names`"
         );
     }
 

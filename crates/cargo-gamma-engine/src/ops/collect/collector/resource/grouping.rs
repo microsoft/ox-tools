@@ -39,7 +39,7 @@ fn text(value: &impl quote::ToTokens) -> String {
 }
 
 fn name(expression: &Expr) -> Option<String> {
-    let Expr::Path(path) = bare(expression) else { return None };
+    let Expr::Path(path) = bare(expression) else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
     path.path.get_ident().map(ToString::to_string)
 }
 
@@ -55,20 +55,20 @@ fn bare(mut expression: &Expr) -> &Expr {
 }
 
 fn method<'a>(expression: &'a Expr, method: &str, arguments: usize) -> Option<&'a syn::ExprMethodCall> {
-    let Expr::MethodCall(call) = expression else { return None };
+    let Expr::MethodCall(call) = expression else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
     (call.method == method && call.args.len() == arguments && call.attrs.is_empty() && (method == "collect" || call.turbofish.is_none()))
         .then_some(call)
 }
 
 fn local(statement: &Stmt) -> Option<(String, &Expr)> {
-    let Stmt::Local(local) = statement else { return None };
+    let Stmt::Local(local) = statement else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
     let pat = match &local.pat {
         Pat::Type(pattern) => &*pattern.pat,
         pattern => pattern,
     };
-    let Pat::Ident(pattern) = pat else { return None };
+    let Pat::Ident(pattern) = pat else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
     if !local.attrs.is_empty() || pattern.by_ref.is_some() || pattern.subpat.is_some() {
-        return None;
+        return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
     }
     Some((
         pattern.ident.to_string(),
@@ -87,7 +87,7 @@ fn record<'a>(file: &'a syn::File, name: &str) -> Option<&'a syn::ItemStruct> {
 
 fn field<'a>(record: &'a syn::ItemStruct, name: &str) -> Option<&'a Type> {
     if record.fields.len() > 64 {
-        return None;
+        return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
     }
     let mut fields = record
         .fields
@@ -133,113 +133,117 @@ impl Grouping {
         source: &str,
         inline: &[String],
     ) -> Option<Self> {
-        let Expr::While(loop_) = expression else { return None };
+        let Expr::While(loop_) = expression else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         if file.items.len() > 256
             || loop_.body.stmts.len() > 16
             || !loop_.attrs.is_empty()
             || loop_.label.is_some()
             || !sources.closed_methods_for(source, inline)
-            || !sources.primitive_scope_for(source, inline)
         {
-            return None;
+            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         }
-        let Expr::Binary(condition) = &*loop_.cond else { return None };
+        let Expr::Binary(condition) = &*loop_.cond else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         if !matches!(condition.op, BinOp::Lt(_)) {
-            return None;
+            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         }
         let cursor = name(&condition.left)?;
         let length = method(&condition.right, "len", 0)?;
-        let Expr::Field(input) = &*length.receiver else { return None };
+        let Expr::Field(input) = &*length.receiver else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         let root = name(&input.base)?;
-        let Member::Named(input_field) = &input.member else { return None };
+        let Member::Named(input_field) = &input.member else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         let input_text = text(input);
         if !matches!(
             bindings.get(&format!("{root}.{input_field}")),
             Some(Binding::Vec | Binding::VecChar | Binding::VecString)
         ) {
-            return None;
+            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         }
         let (signature, block) = function(file, expression)?;
         if block.stmts.len() > 64 {
-            return None;
+            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         }
         let at = block
             .stmts
             .iter()
             .position(|statement| statement.span().byte_range() == expression.span().byte_range())?;
-        if block.stmts[..at]
+        if block.stmts[
+            // #[gamma::skip(range.exclusive_to_inclusive, reason = "Including the target While adds no Item, Macro, or Local to this setup-only scan.", tag = "equivalent")]
+            ..at]
             .iter()
             .any(|statement| matches!(statement, Stmt::Item(_) | Stmt::Macro(_)))
         {
-            return None;
+            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         }
-        let (initial_name, initial) = local(block.stmts.get(at.checked_sub(1)?)?)?;
+        let (initial_name, initial) = local(&block.stmts[at.checked_sub(1)?])?;
         if initial_name != cursor
             || !matches!(initial, Expr::Lit(literal) if matches!(&literal.lit, syn::Lit::Int(value) if value.base10_parse::<u128>().ok() == Some(0)))
         {
-            return None;
+            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         }
         let parameter = signature.inputs.iter().find_map(|argument| match argument {
             FnArg::Typed(argument) if matches!(&*argument.pat, Pat::Ident(pattern) if pattern.ident == root) => Some(&*argument.ty),
             _ => None,
         })?;
-        let Type::Reference(parameter) = parameter else { return None };
+        let Type::Reference(parameter) = parameter else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         if parameter.mutability.is_some() {
-            return None;
+            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         }
-        let Type::Path(parameter) = &*parameter.elem else { return None };
+        let Type::Path(parameter) = &*parameter.elem else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         let record_name = parameter.path.get_ident()?.to_string();
         if !sources.local_record_for(source, inline, &record_name) {
-            return None;
+            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         }
         let Type::Path(vector) = field(record(file, &record_name)?, &input_field.to_string())? else {
-            return None;
+            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         };
-        let PathArguments::AngleBracketed(arguments) = &vector.path.segments.last()?.arguments else {
-            return None;
+        let PathArguments::AngleBracketed(arguments) = &
+            // #[gamma::skip(try.propagate_to_unwrap, reason = "A parsed type path always has at least one segment.", tag = "equivalent")]
+            vector.path.segments.last()?.arguments
+        else {
+            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         };
         let GenericArgument::Type(Type::Path(element)) = arguments.args.first()? else {
-            return None;
+            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         };
         let element_name = element.path.get_ident()?.to_string();
         if !sources.local_record_for(source, inline, &element_name) {
-            return None;
+            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         }
         let (copied, copy) = local(loop_.body.stmts.first()?)?;
         let copy = method(copy, "clone", 0)?;
-        let Expr::Field(projected) = &*copy.receiver else { return None };
-        let Expr::Index(index) = &*projected.base else { return None };
+        let Expr::Field(projected) = &*copy.receiver else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+        let Expr::Index(index) = &*projected.base else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         let Member::Named(projected_field) = &projected.member else {
-            return None;
+            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         };
         let copied_type = field(record(file, &element_name)?, &projected_field.to_string())?;
         if text(&index.expr) != input_text
             || name(&index.index).as_deref() != Some(&cursor)
             || !sources.stable_path_for(source, inline, copied_type)
         {
-            return None;
+            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         }
         let (boundary, _) = local(loop_.body.stmts.get(1)?)?;
         let output = loop_.body.stmts.iter().find_map(|statement| match statement {
             Stmt::Expr(Expr::MethodCall(call), _) if call.method == "push" => call.args.first(),
             _ => None,
         })?;
-        let Expr::Struct(output) = output else { return None };
+        let Expr::Struct(output) = output else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         let output_record = output.path.get_ident()?.to_string();
         if !sources.local_record_for(source, inline, &output_record) {
-            return None;
+            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         }
         let schema = record(file, &output_record)?;
         let mut vector_fields = HashSet::default();
         for projected in &output.fields {
-            let Member::Named(member) = &projected.member else { return None };
+            let Member::Named(member) = &projected.member else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
             let ty = field(schema, &member.to_string())?;
             if matches!(ty, Type::Path(path) if path.qself.is_none() && path.path.segments.len() == 1
                 && path.path.segments.first().is_some_and(|segment| segment.ident == "Vec"))
             {
                 let _new = vector_fields.insert(member.to_string());
-            } else if text(ty) != text(copied_type) || !sources.stable_path_for(source, inline, ty) {
-                return None;
+            } else if text(ty) != text(copied_type) {
+                return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
             }
         }
         let mut captures = Captures {
@@ -247,7 +251,9 @@ impl Grouping {
             source,
             inline,
             bound: HashSet::default(),
-            allowed: [root, copied.clone(), cursor.clone()].into_iter().collect(),
+            allowed:
+                // #[gamma::skip(collection.reverse_array, reason = "These identities are immediately collected into an unordered set.", tag = "equivalent")]
+                [root, copied.clone(), cursor.clone()].into_iter().collect(),
             remaining: 256,
             valid: true,
         };
@@ -258,14 +264,17 @@ impl Grouping {
             }
         }
         if !captures.valid || captures.remaining == 0 {
-            return None;
+            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         }
         let mut outputs = bindings
             .iter()
             .filter(|(_, kind)| matches!(kind, Binding::Vec | Binding::VecString | Binding::VecChar))
             .map(|(name, _)| name.clone())
             .collect::<HashSet<_>>();
-        for statement in &block.stmts[..at] {
+        for statement in &block.stmts[
+            // #[gamma::skip(range.exclusive_to_inclusive, reason = "Including the target While adds no Item, Macro, or Local to this setup-only scan.", tag = "equivalent")]
+            ..at]
+        {
             if let Some((name, initializer)) = local(statement) {
                 let _old = outputs.remove(&name);
                 if matches!(initializer, Expr::Call(call) if call.args.is_empty() && call.attrs.is_empty()
@@ -291,51 +300,61 @@ impl Grouping {
 
     fn boundary<'a>(&self, expression: &'a Expr, multiply: bool) -> Option<&'a Expr> {
         let call = method(expression, "map_or", 2)?;
-        let count = method(call.args.first()?, "len", 0)?;
+        let count = method(
+            // #[gamma::skip(try.propagate_to_unwrap, reason = "The preceding exact arity check guarantees these arguments exist; singleton first and last coincide.", tag = "equivalent")]
+            call.args.first()?,
+            "len",
+            0,
+        )?;
         if text(&count.receiver) != self.input {
-            return None;
+            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         }
-        let Expr::Closure(closure) = call.args.last()? else { return None };
+        let Expr::Closure(closure) =
+            // #[gamma::skip(try.propagate_to_unwrap, reason = "The preceding exact arity check guarantees these arguments exist; singleton first and last coincide.", tag = "equivalent")]
+            call.args.last()? else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         if closure.inputs.len() != 1 {
-            return None;
+            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         }
-        let Pat::Ident(offset) = closure.inputs.first()? else { return None };
-        let Expr::Binary(binary) = bare(&closure.body) else { return None };
+        let Pat::Ident(offset) =
+            // #[gamma::skip(iter.first_to_last, try.propagate_to_unwrap, reason = "The preceding exact arity check guarantees these arguments exist; singleton first and last coincide.", tag = "equivalent")]
+            closure.inputs.first()? else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+        let Expr::Binary(binary) = bare(&closure.body) else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         if (multiply && !matches!(binary.op, BinOp::Mul(_)))
             || (!multiply && !matches!(binary.op, BinOp::Add(_)))
             || name(&binary.left).as_deref() != Some(&self.cursor)
             || name(&binary.right).as_deref() != Some(&offset.ident.to_string())
         {
-            return None;
+            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         }
         let position = method(&call.receiver, "position", 1)?;
         let iter = method(&position.receiver, "iter", 0)?;
-        let Expr::Index(index) = &*iter.receiver else { return None };
-        let Expr::Range(range) = &*index.index else { return None };
-        if text(&index.expr) != self.input
-            || range.end.is_some()
-            || range.start.as_deref().and_then(name).as_deref() != Some(&self.cursor)
-            || !matches!(range.limits, syn::RangeLimits::HalfOpen(_))
+        let Expr::Index(index) = &*iter.receiver else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+        let Expr::Range(range) = &*index.index else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+        if text(&index.expr) != self.input || range.end.is_some() || range.start.as_deref().and_then(name).as_deref() != Some(&self.cursor)
         {
-            return None;
+            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         }
-        let Expr::Closure(predicate) = position.args.first()? else {
-            return None;
+        let Expr::Closure(predicate) =
+            // #[gamma::skip(iter.first_to_last, try.propagate_to_unwrap, reason = "The preceding exact arity check guarantees these arguments exist; singleton first and last coincide.", tag = "equivalent")]
+            position.args.first()? else {
+            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         };
         if predicate.inputs.len() != 1 {
-            return None;
+            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         }
-        let Pat::Ident(parameter) = predicate.inputs.first()? else {
-            return None;
+        let Pat::Ident(parameter) =
+            // #[gamma::skip(iter.first_to_last, try.propagate_to_unwrap, reason = "The preceding exact arity check guarantees these arguments exist; singleton first and last coincide.", tag = "equivalent")]
+            predicate.inputs.first()? else {
+            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         };
-        let Expr::Binary(predicate) = &*predicate.body else { return None };
-        let Expr::Field(projected) = &*predicate.left else { return None };
+        let Expr::Binary(predicate) = &*predicate.body else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+        let Expr::Field(projected) = &*predicate.left else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         if !matches!(predicate.op, BinOp::Ne(_))
             || name(&projected.base).as_deref() != Some(&parameter.ident.to_string())
             || text(&projected.member) != self.field
             || name(&predicate.right).as_deref() != Some(&self.copied)
         {
-            return None;
+            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         }
         Some(&closure.body)
     }
@@ -350,7 +369,7 @@ impl Grouping {
     )]
     fn check(&self, original: &Expr, mutated: &Expr) -> Option<()> {
         let (Expr::While(before), Expr::While(after)) = (original, mutated) else {
-            return None;
+            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         };
         let (_, original_boundary) = local(before.body.stmts.get(1)?)?;
         let (_, boundary) = local(after.body.stmts.get(1)?)?;
@@ -358,26 +377,32 @@ impl Grouping {
         let _stationary = self.boundary(boundary, true)?;
         let mut normalized = mutated.clone();
         let Expr::While(normalized_loop) = &mut normalized else {
-            return None;
+            return None; // #[gamma::skip(option.none_to_some, return_value.default, reason = "Cloning the already-validated While and initialized second Local preserves their variants and indices. None is the Option default.", tag = "equivalent")]
         };
-        let Stmt::Local(normalized_boundary) = normalized_loop.body.stmts.get_mut(1)? else {
-            return None;
+        let Stmt::Local(normalized_boundary) =
+            // #[gamma::skip(try.propagate_to_unwrap, reason = "Cloning the already-validated While and initialized second Local preserves their variants and indices.", tag = "equivalent")]
+            normalized_loop.body.stmts.get_mut(1)? else {
+            return None; // #[gamma::skip(option.none_to_some, return_value.default, reason = "Cloning the already-validated While and initialized second Local preserves their variants and indices. None is the Option default.", tag = "equivalent")]
         };
-        *normalized_boundary.init.as_mut()?.expr = original_boundary.clone();
+        *
+            // #[gamma::skip(try.propagate_to_unwrap, reason = "Cloning the already-validated While and initialized second Local preserves their variants and indices.", tag = "equivalent")]
+            normalized_boundary.init.as_mut()?.expr = original_boundary.clone();
         if text(&normalized) != text(original) {
-            return None;
+            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         }
         let mut empty = HashSet::default();
         let mut slices = HashSet::default();
         let mut grew = false;
         let mut assigned = false;
-        let mut names: HashSet<String> = [self.cursor.clone(), self.copied.clone(), self.boundary.clone()]
+        let mut names: HashSet<String> =
+            // #[gamma::skip(collection.reverse_array, reason = "These identities are immediately collected into an unordered set.", tag = "equivalent")]
+            [self.cursor.clone(), self.copied.clone(), self.boundary.clone()]
             .into_iter()
             .collect();
         for (at, statement) in after.body.stmts.iter().enumerate().skip(2) {
             if let Some((name, initializer)) = local(statement) {
                 if !names.insert(name.clone()) {
-                    return None;
+                    return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
                 }
                 if let Expr::Reference(reference) = initializer
                     && reference.mutability.is_none()
@@ -392,7 +417,7 @@ impl Grouping {
                 } else {
                     let collect = method(initializer, "collect", 0)?;
                     let Expr::MethodCall(adapter) = &*collect.receiver else {
-                        return None;
+                        return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
                     };
                     if !matches!(adapter.method.to_string().as_str(), "map" | "filter_map")
                         || adapter.args.len() != 1
@@ -400,20 +425,20 @@ impl Grouping {
                         || !adapter.attrs.is_empty()
                         || adapter.turbofish.is_some()
                     {
-                        return None;
+                        return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
                     }
                     let iter = method(&adapter.receiver, "iter", 0)?;
                     if !slices.contains(&super::grouping::name(&iter.receiver)?) {
-                        return None;
+                        return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
                     }
                     let _new = empty.insert(name);
                 }
                 continue;
             }
-            let Stmt::Expr(expression, _) = statement else { return None };
+            let Stmt::Expr(expression, _) = statement else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
             if let Expr::MethodCall(call) = expression {
                 if !call.attrs.is_empty() || call.turbofish.is_some() {
-                    return None;
+                    return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
                 }
                 let receiver = name(&call.receiver)?;
                 if empty.contains(&receiver)
@@ -423,9 +448,11 @@ impl Grouping {
                     continue;
                 }
                 if call.method != "push" || call.args.len() != 1 || !self.outputs.contains(&receiver) {
-                    return None;
+                    return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
                 }
-                let Expr::Struct(record) = call.args.first()? else { return None };
+                let Expr::Struct(record) =
+                    // #[gamma::skip(iter.first_to_last, try.propagate_to_unwrap, reason = "The preceding exact arity check guarantees these arguments exist; singleton first and last coincide.", tag = "equivalent")]
+                    call.args.first()? else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
                 if record.rest.is_some()
                     || !record.attrs.is_empty()
                     || text(&record.path) != self.output_record
@@ -439,16 +466,16 @@ impl Grouping {
                         })
                     })
                 {
-                    return None;
+                    return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
                 }
                 grew = true;
             } else {
-                let Expr::Assign(assign) = expression else { return None };
+                let Expr::Assign(assign) = expression else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
                 if at + 1 != after.body.stmts.len()
                     || name(&assign.left).as_deref() != Some(&self.cursor)
                     || name(&assign.right).as_deref() != Some(&self.boundary)
                 {
-                    return None;
+                    return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
                 }
                 assigned = true;
             }

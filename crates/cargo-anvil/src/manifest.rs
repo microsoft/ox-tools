@@ -86,6 +86,14 @@ pub struct RegionKey {
 /// absolute, carries a drive or network-share prefix or a backslash, contains
 /// a `..` component, or names no file at all.
 fn ensure_contained(path: &str, context: &str) -> Result<(), AppError> {
+    ensure_contained_with(path, context, contained_path_shape)
+}
+
+fn ensure_contained_with<'a>(
+    path: &'a str,
+    context: &str,
+    shape: impl FnOnce(&'a str, &str) -> Result<(usize, &'a str), AppError>,
+) -> Result<(), AppError> {
     // The format is `/`-separated, and the platforms disagree about `\`:
     // Windows treats it as a separator, Unix as an ordinary filename character.
     // A path carrying one therefore denotes different things on different
@@ -104,7 +112,7 @@ fn ensure_contained(path: &str, context: &str) -> Result<(), AppError> {
     if path.contains('\\') || drive_qualified {
         bail!("{context} '{path}' must be a relative path inside the repository");
     }
-    let (names, last) = contained_path_shape(path, context)?;
+    let (names, last) = shape(path, context)?;
     if path_names_no_file(names, last) {
         bail!("{context} '{path}' must name a file inside the repository");
     }
@@ -151,6 +159,7 @@ impl Manifest {
     ///
     /// Returns an error if the file exists but can't be read, can't be
     /// parsed, or declares an unsupported schema version.
+    #[cfg(any(test, feature = "test-util"))]
     pub fn load(repo_root: &Path) -> Result<Self, AppError> {
         let path = Self::path_for(repo_root);
         if !path.exists() {
@@ -364,34 +373,19 @@ impl Manifest {
     /// # Errors
     ///
     /// Returns an error if the write fails.
+    #[cfg(any(test, feature = "test-util"))]
     pub fn save(&self, repo_root: &Path) -> Result<(), AppError> {
-        let path = Self::path_for(repo_root);
-        let text = self.to_toml();
-        let tmp = path.with_extension("lock.tmp");
-        // The write lands on this sibling before the rename, and `fs::write`
-        // opens with create+truncate, which follows a symlink. A checkout can
-        // carry `.anvil.lock.tmp` as a link out of the tree just as easily as
-        // any other name. Clearing it first turns a followed link into a
-        // replaced link; the name is anvil's own, so nothing that belongs to
-        // the repository is at stake. Only a missing file is absorbed.
-        match std::fs::remove_file(&tmp) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                return Err(e).into_app_err_with(|| format!("failed to clear the temporary file {}", tmp.display()));
-            }
-        }
-        std::fs::write(&tmp, text.as_bytes()).into_app_err_with(|| format!("failed to write {}", tmp.display()))?;
-        std::fs::rename(&tmp, &path).into_app_err_with(|| format!("failed to rename {} -> {}", tmp.display(), path.display()))?;
-        Ok(())
+        save_text(repo_root, &self.to_toml())
     }
 
     /// Insert or update one file entry.
+    #[cfg(any(test, feature = "test-util"))]
     pub fn set_file(&mut self, path: impl Into<String>, checksum: impl Into<String>) {
         self.files.insert(path.into(), checksum.into());
     }
 
     /// Insert or update one region entry.
+    #[cfg(any(test, feature = "test-util"))]
     pub fn set_region(&mut self, host: impl Into<String>, id: impl Into<String>, checksum: impl Into<String>) {
         self.regions.insert(
             RegionKey {
@@ -456,8 +450,22 @@ impl Manifest {
     }
 }
 
-// Suppress an unused-import lint when no callers reference `Array`/`Value`
-// yet (they will once writers gain inline-table support in later commits).
+pub(crate) fn save_text(repo_root: &Path, text: &str) -> Result<(), AppError> {
+    let path = Manifest::path_for(repo_root);
+    let tmp = path.with_extension("lock.tmp");
+    // Clear the staging name before writing so a stale symlink cannot redirect
+    // the write outside the repository.
+    match std::fs::remove_file(&tmp) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(e).into_app_err_with(|| format!("failed to clear the temporary file {}", tmp.display()));
+        }
+    }
+    std::fs::write(&tmp, text.as_bytes()).into_app_err_with(|| format!("failed to write {}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).into_app_err_with(|| format!("failed to rename {} -> {}", tmp.display(), path.display()))?;
+    Ok(())
+}
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -465,6 +473,39 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn scanner_host_paths_reject_escapes_with_the_field_context() {
+        let error = super::Manifest::parse("version = 2\njson_scanner_hosts = ['../outside.json']\n").unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "`json_scanner_hosts` entry '../outside.json' must be a relative path inside the repository"
+        );
+    }
+
+    #[test]
+    fn survivor_drive_qualified_paths_are_rejected_before_platform_component_classification() {
+        for path in ["C:file", "z:nested/file"] {
+            let calls = std::cell::Cell::new(0);
+            let error = ensure_contained_with(path, "portable", |path, _| {
+                calls.set(calls.get() + 1);
+                Ok((path.split('/').count(), path.rsplit('/').next().unwrap()))
+            })
+            .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!("portable '{path}' must be a relative path inside the repository")
+            );
+            assert_eq!(calls.get(), 0);
+        }
+        let calls = std::cell::Cell::new(0);
+        ensure_contained_with("folder/file", "portable", |path, _| {
+            calls.set(calls.get() + 1);
+            Ok((2, path.rsplit('/').next().unwrap()))
+        })
+        .unwrap();
+        assert_eq!(calls.get(), 1);
+    }
 
     #[test]
     fn drive_qualified_paths_are_rejected_independently_of_backslashes() {

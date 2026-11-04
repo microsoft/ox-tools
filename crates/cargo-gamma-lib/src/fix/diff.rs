@@ -88,14 +88,29 @@ fn script<'a>(old: &[&'a str], new: &[&'a str]) -> Vec<Step<'a>> {
     // `2 · max + 1` values into a fresh allocation `d` times, for tens of megabytes of transient
     // garbage on a large diff and no more information.
     let mut rounds: Vec<isize> = Vec::new();
-    let shift = |k: isize| usize::try_from(k + isize::try_from(max).unwrap_or(isize::MAX)).unwrap_or(0);
+    let shift = |k: isize| {
+        usize::try_from(
+            k + isize::try_from(max).unwrap_or(
+                // #[gamma::skip(expr.decrement, reason = "Conversions take lengths of valid slices of &str. Their nonzero-sized16-byte elements on64-bit(8-byte on32-bit) bound lengths and the sum n+m strictly below isize::MAX. All four isize conversion fallbacks are unreachable; changing MAX to MAX-1 cannot be observed.", tag = "equivalent")]
+                isize::MAX,
+            ),
+        )
+        .unwrap_or(
+            // #[gamma::skip(literal.int_increment, reason = "shift is called only for diagonals within[-max,max], including guarded neighboring diagonals. k+max is nonnegative and within the allocated2*max+1 frontier. usize conversion succeeds, so fallback0/1 is unreachable.", tag = "equivalent")]
+            0,
+        )
+    };
 
-    for d in 0..=isize::try_from(max).unwrap_or(isize::MAX) {
+    for d in 0..=isize::try_from(max).unwrap_or(
+        // #[gamma::skip(expr.decrement, reason = "Conversions take lengths of valid slices of &str. Their nonzero-sized16-byte elements on64-bit(8-byte on32-bit) bound lengths and the sum n+m strictly below isize::MAX. All four isize conversion fallbacks are unreachable; changing MAX to MAX-1 cannot be observed.", tag = "equivalent")]
+        isize::MAX,
+    ) {
         rounds.extend_from_slice(furthest.get(shift(-d)..=shift(d)).unwrap_or_default());
 
         let mut k = -d;
 
         while k <= d {
+            let previous_diagonal = k;
             // Which of the two neighbouring diagonals to extend from: going down (an insertion)
             // when there is no diagonal to the left, or when the one to the right reaches further.
             let down = k == -d || (k != d && furthest[shift(k - 1)] < furthest[shift(k + 1)]);
@@ -114,11 +129,23 @@ fn script<'a>(old: &[&'a str], new: &[&'a str]) -> Vec<Step<'a>> {
 
             furthest[shift(k)] = x;
 
-            if usize::try_from(x).unwrap_or(0) >= n && usize::try_from(y).unwrap_or(0) >= m {
+            if usize::try_from(x).unwrap_or(
+                // #[gamma::skip(literal.int_increment, reason = "Myers frontier starts x=0 and advances x nonnegatively; its diagonal induction ensures x>=k, hence y=x-k>=0. Both fit usize because bounded by finite source slice lengths plus edit count. Thus the final-corner x/y conversion failure fallbacks are unreachable.", tag = "equivalent")]
+                0,
+            ) >= n
+                && usize::try_from(y).unwrap_or(
+                    // #[gamma::skip(literal.int_increment, reason = "Myers frontier starts x=0 and advances x nonnegatively; its diagonal induction ensures x>=k, hence y=x-k>=0. Both fit usize because bounded by finite source slice lengths plus edit count. Thus the final-corner x/y conversion failure fallbacks are unreachable.", tag = "equivalent")]
+                    0,
+                ) >= m
+            {
                 return walk_back(old, new, &rounds, d);
             }
 
             k += 2;
+            assert!(
+                k > previous_diagonal,
+                "each edit-distance iteration must advance to the next diagonal"
+            );
         }
     }
 
@@ -133,8 +160,14 @@ fn script<'a>(old: &[&'a str], new: &[&'a str]) -> Vec<Step<'a>> {
 /// neighbours consulted are only consulted when `k` is neither `-r` nor `r`.
 fn walk_back<'a>(old: &[&'a str], new: &[&'a str], rounds: &[isize], d: isize) -> Vec<Step<'a>> {
     let mut steps = Vec::new();
-    let mut x = isize::try_from(old.len()).unwrap_or(isize::MAX);
-    let mut y = isize::try_from(new.len()).unwrap_or(isize::MAX);
+    let mut x = isize::try_from(old.len()).unwrap_or(
+        // #[gamma::skip(expr.decrement, reason = "Conversions take lengths of valid slices of &str. Their nonzero-sized16-byte elements on64-bit(8-byte on32-bit) bound lengths and the sum n+m strictly below isize::MAX. All four isize conversion fallbacks are unreachable; changing MAX to MAX-1 cannot be observed.", tag = "equivalent")]
+        isize::MAX,
+    );
+    let mut y = isize::try_from(new.len()).unwrap_or(
+        // #[gamma::skip(expr.decrement, reason = "Conversions take lengths of valid slices of &str. Their nonzero-sized16-byte elements on64-bit(8-byte on32-bit) bound lengths and the sum n+m strictly below isize::MAX. All four isize conversion fallbacks are unreachable; changing MAX to MAX-1 cannot be observed.", tag = "equivalent")]
+        isize::MAX,
+    );
 
     for round in (0..=d).rev() {
         let reached = |k: isize| -> isize {
@@ -150,7 +183,11 @@ fn walk_back<'a>(old: &[&'a str], new: &[&'a str], rounds: &[isize], d: isize) -
         };
 
         let k = x - y;
-        let down = k == -round || (k != round && reached(k - 1) < reached(k + 1));
+        let down = k == -round
+            || (
+                // #[gamma::skip(logical.and_remove_left, reason = "At right boundary k==round, reached(k+1) addresses the first slot of the next saved round, or missing storage default0. That slot is the newly exposed negative diagonal, recorded before first update, so it is always initial0. reached(k-1) is a nonnegative frontier x. Hence comparison <0 is false even without k!=round; all nonboundary cases preserve the conjunct's true value.", tag = "equivalent")]
+                k != round && reached(k - 1) < reached(k + 1)
+            );
         let previous = if down { k + 1 } else { k - 1 };
         let start = reached(previous);
         let (before_x, before_y) = (start, start - previous);
@@ -165,7 +202,11 @@ fn walk_back<'a>(old: &[&'a str], new: &[&'a str], rounds: &[isize], d: isize) -
             }
         }
 
-        if round == 0 {
+        if
+        // #[gamma::skip(cond.always_false, reason = "At final walk_back round0 the equal-prefix diagonal consumes back to x=y=0 and k0 forces down=true. Without its break, y becomes-1, usize::try_from(y) fails, and no Added step is emitted. This is the final reverse-loop iteration and y is discarded; emitted steps are identical.", tag = "equivalent")]
+        round == 0 {
+            // #[gamma::skip(loop.break_to_continue, reason = "The loop is for round in(0..=d).rev(); round==0 is its final iteration. continue at that exact branch exits the loop exactly as break does, without executing the remaining body.", tag = "equivalent")]
+            // #[gamma::skip(loop.delete_break, reason = "At final walk_back round0 the equal-prefix diagonal consumes back to x=y=0 and k0 forces down=true. Without its break, y becomes-1, usize::try_from(y) fails, and no Added step is emitted. This is the final reverse-loop iteration and y is discarded; emitted steps are identical.", tag = "equivalent")]
             break;
         }
 
@@ -192,6 +233,16 @@ fn walk_back<'a>(old: &[&'a str], new: &[&'a str], rounds: &[isize], d: isize) -
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recovered_diagonal_walk_produces_exact_edit_scripts_after_unequal_initial_lines() {
+        assert_eq!(
+            script(&["old", "common"], &["new", "common"]),
+            [Step::Removed("old"), Step::Added("new"), Step::Kept("common")]
+        );
+        assert_eq!(script(&["first", "second"], &[]), [Step::Removed("first"), Step::Removed("second")]);
+        assert_eq!(script(&[], &["first", "second"]), [Step::Added("first"), Step::Added("second")]);
+    }
 
     #[test]
     fn survivor_equal_frontiers_do_not_lose_a_two_edit_alignment_between_three_distinct_lines() {

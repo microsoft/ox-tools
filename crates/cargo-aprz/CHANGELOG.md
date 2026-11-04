@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-10-29
+
+- 🐛 Bug Fixes
+
+  - aprz: prepare rustls 1.2.2 release
+
 ## [1.2.1] - 2026-10-27
 
 - ✨ Features

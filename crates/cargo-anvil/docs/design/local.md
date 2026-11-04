@@ -43,7 +43,8 @@ repo/
 │   ├── groups/             one file per group: groups/<group>.just holds the
 │   │                       `anvil-<group>` recipe plus its `*-setup` /
 │   │                       `*-validate-prereqs` (anvil-pr-fast, anvil-pr-test,
-│   │                       anvil-pr-msrv, anvil-pr-runtime-analysis, anvil-pr-mutants,
+│   │                       anvil-pr-msrv, anvil-pr-runtime-analysis, anvil-pr-fuzzing,
+│   │                       anvil-pr-mutants,
 │   │                       anvil-scheduled-test, …). `anvil-pr-slow` is a
 │   │                       convenience umbrella over the pr-slow groups.
 │   ├── container.just      containerized execution (`anvil-container`). See containers.md.
@@ -147,27 +148,29 @@ any tier × group combination (e.g. the coverage-instrumented test check is name
 `llvm-cov`, not `test`, so that group names like `anvil-pr-test` unambiguously refer to a group recipe).
 
 The `pr-slow` work is split into independent cloud-workflow-visible groups
-(`pr-test`, `pr-msrv`, `pr-runtime-analysis`, `pr-mutants`) so they run as parallel cloud-workflow jobs/stages.
+(`pr-test`, `pr-msrv`, `pr-runtime-analysis`, `pr-fuzzing`, `pr-mutants`) so they run as parallel cloud-workflow jobs/stages.
 A convenience umbrella `anvil-pr-slow` recipe is also provided for local
-use; it invokes those groups sequentially. `pr-mutants` (mutants) is
-diff-scoped against the PR base; `scheduled-exhaustive` runs the
-full-workspace mutants recipe:
+use; it invokes those groups sequentially. `pr-fuzzing` runs affected-package
+Bolero smoke checks and is Linux-only in CI. `pr-mutants` is diff-scoped
+against the PR base; `scheduled-exhaustive` runs the full-workspace mutants recipe:
 
 ```just
-anvil-pr-fast: anvil-fmt anvil-clippy anvil-check-all-targets anvil-cargo-sort \
+anvil-pr-fast: anvil-fmt anvil-clippy anvil-cargo-sort \
                anvil-license-headers \
                anvil-ensure-no-cyclic-deps anvil-ensure-no-default-features \
                anvil-doc-build anvil-readme-check anvil-spellcheck anvil-pr-title \
                anvil-deny anvil-audit anvil-udeps anvil-semver-check \
                anvil-external-types anvil-aprz
 
-anvil-pr-slow: anvil-pr-test anvil-pr-msrv anvil-pr-runtime-analysis anvil-pr-mutants
+anvil-pr-slow: anvil-pr-test anvil-pr-msrv anvil-pr-runtime-analysis anvil-pr-fuzzing anvil-pr-mutants
 anvil-pr-test: anvil-llvm-cov anvil-doc-test anvil-examples
 anvil-pr-msrv: anvil-msrv-test
-anvil-pr-runtime-analysis: anvil-miri anvil-careful anvil-loom anvil-bolero
+anvil-pr-runtime-analysis: anvil-miri anvil-careful anvil-loom
+anvil-pr-fuzzing: anvil-bolero
 anvil-pr-mutants: anvil-mutants-diff
 
-anvil-scheduled-test: anvil-llvm-cov anvil-doc-test anvil-examples
+anvil-scheduled-test: anvil-check-all-targets anvil-llvm-cov anvil-doc-test anvil-examples \
+                      (anvil-bolero "scheduled")
 anvil-scheduled-advisories: anvil-deny anvil-audit anvil-aprz anvil-clippy
 anvil-scheduled-runtime-analysis: anvil-miri anvil-miri-tree-borrows \
                                   anvil-miri-strict-provenance anvil-miri-race-coverage
@@ -207,7 +210,7 @@ anvil-full: anvil-pr anvil-scheduled
    Component installs depend on the matching toolchain install.
 5. **Per-tool recipes** — `anvil-tool-<bin>-install installer="install"` and
    `anvil-tool-<bin>-validate-prereqs` for every cargo subcommand the catalog needs
-   (`cargo-nextest`, `cargo-llvm-cov`, `cargo-mutants`, …) plus `rustc` and `pwsh`.
+   (`cargo-nextest`, `cargo-llvm-cov`, `cargo-gamma`, …) plus `rustc` and `pwsh`.
    `installer` selects `cargo install` vs `cargo binstall`.
 6. **Per-check / per-group / per-tier / global setup** — composition layer; see §3.3.
 
@@ -288,7 +291,7 @@ already present at or above its pin and fails with a one-line install hint other
   `cargo-clippy` (a default-toolchain component) and `rustc`, and nothing else.
 - `anvil-<group>-setup installer="install"` — depends on every per-check setup
   in the group. cloud workflows matrix jobs call this so a `pr-fast` leg never installs
-  cargo-mutants.
+  cargo-gamma.
 - `anvil-<tier>-setup installer="install"` — depends on every per-group setup
   in the tier. Local "I want to run the whole PR tier" convenience.
 - `anvil-setup installer="install"` — depends on every per-tier setup. The
@@ -498,14 +501,17 @@ a group's `*-setup` recipe). There is no env-file duplicate.
 **Two pins, not one.** `rust_nightly` is the general-purpose nightly used by udeps, miri,
 careful. `rust_nightly_external_types` is intentionally narrower: it's tied to the rustdoc
 JSON schema version that the currently-selected `cargo-check-external-types` release
-accepts. Bump it alongside `cargo-check-external-types` upgrades, not on the general
-cadence. When the two pins resolve to the same date the setup composite installs only one
+accepts. Bump it alongside `cargo-check-external-types` upgrades or to support the
+workspace's minimum Rust version, not on the general cadence. When the two pins resolve to the same date the setup composite installs only one
 toolchain.
 
 **Bump policy.** The general `rust_nightly` is intended to move on a regular cadence
 (monthly is a reasonable default) so adopters absorb nightly drift in predictable chunks.
-`rust_nightly_external_types` moves only when `cargo-check-external-types` releases a new
-version that targets a newer rustdoc JSON schema. Both bumps are normal `cargo anvil
+`rust_nightly_external_types` moves when `cargo-check-external-types` releases a new
+version that targets a newer rustdoc JSON schema. It can also move within the accepted
+schema version when the workspace's minimum Rust version requires a newer nightly.
+Make sure that the selected nightly uses the accepted schema. Run the external-types
+check before retaining that schema-preserving update. Both bumps are normal `cargo anvil
 update` operations: edit `versions.just`, regenerate, validate, commit. Adopters are free
 to override either pin in their `versions.just` (it's an owned file) — the next run sees
 the dirt and emits a `.anvil-proposed` sibling instead of overwriting.
@@ -532,8 +538,8 @@ a CI shell and threading the result between jobs as environment variables.
 
 | Artifact                     | Purpose                                                                 |
 |------------------------------|-------------------------------------------------------------------------|
-| `snapshots/baseline.json`    | cargo-delta snapshot of the base ref. Cached, keyed on the composite of the base commit sha **and** the effective `.delta.toml` identity (`baseline.key` stores `<base-sha> <config-hash>`) — the expensive throwaway-worktree snapshot is retaken when the base moves *or* the cargo-delta config changes, so the baseline is never diffed against a current snapshot captured under different rules. |
-| `snapshots/current.json`     | cargo-delta snapshot of the working tree. Cached, keyed on the HEAD sha (`current.key`); the dirty-tree guard widens instead of snapshotting, so a snapshotted tree always corresponds exactly to HEAD. |
+| `snapshots/baseline.json`    | cargo-delta snapshot of the base ref. Cached, keyed on the base commit sha, effective `.delta.toml` identity, and pinned cargo-delta version (`baseline.key` stores `<base-sha> <config-hash> <cargo-delta-version>`). The expensive throwaway-worktree snapshot is retaken when any input changes, preventing reuse across incompatible rules or snapshot formats. |
+| `snapshots/current.json`     | cargo-delta snapshot of the working tree. Cached, keyed on the HEAD sha and pinned cargo-delta version (`current.key` stores `<HEAD-sha> <cargo-delta-version>`). Tool upgrades invalidate both snapshots, including existing versionless cache entries. The dirty-tree guard widens instead of snapshotting, so a snapshotted tree always corresponds exactly to HEAD. |
 | `impact.json`                | the `cargo delta impact --format json` report (the durable source of truth). An unchanged tree yields an empty impact set, which cargo-delta reports either as a report with empty tiers or by printing nothing at all, in which case the recipe stores `{}`. A bare `{}` is therefore not a reliable "nothing changed" signal: the dirty-tree and baseline-without-a-workspace paths also write `{}` as a synthetic placeholder while widening every tier to `--workspace`. Read the `include_<tier>.txt` files for the scope actually selected. |
 | `include_<tier>.txt`         | the pre-projected per-tier scope string (see below), one file per tier. |
 | `doctest_packages.txt`       | Ordinally sorted `name@version` specs for workspace members with at least one metadata target marked `doctest = true`. It is projected from the formatter's locked metadata read and lets doc-test avoid rereading target capabilities. |
@@ -592,18 +598,17 @@ deletes any older capability projection first, so a stale file cannot suppress a
 added or newly doctest-capable workspace member.
 
 `_anvil-impact-format` **fails the recipe** (non-zero exit, aborting `anvil-impact`)
-when at least one name cargo-delta reported cannot be resolved to exactly one workspace
-package. The helper resolves each reported name against three namespaces: the exact cargo
-package name, the library/proc-macro target name (snake_case, for crates whose package and
-lib names differ), and the manifest-directory leaf (for deeply nested workspaces where
-cargo-delta emits a directory name). A name is unresolvable when it maps to **no** package
-*or* to **more than one** distinct package (a genuinely ambiguous identifier). Because
-cargo-delta reports *library* identifiers rather than unique cargo specs, an unresolvable
-name signals a gap in this reverse-mapping — not a scoping decision — so the helper logs
-`cargo-delta returned unknown package '<name>'` or `cargo-delta returned ambiguous package
-identifier '<name>'` to stderr and exits non-zero rather than guessing (and risking a
-silently under-scoped tier that skips a check). Failing hard surfaces the mapping gap so it
-gets fixed, instead of masking it behind a silently full-workspace run.
+when at least one package name cargo-delta reported is absent from the workspace.
+The pinned cargo-delta reports JSON tiers as Cargo package names. The helper
+uses an Ordinal (case-sensitive) package-name lookup over workspace members from locked
+Cargo metadata, then reads each matched package's version to produce its Cargo selector.
+Cargo enforces unique package names within a workspace, so each reported name has
+either one exact match or none.
+Library/proc-macro target names and manifest-directory leaves are not aliases: they can
+coincide with another package's name without affecting the lookup. An unknown name
+signals a report/metadata mismatch, not a scoping decision. The helper logs
+`cargo-delta returned unknown package '<name>'` to stderr and exits non-zero rather than
+silently dropping affected work or masking the mismatch behind a full-workspace run.
 
 Formatting illustrates the modified-tier contract. The tier decides only whether
 the recipe runs. Once admitted, the recipe validates its pinned tools and uses
@@ -727,6 +732,18 @@ baseline — so an environment without the base ref must either provide it, run 
 
 ## 5. Miri execution customization
 
+`anvil-miri-setup` installs the Miri and rust-src components for the catalog's
+pinned nightly, then runs `cargo +<nightly> miri setup` to prepare its sysroot:
+the standard-library artifacts Miri uses to interpret tests.
+Setup is not complete until sysroot preparation succeeds; Cargo's failure exit
+code is preserved. This also applies when setup is reached through a group,
+tier, or the global `anvil-setup` recipe. Preparing a missing sysroot can compile
+standard-library dependencies and require registry access; component installation
+alone does not make Miri ready to run. Repeated setup reuses Miri's cached sysroot.
+Container catalogs remain responsible for sysroot location, credentials,
+permissions, and cleanup. The test runner still invokes setup with
+`--print-sysroot` to locate or prepare the sysroot at execution time.
+
 Miri compiles the selected package scope once, then executes each compiled Miri
 test executable concurrently. `ANVIL_MIRI_JOBS` overrides the default of one
 artifact worker per logical processor and must be a positive integer. The worker
@@ -737,6 +754,13 @@ setting unchanged.
 The standard, Tree Borrows, strict-provenance, and race-coverage recipes share
 this compile-once execution behavior. Each stricter profile applies its
 documented Miri flags and matching `miri_<profile>` cfg before compilation.
+
+Direct execution uses the matching nightly's Miri sysroot, runner, and package
+working directory. Native proc-macro tests also need that toolchain's target
+library directory. The recipes prepend it to `PATH` on Windows,
+`DYLD_FALLBACK_LIBRARY_PATH` on macOS, or `LD_LIBRARY_PATH` on Linux.
+They preserve caller entries and retain the default macOS search directories
+when the caller supplies none.
 
 Packages whose own test targets are inherently unsuitable or unproductive under
 Miri can declare:
@@ -868,88 +892,74 @@ Customizing the *contents* of `justfiles/anvil/*.just` is supported — they're 
 so editing them flips them to "dirty" and the next `update` writes a `.anvil-proposed`
 sibling instead of overwriting. See [updates.md](./updates.md) for the lifecycle.
 
-## 9. Platform-specific mutation configuration
+## 9. Mutation testing with cargo-gamma
 
-### Why this is needed
+Anvil requires cargo-gamma 0.4.0 or newer. The public recipes
+`anvil-mutants-diff`, `anvil-mutants-full`, and `anvil-pr-mutants` use Gamma.
 
-Cargo-mutants 27.1.0 discovers and mutates Rust source without evaluating
-platform-conditional compilation. Its [documented limitations][mutants-cfg]
-explicitly warn that functions for other platforms can be reported as missed.
-For example, it can change a function guarded by `#[cfg(windows)]` during a Linux
-run. The source is mutated, but the compiler excludes that function, so the
-change introduces no behavioral mutation into the code under test. The tests
-continue to pass and cargo-mutants reports `MISSED`: a false indication of a
-test gap on that platform, not a mutation those tests could have detected.
-This does not establish test coverage on the platform where the function is
-actually compiled.
+Both recipes invoke `cargo gamma run --workspace --min-score 100 --max-flaky 0`.
+The PR recipe additionally passes `--in-diff` a unified diff of the resolved
+base against the working tree, including uncommitted changes. Impact scoping
+still skips an empty affected-package set; otherwise Gamma filters mutation
+sites by changed lines across the workspace, including non-default members.
+The scheduled recipe runs the whole workspace without a diff.
 
-There is no native platform-conditional exclusion table in that version's
-[configuration schema][mutants-config-source]: `exclude_globs` and `exclude_re`
-are unconditional lists. A conditional skip attribute is not a workaround:
-the [attribute documentation][mutants-attributes] states that cargo-mutants does
-not evaluate the `cfg_attr` condition. Thus
-`#[cfg_attr(windows, mutants::skip)]` suppresses mutations on other platforms too.
+The explicit gates are important: Gamma otherwise permits a completed campaign
+with survivors to exit successfully. A score below 100 or any unresolved flaky
+outcome fails the check. Timeouts and out-of-memory outcomes do not count as
+assertion kills. Native exit codes, including infrastructure and baseline
+failures, propagate unchanged.
 
-Anvil therefore selects a complete native configuration for the current OS,
-using cargo-mutants' existing [`--config` option][mutants-config-file].
-Duplicating common policy is intentional: it avoids both a custom metadata
-schema and an Anvil-owned configuration merger while retaining native matching.
+After every invoked campaign returns, both recipes unconditionally run
+`cargo gamma hints` with the same selected toolchain to update
+`gamma-hints.yaml`. This also happens when score gates or the campaign fail.
+Ordinary hint promotion merges the campaign's knowledge rather than replacing
+hints outside a diff-scoped population. The campaign's nonzero exit code takes
+precedence over a hint-promotion failure; when the campaign succeeds, a
+hint-promotion failure fails the recipe. No hints command runs when impact
+scoping skips the campaign or a prerequisite fails before it starts.
 
-### File selection
+An empty impact scope remains an explicit successful skip. Within an affected
+scope, a diff-scoped campaign with no mutation sites also succeeds, including
+comment-only diffs; hint promotion still runs after Gamma exits. An empty
+full-workspace campaign or a nonempty but wholly ungradeable population fails
+the applicable gates. Empty diff selections never hide infrastructure or
+baseline failures. Anvil does not preflight discovery to change these outcomes.
 
-`anvil-mutants-diff` and `anvil-mutants-full` select an optional native
-cargo-mutants configuration by the executing host OS:
+Gamma reads the workspace's native `gamma.toml`, or uses its defaults when
+that file is absent. Anvil does not generate, merge, or override that policy
+except for the workspace selection, diff scope, strict gates, and GitHub report
+destination described here.
+Mutator selection, Cargo features, build profile, test selection, concurrency,
+and memory policy follow Gamma's configuration and defaults. In particular,
+Anvil does not pass cargo-mutants' `--jobs 0` or `--no-shuffle` flags.
+On GitHub Actions (`GITHUB_ACTIONS=true`), both recipes explicitly pass
+`--artifact-dir target/cargo-gamma`, overriding any native `artifact-dir` so
+report execution and the artifact/SARIF uploads agree. Local and ADO runs
+honor the configured report directory, defaulting to `target/cargo-gamma`.
 
-| Host | Preferred configuration |
-|------|-------------------------|
-| Linux | `.cargo/mutants.linux.toml` |
-| Windows | `.cargo/mutants.windows.toml` |
-| Other hosts | `.cargo/mutants.<os>.toml`, using Just's `os()` name |
+Gamma evaluates conditional compilation and conditional `gamma::skip`
+attributes. Both recipes use the same native configuration on every supported
+host, including Windows ARM. The GitHub PR workflow uses its
+Windows x64 campaign and compatibility contexts, and scheduled exhaustive
+workflows retain their Linux/Windows x64 matrix to bound recurring cost.
+ADO recipes also work on adopters' supported self-hosted ARM pools.
 
-If that file exists at the workspace root, both recipes pass
-`--config=.cargo/mutants.<os>.toml`. Otherwise neither recipe adds a config
-argument: cargo-mutants reads `.cargo/mutants.toml`, or uses its defaults if
-that file is absent. Files for other hosts do not affect selection.
-The same OS configuration applies across architectures.
-A selected file that cannot be read or parsed fails in cargo-mutants; it does
-not fall back to another configuration.
+### Migrating existing repositories
 
-Each platform file is a **complete native configuration**. Cargo-mutants does
-not merge it with `.cargo/mutants.toml`: duplicate shared exclusions, regexes,
-features, test-package settings, and other policy where needed. For example,
-platform files can each retain the common exclusions and add native
-`exclude_globs` for the other platform's packages, directories, or source files.
-There is no Anvil metadata schema, glob matcher, or configuration merger.
+Regenerate with the updated Anvil, then run `just anvil-pr-mutants-setup`.
+Gamma 0.4.0 must be published before releasing an Anvil version that requires
+it or running the updated setup in CI. That release must include diff inventory
+support for nonmutation targets, so PRs changing integration tests are accepted.
+Existing cargo-mutants installations need not be uninstalled.
 
-Selection uses only Just's `os()`, `path_exists()`, and conditional expressions;
-it does not launch PowerShell, Bash, Cargo metadata, or a helper executable.
-The existing recipe wrappers and prerequisites still use PowerShell, but this
-selector does not depend on their interpreter and can remain when they migrate.
-The selected OS is the native host, not a cross-compilation target.
-
-Existing impact and Windows ARM skips, diff scoping, baseline defaults, worker
-counts, and exit-code handling are unchanged. Plain `cargo mutants` and legacy
-recipes do not automatically select these platform filenames. Keep their
-existing `.cargo/mutants.toml` unchanged during side-by-side adoption, and pass
-`--config` explicitly when reproducing a platform-specific run without Anvil.
-
-### Future direction: conditional source attributes
-
-Cargo-gamma's implementation already [covers conditional `gamma::skip`
-attributes][gamma-conditional-skips], including not suppressing a site when its
-`cfg_attr` predicate is false. Once a suitable release is available and adopted
-by Anvil, conditional source attributes such as
-`#[cfg_attr(windows, gamma::skip)]` are expected to be preferable for
-source-local platform exceptions: the policy stays beside the affected code
-and need not be duplicated across OS configuration files.
-
-This is a future migration option, not a backend change in this feature.
-Existing `mutants::skip` annotations would need review because
-[cargo-gamma does not interpret them][gamma-mutants-skips].
-
-[mutants-cfg]: https://github.com/sourcefrog/cargo-mutants/blob/v27.1.0/book/src/limitations.md#limitations-and-known-bugs
-[mutants-config-source]: https://github.com/sourcefrog/cargo-mutants/blob/v27.1.0/src/config.rs
-[mutants-attributes]: https://github.com/sourcefrog/cargo-mutants/blob/v27.1.0/book/src/attrs.md
-[mutants-config-file]: https://github.com/sourcefrog/cargo-mutants/blob/v27.1.0/book/src/config-file.md
-[gamma-conditional-skips]: https://github.com/microsoft/ox-tools/blob/f683d6a9041fe5a32a6f09fa64d82a5000378d55/crates/cargo-gamma-lib/src/suppress/tests.rs#L177-L215
-[gamma-mutants-skips]: https://github.com/microsoft/ox-tools/blob/f683d6a9041fe5a32a6f09fa64d82a5000378d55/crates/cargo-gamma-lib/src/suppress/tests.rs#L35-L61
+The former `.cargo/mutants.toml` and `.cargo/mutants.<os>.toml` files are
+user-owned and are neither deleted nor consumed by the new recipes. Review
+their policy and translate applicable settings into native `gamma.toml` keys,
+such as `exclude-files`, `features`, `all-features`, `profile`, and
+`test-packages`. The mutation catalogs and configuration schemas differ:
+there is no automatic conversion, and historical scores are not comparable.
+Review existing `mutants::skip` annotations explicitly; Gamma does not
+interpret them. Use narrowly justified Gamma suppressions, including
+conditional source attributes where appropriate, rather than copying broad
+platform exclusion lists.

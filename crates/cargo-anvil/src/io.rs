@@ -3,7 +3,8 @@
 
 //! Trivial filesystem helpers shared across emit/plan paths.
 
-use std::path::Path;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 
 use ohno::{AppError, IntoAppError as _, app_err};
 
@@ -14,7 +15,6 @@ use ohno::{AppError, IntoAppError as _, app_err};
 ///
 /// Returns an error if reading the file fails for a reason other than
 /// `NotFound` (e.g., permissions, invalid UTF-8).
-#[mutants::skip] // Trivial `fs::read_to_string` + `NotFound` passthrough; mutations on its match guard / Ok arms are not behavior-meaningful and exhaustively exercised via every plan/emit path.
 pub fn read_file_if_present(path: &Path) -> Result<Option<String>, AppError> {
     match std::fs::read_to_string(path) {
         Ok(s) => Ok(Some(s)),
@@ -96,6 +96,120 @@ fn directory_entry_names(dir: &Path) -> Result<Option<Vec<String>>, AppError> {
     })
 }
 
+#[derive(Debug)]
+pub(crate) struct RepositoryIo<'a> {
+    pub root: &'a Path,
+}
+
+impl crate::UpdateIo for RepositoryIo<'_> {
+    fn read_file(&self, path: &Path) -> Result<Option<String>, AppError> {
+        read_file_if_present(&self.root.join(path))
+    }
+
+    fn read_directory(&self, path: &Path) -> Result<Option<Vec<crate::RepositoryEntry>>, AppError> {
+        let absolute = self.root.join(path);
+        read_repository_directory_with(&absolute, |path| {
+            std::fs::read_dir(path).map(|entries| {
+                entries.map(|entry| {
+                    entry.and_then(|entry| {
+                        repository_entry_with(
+                            entry.file_name(),
+                            entry.file_type(),
+                            std::fs::FileType::is_dir,
+                            std::fs::FileType::is_symlink,
+                            || entry.path().is_dir(),
+                        )
+                    })
+                })
+            })
+        })
+    }
+
+    fn write_file(&mut self, path: &Path, content: &str) -> Result<(), AppError> {
+        write_repository_file_with(
+            self.root,
+            path,
+            content,
+            crate::plan::contained_path,
+            crate::plan::write_file,
+            crate::manifest::save_text,
+        )
+    }
+
+    fn remove_file(&mut self, path: &Path) -> std::io::Result<()> {
+        remove_repository_file_with(self.root, path, crate::plan::contained_path, |destination| {
+            std::fs::remove_file(destination)
+        })
+    }
+}
+
+fn read_repository_directory_with<I: IntoIterator<Item = std::io::Result<crate::RepositoryEntry>>>(
+    dir: &Path,
+    read: impl FnOnce(&Path) -> std::io::Result<I>,
+) -> Result<Option<Vec<crate::RepositoryEntry>>, AppError> {
+    let entries = match read(dir) {
+        Ok(entries) => entries,
+        Err(error) if matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) => return Ok(None),
+        Err(error) => return Err::<_, _>(error).into_app_err_with(|| format!("failed to read directory {}", dir.display())),
+    };
+    entries
+        .into_iter()
+        .collect::<std::io::Result<Vec<_>>>()
+        .into_app_err_with(|| format!("failed to enumerate directory {}", dir.display()))
+        .map(Some)
+}
+
+fn repository_entry_with<T>(
+    name: OsString,
+    file_type: std::io::Result<T>,
+    is_directory: impl FnOnce(&T) -> bool,
+    is_symlink: impl FnOnce(&T) -> bool,
+    symlink_target_is_directory: impl FnOnce() -> bool,
+) -> std::io::Result<crate::RepositoryEntry> {
+    let file_type = file_type?;
+    Ok(crate::RepositoryEntry::new(
+        name,
+        is_directory(&file_type) || (is_symlink(&file_type) && symlink_target_is_directory()),
+    ))
+}
+
+fn write_repository_file_with(
+    root: &Path,
+    path: &Path,
+    content: &str,
+    contained: impl FnOnce(&Path, &str) -> Result<PathBuf, AppError>,
+    write: impl FnOnce(&Path, &str) -> Result<(), AppError>,
+    save_manifest: impl FnOnce(&Path, &str) -> Result<(), AppError>,
+) -> Result<(), AppError> {
+    if path == Path::new(crate::manifest::MANIFEST_FILE_NAME) {
+        return save_manifest(root, content);
+    }
+    let relative = path.to_string_lossy().replace('\\', "/");
+    let destination = contained(root, &relative)?;
+    write(&destination, content)
+}
+
+fn remove_repository_file_with(
+    root: &Path,
+    path: &Path,
+    contained: impl FnOnce(&Path, &str) -> Result<PathBuf, AppError>,
+    remove: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let relative = path.to_string_lossy().replace('\\', "/");
+    let destination = contained(root, &relative).map_err(std::io::Error::other)?;
+    remove(&destination)
+}
+
+pub(crate) fn resolve_with_io(io: &dyn crate::UpdateIo, root: &Path, path: &str) -> Result<String, AppError> {
+    resolve_case_insensitive_with(root, path, |dir, name| {
+        find_entry_case_insensitive_with(dir, name, |dir| {
+            Ok(io
+                .read_directory(dir)?
+                .map(|entries| entries.into_iter().map(|entry| entry.name.to_string_lossy().into_owned()).collect()))
+        })
+    })
+}
+
 fn directory_entry_names_with<I: IntoIterator<Item = std::io::Result<String>>>(
     dir: &Path,
     read: impl FnOnce(&Path) -> std::io::Result<I>,
@@ -114,7 +228,11 @@ fn selected_entry_with_context(selected: Result<Option<String>, Vec<String>>, di
     selected.map_err(|matches| {
         app_err!(
             "cannot resolve path segment '{name}' in {} because these entries differ only by ASCII case: {}",
-            dir.display(),
+            if dir.as_os_str().is_empty() {
+                "the repository root".to_owned()
+            } else {
+                dir.display().to_string()
+            },
             matches.join(", ")
         )
     })
@@ -148,9 +266,229 @@ fn select_entry_case_insensitive(entries: impl IntoIterator<Item = String>, name
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use std::cell::Cell;
+
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn repository_directory_absence_and_empty_listing_are_distinct() {
+        let dir = Path::new("repository").join("catalog");
+        for kind in [std::io::ErrorKind::NotFound, std::io::ErrorKind::NotADirectory] {
+            assert_eq!(
+                read_repository_directory_with(&dir, |requested| {
+                    assert_eq!(requested, dir);
+                    Err::<Vec<std::io::Result<crate::RepositoryEntry>>, _>(kind.into())
+                })
+                .unwrap(),
+                None
+            );
+        }
+        assert_eq!(
+            read_repository_directory_with(&dir, |_| Ok(Vec::<std::io::Result<crate::RepositoryEntry>>::new())).unwrap(),
+            Some(Vec::new())
+        );
+        let entries = vec![
+            crate::RepositoryEntry::new("second", false),
+            crate::RepositoryEntry::new("first", true),
+        ];
+        assert_eq!(
+            read_repository_directory_with(&dir, |_| Ok(entries.iter().cloned().map(Ok))).unwrap(),
+            Some(entries)
+        );
+    }
+
+    #[test]
+    fn repository_directory_errors_retain_their_stage_and_cause() {
+        let dir = Path::new("repository").join("catalog");
+        let failure = || std::io::Error::new(std::io::ErrorKind::PermissionDenied, "scripted directory failure");
+        for (result, context) in [
+            (
+                read_repository_directory_with(&dir, |_| Err::<Vec<std::io::Result<crate::RepositoryEntry>>, _>(failure())),
+                "failed to read directory",
+            ),
+            (
+                read_repository_directory_with(&dir, |_| Ok(vec![Err(failure())])),
+                "failed to enumerate directory",
+            ),
+            (
+                read_repository_directory_with(&dir, |_| {
+                    Ok(vec![repository_entry_with(
+                        "denied".into(),
+                        Err::<(), _>(failure()),
+                        |()| panic!("failed cached metadata must not be classified"),
+                        |()| panic!("failed cached metadata must not be classified"),
+                        || panic!("failed cached metadata must not trigger a target lookup"),
+                    )])
+                }),
+                "failed to enumerate directory",
+            ),
+        ] {
+            let error = result.expect_err("directory read, entry and metadata errors must propagate");
+            let cause = error.find_source::<std::io::Error>().expect("the I/O cause is retained");
+            assert_eq!(cause.kind(), std::io::ErrorKind::PermissionDenied);
+            assert_eq!(cause.to_string(), "scripted directory failure");
+            assert!(error.to_string().contains(&format!("{context} {}", dir.display())), "{error}");
+        }
+    }
+
+    #[test]
+    fn repository_entries_use_cached_types_and_follow_only_symlinks() {
+        for (is_directory, is_symlink, target_is_directory, expected) in [
+            (true, false, true, true),
+            (false, false, false, false),
+            (false, true, true, true),
+            (false, true, false, false),
+        ] {
+            let target_lookups = Cell::new(0);
+            let entry = repository_entry_with(
+                "entry".into(),
+                Ok((is_directory, is_symlink)),
+                |file_type| file_type.0,
+                |file_type| file_type.1,
+                || {
+                    assert!(is_symlink, "ordinary entries must use cached file types");
+                    target_lookups.set(target_lookups.get() + 1);
+                    target_is_directory
+                },
+            )
+            .unwrap();
+            assert_eq!(entry, crate::RepositoryEntry::new("entry", expected));
+            assert_eq!(target_lookups.get(), u32::from(is_symlink));
+        }
+    }
+
+    #[test]
+    fn repository_writes_normalize_paths_and_forward_content() {
+        let root = Path::new("repository");
+        let destination = root.join("resolved.txt");
+        for path in ["folder/nested/file.txt", r"folder\nested\file.txt", r"folder\nested/file.txt"] {
+            let phase = Cell::new(0);
+            write_repository_file_with(
+                root,
+                Path::new(path),
+                "replacement",
+                |requested_root, relative| {
+                    assert_eq!(requested_root, root);
+                    assert_eq!(relative, "folder/nested/file.txt");
+                    phase.set(1);
+                    Ok(destination.clone())
+                },
+                |requested, content| {
+                    assert_eq!(phase.get(), 1);
+                    assert_eq!(requested, destination);
+                    assert_eq!(content, "replacement");
+                    phase.set(2);
+                    Ok(())
+                },
+                |_, _| panic!("ordinary writes must not save the manifest"),
+            )
+            .unwrap();
+            assert_eq!(phase.get(), 2);
+        }
+    }
+
+    #[test]
+    fn repository_writes_stop_at_containment_errors_and_propagate_write_errors() {
+        let root = Path::new("repository");
+        let path = Path::new("outside.txt");
+        let error = write_repository_file_with(
+            root,
+            path,
+            "replacement",
+            |_, _| Err(app_err!("outside repository")),
+            |_, _| panic!("containment failure must prevent writing"),
+            |_, _| panic!("ordinary writes must not save the manifest"),
+        )
+        .unwrap_err();
+        assert_eq!(error.message(), "outside repository");
+
+        let error = write_repository_file_with(
+            root,
+            path,
+            "replacement",
+            |_, _| Ok(root.join(path)),
+            |_, _| Err(app_err!("write denied")),
+            |_, _| panic!("ordinary writes must not save the manifest"),
+        )
+        .unwrap_err();
+        assert_eq!(error.message(), "write denied");
+    }
+
+    #[test]
+    fn repository_manifest_writes_use_the_manifest_writer_and_retain_errors() {
+        let root = Path::new("repository");
+        for fails in [false, true] {
+            let saved = Cell::new(false);
+            let result = write_repository_file_with(
+                root,
+                Path::new(crate::manifest::MANIFEST_FILE_NAME),
+                "manifest contents",
+                |_, _| panic!("the manifest writer owns its containment check"),
+                |_, _| panic!("the manifest must not use the ordinary writer"),
+                |requested_root, content| {
+                    assert_eq!(requested_root, root);
+                    assert_eq!(content, "manifest contents");
+                    saved.set(true);
+                    if fails { Err(app_err!("manifest denied")) } else { Ok(()) }
+                },
+            );
+            assert!(saved.get());
+            if fails {
+                assert_eq!(result.unwrap_err().message(), "manifest denied");
+            } else {
+                result.unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn repository_removals_normalize_paths_and_use_the_contained_destination() {
+        let root = Path::new("repository");
+        let destination = root.join("resolved.txt");
+        for path in ["folder/nested/file.txt", r"folder\nested\file.txt", r"folder\nested/file.txt"] {
+            let phase = Cell::new(0);
+            remove_repository_file_with(
+                root,
+                Path::new(path),
+                |requested_root, relative| {
+                    assert_eq!(requested_root, root);
+                    assert_eq!(relative, "folder/nested/file.txt");
+                    phase.set(1);
+                    Ok(destination.clone())
+                },
+                |requested| {
+                    assert_eq!(phase.get(), 1);
+                    assert_eq!(requested, destination);
+                    phase.set(2);
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert_eq!(phase.get(), 2);
+        }
+    }
+
+    #[test]
+    fn repository_removals_stop_at_containment_errors_and_propagate_remove_errors() {
+        let root = Path::new("repository");
+        let path = Path::new("outside.txt");
+        let error = remove_repository_file_with(
+            root,
+            path,
+            |_, _| Err(app_err!("outside repository")),
+            |_| panic!("containment failure must prevent removal"),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::Other);
+        assert_eq!(error.to_string(), "outside repository");
+
+        for kind in [std::io::ErrorKind::PermissionDenied, std::io::ErrorKind::NotFound] {
+            let error = remove_repository_file_with(root, path, |_, _| Ok(root.join(path)), |_| Err(kind.into())).unwrap_err();
+            assert_eq!(error.kind(), kind);
+        }
+    }
 
     fn touch(root: &Path, rel: &str) {
         let path = root.join(rel);

@@ -40,8 +40,9 @@ pub(crate) fn evaluate_filtered_paths(
     lcov_paths: &[PathBuf],
     gated_packages: &[String],
     target: Option<&str>,
+    read: impl FnMut(&Path) -> io::Result<String>,
 ) -> Result<ExitCode, AppError> {
-    let lcov_texts = read_lcov_paths(lcov_paths)?;
+    let lcov_texts = read_lcov_paths_with_reader(lcov_paths, read)?;
     let lcov_refs = lcov_texts.iter().map(String::as_str).collect::<Vec<_>>();
     let report =
         evaluate_unfiltered_many_for_target(&lcov_refs, None, gated_packages, target).into_app_err("failed to evaluate coverage")?;
@@ -49,9 +50,13 @@ pub(crate) fn evaluate_filtered_paths(
 }
 
 fn read_lcov_paths(lcov_paths: &[PathBuf]) -> Result<Vec<String>, AppError> {
+    read_lcov_paths_with_reader(lcov_paths, |path| fs::read_to_string(path))
+}
+
+fn read_lcov_paths_with_reader(lcov_paths: &[PathBuf], mut read: impl FnMut(&Path) -> io::Result<String>) -> Result<Vec<String>, AppError> {
     let mut lcov_texts: Vec<String> = Vec::with_capacity(lcov_paths.len());
     for path in lcov_paths {
-        let text = fs::read_to_string(path).into_app_err(format!("failed to read lcov tracefile `{}`", path.display()))?;
+        let text = read(path).into_app_err(format!("failed to read lcov tracefile `{}`", path.display()))?;
         lcov_texts.push(text);
     }
     Ok(lcov_texts)
@@ -161,6 +166,42 @@ mod tests {
             quiet: false,
             command: None::<CoverageGateCommand>,
         }
+    }
+
+    #[test]
+    fn survivor_filtered_path_read_failures_do_not_reach_metadata_or_output() {
+        let missing = PathBuf::from("scripted-unreadable.info");
+        let reads = Cell::new(0);
+        let error = evaluate_filtered_paths(&args(), std::slice::from_ref(&missing), &[], None, |path| {
+            assert_eq!(path, missing);
+            reads.set(reads.get() + 1);
+            Err(io::Error::from(io::ErrorKind::NotFound))
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("failed to read lcov tracefile"), "{error}");
+        assert!(error.contains(&missing.display().to_string()), "{error}");
+        assert!(!error.contains("failed to load cargo workspace metadata"), "{error}");
+        assert_eq!(reads.get(), 1);
+    }
+
+    #[test]
+    fn filtered_evaluation_returns_malformed_lcov_with_its_operation_context() {
+        let input = PathBuf::from("scripted-malformed.info");
+        let error = evaluate_filtered_paths(&args(), std::slice::from_ref(&input), &[], None, |path| {
+            assert_eq!(path, input);
+            Ok(include_str!("../../../tests/fixtures/lcov/malformed.info").to_owned())
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("failed to evaluate coverage"), "{error}");
+        let expected = lcov::Report::from_reader(lcov::Reader::new(
+            include_bytes!("../../../tests/fixtures/lcov/malformed.info").as_slice(),
+        ))
+        .unwrap_err();
+        let cause = error
+            .find_source::<lcov::report::ParseError>()
+            .expect("evaluation must retain the original LCOV parser error");
+        assert_eq!(cause.to_string(), expected.to_string());
     }
 
     fn zero_threshold_report() -> (tempfile::TempDir, cargo_coverage_gate::EvaluatedReport) {

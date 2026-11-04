@@ -13,20 +13,20 @@ expression: render_tree(tmp.path())
 #
 # Re-declare BASE_IMAGE in the gap below to build on another base; a later ARG
 # wins, and the pins anvil maintains stay current.
-ARG BASE_IMAGE=docker.io/library/ubuntu:24.04@sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c538ea
+ARG BASE_IMAGE=docker.io/library/ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852
 # <<< anvil-managed: anvil-container-base-image
 
 # >>> anvil-managed: anvil-container-base
 FROM ${BASE_IMAGE}
 
-ARG JUST_VERSION=1.56.0
-ARG JUST_SHA256=fa2a8ec1015d9df5330941ade12437488fc40d33f9c9f8cd4eb70a26de11b639
-ARG POWERSHELL_VERSION=7.6.3
-ARG POWERSHELL_SHA256=856d0765d2332377f9d7a4aea76efdfde4de51446e7738dde2dfda41dba9e2a7
-ARG RUSTUP_VERSION=1.29.0
-ARG RUSTUP_SHA256=4acc9acc76d5079515b46346a485974457b5a79893cfb01112423c89aeb5aa10
-ARG CARGO_BINSTALL_VERSION=1.21.1
-ARG CARGO_BINSTALL_SHA256=630c8f8803a686aa6779497f0f0fb51d49822fb5fc3c514d8ced33b34e338e6e
+ARG JUST_VERSION=1.59.0
+ARG JUST_SHA256=409044617b6f06517c1035e55ca38c8c856ff8b650e41bc2aa1ef82d5903a23e
+ARG POWERSHELL_VERSION=7.6.9
+ARG POWERSHELL_SHA256=1da6d6d6035d651f20e70ddee7c4c15ac6ab8b9fb40ee92240d91263f28a884b
+ARG RUSTUP_VERSION=1.29.2
+ARG RUSTUP_SHA256=5be191e8c70a5007074254cb74d78dbfdd25cd5a61c27de7b8e5410122ec24f4
+ARG CARGO_BINSTALL_VERSION=1.26.2
+ARG CARGO_BINSTALL_SHA256=9e0e064f189a9abb9f8df5fb93c3c810ef5cc19e7212d998c7a64c9e4d3527d5
 
 ENV DEBIAN_FRONTEND=noninteractive \
     CARGO_HOME=/usr/local/cargo \
@@ -267,6 +267,10 @@ as the source of truth for local verification.
 - Regenerate crate README files with `just anvil-readme --fix`; do not edit
   generated crate README files manually.
 - Format source with `just anvil-fmt --fix`.
+- Generated GitHub Actions dependency pins are maintained by cargo-anvil.
+  Upgrade Anvil and regenerate rather than editing generated workflows.
+  Anvil excludes these files from existing Dependabot version-update jobs;
+  security updates are not suppressed.
 
 === .github/skills/cargo-anvil-adoption/SKILL.md ===
 ---
@@ -398,6 +402,7 @@ its failures first. Examples:
 - `just anvil-pr-test`
 - `just anvil-pr-msrv`
 - `just anvil-pr-runtime-analysis`
+- `just anvil-pr-fuzzing`
 - `just anvil-pr-mutants`
 
 When a check fails, fix the root cause and rerun that specific recipe instead of
@@ -766,43 +771,58 @@ anvil-bench-validate-prereqs: anvil-tool-rustc-validate-prereqs
 
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
-# Affected tier. Smoke-only fuzz pass via [bolero](https://crates.io/crates/bolero):
-# each fuzz target gets a 60-second libfuzzer run, just enough to
-# surface obvious crashes/hangs introduced by a PR without paying for
-# a long fuzzing campaign.
+# Fuzz passes via [bolero](https://crates.io/crates/bolero):
+# the default PR campaign uses a fixed run count and seed. The scheduled
+# campaign uses a time budget without specifying a seed.
 #
 # Linux-only: cargo-bolero's libfuzzer engine (and its bolero-afl
 # build dependency) only builds on Linux, so the recipe self-skips on
-# non-Linux hosts -- the pr-runtime-analysis Windows/ARM legs treat
-# bolero as a no-op rather than a failure. This matches oxidizer's
-# reference workflow, whose bolero job runs exclusively on ubuntu.
+# non-Linux hosts -- local non-Linux invocations treat bolero as a
+# no-op rather than a failure. CI schedules pr-fuzzing on Linux only.
+# This matches oxidizer's reference workflow, whose bolero job runs
+# exclusively on ubuntu.
 # Crates that ship bolero harnesses still get them compiled and
 # exercised as ordinary tests by anvil-llvm-cov on every leg; the
 # libfuzzer campaign is the Linux-only extra.
 #
-# Target discovery is `cargo +<nightly> bolero list --profile release` over the affected packages.
+# Discovery and execution use the pinned nightly's host target and release profile.
+# This avoids inheriting a prebuilt cargo-bolero binary's musl build target.
 # Crates with no bolero harness print zero targets and the recipe
 # no-ops. The libfuzzer engine requires nightly, so the test
-# invocation uses the pinned rust_nightly. Adopters who want longer
-# campaigns wire a separate scheduled job; anvil deliberately does
-# not ship a long-form fuzz tier (the failure surface is too
-# repo-specific to standardize).
+# invocation uses the pinned rust_nightly.
+# Scheduled-test selects the scheduled campaign and full-workspace scope.
 
-# Run Bolero tests for affected workspace packages.
+# Run Bolero tests with the PR or scheduled campaign.
 [group("anvil")]
 [script("pwsh", "-NoProfile")]
-anvil-bolero: anvil-bolero-validate-prereqs anvil-impact
+anvil-bolero campaign="pr":
     $ErrorActionPreference = 'Stop'
-    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
-    $impactExit = $LASTEXITCODE
-    if ($impactExit -ne 0) { exit $impactExit }
+    $campaign = '{{ replace(campaign, "'", "''") }}'
+    $campaignArgs = switch ($campaign) {
+        'pr' { @('--runs', '30000', '-S', '2027') }
+        'scheduled' { @('-T', '90s') }
+        default {
+            [Console]::Error.WriteLine("anvil-bolero: unknown campaign '$campaign'; expected 'pr' or 'scheduled'.")
+            exit 2
+        }
+    }
     if (-not $IsLinux) {
         Write-Host 'anvil-bolero: non-Linux host -- skipping (cargo-bolero/libfuzzer is Linux-only; harnesses still run under anvil-llvm-cov)'
         exit 0
     }
+    & "{{ just_executable() }}" anvil-bolero-validate-prereqs anvil-impact
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
+    $impactExit = $LASTEXITCODE
+    if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') {
         Write-Host 'anvil-bolero: no affected packages; skipping'
         exit 0
+    }
+    $hostTarget = & rustc '+{{ rust_nightly }}' --print host-tuple
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error 'anvil-bolero: pinned compiler host-target discovery failed'
+        exit $LASTEXITCODE
     }
     $packageSpecs = [System.Collections.Generic.List[string]]::new()
     if ($include -and $include -ne '--workspace') {
@@ -840,7 +860,7 @@ anvil-bolero: anvil-bolero-validate-prereqs anvil-impact
     # registry dependency shares the member's name and version.
     $targets = [System.Collections.Generic.List[object]]::new()
     foreach ($packageSpec in $packageSpecs) {
-        $targetsJson = & cargo {{_anvil_stable_toolchain_args}} each --package $packageSpec '--' cargo '+{{ rust_nightly }}' bolero list --profile release --package '{cargo-spec}'
+        $targetsJson = & cargo {{_anvil_stable_toolchain_args}} each --package $packageSpec '--' cargo '+{{ rust_nightly }}' bolero list --profile release --target $hostTarget --package '{cargo-spec}'
         if ($LASTEXITCODE -ne 0) {
             Write-Error "anvil-bolero: target discovery failed for package '$packageSpec'"
             exit $LASTEXITCODE
@@ -868,7 +888,7 @@ anvil-bolero: anvil-bolero-validate-prereqs anvil-impact
             exit 1
         }
         Write-Host "anvil-bolero: $($t.anvilPackageSpec)::${testName}"
-        & cargo {{_anvil_stable_toolchain_args}} each --package $t.anvilPackageSpec '--' cargo '+{{ rust_nightly }}' bolero test --profile release --engine libfuzzer -T 60s --package '{cargo-spec}' $testName
+        & cargo {{_anvil_stable_toolchain_args}} each --package $t.anvilPackageSpec '--' cargo '+{{ rust_nightly }}' bolero test --profile release --target $hostTarget --engine libfuzzer @campaignArgs --package '{cargo-spec}' $testName
         if ($LASTEXITCODE -ne 0) { $failed = $true }
     }
     if ($failed) { exit 1 }
@@ -1638,7 +1658,22 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
         # coverage-gate runs that target's tests without measuring coverage.
         '--no-coverage-target', 'aarch64-pc-windows-msvc'
     )
-    & cargo '+{{ rust_nightly }}' coverage-gate run @packageArgs @collectionArgs
+    $metadataOutput = (& cargo '+{{ rust_nightly }}' metadata --format-version 1 --no-deps --locked | Out-String)
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $metadata = ConvertFrom-Json -InputObject $metadataOutput
+    $ownsCollector = @(
+        $metadata.packages |
+            Where-Object { $_.name -ceq 'cargo-coverage-gate' -and $_.id -cin $metadata.workspace_members } |
+            ForEach-Object { $_.targets } |
+            Where-Object { $_.name -ceq 'cargo-coverage-gate' -and 'bin' -cin $_.kind }
+    ).Count -gt 0
+    if ($ownsCollector) {
+        $hostTarget = & rustc '+{{ rust_nightly }}' --print host-tuple
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & cargo '+{{ rust_nightly }}' run --locked --package cargo-coverage-gate --bin cargo-coverage-gate --target $hostTarget -- coverage-gate run @packageArgs @collectionArgs
+    } else {
+        & cargo '+{{ rust_nightly }}' coverage-gate run @packageArgs @collectionArgs
+    }
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # --- pr-test members (shared with scheduled-test) ---
@@ -1959,6 +1994,11 @@ _anvil-miri-test profile package="" test_filter="" example="": anvil-impact
     }
 
     $env:RUSTUP_TOOLCHAIN = '{{ rust_nightly }}'
+    if ($IsWindows) {
+        # Cargo 1.100's per-crate dependency paths exceed Windows' command limit.
+        # Pinned cargo-miri cannot read Cargo's argument-file fallback.
+        $env:__CARGO_TEMPORARY_BUILD_DIR_NEW_LAYOUT_OPT_OUT = '1'
+    }
     $include = (& "{{ just_executable() }}" _anvil-impact-exclude affected)
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
@@ -2144,6 +2184,27 @@ _anvil-miri-test profile package="" test_filter="" example="": anvil-impact
             Write-Error "anvil miri: cargo-miri was not found under '$toolchainBin'"
             exit 1
         }
+        $targetLibdirOutput = @(& rustc $toolchain --print target-libdir)
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        $targetLibdir = @(
+            $targetLibdirOutput |
+                Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }
+        ) | Select-Object -Last 1
+        if ([string]::IsNullOrWhiteSpace([string]$targetLibdir)) {
+            Write-Error "anvil miri: could not resolve the $toolchain target library directory"
+            exit 1
+        }
+        # Native proc-macro tests need the library search path Cargo normally supplies.
+        $libraryPathVariable = if ($IsWindows) { 'PATH' } elseif ($IsMacOS) { 'DYLD_FALLBACK_LIBRARY_PATH' } else { 'LD_LIBRARY_PATH' }
+        $inheritedLibraryPath = [Environment]::GetEnvironmentVariable($libraryPathVariable)
+        $libraryPaths = @(([string]$targetLibdir).Trim())
+        if ($inheritedLibraryPath) {
+            $libraryPaths += $inheritedLibraryPath
+        } elseif ($IsMacOS) {
+            if ($env:HOME) { $libraryPaths += Join-Path $env:HOME 'lib' }
+            $libraryPaths += '/usr/local/lib', '/usr/lib'
+        }
+        [Environment]::SetEnvironmentVariable($libraryPathVariable, ($libraryPaths -join [IO.Path]::PathSeparator))
         # Matching the recorded sentinel lets the runner suppress it before
         # launching Miri for interpretation.
         $env:MIRI_BE_RUSTC = 'host'
@@ -2229,9 +2290,13 @@ _anvil-miri-test profile package="" test_filter="" example="": anvil-impact
 
 # --- pr-runtime-analysis members ---
 
-# Install prerequisites for the `anvil-miri` recipe.
+# Install prerequisites and prepare the sysroot for the `anvil-miri` recipe.
 [private]
+[script("pwsh", "-NoProfile")]
 anvil-miri-setup installer="install": anvil-component-nightly-miri-install anvil-component-nightly-rust-src-install
+    $ErrorActionPreference = 'Stop'
+    & cargo '+{{ rust_nightly }}' miri setup
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Validate prerequisites for the `anvil-miri` recipe.
 [private]
@@ -2322,16 +2387,10 @@ anvil-msrv-test-validate-prereqs:
 
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
-# Affected tier. cargo-mutants does its own diff-scoping via --in-diff;
+# Affected tier. cargo-gamma does its own diff-scoping via --in-diff;
 # the affected-tier guard is the wiring-layer's coarse filter (if no
 # affected packages exist, the entire mutants run is pointless).
 #
-# Skip on aarch64-pc-windows-msvc: cargo-mutants doesn't build there
-# (upstream winapi incompatibility), so `_anvil-require cargo-mutants`
-# would fail. The merged pr-slow group runs on all four OS legs; mutants
-# is the only sub-recipe that can't follow, so it bails out early on the
-# affected leg. Coverage on the other three legs is unchanged.
-
 # Run mutation testing for changes relative to the base branch.
 [group("anvil")]
 [script("pwsh", "-NoProfile")]
@@ -2340,10 +2399,6 @@ anvil-mutants-diff: anvil-mutants-diff-validate-prereqs anvil-impact
     $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
-    if ($IsWindows -and ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64')) {
-        Write-Host 'anvil-mutants-diff: anvil-mutants-diff-validate-prereqs aarch64-pc-windows-msvc -- cargo-mutants does not build here (winapi); skipping'
-        exit 0
-    }
     if ($include -eq '--skip') {
         Write-Host 'anvil-mutants-diff: anvil-mutants-diff-validate-prereqs no affected packages; skipping'
         exit 0
@@ -2352,35 +2407,51 @@ anvil-mutants-diff: anvil-mutants-diff-validate-prereqs anvil-impact
     # across the impact steps and this recipe; see _anvil-base-ref).
     $base = (& "{{just_executable()}}" _anvil-base-ref)
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    # cargo-mutants --in-diff takes a FILE path containing a unified
+    # cargo-gamma --in-diff takes a FILE path containing a unified
     # diff, not a git revision range. Write the diff to a temp file
     # first. RUNNER_TEMP (GH) and AGENT_TEMPDIRECTORY (ADO) point at
     # the job's scratch dir; fall back to the system temp dir locally.
     $tmp_dir = $env:RUNNER_TEMP
     if (-not $tmp_dir) { $tmp_dir = $env:AGENT_TEMPDIRECTORY }
     if (-not $tmp_dir) { $tmp_dir = [System.IO.Path]::GetTempPath() }
-    $diff_path = Join-Path $tmp_dir 'anvil-mutants-diff.diff'
-    # Diff the base against the WORKING TREE, not against HEAD.
-    # cargo-mutants validates every line of the diff against the file on
-    # disk and aborts when they disagree, so a commit-to-commit diff fails
-    # the moment anything is uncommitted -- which is the normal local state,
-    # since the point of running a tier locally is to check work in progress.
-    # CI has a clean tree, so the two forms are identical there and this is
-    # not a behaviour change for it.
-    git diff "$base" --output=$diff_path
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    & cargo {{_anvil_stable_toolchain_args}} mutants --in-diff $diff_path --no-shuffle --jobs 0 {{_anvil_mutants_config_arg}}
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $diff_path = Join-Path $tmp_dir ('anvil-mutants-diff-' + [Guid]::NewGuid().ToString('N') + '.diff')
+    New-Item -ItemType File -Path $diff_path | Out-Null
+    # Include uncommitted local changes as well as commits after the base.
+    $exitCode = 0
+    $completed = $false
+    $reportArgs = @()
+    if ($env:GITHUB_ACTIONS -eq 'true') { $reportArgs = @('--artifact-dir', 'target/cargo-gamma') }
+    try {
+        git diff --src-prefix=a/ --dst-prefix=b/ "$base" --output=$diff_path
+        $exitCode = $LASTEXITCODE
+        if ($exitCode -eq 0) {
+            & cargo {{_anvil_stable_toolchain_args}} gamma run --workspace --in-diff $diff_path --min-score 100 --max-flaky 0 @reportArgs
+            $campaignExit = $LASTEXITCODE
+            & cargo {{_anvil_stable_toolchain_args}} gamma hints
+            $hintsExit = $LASTEXITCODE
+            $exitCode = $campaignExit
+            if ($exitCode -eq 0) { $exitCode = $hintsExit }
+        }
+        $completed = $true
+    } finally {
+        try {
+            Remove-Item -LiteralPath $diff_path
+        } catch {
+            if ($completed -and $exitCode -eq 0) { throw }
+            Write-Warning "Could not remove mutation diff '$diff_path': $_ (preserving the primary failure)"
+        }
+    }
+    exit $exitCode
 
 # --- pr-mutants members ---
 
 # Install prerequisites for the `anvil-mutants-diff` recipe.
 [private]
-anvil-mutants-diff-setup installer="install": (anvil-tool-cargo-mutants-install installer)
+anvil-mutants-diff-setup installer="install": (anvil-tool-cargo-gamma-install installer)
 
 # Validate prerequisites for the `anvil-mutants-diff` recipe.
 [private]
-anvil-mutants-diff-validate-prereqs: anvil-tool-cargo-mutants-validate-prereqs
+anvil-mutants-diff-validate-prereqs: anvil-tool-cargo-gamma-validate-prereqs
 
 === justfiles/anvil/checks/mutants-full.just ===
 # Copyright (c) Microsoft Corporation.
@@ -2399,23 +2470,25 @@ anvil-mutants-diff-validate-prereqs: anvil-tool-cargo-mutants-validate-prereqs
 [script("pwsh", "-NoProfile")]
 anvil-mutants-full: anvil-mutants-full-validate-prereqs
     $ErrorActionPreference = 'Stop'
-    if ($IsWindows -and ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64')) {
-        Write-Host 'anvil-mutants-full: aarch64-pc-windows-msvc -- cargo-mutants does not build here (winapi); skipping'
-        exit 0
-    }
-    & cargo {{_anvil_stable_toolchain_args}} mutants --workspace --no-shuffle --jobs 0 {{_anvil_mutants_config_arg}}
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $reportArgs = @()
+    if ($env:GITHUB_ACTIONS -eq 'true') { $reportArgs = @('--artifact-dir', 'target/cargo-gamma') }
+    & cargo {{_anvil_stable_toolchain_args}} gamma run --workspace --min-score 100 --max-flaky 0 @reportArgs
+    $campaignExit = $LASTEXITCODE
+    & cargo {{_anvil_stable_toolchain_args}} gamma hints
+    $hintsExit = $LASTEXITCODE
+    if ($campaignExit -ne 0) { exit $campaignExit }
+    exit $hintsExit
 
-# --- scheduled-exhaustive members (mutants-full reuses cargo-mutants;
+# --- scheduled-exhaustive members (mutants-full reuses cargo-gamma;
 #     cargo-hack and bench are dedicated tools) ---
 
 # Install prerequisites for the `anvil-mutants-full` recipe.
 [private]
-anvil-mutants-full-setup installer="install": (anvil-tool-cargo-mutants-install installer)
+anvil-mutants-full-setup installer="install": (anvil-tool-cargo-gamma-install installer)
 
 # Validate prerequisites for the `anvil-mutants-full` recipe.
 [private]
-anvil-mutants-full-validate-prereqs: anvil-tool-cargo-mutants-validate-prereqs
+anvil-mutants-full-validate-prereqs: anvil-tool-cargo-gamma-validate-prereqs
 
 === justfiles/anvil/checks/pr-title.just ===
 # Copyright (c) Microsoft Corporation.
@@ -2641,7 +2714,9 @@ anvil-readme-check-validate-prereqs: anvil-tool-cargo-doc2readme-validate-prereq
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Affected tier (compares changed crates' current API against the PR
-# target branch baseline; only changed crates' surface is at risk).
+# target branch baseline; only changed crates' surface is at risk). Generate
+# both rustdoc snapshots with each revision's lockfile, not the fresh consumer
+# resolution performed by cargo-semver-checks --baseline-rev.
 #
 # Several real-world conditions aren't actually SemVer violations:
 #   - bin-only crates have no API to compare (reported as a missing lib target).
@@ -2649,13 +2724,12 @@ anvil-readme-check-validate-prereqs: anvil-tool-cargo-doc2readme-validate-prereq
 #   - crates newly added since the PR base have no manifest at their
 #     current workspace-relative path in that baseline.
 #   - crates renamed since the PR base have no matching package in that
-#     baseline ("package `<name>` not found in ...").
+#     baseline.
 #   - crates where the branch baseline lacks a lib target the
 #     current source has (bin -> bin+lib transition).
 # We pre-filter to publishable library crates from cargo metadata, skip
-# packages whose current manifest path is absent from the baseline,
-# then run cargo-semver-checks per-package and tolerate the remaining
-# "no-comparable-baseline" failure modes.
+# packages whose current manifest path is absent from the baseline, and
+# establish renames / missing baseline libraries from metadata before building.
 #
 # Findings policy: cargo-semver-checks is *advisory*. Real SemVer
 # findings and operational failures do NOT fail the recipe -- breaking
@@ -2663,28 +2737,78 @@ anvil-readme-check-validate-prereqs: anvil-tool-cargo-doc2readme-validate-prereq
 # baseline is not evidence that the PR broke the API. Instead, either
 # outcome writes a markdown advisory body to
 # `target/anvil/comments/semver.md`; when the tree is clean we remove
-# that file. Anvil preflight failures before cargo-semver-checks still
+# that file. Anvil preflight failures before snapshot generation still
 # fail because no comparison can be configured. cloud-workflow wiring (GH:
 # marocchino/sticky-pull-request-comment; ADO: pwsh + REST API)
 # inspects the file after the recipe and upserts / clears a sticky
 # PR comment accordingly. Local invocation gets the same file
 # written under target/ for inspection.
 #
-# TODO(anvil-runner): even after a `cargo ox-run` helper absorbs the
-# skip/splat preamble, this recipe stays multi-step: cargo-metadata
-# filter to publishable library crates (cargo-semver-checks --workspace
-# fails on bin-only workspaces), intersect the affected set ($include) with that
-# set, verify the PR branch baseline is present, skip newly-added
-# manifest paths, then invoke per-crate against that baseline with
-# special handling for renamed crates ("package `<name>` not found in
-# ...") and bin->bin+lib transitions (reported as a missing lib target).
-
 # Check affected crates for semantic versioning violations.
 [group("anvil")]
 [script("pwsh", "-NoProfile")]
 anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
     $stableArgs = {{_anvil_stable_toolchain_args}}
+
+    function Add-Report($lines, [string]$heading, [string]$output) {
+        $lines.Add($heading) | Out-Null
+        $lines.Add('') | Out-Null
+        $lines.Add('```') | Out-Null
+        foreach ($line in ($output.TrimEnd() -split "`r?`n")) {
+            $lines.Add($line.TrimEnd()) | Out-Null
+        }
+        $lines.Add('```') | Out-Null
+        $lines.Add('') | Out-Null
+    }
+
+    function Invoke-CargoJson([string[]]$arguments) {
+        $stderrFile = [System.IO.Path]::GetTempFileName()
+        try {
+            $stdout = @(& cargo @stableArgs @arguments 2> $stderrFile) | Out-String
+            $code = $LASTEXITCODE
+            $stderr = [System.IO.File]::ReadAllText($stderrFile)
+        } finally {
+            Remove-Item -LiteralPath $stderrFile -Force -ErrorAction Stop
+        }
+        if ($code -eq 0 -and -not [string]::IsNullOrWhiteSpace($stderr)) {
+            [Console]::Error.Write($stderr)
+        }
+        [pscustomobject]@{ ExitCode = $code; Stdout = $stdout; Stderr = $stderr }
+    }
+
+    # Build one revision's locked API snapshot, keeping defaults enabled and
+    # the checker's case-sensitive feature exclusions so file-input comparisons
+    # cover the same feature-gated API as cargo-semver-checks' own generation.
+    function Get-RustdocSnapshot($package, [string]$workspace, [string]$targetDir) {
+        $features = @($package.features.PSObject.Properties.Name | Where-Object {
+            $_ -and $_ -cnotin @('unstable', 'nightly', 'bench', 'no_std') -and
+                $_ -cnotmatch '^(_|unstable[-_])'
+        })
+        $featureArgs = if ($features.Count -gt 0) { @('--features', ($features -join ',')) } else { @() }
+        $lib = $package.targets | Where-Object { $_.kind -contains 'lib' } | Select-Object -First 1
+        $json = Join-Path (Join-Path (Join-Path $targetDir $targetName) 'doc') ($lib.name.Replace('-', '_') + '.json')
+        # A previous invocation must never supply a success-shaped stale artifact.
+        if (Test-Path -LiteralPath $json) { Remove-Item -LiteralPath $json -Force }
+        Push-Location -LiteralPath $workspace
+        try {
+            $outputLines = @(& cargo @stableArgs rustdoc --locked --lib --quiet `
+                --manifest-path $package.manifest_path --package $package.id `
+                --target $target --target-dir $targetDir @featureArgs `
+                '--' '-Z' 'unstable-options' '--output-format=json' `
+                '--document-private-items' '--document-hidden-items' '--cap-lints=allow' 2>&1)
+            $code = $LASTEXITCODE
+        } finally {
+            Pop-Location
+        }
+        $output = $outputLines | Out-String
+        if ($code -eq 0 -and -not (Test-Path -LiteralPath $json -PathType Leaf)) {
+            $code = 101
+            $output += "anvil-semver-check: cargo rustdoc succeeded but did not produce '$json'; check the library's rustdoc configuration."
+        }
+        [pscustomobject]@{ ExitCode = $code; Output = $output; Path = $json }
+    }
+
     $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
@@ -2706,13 +2830,13 @@ anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
     # null, `publish = false` as an empty array, and named-registry restrictions
     # as a nonempty array. Only the empty array is non-publishable.
     $libPkgs = @{}
-    $metadataJson = & cargo @stableArgs metadata --no-deps --format-version 1
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error 'anvil-semver-check: cargo metadata failed'
-        exit $LASTEXITCODE
+    $metadata = Invoke-CargoJson -arguments @('metadata', '--locked', '--no-deps', '--format-version', '1')
+    if ($metadata.ExitCode -ne 0) {
+        Write-Error "anvil-semver-check: cargo metadata failed (exit $($metadata.ExitCode)):`n$($metadata.Stdout)$($metadata.Stderr)"
+        exit $metadata.ExitCode
     }
     try {
-        $meta = $metadataJson | ConvertFrom-Json
+        $meta = $metadata.Stdout | ConvertFrom-Json
     } catch {
         Write-Error "anvil-semver-check: could not parse cargo metadata output: $_"
         exit 1
@@ -2752,88 +2876,164 @@ anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
     #
     # The jobs that run this recipe check out full history (GitHub
     # pr-fast: fetch-depth: 0; ADO: the default full checkout), so the
-    # baseline commit is already present locally and no fetch is needed:
-    # cargo-semver-checks reads only that one commit's tree (via gix, no
-    # history walk). If the baseline is genuinely absent (a shallow local
+    # baseline commit is already present locally and no fetch is needed.
+    # If the baseline is genuinely absent (a shallow local
     # clone, or a mis-configured job) we fail loudly with actionable
     # guidance rather than silently misreporting an unresolvable baseline
     # as a breaking change.
     $base = (& "{{just_executable()}}" _anvil-base-ref)
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     $base = $base.Trim()
-    & git rev-parse --verify "$base^{commit}" 2>$null | Out-Null
-    if ($LASTEXITCODE -ne 0) {
+    $baseSha = @(& git rev-parse --verify "$base^{commit}" 2>$null)
+    if ($LASTEXITCODE -ne 0 -or $baseSha.Count -ne 1) {
         Write-Error "anvil-semver-check: baseline '$base' is not present in this clone (shallow/truncated history? fetch it or unshallow)."
         exit 1
     }
+    $baseSha = $baseSha[0].Trim()
+    $gitRoot = @(& git rev-parse --show-toplevel)
+    if ($LASTEXITCODE -ne 0 -or $gitRoot.Count -ne 1) {
+        Write-Error 'anvil-semver-check: could not locate the Git root; run this recipe in a Git checkout.'
+        exit 1
+    }
+    $gitRoot = $gitRoot[0].Trim()
+    $packages = @($packages | Sort-Object -CaseSensitive | Where-Object {
+        $manifestPath = [System.IO.Path]::GetRelativePath($gitRoot, $libPkgs[$_].manifest_path).Replace('\', '/')
+        & git cat-file -e ('{0}:{1}' -f $baseSha, $manifestPath) 2>$null
+        if ($LASTEXITCODE -eq 0) { $true } else {
+            Write-Host "anvil-semver-check: $_ has no manifest at '$manifestPath' in baseline $base; skipping (new or moved crate)" -ForegroundColor Yellow
+            $false
+        }
+    })
+    if ($packages.Count -eq 0) {
+        Remove-Item -LiteralPath $commentFile -ErrorAction SilentlyContinue
+        exit 0
+    }
+
+    # Pin both subprocess scopes to the current compiler, even when the baseline
+    # selects an obsolete/uninstalled toolchain. This recipe owns its environment.
+    $sysroot = @(& rustc @stableArgs --print sysroot)
+    if ($LASTEXITCODE -ne 0 -or $sysroot.Count -ne 1 -or [string]::IsNullOrWhiteSpace([string]$sysroot[0])) {
+        Write-Error 'anvil-semver-check: rustc could not report the selected compiler sysroot; validate the stable toolchain and retry.'
+        exit 1
+    }
+    $env:RUSTUP_TOOLCHAIN = $sysroot[0].Trim()
+    $env:RUSTC_BOOTSTRAP = '1'
+    $targetOutput = Invoke-CargoJson -arguments @('config', '-Z', 'unstable-options', 'get', 'build.target', '--format=json-value')
+    if ($targetOutput.ExitCode -eq 0) {
+        $targets = @($targetOutput.Stdout | ConvertFrom-Json)
+        if ($targets.Count -ne 1 -or $targets[0] -isnot [string] -or [string]::IsNullOrWhiteSpace($targets[0])) {
+            Write-Error 'anvil-semver-check: select one build target with CARGO_BUILD_TARGET and retry; multi-target comparisons are not supported.'
+            exit 1
+        }
+        $target = $targets[0]
+    } elseif ($targetOutput.Stderr.Contains('config value `build.target` is not set')) {
+        $hostTarget = @(& rustc @stableArgs --print host-tuple)
+        if ($LASTEXITCODE -ne 0 -or $hostTarget.Count -ne 1 -or [string]::IsNullOrWhiteSpace([string]$hostTarget[0])) {
+            Write-Error 'anvil-semver-check: rustc could not report the host target; set CARGO_BUILD_TARGET explicitly and retry.'
+            exit 1
+        }
+        $target = $hostTarget[0].Trim()
+    } else {
+        Write-Error "anvil-semver-check: could not read Cargo's build target; fix the Cargo configuration and retry.`n$($targetOutput.Stdout)$($targetOutput.Stderr)"
+        exit 1
+    }
+    $targetName = $target
+    if ($target.EndsWith('.json', [System.StringComparison]::OrdinalIgnoreCase)) {
+        $target = [System.IO.Path]::GetFullPath($target)
+        $targetName = [System.IO.Path]::GetFileNameWithoutExtension($target)
+    }
+
     $findings = New-Object System.Collections.Generic.List[string]
     $inconclusive = New-Object System.Collections.Generic.List[string]
-    foreach ($p in $packages) {
-        # A manifest absent at its current workspace-relative path did
-        # not exist on the PR base, so this is a newly-added crate (or a
-        # moved crate with no same-path baseline). Treat it as having no
-        # comparable path baseline, so cargo-semver-checks need not run.
-        $manifestPath = [System.IO.Path]::GetRelativePath(
-            $meta.workspace_root,
-            $libPkgs[$p].manifest_path
-        ).Replace('\', '/')
-        $baselineManifest = '{0}:{1}' -f $base, $manifestPath
-        & git cat-file -e $baselineManifest 2>$null
+    $buildRoot = [System.IO.Path]::GetFullPath('target/anvil/semver')
+    $tmpRoot = $env:RUNNER_TEMP
+    if (-not $tmpRoot) { $tmpRoot = $env:AGENT_TEMPDIRECTORY }
+    if (-not $tmpRoot) { $tmpRoot = [System.IO.Path]::GetTempPath() }
+    $baselineRoot = Join-Path $tmpRoot "anvil-semver-$PID-$([System.Guid]::NewGuid().ToString('N'))"
+    try {
+        $cloneOutput = @(& git clone --shared --no-checkout --quiet '--' $gitRoot $baselineRoot 2>&1)
         if ($LASTEXITCODE -ne 0) {
-            Write-Host "anvil-semver-check: $p has no manifest at '$manifestPath' in baseline $base; skipping (new or moved crate)" -ForegroundColor Yellow
-            continue
+            throw "anvil-semver-check: failed to create the local baseline clone: $($cloneOutput -join [Environment]::NewLine)"
         }
-
-        Write-Host "anvil-semver-check: $p (baseline $base)"
-        $outputLines = @(& cargo @stableArgs semver-checks --package $p --baseline-rev $base 2>&1)
-        $semverExit = $LASTEXITCODE
-        $output = ($outputLines | Out-String)
-        if ($semverExit -eq 100) {
-            # cargo-semver-checks 0.49+ reserves exit 100 for a completed
-            # check with deny-level SemVer findings. These are advisory.
-            Write-Host $output
-            $findings.Add('#### `' + $p + '`') | Out-Null
-            $findings.Add('') | Out-Null
-            $findings.Add('```') | Out-Null
-            foreach ($line in ($output.TrimEnd() -split "`r?`n")) {
-                $findings.Add($line.TrimEnd()) | Out-Null
+        # A local source snapshot must not fetch LFS assets from the clone's local origin.
+        $checkoutOutput = @(& git -C $baselineRoot -c filter.lfs.process= -c filter.lfs.smudge= `
+            -c filter.lfs.required=false checkout --quiet --detach $baseSha 2>&1)
+        if ($LASTEXITCODE -ne 0) {
+            throw "anvil-semver-check: failed to check out baseline ${baseSha}: $($checkoutOutput -join [Environment]::NewLine)"
+        }
+        $workspacePath = [System.IO.Path]::GetRelativePath($gitRoot, $meta.workspace_root)
+        $baselineWorkspace = Join-Path $baselineRoot $workspacePath
+        Push-Location -LiteralPath $baselineWorkspace
+        try {
+            $baselineMetadata = Invoke-CargoJson -arguments @(
+                'metadata', '--locked', '--no-deps', '--format-version', '1',
+                '--manifest-path', (Join-Path $baselineWorkspace 'Cargo.toml')
+            )
+            $baselineExit = $baselineMetadata.ExitCode
+        } finally {
+            Pop-Location
+        }
+        $baselineMeta = $null
+        if ($baselineExit -eq 0) {
+            try {
+                $baselineMeta = $baselineMetadata.Stdout | ConvertFrom-Json
+            } catch {
+                $baselineExit = 101
+                $baselineMetadata.Stderr += "anvil-semver-check: could not parse baseline metadata: $_"
             }
-            $findings.Add('```') | Out-Null
-            $findings.Add('') | Out-Null
-        } elseif ($semverExit -eq 101) {
-            # Exit 101 means the check could not complete. Some conditions
-            # intentionally have no usable branch baseline: a package renamed
-            # in place, a baseline bin becoming a library, or a dependency
-            # version in the baseline becoming yanked after that commit landed.
-            $packageMissing = $output.Contains(('package `{0}` not found in' -f $p))
-            $manifestParseFailed = $output.Contains('possibly due to errors:')
-            $renamedPackage = $packageMissing -and -not $manifestParseFailed
-            $baselineLibraryMissing = $output.Contains('has no lib target') -or
-                                      $output.Contains('no library targets found')
-            $baselineDependencyYanked = $output.Contains('is yanked') -and
-                                        ($output -match 'target[\\/]+semver-checks[\\/]+git-')
-            if ($renamedPackage -or $baselineLibraryMissing -or $baselineDependencyYanked) {
-                Write-Host "  $p has no usable branch baseline; skipping (renamed, bin->lib, or yanked baseline dependency)" -ForegroundColor Yellow
-            } else {
-                Write-Warning "anvil-semver-check: $p could not be checked (cargo-semver-checks exit 101):`n$output"
-                $inconclusive.Add('#### `' + $p + '` (exit 101)') | Out-Null
-                $inconclusive.Add('') | Out-Null
-                $inconclusive.Add('```') | Out-Null
-                foreach ($line in ($output.TrimEnd() -split "`r?`n")) {
-                    $inconclusive.Add($line.TrimEnd()) | Out-Null
+        }
+        if ($baselineExit -ne 0) {
+            $output = $baselineMetadata.Stdout + $baselineMetadata.Stderr
+            Write-Warning "anvil-semver-check: locked baseline metadata failed (exit ${baselineExit}):`n$output"
+            Add-Report $inconclusive "#### Baseline metadata (exit $baselineExit)" $output
+        } else {
+            $baselinePackages = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::Ordinal)
+            foreach ($old in $baselineMeta.packages) {
+                $path = [System.IO.Path]::GetRelativePath($baselineMeta.workspace_root, $old.manifest_path).Replace('\', '/')
+                $baselinePackages[$path] = $old
+            }
+            foreach ($p in $packages) {
+                $currentPackage = $libPkgs[$p]
+                $path = [System.IO.Path]::GetRelativePath($meta.workspace_root, $currentPackage.manifest_path).Replace('\', '/')
+                $old = if ($baselinePackages.ContainsKey($path)) { $baselinePackages[$path] } else { $null }
+                if (-not $old -or $old.name -cne $p -or -not ($old.targets | Where-Object { $_.kind -contains 'lib' })) {
+                    Write-Host "anvil-semver-check: $p has no comparable baseline library at '$path'; skipping (new, moved, renamed, or bin->lib)" -ForegroundColor Yellow
+                    continue
                 }
-                $inconclusive.Add('```') | Out-Null
-                $inconclusive.Add('') | Out-Null
+                if ($meta.metadata.'cargo-semver-checks' -or $currentPackage.metadata.'cargo-semver-checks') {
+                    Write-Warning "anvil-semver-check: $p uses Cargo metadata lint overrides; cargo-semver-checks file inputs use the built-in lint policy instead."
+                }
+                Write-Host "anvil-semver-check: $p (locked current vs baseline $base)"
+                $current = Get-RustdocSnapshot $currentPackage $meta.workspace_root (Join-Path $buildRoot 'current')
+                if ($current.ExitCode -ne 0) {
+                    Write-Warning "anvil-semver-check: $p current locked rustdoc failed (exit $($current.ExitCode)):`n$($current.Output)"
+                    Add-Report $inconclusive ('#### `' + $p + '` current rustdoc (exit ' + $current.ExitCode + ')') $current.Output
+                    continue
+                }
+                $baseline = Get-RustdocSnapshot $old $baselineMeta.workspace_root (Join-Path $buildRoot 'baseline')
+                if ($baseline.ExitCode -ne 0) {
+                    Write-Warning "anvil-semver-check: $p baseline locked rustdoc failed (exit $($baseline.ExitCode)):`n$($baseline.Output)"
+                    Add-Report $inconclusive ('#### `' + $p + '` baseline rustdoc (exit ' + $baseline.ExitCode + ')') $baseline.Output
+                    continue
+                }
+                $outputLines = @(& cargo @stableArgs semver-checks --package $p `
+                    --current-rustdoc $current.Path --baseline-rustdoc $baseline.Path 2>&1)
+                $semverExit = $LASTEXITCODE
+                $output = $outputLines | Out-String
+                if ($semverExit -eq 0 -or $semverExit -eq 100) {
+                    Write-Host $output
+                    if ($semverExit -eq 100) {
+                        Add-Report $findings ('#### `' + $p + '`') $output
+                    }
+                } else {
+                    Write-Warning "anvil-semver-check: $p comparison failed (exit ${semverExit}):`n$output"
+                    Add-Report $inconclusive ('#### `' + $p + '` (exit ' + $semverExit + ')') $output
+                }
             }
-        } elseif ($semverExit -ne 0) {
-            Write-Warning "anvil-semver-check: $p failed with unexpected cargo-semver-checks exit code ${semverExit}:`n$output"
-            $inconclusive.Add('#### `' + $p + '` (exit ' + $semverExit + ')') | Out-Null
-            $inconclusive.Add('') | Out-Null
-            $inconclusive.Add('```') | Out-Null
-            foreach ($line in ($output.TrimEnd() -split "`r?`n")) {
-                $inconclusive.Add($line.TrimEnd()) | Out-Null
-            }
-            $inconclusive.Add('```') | Out-Null
-            $inconclusive.Add('') | Out-Null
+        }
+    } finally {
+        if (Test-Path -LiteralPath $baselineRoot) {
+            Remove-Item -LiteralPath $baselineRoot -Recurse -Force -ErrorAction Stop
         }
     }
     [System.IO.Directory]::CreateDirectory((Split-Path -Parent $commentFile)) | Out-Null
@@ -2859,7 +3059,7 @@ anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
             $lines.Add('') | Out-Null
             $lines.Add('### Inconclusive comparisons') | Out-Null
             $lines.Add('') | Out-Null
-            $lines.Add('`cargo semver-checks` could not complete the following comparisons. These failures are **informational** because an unbuildable baseline is not evidence of a breaking API change.') | Out-Null
+            $lines.Add('The locked rustdoc builds or `cargo semver-checks` could not complete the following comparisons. These failures are **informational** because an unbuildable baseline is not evidence of a breaking API change.') | Out-Null
             $lines.Add('') | Out-Null
             foreach ($f in $inconclusive) { $lines.Add($f) | Out-Null }
         }
@@ -4184,7 +4384,6 @@ anvil-build-validate-prereqs: anvil-tool-rustc-validate-prereqs
 anvil-pr-fast: anvil-pr-fast-validate-prereqs \
     anvil-fmt \
     anvil-clippy \
-    anvil-check-all-targets \
     anvil-cargo-sort \
     anvil-license-headers \
     anvil-ensure-no-cyclic-deps \
@@ -4211,7 +4410,6 @@ anvil-pr-fast-setup installer="install": \
     (anvil-tool-cargo-delta-install installer) \
     (anvil-fmt-setup installer) \
     (anvil-clippy-setup installer) \
-    (anvil-check-all-targets-setup installer) \
     (anvil-cargo-sort-setup installer) \
     (anvil-license-headers-setup installer) \
     (anvil-ensure-no-cyclic-deps-setup installer) \
@@ -4232,7 +4430,6 @@ anvil-pr-fast-validate-prereqs: \
     anvil-tool-cargo-delta-validate-prereqs \
     anvil-fmt-validate-prereqs \
     anvil-clippy-validate-prereqs \
-    anvil-check-all-targets-validate-prereqs \
     anvil-cargo-sort-validate-prereqs \
     anvil-license-headers-validate-prereqs \
     anvil-ensure-no-cyclic-deps-validate-prereqs \
@@ -4246,6 +4443,42 @@ anvil-pr-fast-validate-prereqs: \
     anvil-udeps-validate-prereqs \
     anvil-semver-check-validate-prereqs \
     anvil-external-types-validate-prereqs
+
+=== justfiles/anvil/groups/pr-fuzzing.just ===
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# GENERATED BY cargo-anvil. DO NOT EDIT DIRECTLY.
+# Update cargo-anvil and regenerate; repository-specific edits stop automatic updates.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
+
+# Run the pull request fuzzing smoke checks.
+[group("anvil")]
+anvil-pr-fuzzing: anvil-pr-fuzzing-validate-prereqs \
+    anvil-bolero
+
+# Install prerequisites for the `anvil-pr-fuzzing` recipe.
+[private]
+[script("pwsh", "-NoProfile")]
+anvil-pr-fuzzing-setup installer="install":
+    if (-not $IsLinux) {
+        Write-Host 'anvil-pr-fuzzing-setup: non-Linux host -- skipping'
+        exit 0
+    }
+    & "{{ just_executable() }}" anvil-tool-cargo-delta-install '{{installer}}' anvil-bolero-setup '{{installer}}'
+    exit $LASTEXITCODE
+
+# Validate prerequisites for the `anvil-pr-fuzzing` recipe.
+[private]
+[script("pwsh", "-NoProfile")]
+anvil-pr-fuzzing-validate-prereqs:
+    if (-not $IsLinux) {
+        Write-Host 'anvil-pr-fuzzing-validate-prereqs: non-Linux host -- skipping'
+        exit 0
+    }
+    & "{{ just_executable() }}" anvil-tool-cargo-delta-validate-prereqs anvil-bolero-validate-prereqs
+    exit $LASTEXITCODE
 
 === justfiles/anvil/groups/pr-msrv.just ===
 # Copyright (c) Microsoft Corporation.
@@ -4311,8 +4544,7 @@ anvil-pr-mutants-validate-prereqs: \
 anvil-pr-runtime-analysis: anvil-pr-runtime-analysis-validate-prereqs \
     anvil-miri \
     anvil-careful \
-    anvil-loom \
-    anvil-bolero
+    anvil-loom
 
 # Install prerequisites for the `anvil-pr-runtime-analysis` recipe.
 [private]
@@ -4320,8 +4552,7 @@ anvil-pr-runtime-analysis-setup installer="install": \
     (anvil-tool-cargo-delta-install installer) \
     (anvil-miri-setup installer) \
     (anvil-careful-setup installer) \
-    (anvil-loom-setup installer) \
-    (anvil-bolero-setup installer)
+    (anvil-loom-setup installer)
 
 # Validate prerequisites for the `anvil-pr-runtime-analysis` recipe.
 [private]
@@ -4329,8 +4560,7 @@ anvil-pr-runtime-analysis-validate-prereqs: \
     anvil-tool-cargo-delta-validate-prereqs \
     anvil-miri-validate-prereqs \
     anvil-careful-validate-prereqs \
-    anvil-loom-validate-prereqs \
-    anvil-bolero-validate-prereqs
+    anvil-loom-validate-prereqs
 
 === justfiles/anvil/groups/pr-slow.just ===
 # Copyright (c) Microsoft Corporation.
@@ -4342,12 +4572,13 @@ anvil-pr-runtime-analysis-validate-prereqs: \
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # pr-slow is the local umbrella for everything that takes more than ~30s
-# per crate (tests, MSRV tests, stricter runtimes, mutation testing). Its
+# per crate (tests, MSRV tests, stricter runtimes, mutation testing, fuzzing). Its
 # groups can be invoked individually without invoking the other groups:
 #
 #   pr-test: tests + coverage
 #   pr-msrv: all-target tests under the declared MSRV
-#   pr-runtime-analysis: stricter-runtime correctness (miri, careful)
+#   pr-runtime-analysis: stricter-runtime correctness (miri, careful, loom)
+#   pr-fuzzing: fuzzing smoke checks
 #   pr-mutants: mutation testing
 #
 # Cloud workflows run these groups as independent parallel jobs.
@@ -4355,12 +4586,13 @@ anvil-pr-runtime-analysis-validate-prereqs: \
 #
 #   $ just anvil-pr-test   # tests + coverage only
 #   $ just anvil-pr-msrv   # MSRV all-target tests only
-#   $ just anvil-pr-runtime-analysis   # miri + careful only
+#   $ just anvil-pr-runtime-analysis   # miri + careful + loom only
+#   $ just anvil-pr-fuzzing   # bolero only
 #   $ just anvil-pr-mutants   # mutants only
 
 # Run the slow pull request checks.
 [group("anvil")]
-anvil-pr-slow: anvil-pr-slow-validate-prereqs anvil-pr-test anvil-pr-msrv anvil-pr-runtime-analysis anvil-pr-mutants
+anvil-pr-slow: anvil-pr-slow-validate-prereqs anvil-pr-test anvil-pr-msrv anvil-pr-runtime-analysis anvil-pr-fuzzing anvil-pr-mutants
 
 # Install prerequisites for the `anvil-pr-slow` recipe.
 [private]
@@ -4368,6 +4600,7 @@ anvil-pr-slow-setup installer="install": \
     (anvil-pr-test-setup installer) \
     (anvil-pr-msrv-setup installer) \
     (anvil-pr-runtime-analysis-setup installer) \
+    (anvil-pr-fuzzing-setup installer) \
     (anvil-pr-mutants-setup installer)
 
 # Validate prerequisites for the `anvil-pr-slow` recipe.
@@ -4376,6 +4609,7 @@ anvil-pr-slow-validate-prereqs: \
     anvil-pr-test-validate-prereqs \
     anvil-pr-msrv-validate-prereqs \
     anvil-pr-runtime-analysis-validate-prereqs \
+    anvil-pr-fuzzing-validate-prereqs \
     anvil-pr-mutants-validate-prereqs
 
 === justfiles/anvil/groups/pr-test.just ===
@@ -4560,23 +4794,29 @@ anvil-scheduled-test: (_anvil-unscoped "scheduled-test")
 
 [private]
 _anvil-scheduled-test: anvil-scheduled-test-validate-prereqs \
+    anvil-check-all-targets \
     anvil-llvm-cov \
     anvil-doc-test \
-    anvil-examples
+    anvil-examples \
+    (anvil-bolero "scheduled")
 
 # Install prerequisites for the `anvil-scheduled-test` recipe.
 [private]
 anvil-scheduled-test-setup installer="install": \
+    (anvil-check-all-targets-setup installer) \
     (anvil-llvm-cov-setup installer) \
     (anvil-doc-test-setup installer) \
-    (anvil-examples-setup installer)
+    (anvil-examples-setup installer) \
+    (anvil-bolero-setup installer)
 
 # Validate prerequisites for the `anvil-scheduled-test` recipe.
 [private]
 anvil-scheduled-test-validate-prereqs: \
+    anvil-check-all-targets-validate-prereqs \
     anvil-llvm-cov-validate-prereqs \
     anvil-doc-test-validate-prereqs \
-    anvil-examples-validate-prereqs
+    anvil-examples-validate-prereqs \
+    anvil-bolero-validate-prereqs
 
 === justfiles/anvil/helpers.just ===
 # Copyright (c) Microsoft Corporation.
@@ -4684,15 +4924,6 @@ anvil-scheduled-test-validate-prereqs: \
 # mod.just does NOT redeclare it, to avoid conflicting with adopters
 # who already have it.
 
-# Platform configs replace, rather than overlay, cargo-mutants' default config.
-# Selection is native Just evaluation, independent of the recipe's interpreter.
-_anvil_mutants_platform_config := ".cargo/mutants." + os() + ".toml"
-_anvil_mutants_config_arg := if path_exists(justfile_directory() / _anvil_mutants_platform_config) == "true" {
-    "--config=" + _anvil_mutants_platform_config
-} else {
-    ""
-}
-
 # _anvil-base-ref: single source of truth for "which git ref does a PR
 # diff against". Shared by the impact step (github/impact-action.yml,
 # ado/steps/impact.yml) and anvil-mutants-diff so the resolution lives in
@@ -4797,13 +5028,13 @@ _anvil-unscoped name:
 # Private. Produces the two cargo-delta snapshots under
 # target/anvil/impact/snapshots/ with two independent cache keys:
 #   * baseline.json  -- snapshot of the base ref. EXPENSIVE (needs a throwaway
-#     git worktree). Keyed on the composite of the base commit sha and the
-#     effective .delta.toml identity (baseline.key stores "<base-sha>
-#     <config-hash>"), so the worktree is recreated when the base moves OR the
-#     cargo-delta config changes.
+#     git worktree). Keyed on the base commit sha, effective .delta.toml
+#     identity, and pinned cargo-delta version (baseline.key stores
+#     "<base-sha> <config-hash> <cargo-delta-version>").
 #   * current.json   -- snapshot of the working tree. Cheap. Keyed on
-#     <HEAD sha> (current.key); the dirty-tree guard means a clean tree
-#     corresponds exactly to HEAD.
+#     "<HEAD sha> <cargo-delta-version>" (current.key); the dirty-tree guard
+#     means a clean tree corresponds exactly to HEAD. Tool upgrades invalidate
+#     both snapshots so incompatible formats are never reused.
 
 # Snapshot the base ref and working tree for impact analysis.
 [script("pwsh", "-NoProfile")]
@@ -4867,7 +5098,8 @@ _anvil-impact-snapshot:
     # committed config edit moved HEAD -- is captured under the new config, and
     # `cargo delta impact` would then diff two snapshots taken under different
     # rules and silently mis-scope. So hash the resolved config (or mark its
-    # absence) and fold it into the composite baseline key `$baseSha $configId`
+    # absence) and fold it into the composite baseline key alongside the base
+    # sha and pinned cargo-delta version
     # below (which also flows into anvil-impact's projection cache via
     # baseline.key). Absent a config file, `$deltaArgs` stays empty and the id
     # is `<none>`, so adopters without a `.delta.toml` are unaffected.
@@ -4898,17 +5130,11 @@ _anvil-impact-snapshot:
         [Console]::Error.WriteLine("anvil-impact: warning: no .delta.toml found at the repo root; cargo-delta will run under its defaults (trip_wire_patterns and file_exclude_patterns inactive), which can under-scope the impact set. Restore the anvil-managed .delta.toml to get conservative scoping.")
     }
 
-    # Working-tree state key -- git only, no cargo-delta, no base ref. The
-    # dirty-tree guard above already exited on any non-target/ change, so by
-    # this point the tree is clean and the snapshot corresponds exactly to
-    # HEAD; the key is therefore just the HEAD sha. (An earlier version also
-    # appended a hash of `git diff HEAD` + porcelain status, but past the guard
-    # both are empty for every tracked change. Their only remaining input was
-    # tracked target/ content -- which `git diff HEAD` reports even though the
-    # guard's status probe excludes target/ -- so it could only cause spurious
-    # current-snapshot invalidation, never add signal. target/ must not perturb
-    # the key, so keying on HEAD alone is both simpler and more correct.)
-    $currentState = (git rev-parse HEAD).Trim()
+    # The dirty-tree guard leaves a clean tree corresponding exactly to HEAD.
+    # Include the pinned cargo-delta version without invoking the tool, so an
+    # upgrade invalidates old snapshot formats even when HEAD is unchanged.
+    # target/ changes must not perturb this key.
+    $currentState = "$((git rev-parse HEAD).Trim()) {{ cargo_delta_version }}"
 
     # Consumer fast path: reuse an already-present, matching snapshot set
     # WITHOUT cargo-delta or a fetched base ref -- this short-circuits a local
@@ -4929,11 +5155,9 @@ _anvil-impact-snapshot:
         git rev-parse --verify "$base^{commit}" 2>$null | Out-Null
         if ($LASTEXITCODE -eq 0) { $baseSha = (git rev-parse $base).Trim() }
     }
-    # Baseline freshness is keyed on the COMPOSITE `$baseSha $deltaConfigId`
-    # (see the config-identity note above): a moved base ref OR a changed
-    # cargo-delta config both invalidate it, so the baseline is never diffed
-    # against a current snapshot captured under different rules.
-    $baselineKey = "$baseSha $deltaConfigId"
+    # A moved base ref, changed config, or tool upgrade invalidates the
+    # baseline, so it is never reused across incompatible rules or formats.
+    $baselineKey = "$baseSha $deltaConfigId {{ cargo_delta_version }}"
     $baselineFresh = (Test-Path $baselineKeyFile) -and `
         ((Test-Path $baselineJson) -or (Test-Path $noWorkspaceMarker)) -and `
         ("$(Get-Content -Raw $baselineKeyFile)".Trim() -eq $baselineKey)
@@ -4980,10 +5204,10 @@ _anvil-impact-snapshot:
         exit 1
     }
 
-    # --- Baseline snapshot: only when the base sha OR the config changed. ---
+    # --- Baseline snapshot: only when the base sha, config, or tool changed. ---
     # Re-derive the composite key now that `$baseSha` is authoritatively
     # resolved (the fast-path value above may have been $null on a cache miss).
-    $baselineKey = "$baseSha $deltaConfigId"
+    $baselineKey = "$baseSha $deltaConfigId {{ cargo_delta_version }}"
     $haveBaseline = (Test-Path $baselineKeyFile) -and `
         ("$(Get-Content -Raw $baselineKeyFile)".Trim() -eq $baselineKey) -and `
         ((Test-Path $baselineJson) -or (Test-Path $noWorkspaceMarker))
@@ -5241,9 +5465,8 @@ anvil-impact: _anvil-impact-snapshot
     Set-Content -LiteralPath $impactJson -Value $impactOut.Trim() -Encoding UTF8
 
     # Project each tier into its `--package name@version ...` / `--skip`
-    # string via the shared formatter (version-qualified specs + lib-name ->
-    # package-name translation live there, used identically by the cloud
-    # impact steps).
+    # string via the shared formatter (version-qualified workspace-member
+    # specs live there, used identically by the cloud impact steps).
     foreach ($tier in @('modified', 'affected', 'required')) {
         $value = (& "{{ just_executable() }}" _anvil-impact-format $tier $impactJson)
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -5271,7 +5494,7 @@ anvil-impact: _anvil-impact-snapshot
 #     transitive dependency pulled in at a different version, which a
 #     bare `-p name` cannot do ("multiple packages named name").
 #   * "--skip" when the tier is empty (recipes treat this as a no-op).
-# Metadata failures and unknown/ambiguous package names are written to
+# Metadata failures and unknown package names are written to
 # STDERR and fail the recipe, so callers never continue with an incomplete
 # package set (which would silently under-scope and skip a check).
 #
@@ -5299,19 +5522,9 @@ _anvil-impact-format tier impactJson:
             exit 1
         }
     }
-    # Build three lookups from workspace members:
-    #   * $byName:    exact cargo package name (may contain hyphens) -> pkgs
-    #   * $byLib:     library / proc-macro target name (snake_case) -> pkgs
-    #   * $byDirLeaf: manifest directory leaf -> pkgs
-    # cargo-delta reports *library* names (snake_case), but for crates
-    # whose package name differs from the lib name (e.g. `cargo-anvil`
-    # vs `cargo_anvil`) we must translate back to the package name cargo
-    # accepts. Proc-macro crates carry the same name/target skew, so their
-    # target is indexed too. Bin-only crates have no lib target; cargo-delta
-    # reports those by their package name, caught by $byName. In deeply
-    # nested workspaces cargo-delta can instead emit a manifest directory
-    # leaf; accept any reported identifier only when every matching namespace
-    # resolves to the *same* workspace package.
+    # cargo-delta JSON reports Cargo package names. Library target names and
+    # manifest directory leaves are not aliases: they can name a different
+    # workspace package.
     $metadataJson = & cargo {{_anvil_stable_toolchain_args}} metadata --locked --no-deps --format-version 1
     $metadataExit = $LASTEXITCODE
     if ($metadataExit -ne 0) {
@@ -5324,17 +5537,9 @@ _anvil-impact-format tier impactJson:
         Write-Error "anvil-impact: could not parse cargo metadata output: $_"
         exit 1
     }
-    # These identifiers (package name, lib/proc-macro target name, manifest
-    # directory leaf) are case-sensitive: both `cargo metadata` and cargo-delta
-    # derive them from the same on-disk workspace, so their casing agrees
-    # exactly. Use Ordinal dictionaries rather than PowerShell's default
-    # case-insensitive hashtables so that case-distinct identifiers on a
-    # case-sensitive checkout (`Foo` vs `foo`) stay separate instead of
-    # collapsing into one key and triggering a spurious ambiguous-identifier
-    # error.
+    # Preserve exact package-name casing instead of using PowerShell's default
+    # case-insensitive hashtables.
     $byName = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::Ordinal)
-    $byLib = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::Ordinal)
-    $byDirLeaf = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::Ordinal)
     $workspaceIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
     foreach ($id in $meta.workspace_members) { [void]$workspaceIds.Add("$id") }
     $workspacePackages = @($meta.packages | Where-Object { $workspaceIds.Contains("$($_.id)") })
@@ -5349,62 +5554,18 @@ _anvil-impact-format tier impactJson:
         Set-Content -LiteralPath $doctestFile -Value ($doctestSpecs -join "`n") -Encoding UTF8 -NoNewline
     }
     foreach ($p in $workspacePackages) {
-        if (-not $byName.ContainsKey($p.name)) {
-            $byName[$p.name] = [System.Collections.Generic.List[object]]::new()
-        }
-        $byName[$p.name].Add($p)
-        foreach ($t in $p.targets) {
-            if (($t.kind -contains 'lib') -or ($t.kind -contains 'proc-macro')) {
-                if (-not $byLib.ContainsKey($t.name)) {
-                    $byLib[$t.name] = [System.Collections.Generic.List[object]]::new()
-                }
-                $byLib[$t.name].Add($p)
-            }
-        }
-        $dirLeaf = Split-Path (Split-Path $p.manifest_path -Parent) -Leaf
-        if (-not $byDirLeaf.ContainsKey($dirLeaf)) {
-            $byDirLeaf[$dirLeaf] = [System.Collections.Generic.List[object]]::new()
-        }
-        $byDirLeaf[$dirLeaf].Add($p)
+        $byName[$p.name] = $p
     }
     $impact = Get-Content -LiteralPath $impactJson -Raw | ConvertFrom-Json
     $names = @($impact.$tierKey)
     $specs = [System.Collections.Generic.List[string]]::new()
     foreach ($name in $names) {
         if ([string]::IsNullOrWhiteSpace($name)) { continue }
-        # Union candidates from every namespace, de-duplicated by package id
-        # (case-sensitive, so Ordinal) so that a name matching the same package
-        # as both a cargo name and a directory leaf collapses to one candidate.
-        $matches = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::Ordinal)
-        if ($byName.ContainsKey($name)) {
-            foreach ($candidate in $byName[$name]) { $matches[$candidate.id] = $candidate }
-        }
-        if ($byLib.ContainsKey($name)) {
-            foreach ($candidate in $byLib[$name]) { $matches[$candidate.id] = $candidate }
-        }
-        if ($byDirLeaf.ContainsKey($name)) {
-            foreach ($candidate in $byDirLeaf[$name]) { $matches[$candidate.id] = $candidate }
-        }
-        $candidates = @($matches.Values)
-        if ($candidates.Count -eq 0) {
-            # A name cargo-delta reported that doesn't resolve to any workspace
-            # package -- a gap in our reverse-mapping of the (non-unique) library
-            # identifier cargo-delta emits. Fail hard so the mapping gap is
-            # surfaced and fixed rather than silently under-scoping the tier.
+        if (-not $byName.ContainsKey($name)) {
             Write-Error "anvil-impact: cargo-delta returned unknown package '$name' in the $tier set. Re-run with ANVIL_IMPACT=off to proceed unscoped, and report the unmapped identifier."
             exit 1
         }
-        if ($candidates.Count -ne 1) {
-            # The identifier is genuinely ambiguous -- it names two or more
-            # distinct workspace packages across the name / lib / directory-leaf
-            # namespaces (e.g. `ffi` / `ffi_build` collisions in deeply nested
-            # workspaces). We cannot know which cargo-delta meant, so fail hard
-            # rather than guess and risk under-scoping the tier.
-            $candidateNames = ($candidates | ForEach-Object { $_.name } | Sort-Object) -join ', '
-            Write-Error "anvil-impact: cargo-delta returned ambiguous package identifier '$name' in the $tier set (matches: $candidateNames). Re-run with ANVIL_IMPACT=off to proceed unscoped, and report the identifier."
-            exit 1
-        }
-        $p = $candidates[0]
+        $p = $byName[$name]
         $specs.Add("--package $($p.name)@$($p.version)")
     }
     if ($specs.Count -eq 0) {
@@ -5638,6 +5799,7 @@ import 'groups/pr-msrv.just'
 import 'groups/pr-slow.just'
 import 'groups/pr-test.just'
 import 'groups/pr-runtime-analysis.just'
+import 'groups/pr-fuzzing.just'
 import 'groups/pr-mutants.just'
 import 'groups/scheduled-test.just'
 import 'groups/scheduled-advisories.just'
@@ -6677,10 +6839,9 @@ anvil-tool-cargo-audit-validate-prereqs: (_check-tool "cargo-audit" cargo_audit_
 # install fails outright on windows-*-msvc. bolero's libfuzzer engine
 # is likewise Linux-only. oxidizer's reference workflow runs bolero
 # exclusively on ubuntu, so anvil follows suit: the install/validate
-# pair self-skips on non-Linux (analogous to cargo-mutants skipping
-# aarch64-pc-windows-msvc), and the anvil-bolero check self-skips on
-# the same hosts. The pr-runtime-analysis Windows/ARM legs therefore
-# treat bolero as a no-op rather than a setup failure.
+# pair and the anvil-bolero check self-skip on non-Linux hosts.
+# Local non-Linux invocations therefore treat bolero
+# as a no-op rather than a setup failure; CI schedules pr-fuzzing on Linux only.
 
 # Install the pinned `cargo-bolero` tool.
 [private]
@@ -6800,34 +6961,13 @@ anvil-tool-cargo-llvm-cov-install installer="install": (_install-tool "cargo-llv
 [private]
 anvil-tool-cargo-llvm-cov-validate-prereqs: (_check-tool "cargo-llvm-cov" cargo_llvm_cov_version)
 
-# cargo-mutants doesn't build on aarch64-pc-windows-msvc (upstream
-# winapi crate incompat). The install recipe self-skips on that target
-# so per-group setup recipes that depend on it (pr-mutants-setup,
-# scheduled-exhaustive-setup) don't fail on that platform. The
-# mutants-diff / mutants-full check recipes also self-skip on the same
-# target, so the check is effectively a no-op end-to-end there.
-
-# Install the pinned `cargo-mutants` tool.
+# Install the pinned `cargo-gamma` tool.
 [private]
-[script("pwsh", "-NoProfile")]
-anvil-tool-cargo-mutants-install installer="install": anvil-toolchain-stable-install
-    if ($IsWindows -and ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64')) {
-        Write-Host 'anvil-tool-cargo-mutants-install: aarch64-pc-windows-msvc -- skipping (winapi build incompat)'
-        exit 0
-    }
-    & "{{ just_executable() }}" _install-tool-core cargo-mutants {{cargo_mutants_version}} {{installer}}
-    exit $LASTEXITCODE
+anvil-tool-cargo-gamma-install installer="install": (_install-tool "cargo-gamma" cargo_gamma_version installer)
 
-# Validate that the pinned `cargo-mutants` tool is available.
+# Validate that the pinned `cargo-gamma` tool is available.
 [private]
-[script("pwsh", "-NoProfile")]
-anvil-tool-cargo-mutants-validate-prereqs:
-    if ($IsWindows -and ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64')) {
-        Write-Host 'anvil-tool-cargo-mutants-validate-prereqs: aarch64-pc-windows-msvc -- skipping (winapi build incompat)'
-        exit 0
-    }
-    & "{{ just_executable() }}" _check-tool cargo-mutants {{cargo_mutants_version}}
-    exit $LASTEXITCODE
+anvil-tool-cargo-gamma-validate-prereqs: (_check-tool "cargo-gamma" cargo_gamma_version)
 
 # Install the pinned `cargo-nextest` tool.
 [private]
@@ -6962,7 +7102,7 @@ Write-Output ('+' + $msrv)
 # nightly-dependent check. Bumped on a regular cadence (monthly is a
 # reasonable default) when an adopter has time to absorb formatting /
 # lint / API-surface drift. Pin only -- do not use bare `nightly` here.
-rust_nightly := "nightly-2026-05-30"
+rust_nightly := "nightly-2026-10-31"
 
 # Pinned narrowly to the rustdoc JSON schema version that the currently
 # selected cargo-check-external-types release accepts. cargo-check-
@@ -6971,30 +7111,30 @@ rust_nightly := "nightly-2026-05-30"
 # with "produces JSON format version X, but this tool requires
 # format version Y" -- which is a tooling-incompat, not a real API
 # violation. Bump this alongside any cargo-check-external-types upgrade.
-rust_nightly_external_types := "nightly-2026-03-20"
+rust_nightly_external_types := "nightly-2026-06-22"
 
 # ============================================================================
 # Cargo subcommands
 # ============================================================================
 
-cargo_aprz_version := "1.2.1"
+cargo_aprz_version := "1.2.2"
 cargo_audit_version := "0.22.2"
-cargo_bolero_version := "0.13.4"
+cargo_bolero_version := "0.13.5"
 cargo_careful_version := "0.4.10"
 cargo_check_external_types_version := "0.5.0"
-cargo_coverage_gate_version := "0.7.2"
-cargo_delta_version := "0.3.1"
+cargo_coverage_gate_version := "0.7.4"
+cargo_delta_version := "0.5.0"
 cargo_deny_version := "0.20.2"
 cargo_doc2readme_version := "0.7.3"
-cargo_each_version := "0.6.0"
+cargo_each_version := "0.7.0"
 cargo_ensure_no_cyclic_deps_version := "0.2.0"
-cargo_ensure_no_default_features_version := "1.1.0"
+cargo_ensure_no_default_features_version := "1.1.1"
+cargo_gamma_version := "0.4.0"
 cargo_hack_version := "0.6.45"
 cargo_heather_version := "0.3.0"
-cargo_llvm_cov_version := "0.9.0"
-cargo_mutants_version := "27.1.0"
-cargo_nextest_version := "0.9.143"
-cargo_semver_checks_version := "0.50.0"
+cargo_llvm_cov_version := "0.9.1"
+cargo_nextest_version := "0.9.150"
+cargo_semver_checks_version := "0.51.0"
 cargo_sort_version := "2.1.4"
 cargo_spellcheck_version := "0.15.7"
 cargo_udeps_version := "0.1.61"

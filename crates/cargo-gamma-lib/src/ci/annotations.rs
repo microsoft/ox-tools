@@ -100,7 +100,7 @@ fn escape_property(text: &str) -> String {
 /// remainder into log noise. The second layer no longer has a return or a newline to find, and is
 /// kept because it is what the syntax requires rather than a consequence of the first.
 fn escape_data(text: &str) -> String {
-    encode_controls(text).replace('%', "%25").replace('\r', "%0D").replace('\n', "%0A")
+    encode_controls(text).replace('%', "%25")
 }
 
 #[cfg(test)]
@@ -161,7 +161,7 @@ mod tests {
     fn nothing_survived_means_nothing_to_annotate() {
         let mutants = vec![mutant("/w/src/a.rs", 1, "relational.gt_to_ge", Outcome::Killed)];
 
-        assert!(annotations(&mutants, &root()).is_empty());
+        assert_eq!(annotations(&mutants, &root()).len(), 0);
     }
 
     #[test]

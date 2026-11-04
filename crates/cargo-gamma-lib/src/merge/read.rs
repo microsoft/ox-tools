@@ -123,9 +123,13 @@ fn read_limited_with_io(
     crate::elements::validate_schema(&document).map_err(|cause| error!("{path} is not a mutation report: {cause}").usage())?;
 
     let incoming: Incoming =
+
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "The immediately preceding schema validator checks every field decoded by Incoming, including nested file/mutant DTO types and ranges; on supported 64-bit targets this validated Value has no remaining serde conversion error.", tag = "equivalent")]
         serde_json::from_value(document).map_err(|cause| error!("{path} is not a mutation report").caused_by(cause).usage())?;
 
-    if !incoming.has_supported_schema_version() {
+    if
+    // #[gamma::skip(cond.always_false, reason = "The same parsed document has already passed elements::validate_schema, whose schemaVersion string check calls supported_schema_version accepting only majors1/2. Incoming.has_supported_schema_version uses that same predicate, so its false/unsupported branch is unreachable here.", tag = "equivalent")]
+    !incoming.has_supported_schema_version() {
         return Err(error!(
             "{path} declares unsupported schema version `{}`; merge accepts only schema versions 1 and 2",
             incoming.schema_version()
@@ -240,7 +244,9 @@ fn read_contents(input: &mut impl std::io::Read, path: &Utf8Path, limit: u64) ->
         .read_to_end(&mut bytes)
         .map_err(|cause| error!("could not read `{path}`").caused_by(cause))?;
 
-    let bytes_read = u64::try_from(bytes.len()).map_err(|cause| error!("could not read `{path}`").caused_by(cause))?;
+    let bytes_read =
+    // #[gamma::skip(try.propagate_to_unwrap, reason = "bytes.len() is usize and cannot exceed u64::MAX on any supported32/64-bit target. The conversion to u64 cannot fail; wrapping its mapped Result in panic_on_failure changes no behavior.", tag = "equivalent")]
+    u64::try_from(bytes.len()).map_err(|cause| error!("could not read `{path}`").caused_by(cause))?;
 
     if bytes_read > limit {
         return Err(too_large(path, bytes_read, limit));

@@ -36,6 +36,29 @@ use crate::{HashMap, Result};
 /// How many groups a "not run, by …" line names before it starts counting the rest.
 const GROUP_LIMIT: usize = 5;
 
+#[cfg(test)]
+thread_local! {
+    static PREPARED_MEASUREMENT: std::cell::RefCell<Option<Measured>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn with_prepared_measurement<T>(measurement: Measured, body: impl FnOnce() -> T) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            PREPARED_MEASUREMENT.with_borrow_mut(|slot| {
+                let _ = slot.take();
+            });
+        }
+    }
+    PREPARED_MEASUREMENT.with_borrow_mut(|slot| {
+        assert!(slot.is_none(), "a thread cannot install two prepared measurements simultaneously");
+        *slot = Some(measurement);
+    });
+    let _reset = Reset;
+    body()
+}
+
 /// Runs every live mutant in the plan, writing verdicts back onto it.
 ///
 /// # Errors
@@ -119,7 +142,6 @@ pub(crate) fn run_with_locks(
                 jobs: config.jobs,
                 mutators: Some(selection.sorted().join(",")),
                 timeout_floor: config.timeout_floor,
-                confirm: config.confirm,
                 narrowed,
                 incremental,
             },
@@ -139,7 +161,6 @@ pub(crate) fn run_with_locks(
         stall,
         jobs: config.jobs,
         meter: built.session.metered,
-        confirm: config.confirm,
     };
 
     let sweep_started = Instant::now();
@@ -150,6 +171,8 @@ pub(crate) fn run_with_locks(
         Ok(spent) => spent,
         Err(failure) => {
             // An incomplete campaign has no completed record to carry its partial learning.
+
+            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
             store_incomplete_learning(incremental, &killers, &base, &plan.mutants);
             failed.plan = Some(plan);
 
@@ -183,6 +206,8 @@ pub(crate) fn resume_testing(
     workspace.retain_initial_hints(state.session.phases.initial_hints.clone());
     events.sweep_planning(&state.plan, state.session.binaries.len(), state.settings.jobs);
     let reach = Reachability::build(&state.plan, &state.session.binaries, &scope);
+
+    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
     announce_measurement(events, &state.plan, &state.session);
     let started = Instant::now();
     let sweep = Sweep {
@@ -192,7 +217,6 @@ pub(crate) fn resume_testing(
         },
         jobs: state.settings.jobs,
         meter: state.session.metered,
-        confirm: state.settings.confirm,
     };
     let swept = test_all(
         &workspace,
@@ -206,6 +230,7 @@ pub(crate) fn resume_testing(
     let spent = match swept {
         Ok(spent) => spent,
         Err(failure) => {
+            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
             store_incomplete_learning(state.settings.incremental, &state.killers, &state.record.base, &state.plan.mutants);
             return Err(failure);
         }
@@ -632,14 +657,13 @@ fn measure_with_locks(
     locks: Option<super::workspace::CacheLocks>,
     failed: &mut FailedMeasurement,
 ) -> Result<Measured> {
+    #[cfg(test)]
+    if let Some(measured) = PREPARED_MEASUREMENT.with_borrow_mut(Option::take) {
+        return Ok(measured);
+    }
     let started = Instant::now();
 
-    let support = runner_memory_support(
-        config.nextest,
-        cfg!(target_os = "macos"),
-        memory::support().map_err(|reason| reason.to_string()),
-    );
-    let (memory, unbounded) = settle_memory_control(config, support)?;
+    let (memory, unbounded) = settle_memory_control(config, memory::support().map_err(|reason| reason.to_string()))?;
 
     // Resource discovery also uses the baseline limit, even with --no-baseline, so those
     // launches still need the soft-bound warning. Enforcement reaches here only with a
@@ -648,10 +672,10 @@ fn measure_with_locks(
     #[cfg(target_os = "macos")]
     if memory.enforcing() || memory.baseline_limit.is_some() {
         events.warn(&format!(
-            "memory enforcement on macOS samples the process group's physical footprint every {} ms: \
-             the bound is soft, allocation can overshoot between samples, descendants that leave \
-             the process group are neither counted nor stopped, and members owned by another user \
-             cannot be read and are not counted",
+            "memory enforcement on macOS samples the process tree's physical footprint every {} ms: \
+             the bound is soft, allocation can overshoot between samples, a descendant that leaves \
+             the process group and outlives its parent is neither counted nor stopped, and members \
+             owned by another user cannot be read and are not counted",
             cargo_gamma_process::SAMPLE_INTERVAL.as_millis(),
         ));
     }
@@ -670,29 +694,34 @@ fn measure_with_locks(
     announce_compile_fail_costs(survey, config, events);
 
     let mut plan = survey.skeleton();
-    let mut converger = Converger::default();
-    converger.select_test_lib(config.test_lib);
+    let mut converger = configured_converger(config);
 
     // The scratch-tree copy, timed on its own: it is a component of the build's total, but a large
     // workspace can spend as much duplicating itself as compiling, and the aggregate cannot say
     // which.
     let copy_started = Instant::now();
     let mut work = Workspace::prepare_with_locks(&plan.root, &survey.target, config, events, locks)?;
-    let exclusions = crate::discover::CompilerExclusions::load(work.base(), &plan.root)?;
-    exclusions.store(work.base())?;
-    let copy = copy_started.elapsed();
+    let mut copy = Duration::ZERO;
+    let exclusions =
+    // #[gamma::skip(try.propagate_to_unwrap, reason = "This exact measurement-orchestration propagation follows real workspace preparation, compiler inventory, and runtime linking. Forcing its failure at this caller requires filesystem/process inputs; owned inventory-order/error tests exercise the injected policy separately.", tag = "native-boundary")]
+    prepare_runtime_inventory(
+        &work,
+        survey,
+        &plan,
+        prepare_compiler_exclusions,
+        |work| {
 
-    // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
-    work.begin_build_sequence();
-
-    // Settled once, before anything is spawned, so the baseline and the sweep cannot disagree about
-    // how wide the workload they measure and judge is.
-    // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
-    calibrate_harness(&work, config.jobs);
-
-    for package in survey.packages() {
-        work.link_runtime(&package, &plan.files)?;
-    }
+            // #[gamma::skip(stmt.delete_assign, reason = "This assignment samples native elapsed workspace-copy time; distinguishing its omission requires a real-clock observation in the preparation pipeline, which deterministic tests must not depend on.", tag = "native-boundary")]
+            copy = copy_started.elapsed();
+            // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
+            work.begin_build_sequence();
+            // Settled once, before anything is spawned, so the baseline and the sweep cannot disagree about
+            // how wide the workload they measure and judge is.
+            // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
+            calibrate_harness(work, config.jobs);
+        },
+        link_package_runtimes,
+    )?;
 
     let preflight_started = Instant::now();
     let Cleared {
@@ -704,9 +733,7 @@ fn measure_with_locks(
     let oracle = Oracle::new(packages, inferred_package_local(config), whole_workspace);
     let scope = oracle.scope();
 
-    let anything_live = instrument_population(survey, selection, &mut plan, &work, events, Some(&exclusions))?;
-    converger.historical_exclusions = plan.mutants.iter().filter(|mutant| mutant.outcome == Outcome::CompileError).count();
-    converger.compiler_exclusions = Some(exclusions);
+    let anything_live = instrument_compiler_population(survey, selection, &mut plan, &work, events, &mut converger, exclusions)?;
     let mut stuck = Vec::new();
 
     // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
@@ -732,8 +759,7 @@ fn measure_with_locks(
     // build's artifact stream is retained for the baseline, so convergence does not end with a
     // redundant cache-hit Cargo invocation.
     // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
-    begin_schema_build(events);
-    events.convergence_progress(converger.historical_exclusions);
+    begin_schema_build(events, converger.historical_exclusions);
 
     // Build only packages whose tests can actually be selected: the rest would be compiled,
     // baselined and never consulted. All target packages have already been instrumented, so this
@@ -814,16 +840,7 @@ fn measure_with_locks(
     // Marker enumeration requires that finalized launch environment. Install the resulting policy
     // before baseline measurement so baseline, mutant, and confirmation launches all use
     // the same admission rules.
-    let resources = match Resources::discover(
-        &work,
-        &build.binaries,
-        &config.resources,
-        MemoryRequest {
-            calibrating: false,
-            meter: memory.measuring(),
-            limit: memory.baseline_limit,
-        },
-    ) {
+    let resources = match Resources::discover(&work, &build.binaries, &config.resources, listing_memory_request(&memory)) {
         Ok(resources) => resources,
         Err(error) => {
             failed.plan = Some(plan);
@@ -1074,6 +1091,68 @@ fn instrument_population(
     Ok(live > usize::default())
 }
 
+fn configured_converger(config: &Config) -> Converger {
+    let mut converger = Converger::default();
+    converger.select_test_lib(config.test_lib);
+    converger
+}
+
+/// Prepares retained exclusions before build setup and runtime linking; the first failure stops setup.
+fn prepare_runtime_inventory(
+    work: &Workspace,
+    survey: &Survey,
+    plan: &Plan,
+    prepare: impl FnOnce(&Workspace, &Plan) -> Result<crate::discover::CompilerExclusions>,
+    after_prepare: impl FnOnce(&Workspace),
+    link: impl FnOnce(&Workspace, &Survey, &Plan) -> Result<()>,
+) -> Result<crate::discover::CompilerExclusions> {
+    let exclusions = prepare(work, plan)?;
+    after_prepare(work);
+    link(work, survey, plan)?;
+    Ok(exclusions)
+}
+
+fn link_package_runtimes(work: &Workspace, survey: &Survey, plan: &Plan) -> Result<()> {
+    link_package_runtimes_with(survey, |package| work.link_runtime(package, &plan.files))
+}
+
+fn link_package_runtimes_with(survey: &Survey, mut link: impl FnMut(&str) -> Result<()>) -> Result<()> {
+    for package in survey.packages() {
+        link(&package)?;
+    }
+    Ok(())
+}
+
+/// Instruments against retained compiler evidence, then transfers it into convergence state.
+fn instrument_compiler_population(
+    survey: &Survey,
+    selection: &Selection,
+    plan: &mut Plan,
+    work: &Workspace,
+    events: &mut impl Events,
+    converger: &mut Converger,
+    exclusions: crate::discover::CompilerExclusions,
+) -> Result<bool> {
+    let anything_live = instrument_population(survey, selection, plan, work, events, Some(&exclusions))?;
+
+    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
+    retain_compiler_exclusions(converger, plan, exclusions);
+    Ok(anything_live)
+}
+
+/// Recounts historically excluded mutants in the new plan and retains their reusable evidence.
+fn retain_compiler_exclusions(converger: &mut Converger, plan: &Plan, exclusions: crate::discover::CompilerExclusions) {
+    converger.historical_exclusions = plan.mutants.iter().filter(|mutant| mutant.outcome == Outcome::CompileError).count();
+    converger.compiler_exclusions = Some(exclusions);
+}
+
+/// Loads and persists retained compiler evidence before instrumenting a new population.
+fn prepare_compiler_exclusions(work: &Workspace, plan: &Plan) -> Result<crate::discover::CompilerExclusions> {
+    let exclusions = crate::discover::CompilerExclusions::load(work.base(), &plan.root)?;
+    exclusions.store(work.base())?;
+    Ok(exclusions)
+}
+
 fn begin_population(events: &mut impl Events, packages: usize) {
     let detail = crate::report::quantity(packages, "target package");
     // #[gamma::skip(all, reason = "this literal belongs to a Cargo process protocol or diagnostic boundary that cannot be isolated deterministically without replacing process-global integration state")]
@@ -1106,8 +1185,9 @@ fn schema_build_counts(mutants: &[Mutant]) -> (usize, usize, usize) {
     (unviable, viable, not_built)
 }
 
-fn begin_schema_build(events: &mut impl Events) {
+fn begin_schema_build(events: &mut impl Events, historical_exclusions: usize) {
     events.begin("Excluding", "Excluded", "unviable mutants");
+    events.convergence_progress(historical_exclusions);
 }
 
 fn finish_schema_build(events: &mut impl Events, unviable: usize, viable: usize, not_built: usize) {
@@ -1291,11 +1371,7 @@ fn take_baseline_retaining(
         });
     }
 
-    let request = MemoryRequest {
-        calibrating: true,
-        meter: memory.measuring(),
-        limit: memory.baseline_limit,
-    };
+    let request = baseline_memory_request(memory);
 
     let total = binaries.len();
     let unit = if total == 1 { "test binary" } else { "test binaries" };
@@ -1376,14 +1452,18 @@ fn settle_memory_control(config: &Config, support: Result<(), String>) -> Result
     Ok((policy, None))
 }
 
-fn runner_memory_support(nextest: bool, macos: bool, support: Result<(), String>) -> Result<(), String> {
-    if macos && nextest {
-        Err(
-            "nextest puts each test in its own process group, outside macOS sampled memory control; drop `--nextest` to use memory control"
-                .to_owned(),
-        )
-    } else {
-        support
+fn listing_memory_request(memory: &MemoryPolicy) -> MemoryRequest {
+    MemoryRequest {
+        calibrating: false,
+        meter: memory.measuring(),
+        limit: memory.baseline_limit,
+    }
+}
+
+fn baseline_memory_request(memory: &MemoryPolicy) -> MemoryRequest {
+    MemoryRequest {
+        calibrating: true,
+        ..listing_memory_request(memory)
     }
 }
 
@@ -1432,10 +1512,16 @@ fn calibrate_stall(baseline: &Baseline, config: &Config) -> Stall {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use core::iter::once;
     use std::cell::RefCell;
+    #[cfg(unix)]
+    use std::os::unix::process::ExitStatusExt as _;
+    #[cfg(windows)]
+    use std::os::windows::process::ExitStatusExt as _;
     use std::rc::Rc;
 
     use camino::Utf8Path;
+    use serde_json::{Value, from_slice, from_value, json, to_value, to_vec};
 
     use super::*;
     use crate::discover::{Killer, TargetFile};
@@ -1443,6 +1529,393 @@ mod tests {
     use crate::exec::verdict::Only;
     use crate::fixtures;
     use crate::testing::Recorder;
+
+    #[test]
+    fn oct25_prepared_runtime_setup_preserves_each_error_before_advancing_the_pipeline() {
+        let output = tempfile::tempdir_in(".").unwrap();
+        let base = Utf8Path::from_path(output.path()).unwrap();
+        let root = Utf8Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/completed-recovery");
+        let survey = Survey::from_test_root(root.clone());
+        let plan = survey.skeleton();
+        let work = Workspace::adopt(root, base.join("target"));
+        let failure = prepare_runtime_inventory(
+            &work,
+            &survey,
+            &plan,
+            |seen, selected| {
+                assert!(std::ptr::eq(seen, &raw const work));
+                assert!(std::ptr::eq(selected, &raw const plan));
+                Err(error!("owned inventory preparation refusal"))
+            },
+            |_| panic!("preparation failure must precede build setup"),
+            |_, _, _| panic!("preparation failure must precede runtime linking"),
+        )
+        .unwrap_err();
+        assert_eq!(failure.message(), "owned inventory preparation refusal");
+        let prepared = std::cell::Cell::new(false);
+        let failure = prepare_runtime_inventory(
+            &work,
+            &survey,
+            &plan,
+            prepare_compiler_exclusions,
+            |seen| {
+                assert!(std::ptr::eq(seen, &raw const work));
+                prepared.set(true);
+            },
+            |seen, selected, population| {
+                assert!(prepared.get());
+                assert!(std::ptr::eq(seen, &raw const work));
+                assert!(std::ptr::eq(selected, &raw const survey));
+                assert!(std::ptr::eq(population, &raw const plan));
+                Err(error!("owned runtime link refusal"))
+            },
+        )
+        .unwrap_err();
+        assert_eq!(failure.message(), "owned runtime link refusal");
+        assert_eq!(
+            from_slice::<Value>(&std::fs::read(base.join("compiler-exclusions.json")).unwrap()).unwrap(),
+            json!({"version": 1, "mutants": {}})
+        );
+    }
+
+    #[test]
+    fn recovered_runtime_linking_returns_the_package_error_without_touching_native_manifests() {
+        let survey = Survey::from_checked_fixture();
+        let mut calls = Vec::new();
+        let failure = link_package_runtimes_with(&survey, |package| {
+            calls.push(package.to_owned());
+            Err(error!("injected runtime manifest read refusal"))
+        })
+        .unwrap_err();
+        assert_eq!(calls, ["alpha"]);
+        assert_eq!(failure.message(), "injected runtime manifest read refusal");
+    }
+
+    #[test]
+    fn listing_and_baseline_memory_requests_differ_only_in_calibration() {
+        for control in [
+            memory::MemoryControl::Off,
+            memory::MemoryControl::Measure,
+            memory::MemoryControl::Enforce,
+        ] {
+            for limit in [None, Some(8192)] {
+                let policy = MemoryPolicy {
+                    control,
+                    baseline_limit: limit,
+                    ..MemoryPolicy::default()
+                };
+                let expected = MemoryRequest {
+                    calibrating: false,
+                    meter: control != memory::MemoryControl::Off,
+                    limit,
+                };
+                assert_eq!(listing_memory_request(&policy), expected);
+                assert_eq!(
+                    baseline_memory_request(&policy),
+                    MemoryRequest {
+                        calibrating: true,
+                        ..expected
+                    }
+                );
+            }
+        }
+    }
+
+    fn recovered_measured_plan() -> (super::super::testing_state::TestingState, Survey, Selection) {
+        let state = super::super::testing_state::TestingState::from_test_plan(fixtures::plan(vec![Mutant {
+            outcome: Outcome::Pending,
+            ..fixtures::mutant()
+        }]));
+        let survey = Survey::from_test_root(state.plan.root.clone());
+        let selection = Selection::parse("literal.bool_flip,arith.add_to_sub").unwrap();
+        (state, survey, selection)
+    }
+
+    fn recovered_memory_work() -> (Workspace, super::super::testing_state::JournalEntries) {
+        let mut work = Workspace::adopt("invalid\0measurement".into(), "invalid\0measurement/target".into());
+        let (journal, entries) = super::super::testing_state::TestingJournal::memory_failing_after_for_test(Some(0));
+        work.set_journal_for_test(journal);
+        (work, entries)
+    }
+
+    fn recovered_first_accounting(entries: &super::super::testing_state::JournalEntries) -> Value {
+        let entries = entries
+            .lock()
+            .expect("journal capture only appends or copies owned bytes under this lock")
+            .clone();
+        assert_eq!(entries.len(), 1);
+        from_slice(&entries[0]).unwrap()
+    }
+
+    #[test]
+    fn recovered_native_run_captures_and_retains_initial_hints_before_its_first_in_memory_checkpoint() {
+        let (state, survey, selection) = recovered_measured_plan();
+        let (work, entries) = recovered_memory_work();
+        let measured = Measured {
+            plan: state.plan,
+            built: Some(Built {
+                work,
+                session: state.session,
+                oracle: state.oracle,
+            }),
+            stuck: Vec::new(),
+            dropped: Vec::new(),
+            learning: None,
+        };
+        let config = Config {
+            incremental: super::super::incremental_mode::IncrementalMode::No,
+            ..Config::default()
+        };
+        let result = with_prepared_measurement(measured, || {
+            run_with_locks(
+                &survey,
+                &selection,
+                &config,
+                &mut Recorder::default(),
+                None,
+                &mut FailedMeasurement::default(),
+                None,
+            )
+        });
+        let Err(failure) = result else {
+            panic!("the first durable checkpoint is deliberately refused");
+        };
+        assert_eq!(failure.message(), "injected durable append error");
+        let entry = recovered_first_accounting(&entries);
+        assert_eq!(entry["sweep"]["accounting"]["initialExactHints"], 0);
+        assert_eq!(entry["sweep"]["accounting"]["initialKillerConfirmed"], 0);
+    }
+
+    #[test]
+    fn recovered_resumed_run_retains_prior_cost_and_hint_coverage_before_its_first_in_memory_checkpoint() {
+        for retain_prior in [false, true] {
+            let (mut state, _survey, _selection) = recovered_measured_plan();
+            let (work, entries) = recovered_memory_work();
+            state.session.phases.initial_hints = Some(super::super::session::InitialHints {
+                population: 1,
+                killers: HashMap::default(),
+            });
+            state.session.phases.sweep = retain_prior.then(|| SweepCost {
+                elapsed: Duration::from_millis(37),
+                confirmed_initial_killers: std::collections::BTreeSet::from(["retained-confirmation".into()]),
+                accounting: Some(super::super::session::SweepAccounting::segment(
+                    state.session.phases.initial_hints.as_ref(),
+                    true,
+                )),
+                ..SweepCost::default()
+            });
+            let result = resume_testing(state, work, &mut Recorder::default());
+            let Err(failure) = result else {
+                panic!("the first durable checkpoint is deliberately refused");
+            };
+            assert_eq!(failure.message(), "injected durable append error");
+            let entry = recovered_first_accounting(&entries);
+            assert_eq!(
+                entry["sweep"]["elapsed"],
+                to_value(Duration::from_millis(if retain_prior { 37 } else { 0 })).unwrap()
+            );
+            assert_eq!(entry["sweep"]["accounting"]["initialExactHints"], 0);
+            assert_eq!(entry["sweep"]["accounting"]["initialKillerConfirmed"], usize::from(retain_prior));
+        }
+    }
+
+    #[test]
+    fn recovered_native_run_passes_sorted_mutator_settings_and_propagates_checkpoint_start_failure() {
+        let (state, survey, selection) = recovered_measured_plan();
+        let record = state.record.clone();
+        let work = Workspace::adopt("invalid\0measurement".into(), "invalid\0measurement/target".into());
+        let measured = Measured {
+            plan: state.plan,
+            built: Some(Built {
+                work,
+                session: state.session,
+                oracle: state.oracle,
+            }),
+            stuck: Vec::new(),
+            dropped: Vec::new(),
+            learning: None,
+        };
+        let config = Config {
+            incremental: super::super::incremental_mode::IncrementalMode::No,
+            ..Config::default()
+        };
+        let result = super::super::testing_state::with_start_observer(
+            |settings| {
+                assert_eq!(settings.mutators.as_deref(), Some("arith.add_to_sub,literal.bool_flip"));
+                Err(error!("the in-memory testing-state start is deliberately refused"))
+            },
+            || {
+                with_prepared_measurement(measured, || {
+                    run_with_locks(
+                        &survey,
+                        &selection,
+                        &config,
+                        &mut Recorder::default(),
+                        None,
+                        &mut FailedMeasurement::default(),
+                        Some(&record),
+                    )
+                })
+            },
+        );
+        let Err(failure) = result else {
+            panic!("the testing-state observer returned a named error");
+        };
+        assert_eq!(failure.message(), "the in-memory testing-state start is deliberately refused");
+    }
+
+    #[test]
+    fn recovered_materialization_preserves_exact_historical_exclusions_and_counts_only_compile_error_outcomes() {
+        let survey = Survey::from_checked_fixture();
+        let selection = Selection::parse("relational.lt_to_le").unwrap();
+        let scanned = survey.scan_excluding(Some("alpha"), &selection, &mut 0, None).unwrap();
+        assert_eq!(scanned.mutants.len(), 1);
+        let id = scanned.mutants[0].id.clone();
+        let exclusions: crate::discover::CompilerExclusions = from_value(json!({
+            "version": 1, "mutants": {id.as_str(): "retained exact compiler rejection"}
+        }))
+        .unwrap();
+        let work = Workspace::adopt(survey.root.clone(), "never-written-materialization-target".into());
+        let mut plan = survey.skeleton();
+        let mut converger = configured_converger(&Config {
+            test_lib: true,
+            ..Config::default()
+        });
+        assert!(converger.test_lib);
+        assert!(
+            !instrument_compiler_population(
+                &survey,
+                &selection,
+                &mut plan,
+                &work,
+                &mut Recorder::default(),
+                &mut converger,
+                exclusions,
+            )
+            .unwrap()
+        );
+        assert_eq!(converger.historical_exclusions, 1);
+        assert_eq!(plan.mutants.len(), 1);
+        assert_eq!(plan.mutants[0].id, id);
+        assert_eq!(plan.mutants[0].outcome, Outcome::CompileError);
+        assert_eq!(plan.mutants[0].ordinal, 0);
+        assert_eq!(
+            plan.mutants[0].note.as_deref(),
+            Some("historical compiler exclusion: retained exact compiler rejection")
+        );
+        plan.mutants.extend([
+            Mutant {
+                outcome: Outcome::Pending,
+                ..fixtures::mutant()
+            },
+            Mutant {
+                outcome: Outcome::CompileError,
+                ..fixtures::mutant()
+            },
+        ]);
+        let exclusions = converger.compiler_exclusions.take().unwrap();
+        retain_compiler_exclusions(&mut converger, &plan, exclusions);
+        assert_eq!(converger.historical_exclusions, 2);
+        assert_eq!(
+            converger.compiler_exclusions.as_ref().unwrap().reason(&plan.mutants[0]),
+            Some("retained exact compiler rejection")
+        );
+    }
+
+    #[test]
+    fn recovered_schema_build_announces_the_exact_historical_count_after_its_phase_start() {
+        #[derive(Default)]
+        struct Announcements(Vec<(String, usize)>);
+        impl Events for Announcements {
+            fn phase(&mut self, verb: &str, _detail: &str) {
+                self.0.push((verb.to_owned(), 0));
+            }
+            fn convergence_progress(&mut self, excluded: usize) {
+                self.0.push(("historical".into(), excluded));
+            }
+            fn mutant(&mut self, _mutant: &Mutant) {
+                panic!("announcing the schema build does not settle any mutant");
+            }
+        }
+        let mut events = Announcements::default();
+        begin_schema_build(&mut events, 7);
+        assert_eq!(events.0, [("Excluding".into(), 0), ("historical".into(), 7)]);
+    }
+
+    #[test]
+    fn recovered_compiler_inventory_preparation_returns_native_load_and_store_failures_without_creating_an_inventory() {
+        let survey = Survey::from_checked_fixture();
+        let plan = survey.skeleton();
+        let invalid_base = Utf8Path::new("invalid\0compiler-inventory");
+        let invalid_work = Workspace::adopt(plan.root.clone(), invalid_base.join("target"));
+        let expected = crate::discover::CompilerExclusions::load(invalid_base, &plan.root)
+            .unwrap_err()
+            .message()
+            .to_owned();
+        assert_eq!(prepare_compiler_exclusions(&invalid_work, &plan).unwrap_err().message(), expected);
+
+        #[cfg(windows)]
+        {
+            let base_file = survey.files[0].absolute.clone();
+            let work = Workspace::adopt(survey.root, base_file.join("target"));
+            let inventory = crate::discover::CompilerExclusions::load(&base_file, &plan.root).unwrap();
+            let expected = inventory.store(&base_file).unwrap_err().message().to_owned();
+            assert_eq!(prepare_compiler_exclusions(&work, &plan).unwrap_err().message(), expected);
+            assert_eq!(
+                std::fs::read(&base_file).unwrap(),
+                include_bytes!("../../tests/fixtures/completed-recovery/lib.rs")
+            );
+        }
+    }
+
+    #[test]
+    fn oct25_preflight_distinguishes_implicit_local_policy_from_a_selected_nonmutating_dependent() {
+        for (whole_workspace, explicit_package, expected_selection) in [
+            (false, None, vec!["--package", "alpha"]),
+            (true, None, vec!["--workspace"]),
+            (false, Some("beta"), vec!["--package", "alpha", "--package", "beta"]),
+        ] {
+            let mut survey = Survey::from_test_root("never-read-preflight-root".into());
+            survey.selected = vec!["alpha".into(), "beta".into()];
+            survey.files.push(TargetFile {
+                path: "lib.rs".into(),
+                absolute: "never-read-preflight-root/lib.rs".into(),
+                package: "alpha".into(),
+                source: None,
+            });
+            survey.reach = [
+                ("alpha".into(), once("alpha".into()).collect()),
+                ("beta".into(), once("alpha".into()).collect()),
+                ("gamma".into(), once("gamma".into()).collect()),
+            ]
+            .into_iter()
+            .collect();
+            let plan = survey.skeleton();
+            let config = Config {
+                test_workspace: whole_workspace,
+                test_packages: explicit_package.into_iter().map(str::to_owned).collect(),
+                ..Config::default()
+            };
+            let work = Workspace::adopt("never-read-preflight-root".into(), "never-written-preflight-target".into());
+            let calls = Rc::new(RefCell::new(0));
+            let result = super::super::build::with_compiler(
+                {
+                    let calls = Rc::clone(&calls);
+                    move |_work, arguments, _timeout, _events| {
+                        *calls.borrow_mut() += 1;
+                        let mut expected = vec!["check", "--tests", "--keep-going", "--message-format=json"];
+                        expected.extend_from_slice(&expected_selection);
+                        assert_eq!(arguments, expected);
+                        Err(error!("the in-process preflight observer stops before execution"))
+                    }
+                },
+                || preflight(&survey, &plan, &work, &config, &mut Converger::default(), &mut Recorder::default()),
+            );
+            let failure = result.err().expect("the injected compiler returned an error");
+            assert_eq!(failure.message(), "the in-process preflight observer stops before execution");
+            assert_eq!(*calls.borrow(), 1);
+        }
+    }
 
     #[derive(Default)]
     struct MeasurementEvents {
@@ -1510,10 +1983,10 @@ mod tests {
             .output()
             .unwrap();
         assert!(metadata.status.success(), "{}", String::from_utf8_lossy(&metadata.stderr));
-        let metadata: serde_json::Value = serde_json::from_slice(&metadata.stdout).unwrap();
+        let metadata: Value = from_slice(&metadata.stdout).unwrap();
         let package = &metadata["packages"][0];
         let stdout = if emit_binary {
-            serde_json::json!({
+            json!({
                 "reason": "compiler-artifact",
                 "profile": {"test": true},
                 "package_id": package["id"],
@@ -1528,15 +2001,9 @@ mod tests {
             Vec::new()
         };
         #[cfg(unix)]
-        let status = {
-            use std::os::unix::process::ExitStatusExt as _;
-            std::process::ExitStatus::from_raw(0)
-        };
+        let status = { std::process::ExitStatus::from_raw(0) };
         #[cfg(windows)]
-        let status = {
-            use std::os::windows::process::ExitStatusExt as _;
-            std::process::ExitStatus::from_raw(0)
-        };
+        let status = { std::process::ExitStatus::from_raw(0) };
         std::process::Output {
             status,
             stdout,
@@ -1563,8 +2030,8 @@ mod tests {
             .unwrap();
             assert_eq!(result.plan.mutants.len(), 1);
             assert!(result.learning.is_none());
-            assert!(result.stuck.is_empty());
-            assert!(result.dropped.is_empty());
+            assert_eq!(result.stuck.len(), 0);
+            assert_eq!(result.dropped.len(), 0);
             let built = result
                 .built
                 .expect("one viable mutation and its test artifact must retain a measured workspace");
@@ -1627,7 +2094,7 @@ mod tests {
         assert!(result.plan.mutants.is_empty());
         assert!(result.built.is_none());
         assert!(result.learning.is_none());
-        assert!(result.stuck.is_empty());
+        assert_eq!(result.stuck.len(), 0);
         assert!(!events.phases.iter().any(|(verb, _)| verb == "Excluding"));
         assert!(events.phases.iter().any(|(_, detail)| detail == ", 0 mutants"));
     }
@@ -1724,7 +2191,7 @@ mod tests {
         )
         .unwrap();
         let built = result.built.expect("a viable nonlibrary population still has a measured run");
-        assert!(built.session.binaries.is_empty());
+        assert_eq!(built.session.binaries.len(), 0);
         assert!(result.learning.is_none());
     }
 
@@ -1804,7 +2271,7 @@ mod tests {
                 move |work, _arguments, _timeout, _events| {
                     let mut output = successful_compiler_output(work, &executable, true);
                     if wrong_target {
-                        let mut artifact: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+                        let mut artifact: Value = from_slice(&output.stdout).unwrap();
                         artifact["target"]["name"] = "not-the-selected-library".into();
                         output.stdout = artifact.to_string().into_bytes();
                     }
@@ -1921,7 +2388,6 @@ mod tests {
                 jobs: config.jobs,
                 mutators: Some(selection.sorted().join(",")),
                 timeout_floor: config.timeout_floor,
-                confirm: config.confirm,
                 narrowed: true,
                 incremental: config.incremental.is_enabled(),
             },
@@ -1994,7 +2460,6 @@ mod tests {
             assert!(!self.fired);
             self.fired = true;
             let phase = self.base.join("testing-phase.json");
-            fs::remove_file(&phase).unwrap();
             fs::create_dir(&phase).unwrap();
         }
     }
@@ -2002,35 +2467,52 @@ mod tests {
     #[test]
     fn completed_and_resumed_sweeps_propagate_native_phase_publication_errors() {
         for resume in [false, true] {
-            let (_directory, survey, selection, config) = orchestration_fixture("pub fn subject() -> bool { true }\n");
-            let record = prepared_record(&survey, &config);
+            let directory = tempfile::tempdir_in(".").unwrap();
+            let base = Utf8Path::from_path(directory.path()).unwrap().to_owned();
+            let (mut state, survey, selection) = recovered_measured_plan();
+            state.record.base.clone_from(&base);
+            fs::write(base.join("testing-session.json"), to_vec(&state).unwrap()).unwrap();
+            fs::write(base.join("testing-verdicts.jsonl"), "").unwrap();
+            let mut work = Workspace::adopt(survey.root.clone(), base.join("target"));
+            work.arm_testing_journal().unwrap();
             let mut events = PublicationCollision {
-                base: record.base.clone(),
+                base: base.clone(),
                 fired: false,
             };
             let result = if resume {
-                let (state, work) = prepared_testing_fixture(&survey, &selection, &config, Killers::default());
                 resume_testing(state, work, &mut events)
             } else {
-                let executable = crate::testing::helper().path;
-                super::super::build::with_compiler(
-                    move |work, _arguments, _timeout, _events| Ok(Some(retained_compiler_output(work, &executable))),
-                    || {
-                        run_with_locks(
-                            &survey,
-                            &selection,
-                            &config,
-                            &mut events,
-                            None,
-                            &mut FailedMeasurement::default(),
-                            Some(&record),
-                        )
-                    },
-                )
+                let measured = Measured {
+                    plan: state.plan,
+                    built: Some(Built {
+                        work,
+                        session: state.session,
+                        oracle: state.oracle,
+                    }),
+                    stuck: Vec::new(),
+                    dropped: Vec::new(),
+                    learning: None,
+                };
+                let config = Config {
+                    incremental: super::super::incremental_mode::IncrementalMode::No,
+                    ..Config::default()
+                };
+                with_prepared_measurement(measured, || {
+                    run_with_locks(
+                        &survey,
+                        &selection,
+                        &config,
+                        &mut events,
+                        None,
+                        &mut FailedMeasurement::default(),
+                        None,
+                    )
+                })
             };
-            assert!(events.fired);
             let error = result.expect_err("a directory at the phase filename must refuse completed-state publication");
+            assert!(events.fired, "resume={resume}: failed before publication: {error}");
             assert!(error.to_string().contains("testing-phase.json"), "{error}");
+            assert!(base.join("testing-phase.json").is_dir());
         }
     }
 
@@ -2120,7 +2602,7 @@ mod tests {
         )
         .unwrap();
         let built = measured.built.unwrap();
-        assert!(!built.work.required_resources(&built.session.binaries[0], Only::All).is_empty());
+        assert_ne!(built.work.required_resources(&built.session.binaries[0], Only::All).len(), 0);
     }
 
     #[test]
@@ -2365,7 +2847,7 @@ mod tests {
             (2, "2 unviable mutants; 2 mutants could not be built; 7 are viable"),
         ] {
             let mut events = Recorder::default();
-            begin_schema_build(&mut events);
+            begin_schema_build(&mut events, 0);
             finish_schema_build(&mut events, 2, 7, not_built);
             assert_eq!(
                 events.phases,
@@ -2635,7 +3117,7 @@ mod tests {
             .expect("an ordinary preflight keeps its request");
         assert_eq!(ordinary.packages, ["a"]);
         assert!(!ordinary.whole_workspace);
-        assert!(ordinary.dropped.is_empty());
+        assert_eq!(ordinary.dropped.len(), 0);
         let retreated = finish_preflight(
             vec!["a".to_owned(), "b".to_owned()],
             vec!["a".to_owned(), "b".to_owned()],
@@ -2755,7 +3237,7 @@ mod tests {
     fn stuck_plan(mutants: Vec<Mutant>) -> Plan {
         Plan {
             skipped: Vec::new(),
-            digests: crate::HashMap::default(),
+            digests: HashMap::default(),
             root: Utf8PathBuf::from("/workspace"),
             files: Vec::new(),
             mutants,
@@ -2763,8 +3245,8 @@ mod tests {
             idle: Vec::new(),
             sharded_out: 0,
             settled_out: 0,
-            reach: crate::HashMap::default(),
-            specs: crate::HashMap::default(),
+            reach: HashMap::default(),
+            specs: HashMap::default(),
         }
     }
 
@@ -2878,7 +3360,7 @@ mod tests {
         let mut events = Recorder::default();
         begin_population(&mut events, 12);
         finish_population(&mut events, &mutants);
-        begin_schema_build(&mut events);
+        begin_schema_build(&mut events, 0);
         finish_schema_build(&mut events, 1, 2, 0);
         assert_eq!(
             events.phases,
@@ -2938,7 +3420,7 @@ mod tests {
         }
 
         let mut events = Labels::default();
-        begin_schema_build(&mut events);
+        begin_schema_build(&mut events, 0);
         begin_preflight(&mut events);
         begin_population(&mut events, 2);
         assert_eq!(
@@ -3116,7 +3598,7 @@ mod tests {
         assert_eq!(without.tests, None);
         assert_eq!(without.peak, None);
         assert_eq!(disabled.phases, vec![(String::new(), "no baseline was measured".to_owned())]);
-        assert!(disabled.progress.is_empty());
+        assert_eq!(disabled.progress.len(), 0);
 
         let mut empty = BaselineEvents::default();
         let measured = take_baseline(
@@ -3261,107 +3743,6 @@ mod tests {
             Some("no cgroup here"),
             "a degraded policy must say why, not merely that it degraded"
         );
-    }
-
-    #[test]
-    fn macos_nextest_disables_inherited_memory_control_with_a_reason() {
-        let config = Config {
-            nextest: true,
-            ..Config::default()
-        };
-        let support = runner_memory_support(config.nextest, true, Ok(()));
-        let (settled, note) = settle_memory_control(&config, support).unwrap();
-        assert_eq!(settled, config.memory.disabled());
-        assert!(!settled.enforcing());
-        assert_eq!(settled.baseline_limit, None);
-        assert_eq!(
-            note.as_deref(),
-            Some(
-                "nextest puts each test in its own process group, outside macOS sampled memory control; drop `--nextest` to use memory control"
-            )
-        );
-    }
-
-    #[test]
-    fn macos_nextest_refuses_stated_memory_control_and_limits() {
-        for memory in [
-            MemoryPolicy {
-                control: MemoryControl::Measure,
-                demand: Demand::Stated,
-                ..MemoryPolicy::default()
-            },
-            MemoryPolicy {
-                demand: Demand::Stated,
-                ..MemoryPolicy::default()
-            },
-            MemoryPolicy {
-                demand: Demand::Stated,
-                limit: Some(100),
-                ..MemoryPolicy::default()
-            },
-            MemoryPolicy {
-                control: MemoryControl::Measure,
-                demand: Demand::Stated,
-                baseline_limit: Some(100),
-                ..MemoryPolicy::default()
-            },
-        ] {
-            let config = Config {
-                nextest: true,
-                memory,
-                ..Config::default()
-            };
-            let support = runner_memory_support(config.nextest, true, Ok(()));
-            let error = settle_memory_control(&config, support).unwrap_err();
-            assert_eq!(
-                error.to_string(),
-                "memory control was asked for, but it is not available here: nextest puts each test in its own process group, outside macOS sampled memory control; drop `--nextest` to use memory control.\nRun with `--memory off` to continue without it."
-            );
-        }
-    }
-
-    #[test]
-    fn runner_memory_support_preserves_supported_combinations_and_host_failures() {
-        for (macos, nextest) in [(true, false), (false, true), (false, false)] {
-            let config = Config {
-                nextest,
-                ..Config::default()
-            };
-            let support = runner_memory_support(config.nextest, macos, Ok(()));
-            let (settled, note) = settle_memory_control(&config, support).unwrap();
-            assert_eq!(settled, config.memory);
-            assert_eq!(note, None);
-            assert_eq!(
-                runner_memory_support(nextest, macos, Err("host unavailable".to_owned())),
-                Err("host unavailable".to_owned())
-            );
-        }
-    }
-
-    #[test]
-    fn macos_nextest_allows_explicitly_disabled_memory_control() {
-        let config = Config {
-            nextest: true,
-            memory: MemoryPolicy {
-                control: MemoryControl::Off,
-                demand: Demand::Stated,
-                limit: Some(100),
-                baseline_limit: Some(200),
-                ..MemoryPolicy::default()
-            },
-            ..Config::default()
-        };
-        let support = runner_memory_support(config.nextest, true, Ok(()));
-        let (settled, note) = settle_memory_control(&config, support).unwrap();
-        assert_eq!(
-            settled,
-            MemoryPolicy {
-                limit: None,
-                baseline_limit: None,
-                ..config.memory
-            }
-        );
-        assert_eq!(note, None);
     }
 
     /// A stated policy this host *can* deliver still errors when there is no baseline to derive a
@@ -3569,7 +3950,7 @@ mod tests {
 
     /// A workspace where `app` links `core`, and both are their own reach.
     fn oracle_plan(mutating: &str) -> Plan {
-        let mut reach: crate::HashMap<String, crate::HashSet<String>> = crate::HashMap::default();
+        let mut reach: HashMap<String, crate::HashSet<String>> = HashMap::default();
 
         let _app = reach.insert("app".to_owned(), ["app".to_owned(), "core".to_owned()].into_iter().collect());
         let _core = reach.insert("core".to_owned(), core::iter::once("core".to_owned()).collect());
@@ -3584,7 +3965,7 @@ mod tests {
 
         Plan {
             skipped: Vec::new(),
-            digests: crate::HashMap::default(),
+            digests: HashMap::default(),
             root: Utf8PathBuf::from("/w"),
             files: Vec::new(),
             mutants: vec![pending],
@@ -3593,7 +3974,7 @@ mod tests {
             sharded_out: 0,
             settled_out: 0,
             reach,
-            specs: crate::HashMap::default(),
+            specs: HashMap::default(),
         }
     }
 

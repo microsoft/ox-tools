@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-28
+
+- ✨ Features
+
+  - cargo-gamma: improve campaign reliability and mutation detection ([#282](https://github.com/microsoft/ox-tools/pull/282))
+
 ## [0.3.0] - 2026-10-12
 
 - ✨ Features

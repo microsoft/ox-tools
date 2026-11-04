@@ -168,7 +168,9 @@ fn propagate_worklist(members: &[&Package], renames: &Renames, on: &mut HashMap<
             }
         }
         for package in changed {
-            if queued.insert(package.clone()) {
+            if
+            // #[gamma::skip(cond.always_true, reason = "queued.insert guards only duplicate worklist admission. changed is emitted only for genuinely new feature insertions into finite HashSets. Always queueing still terminates after finitely many such insertions (possibly duplicate package visits); monotone fixed-point feature sets are identical. No callback/output exposes queue order/count.", tag = "equivalent")]
+            queued.insert(package.clone()) {
                 queue.push_back(package);
             }
         }
@@ -389,7 +391,9 @@ pub fn from_extra(args: &FeatureArgs, extra: &[String]) -> FeatureArgs {
     for argument in extra {
         if expecting {
             widened.features.push(argument.clone());
-            expecting = false;
+            expecting =
+            // #[gamma::skip(assign_value.default, reason = "The assigned false is exactly the inferred primitive type's Default value.", tag = "equivalent")]
+            false;
 
             continue;
         }
@@ -423,13 +427,135 @@ mod tests {
     use std::fs;
 
     use camino::Utf8PathBuf;
+    use serde_json::{Value, from_str, from_value, to_value};
     use tempfile::TempDir;
 
     use super::*;
     use crate::discover::load_metadata;
 
     fn optional_metadata() -> Metadata {
-        serde_json::from_str(include_str!("../../tests/fixtures/correctness/optional-features.json")).unwrap()
+        from_str(include_str!("../../tests/fixtures/correctness/optional-features.json")).unwrap()
+    }
+
+    #[test]
+    fn recovered_missing_feature_entries_do_not_stop_other_selected_feature_edges() {
+        let names: Vec<_> = (0..8).map(|index| format!("selected{index}")).collect();
+        for missing in &names {
+            let mut metadata = optional_metadata();
+            for package in &mut metadata.packages {
+                package.features.clear();
+                package.dependencies.clear();
+            }
+            for name in names.iter().filter(|name| *name != missing) {
+                metadata.packages[0].features.insert(name.clone(), vec![format!("beta/{name}")]);
+            }
+            let members: Vec<_> = metadata.packages.iter().collect();
+            let mut on = HashMap::from_iter([
+                ("alpha".to_owned(), names.iter().cloned().collect()),
+                ("beta".to_owned(), HashSet::default()),
+            ]);
+            propagate_worklist(&members, &Renames::default(), &mut on);
+            assert_eq!(
+                on["beta"],
+                names.iter().filter(|name| *name != missing).cloned().collect(),
+                "missing entry {missing}"
+            );
+        }
+    }
+
+    #[test]
+    fn recovered_uncertainty_worklist_traverses_beyond_the_first_new_dependency() {
+        let mut metadata = optional_metadata();
+        let mut gamma = metadata.packages[1].clone();
+        gamma.name = from_str("\"gamma\"").unwrap();
+        gamma.id.repr.push_str("-gamma");
+        let mut delta = gamma.clone();
+        delta.name = from_str("\"delta\"").unwrap();
+        delta.id.repr.push_str("-delta");
+        let mut edge = metadata.packages[0].dependencies[0].clone();
+        edge.target = None;
+        edge.kind = DependencyKind::Normal;
+        edge.name = "delta".into();
+        gamma.dependencies = vec![edge.clone()];
+        delta.dependencies.clear();
+        edge.name = "gamma".into();
+        metadata.packages[1].dependencies = vec![edge];
+        metadata.packages[0].dependencies[0].target = Some("cfg(custom)".parse().unwrap());
+        metadata.workspace_members.extend([gamma.id.clone(), delta.id.clone()]);
+        metadata.packages.extend([gamma, delta]);
+        let selected = ["alpha", "beta", "gamma", "delta"].map(str::to_owned).into_iter().collect();
+        assert_eq!(
+            uncertain_packages(&metadata, &selected),
+            ["beta", "gamma", "delta"].map(str::to_owned).into_iter().collect()
+        );
+    }
+
+    #[test]
+    fn recovered_optional_dependency_activation_accepts_only_the_selected_alias() {
+        let mut metadata = optional_metadata();
+        let package = &mut metadata.packages[0];
+        package.dependencies[0].rename = Some("renamed".into());
+        package.dependencies[0].optional = true;
+        package.features.clear();
+        package.features.insert("selected".into(), vec!["renamed/extra".into()]);
+        package.features.insert("unrelated".into(), vec!["other/extra".into()]);
+        let dependency = &package.dependencies[0];
+        for (feature, expected) in [("selected", true), ("unrelated", false), ("absent", false)] {
+            assert_eq!(
+                dependency_is_active(package, dependency, &HashSet::from_iter([feature.to_owned()])),
+                expected,
+                "{feature}"
+            );
+        }
+    }
+
+    #[test]
+    fn recovered_weak_forwarding_checks_one_matching_active_dependency() {
+        let mut metadata = optional_metadata();
+        let package = &mut metadata.packages[0];
+        package.dependencies[0].rename = Some("chosen".into());
+        package.dependencies[0].optional = true;
+        let mut unrelated = package.dependencies[0].clone();
+        unrelated.name = "other".into();
+        unrelated.rename = None;
+        unrelated.optional = false;
+        package.dependencies.push(unrelated);
+        for active in [false, true] {
+            let mine = if active {
+                HashSet::from_iter(["chosen".to_owned()])
+            } else {
+                HashSet::default()
+            };
+            assert_eq!(forwarding_is_active(package, "chosen?/extra", &mine), active);
+            assert!(!forwarding_is_active(package, "missing?/extra", &mine));
+        }
+    }
+
+    #[test]
+    fn recovered_dependency_features_requeue_already_visited_packages() {
+        let mut metadata = optional_metadata();
+        let mut gamma = metadata.packages[1].clone();
+        gamma.name = from_str("\"gamma\"").unwrap();
+        gamma.dependencies.clear();
+        gamma.features.clear();
+        gamma.features.insert("deep".into(), Vec::new());
+        metadata.packages[0].features.clear();
+        metadata.packages[0].dependencies[0].optional = false;
+        metadata.packages[0].dependencies[0].features = vec!["relay".into()];
+        metadata.packages[0].dependencies[0].uses_default_features = false;
+        let mut edge = metadata.packages[0].dependencies[0].clone();
+        edge.name = "gamma".into();
+        edge.rename = None;
+        edge.features.clear();
+        metadata.packages[1].dependencies = vec![edge];
+        metadata.packages[1].features.clear();
+        metadata.packages[1].features.insert("relay".into(), vec!["gamma/deep".into()]);
+        let members = [&gamma, &metadata.packages[1], &metadata.packages[0]];
+        let mut on = HashMap::from_iter(["alpha", "beta", "gamma"].map(|name| (name.to_owned(), HashSet::default())));
+        propagate_worklist(&members, &renames(&members), &mut on);
+        assert_eq!(on["alpha"], HashSet::default());
+        assert_eq!(on["beta"], HashSet::from_iter(["relay".to_owned()]));
+        assert_eq!(on["gamma"], HashSet::from_iter(["deep".to_owned()]));
     }
 
     #[test]
@@ -707,7 +833,7 @@ mod tests {
             ..FeatureArgs::default()
         };
 
-        assert!(features_of(&[("Cargo.toml", &manifest)], &args, "alpha").is_empty());
+        assert_eq!(features_of(&[("Cargo.toml", &manifest)], &args, "alpha").len(), 0);
     }
 
     #[test]
@@ -755,7 +881,7 @@ mod tests {
             ..FeatureArgs::default()
         };
 
-        assert!(features_of(&[("Cargo.toml", &manifest)], &args, "alpha").is_empty());
+        assert_eq!(features_of(&[("Cargo.toml", &manifest)], &args, "alpha").len(), 0);
     }
 
     #[test]
@@ -766,7 +892,7 @@ mod tests {
             ..FeatureArgs::default()
         };
 
-        assert!(features_of(&[("Cargo.toml", &manifest)], &args, "alpha").is_empty());
+        assert_eq!(features_of(&[("Cargo.toml", &manifest)], &args, "alpha").len(), 0);
     }
 
     #[test]
@@ -799,7 +925,7 @@ mod tests {
         let found = features_of(&borrowed(&files), &FeatureArgs::default(), "alpha");
 
         assert_eq!(found, vec!["default".to_owned()], "`dep:` activates a crate, not a feature");
-        assert!(features_of(&borrowed(&files), &FeatureArgs::default(), "beta").is_empty());
+        assert_eq!(features_of(&borrowed(&files), &FeatureArgs::default(), "beta").len(), 0);
     }
 
     /// A two-member workspace, where `alpha` relates to `beta` however the caller says.
@@ -876,7 +1002,7 @@ mod tests {
         metadata.packages[0].dependencies[0].features.clear();
         metadata.packages[1].features.clear();
         metadata.packages[1].features.insert("y".into(), Vec::new());
-        assert!(enabled(&metadata, &FeatureArgs::default())["beta"].is_empty());
+        assert_eq!(enabled(&metadata, &FeatureArgs::default())["beta"].len(), 0);
         metadata.packages[0].features.get_mut("default").unwrap().push("activate".into());
         assert_eq!(enabled(&metadata, &FeatureArgs::default())["beta"], ["y"]);
     }
@@ -1004,11 +1130,8 @@ mod tests {
 
         // Round-trip the real metadata through JSON, forging the one field that real cargo never
         // produces, so the dependency in `alpha` is now of a kind this module cannot recognise.
-        let mut value = serde_json::to_value(&metadata).expect("metadata serialises");
-        let packages = value
-            .get_mut("packages")
-            .and_then(serde_json::Value::as_array_mut)
-            .expect("packages array");
+        let mut value = to_value(&metadata).expect("metadata serialises");
+        let packages = value.get_mut("packages").and_then(Value::as_array_mut).expect("packages array");
         let alpha = packages
             .iter_mut()
             .find(|package| package["name"] == "alpha")
@@ -1018,9 +1141,9 @@ mod tests {
             .expect("alpha has dependencies")
             .first_mut()
             .expect("alpha declares exactly one dependency");
-        dependency["kind"] = serde_json::Value::String("build-tool".to_owned());
+        dependency["kind"] = Value::String("build-tool".to_owned());
 
-        let forged: Metadata = serde_json::from_value(value).expect("the forged metadata still deserialises");
+        let forged: Metadata = from_value(value).expect("the forged metadata still deserialises");
         let found = enabled(&forged, &FeatureArgs::default()).remove("beta").unwrap_or_default();
 
         assert!(!found.contains(&"loud".to_owned()), "{found:?}");
@@ -1033,7 +1156,7 @@ mod tests {
         let found = enabled(&metadata, &FeatureArgs::default());
 
         assert!(found.contains_key("alpha"), "a missing package would be left unconditional");
-        assert!(found["alpha"].is_empty());
+        assert_eq!(found["alpha"].len(), 0);
     }
 
     /// Every spelling cargo itself accepts, because the vector is passed to cargo verbatim: a

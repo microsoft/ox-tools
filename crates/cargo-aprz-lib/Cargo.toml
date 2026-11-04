@@ -4,7 +4,7 @@
 [package]
 name = "cargo-aprz-lib"
 description = "Internal library for cargo-aprz"
-version = "1.2.1"
+version = "1.2.2"
 readme = "README.md"
 keywords = ["oxidizer", "cargo", "dependencies", "analysis", "quality"]
 categories = ["development-tools"]
@@ -30,12 +30,12 @@ allowed_external_types = []
 # public rustdoc for cargo-doc2readme to turn into a README.
 disable = true
 
-# These dependencies constrain transitive versions without being used directly.
+# This dependency constrains a transitive version without being used directly.
 [package.metadata.cargo-udeps.ignore]
-normal = ["constant_time_eq", "unicode-ident"]
+normal = ["constant_time_eq"]
 
 [package.metadata.unused-deps]
-allowed = ["constant_time_eq", "unicode-ident"]
+allowed = ["constant_time_eq"]
 
 [package.metadata.coverage-gate]
 # Production-only coverage excludes test modules and scaffolding. The measured
@@ -80,7 +80,7 @@ compact_str = { workspace = true, features = ["std", "serde"] }
 constant_time_eq = { workspace = true }
 csv = { workspace = true }
 env_logger = { workspace = true }
-fetch = { workspace = true, features = ["json", "native-tls", "tokio"] }
+fetch = { workspace = true, features = ["json", "rustls", "tokio"] }
 flate2 = { workspace = true, features = ["zlib-rs"] }
 futures = { workspace = true }
 futures-util = { workspace = true }
@@ -89,7 +89,6 @@ indicatif = { workspace = true }
 layered = { workspace = true }
 log = { workspace = true }
 mmap-rs = { workspace = true }
-mutants = { workspace = true }
 ohno = { workspace = true, features = ["app-err"] }
 owo-colors = { workspace = true }
 pastey = { workspace = true }
@@ -120,10 +119,6 @@ terminal_size = { workspace = true }
 tick = { workspace = true, features = ["tokio"] }
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "rt-multi-thread", "sync", "process", "time"] }
 toml = { workspace = true, features = ["parse", "serde", "display"] }
-# Never named in this crate's code. It is here only to bound the `unicode-ident` that
-# `ra_ap_syntax` -> `ra-ap-rustc_lexer` resolves; see the catalog entry in the workspace
-# manifest for why. Removing it breaks every consumer that resolves dependencies freshly.
-unicode-ident = { workspace = true }
 unicode-width = { workspace = true }
 url = { workspace = true }
 vu128 = { workspace = true }
@@ -149,12 +144,17 @@ serde_json = { workspace = true }
 tempfile = { workspace = true }
 tick = { workspace = true, features = ["test-util"] }
 tokio = { workspace = true, features = ["test-util"] }
+tracing = { workspace = true, features = ["std"] }
 wiremock = { workspace = true }
 
 # Every integration test reaches into the crate through the `internals` facade, directly or
 # through `tests/support`, so they are all gated on that feature.
 [[test]]
 name = "advisory_provider_integration"
+required-features = ["internals"]
+
+[[test]]
+name = "archive_integration"
 required-features = ["internals"]
 
 [[test]]

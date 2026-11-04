@@ -40,9 +40,10 @@ pub fn support() -> Result<(), PlatformError> {
     Ok(())
 }
 
-/// macOS supports sampled process-group footprint accounting and soft enforcement every 10 ms.
+/// macOS supports sampled process-tree footprint accounting and soft enforcement every 10 ms.
 ///
-/// A descendant that leaves the process group is neither counted nor stopped by this facility.
+/// A descendant that leaves the process group and outlives its parent is neither counted nor
+/// stopped by this facility.
 #[cfg(target_os = "macos")]
 #[expect(
     clippy::missing_const_for_fn,

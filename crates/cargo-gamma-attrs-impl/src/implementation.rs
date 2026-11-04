@@ -280,7 +280,6 @@ pub(super) const CHAIN_FACTOR: usize = 4;
 /// One token-stream level waiting to be walked.
 struct Frame {
     iter: proc_macro2::token_stream::IntoIter,
-    depth: usize,
     links: usize,
     base: usize,
     peak: usize,
@@ -290,10 +289,9 @@ struct Frame {
 }
 
 impl Frame {
-    fn new(stream: TokenStream, depth: usize, base: usize) -> Self {
+    fn new(stream: TokenStream, base: usize) -> Self {
         Self {
             iter: stream.into_iter(),
-            depth,
             links: base,
             base,
             peak: base,
@@ -343,7 +341,7 @@ impl Frame {
 #[must_use]
 pub(super) fn exceeds_nesting_limit(stream: &TokenStream, limit: usize) -> bool {
     let chain_limit = limit.saturating_mul(CHAIN_FACTOR);
-    let mut frames = vec![Frame::new(stream.clone(), 0, 0)];
+    let mut frames = vec![Frame::new(stream.clone(), 0)];
 
     'walk: while let Some(mut frame) = frames.pop() {
         while let Some(tree) = frame.iter.next() {
@@ -358,7 +356,6 @@ pub(super) fn exceeds_nesting_limit(stream: &TokenStream, limit: usize) -> bool 
                         return true;
                     }
 
-                    let next_depth = frame.depth + 1;
                     // Blocks start a sibling body after their condition. Other groups continue
                     // the enclosing expression path, including prefix operators before them.
                     let inherited = if group.delimiter() == Delimiter::Brace && frame.previous != Previous::Prefix {
@@ -368,7 +365,8 @@ pub(super) fn exceeds_nesting_limit(stream: &TokenStream, limit: usize) -> bool 
                     }
                     .saturating_add(CHAIN_FACTOR);
 
-                    if next_depth > limit || inherited > chain_limit {
+                    // Each nested group spends CHAIN_FACTOR, also enforcing delimiter depth.
+                    if inherited > chain_limit {
                         return true;
                     }
 
@@ -377,7 +375,7 @@ pub(super) fn exceeds_nesting_limit(stream: &TokenStream, limit: usize) -> bool 
                     frame.awaiting_else = group.delimiter() == Delimiter::Brace;
                     frame.previous = Previous::Expression;
                     frames.push(frame);
-                    frames.push(Frame::new(group.stream(), next_depth, inherited));
+                    frames.push(Frame::new(group.stream(), inherited));
                     continue 'walk;
                 }
 
@@ -822,7 +820,9 @@ fn reject_empty_arguments(tokens: &TokenStream) -> Result<(), String> {
             current_is_empty = true;
             saw_comma = true;
         } else {
-            current_is_empty = false;
+            current_is_empty =
+            // #[gamma::skip(assign_value.default, reason = "Default produces the same concrete false or None value as this assignment.", tag = "equivalent")]
+            false;
         }
     }
 
@@ -2059,11 +2059,20 @@ mod tests {
     }
 
     #[test]
+    fn a_value_on_an_item_one_level_beyond_the_nesting_limit_is_rejected() {
+        // The enclosing function body adds one group beyond the expression's limit.
+        let item = format!("fn f() -> u32 {{ {}1{} }}", "(".repeat(NESTING_LIMIT), ")".repeat(NESTING_LIMIT));
+        assert_eq!(
+            validate_value(stream("1"), &stream(&item)),
+            Err("item nests too deeply to be safely parsed".to_owned())
+        );
+    }
+
+    #[test]
     fn each_chain_counter_accepts_the_exact_limit() {
         let empty = TokenStream::new();
         let at_links_limit = Frame {
             iter: empty.clone().into_iter(),
-            depth: 0,
             links: 7,
             base: 0,
             peak: 7,
@@ -2073,7 +2082,6 @@ mod tests {
         };
         let at_ladders_limit = Frame {
             iter: empty.into_iter(),
-            depth: 0,
             links: 0,
             base: 0,
             peak: 0,
@@ -2090,7 +2098,6 @@ mod tests {
     fn completing_an_else_ladder_resets_its_counter_to_zero() {
         let mut frame = Frame {
             iter: TokenStream::new().into_iter(),
-            depth: 0,
             links: 0,
             base: 0,
             peak: 0,
@@ -2103,6 +2110,22 @@ mod tests {
 
         assert_eq!(frame.ladders, 0);
         assert!(!frame.awaiting_else);
+    }
+
+    #[test]
+    fn survivor_new_frames_preserve_the_callers_state_and_start_no_else_ladder() {
+        let frame = Frame::new(TokenStream::new(), 13);
+        assert_eq!((frame.links, frame.base, frame.peak, frame.ladders), (13, 13, 13, 0));
+        assert!(!frame.awaiting_else);
+        assert!(frame.previous == Previous::Other);
+        let over = format!("{}1{}", "(".repeat(NESTING_LIMIT + 1), ")".repeat(NESTING_LIMIT + 1));
+        assert_eq!(
+            validate_value(stream(&over), &stream("fn f() -> u32 { 1 }")),
+            Err("expression nests too deeply to be safely parsed".to_owned())
+        );
+        assert!(!exceeds_nesting_limit(&stream("call()"), 2));
+        assert!(exceeds_nesting_limit(&stream("call()()"), 2));
+        assert!(!exceeds_nesting_limit(&stream(&"else ".repeat(17)), 4));
     }
 
     #[test]
@@ -2174,6 +2197,24 @@ mod tests {
                 "`{separator}` did not restart the ladder budget"
             );
         }
+    }
+
+    #[test]
+    fn survivor_postfix_and_nonprefix_punctuation_have_distinct_exact_budgets() {
+        // Each punctuation/group pair spends two links plus CHAIN_FACTOR for the
+        // group: two pairs fit 4 * CHAIN_FACTOR, while three exceed it.
+        for operator in ["?", ">"] {
+            for (groups, expected) in [(2, false), (3, true)] {
+                let source = format!("value{}", format!("{operator}()").repeat(groups));
+                assert_eq!(exceeds_nesting_limit(&stream(&source), 4), expected, "{source}");
+            }
+        }
+        // Eleven binary links fit the twelve-link budget. A block after `.` resets its
+        // inherited budget; prefix `+` instead carries that budget into the block.
+        let source = format!("value{}.{{}}", " + value".repeat(11));
+        assert!(!exceeds_nesting_limit(&stream(&source), 3), "{source}");
+        let prefix = format!("value{} + {{}}", " + value".repeat(11));
+        assert!(exceeds_nesting_limit(&stream(&prefix), 3), "{prefix}");
     }
 
     #[test]

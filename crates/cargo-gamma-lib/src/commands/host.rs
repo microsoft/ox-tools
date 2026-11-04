@@ -135,7 +135,7 @@ mod tests {
         let host = PlainHost;
         let path = host.env("PATH").expect("PATH should be set for cargo test");
 
-        assert!(!path.is_empty());
+        assert_ne!(path.len(), 0);
         assert_eq!(host.env("GAMMA_DEFINITELY_NOT_SET_IN_THE_ENVIRONMENT"), None);
     }
 

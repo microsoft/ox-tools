@@ -4,7 +4,7 @@
 [package]
 name = "cargo-aprz"
 description = "A cargo subcommand that appraises the quality of Rust dependencies"
-version = "1.2.1"
+version = "1.2.2"
 readme = "README.md"
 keywords = ["oxidizer", "cargo", "subcommand", "dependencies", "quality"]
 categories = ["command-line-utilities", "development-tools::cargo-plugins"]
@@ -36,7 +36,6 @@ path = "src/main.rs"
 [dependencies]
 cargo-aprz-lib = { workspace = true }
 mimalloc = { workspace = true }
-mutants = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [dev-dependencies]

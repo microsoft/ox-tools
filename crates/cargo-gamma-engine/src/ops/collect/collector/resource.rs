@@ -85,7 +85,7 @@ impl LoopProof {
         // Conservative defaults bound cloned loop syntax, abstract-state entries, and name storage.
         // These are not measured capacities or semantic limits; exhaustion retains the candidate.
         if span.len() > 4096 || bindings.len() > 64 || bindings.keys().any(|name| name.len() > 256) {
-            return None;
+            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         }
         let mut proof = Self {
             span,
@@ -128,15 +128,15 @@ impl LoopProof {
 
     pub(super) fn omits(&self, source: &str, span: &Range<usize>, replacement: &str) -> bool {
         if span.start < self.span.start || span.end > self.span.end {
-            return false;
+            return false; // #[gamma::skip(return_value.default, reason = "false is the bool default.", tag = "equivalent")]
         }
         let Some(original) = source.get(self.span.clone()) else {
-            return false;
+            return false; // #[gamma::skip(return_value.default, reason = "false is the bool default.", tag = "equivalent")]
         };
         let mut mutated = original.to_owned();
         mutated.replace_range(span.start - self.span.start..span.end - self.span.start, replacement);
         let Some(tokens) = Self::proof_tokens(&mutated, &self.literals) else {
-            return false;
+            return false; // #[gamma::skip(return_value.default, reason = "false is the bool default.", tag = "equivalent")]
         };
         syn::parse2::<Expr>(tokens).is_ok_and(|expression| {
             self.grouping
@@ -181,7 +181,9 @@ impl LoopProof {
         let mut groups = vec![(Delimiter::None, TokenStream::new())];
         let mut at = 0;
         for token in rustc_lexer::tokenize(text) {
-            let spelling = text.get(at..at + token.len)?;
+            let spelling =
+                // #[gamma::skip(try.propagate_to_unwrap, reason = "Lexer byte boundaries and terminated-char quotes are valid; the guarded token stack retains its base frame.", tag = "equivalent")]
+                text.get(at..at + token.len)?;
             at += token.len;
             let delimiter = match token.kind {
                 TokenKind::OpenParen | TokenKind::CloseParen => Some(Delimiter::Parenthesis),
@@ -197,7 +199,7 @@ impl LoopProof {
                         || (spelling.starts_with("/**") && !spelling.starts_with("/***"))
                         || spelling.starts_with("/*!")
                     {
-                        return None;
+                        return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
                     }
                     continue;
                 }
@@ -207,11 +209,11 @@ impl LoopProof {
                 }
                 TokenKind::CloseParen | TokenKind::CloseBrace | TokenKind::CloseBracket => {
                     if groups.len() == 1 {
-                        return None;
+                        return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
                     }
                     let (opened, tokens) = groups.pop()?;
                     if Some(opened) != delimiter {
-                        return None;
+                        return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
                     }
                     TokenTree::Group(Group::new(opened, tokens))
                 }
@@ -222,19 +224,30 @@ impl LoopProof {
                         literal.clone()
                     } else if spelling == "\"\"" {
                         Literal::string("")
-                    } else if matches!(kind, LiteralKind::Char { terminated: true }) && suffix_start == spelling.len() {
-                        Literal::character(rustc_lexer::unescape::unescape_char(spelling.strip_prefix('\'')?.strip_suffix('\'')?).ok()?)
+                    } else if
+                    // #[gamma::skip(logical.and_remove_right, reason = "A suffixed uncached char still fails the following closing-quote check.", tag = "equivalent")]
+                    matches!(kind, LiteralKind::Char { terminated: true }) && suffix_start == spelling.len() {
+                        Literal::character(
+                            rustc_lexer::unescape::unescape_char(
+                                // #[gamma::skip(try.propagate_to_unwrap, reason = "Lexer byte boundaries and terminated-char quotes are valid; the guarded token stack retains its base frame.", tag = "equivalent")]
+                                spelling.strip_prefix('\'')?.strip_suffix('\'')?,
+                            )
+                            .ok()?,
+                        )
                     } else if matches!(kind, LiteralKind::Int { empty_int: false, .. })
                         && suffix_start == spelling.len()
                         && let Ok(value) = spelling.replace('_', "").parse::<u128>()
                     {
                         Literal::u128_unsuffixed(value)
                     } else {
-                        return None;
+                        return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
                     };
                     TokenTree::Literal(literal)
                 }
-                _ if spelling.len() == 1 && spelling.chars().all(|character| "~!@#$%^&*-=+|;:,<>./?'".contains(character)) => {
+                _ if spelling.len() == 1 &&
+                    // #[gamma::skip(iter.all_to_any, reason = "The enclosing one-byte spelling guard makes this iterator a singleton.", tag = "equivalent")]
+                    spelling.chars().all(|character| "~!@#$%^&*-=+|;:,<>./?'".contains(character)) =>
+                {
                     let character = spelling.chars().next()?;
                     let joint = text
                         .get(at..)
@@ -242,8 +255,9 @@ impl LoopProof {
                         .is_some_and(|next| "~!@#$%^&*-=+|;:,<>./?'".contains(next));
                     TokenTree::Punct(Punct::new(character, if joint { Spacing::Joint } else { Spacing::Alone }))
                 }
-                _ => return None,
+                _ => return None, // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
             };
+            // #[gamma::skip(try.propagate_to_unwrap, reason = "Lexer byte boundaries and terminated-char quotes are valid; the guarded token stack retains its base frame.", tag = "equivalent")]
             groups.last_mut()?.1.extend([tree]);
         }
         (groups.len() == 1).then(|| groups.remove(0).1)
@@ -253,12 +267,11 @@ impl LoopProof {
         let (condition, body) = match expression {
             Expr::While(node) if node.attrs.is_empty() => (Some(&*node.cond), &node.body),
             Expr::Loop(node) if node.attrs.is_empty() => (None, &node.body),
-            _ => return None,
+            _ => return None, // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         };
         if let Some(condition) = condition {
-            for (name, kind) in &self.bindings {
-                if *kind == Binding::PeekableChars
-                    && self.at_eof(condition, name) == Some(true)
+            for name in self.bindings.keys() {
+                if self.at_eof(condition, name) == Some(true)
                     && let Some(grows) = self.exhausted_body(body, name)
                 {
                     return Some(if grows { Hazard::UnboundedGrowth } else { Hazard::Nontermination });
@@ -268,7 +281,7 @@ impl LoopProof {
         if let Some(condition) = condition
             && (self.scalar(condition) != Some(Binding::Bool) || literal_bool(condition) == Some(false))
         {
-            return None;
+            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         }
         // Every supported body operation preserves scalar bindings. The condition is therefore
         // invariant once true. String appends may fail allocation, but cannot restore progress.
@@ -285,7 +298,7 @@ impl LoopProof {
         let mut grows = false;
         for statement in &block.stmts {
             let Stmt::Expr(expression, _) = statement else {
-                return None;
+                return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
             };
             match expression {
                 Expr::Continue(node) if node.attrs.is_empty() && node.label.is_none() => {
@@ -299,18 +312,15 @@ impl LoopProof {
                     }
                 }
                 Expr::If(node) if node.attrs.is_empty() => {
-                    if self.scalar(&node.cond) != Some(Binding::Bool) {
-                        return None;
-                    }
                     // Only constant branches are folded; unknown branches may hide an escape.
                     let iteration = if literal_bool(&node.cond)? {
                         Some(self.block(&node.then_branch)?)
                     } else if let Some((_, otherwise)) = &node.else_branch {
                         let Expr::Block(otherwise) = &**otherwise else {
-                            return None;
+                            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
                         };
                         if !otherwise.attrs.is_empty() || otherwise.label.is_some() {
-                            return None;
+                            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
                         }
                         Some(self.block(&otherwise.block)?)
                     } else {
@@ -337,7 +347,7 @@ impl LoopProof {
                 if !matches!(kind, Binding::Bool | Binding::Integer | Binding::Primitive(_))
                     || bare_name(&node.right).as_ref() != Some(&name)
                 {
-                    return None;
+                    return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
                 }
                 Some(false)
             }
@@ -348,20 +358,20 @@ impl LoopProof {
                     Some(Binding::Integer | Binding::Primitive(Primitive::Signed(_) | Primitive::Unsigned(_)))
                 ) || !integer_zero(&node.right)
                 {
-                    return None;
+                    return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
                 }
                 Some(false)
             }
             Expr::MethodCall(node) if node.attrs.is_empty() && node.turbofish.is_none() && node.args.len() == 1 => {
                 let name = bare_name(&node.receiver)?;
                 if self.bindings.get(&name) != Some(&Binding::String) {
-                    return None;
+                    return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
                 }
                 let Expr::Lit(argument) = &node.args[0] else {
-                    return None;
+                    return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
                 };
                 if !argument.attrs.is_empty() {
-                    return None;
+                    return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
                 }
                 match (&*node.method.to_string(), &argument.lit) {
                     ("push", Lit::Char(_)) => Some(true),
@@ -377,14 +387,16 @@ impl LoopProof {
         match expression {
             Expr::Paren(node) if node.attrs.is_empty() => self.scalar(&node.expr),
             Expr::Group(node) if node.attrs.is_empty() => self.scalar(&node.expr),
-            Expr::Path(node) if node.attrs.is_empty() => {
+            Expr::Path(node) if
+                // #[gamma::skip(match_guard.always_true, reason = "bare_name independently rejects path attributes before lookup.", tag = "equivalent")]
+                node.attrs.is_empty() => {
                 let name = bare_name(expression)?;
                 let kind = match *self.bindings.get(&name)? {
                     Binding::Primitive(Primitive::Unsigned(_) | Primitive::Signed(_)) => Binding::Integer,
                     kind => kind,
                 };
                 if !matches!(kind, Binding::Bool | Binding::Integer) {
-                    return None;
+                    return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
                 }
                 Some(kind)
             }
@@ -414,17 +426,17 @@ impl LoopProof {
 
     fn peek_predicate(&self, node: &syn::ExprMethodCall) -> Option<String> {
         if !node.attrs.is_empty() || node.turbofish.is_some() {
-            return None;
+            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         }
         let Expr::MethodCall(peek) = &*node.receiver else {
-            return None;
+            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         };
         if !peek.attrs.is_empty() || peek.turbofish.is_some() || !peek.args.is_empty() || peek.method != "peek" {
-            return None;
+            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         }
         let name = bare_name(&peek.receiver)?;
         if self.bindings.get(&name) != Some(&Binding::PeekableChars) {
-            return None;
+            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         }
         match node.method.to_string().as_str() {
             "is_none" | "is_some" if node.args.is_empty() => Some(name),
@@ -443,10 +455,10 @@ impl LoopProof {
             }
             Expr::Closure(node) if node.attrs.is_empty() && node.asyncness.is_none() && node.inputs.len() == 1 => {
                 let syn::Pat::Ident(parameter) = &node.inputs[0] else {
-                    return false;
+                    return false; // #[gamma::skip(return_value.default, reason = "false is the bool default.", tag = "equivalent")]
                 };
                 if parameter.by_ref.is_some() || parameter.subpat.is_some() {
-                    return false;
+                    return false; // #[gamma::skip(return_value.default, reason = "false is the bool default.", tag = "equivalent")]
                 }
                 let body = match &*node.body {
                     Expr::Unary(unary) if unary.attrs.is_empty() && matches!(unary.op, UnOp::Not(_)) => &*unary.expr,
@@ -481,11 +493,11 @@ impl LoopProof {
                 Stmt::Local(local) if local.attrs.is_empty() && matches!(local.pat, syn::Pat::Wild(_)) => {
                     let init = local.init.as_ref()?;
                     if init.diverge.is_some() {
-                        return None;
+                        return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
                     }
                     &*init.expr
                 }
-                _ => return None,
+                _ => return None, // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
             };
             if matches!(expression, Expr::MethodCall(call)
                 if call.attrs.is_empty() && call.turbofish.is_none() && call.args.is_empty()
@@ -507,7 +519,9 @@ fn bare_name(expression: &Expr) -> Option<String> {
     match expression {
         Expr::Paren(node) if node.attrs.is_empty() => bare_name(&node.expr),
         Expr::Group(node) if node.attrs.is_empty() => bare_name(&node.expr),
-        Expr::Path(node) if node.attrs.is_empty() && node.qself.is_none() => node.path.get_ident().map(ToString::to_string),
+        Expr::Path(node) if
+            // #[gamma::skip(logical.and_remove_right, reason = "Parsed qualified-self paths cannot pass the following get_ident check.", tag = "equivalent")]
+            node.attrs.is_empty() && node.qself.is_none() => node.path.get_ident().map(ToString::to_string),
         _ => None,
     }
 }
@@ -536,7 +550,274 @@ fn literal_bool(expression: &Expr) -> Option<bool> {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use syn::{ExprGroup, ExprMethodCall, Item, parse_file, parse_quote, parse_str};
+
+    use super::super::Collector;
     use super::*;
+    use crate::cfg::CfgSet;
+    use crate::ops::collect::Defaults;
+    use crate::ops::registry::Selection;
+    use crate::parse::SourceFile;
+
+    #[test]
+    fn collector_resource_proof_admits_the_exact_source_limit() {
+        let loop_text = format!("loop {{ {}break; }}", " ".repeat(4096 - "loop { break; }".len()));
+        let file = SourceFile::parse("fixture.rs", format!("fn f() {{ {loop_text} }}")).unwrap();
+        let defaults = Defaults::of(&file.ast);
+        let selection = Selection::everything();
+        let cfg = CfgSet::parse("");
+        let collector = Collector::new(&file, &selection, &[], &cfg, &defaults);
+        let Item::Fn(function) = &file.ast.items[0] else { unreachable!() };
+        let Stmt::Expr(expression, _) = &function.block.stmts[0] else {
+            unreachable!()
+        };
+        assert_eq!(expression.span().byte_range().len(), 4096);
+        assert!(collector.resource_proof(expression).is_some());
+    }
+
+    #[test]
+    fn collector_primitive_normalization_preserves_noninteger_alias_binding_kinds() {
+        let file = SourceFile::parse("fixture.rs", "type u8 = bool; type f32 = f64; fn f() { loop { break; } }".into()).unwrap();
+        let defaults = Defaults::of(&file.ast);
+        let selection = Selection::everything();
+        let cfg = CfgSet::parse("");
+        let mut collector = Collector::new(&file, &selection, &[], &cfg, &defaults);
+        collector.bind_type_with_trust("flag".into(), parse_quote!(u8), true);
+        collector.bind_type_with_trust("float".into(), parse_quote!(f32), true);
+        let Item::Fn(function) = &file.ast.items[2] else { unreachable!() };
+        let Stmt::Expr(expression, _) = &function.block.stmts[0] else {
+            unreachable!()
+        };
+        let proof = collector.resource_proof(expression).unwrap();
+        assert_eq!(proof.bindings.get("flag"), Some(&Binding::Bool));
+        assert_eq!(
+            proof.bindings.get("float"),
+            Some(&Binding::Primitive(Primitive::named("f64").unwrap()))
+        );
+    }
+
+    #[test]
+    fn collector_open_method_scopes_reject_any_collection_even_among_scalar_bindings() {
+        for collection in [false, true] {
+            let file = SourceFile::parse("fixture.rs", "use dependency::Extension; fn f() { loop { break; } }".into()).unwrap();
+            let defaults = Defaults::of(&file.ast);
+            let selection = Selection::everything();
+            let cfg = CfgSet::parse("");
+            let mut collector = Collector::new(&file, &selection, &[], &cfg, &defaults);
+            collector.bind_type_with_trust("count".into(), parse_quote!(u8), true);
+            if collection {
+                collector.bind_type_with_trust("values".into(), parse_quote!(Vec<u8>), true);
+            }
+            let Item::Fn(function) = &file.ast.items[1] else { unreachable!() };
+            let Stmt::Expr(expression, _) = &function.block.stmts[0] else {
+                unreachable!()
+            };
+            assert!(!defaults.resource_sources().closed_methods_for("fixture.rs", &[]));
+            assert_eq!(collector.resource_proof(expression).is_some(), !collection);
+        }
+    }
+
+    #[test]
+    fn collector_projection_bindings_skip_unknown_sites_and_admit_only_supported_direct_fields() {
+        let source = "
+            struct Inner { count: u8 }
+            struct State {
+                flag: bool, count: u8, items: Vec<u8>, text: String,
+                unknown: dependency::Unknown, inner: Inner,
+            }
+            fn f() {
+                loop {
+                    consume(missing.count, untrusted.count, state.unknown, state.inner.count,
+                            state.missing, state.flag, state.count, &state.items, &state.text);
+                    break;
+                }
+            }
+        ";
+        for (ty, vector) in [("State", false), ("&State", true), ("&mut State", false)] {
+            let file = SourceFile::parse("fixture.rs", source.into()).unwrap();
+            let defaults = Defaults::of(&file.ast);
+            let selection = Selection::everything();
+            let cfg = CfgSet::parse("");
+            let mut collector = Collector::new(&file, &selection, &[], &cfg, &defaults);
+            collector.bind_type_with_trust("state".into(), parse_str(ty).unwrap(), true);
+            collector.bind_type_with_trust("untrusted".into(), parse_quote!(State), false);
+            let Item::Fn(function) = &file.ast.items[2] else { unreachable!() };
+            let Stmt::Expr(expression, _) = &function.block.stmts[0] else {
+                unreachable!()
+            };
+            let proof = collector.resource_proof(expression).unwrap();
+            assert_eq!(proof.bindings.get("state.flag"), Some(&Binding::Bool), "{ty}");
+            assert_eq!(proof.bindings.get("state.count"), Some(&Binding::Integer), "{ty}");
+            assert_eq!(proof.bindings.get("state.items"), vector.then_some(&Binding::Vec), "{ty}");
+            for name in [
+                "missing.count",
+                "untrusted.count",
+                "state.unknown",
+                "state.inner.count",
+                "state.missing",
+                "state.text",
+            ] {
+                assert!(!proof.bindings.contains_key(name), "{ty}: {name}");
+            }
+        }
+    }
+
+    #[test]
+    fn loop_proof_input_limits_are_inclusive_and_apply_to_source_bindings_and_names_independently() {
+        for length in [4095, 4096, 4097] {
+            let prefix = "loop { advance();";
+            let source = format!("{prefix}{}}}", " ".repeat(length - prefix.len() - 1));
+            let expression: Expr = parse_str(&source).unwrap();
+            assert_eq!(expression.span().byte_range().len(), length);
+            assert_eq!(LoopProof::new(&expression, HashMap::default(), true).is_some(), length <= 4096);
+        }
+        let expression: Expr = parse_quote!(loop {
+            advance();
+        });
+        for count in [63, 64, 65] {
+            let bindings = (0..count).map(|index| (format!("ready{index}"), Binding::Bool)).collect();
+            assert_eq!(LoopProof::new(&expression, bindings, true).is_some(), count <= 64);
+        }
+        for length in [255, 256, 257] {
+            let bindings = HashMap::from_iter([("x".repeat(length), Binding::Bool)]);
+            assert_eq!(LoopProof::new(&expression, bindings, true).is_some(), length <= 256);
+        }
+        let proof = LoopProof::new(&expression, HashMap::default(), true).unwrap();
+        assert!(proof.numeric_names);
+    }
+
+    #[test]
+    fn compiler_groups_and_primitive_bindings_keep_scalar_types_and_reject_group_attributes() {
+        let mut proof = scalar_proof();
+        proof.bindings.insert("unsigned".into(), Binding::Primitive(Primitive::Unsigned(8)));
+        assert_eq!(proof.scalar(&parse_quote!(unsigned)), Some(Binding::Integer));
+        assert_eq!(bare_name(&parse_quote!(<Owner>::ready)), None);
+        for source in ["ready", "0", "false", "chars.peek().is_none()"] {
+            let group = Expr::Group(ExprGroup {
+                attrs: vec![parse_quote!(#[expand])],
+                group_token: syn::token::Group::default(),
+                expr: Box::new(parse_str(source).unwrap()),
+            });
+            assert_eq!(proof.scalar(&group), None);
+            assert_eq!(proof.at_eof(&group, "chars"), None);
+            assert_eq!(bare_name(&group), None);
+            assert!(!integer_zero(&group));
+            assert_eq!(literal_bool(&group), None);
+            assert_eq!(proof.at_eof(&group, "items"), None);
+        }
+    }
+
+    #[test]
+    fn nested_restart_flags_must_propagate_through_more_than_one_enclosing_block() {
+        let proof = scalar_proof();
+        for source in [
+            "loop { { { continue; } unknown(); } unknown(); }",
+            "loop { { if true { continue; } unknown(); } unknown(); }",
+        ] {
+            assert_eq!(proof.proves(&parse_str(source).unwrap()), Some(Hazard::Nontermination), "{source}");
+        }
+    }
+
+    #[test]
+    fn proof_node_attributes_and_else_labels_are_checked_on_the_exact_node_not_a_child() {
+        let proof = scalar_proof();
+        for source in ["i = i", "i += 0", "s.push('x')"] {
+            let mut expression: Expr = parse_str(source).unwrap();
+            assert!(proof.preserves(&expression).is_some());
+            match &mut expression {
+                Expr::Assign(node) => node.attrs.push(parse_quote!(#[expand])),
+                Expr::Binary(node) => node.attrs.push(parse_quote!(#[expand])),
+                Expr::MethodCall(node) => node.attrs.push(parse_quote!(#[expand])),
+                _ => unreachable!(),
+            }
+            assert_eq!(proof.preserves(&expression), None, "{source}");
+        }
+        assert_eq!(proof.preserves(&parse_quote!(s.push::<char>('x'))), None);
+        let mut expression: Expr = parse_quote!(ready && true);
+        let Expr::Binary(binary) = &mut expression else { unreachable!() };
+        binary.attrs.push(parse_quote!(#[expand]));
+        assert_eq!(proof.scalar(&expression), None);
+        for attributed in [false, true] {
+            let mut expression: Expr = parse_quote!(loop {
+                if false {
+                } else {
+                }
+            });
+            let Expr::Loop(looped) = &mut expression else { unreachable!() };
+            let Stmt::Expr(Expr::If(conditional), _) = &mut looped.body.stmts[0] else {
+                unreachable!()
+            };
+            let Expr::Block(otherwise) = &mut *conditional.else_branch.as_mut().unwrap().1 else {
+                unreachable!()
+            };
+            if attributed {
+                otherwise.attrs.push(parse_quote!(#[expand]));
+            } else {
+                otherwise.label = Some(parse_quote!('exit:));
+            }
+            assert_eq!(proof.proves(&expression), None);
+        }
+    }
+
+    #[test]
+    fn rejected_peek_predicates_return_none_rather_than_an_empty_or_unrelated_receiver_name() {
+        let proof = scalar_proof();
+        for source in [
+            "chars.peek(1).is_none()",
+            "s.peek().is_none()",
+            "chars.peek().unknown()",
+            "chars.peek().is_some_and(char::is_whitespace, other)",
+        ] {
+            let call: ExprMethodCall = parse_str(source).unwrap();
+            assert_eq!(proof.peek_predicate(&call), None, "{source}");
+        }
+        let mut call: ExprMethodCall = parse_quote!(chars.peek().is_none());
+        let Expr::MethodCall(peek) = &mut *call.receiver else {
+            unreachable!()
+        };
+        peek.attrs.push(parse_quote!(#[expand]));
+        assert_eq!(proof.peek_predicate(&call), None);
+        assert!(!proof.char_predicate(&parse_quote!(<Owner as char>::is_whitespace)));
+        for source in ["/*", "/**", "/*/", "'\\q'"] {
+            assert!(LoopProof::proof_tokens(source, &HashMap::default()).is_none(), "{source}");
+        }
+    }
+
+    #[test]
+    fn initializer_metadata_respects_primitive_shadowing_before_retaining_numeric_name_evidence() {
+        let file = parse_file("struct u8; fn f() { loop { advance(); } }").unwrap();
+        let Item::Fn(function) = &file.items[1] else { unreachable!() };
+        let Stmt::Expr(expression, _) = &function.block.stmts[0] else {
+            unreachable!()
+        };
+        let proof = LoopProof::new(expression, HashMap::default(), true).unwrap().initializers(&file);
+        assert!(!proof.numeric_names);
+    }
+
+    #[test]
+    fn a_fixed_proof_of_the_original_hazard_does_not_exclude_an_equally_hazardous_replacement() {
+        let source = "while true { let local = true; }";
+        let original: Expr = parse_str(source).unwrap();
+        let replaced: Expr = parse_str("while true { let local = false; }").unwrap();
+        let proof = LoopProof::new(&original, HashMap::default(), true).unwrap();
+        assert_eq!(proof.proves(&original), None);
+        assert_eq!(proof.proves(&replaced), None);
+        let fixed_proves = |expression: &Expr| {
+            fixed::proves_with_effects(
+                &original,
+                expression,
+                &proof.bindings,
+                &proof.initializers,
+                &proof.helpers,
+                proof.numeric_names,
+                &proof.stable_calls,
+            )
+        };
+        assert!(fixed_proves(&original));
+        assert!(fixed_proves(&replaced));
+        assert_eq!(&source[25..29], "true");
+        assert!(!proof.omits(source, &(25..29), "false"));
+    }
 
     #[test]
     fn proof_tokens_reuse_raw_literals_and_preserve_punctuation_and_grouping() {
@@ -546,11 +827,11 @@ mod tests {
             "while i <= 0x2Ausize && ready { /* ordinary comment */ i += 1usize; }",
             "while !((i < n)) { if true { continue; } }",
         ] {
-            let original: syn::Expr = syn::parse_str(text).unwrap();
+            let original: Expr = parse_str(text).unwrap();
             let mut literals = HashMap::default();
             LoopProof::collect_literals(original.to_token_stream(), &mut literals);
             let tokens = LoopProof::proof_tokens(text, &literals).unwrap();
-            assert_eq!(syn::parse2::<syn::Expr>(tokens).unwrap(), original);
+            assert_eq!(syn::parse2::<Expr>(tokens).unwrap(), original);
         }
         for text in [
             "loop {",
@@ -577,7 +858,7 @@ mod tests {
             standard_char: true,
             literals: HashMap::default(),
             initializers: HashMap::default(),
-            original: syn::parse_quote!(loop {}),
+            original: parse_quote!(loop {}),
             stable_calls: HashMap::default(),
             helpers: HashMap::default(),
             numeric_names: true,
@@ -590,7 +871,7 @@ mod tests {
             ("loop { s.push_str(\"x\"); s.clear(); }", None),
             ("loop { let s = String::new(); }", None),
         ] {
-            assert_eq!(proof.proves(&syn::parse_str(expression).unwrap()), expected, "{expression}");
+            assert_eq!(proof.proves(&parse_str(expression).unwrap()), expected, "{expression}");
         }
     }
 
@@ -608,7 +889,7 @@ mod tests {
             standard_char: true,
             literals: HashMap::default(),
             initializers: HashMap::default(),
-            original: syn::parse_quote!(loop {}),
+            original: parse_quote!(loop {}),
             stable_calls: HashMap::default(),
             helpers: HashMap::default(),
             numeric_names: true,
@@ -620,7 +901,7 @@ mod tests {
         for (length, admitted) in [(4095, true), (4096, true), (4097, false)] {
             let text = format!("loop {{ /*{}*/ break; }}", " ".repeat(length - "loop { /**/ break; }".len()));
             assert_eq!(text.len(), length);
-            let expression: Expr = syn::parse_str(&text).unwrap();
+            let expression: Expr = parse_str(&text).unwrap();
             let proof = LoopProof::new(&expression, HashMap::default(), true);
             assert_eq!(proof.is_some(), admitted, "length {length}");
             if let Some(proof) = proof {
@@ -655,7 +936,7 @@ mod tests {
             "loop { if 1 {} }",
             "loop { if ready {} }",
         ] {
-            assert_eq!(proof.proves(&syn::parse_str(text).unwrap()), None, "{text}");
+            assert_eq!(proof.proves(&parse_str(text).unwrap()), None, "{text}");
         }
         for text in [
             "loop { {} s.push('x'); }",
@@ -665,11 +946,7 @@ mod tests {
             "loop { { s.push('x'); continue; } }",
             "loop { if true { s.push('x'); continue; } }",
         ] {
-            assert_eq!(
-                proof.proves(&syn::parse_str(text).unwrap()),
-                Some(Hazard::UnboundedGrowth),
-                "{text}"
-            );
+            assert_eq!(proof.proves(&parse_str(text).unwrap()), Some(Hazard::UnboundedGrowth), "{text}");
         }
         for text in [
             "loop { { continue; } break; }",
@@ -677,7 +954,7 @@ mod tests {
             "loop { if false {} else { continue; } break; }",
             "loop { if false { s.push('x'); } }",
         ] {
-            assert_eq!(proof.proves(&syn::parse_str(text).unwrap()), Some(Hazard::Nontermination), "{text}");
+            assert_eq!(proof.proves(&parse_str(text).unwrap()), Some(Hazard::Nontermination), "{text}");
         }
     }
 
@@ -716,7 +993,7 @@ mod tests {
             ("i *= 0", None, None),
             ("s.push_str(#[cfg(any())] \"x\")", None, None),
         ] {
-            let expression: Expr = syn::parse_str(text).unwrap();
+            let expression: Expr = parse_str(text).unwrap();
             assert_eq!(proof.scalar(&expression), scalar, "{text}");
             assert_eq!(proof.preserves(&expression), preserving, "{text}");
         }
@@ -730,18 +1007,18 @@ mod tests {
             "i += 0",
             "s.push('x')",
         ] {
-            let expression: Expr = syn::parse_str(&format!("#[cfg(any())] {text}")).unwrap();
+            let expression: Expr = parse_str(&format!("#[cfg(any())] {text}")).unwrap();
             assert_eq!(proof.scalar(&expression), None, "{text}");
             assert_eq!(proof.preserves(&expression), None, "{text}");
         }
         for text in ["#[cfg(any())] (i)", "#[cfg(any())] i", "<T as Trait>::i", "i + 1"] {
-            assert_eq!(bare_name(&syn::parse_str(text).unwrap()), None, "{text}");
+            assert_eq!(bare_name(&parse_str(text).unwrap()), None, "{text}");
         }
         for text in ["#[cfg(any())] (0)", "#[cfg(any())] 0", "1", "true", "i"] {
-            assert!(!integer_zero(&syn::parse_str(text).unwrap()), "{text}");
+            assert!(!integer_zero(&parse_str(text).unwrap()), "{text}");
         }
         for text in ["#[cfg(any())] (false)", "#[cfg(any())] false", "0", "ready"] {
-            assert_eq!(literal_bool(&syn::parse_str(text).unwrap()), None, "{text}");
+            assert_eq!(literal_bool(&parse_str(text).unwrap()), None, "{text}");
         }
     }
 
@@ -769,7 +1046,7 @@ mod tests {
             "#[cfg(any())] (chars.peek().is_none())",
             "#[cfg(any())] !chars.peek().is_none()",
         ] {
-            let expression: Expr = syn::parse_str(text).unwrap();
+            let expression: Expr = parse_str(text).unwrap();
             assert_eq!(proof.at_eof(&expression, "chars"), None, "{text}");
         }
         for condition in ["chars.peek().is_none()", "!chars.peek().is_some()"] {
@@ -785,23 +1062,19 @@ mod tests {
                 "chars.peek();",
             ] {
                 let text = format!("while {condition} {{ {body} }}");
-                assert_eq!(proof.proves(&syn::parse_str(&text).unwrap()), None, "{text}");
+                assert_eq!(proof.proves(&parse_str(&text).unwrap()), None, "{text}");
             }
             let text = format!("while {condition} {{ chars.next(); s.push('x'); }}");
-            assert_eq!(
-                proof.proves(&syn::parse_str(&text).unwrap()),
-                Some(Hazard::UnboundedGrowth),
-                "{text}"
-            );
+            assert_eq!(proof.proves(&parse_str(&text).unwrap()), Some(Hazard::UnboundedGrowth), "{text}");
         }
         for method in ["is_whitespace", "is_ascii_whitespace", "is_ascii_digit"] {
             let text = format!("chars.peek().is_some_and(char::{method})");
-            assert_eq!(proof.at_eof(&syn::parse_str(&text).unwrap(), "chars"), Some(false));
+            assert_eq!(proof.at_eof(&parse_str(&text).unwrap(), "chars"), Some(false));
         }
         let mut shadowed_char = scalar_proof();
         shadowed_char.standard_char = false;
         assert_eq!(
-            shadowed_char.at_eof(&syn::parse_quote!(chars.peek().is_some_and(char::is_whitespace)), "chars"),
+            shadowed_char.at_eof(&parse_quote!(chars.peek().is_some_and(char::is_whitespace)), "chars"),
             None
         );
     }
@@ -822,25 +1095,25 @@ mod tests {
             ("s.push_str(unknown)", None),
             ("s.reserve(0)", None),
         ] {
-            assert_eq!(proof.preserves(&syn::parse_str(text).unwrap()), expected, "{text}");
+            assert_eq!(proof.preserves(&parse_str(text).unwrap()), expected, "{text}");
         }
         for text in ["0", "(0)", "((0u8))"] {
-            assert!(integer_zero(&syn::parse_str(text).unwrap()), "{text}");
+            assert!(integer_zero(&parse_str(text).unwrap()), "{text}");
         }
         for text in ["1", "(1)", "340282366920938463463374607431768211456"] {
-            assert!(!integer_zero(&syn::parse_str(text).unwrap()), "{text}");
+            assert!(!integer_zero(&parse_str(text).unwrap()), "{text}");
         }
         for (text, expected) in [("true", true), ("(false)", false), ("((true))", true)] {
-            assert_eq!(literal_bool(&syn::parse_str(text).unwrap()), Some(expected), "{text}");
+            assert_eq!(literal_bool(&parse_str(text).unwrap()), Some(expected), "{text}");
         }
         for text in ["i", "(i)", "((i))"] {
-            assert_eq!(bare_name(&syn::parse_str(text).unwrap()).as_deref(), Some("i"));
+            assert_eq!(bare_name(&parse_str(text).unwrap()).as_deref(), Some("i"));
         }
         for text in [
             "chars.peek().is_some_and(|c| c.is_whitespace())",
             "chars.peek().is_some_and(|c| !c.is_whitespace())",
         ] {
-            let expression: Expr = syn::parse_str(text).unwrap();
+            let expression: Expr = parse_str(text).unwrap();
             assert_eq!(proof.at_eof(&expression, "chars"), Some(false));
             assert_eq!(proof.at_eof(&expression, "other"), None);
         }
@@ -854,16 +1127,16 @@ mod tests {
             "chars.peek().is_some_and(char::is_whitespace::<u8>)",
             "chars.peek().is_some_and(char::unknown)",
         ] {
-            assert_eq!(proof.at_eof(&syn::parse_str(text).unwrap(), "chars"), None, "{text}");
+            assert_eq!(proof.at_eof(&parse_str(text).unwrap(), "chars"), None, "{text}");
         }
         for text in ["#[transform] chars.peek().is_none()", "(#[transform] chars.peek()).is_none()"] {
-            assert_eq!(proof.at_eof(&syn::parse_str(text).unwrap(), "chars"), None, "{text}");
+            assert_eq!(proof.at_eof(&parse_str(text).unwrap(), "chars"), None, "{text}");
         }
-        let expression: Expr = syn::parse_quote!(while chars.peek().is_none() {
+        let expression: Expr = parse_quote!(while chars.peek().is_none() {
             let _ = chars.next();
         });
         assert_eq!(proof.proves(&expression), Some(Hazard::Nontermination));
-        let expression: Expr = syn::parse_quote!(while chars.peek().is_some() {
+        let expression: Expr = parse_quote!(while chars.peek().is_some() {
             chars.next();
         });
         assert_eq!(proof.proves(&expression), None);
@@ -892,7 +1165,7 @@ mod tests {
             ("i == ready", None),
             ("i + n", None),
         ] {
-            assert_eq!(proof.scalar(&syn::parse_str(text).unwrap()), expected, "{text}");
+            assert_eq!(proof.scalar(&parse_str(text).unwrap()), expected, "{text}");
         }
         for (text, expected) in [
             ("i = i", Some(false)),
@@ -910,20 +1183,20 @@ mod tests {
             ("s.clear(\"x\")", None),
             ("i.push('x')", None),
         ] {
-            assert_eq!(proof.preserves(&syn::parse_str(text).unwrap()), expected, "{text}");
+            assert_eq!(proof.preserves(&parse_str(text).unwrap()), expected, "{text}");
         }
-        let grouped = Expr::Group(syn::ExprGroup {
+        let grouped = Expr::Group(ExprGroup {
             attrs: Vec::new(),
             group_token: syn::token::Group::default(),
-            expr: Box::new(syn::parse_quote!(i)),
+            expr: Box::new(parse_quote!(i)),
         });
         assert_eq!(proof.scalar(&grouped), Some(Binding::Integer));
         assert_eq!(bare_name(&grouped), Some("i".to_owned()));
         for (text, boolean, zero) in [("(true)", Some(true), false), ("(0)", None, true), ("(1)", None, false)] {
-            let expression = Expr::Group(syn::ExprGroup {
+            let expression = Expr::Group(ExprGroup {
                 attrs: Vec::new(),
                 group_token: syn::token::Group::default(),
-                expr: Box::new(syn::parse_str(text).unwrap()),
+                expr: Box::new(parse_str(text).unwrap()),
             });
             assert_eq!(literal_bool(&expression), boolean);
             assert_eq!(integer_zero(&expression), zero);
@@ -949,7 +1222,7 @@ mod tests {
             ("loop { break; }", None),
             ("loop { let value = 1; }", None),
         ] {
-            assert_eq!(proof.proves(&syn::parse_str(text).unwrap()), expected, "{text}");
+            assert_eq!(proof.proves(&parse_str(text).unwrap()), expected, "{text}");
         }
     }
 
@@ -972,12 +1245,12 @@ mod tests {
             ("chars.peek(1).is_none()", None),
             ("unknown.peek().is_none()", None),
         ] {
-            assert_eq!(proof.at_eof(&syn::parse_str(text).unwrap(), "chars"), expected, "{text}");
+            assert_eq!(proof.at_eof(&parse_str(text).unwrap(), "chars"), expected, "{text}");
         }
-        let grouped = Expr::Group(syn::ExprGroup {
+        let grouped = Expr::Group(ExprGroup {
             attrs: Vec::new(),
             group_token: syn::token::Group::default(),
-            expr: Box::new(syn::parse_quote!(chars.peek().is_none())),
+            expr: Box::new(parse_quote!(chars.peek().is_none())),
         });
         assert_eq!(proof.at_eof(&grouped, "chars"), Some(true));
         for (text, expected) in [
@@ -991,14 +1264,14 @@ mod tests {
             ("while chars.peek().is_none() { let value = chars.next(); }", None),
             ("while chars.peek().is_none() { chars.next(1); }", None),
         ] {
-            assert_eq!(proof.proves(&syn::parse_str(text).unwrap()), expected, "{text}");
+            assert_eq!(proof.proves(&parse_str(text).unwrap()), expected, "{text}");
         }
     }
 
     #[test]
     fn mutation_probes_reject_outside_invalid_and_unparseable_source() {
         let source = "while i < n { i += 1; }";
-        let expression: Expr = syn::parse_str(source).unwrap();
+        let expression: Expr = parse_str(source).unwrap();
         let proof = LoopProof::new(&expression, scalar_proof().bindings, true).expect("an advancing loop is a proof candidate");
         let offset = source.find('1').unwrap();
         assert!(proof.omits(source, &(offset..offset + 1), "0"));
@@ -1009,7 +1282,7 @@ mod tests {
         let mut shifted = scalar_proof();
         shifted.span = 1..2;
         assert!(!shifted.omits(source, &(0..1), "0"));
-        let already_stalled: Expr = syn::parse_quote!(loop {});
+        let already_stalled: Expr = parse_quote!(loop {});
         assert!(LoopProof::new(&already_stalled, HashMap::default(), true).is_none());
     }
 }

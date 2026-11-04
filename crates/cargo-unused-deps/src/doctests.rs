@@ -128,7 +128,9 @@ fn stable_diagnostic_args(args: &[OsString]) -> Vec<OsString> {
     let mut skip_value = false;
     for arg in args {
         if skip_value {
-            skip_value = false;
+            skip_value =
+            // #[gamma::skip(assign_value.default, reason = "Default produces the same concrete false or None value as this assignment.", tag = "equivalent")]
+            false;
             continue;
         }
         let text = arg.to_string_lossy();

@@ -112,7 +112,6 @@ fn extract_host(url: &str) -> Option<&str> {
 /// Returns an error if `git` is not on PATH, the command exits non-zero, or
 /// no `origin` remote is configured.
 #[cfg_attr(coverage_nightly, coverage(off))]
-#[mutants::skip] // Shells out to `git config`; behavior tested via backend autodetect integration paths, not unit-mutatable.
 pub fn read_origin_url(repo_root: &Path) -> Result<String, AppError> {
     let output = Command::new("git")
         .args(["config", "--get", "remote.origin.url"])
@@ -128,7 +127,11 @@ pub fn read_origin_url(repo_root: &Path) -> Result<String, AppError> {
         ));
     }
 
-    let url = String::from_utf8(output.stdout)
+    origin_url_from_stdout(repo_root, output.stdout)
+}
+
+fn origin_url_from_stdout(repo_root: &Path, stdout: Vec<u8>) -> Result<String, AppError> {
+    let url = String::from_utf8(stdout)
         .into_app_err("git config output was not valid UTF-8")?
         .trim()
         .to_owned();
@@ -186,6 +189,25 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn origin_stdout_validation_distinguishes_blank_invalid_and_trimmed_urls_in_memory() {
+        let root = Path::new("scripted-repository");
+        for bytes in [b"".as_slice(), b" \t\r\n".as_slice()] {
+            let error = origin_url_from_stdout(root, bytes.to_vec()).unwrap_err();
+            assert_eq!(error.to_string(), "no `origin` remote configured in scripted-repository");
+        }
+        assert_eq!(
+            origin_url_from_stdout(root, b" \thttps://github.com/example/repo.git\r\n".to_vec()).unwrap(),
+            "https://github.com/example/repo.git"
+        );
+        let error = origin_url_from_stdout(root, vec![0xff]).unwrap_err();
+        let cause = error
+            .downcast_ref::<std::string::FromUtf8Error>()
+            .expect("invalid stdout retains its typed UTF-8 conversion cause");
+        assert_eq!(cause.as_bytes(), [0xff]);
+        assert_eq!(cause.utf8_error().valid_up_to(), 0);
+    }
 
     #[test]
     fn a_single_character_scheme_still_has_a_host() {
@@ -252,7 +274,7 @@ mod tests {
         assert_eq!(detect_from_url("https://github.com/foo/bar.git"), vec![Backend::GitHub]);
         assert_eq!(detect_from_url("git@github.com:foo/bar.git"), vec![Backend::GitHub]);
         assert_eq!(detect_from_url("https://enterprise.github.com/foo/bar.git"), vec![Backend::GitHub]);
-        assert!(detect_from_url("https://github.com.example/foo/bar.git").is_empty());
+        assert_eq!(detect_from_url("https://github.com.example/foo/bar.git").len(), 0);
     }
 
     #[test]
@@ -264,14 +286,14 @@ mod tests {
 
     #[test]
     fn detect_unknown_host() {
-        assert!(detect_from_url("https://gitlab.com/foo/bar.git").is_empty());
-        assert!(detect_from_url("").is_empty());
+        assert_eq!(detect_from_url("https://gitlab.com/foo/bar.git").len(), 0);
+        assert_eq!(detect_from_url("").len(), 0);
     }
 
     #[test]
     fn resolve_no_backends_wins() {
         let result = resolve(&[], true, Path::new(".")).unwrap();
-        assert!(result.is_empty());
+        assert_eq!(result.len(), 0);
     }
 
     #[test]

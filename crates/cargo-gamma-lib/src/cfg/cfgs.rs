@@ -33,6 +33,7 @@ impl Cfgs {
 
     /// Returns a map under which nothing is stripped, for callers with no cfg information.
     #[must_use]
+    // #[gamma::skip(fn_value.default, reason = "Cfgs::unconditional is exactly { Self::default() }; replacement Default::default() has the same Self type and value.", tag = "equivalent")]
     pub fn unconditional() -> Self {
         Self::default()
     }

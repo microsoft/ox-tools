@@ -61,6 +61,7 @@ flowchart LR
     pr_test_job["pr-test<br/>matrix: linux, windows,<br/>linux-arm, windows-arm"]:::job
     pr_msrv_job["pr-msrv<br/>matrix: linux, windows,<br/>linux-arm, windows-arm"]:::job
     pr_runtime_analysis_job["pr-runtime-analysis<br/>matrix: linux, windows,<br/>linux-arm, windows-arm"]:::job
+    pr_fuzzing_job["pr-fuzzing<br/>matrix: linux, linux-arm"]:::job
     pr_mutants_job["pr-mutants<br/>matrix: linux, windows,<br/>linux-arm, windows-arm"]:::job
     required_checks["required-checks<br/>(single branch-protection context)"]:::job
     impact_act[".github/actions/<br/>anvil-impact"]:::action
@@ -72,6 +73,7 @@ flowchart LR
     test_just["just anvil-pr-test"]:::recipe
     msrv_just["just anvil-pr-msrv"]:::recipe
     runtime_just["just anvil-pr-runtime-analysis"]:::recipe
+    fuzzing_just["just anvil-pr-fuzzing"]:::recipe
     mutants_just["just anvil-pr-mutants"]:::recipe
     setup_just["just anvil-&lt;group&gt;-setup"]:::recipe
 
@@ -82,12 +84,14 @@ flowchart LR
     pr_impl --> pr_test_job
     pr_impl --> pr_msrv_job
     pr_impl --> pr_runtime_analysis_job
+    pr_impl --> pr_fuzzing_job
     pr_impl --> pr_mutants_job
     impact --> required_checks
     pr_fast_job --> required_checks
     pr_test_job --> required_checks
     pr_msrv_job --> required_checks
     pr_runtime_analysis_job --> required_checks
+    pr_fuzzing_job --> required_checks
     pr_mutants_job --> required_checks
 
     impact ==> impact_act
@@ -96,6 +100,7 @@ flowchart LR
     pr_msrv_job ==> run_group_act
     pr_test_job ==> codecov_act
     pr_runtime_analysis_job ==> run_group_act
+    pr_fuzzing_job ==> run_group_act
     pr_mutants_job ==> run_group_act
 
     impact_act ==> setup_act
@@ -105,6 +110,7 @@ flowchart LR
     run_group_act ==> test_just
     run_group_act ==> msrv_just
     run_group_act ==> runtime_just
+    run_group_act ==> fuzzing_just
     run_group_act ==> mutants_just
     setup_act ==> setup_just
 
@@ -263,6 +269,8 @@ jobs:
     uses: ./.github/workflows/anvil-pr-impl.yml
     permissions:
       contents: read
+      actions: read
+      security-events: write
       statuses: write
       pull-requests: write
     with:
@@ -276,8 +284,8 @@ instead of showing a second skipped caller. The event-specific `base_ref`
 expression selects the pull-request base or merge-group base SHA. The caller
 grants the write scopes needed for pull-request presentation on both event
 types; all status and comment writes remain guarded to same-repository
-`pull_request` events, so merge-group runs receive but do not exercise those
-permissions. The workflow display name is UI grouping rather than part of a
+`pull_request` events. Mutation groups also upload SARIF to code scanning,
+including on merge-group runs. The workflow display name is UI grouping rather than part of a
 check-run name; branch protection sees contexts beginning with `PR Job / ...`.
 The called PR implementation intentionally declares no `permissions` blocks, so
 its jobs inherit the caller's ceiling.
@@ -295,6 +303,11 @@ permissions:
 jobs:
   anvil:
     uses: ./.github/workflows/anvil-scheduled-impl.yml
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
+      issues: write
 ```
 
 Common edits users make to the root workflow (these flip the file to "dirty" and produce
@@ -385,7 +398,7 @@ jobs:
       || inputs.windows_arm_runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with: { fetch-depth: 0 }  # semver-check needs origin/<base> resolvable for --baseline-rev
+        with: { fetch-depth: 0 }  # semver-check needs the local baseline commit for locked rustdoc
       # Download the impact cache computed on this leg's OS into
       # target/anvil/impact/ (arm reuses its OS-family artifact). pr-test /
       # pr-runtime-analysis / pr-mutants do the identical download.
@@ -462,9 +475,12 @@ jobs:
           impact_mode: consume
           free-disk-space: true
 
-  # pr-runtime-analysis (miri + careful) and pr-mutants (mutants) follow the
-  # multi-OS shape; pr-mutants additionally sets `env: BASE_REF` for
-  # diff-scoped cargo-mutants.
+  # pr-runtime-analysis (miri + careful + loom) follows the multi-OS shape.
+  # pr-fuzzing (bolero) has only linux + linux-arm legs, depends only on
+  # impact-linux, and downloads anvil-impact-Linux. It runs in parallel with
+  # runtime analysis and is included in the required-check aggregator.
+  # pr-mutants runs on Windows x64; the other three stable ruleset contexts
+  # remain explicit no-ops. It sets `env: BASE_REF` for diff-scoped cargo-gamma.
 ```
 
 Every multi-OS job hardcodes its OS axis as an inline YAML array. Per-leg runner
@@ -681,6 +697,46 @@ check needs which env var."
 The shared action is an implementation detail of Anvil's generated reusable
 workflows. Anvil does not emit or support public per-group action paths.
 
+### Gamma reports and code scanning
+
+After `pr-mutants` or `scheduled-exhaustive`, the shared `anvil-run-group`
+action preserves any completed Gamma reports even when the group fails.
+Unrelated groups and mutation no-op matrix legs do not upload Gamma outputs.
+The upload requires at least one report, diagnostic, or performance-advice file;
+the checked-in hints file alone does not trigger an artifact.
+
+The downloadable artifact is named
+`gamma-<group>-<runner.os>-<runner.arch>-<run_attempt>` and retained for 30 days,
+subject to the repository's retention policy. It contains the JSON, HTML, and
+SARIF reports, `gamma-diagnostics.json`, and `gamma-perf-advice.md` from
+`target/cargo-gamma/`, plus the root `gamma-hints.yaml` as left by the recipe's
+hint-promotion step. Scratch directories and compiled targets are not uploaded.
+The mutation recipes pin `--artifact-dir target/cargo-gamma` on GitHub Actions,
+even when `gamma.toml` specifies a different report directory; local and ADO
+runs retain native directory configuration.
+Artifacts are available from the workflow run's Artifacts section or
+`gh run download`. Separate names prevent platforms and rerun attempts from
+overwriting one another.
+
+When `target/cargo-gamma/gamma-report.sarif` exists, a separate `upload-sarif`
+step publishes it to GitHub code scanning. Categories include the group, OS,
+and architecture so diff-scoped PR results remain separate from full scheduled
+campaigns and from other platforms. A successful campaign with no survivors
+produces no survivor alerts; hint-efficiency accounting remains in the
+downloadable diagnostics rather than code scanning.
+
+Both root workflow callers grant `security-events: write` and `actions: read`
+alongside `contents: read`; these additional scopes allow SARIF upload in private
+repositories. The reusable implementations default to `contents: read` and
+restore those scopes only on `pr-mutants` and `scheduled-exhaustive`.
+PR group jobs separately retain `statuses: write` for supplemental failure
+statuses, and only `pr-fast` receives `pull-requests: write` for advisory comments.
+Impact analysis and aggregate-gate jobs remain read-only. Repositories
+must enable GitHub code scanning; private/internal repositories require GitHub
+Code Security availability. Upload failures are surfaced as job failures, not
+silently ignored, and artifact and SARIF uploads are independently guarded to
+run after group failure.
+
 ### Failure attribution and commit statuses
 
 GitHub fixes workflow job names before a job runs, so a matrix check named
@@ -827,7 +883,7 @@ prerequisites provision the selected compiler and tools. Its
   `just anvil-<group>-setup binstall` -- only the tools, components, and
   toolchains that group actually needs. Ordinary group names contain only
   lowercase letters, digits, and hyphens. `anvil-run-group` passes its group
-  input here, so a `pr-fast` matrix leg never installs cargo-mutants.
+  input here, so a `pr-fast` matrix leg never installs cargo-gamma.
 
 Linux setup jobs whose selected group includes spellcheck install
 `libclang-dev` before catalog tool installation. This is intentionally eager:
@@ -1020,10 +1076,14 @@ Recommended root workflow shape:
   this.
 - The reusable-workflow call grants `pull-requests: write` for
   advisory comments and `statuses: write` for opt-in supplemental commit statuses. The
-  shared called workflow declares no permission overrides and inherits that
-  caller ceiling. The same caller handles pull-request and merge-group events,
+  shared called workflow resets its default to `contents: read`, restores
+  `statuses: write` on PR group jobs, and grants `pull-requests: write` only to
+  `pr-fast`. The same caller handles pull-request and merge-group events,
   avoiding a second skipped `PR Job`; merge-group jobs receive these scopes but
   do not use them.
+- Both reusable-workflow callers also grant `security-events: write` and
+  `actions: read` for Gamma's SARIF uploads. The reusable implementations restore
+  these scopes only on their mutation jobs.
 - Status publishing is guarded to same-repository `pull_request` events. Fork
   PRs never reach the status API step regardless of whether administrators keep
   GitHub's default read-only token policy or enable write tokens for fork
@@ -1032,8 +1092,9 @@ Recommended root workflow shape:
   publisher can create or comment on the failure issue. The called workflow resets its
   default permissions to `contents: read`, then restores `issues: write` only on the
   publishing job. That job-level map omits `contents`, so the publisher cannot read
-  repository contents; scheduled check jobs retain read-only access. The PR workflow
-  never receives this permission.
+  repository contents. Only `scheduled-exhaustive` restores code-scanning upload
+  scopes; the other scheduled check jobs retain read-only access. The PR workflow
+  never receives `issues: write`.
 - Scheduled-tier secrets, if any, live on `anvil-scheduled.yml` only — never on `anvil-pr.yml`.
 - All cargo-tool installs done by the catalog setup recipes use `--locked` (with
   `cargo install` or `cargo binstall` depending on `installer`).
@@ -1079,7 +1140,70 @@ Pin changes belong in the source templates. Regenerate the workflows and `.anvil
 with that updated catalog; editing only generated workflows leaves their recorded
 checksums stale and takes them off the automatic update path.
 
+### Dependabot ownership
+
+When the GitHub backend is selected, `cargo anvil` adds the catalog's generated
+workflow and action-manifest YAML paths to `exclude-paths` in existing
+`github-actions` Dependabot update entries. Paths are exact repository-relative
+file names with glob metacharacters escaped, not action-name ignores or `anvil-*`
+globs: a repository-owned workflow such as `codeql.yml` remains eligible even when
+it uses the same actions. Catalog-owned `action.yml` and `action.yaml` files are
+included at the root and in other directories.
+
+Root, subdirectory, and multi-directory update jobs retain their existing scan
+settings. Exclusions remain repository-relative because the GitHub Actions
+fetcher's [directory listing filter][dependabot-contents-filter] matches the
+repository-relative `path` from each returned entry. This also avoids a shared
+`directories` list applying a bare `action.yml` exclusion to unrelated action
+directories.
+
+Anvil patches `.github/dependabot.yml` or `.github/dependabot.yaml` without taking
+ownership of the file. Existing exclusions, schedules, groups, cooldowns, other
+settings, comments, and unrelated ecosystem entries are preserved. Missing paths
+are added once; existing exclusions are never removed. Block lists, including
+indentless lists, and inline YAML lists retain flat string entries. Anvil does not
+create a Dependabot configuration or enable a missing update job. Rerun
+`cargo anvil` after adding Dependabot configuration. Configurations already
+scheduled for whole-file retirement are not patched or recreated. Malformed or
+ambiguous configuration, including aliases or shared YAML containers that would
+need editing, is left unchanged with an actionable refusal; anchors on untouched
+containers do not cause refusals, and unrelated YAML anchors remain supported.
+Refused managed-region retirement also blocks automatic patches to that file;
+successful region removal still permits patching the remaining repository content.
+Protected configurations still count when checking for both filename spellings.
+Only configurations scheduled for whole-file removal are excluded from that check;
+if both spellings otherwise exist, neither is patched.
+Explicit YAML keys retain their complete mapping-entry boundaries. Inherited
+ecosystem defaults are used for read-only job classification with explicit values
+taking precedence, so merged defaults for unrelated ecosystems remain no-ops.
+Existing exclusions use the same read-only lookup: complete inherited lists are
+no-ops, explicit lists override defaults, and merge sequences use the first
+matching list rather than combining lists.
+Aliases are followed by reference for read-only comparisons, without expanding
+their graphs. Repeated merge targets reuse completed field lookups, including
+missing values, while cyclic defaults retain their refusal.
+Already-complete shared exclusion lists remain byte-for-byte no-ops;
+an insertion that would change a shared target is still refused.
+
+The source repository deliberately continues receiving generated-action update
+PRs so maintainers can update the templates/catalog and regenerate the deployed
+pipelines. Its repository-owned Dependabot configuration starts with:
+
+```yaml
+# anvil: keep-generated-action-updates
+```
+
+This exact leading comment opts out of automatic exclusions, without depending on
+the checkout's remote or enabling a second update policy. It does not remove any
+existing exclusions. The same opt-out is available to catalog source forks.
+
+Dependabot's `exclude-paths` applies to **version updates only**, not security
+updates. Security-update PRs can therefore still require reconciliation with the
+source catalog. See the [Dependabot options reference][dependabot-exclude-paths].
+
 [immutable]: https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases
+[dependabot-exclude-paths]: https://docs.github.com/en/code-security/reference/supply-chain-security/dependabot-options-reference#exclude-paths
+[dependabot-contents-filter]: https://github.com/dependabot/dependabot-core/blob/510dd5e861be74ddc533083fe8b9953a66670f2f/common/lib/dependabot/file_fetchers/base.rb
 
 ## 10. Coverage upload
 

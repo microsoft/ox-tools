@@ -3,6 +3,42 @@
 This guide describes internal implementation constraints that keep the emitted behavior aligned
 with the user-visible contract in [design](./design/README.md).
 
+## Dependabot configuration editing
+
+The [Dependabot ownership contract](./design/github.md#dependabot-ownership) uses
+source-preserving edits rather than YAML reserialization: the configuration
+belongs to the repository, including comments and formatting. `saphyr-parser`
+events supply a small tree for selecting jobs and locating insertion boundaries.
+The tree retains mapping key/value order, collection sharing, and alias identities;
+it is not a second general-purpose YAML object model.
+
+Parser character positions are converted to byte offsets in the original UTF-8
+text, including its optional byte-order mark. Insertions run from the final
+offset backwards so earlier positions stay valid, and the complete result is
+parsed again before planning a write. Block jobs insert before a complete mapping
+entry, retaining any explicit key indicator and the original sequence marker.
+
+Aliases and inherited defaults are inspected without expanding their graphs.
+The ecosystem and exclusion list share one read-only field lookup: explicit
+values override defaults, merge sequences use their first matching value, and
+active merge spans detect cycles. A per-document cache retains completed lookups
+by resolved node and field, including absent results, so repeated acyclic merge
+targets are evaluated once rather than repeatedly expanding their dependencies.
+Failed lookups are not cached, and their active merge state is unwound. This
+keeps unrelated ecosystems and complete inherited exclusions untouched; it does
+not authorize editing merged or shared containers. Local typed error causes
+distinguish safety refusals from parser failures while the planner retains its
+`AppError` boundary.
+
+The planner records a `patch_file` write with no ownership checksum. Neither the
+whole configuration nor its user exclusions become catalog-owned. Pending
+whole-file removals and refused region hosts block automatic patches, so this
+pass cannot recreate retired files or bypass a preservation refusal. Successful
+region removal still composes with the subsequent patch through the host cache.
+Only whole-file removals are omitted from the duplicate-spelling check. A refused
+region protects its file from editing without making that retained file disappear
+from ambiguity detection.
+
 ## Pull request title validation
 
 The `pr-title.just` template owns both title validation and its failure diagnostic. The ordered
@@ -43,6 +79,29 @@ the other two forms remain candidates.
 The canonical recipe owns this mapping, baseline availability checks, and
 per-package execution. Focused contract tests cover every publication form,
 while generated copies and snapshots detect drift from the template.
+
+For the [locked snapshot contract](./design/checks.md#locked-semver-snapshots),
+the recipe creates a temporary local shared Git clone and checks out the
+resolved PR target commit. Sharing Git objects avoids copying the repository's
+history, while a separate checkout protects the original repository and its
+historical manifests. LFS smudging is disabled so the local origin need not
+provide LFS assets. A PowerShell `finally` block removes the clone even when
+snapshot generation or comparison fails.
+
+`Get-RustdocSnapshot` invokes `cargo rustdoc --locked --lib` separately for each
+revision, using that revision's source-qualified Cargo metadata package ID to
+avoid ambiguity with same-name dependencies. Both invocations use the current
+checkout's selected compiler and target, with separate target directories.
+`RUSTC_BOOTSTRAP=1` enables unstable rustdoc JSON output on that compiler,
+matching the checker's own generation path. Each revision supplies its own
+metadata feature list; defaults remain enabled and case-sensitive exclusions
+preserve the checker's feature-selection heuristic when using file inputs.
+
+Cargo JSON commands capture stdout separately from stderr so warnings do not
+corrupt metadata or target-configuration parsing. Successful commands replay
+stderr, and failed commands retain it in diagnostics. Snapshot generation
+removes any previous JSON artifact before building so a stale file cannot turn
+a failed or incomplete build into an apparently successful comparison.
 
 ## Stable toolchain selection and setup
 
@@ -243,17 +302,22 @@ expected category, so a check silently gaining, losing, or changing scoping fail
 The recipe keeps two independently keyed snapshots under `target/anvil/impact/snapshots/`:
 
 - `baseline.json` (base ref) — expensive (needs a throwaway git worktree). Keyed on the
-  **composite** of the base commit sha *and* the effective `.delta.toml` identity, persisted in
-  `baseline.key` as `<base-sha> <config-hash>`. Folding the config hash in is a correctness
+  **composite** of the base commit sha, effective `.delta.toml` identity, and pinned cargo-delta
+  version, persisted in `baseline.key` as `<base-sha> <config-hash> <cargo-delta-version>`.
+  Folding the config hash in is a correctness
   requirement, not an optimization: the config governs *what* every snapshot captures, so a
   warm cache keyed on the base sha alone could diff a stale-config baseline against a
   new-config current snapshot and silently mis-scope.
-- `current.json` (working tree) — cheap. Keyed on the HEAD sha alone (`current.key`); the
-  dirty-tree guard means a snapshotted tree corresponds exactly to HEAD.
+- `current.json` (working tree) — cheap. Keyed on the HEAD sha and pinned cargo-delta version
+  (`current.key` stores `<HEAD-sha> <cargo-delta-version>`); the dirty-tree guard means a
+  snapshotted tree corresponds exactly to HEAD.
 
-The composite baseline key is why the base worktree is retaken when the base moves *or*
-`.delta.toml` changes; `baseline_regenerates_when_delta_config_changes_without_moving_the_base`
-pins that second input. The worktree lives under the runner-managed scratch dir
+Including the pinned cargo-delta version in both keys invalidates snapshots written by older
+tool versions, including formats that the new tool cannot read. Existing versionless keys
+also miss once and regenerate. The composite baseline key also retakes the base worktree when
+the base moves or `.delta.toml` changes;
+`baseline_regenerates_when_delta_config_changes_without_moving_the_base` pins that config input.
+The worktree lives under the runner-managed scratch dir
 (`RUNNER_TEMP` → `AGENT_TEMPDIRECTORY` → system temp) and is named with `$PID` and a fresh
 GUID. Reused process IDs cannot select abandoned directories, and a run never removes a
 pre-existing checkout to claim its path. Its own worktree is removed in a `finally`.
@@ -261,12 +325,14 @@ Creation failures include Git's diagnostic output.
 
 ### Fail-closed mapping and the dirty-tree safety net
 
-cargo-delta reports library/target identifiers that do not uniquely name a Cargo package, so
-`_anvil-impact-format` reverse-maps them to version-qualified package selectors using three
-Ordinal (case-sensitive) lookups (package name, lib/proc-macro target, manifest-dir leaf). When
-a reported identifier resolves to **zero** packages (an unmapped gap) or **more than one** (an
-ambiguity), the recipe fails hard rather than guessing — under-scoping would silently skip
-affected work. Complementarily, a dirty working tree (any uncommitted change outside `target/`,
+Cargo-delta JSON tiers contain Cargo package names. `_anvil-impact-format` resolves them to
+version-qualified package selectors using one Ordinal (case-sensitive) lookup restricted to
+workspace members from locked Cargo metadata. Library/proc-macro target names and manifest
+directory leaves are not aliases, so a collision with either cannot obscure an exact package
+name. Cargo enforces unique package names within a workspace, so each reported name
+matches at most one member. A name with no match signals a report/metadata mismatch;
+the recipe fails rather than silently dropping affected work.
+Complementarily, a dirty working tree (any uncommitted change outside `target/`,
 detected via a git `:(exclude)` pathspec) widens *every* tier to `--workspace` locally, because
 cargo-delta scopes on the committed diff and cannot see working-tree edits. Cloud checkouts are clean, so this
 only affects local runs.

@@ -78,14 +78,12 @@ struct GhCommandRequest {
 
 /// Resolve the GitHub credential used by the hosting provider.
 pub(super) async fn discover(explicit: Option<&GitHubToken>, github_token_from_gh: bool, endpoints: &Endpoints) -> Option<GitHubToken> {
-    discover_with(
-        explicit,
-        github_token_from_gh,
-        endpoints,
-        || std::env::var_os(GITHUB_TOKEN_ENV),
-        query_gh,
-    )
-    .await
+    discover_with(explicit, github_token_from_gh, endpoints, github_token_from_environment, query_gh).await
+}
+
+// #[gamma::skip(fn_value.none, fn_value.some_default, tag = "native", reason = "this adapter reads process-global credentials; discover_with tests absent, blank and populated values without changing the environment")]
+fn github_token_from_environment() -> Option<OsString> {
+    std::env::var_os(GITHUB_TOKEN_ENV)
 }
 
 async fn discover_with<OutputFuture>(
@@ -232,7 +230,7 @@ where
 }
 
 async fn run_gh_command(request: GhCommandRequest) -> io::Result<GhCommandOutput> {
-    run_gh_command_with(
+    run_gh_command_with_output(
         request,
         |request, kill_on_drop| {
             let GhCommandRequest {
@@ -252,8 +250,27 @@ async fn run_gh_command(request: GhCommandRequest) -> io::Result<GhCommandOutput
                 .stderr(stderr.into_stdio())
                 .kill_on_drop(kill_on_drop)
                 .spawn()?;
+            Ok(child)
+        },
+        tokio::process::Child::wait_with_output,
+    )
+    .await
+}
+
+async fn run_gh_command_with_output<C, F>(
+    request: GhCommandRequest,
+    spawn: impl FnOnce(GhCommandRequest, bool) -> io::Result<C>,
+    wait_output: impl FnOnce(C) -> F,
+) -> io::Result<GhCommandOutput>
+where
+    F: Future<Output = io::Result<std::process::Output>>,
+{
+    run_gh_command_with(
+        request,
+        |request, kill_on_drop| {
+            let child = spawn(request, kill_on_drop)?;
             Ok(async move {
-                let output = child.wait_with_output().await?;
+                let output = wait_output(child).await?;
                 Ok(GhCommandOutput {
                     success: output.status.success(),
                     stdout: output.stdout,
@@ -329,6 +346,7 @@ fn resolve_executable(program: &OsStr, path: &OsStr, path_ext: Option<&OsStr>, c
         // actual entry such as `.` keeps repository-local executables opt-in.
         .filter(|directory| !directory.as_os_str().is_empty())
         .map(|directory| {
+            // #[gamma::skip(cond.always_false, tag = "equivalent", reason = "Path::join replaces the base for an absolute path, so always joining preserves every candidate and only adds an allocation.")]
             if directory.is_absolute() {
                 directory
             } else {
@@ -408,8 +426,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn survivor_native_gh_output_wait_errors_propagate_without_panicking() {
+        let request = GhCommandRequest {
+            executable: PathBuf::from("never-spawned-gh"),
+            args: vec![OsString::from("auth"), OsString::from("token")],
+            stdin: GhStdio::Null,
+            stdout: GhStdio::Capture,
+            stderr: GhStdio::Null,
+            timeout: Duration::from_secs(1),
+        };
+        let Err(error) = run_gh_command_with_output(
+            request,
+            |request, kill_on_drop| {
+                assert_eq!(request.executable, Path::new("never-spawned-gh"));
+                assert!(kill_on_drop);
+                Ok(())
+            },
+            |()| std::future::ready(Err(io::Error::new(io::ErrorKind::BrokenPipe, "native gh output wait probe"))),
+        )
+        .await
+        else {
+            panic!("a native output-wait failure must remain an ordinary IO error");
+        };
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+        assert_eq!(error.to_string(), "native gh output wait probe");
+    }
+
+    #[tokio::test]
+    async fn survivor_public_discovery_keeps_an_explicit_token_distinct_from_the_environment() {
+        let explicit = token("explicit-noncredential-fixture");
+        for (explicit, expected) in [
+            (Some(&explicit), "explicit-noncredential-fixture"),
+            (None, "environment-noncredential-fixture"),
+        ] {
+            let actual = discover_with(
+                explicit,
+                false,
+                &Endpoints::default(),
+                || Some(OsString::from("environment-noncredential-fixture")),
+                |_| async { panic!("fixed credentials must not query gh") },
+            )
+            .await
+            .unwrap();
+            assert_eq!(actual.expose_secret(), expected);
+        }
+    }
+
+    #[tokio::test]
     async fn discovery_retains_the_explicit_token_without_environment_or_gh() {
         let explicit = token("noncredential-test-value");
+        assert_eq!(
+            discover(Some(&explicit), false, &Endpoints::default()).await,
+            Some(explicit.clone())
+        );
         let discovered = discover_with(
             Some(&explicit),
             false,
@@ -1064,11 +1133,17 @@ mod tests {
             executable_names(OsStr::new("gh.EXE"), Some(OsStr::new(".COM"))),
             vec![OsString::from("gh.EXE")]
         );
-        assert!(executable_names(OsStr::new("gh.CMD"), Some(OsStr::new(".EXE"))).is_empty());
+        assert_eq!(executable_names(OsStr::new("gh.CMD"), Some(OsStr::new(".EXE"))).len(), 0);
         assert_eq!(
             executable_names(OsStr::new("gh"), Some(OsStr::new(";.EXE;COM"))),
             vec![OsString::from("gh.EXE"), OsString::from("gh.COM")]
         );
+        for path_ext in [None, Some(OsStr::new(""))] {
+            assert_eq!(
+                executable_names(OsStr::new("gh"), path_ext),
+                vec![OsString::from("gh.COM"), OsString::from("gh.EXE")]
+            );
+        }
     }
 
     #[cfg(windows)]

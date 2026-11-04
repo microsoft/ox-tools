@@ -3,8 +3,10 @@
 
 //! Opt-in system checks of real compiler acceptance and offline fixture buildability.
 
+use std::env;
+#[cfg(not(miri))]
+use std::fs;
 use std::process::Command;
-use std::{env, fs};
 
 use cargo_gamma_lib::testing::write_project;
 use tempfile::TempDir;
@@ -14,6 +16,7 @@ mod child_test;
 #[path = "support/rustflags.rs"]
 mod rustflags;
 
+#[cfg(not(miri))]
 fn builds_offline(directory: &TempDir) {
     let home = TempDir::new().expect("could not create an empty Cargo home");
     let mut command = Command::new(env!("CARGO"));
@@ -53,6 +56,11 @@ fn builds_offline(directory: &TempDir) {
         "the embedded project must build with an empty registry cache:\n{}",
         String::from_utf8_lossy(&built.stderr)
     );
+}
+
+#[cfg(miri)]
+fn builds_offline(_: &TempDir) {
+    unreachable!("the compiler subprocess tests are ignored under Miri");
 }
 
 #[test]

@@ -54,6 +54,7 @@ async fn get_repo_core(repo_path: &Path, repo_url: &Url, timeout: Duration) -> R
 async fn get_repo_core_with_executable(repo_path: &Path, repo_url: &Url, timeout: Duration, git_executable: &Path) -> Result<RepoStatus> {
     let path_str = path_str(repo_path)?;
 
+    // #[gamma::skip(try.propagate_to_unwrap, tag = "native", reason = "this adapter removes a real corrupt cache directory; prepare_cached_repo tests removal errors through its injected remover without changing host permissions")]
     if prepare_cached_repo(
         repo_path,
         Path::exists,
@@ -143,6 +144,16 @@ async fn clone_repo_with_executable(repo_path: &str, repo_url: &Url, timeout: Du
     )
     .await?;
 
+    finish_clone(repo_path, repo_url, &output, Path::exists, |path| fs::remove_dir_all(path))
+}
+
+fn finish_clone(
+    repo_path: &str,
+    repo_url: &Url,
+    output: &std::process::Output,
+    exists: impl FnOnce(&Path) -> bool,
+    remove_partial: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<RepoStatus> {
     if output.status.success() {
         return Ok(RepoStatus::Ok);
     }
@@ -151,8 +162,8 @@ async fn clone_repo_with_executable(repo_path: &str, repo_url: &Url, timeout: Du
 
     // Clean up any partial clone directory left behind
     let path = Path::new(repo_path);
-    if path.exists() {
-        let _ = fs::remove_dir_all(path);
+    if exists(path) {
+        let _ = remove_partial(path);
     }
 
     if is_repo_not_found(&stderr) {
@@ -331,6 +342,94 @@ fn classify_git_run(
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    #[cfg(unix)]
+    use std::os::unix::process::ExitStatusExt as _;
+    #[cfg(windows)]
+    use std::os::windows::process::ExitStatusExt as _;
+
+    #[test]
+    fn survivor_failed_clone_cleans_only_an_existing_partial_directory() {
+        let path = Path::new("partial-clone");
+        let url = Url::parse("https://example.test/absent-repository").unwrap();
+        for exists in [false, true] {
+            let calls = std::cell::Cell::new(0);
+            let output = std::process::Output {
+                #[cfg(unix)]
+                status: std::process::ExitStatus::from_raw(1 << 8),
+                #[cfg(windows)]
+                status: std::process::ExitStatus::from_raw(1),
+                stdout: Vec::new(),
+                stderr: b"repository not found".to_vec(),
+            };
+            let status = finish_clone(
+                path.to_str().unwrap(),
+                &url,
+                &output,
+                |requested| {
+                    assert_eq!(requested, path);
+                    exists
+                },
+                |requested| {
+                    assert_eq!(requested, path);
+                    calls.set(calls.get() + 1);
+                    Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+                },
+            )
+            .unwrap();
+            assert!(matches!(status, RepoStatus::NotFound));
+            assert_eq!(calls.get(), usize::from(exists));
+        }
+    }
+
+    #[test]
+    fn survivor_cached_regular_file_errors_before_any_git_command_is_started() {
+        let path = Path::new("cached-regular-file");
+        let error = prepare_cached_repo(
+            path,
+            |candidate| {
+                assert!(candidate == path || candidate == path.join(".git"));
+                candidate == path
+            },
+            |candidate, context| {
+                assert_eq!(candidate, path);
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "scripted regular-file removal refusal",
+                ))
+                .into_app_err(context)
+            },
+            |message| assert!(message.contains(".git directory missing")),
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("removing potentially corrupt cached repository"),
+            "{error}"
+        );
+        let cause = error.find_source::<std::io::Error>().unwrap();
+        assert_eq!(cause.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(cause.to_string(), "scripted regular-file removal refusal");
+    }
+
+    #[tokio::test]
+    async fn survivor_injected_git_wait_errors_keep_the_original_io_cause_not_a_timeout() {
+        let error = run_git_executable_with(
+            Path::new("never-spawned-git"),
+            &["status"],
+            Duration::from_secs(7),
+            |_, _, kill_on_drop| {
+                assert!(kill_on_drop);
+                Ok(std::future::ready(Err::<std::process::Output, _>(std::io::Error::other(
+                    "injected wait failure",
+                ))))
+            },
+            |_, child| async { Ok(child.await) },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.message(), "injected wait failure");
+        assert!(error.to_string().contains("running 'git status'"), "{error}");
+        assert!(!error.to_string().contains("timed out"), "{error}");
+    }
     #[cfg(unix)]
     use std::ffi::OsStr;
     #[cfg(windows)]
@@ -578,7 +677,7 @@ mod tests {
         let (_tmp, repo_path) = create_test_repo();
         let stats = get_commit_stats(&repo_path, &[], GIT_TIMEOUT).await.unwrap();
         assert_eq!(stats.commit_count, 2);
-        assert!(stats.commits_per_window.is_empty());
+        assert_eq!(stats.commits_per_window, [] as [u64; 0]);
     }
 
     #[tokio::test]

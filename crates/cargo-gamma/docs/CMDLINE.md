@@ -101,8 +101,8 @@ one unresolved mutant through the remaining stages before claiming another:
 
 Fallback tries own-package binaries first, then other eligible binaries. Within
 each tier, binaries with more distinct mutant kills run first; baseline runtime
-and stable identity break ties. Counts include known exact hints and confirmed
-kills discovered during this campaign, without counting reconfirmations twice.
+and stable identity break ties. Counts include known exact hints and observed
+kills discovered during this campaign, without crediting the same mutant twice.
 The ordering is refreshed when each mutant enters fallback and does not change
 final non-killing outcome precedence.
 
@@ -113,18 +113,18 @@ estimated cost. Repeated transfer misses reduce the function's priority boost
 without retiring its candidates. Same-function siblings remain runnable when
 there is no independent work.
 
-Every confirmed kill settles immediately, without waiting for earlier binaries.
+Every kill settles immediately, without waiting for earlier binaries.
 Each mutant runs one selection at a time; parallelism is across mutants, up to
 the configured job count in every phase. Gamma imposes no additional CPU-count cap
 or aggregate memory reservation. Reduce `--jobs` if concurrent runs exhaust system
 memory. Per-process memory limits and declared named-resource capacities remain
 enforced. Nextest retains
 process-per-test isolation and executes one test process at a time per mutant.
-Control confirmations and configured nextest retries are separate from phase-2
+Resource retries, nextest enumeration controls, and configured nextest retries are separate from phase-2
 candidate limits. Passing selected cases never establishes survival.
 
-Baseline harness-thread settings, memory ceilings, named-resource limits, and
-failure confirmation remain in force. Diagnostic accounting records execution-tier
+Baseline harness-thread settings, memory ceilings, named-resource limits, resource retries, and
+nextest enumeration controls remain in force. Diagnostic accounting records execution-tier
 costs. Snapshots from earlier scheduler policies require a new campaign rather
 than resuming under a different verdict policy.
 
@@ -147,7 +147,7 @@ execution values are not validated on resume, but unknown top-level configuratio
 keys are rejected. Use `--dir` and, if necessary,
 `--cache-dir` to identify the existing campaign.
 
-Prepared snapshot schema version 2 rejects older reachability-policy snapshots;
+Prepared snapshot schema version 3 rejects older reachability- or kill-confirmation-policy snapshots;
 their settled no-coverage verdicts cannot be safely reused. Start a fresh
 campaign instead of resuming those snapshots.
 
@@ -308,7 +308,11 @@ gate failed, and a campaign that could not obtain a complete answer:
 | `3` | The command could not proceed or could not produce the requested complete result. |
 | `70` | An internal cargo-gamma panic reached the top-level boundary. |
 
-An empty population fails only when a configured gate requires something to grade. A partially
+An `--in-diff` run that selects no mutants succeeds, even with `--min-score` or `--max-flaky`
+configured. This applies to the final selection after combining diff scope with other filters,
+such as `--re` and sharding, not only to a diff with no mutable lines. Other empty populations fail
+when a configured gate requires something to grade. A nonempty population consisting entirely of excluded or
+otherwise ungradeable mutants still fails the applicable gate, including with `--in-diff`. A partially
 completed population fails when either `--min-score` or `--max-flaky` is configured; with no strict
 gate it remains a reportable result. Build convergence that leaves stuck mutants is still status
 `3`, because the selected population was not built completely enough to answer.
@@ -321,6 +325,31 @@ failure's `failure.json` and `diags.json`, then one aggregate error directing th
 new build clears that directory first, so every retained record belongs to the current run. Because
 the instrumented build has already converged before baselining, these diagnostics retain the full
 mutant population and its known unviable and still-pending outcomes even when the baseline fails.
+
+## Diff scope and limitations
+
+`--in-diff` selects mutation sites that overlap added or changed production-code lines. It does
+not perform test-impact analysis: changing or deleting tests does not select mutants in the
+unchanged production code those tests exercised. A PR that deletes every test without changing
+production code can therefore select no mutants and succeed, even with score and flaky gates enabled.
+Deletions alone provide no new lines to mutate.
+
+A passing diff-scoped run establishes nothing about test protection outside its selected mutation
+sites. Use it for faster feedback, not as a substitute for full mutation testing. To detect lost
+protection in unchanged code, run without `--in-diff`; CI can do this whenever tests or test
+configuration change, in addition to periodic full runs.
+
+## Baseline and kill attribution
+
+Baseline runs the selected healthy tests before the sweep. Ordinary failures with a mutant active
+then count as kills without an additional unmutated run, including failures from hinted tests.
+A passing baseline does not rule out intermittent assertion failures later, which can count as
+kills. New flaky verdicts arise only from unmutated nextest enumeration controls: a failed test or
+a control that times out, stalls or exceeds its memory ceiling leaves the mutant unjudged in that
+score-neutral bucket. `--max-flaky` gates those verdicts, not ordinary intermittent assertion failures.
+Merge also retains and gates flaky verdicts in historical reports. Timeout, stall and memory
+suspicions retain their retries.
+`--no-confirm` and `no-confirm` are unsupported; omit them from commands and configuration.
 
 ## Full option reference
 
@@ -357,7 +386,6 @@ cargo gamma run [OPTIONS] [-- <TEST_ARGS>...]
 | `--incremental` | `<INCREMENTAL>` | How an incremental run reuses the last run: `no` starts cold; `build` reuses compiler unviability and checked execution hints. |
 | `--leak-dirs` |  | Keep an incomplete scratch workspace after errors so it can be inspected. |
 | `--no-baseline` |  | Skip the baseline run. |
-| `--no-confirm` |  | Believe a failing test without re-running it with no mutant active. |
 | `--dry-run` |  | Find and report mutants without building or running anything. |
 | `--no-stall-detection` |  | Wait out the whole budget for every mutant instead of cutting off one that has stopped making progress. |
 

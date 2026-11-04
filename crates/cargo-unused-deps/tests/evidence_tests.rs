@@ -25,11 +25,7 @@ use tempfile::TempDir;
 
 /// Path to the binary under test.
 fn binary() -> PathBuf {
-    let test = std::env::current_exe().expect("failed to locate the test executable");
-    test.parent()
-        .and_then(Path::parent)
-        .expect("integration tests run from the profile's deps directory")
-        .join(format!("cargo-unused-deps{}", std::env::consts::EXE_SUFFIX))
+    PathBuf::from(env!("CARGO_BIN_EXE_cargo-unused-deps"))
 }
 
 /// The rustdoc beside the active rustc, found without assuming rustup manages it.
@@ -86,7 +82,7 @@ fn a_bin_only_finding_does_not_try_to_compile_doctests() {
 /// Command the binary under test with nightly-only rustdoc options enabled.
 ///
 /// `RUSTC_BOOTSTRAP` is confined to synthetic fixture builds. It lets the same
-/// behavioral tests run under cargo-mutants' stable compiler.
+/// behavioral tests run under a stable compiler.
 fn command() -> Command {
     let mut command = Command::new(binary());
     command.env("RUSTC_BOOTSTRAP", "1");

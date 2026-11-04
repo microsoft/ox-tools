@@ -63,6 +63,19 @@ mod final_survivor_tests {
     }
 
     #[test]
+    fn recovered_an_empty_nextest_argument_list_never_appends_the_harness_separator() {
+        let root = Utf8PathBuf::from("adopted-nextest");
+        let work = Workspace::adopt(root.clone(), root.join("target"));
+        let harness = Harness::fake(&[("subject-binary", "subject::tests")]);
+        let command = harness
+            .command(&work, &crate::testing::test_binary("subject-binary"), &[], false, false)
+            .unwrap();
+        let args = command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect::<Vec<_>>();
+        assert!(!args.iter().any(|arg| arg == "--"));
+        assert_eq!(args.last().map(String::as_str), Some("pass"));
+    }
+
+    #[test]
     fn narrowed_nextest_commands_cannot_turn_an_empty_selection_into_a_pass() {
         let root = Utf8PathBuf::from(if cfg!(windows) { "C:/nextest-policy" } else { "/nextest-policy" });
         let work = Workspace::adopt(root.clone(), root.join("target"));
@@ -456,6 +469,11 @@ mod tests {
         assert_eq!(first_failure("FAIL [  0.123s]   \n"), None);
     }
 
+    #[test]
+    fn a_failure_without_a_test_name_does_not_report_the_binary_as_the_test() {
+        assert_eq!(first_failure("FAIL binary "), None);
+    }
+
     /// The scan must not stop at the first line that is not a failure, or a suite that reports
     /// anything at all before its failure would convict a mutant without naming what caught it.
     #[test]
@@ -626,8 +644,8 @@ mod tests {
 
     #[test]
     fn nextest_metadata_files_are_distinct_nonempty_json_names() {
-        assert!(!BINARIES_METADATA_FILE.is_empty());
-        assert!(!CARGO_METADATA_FILE.is_empty());
+        assert_ne!(BINARIES_METADATA_FILE.len(), 0);
+        assert_ne!(CARGO_METADATA_FILE.len(), 0);
         assert_ne!(BINARIES_METADATA_FILE, CARGO_METADATA_FILE);
         assert!(
             std::path::Path::new(BINARIES_METADATA_FILE)

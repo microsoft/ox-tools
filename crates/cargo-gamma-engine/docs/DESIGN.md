@@ -136,6 +136,19 @@ configuration and therefore audits the whole file.
   imports without rebinding already normalized parent aliases. Declaration-only
   freezing does not resolve sibling wrapper aliases; payload extraction happens
   after the wrapper itself has been expanded.
+  Qualified-self associated paths such as `<T>::Item` never resolve through a
+  same-named lexical type alias.
+  Attribute metadata and opaque macro bodies do not supply runtime numeric
+  binding evidence, including attributes on macro declarations, invocations,
+  and external-crate declarations.
+  Generic alias cycle detection distinguishes instantiations, allowing finite
+  repeated wrappers such as `Id<Id<bool>>` to resolve while retaining the
+  reconstruction-work allowance. A bare generic parameter shadows a same-named
+  outer declaration; concrete alias instantiations substitute their supplied
+  arguments.
+  A written `Default` implementation through a renamed local import prevents
+  negative default evidence for its transitive local targets, including after
+  merging file indexes. Same-name imports do not weaken direct default evidence.
   Operator-output incompatibility requires complete, canonicalized types on both
   sides. Equivalent primitive spellings compare equally, and nested unknown or
   over-budget outputs retain replacements for compiler validation.
@@ -390,7 +403,9 @@ configuration and therefore audits the whole file.
   Loops over 4096 source bytes remain unfiltered to bound proof work.
   Resource aliases resolve in their declaring lexical scope, not through a
   file-wide terminal name. Imported or ambiguous alias identities remain unknown,
-  and recursive alias/reference queries stop at cycles. Proofs reuse the original
+  and recursive alias/reference queries stop at cycles. A known module path with
+  ambiguous or opaque ancestors cannot be reinterpreted through an ancestor's
+  same-named import, including after a reexport redirect. Proofs reuse the original
   AST and literal tokens; probing candidate text does not retain additional
   proc-macro source-map entries.
   Source identity indexes are built even for narrow selectors so shadows and

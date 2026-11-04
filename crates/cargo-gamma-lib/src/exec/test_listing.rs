@@ -85,7 +85,9 @@ fn listing_command(work: &Workspace, binary: &TestBinary, include_filters: bool,
 
 fn read_listing(pipe: &mut impl io::Read) -> (Vec<u8>, bool) {
     let mut text = Vec::new();
-    let mut buffer = [0_u8; 8192];
+    let mut buffer = [
+    // #[gamma::skip(literal.int_increment, reason = "The initialized read buffer's unused bytes are never read: only buffer[..successful_read_length] contributes to output/search. Successful Read/read_exact overwrites those bytes before use; initial byte0 versus1 is unobservable.", tag = "equivalent")]
+    0_u8; 8192];
     let mut whole = true;
     loop {
         match pipe.read(&mut buffer) {
@@ -98,7 +100,9 @@ fn read_listing(pipe: &mut impl io::Read) -> (Vec<u8>, bool) {
             }
             Err(cause) if cause.kind() == io::ErrorKind::Interrupted => {}
             Err(_truncated) => {
-                whole = false;
+                whole =
+                // #[gamma::skip(assign_value.default, reason = "The assigned false is exactly the inferred primitive type's Default value.", tag = "equivalent")]
+                false;
                 break;
             }
         }
@@ -145,7 +149,7 @@ fn listed_with_request(mut command: Command, budget: Duration, request: MemoryRe
     let prepared = prepare(command, request).ok()?;
     let spawned = prepared.spawn().ok()?;
     let mut subtree = ProcessTree::adopt(spawned).ok()?;
-    let (sender, receiver) = mpsc::sync_channel(1);
+    let (sender, receiver) = listing_output_channel();
     let reading = subtree.take_stdout().map(|mut pipe| {
         let sender = sender.clone();
         let failed = sender.clone();
@@ -154,38 +158,99 @@ fn listed_with_request(mut command: Command, budget: Duration, request: MemoryRe
         #[cfg(not(test))]
         let refused = false;
         let spawned = if refused {
-            Err(io::Error::other("the reader thread a test asked to fail"))
+            Err(io::Error::other(
+                // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "Fault::Thread branch constructs an io::Error used only by spawned.is_err(). No error text/source is returned, formatted or stored; all these error messages take the same failed.send((empty,false)) branch. Replacement string is therefore unobservable.", tag = "equivalent")]
+                "the reader thread a test asked to fail",
+            ))
         } else {
             // A descendant can retain this pipe after escaping containment; never join its reader.
-            thread::Builder::new().name("cargo-gamma-listing-output".to_owned()).spawn(move || {
-                let (text, whole) = read_listing(&mut pipe);
-                let _sent = sender.send((text, whole));
-            })
+            thread::Builder::new()
+                .name(
+                    // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "This literal is only the private OS/Rust diagnostic name passed to thread::Builder for the listing-output reader. Neither worker nor observer reads thread::current().name; channels, parsing, counters, admission and public errors do not use it. Both replacement strings are valid NUL-free thread names. Changing it cannot alter the program's listing protocol or verdict, only diagnostic thread labels.", tag = "equivalent")]
+                    "cargo-gamma-listing-output".to_owned(),
+                )
+                .spawn(move || {
+                    let (text, whole) = read_listing(&mut pipe);
+                    let _sent = sender.send((text, whole));
+                })
         };
-        if spawned.is_err() {
-            let _sent = failed.send((Vec::new(), false));
+        if
+        // #[gamma::skip(cond.always_false, reason = "When listing-reader spawn succeeds this guard is false in both versions. On spawn failure, its owned thread closure/sender are dropped; deleting failed.send only changes the later receive from explicit(Vec::new(),false) to disconnected -> unwrap_or_default=(Vec::new(),false), because all other senders are dropped before receiving. Both paths perform identical child observation/termination and return None; no output/handle survives.", tag = "equivalent")]
+        spawned.is_err() {
+            // #[gamma::skip(stmt.delete_call, reason = "After reader-spawn failure all senders are dropped. Sending (empty,false) or observing channel disconnection yields the same unwrap_or_default result and unsuccessful listing; no protocol result differs.", tag = "equivalent")]
+            failed
+                .try_send((Vec::new(), false))
+                .expect("a refused reader has not published into the single reserved listing result slot");
         }
     });
     drop(sender);
-    let deadline = Instant::now() + budget;
+    finish_listing(&mut subtree, reading, &receiver, budget, Instant::now, thread::sleep)
+}
+
+type ListingOutput = (Vec<u8>, bool);
+
+fn listing_output_channel() -> (mpsc::SyncSender<ListingOutput>, mpsc::Receiver<ListingOutput>) {
+    mpsc::sync_channel(1)
+}
+
+trait ListingChild {
+    fn observe_exit(&mut self) -> io::Result<Option<std::process::ExitStatus>>;
+    fn terminate_tree(&mut self) -> io::Result<()>;
+    fn leader_released(&self) -> bool;
+}
+
+impl ListingChild for ProcessTree {
+    fn observe_exit(&mut self) -> io::Result<Option<std::process::ExitStatus>> {
+        Self::observe(self)
+    }
+
+    // #[gamma::skip(fn_value.ok, reason = "This thin adapter invokes native ProcessTree termination. Scripted ListingChild tests cover termination requests and failures, but cannot exercise this actual adapter without spawning a real child.", tag = "native-boundary")]
+    fn terminate_tree(&mut self) -> io::Result<()> {
+        Self::terminate(self).map(|_status| ())
+    }
+
+    // #[gamma::skip(fn_value.bool_true, reason = "This thin ProcessTree adapter reads native containment/reaping state. An owned fake bypasses this exact native adapter; deterministic tests cannot launch a child or mutate native process state.", tag = "native-boundary")]
+    fn leader_released(&self) -> bool {
+        Self::released(self)
+    }
+}
+
+/// Supervises exit and cleanup with injected polling time; output reception uses a native channel timeout.
+fn finish_listing(
+    subtree: &mut impl ListingChild,
+    reading: Option<()>,
+    receiver: &mpsc::Receiver<ListingOutput>,
+    budget: Duration,
+    mut clock: impl FnMut() -> Instant,
+    mut sleep: impl FnMut(Duration),
+) -> Option<Vec<Box<str>>> {
+    let deadline = clock() + budget;
     let status = loop {
-        match subtree.observe() {
+        match subtree.observe_exit() {
             Ok(Some(status)) => break Some(status),
-            Ok(None) if Instant::now() >= deadline => break None,
-            Ok(None) => thread::sleep(LIST_POLL.min(deadline.saturating_duration_since(Instant::now()))),
-            Err(_unaskable) => break None,
+            Ok(None) if clock() >= deadline => {
+                break
+            // #[gamma::skip(loop.break_value_default, reason = "The loop breaks with None; Default<Option<_>> is exactly None.", tag = "equivalent")]
+            None;
+            }
+            Ok(None) => sleep(LIST_POLL.min(deadline.saturating_duration_since(clock()))),
+            Err(_unaskable) => {
+                break
+            // #[gamma::skip(loop.break_value_default, reason = "The loop breaks with None; Default<Option<_>> is exactly None.", tag = "equivalent")]
+            None;
+            }
         }
     };
     if status.is_none() {
-        let _reaped = subtree.terminate();
+        let _reaped = subtree.terminate_tree();
     } else {
         debug_assert!(
-            subtree.released(),
+            subtree.leader_released(),
             "the observed listing released containment before its output was read"
         );
     }
     let (text, whole) = reading
-        .and_then(|()| receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())).ok())
+        .and_then(|()| receiver.recv_timeout(deadline.saturating_duration_since(clock())).ok())
         .unwrap_or_default();
     if !whole || !status?.success() {
         return None;
@@ -205,6 +270,10 @@ mod tests {
     #[cfg(unix)]
     use std::fs;
     use std::io::Read;
+    #[cfg(unix)]
+    use std::os::unix::process::ExitStatusExt as _;
+    #[cfg(windows)]
+    use std::os::windows::process::ExitStatusExt as _;
 
     use camino::Utf8Path;
     #[cfg(unix)]
@@ -213,6 +282,225 @@ mod tests {
 
     use super::*;
     use crate::exec::loader::LOADER_VAR;
+
+    #[test]
+    fn oct25_listing_native_cleanup_adapter_terminates_after_a_failed_exit_observation() {
+        #[derive(Default)]
+        struct Child {
+            observations: usize,
+            terminations: usize,
+        }
+        impl ListingChild for Child {
+            fn observe_exit(&mut self) -> io::Result<Option<std::process::ExitStatus>> {
+                self.observations += 1;
+                assert_eq!(self.observations, 1);
+                Err(io::Error::other("owned observation refusal"))
+            }
+
+            fn terminate_tree(&mut self) -> io::Result<()> {
+                self.terminations += 1;
+                assert_eq!(self.terminations, 1);
+                Err(io::Error::new(io::ErrorKind::PermissionDenied, "owned termination refusal"))
+            }
+
+            fn leader_released(&self) -> bool {
+                panic!("an unavailable exit observation must stop before release inspection")
+            }
+        }
+        let mut child = Child::default();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        drop(sender);
+        let anchor = Instant::now();
+        assert!(
+            finish_listing(
+                &mut child,
+                Some(()),
+                &receiver,
+                Duration::from_secs(1),
+                || anchor,
+                |_| panic!("a failed observation must not wait"),
+            )
+            .is_none()
+        );
+        assert_eq!(child.observations, 1);
+        assert_eq!(child.terminations, 1);
+    }
+
+    #[test]
+    fn oct25_listing_output_channel_buffers_exactly_one_reader_result_before_supervision_begins() {
+        let (sender, receiver) = listing_output_channel();
+        sender.try_send((b"reader creation failed".to_vec(), false)).unwrap();
+        assert_eq!(
+            sender.try_send((b"second result".to_vec(), true)),
+            Err(mpsc::TrySendError::Full((b"second result".to_vec(), true)))
+        );
+        assert_eq!(receiver.try_recv().unwrap(), (b"reader creation failed".to_vec(), false));
+        sender.try_send((b"complete output".to_vec(), true)).unwrap();
+        assert_eq!(receiver.try_recv().unwrap(), (b"complete output".to_vec(), true));
+    }
+
+    struct MemoryListingProcess {
+        observations: std::collections::VecDeque<io::Result<Option<std::process::ExitStatus>>>,
+        terminated: usize,
+    }
+
+    impl ListingChild for MemoryListingProcess {
+        fn observe_exit(&mut self) -> io::Result<Option<std::process::ExitStatus>> {
+            self.observations
+                .pop_front()
+                .expect("the scripted process supplies exactly the observations the supervisor may make")
+        }
+
+        fn terminate_tree(&mut self) -> io::Result<()> {
+            self.terminated += 1;
+            Ok(())
+        }
+
+        fn leader_released(&self) -> bool {
+            true
+        }
+    }
+
+    fn recovered_listing_status() -> std::process::ExitStatus {
+        std::process::ExitStatus::from_raw(0)
+    }
+
+    #[test]
+    fn recovered_listing_supervision_terminates_at_the_exact_deadline_and_returns_none_without_panicking() {
+        for observe_error in [false, true] {
+            let mut process = MemoryListingProcess {
+                observations: std::collections::VecDeque::from([
+                    if observe_error {
+                        Err(io::Error::other("in-memory observation refusal"))
+                    } else {
+                        Ok(None)
+                    },
+                    Ok(Some(recovered_listing_status())),
+                ]),
+                terminated: 0,
+            };
+            let now = Instant::now();
+            let mut clocks = std::collections::VecDeque::from([now, now + LIST_BUDGET, now + LIST_BUDGET]);
+            let (sender, receiver) = mpsc::sync_channel(1);
+            sender.send((b"not-a-real-process: test\n".to_vec(), true)).unwrap();
+            assert!(
+                finish_listing(
+                    &mut process,
+                    Some(()),
+                    &receiver,
+                    LIST_BUDGET,
+                    || clocks.pop_front().expect("the deadline test permits no extra clock query"),
+                    |_| panic!("an elapsed deadline or refused observation must never sleep"),
+                )
+                .is_none()
+            );
+            assert_eq!(process.terminated, 1);
+            assert_eq!(process.observations.len(), 1);
+        }
+    }
+
+    #[test]
+    fn recovered_listing_supervision_caps_poll_intervals_and_does_not_terminate_a_completed_process() {
+        let mut process = MemoryListingProcess {
+            observations: std::collections::VecDeque::from([Ok(None), Ok(None), Ok(Some(recovered_listing_status()))]),
+            terminated: 0,
+        };
+        let now = Instant::now();
+        let remaining = LIST_POLL.checked_div(2).unwrap();
+        let near_deadline = now + LIST_BUDGET.checked_sub(remaining).unwrap();
+        let mut clocks = std::collections::VecDeque::from([now, now, now, near_deadline, near_deadline, near_deadline]);
+        let mut sleeps = Vec::new();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        sender
+            .send((b"first: test\nignored: benchmark\n second: test\n".to_vec(), true))
+            .unwrap();
+        let listing = finish_listing(
+            &mut process,
+            Some(()),
+            &receiver,
+            LIST_BUDGET,
+            || {
+                clocks
+                    .pop_front()
+                    .expect("the bounded listing script supplies every expected clock query")
+            },
+            |duration| sleeps.push(duration),
+        )
+        .unwrap();
+        assert_eq!(listing, [Box::<str>::from("first"), Box::<str>::from("second")]);
+        assert_eq!(sleeps, [LIST_POLL, remaining]);
+        assert_eq!(process.terminated, 0);
+        assert!(process.observations.is_empty());
+        assert!(clocks.is_empty());
+    }
+
+    #[test]
+    fn recovered_selected_and_resource_listings_keep_disjoint_names_and_flags() {
+        let root = camino::Utf8PathBuf::from("synthetic-listing-root");
+        let mut work = Workspace::adopt(root.clone(), root.join("target"));
+        work.set_test_args(vec!["suite::selected".into()]);
+        let binary = crate::testing::test_binary("never-launched");
+        let marker = "__cargo_gamma_resource_696f_binary";
+        for resource in [false, true] {
+            with_listing_runner(
+                move |command, budget, _request| {
+                    let args: Vec<_> = command.get_args().map(|arg| arg.to_str().unwrap()).collect();
+                    assert_eq!(budget, LIST_BUDGET);
+                    assert_eq!(
+                        args,
+                        if resource {
+                            vec!["--list", "--format=terse", "--ignored"]
+                        } else {
+                            vec!["--list", "--format=terse", "suite::selected"]
+                        }
+                    );
+                    Some(vec!["suite::selected".into(), marker.into(), "suite::another".into()])
+                },
+                || {
+                    let actual = if resource {
+                        list_resource_markers(&work, &binary, MemoryRequest::default())
+                    } else {
+                        list_selected_allow_empty(&work, &binary, MemoryRequest::default())
+                    };
+                    assert_eq!(
+                        actual,
+                        Some(if resource {
+                            vec![marker.into()]
+                        } else {
+                            vec!["suite::selected".into(), "suite::another".into()]
+                        })
+                    );
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn oct25_listing_reader_stops_at_the_first_noninterrupt_error() {
+        struct FiniteError {
+            reads: usize,
+        }
+        impl Read for FiniteError {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                self.reads += 1;
+                match self.reads {
+                    1 => {
+                        buf[..6].copy_from_slice(b"prefix");
+                        Ok(6)
+                    }
+                    2 => Err(io::ErrorKind::BrokenPipe.into()),
+                    3 => {
+                        buf[..4].copy_from_slice(b"tail");
+                        Ok(4)
+                    }
+                    _ => Ok(0),
+                }
+            }
+        }
+        let mut reader = FiniteError { reads: 0 };
+        assert_eq!(read_listing(&mut reader), (b"prefix".to_vec(), false));
+        assert_eq!(reader.reads, 2);
+    }
 
     fn listed(command: Command, budget: Duration) -> Option<Vec<Box<str>>> {
         listed_with_request(command, budget, MemoryRequest::default())
@@ -235,11 +523,14 @@ mod tests {
 
     struct DataThenError {
         data: Option<Vec<u8>>,
+        errored: bool,
     }
 
     impl Read for DataThenError {
         fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            assert!(!self.errored, "a terminal listing error must not be retried");
             let Some(data) = self.data.take() else {
+                self.errored = true;
                 return Err(io::ErrorKind::BrokenPipe.into());
             };
             buf[..data.len()].copy_from_slice(&data);
@@ -327,6 +618,7 @@ mod tests {
         assert_eq!(read_listing(&mut interrupted), (b"whole".to_vec(), true));
 
         let mut truncated = DataThenError {
+            errored: false,
             data: Some(b"prefix".to_vec()),
         };
         assert_eq!(read_listing(&mut truncated), (b"prefix".to_vec(), false));

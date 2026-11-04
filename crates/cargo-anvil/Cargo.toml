@@ -3,7 +3,7 @@
 
 [package]
 name = "cargo-anvil"
-version = "0.20.2"
+version = "0.25.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -11,7 +11,6 @@ authors = ["The Oxidizer Project Authors"]
 description = "Opinionated, unified Rust build and cloud-workflow scaffolding for GitHub Actions and Azure DevOps"
 readme = "README.md"
 repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil"
-homepage = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil"
 keywords = ["cargo", "subcommand", "workflows", "just", "github-actions"]
 categories = ["development-tools::cargo-plugins"]
 
@@ -38,13 +37,13 @@ path = "src/main.rs"
 # Exposes engine internals only to this crate's integration tests. The targets
 # below opt in explicitly; downstream consumers should use the supported
 # crate-root API.
-internals = []
+test-util = []
 
 [dependencies]
 clap = { workspace = true, features = ["derive", "std", "help", "usage", "error-context", "string"] }
 jsonc-parser.workspace = true
-mutants = { workspace = true }
 ohno = { workspace = true, features = ["app-err"] }
+saphyr-parser = { workspace = true }
 serde_json = { workspace = true, features = ["std"] }
 sha2.workspace = true
 toml_edit = { workspace = true }
@@ -63,39 +62,39 @@ walkdir = { workspace = true }
 
 [[test]]
 name = "container_upgrade"
-required-features = ["internals"]
+required-features = ["test-util"]
 
 [[test]]
 name = "extensibility"
-required-features = ["internals"]
+required-features = ["test-util"]
 
 [[test]]
 name = "fixtures"
-required-features = ["internals"]
+required-features = ["test-util"]
 
 [[test]]
 name = "impact"
-required-features = ["internals"]
+required-features = ["test-util"]
 
 [[test]]
 name = "pr_title"
-required-features = ["internals"]
+required-features = ["test-util"]
 
 [[test]]
 name = "recipe_contracts"
-required-features = ["internals"]
+required-features = ["test-util"]
 
 [[test]]
 name = "schemas"
-required-features = ["internals"]
+required-features = ["test-util"]
 
 [[test]]
 name = "snapshots"
-required-features = ["internals"]
+required-features = ["test-util"]
 
 [[test]]
 name = "toml_adoption"
-required-features = ["internals"]
+required-features = ["test-util"]
 
 # >>> anvil-managed: anvil-lints
 [lints]

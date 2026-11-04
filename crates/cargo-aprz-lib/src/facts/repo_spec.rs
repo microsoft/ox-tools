@@ -46,10 +46,9 @@ impl RepoSpec {
         if clean_url.set_password(None).is_err() || clean_url.set_username("").is_err() || clean_url.set_port(None).is_err() {
             bail!("repository URL does not support host credential normalization: {url}");
         }
-        // #[gamma::skip(try.propagate_to_unwrap, tag = "equivalent", reason = "path_segments returned Some above, proving this is a hierarchical URL; removing host credentials and port cannot change that property")]
         clean_url
             .path_segments_mut()
-            .map_err(|()| ohno::app_err!("repository URL does not support path normalization: {url}"))?
+            .expect("path_segments returned at least two segments above, and credential removal preserves a hierarchical URL")
             .clear()
             .push(&decoded_owner)
             .push(&decoded_repo);
@@ -194,6 +193,15 @@ mod tests {
                 format!("repository URL is missing a host; expected a URL like https://host/owner/repo, got: {raw}")
             );
         }
+    }
+
+    #[test]
+    fn file_repository_urls_with_a_host_report_unsupported_credential_normalization() {
+        let url = Url::parse("file://host/owner/repo").unwrap();
+        assert_eq!(
+            RepoSpec::parse(&url).unwrap_err().to_string(),
+            "repository URL does not support host credential normalization: file://host/owner/repo"
+        );
     }
 
     #[test]

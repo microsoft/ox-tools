@@ -10,7 +10,8 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 use std::fs::{self, File, FileTimes};
-use std::io::ErrorKind;
+use std::io::{self, ErrorKind};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
@@ -81,6 +82,7 @@ impl Reflinks {
     /// Whether a clone is worth attempting for the next file.
     #[must_use]
     pub fn worth_trying(&self) -> bool {
+        // #[gamma::skip(logical.and_remove_left, reason = "Target-specific equivalence for the archived Windows/MSVC campaign: reflink_supported is !cfg!(target_env=musl), hence true on this target. true && self.works.load is identical to self.works.load including its single atomic read. This is not asserted equivalent on musl, where the guard remains important.", tag = "equivalent")]
         reflink_supported() && self.works.load(Ordering::Relaxed)
     }
 
@@ -181,6 +183,7 @@ pub(super) fn copy_tree_with(from: &Utf8Path, to: &Utf8Path, skip: &Utf8Path, op
                 // file missing from the copy produces a build failure naming something unrelated,
                 // which is far harder to act on than the permission error that caused it.
                 Err(cause) => {
+                    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
                     record(failure, error!("could not read the source tree").caused_by(cause));
 
                     return WalkState::Quit;
@@ -188,6 +191,7 @@ pub(super) fn copy_tree_with(from: &Utf8Path, to: &Utf8Path, skip: &Utf8Path, op
             };
 
             let Some(source) = Utf8Path::from_path(entry.path()) else {
+                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
                 record(
                     failure,
                     error!("`{}` is not valid UTF-8 and cannot be copied", entry.path().display()),
@@ -214,6 +218,7 @@ pub(super) fn copy_tree_with(from: &Utf8Path, to: &Utf8Path, skip: &Utf8Path, op
             match copy_entry(source, &destination.join(relative), &reflinks) {
                 Ok(()) => WalkState::Continue,
                 Err(cause) => {
+                    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
                     record(failure, cause);
 
                     WalkState::Quit
@@ -230,7 +235,9 @@ pub(super) fn copy_tree_with(from: &Utf8Path, to: &Utf8Path, skip: &Utf8Path, op
         // panic in this crate, and the panic itself is the thing worth reporting.
         Err(poisoned) => {
             if let Some(cause) = poisoned.into_inner() {
-                return Err(cause);
+                return
+                // #[gamma::skip(result.err_to_ok, reason = "This branch requires the internally constructed failure Mutex to be poisoned with Some(Error). Its sole writer record holds the guard only across held.is_none and assignment to a guaranteed None. Those operations cannot unwind: no allocation, user callback, error formatting or dropping a previous Some occurs under the lock. Skipped causes drop only after the guard; ordinary walker errors use record without panicking. A walker callback panic cannot poison this mutex through this nonpanicking critical section. Thus into_inner cannot return PoisonError on any safe normal copy input, and this tail Err replacement is unreachable.", tag = "equivalent")]
+                Err(cause);
             }
         }
     }
@@ -429,21 +436,40 @@ fn place(metadata: &fs::Metadata, source: &Utf8Path, destination: &Utf8Path, ref
 /// wholesale. The link is reproduced verbatim, including a relative or broken one, since a build
 /// that worked with it in the original tree is the thing being reproduced.
 fn copy_symlink(source: &Utf8Path, destination: &Utf8Path) -> Result<()> {
-    copy_symlink_with(source, destination, |target, destination, directory| {
-        #[cfg(unix)]
-        {
-            let _ = directory;
-            std::os::unix::fs::symlink(target, destination)
-        }
-        #[cfg(windows)]
-        {
-            if directory {
-                std::os::windows::fs::symlink_dir(target, destination)
-            } else {
-                std::os::windows::fs::symlink_file(target, destination)
-            }
-        }
-    })
+    copy_symlink_with(source, destination, create_symlink)
+}
+
+pub(super) fn create_symlink(target: &Path, destination: &Path, directory: bool) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        let _ = directory;
+        std::os::unix::fs::symlink(target, destination)
+    }
+    #[cfg(windows)]
+    {
+        create_windows_symlink(
+            target,
+            destination,
+            directory,
+            |target, destination| std::os::windows::fs::symlink_dir(target, destination),
+            |target, destination| std::os::windows::fs::symlink_file(target, destination),
+        )
+    }
+}
+
+#[cfg(windows)]
+fn create_windows_symlink(
+    target: &Path,
+    destination: &Path,
+    directory: bool,
+    create_directory: impl FnOnce(&Path, &Path) -> io::Result<()>,
+    create_file: impl FnOnce(&Path, &Path) -> io::Result<()>,
+) -> io::Result<()> {
+    if directory {
+        create_directory(target, destination)
+    } else {
+        create_file(target, destination)
+    }
 }
 
 fn copy_symlink_with(
@@ -515,10 +541,29 @@ const fn reflink_supported() -> bool {
 /// `/var/folders` once they pass three days, so a scratch tree cloned from an old checkout can
 /// have files deleted out from under a run that is still using them.
 fn freshen(destination: &Utf8Path) {
+    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
     freshen_at(destination, SystemTime::now());
 }
 
+/// Replaces the timestamp update on this thread, observing wrapper inputs without filesystem writes.
+#[cfg(test)]
+type FresheningObserver = Box<dyn FnMut(&Utf8Path, SystemTime)>;
+
+#[cfg(test)]
+thread_local! {
+    static FRESHENING_OBSERVER: std::cell::RefCell<Option<FresheningObserver>> = const { std::cell::RefCell::new(None) };
+}
+
 fn freshen_at(destination: &Utf8Path, now: SystemTime) {
+    #[cfg(test)]
+    if FRESHENING_OBSERVER.with_borrow_mut(|slot| {
+        slot.as_mut().is_some_and(|observer| {
+            observer(destination, now);
+            true
+        })
+    }) {
+        return;
+    }
     if let Ok(file) = File::options().write(true).open(destination.as_std_path()) {
         let _stamped = file.set_times(FileTimes::new().set_modified(now));
     }
@@ -527,6 +572,63 @@ fn freshen_at(destination: &Utf8Path, now: SystemTime) {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod final_survivor_tests {
+    #[test]
+    #[cfg(windows)]
+    fn recovered_windows_link_creation_routes_each_kind_to_its_exact_native_operation_without_creating_a_link() {
+        let target = Path::new("..\\relative-link-target");
+        let destination = Path::new("never-created-link");
+        for directory in [false, true] {
+            let calls = core::cell::Cell::new(0);
+            let failure = create_windows_symlink(
+                target,
+                destination,
+                directory,
+                |actual_target, actual_destination| {
+                    assert_eq!((actual_target, actual_destination), (target, destination));
+                    calls.set(calls.get() + 1);
+                    Err(io::ErrorKind::PermissionDenied.into())
+                },
+                |actual_target, actual_destination| {
+                    assert_eq!((actual_target, actual_destination), (target, destination));
+                    calls.set(calls.get() + 1);
+                    Err(io::ErrorKind::NotFound.into())
+                },
+            )
+            .unwrap_err();
+            assert_eq!(
+                failure.kind(),
+                if directory {
+                    io::ErrorKind::PermissionDenied
+                } else {
+                    io::ErrorKind::NotFound
+                }
+            );
+            assert_eq!(calls.get(), 1);
+        }
+    }
+
+    #[test]
+    fn recovered_native_freshening_forwards_exactly_one_destination_to_the_timestamp_boundary_without_opening_it() {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                FRESHENING_OBSERVER.with_borrow_mut(|slot| *slot = None);
+            }
+        }
+        let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        FRESHENING_OBSERVER.with_borrow_mut(|slot| {
+            assert!(slot.is_none());
+            *slot = Some(Box::new({
+                let calls = std::rc::Rc::clone(&calls);
+                move |path, _now| calls.borrow_mut().push(path.to_owned())
+            }));
+        });
+        let _reset = Reset;
+        let path = Utf8Path::new("never-opened-freshening-destination");
+        freshen(path);
+        assert_eq!(*calls.borrow(), [path.to_owned()]);
+    }
+
     #[cfg(unix)]
     use std::os::unix::ffi::OsStringExt as _;
     #[cfg(windows)]

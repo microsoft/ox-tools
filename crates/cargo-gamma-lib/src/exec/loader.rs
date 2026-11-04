@@ -281,7 +281,7 @@ mod tests {
 
         let mut none = Vec::new();
         append_toolchain_libraries(&mut none, "");
-        assert!(none.is_empty());
+        assert_eq!(none.len(), 0);
     }
 
     #[test]

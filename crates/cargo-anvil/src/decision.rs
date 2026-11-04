@@ -106,6 +106,7 @@ pub enum Decision {
 impl Decision {
     /// Whether this decision means "everything is in sync" for `--dry-run`
     /// exit-code purposes.
+    #[cfg(any(test, feature = "test-util"))]
     #[must_use]
     pub const fn is_in_sync(self) -> bool {
         matches!(self, Self::InSync | Self::LeaveAlone)

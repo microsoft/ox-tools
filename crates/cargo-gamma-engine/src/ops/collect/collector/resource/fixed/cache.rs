@@ -13,36 +13,36 @@ pub(super) fn constructor(expression: &Expr) -> bool {
 
 pub(super) fn initial_value(call: &syn::ExprCall) -> Option<Value> {
     if !constructor(&call.func) || call.args.len() != 1 || !call.attrs.is_empty() {
-        return None;
+        return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
     }
-    let Expr::Array(array) = &call.args[0] else { return None };
+    let Expr::Array(array) = &call.args[0] else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
     if !array.attrs.is_empty() || array.elems.len() > 16 {
-        return None;
+        return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
     }
     let mut entries = Vec::new();
     for element in &array.elems {
-        let Expr::Tuple(tuple) = element else { return None };
+        let Expr::Tuple(tuple) = element else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         if !tuple.attrs.is_empty() {
-            return None;
+            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         }
         if tuple.elems.len() != 2 {
-            return None;
+            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         }
         let (Expr::Lit(key), Expr::Lit(value)) = (&tuple.elems[0], &tuple.elems[1]) else {
-            return None;
+            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         };
         if !key.attrs.is_empty() || !value.attrs.is_empty() {
-            return None;
+            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         }
         let (Lit::Int(key), Lit::Bool(value)) = (&key.lit, &value.lit) else {
-            return None;
+            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         };
         if !matches!(key.suffix(), "" | "u32") {
-            return None;
+            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         }
         let key = key.base10_parse::<u32>().ok()?;
         if entries.iter().any(|(known, _)| *known == key) {
-            return None;
+            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         }
         entries.push((key, value.value));
     }
@@ -51,99 +51,101 @@ pub(super) fn initial_value(call: &syn::ExprCall) -> Option<Value> {
 
 pub(super) fn hit(machine: &mut Machine<'_>, function: &syn::ItemFn, call: &syn::ExprCall) -> Option<Value> {
     if function.sig.inputs.len() != call.args.len() || function.sig.output != syn::parse_quote!(-> bool) {
-        return None;
+        return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
     }
     let Stmt::Expr(Expr::If(branch), _) = function.block.stmts.first()? else {
-        return None;
+        return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
     };
     if !branch.attrs.is_empty() {
-        return None;
+        return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
     }
-    let Expr::Let(binding) = &*branch.cond else { return None };
+    let Expr::Let(binding) = &*branch.cond else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
     if !binding.attrs.is_empty() {
-        return None;
+        return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
     }
-    let Pat::TupleStruct(pattern) = &*binding.pat else { return None };
+    let Pat::TupleStruct(pattern) = &*binding.pat else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
     if !pattern.attrs.is_empty() || !pattern.path.is_ident("Some") || pattern.elems.len() != 1 {
-        return None;
+        return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
     }
-    let Pat::Ident(cached) = pattern.elems.first()? else { return None };
+    let Pat::Ident(cached) =
+        // #[gamma::skip(iter.first_to_last, try.propagate_to_unwrap, reason = "The preceding exact singleton check guarantees this element exists and first equals last.", tag = "equivalent")]
+        pattern.elems.first()? else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
     if !cached.attrs.is_empty() || cached.by_ref.is_some() || cached.subpat.is_some() {
-        return None;
+        return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
     }
-    let Expr::MethodCall(get) = &*binding.expr else { return None };
+    let Expr::MethodCall(get) = &*binding.expr else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
     if !get.attrs.is_empty() || get.method != "get" || get.turbofish.is_some() || get.args.len() != 1 {
-        return None;
+        return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
     }
     let cache_name = bare_name(&get.receiver)?;
     let Expr::Reference(key_reference) = &get.args[0] else {
-        return None;
+        return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
     };
     if !key_reference.attrs.is_empty() || key_reference.mutability.is_some() {
-        return None;
+        return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
     }
     let key_name = bare_name(&key_reference.expr)?;
     let mut cache = None;
     let mut key = None;
     for (parameter, argument) in function.sig.inputs.iter().zip(&call.args) {
-        let FnArg::Typed(parameter) = parameter else { return None };
+        let FnArg::Typed(parameter) = parameter else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         if !parameter.attrs.is_empty() {
-            return None;
+            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         }
-        let Pat::Ident(parameter_name) = &*parameter.pat else { return None };
+        let Pat::Ident(parameter_name) = &*parameter.pat else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         if !parameter_name.attrs.is_empty() || parameter_name.by_ref.is_some() || parameter_name.subpat.is_some() {
-            return None;
+            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
         }
         let name = parameter_name.ident.to_string();
         if name == cache_name {
-            let Type::Reference(reference) = &*parameter.ty else { return None };
+            let Type::Reference(reference) = &*parameter.ty else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
             if reference.mutability.is_some() || !super::super::bool_cache_type(&reference.elem) {
-                return None;
+                return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
             }
-            let Expr::Reference(argument) = argument else { return None };
+            let Expr::Reference(argument) = argument else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
             if !argument.attrs.is_empty() || argument.mutability.is_some() {
-                return None;
+                return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
             }
             let Value::BoolCache(entries) = machine.eval(&argument.expr, Some(Binding::BoolCache))? else {
-                return None;
+                return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
             };
             cache = Some(entries);
         } else if name == key_name {
             if primitive_type(&parameter.ty) != Some(Primitive::Unsigned(32)) {
-                return None;
+                return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
             }
             let Value::Int(value, Primitive::Unsigned(32)) = machine.eval(argument, Some(Binding::Primitive(Primitive::Unsigned(32))))?
             else {
-                return None;
+                return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
             };
             key = u32::try_from(value).ok();
         } else {
-            let Type::Reference(reference) = &*parameter.ty else { return None };
+            let Type::Reference(reference) = &*parameter.ty else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
             let primitive = primitive_type(&reference.elem)?;
-            let Expr::Reference(argument) = argument else { return None };
+            let Expr::Reference(argument) = argument else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
             if !argument.attrs.is_empty() || bare_name(&argument.expr).is_none() {
-                return None;
+                return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
             }
             let value = machine.eval(&argument.expr, None)?;
             if value.kind() != Binding::Primitive(primitive) {
-                return None;
+                return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
             }
         }
     }
     let [Stmt::Expr(Expr::Return(returned), _)] = branch.then_branch.stmts.as_slice() else {
-        return None;
+        return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
     };
     if !returned.attrs.is_empty() {
-        return None;
+        return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
     }
     let Expr::Unary(dereference) = &**returned.expr.as_ref()? else {
-        return None;
+        return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
     };
     if !dereference.attrs.is_empty()
         || !matches!(dereference.op, UnOp::Deref(_))
         || bare_name(&dereference.expr).as_deref() != Some(&cached.ident.to_string())
     {
-        return None;
+        return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
     }
     let key = key?;
     let (_, value) = cache?.into_iter().find(|(known, _)| *known == key)?;
@@ -153,8 +155,88 @@ pub(super) fn hit(machine: &mut Machine<'_>, function: &syn::ItemFn, call: &syn:
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use syn::{ExprCall, ItemFn, parse_quote, parse_str};
+
     use super::*;
     use crate::{HashMap, HashSet};
+
+    #[test]
+    fn exact_cache_get_arity_is_checked_before_reading_or_ignoring_arguments() {
+        for get in ["cache.get()", "cache.get(&key, &key)"] {
+            let function = parse_str(&format!(
+                "fn lookup(cache: &std::collections::HashMap<u32,bool>, key:u32)->bool {{
+                    if let Some(cached)={get} {{return *cached;}}
+                    opaque()
+                }}"
+            ))
+            .unwrap();
+            assert_eq!(hit(&mut machine(), &function, &parse_quote!(lookup(&cache, 7))), None, "{get}");
+        }
+    }
+
+    #[test]
+    fn cache_prefix_attributes_and_missing_return_values_withhold_hits() {
+        let source: ItemFn = parse_quote! {
+            fn lookup(cache: &std::collections::HashMap<u32, bool>, key: u32) -> bool {
+                if let Some(cached) = cache.get(&key) { return *cached; }
+                opaque()
+            }
+        };
+        let call: ExprCall = parse_quote!(lookup(&cache, 7));
+        assert_eq!(hit(&mut machine(), &source, &call), Some(Value::Bool(true)));
+        for fault in 0..8 {
+            let mut function = source.clone();
+            let mut call = call.clone();
+            let Stmt::Expr(Expr::If(branch), _) = &mut function.block.stmts[0] else {
+                panic!("the fixture begins with its cache branch");
+            };
+            let Expr::Let(binding) = &mut *branch.cond else {
+                panic!("the branch binds its cache hit");
+            };
+            let Pat::TupleStruct(pattern) = &mut *binding.pat else {
+                panic!("the cache hit uses Some(cached)");
+            };
+            let Expr::MethodCall(get) = &mut *binding.expr else {
+                panic!("the cache hit calls get");
+            };
+            let attribute = parse_quote!(#[custom]);
+            match fault {
+                0 => pattern.attrs.push(attribute),
+                1 => {
+                    let Pat::Ident(cached) = &mut pattern.elems[0] else {
+                        panic!("the Some payload is an identifier");
+                    };
+                    cached.attrs.push(attribute);
+                }
+                2 => get.attrs.push(attribute),
+                3 => {
+                    let Expr::Reference(key) = &mut get.args[0] else {
+                        panic!("get borrows its key");
+                    };
+                    key.attrs.push(attribute);
+                }
+                4 => {
+                    let FnArg::Typed(parameter) = &mut function.sig.inputs[0] else {
+                        panic!("the cache parameter is typed");
+                    };
+                    let Pat::Ident(parameter) = &mut *parameter.pat else {
+                        panic!("the cache parameter is an identifier");
+                    };
+                    parameter.attrs.push(attribute);
+                }
+                5 => {
+                    let Expr::Reference(argument) = &mut call.args[0] else {
+                        panic!("the call borrows its cache");
+                    };
+                    argument.attrs.push(attribute);
+                }
+                6 => branch.then_branch.stmts[0] = parse_quote!(return;),
+                7 => pattern.elems.push(parse_quote!(extra)),
+                _ => unreachable!(),
+            }
+            assert_eq!(hit(&mut machine(), &function, &call), None, "unsupported prefix {fault}");
+        }
+    }
 
     fn machine() -> Machine<'static> {
         Machine {
@@ -203,10 +285,10 @@ mod tests {
             ("std::collections::HashMap::from([(#[cfg(test)] 7, true)])", None),
             ("std::collections::HashMap::from([(7, #[cfg(test)] true)])", None),
         ] {
-            let call = syn::parse_str(source).unwrap();
+            let call = parse_str(source).unwrap();
             assert_eq!(initial_value(&call), expected.map(Value::BoolCache), "{source}");
         }
-        let full: syn::ExprCall = syn::parse_quote!(std::collections::HashMap::from([
+        let full: ExprCall = parse_quote!(std::collections::HashMap::from([
             (0, false),
             (1, true),
             (2, false),
@@ -233,13 +315,13 @@ mod tests {
         let Expr::Array(array) = &mut oversized.args[0] else {
             unreachable!()
         };
-        array.elems.push(syn::parse_quote!((16, false)));
+        array.elems.push(parse_quote!((16, false)));
         assert!(initial_value(&oversized).is_none());
     }
 
     #[test]
     fn cache_hit_distinguishes_false_from_miss_and_checks_key_and_arguments() {
-        let function = syn::parse_quote! {
+        let function = parse_quote! {
             fn lookup(cache: &std::collections::HashMap<u32, bool>, key: u32, counter: &mut u32) -> bool {
                 if let Some(cached) = cache.get(&key) { return *cached; }
                 unknown(counter)
@@ -262,7 +344,7 @@ mod tests {
             ("lookup(&cache, 7, &mut counter, 0)", None),
         ] {
             assert_eq!(
-                hit(&mut machine(), &function, &syn::parse_str(source).unwrap()),
+                hit(&mut machine(), &function, &parse_str(source).unwrap()),
                 expected.map(Value::Bool),
                 "{source}"
             );
@@ -271,13 +353,13 @@ mod tests {
 
     #[test]
     fn cache_prefix_rejects_near_matches_with_different_effects_or_provenance() {
-        let call = syn::parse_quote!(lookup(&cache, 7));
+        let call = parse_quote!(lookup(&cache, 7));
         for source in [
             "fn lookup(cache:&std::collections::HashMap<u32,bool>,key:u32)->bool { if let Some(cached)=cache.get(&key){return *cached;} false }",
             "fn lookup(cache:&std::collections::HashMap<u32,bool>,key:u32)->bool { if let Some(value)=cache.get(&key){return *value;} false }",
         ] {
             assert_eq!(
-                hit(&mut machine(), &syn::parse_str(source).unwrap(), &call),
+                hit(&mut machine(), &parse_str(source).unwrap(), &call),
                 Some(Value::Bool(true)),
                 "{source}"
             );
@@ -307,19 +389,19 @@ mod tests {
             "fn lookup(cache:&std::collections::HashMap<u32,bool>,key:u32)->bool { if let Some(cached)=cache.get(&key){return *other;} false }",
             "fn lookup(cache:&std::collections::HashMap<u32,bool>,key:u32)->bool { #[cfg(test)] if let Some(cached)=cache.get(&key){return *cached;} false }",
         ] {
-            assert!(hit(&mut machine(), &syn::parse_str(source).unwrap(), &call).is_none(), "{source}");
+            assert!(hit(&mut machine(), &parse_str(source).unwrap(), &call).is_none(), "{source}");
         }
     }
 
     #[test]
     fn cache_hit_does_not_certify_arguments_with_mismatched_runtime_bindings() {
-        let function = syn::parse_quote! {
+        let function = parse_quote! {
             fn lookup(cache: &std::collections::HashMap<u32, bool>, key: u32, counter: &mut u32) -> bool {
                 if let Some(cached) = cache.get(&key) { return *cached; }
                 false
             }
         };
-        let call = syn::parse_quote!(lookup(&cache, 7, &mut counter));
+        let call = parse_quote!(lookup(&cache, 7, &mut counter));
         for name in ["cache", "counter"] {
             let mut state = machine();
             state.values.insert(name.into(), Value::Bool(true));
@@ -329,7 +411,7 @@ mod tests {
 
     #[test]
     fn cache_literal_arguments_receive_contextual_types_without_treating_misses_as_false() {
-        let function = syn::parse_quote! {
+        let function = parse_quote! {
             fn lookup(cache: &std::collections::HashMap<u32, bool>, key: u32) -> bool {
                 if let Some(cached) = cache.get(&key) { return *cached; }
                 opaque()
@@ -356,7 +438,7 @@ mod tests {
                 hit(
                     &mut state,
                     &function,
-                    &syn::parse_str(source).expect("the fixed cache call is valid Rust syntax")
+                    &parse_str(source).expect("the fixed cache call is valid Rust syntax")
                 ),
                 expected,
                 "{source}"
@@ -382,8 +464,8 @@ mod tests {
                 "lookup(&mut counter, 7, &cache)",
             ),
         ] {
-            let function = syn::parse_str(source).expect("the fixed reordered helper is valid Rust syntax");
-            let call = syn::parse_str(call).expect("the fixed reordered call is valid Rust syntax");
+            let function = parse_str(source).expect("the fixed reordered helper is valid Rust syntax");
+            let call = parse_str(call).expect("the fixed reordered call is valid Rust syntax");
             let mut state = machine();
             assert_eq!(hit(&mut state, &function, &call), Some(Value::Bool(true)), "{source}");
             assert_eq!(state.values["counter"], Value::Int(3, Primitive::Unsigned(32)));
@@ -414,8 +496,8 @@ mod tests {
             assert_eq!(
                 hit(
                     &mut state,
-                    &syn::parse_str(source).expect("the fixed projected helper is valid Rust syntax"),
-                    &syn::parse_str(call).expect("the fixed projected call is valid Rust syntax")
+                    &parse_str(source).expect("the fixed projected helper is valid Rust syntax"),
+                    &parse_str(call).expect("the fixed projected call is valid Rust syntax")
                 ),
                 None,
                 "{source}"
@@ -463,8 +545,8 @@ mod tests {
             assert_eq!(
                 hit(
                     &mut state,
-                    &syn::parse_str(source).expect("syn accepts the fixed helper declaration with external global inputs"),
-                    &syn::parse_str(call).expect("the fixed cache call is valid Rust syntax")
+                    &parse_str(source).expect("syn accepts the fixed helper declaration with external global inputs"),
+                    &parse_str(call).expect("the fixed cache call is valid Rust syntax")
                 ),
                 None,
                 "{source}"

@@ -52,7 +52,14 @@ fn merge_reports_at<H: Host>(
     }
 
     let window = (args.window > 0).then(|| args.window.saturating_mul(86_400));
-    let mut merged = crate::merge::merge(inputs, now.unwrap_or(0), window);
+    let mut merged = crate::merge::merge(
+        inputs,
+        now.unwrap_or(
+            // #[gamma::skip(literal.int_increment, reason = "now.unwrap_or0 is changed only for now=None. merge::union::merge uses now solely to increment fresh versus stale counters; merge_reports_at immediately resets both counters and sets freshness_unavailable for that exact None case. No report population/verdict or other merge field depends on now.", tag = "equivalent")]
+            0,
+        ),
+        window,
+    );
 
     if merged.unpresentable_filtered > 0 {
         return Err(error!(
@@ -63,8 +70,15 @@ fn merge_reports_at<H: Host>(
     }
 
     if now.is_none() {
-        merged.fresh = 0;
-        merged.stale = 0;
+        // #[gamma::skip(stmt.delete_assign, reason = "These counter assignments occur only inside now.is_none(), which always sets freshness_unavailable=true. report_merge then takes its unavailable branch and never reads fresh or stale; later gates read score/completeness/flaky fields, and the serialized Report was already built independently of these counters. Deleting these resets or assigning1 cannot affect command bytes, published report, exit code or retained state.", tag = "equivalent")]
+        merged.fresh =
+        // #[gamma::skip(literal.int_increment, reason = "These counter assignments occur only inside now.is_none(), which always sets freshness_unavailable=true. report_merge then takes its unavailable branch and never reads fresh or stale; later gates read score/completeness/flaky fields, and the serialized Report was already built independently of these counters. Deleting these resets or assigning1 cannot affect command bytes, published report, exit code or retained state.", tag = "equivalent")]
+        0;
+
+        // #[gamma::skip(stmt.delete_assign, reason = "These counter assignments occur only inside now.is_none(), which always sets freshness_unavailable=true. report_merge then takes its unavailable branch and never reads fresh or stale; later gates read score/completeness/flaky fields, and the serialized Report was already built independently of these counters. Deleting these resets or assigning1 cannot affect command bytes, published report, exit code or retained state.", tag = "equivalent")]
+        merged.stale =
+        // #[gamma::skip(literal.int_increment, reason = "These counter assignments occur only inside now.is_none(), which always sets freshness_unavailable=true. report_merge then takes its unavailable branch and never reads fresh or stale; later gates read score/completeness/flaky fields, and the serialized Report was already built independently of these counters. Deleting these resets or assigning1 cannot affect command bytes, published report, exit code or retained state.", tag = "equivalent")]
+        0;
         merged.freshness_unavailable = true;
     }
 
@@ -254,14 +268,24 @@ fn collect_reports_limited(inputs: &[Utf8PathBuf], max_reports: usize, max_bytes
     })
 }
 
-// Replaces directory enumeration and entry outcomes only; report reads and retention enforcement
-// remain ordinary collection work.
+/// Supplies directory discovery while retaining the native bounded report reader.
 fn collect_reports_reading<I: IntoIterator<Item = std::io::Result<std::path::PathBuf>>>(
+    inputs: &[Utf8PathBuf],
+    max_reports: usize,
+    max_bytes: u64,
+    is_dir: impl FnMut(&Utf8Path) -> bool,
+    read_dir: impl FnMut(&Utf8Path) -> std::io::Result<I>,
+) -> crate::Result<Vec<(String, Report)>> {
+    collect_reports_with_reader(inputs, max_reports, max_bytes, is_dir, read_dir, read_report)
+}
+
+fn collect_reports_with_reader<I: IntoIterator<Item = std::io::Result<std::path::PathBuf>>>(
     inputs: &[Utf8PathBuf],
     max_reports: usize,
     max_bytes: u64,
     mut is_dir: impl FnMut(&Utf8Path) -> bool,
     mut read_dir: impl FnMut(&Utf8Path) -> std::io::Result<I>,
+    mut read_report: impl FnMut(&Utf8Path, usize, u64, &mut u64, &mut Vec<(String, Report)>) -> crate::Result<()>,
 ) -> crate::Result<Vec<(String, Report)>> {
     let mut out = Vec::new();
     let mut retained_bytes = 0;
@@ -291,7 +315,14 @@ fn collect_reports_reading<I: IntoIterator<Item = std::io::Result<std::path::Pat
             paths.sort();
 
             for path in paths {
-                read_report(&path, max_reports, max_bytes, &mut retained_bytes, &mut out)?;
+                read_report(
+                    &path,
+                    // #[gamma::skip(expr.increment, reason = "The changed max_reports argument belongs only to the sorted directory loop. Before any report read, directory enumeration rejects when paths.len() reaches max_reports-out.len(), so the retained prefix plus this directory's entire path count is at most max_reports. Every read in that loop consequently has out.len()<max_reports already; increasing its redundant read_report count cap by1 can neither admit another path nor change an error. Direct-file input count checks are unchanged.", tag = "equivalent")]
+                    max_reports,
+                    max_bytes,
+                    &mut retained_bytes,
+                    &mut out,
+                )?;
             }
         } else {
             read_report(input, max_reports, max_bytes, &mut retained_bytes, &mut out)?;
@@ -445,9 +476,9 @@ fn report_merge<H: Host>(host: &mut H, args: &MergeArgs, merged: &crate::merge::
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::collections::BTreeMap;
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "system-tests"))]
     use std::os::unix::ffi::OsStringExt as _;
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "system-tests"))]
     use std::os::windows::ffi::OsStringExt as _;
 
     use super::*;
@@ -455,6 +486,82 @@ mod tests {
     use crate::fixtures;
     use crate::fixtures::mutant_result_at as mutant;
     use crate::testing::{Sink, fails_at_every_line, workdir};
+
+    #[test]
+    fn oct29_merge_refuses_one_or_many_unpresentable_filtered_verdicts_before_publication() {
+        // The unfiltered source wins but cannot present the filtered verdicts.
+        // Invalid destinations distinguish that semantic refusal from publication errors.
+        for count in [1, 2] {
+            let mut filtered = fixtures::report_with(
+                None,
+                100,
+                (0..count)
+                    .map(|index| mutant(&format!("filtered-{index}"), index + 1, "Killed"))
+                    .collect(),
+            );
+            filtered.config.as_mut().unwrap().name_filtered = true;
+            let mut current = fixtures::report_with(Some((0, 2)), 200, vec![mutant("current", 1, "Survived")]);
+            current.files.get_mut("src/lib.rs").unwrap().source = "different source\n".into();
+            let inputs = vec![("filtered".into(), filtered), ("current".into(), current)];
+            let mut args = survivor_args("unused-in-memory-input".into());
+            args.json_report = Some("invalid\0must-not-publish.json".into());
+            args.html_report = Some("invalid\0must-not-publish.html".into());
+            let mut host = Sink::default();
+            let failure = merge_reports_at(&mut host, &args, Styler::new(false), Some(300), &inputs).unwrap_err();
+            let noun = if count == 1 { "mutant" } else { "mutants" };
+            assert_eq!(
+                failure.message(),
+                format!(
+                    "{count} name-filtered {noun} cannot be rendered in the selected source; include an unfiltered listing from the current source before merging so the verdicts are preserved"
+                )
+            );
+            assert_eq!(host.out(), "");
+            assert_eq!(host.err(), "");
+        }
+    }
+
+    #[test]
+    fn recovered_native_merge_returns_the_html_destination_error_before_announcing_a_written_report() {
+        let path = Utf8PathBuf::from("invalid\0merge-report.html");
+        let expected = crate::paths::physical(&path).unwrap_err().message().to_owned();
+        let mut args = survivor_args("not-read-in-memory-input".into());
+        args.html_report = Some(path);
+        let inputs = vec![("in-memory-report".into(), unsharded_report(100, "only", 1, "Survived"))];
+        let mut host = Sink::default();
+        assert_eq!(
+            merge_reports_at(&mut host, &args, Styler::new(false), Some(101), &inputs)
+                .unwrap_err()
+                .message(),
+            expected
+        );
+        assert!(!String::from_utf8(host.err).unwrap().contains("Wrote"));
+    }
+
+    #[test]
+    fn recovered_directory_merge_sorts_reverse_enumeration_before_reporting_the_first_input_error() {
+        let first = Utf8PathBuf::from("first.json");
+        let later = Utf8PathBuf::from("later.json");
+        let mut reads = Vec::new();
+        let result = collect_reports_with_reader(
+            &[Utf8PathBuf::from("memory-report-directory")],
+            2,
+            0,
+            |path| {
+                assert_eq!(path, Utf8Path::new("memory-report-directory"));
+                true
+            },
+            |_path| Ok(vec![Ok(later.clone().into_std_path_buf()), Ok(first.clone().into_std_path_buf())]),
+            |path, count, bytes, retained, reports| {
+                reads.push(path.to_owned());
+                assert_eq!((count, bytes, *retained, reports.len()), (2, 0, 0, 0));
+                Err(error!("named first-report refusal").usage())
+            },
+        );
+        let failure = result.unwrap_err();
+        assert!(failure.is_usage());
+        assert_eq!(failure.message(), "named first-report refusal");
+        assert_eq!(reads, [first]);
+    }
 
     fn report(index: u32, count: u32, status: &str) -> Report {
         let mut files = BTreeMap::new();
@@ -611,7 +718,7 @@ mod tests {
         }
         let mut host = Sink::default();
         assert!(!report_incomplete_gate(&mut host, &crate::merge::Merged::default(), "score gate", Styler::new(false)).unwrap());
-        assert!(host.err.is_empty());
+        assert_eq!(host.err.len(), 0);
     }
 
     fn survivor_args(input: Utf8PathBuf) -> MergeArgs {
@@ -865,7 +972,7 @@ mod tests {
         assert!(err.contains("shards never run"), "{err}");
         assert!(err.contains("different shard count"), "{err}");
         assert!(err.contains("cannot evaluate a complete shard rotation"), "{err}");
-        assert!(host.out.is_empty());
+        assert_eq!(host.out.len(), 0);
     }
 
     #[test]

@@ -3,6 +3,91 @@
 
 use super::*;
 
+#[must_use]
+pub fn prepared_report_info(args: &RunArgs, root: Utf8PathBuf) -> Option<crate::elements::RunInfo> {
+    let survey = crate::discover::acceptance::native_test_util::checked_survey(root);
+    RecordPreparation::for_run(args, &survey, crate::discover::ContextDigest::default()).report_info
+}
+
+pub fn publication_lock(lock: File) -> crate::Result<Option<File>> {
+    super::resumed_work(&(), lock, u64::MAX, true, |(), _, _| {
+        Err(error!("publication-only recovery must not reopen a workspace"))
+    })
+    .map(|(_, lock)| lock)
+}
+
+pub fn configure<H: Host>(host: &mut H, args: &mut RunArgs, styler: Styler) -> crate::Result<()> {
+    super::configure(host, args, styler)
+}
+
+pub fn resumed_publication(
+    plan: &Plan,
+    base: &Utf8Path,
+    probes: &[(crate::model::MutantId, crate::discover::Killer)],
+    remember: impl FnOnce(&Utf8Path, &Utf8Path) -> bool,
+    retained_session: Option<exec::Session>,
+) -> crate::Result<(bool, bool, exec::Session, Utf8PathBuf)> {
+    let prepared = RecordPreparation {
+        report_info: None,
+        name_filtered: false,
+        base: base.to_owned(),
+        context: crate::discover::ContextDigest::default(),
+        inputs: crate::discover::RunRecord::snapshot_with_external(&plan.root, base, &[], false),
+        killers: crate::discover::Killers::default(),
+    };
+    let mut learning = exec::Killers::default();
+    for (id, killer) in probes {
+        learning.record(id.clone(), killer.clone());
+    }
+    super::resumed_publication(prepared, plan, Some(&learning), remember, None, retained_session)
+}
+
+pub fn resumed_report_sources(
+    root: Utf8PathBuf,
+    target: Utf8PathBuf,
+    session: exec::Session,
+    plan: &Plan,
+) -> crate::Result<(exec::Session, Utf8PathBuf)> {
+    let mut built = exec::Built {
+        work: exec::Workspace::adopt(root, target),
+        session,
+        oracle: exec::Oracle {
+            packages: Vec::new(),
+            package_local: false,
+            whole_workspace: false,
+        },
+    };
+    super::resumed_report_sources(Some(&mut built), None, Utf8Path::new("unused-retained-base"), plan)
+}
+
+#[must_use]
+pub fn report_source_root(root: Utf8PathBuf, target: Utf8PathBuf) -> Utf8PathBuf {
+    exec::Workspace::adopt(root, target).report_source_root()
+}
+
+pub fn resumed_report(
+    plan: &Plan,
+    source_root: &Utf8Path,
+    advice: &str,
+    tests: Option<usize>,
+    dropped: &[String],
+) -> crate::Result<(crate::elements::Report, Option<String>)> {
+    let info = super::resumed_report_info(None);
+    let contents = super::resumed_report_contents(&info, source_root, advice, tests, dropped);
+    let report = crate::elements::build_from(
+        plan,
+        contents.source_root,
+        crate::elements::Thresholds::default(),
+        Some(report_info(
+            &RunArgs::default(),
+            contents.retained_info,
+            contents.tests,
+            contents.dropped,
+        )),
+    )?;
+    Ok((report, contents.advice.map(str::to_owned)))
+}
+
 #[derive(Debug)]
 pub struct Recovered {
     pub plan: Option<Plan>,

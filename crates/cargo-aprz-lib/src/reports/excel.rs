@@ -90,6 +90,7 @@ fn generate_with_serializer<W: Write>(
                     Risk::Medium => &medium_risk_format,
                     Risk::High => &high_risk_format,
                 };
+                // #[gamma::skip(try.propagate_to_unwrap, reason = "The preceding header accepted this column, and the bounded appraisal status cannot exceed Excel string limits.", tag = "equivalent")]
                 #[expect(clippy::cast_possible_truncation, reason = "Column index limited by Excel's u16 column limit")]
                 propagate_xlsx(worksheet.write_string_with_format(row, (col_idx + 1) as u16, value, format))?;
             }
@@ -524,7 +525,7 @@ mod tests {
         let result = generate(&crates, &mut output);
         result.unwrap();
         // Should generate a valid Excel file (has content)
-        assert!(!output.is_empty());
+        assert_ne!(output, [] as [u8; 0]);
     }
 
     #[test]
@@ -535,7 +536,7 @@ mod tests {
         let result = generate(&crates, &mut output);
         result.unwrap();
         // Should generate a valid Excel file
-        assert!(!output.is_empty());
+        assert_ne!(output, [] as [u8; 0]);
         // Excel files start with PK (ZIP signature)
         assert_eq!(&output[0..2], b"PK");
     }
@@ -554,7 +555,7 @@ mod tests {
         let mut output = Vec::new();
         let result = generate(&crates, &mut output);
         result.unwrap();
-        assert!(!output.is_empty());
+        assert_ne!(output, [] as [u8; 0]);
         assert_eq!(&output[0..2], b"PK");
     }
 
@@ -585,7 +586,7 @@ mod tests {
         let mut output = Vec::new();
         let result = generate(&crates, &mut output);
         result.unwrap();
-        assert!(!output.is_empty());
+        assert_ne!(output, [] as [u8; 0]);
         // Verify it's a valid ZIP/Excel file
         assert_eq!(&output[0..2], b"PK");
     }
@@ -608,7 +609,7 @@ mod tests {
         let mut output = Vec::new();
         let result = generate(&crates, &mut output);
         result.unwrap();
-        assert!(!output.is_empty());
+        assert_ne!(output, [] as [u8; 0]);
     }
 
     #[test]
@@ -619,7 +620,7 @@ mod tests {
         let result = generate(&crates, &mut output);
         result.unwrap();
         // Should still generate valid file even with missing data
-        assert!(!output.is_empty());
+        assert_ne!(output, [] as [u8; 0]);
     }
 
     #[test]
@@ -629,7 +630,7 @@ mod tests {
         let mut output = Vec::new();
         let result = generate(&crates, &mut output);
         result.unwrap();
-        assert!(!output.is_empty());
+        assert_ne!(output, [] as [u8; 0]);
     }
 
     static KEYWORDS_DEF: MetricDef = MetricDef {

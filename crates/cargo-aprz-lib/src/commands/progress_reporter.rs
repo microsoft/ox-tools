@@ -331,6 +331,7 @@ async fn refresh_task(
     loop {
         let _ = interval.tick().await;
 
+        // #[gamma::skip(call_result.default, reason = "This call returns unit; default_after preserves the call and its side effects, then returns the identical unit value.", tag = "equivalent")]
         refresh_frame(&bar, &state, &callback, &*make_draw_target);
     }
 }

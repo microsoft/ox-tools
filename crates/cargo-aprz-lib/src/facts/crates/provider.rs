@@ -536,7 +536,6 @@ impl Provider {
                 }
 
                 // Check if this crate needs latest version resolution
-                // #[gamma::skip(cond.always_true, reason = "candidates for crates without a latest-version request are discarded by the need_latest_version lookup during conversion, so tracking them changes allocation and scan work only")]
                 if need_latest_version.contains_key(&lean_row.crate_id) {
                     use std::collections::hash_map::Entry;
                     // Resolving "latest" must not land on a yanked or pre-release version:
@@ -574,12 +573,13 @@ impl Provider {
 
         // Convert latest version indices to version_data_map entries
         for (crate_id, (versions_index, version, _)) in latest_version_indices {
-            if let Some(crate_ref) = need_latest_version.get(&crate_id) {
-                let version_id = self.table_mgr.versions_table().get(versions_index).id;
-                let _ = version_data_map.insert(crate_ref.clone(), (version_id, versions_index));
-                let _ = version_ids.insert(version_id);
-                let _ = resolved_versions.insert(crate_ref.clone(), version);
-            }
+            let crate_ref = need_latest_version
+                .get(&crate_id)
+                .expect("latest_version_indices only receives keys present in the unchanged need_latest_version map");
+            let version_id = self.table_mgr.versions_table().get(versions_index).id;
+            let _ = version_data_map.insert(crate_ref.clone(), (version_id, versions_index));
+            let _ = version_ids.insert(version_id);
+            let _ = resolved_versions.insert(crate_ref.clone(), version);
         }
 
         (
@@ -649,21 +649,24 @@ impl Provider {
         });
 
         for (crate_id, values) in owners {
-            if let Some(data) = crate_data.get_mut(&crate_id) {
-                data.owners = values;
-            }
+            crate_data
+                .get_mut(&crate_id)
+                .expect("collect_crate_owners only returns keys present in the unchanged crate_data map")
+                .owners = values;
         }
 
         for (crate_id, values) in categories {
-            if let Some(data) = crate_data.get_mut(&crate_id) {
-                data.categories = values;
-            }
+            crate_data
+                .get_mut(&crate_id)
+                .expect("collect_crate_categories only returns keys present in the unchanged crate_data map")
+                .categories = values;
         }
 
         for (crate_id, values) in keywords {
-            if let Some(data) = crate_data.get_mut(&crate_id) {
-                data.keywords = values;
-            }
+            crate_data
+                .get_mut(&crate_id)
+                .expect("collect_crate_keywords only returns keys present in the unchanged crate_data map")
+                .keywords = values;
         }
     }
 
@@ -1893,9 +1896,18 @@ mod tests {
                     date: valid_date,
                 },
             ];
-            let (versions, crate_totals) = provider.aggregate_monthly_rows(rows, &ids, &all_versions, &crates);
-            assert_eq!(versions[&VersionId(103)].iter().map(|(_, downloads)| downloads).sum::<u64>(), 42);
-            assert_eq!(crate_totals[&CrateId(10)].iter().map(|(_, downloads)| downloads).sum::<u64>(), 42);
+            let logs = crate::facts::test_logging::capture_logs(|| {
+                let (versions, crate_totals) = provider.aggregate_monthly_rows(rows, &ids, &all_versions, &crates);
+                assert_eq!(versions[&VersionId(103)].iter().map(|(_, downloads)| downloads).sum::<u64>(), 42);
+                assert_eq!(crate_totals[&CrateId(10)].iter().map(|(_, downloads)| downloads).sum::<u64>(), 42);
+            });
+            assert_eq!(
+                logs.into_iter().map(|(level, _, message)| (level, message)).collect::<Vec<_>>(),
+                [(
+                    log::Level::Warn,
+                    format!("Ignoring version download row with invalid encoded date {date}")
+                )]
+            );
         }
     }
 
@@ -1914,16 +1926,32 @@ mod tests {
     #[test]
     fn dependent_counts_are_unique_by_dependent_crate() {
         let mut crate_data = HashMap::from_iter([(CrateId(10), empty_per_crate_data())]);
-        let dependent_versions = HashMap::from_iter([(CrateId(10), HashSet::from_iter([VersionId(1), VersionId(2), VersionId(3)]))]);
+        let dependent_versions = HashMap::from_iter([(
+            CrateId(10),
+            HashSet::from_iter([VersionId(1), VersionId(2), VersionId(3), VersionId(4)]),
+        )]);
         let version_crates = HashMap::from_iter([
             (VersionId(1), CrateId(20)),
             (VersionId(2), CrateId(20)),
             (VersionId(3), CrateId(30)),
         ]);
 
-        count_dependents(&mut crate_data, &dependent_versions, &version_crates);
+        let logs = crate::facts::test_logging::capture_logs(|| {
+            count_dependents(&mut crate_data, &dependent_versions, &version_crates);
+        });
 
         assert_eq!(crate_data[&CrateId(10)].dependents, 2);
+        assert_eq!(
+            logs.into_iter().map(|(level, _, message)| (level, message)).collect::<Vec<_>>(),
+            [(
+                log::Level::Debug,
+                format!(
+                    "Version ID {:?} references non-existent crate in dependencies calculation for crate '{:?}'",
+                    VersionId(4),
+                    CrateId(10)
+                )
+            )]
+        );
     }
 
     #[tokio::test]

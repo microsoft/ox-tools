@@ -55,7 +55,11 @@ pub(super) fn consuming_sites(file: &syn::File) -> HashMap<Range<usize>, Range<u
                         _ => return false,
                     };
                     let condition = condition.span().byte_range();
-                    condition.start <= expression_span.start && expression_span.end <= condition.end
+                    // #[gamma::skip(logical.and_remove_left, reason = "Candidates are ancestor if/while nodes in the parsed expression stack, so a descendant expression never begins before their condition. When borrowed evidence is published with an Expr::Let root, the borrowed descendant necessarily starts strictly after the condition's leading let token. Removing the first bound or making it strict changes no published site.", tag = "equivalent")]
+                    (
+                        // #[gamma::skip(relational.le_to_lt, reason = "Candidates are ancestor if/while nodes in the parsed expression stack, so a descendant expression never begins before their condition. When borrowed evidence is published with an Expr::Let root, the borrowed descendant necessarily starts strictly after the condition's leading let token. Removing the first bound or making it strict changes no published site.", tag = "equivalent")]
+                        condition.start <= expression_span.start
+                    ) && expression_span.end <= condition.end
                 })
             });
             if borrowed
@@ -128,8 +132,50 @@ fn borrows_temporary(expression: &Expr) -> bool {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use syn::token::Group;
+    use syn::{Item, Stmt, parse_file, parse_str};
 
     use super::*;
+
+    #[test]
+    fn borrow_propagation_requires_recognized_wrappers_and_checks_each_argument_and_index_base() {
+        for (source, expected) in [
+            ("make().as_slice()[0]", true),
+            ("named[0]", false),
+            ("make().as_str().unwrap()", true),
+            ("make().as_str().unknown()", false),
+            ("Some(&make(), named)", true),
+            ("Some(named, &make())", true),
+            ("Some(named, other)", false),
+            ("unrelated(&make())", false),
+        ] {
+            assert_eq!(borrows_temporary(&parse_str(source).unwrap()), expected, "{source}");
+        }
+    }
+
+    #[test]
+    fn nested_let_condition_borrows_are_guarded_by_the_nearest_consuming_if() {
+        let file = parse_file(
+            "fn f() { if let Some(outer) = (if let Some(inner) = Some(&make()) { inner } else { return }) { consume(outer); } }",
+        )
+        .unwrap();
+        let Item::Fn(function) = &file.items[0] else { unreachable!() };
+        let Stmt::Expr(Expr::If(outer), _) = &function.block.stmts[0] else {
+            unreachable!()
+        };
+        let Expr::Let(condition) = &*outer.cond else { unreachable!() };
+        let Expr::Paren(paren) = &*condition.expr else { unreachable!() };
+        let Expr::If(inner) = &*paren.expr else { unreachable!() };
+        let sites = consuming_sites(&file);
+        assert!(sites.values().any(|site| *site == inner.span().byte_range()));
+        assert!(!sites.values().any(|site| *site == outer.span().byte_range()));
+    }
+
+    #[test]
+    fn match_guard_let_borrows_do_not_consume_an_enclosing_ifs_unrelated_condition() {
+        let file =
+            parse_file("fn f() { if ready { match value { _ if let Some(item) = Some(&make()) => consume(item), _ => () } } }").unwrap();
+        assert!(consuming_sites(&file).is_empty());
+    }
 
     #[test]
     fn grouped_and_parenthesized_temporary_borrows_keep_their_lifetime_requirement() {

@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-10-29
+
+- 🐛 Bug Fixes
+
+  - aprz: use rustls instead of native-tls
+
+- 🧩 Miscellaneous
+
+  - Kill a bunch of mutants ([#315](https://github.com/microsoft/ox-tools/pull/315))
+
 ## [1.2.1] - 2026-10-27
 
 - ✨ Features

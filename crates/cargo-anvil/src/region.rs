@@ -401,7 +401,11 @@ pub(crate) struct XmlRootBounds {
 }
 
 fn complete_line_start(text: &str, range: std::ops::Range<usize>) -> Option<usize> {
-    let line_start = text[..range.start].rfind('\n').map_or(0, |newline| newline + 1);
+    let line_start = text[
+    // #[gamma::skip(range.exclusive_to_inclusive, reason = "An XML token starts with <, not LF; including that byte cannot move the preceding newline.", tag = "equivalent")]
+    ..range.start]
+        .rfind('\n')
+        .map_or(0, |newline| newline + 1);
     let line_end = text[range.end..].find('\n').map_or(text.len(), |newline| range.end + newline);
     let line = text[line_start..line_end].trim_end_matches('\r');
     (line.trim() == &text[range]).then_some(line_start)
@@ -474,15 +478,18 @@ pub(crate) fn xml_document_root(text: &str) -> Result<Option<XmlRootBounds>, Str
                     root_opening_end = Some(span.end());
                 }
                 stack.push(
-                    pending
-                        .take()
-                        .ok_or_else(|| "the XML tokenizer reported an opening delimiter without an element".to_owned())?,
+                    // #[gamma::skip(try.propagate_to_unwrap, reason = "The tokenizer always emits ElementStart before ElementEnd::Open; this missing-element error is unreachable.", tag = "equivalent")]
+                    pending.take().ok_or_else(||
+                        // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "The tokenizer always emits ElementStart before ElementEnd::Open; this missing-element error is unreachable.", tag = "equivalent")]
+                        "the XML tokenizer reported an opening delimiter without an element".to_owned())?,
                 );
             }
             Token::ElementEnd {
                 end: ElementEnd::Empty, ..
             } => {
                 let is_root = stack.is_empty();
+
+                // #[gamma::skip(stmt.delete_assign, reason = "The next opening delimiter is preceded by ElementStart, which overwrites this pending value.", tag = "equivalent")]
                 pending = None;
                 if is_root {
                     root_is_empty = true;
@@ -493,7 +500,9 @@ pub(crate) fn xml_document_root(text: &str) -> Result<Option<XmlRootBounds>, Str
                 span,
             } => {
                 close_xml_element(&mut stack, prefix.as_str(), local.as_str())?;
-                if stack.is_empty() {
+                if
+                // #[gamma::skip(cond.always_true, reason = "Nested closes only add interim values; the final root close overwrites them before the result is returned.", tag = "equivalent")]
+                stack.is_empty() {
                     let range = span.range();
                     root_close = Some((range.start, complete_line_start(text, range)));
                 }
@@ -531,7 +540,6 @@ pub(crate) fn toml_comment_lines(text: &str) -> impl Iterator<Item = ByteRange> 
 
 /// Full JSONC line comments retain original byte bounds; string contents and
 /// block comments never qualify as ownership sentinels.
-#[mutants::skip] // Byte-level JSONC lexical state machine; marker/string/block-comment behavior is covered exhaustively by json_array_region tests.
 pub(crate) fn json_comment_lines(text: &str) -> impl Iterator<Item = ByteRange> + '_ {
     iterate_lines(text)
         .scan((None, false, false), move |(string, escaped, block_comment), line| {
@@ -559,11 +567,13 @@ pub(crate) fn json_comment_lines(text: &str) -> impl Iterator<Item = ByteRange> 
                 } else if matches!(byte, b'"' | b'\'') {
                     *string = Some(byte);
                 } else if byte == b'/' && bytes.get(index + 1) == Some(&b'/') {
+                    // #[gamma::skip(loop.break_to_continue, tag = "timeout", reason = "Continuing at a line-comment delimiter bypasses the index increment and revisits that delimiter forever.")]
                     break;
                 } else if byte == b'/' && bytes.get(index + 1) == Some(&b'*') {
                     *block_comment = true;
                     index += 1;
                 }
+                // #[gamma::skip(literal.int_decrement, stmt.delete_assign, tag = "timeout", reason = "Removing the scan increment or reducing it to zero leaves an ordinary byte at the same index forever.")]
                 index += 1;
             }
             Some(full_line_comment.then_some(line))
@@ -571,7 +581,6 @@ pub(crate) fn json_comment_lines(text: &str) -> impl Iterator<Item = ByteRange> 
         .flatten()
 }
 
-#[mutants::skip] // Byte-level JSONC lexical state machine; malformed strings/comments and valid scanner hosts are covered through planner behavior.
 fn validate_json_comment_scan(text: &str) -> Result<(), AppError> {
     let bytes = text.as_bytes();
     let mut quote = None;
@@ -583,11 +592,15 @@ fn validate_json_comment_scan(text: &str) -> Result<(), AppError> {
         let byte = bytes[index];
         if line_comment {
             if matches!(byte, b'\r' | b'\n') {
-                line_comment = false;
+                line_comment =
+                // #[gamma::skip(assign_value.default, reason = "bool Default is false, identical to the assigned value")]
+                false;
             }
         } else if let Some(active_quote) = quote {
             if escaped {
-                escaped = false;
+                escaped =
+                // #[gamma::skip(assign_value.default, reason = "bool Default is false, identical to this assigned value")]
+                false;
                 if byte == b'\r' && bytes.get(index + 1) == Some(&b'\n') {
                     index += 1;
                 }
@@ -600,18 +613,22 @@ fn validate_json_comment_scan(text: &str) -> Result<(), AppError> {
             }
         } else if block_comment {
             if byte == b'*' && bytes.get(index + 1) == Some(&b'/') {
-                block_comment = false;
+                block_comment =
+                // #[gamma::skip(assign_value.default, reason = "bool Default is false, identical to the assigned value")]
+                false;
                 index += 1;
             }
         } else if matches!(byte, b'"' | b'\'') {
             quote = Some(byte);
         } else if byte == b'/' && bytes.get(index + 1) == Some(&b'/') {
             line_comment = true;
+            // #[gamma::skip(stmt.delete_assign, literal.int_decrement, reason = "rescanning the second opening slash while already in a line comment does not affect its newline boundary")]
             index += 1;
         } else if byte == b'/' && bytes.get(index + 1) == Some(&b'*') {
             block_comment = true;
             index += 1;
         }
+        // #[gamma::skip(literal.int_decrement, stmt.delete_assign, tag = "timeout", reason = "Removing the scan increment or reducing it to zero leaves an ordinary byte at the same index forever.")]
         index += 1;
     }
     if block_comment {
@@ -793,6 +810,8 @@ pub(crate) fn upsert_located_region_with_newline(
         };
         let (before, after) = text.split_at(offset);
         let mut out = before.to_owned();
+
+        // #[gamma::skip(stmt.delete_call, reason = "This reserves String capacity only; automatic growth preserves every appended byte.", tag = "perf")]
         out.reserve(rendered.len());
         separate_region(&mut out, newline);
         out.push_str(&rendered);
@@ -806,6 +825,8 @@ pub(crate) fn upsert_located_region_with_newline(
     // No region present — append at the end with one blank line of separation
     // if the file is non-empty and doesn't end in two newlines.
     let mut out = text.to_owned();
+
+    // #[gamma::skip(stmt.delete_call, reason = "This reserves String capacity only; automatic growth preserves every appended byte.", tag = "perf")]
     out.reserve(rendered.len());
     separate_region(&mut out, newline);
     out.push_str(&rendered);
@@ -842,7 +863,10 @@ fn prepend_region(text: &str, rendered: &str, syntax: CommentSyntax, newline: &s
 
 fn separate_region(out: &mut String, newline: &str) {
     if !out.is_empty() {
-        if !out.ends_with(['\r', '\n']) {
+        if !out.ends_with(
+            // #[gamma::skip(collection.reverse_array, reason = "ends_with treats this character array as a set; its order is immaterial")]
+            ['\r', '\n'],
+        ) {
             out.push_str(newline);
         }
         if trailing_blank_line_len(out) == 0 {
@@ -861,10 +885,9 @@ fn leading_newline_len(text: &str) -> usize {
     }
 }
 
-#[mutants::skip] // The surviving comparison mutation is equivalent when `last == 0`; newline preservation is covered by byte-exact region tests.
 fn trailing_blank_line_len(text: &str) -> usize {
     let last = trailing_newline_len(text);
-    if last > 0 && trailing_newline_len(&text[..text.len() - last]) > 0 {
+    if trailing_newline_len(&text[..text.len() - last]) > 0 {
         last
     } else {
         0
@@ -875,7 +898,10 @@ fn trailing_newline_len(text: &str) -> usize {
     if text.ends_with("\r\n") {
         2
     } else {
-        usize::from(text.ends_with(['\r', '\n']))
+        usize::from(text.ends_with(
+            // #[gamma::skip(collection.reverse_array, reason = "ends_with treats the character array as an unordered set")]
+            ['\r', '\n'],
+        ))
     }
 }
 
@@ -897,10 +923,13 @@ pub(crate) fn render_body_with_newline(body: &str, newline: &str) -> String {
         out.push_str(&rest[..at]);
         out.push_str(newline);
         let ending_len = if rest.as_bytes()[at] == b'\r' && rest.as_bytes().get(at + 1) == Some(&b'\n') {
+            // #[gamma::skip(literal.int_to_zero, tag = "outofmem", reason = "A zero ending length retains the CRLF at the start of rest, appending the same newline without consuming input until allocation fails.")]
             2
         } else {
+            // #[gamma::skip(literal.int_decrement, tag = "timeout", reason = "Reducing the single-byte ending length to zero retains the same newline and prevents the loop from consuming input.")]
             1
         };
+        // #[gamma::skip(arith.add_to_mul, tag = "timeout", reason = "With a newline at offset zero, multiplication selects rest[0..], retaining the same newline forever.")]
         rest = &rest[at + ending_len..];
     }
     if !rest.is_empty() {
@@ -938,9 +967,7 @@ pub(crate) fn remove_toml_region(text: &str, id: &str, syntax: CommentSyntax) ->
     }
     let region = find_toml_region(text, id, syntax)?;
     if let Some(region) = &region
-        && toml_edit::Document::parse(text)
-            .ok()
-            .is_some_and(|document| inside_array(document.as_item(), region.start_line.start))
+        && toml_edit::Document::parse(text).is_ok_and(|document| inside_array(document.as_item(), region.start_line.start))
     {
         // Array insertion adds no separator blank line: all adjacent whitespace is repository-owned.
         return Ok(format!("{}{}", &text[..region.start_line.start], &text[region.end_line.end..]));
@@ -1012,25 +1039,23 @@ pub(crate) fn insert_after_located_region<'a>(
     let at = region.end_line.end;
     let newline = text_newline(text);
 
-    // #[gamma::skip(arith.add_to_mul, literal.int_decrement, literal.int_increment, reason = "these nonnegative allocation estimates affect capacity only, not the inserted residue or host slices")]
-    let mut out = String::with_capacity(text.len() + extra.len() + 1);
-    out.push_str(&text[..at]);
-    if !text[..at].ends_with('\n') {
-        out.push_str(newline);
-    }
-    out.push_str(extra);
-    if !extra.ends_with('\n') {
-        out.push_str(newline);
-    }
     let rest = &text[at..];
     // The gap that followed the region is preserved, but a residue block that
     // already ends in a newline must not be run straight into the next line of
     // the file: that would attach the following header's comment to it.
-    if !rest.is_empty() && leading_newline_len(rest) == 0 {
-        out.push_str(newline);
-    }
-    out.push_str(rest);
-    Ok(out)
+    Ok([
+        &text[..at],
+        if text[..at].ends_with('\n') { "" } else { newline },
+        extra,
+        if extra.ends_with('\n') { "" } else { newline },
+        if !rest.is_empty() && leading_newline_len(rest) == 0 {
+            newline
+        } else {
+            ""
+        },
+        rest,
+    ]
+    .concat())
 }
 
 /// Adopt an outside-region copy of a TOML table whose configuration the region
@@ -1077,11 +1102,21 @@ pub(crate) fn insert_after_located_region<'a>(
 /// is one it must not delete.
 #[must_use]
 pub fn adopt_unmanaged_toml_tables(text: &str, body: &str, syntax: CommentSyntax) -> TomlAdoption {
+    adopt_unmanaged_toml_tables_with_deletions(text, body, syntax).0
+}
+
+pub(crate) fn adopt_unmanaged_toml_tables_with_deletions(text: &str, body: &str, syntax: CommentSyntax) -> (TomlAdoption, Vec<ByteRange>) {
+    let mut deletions = Vec::new();
+    let adoption = adopt_unmanaged_toml_tables_impl(text, body, syntax, &mut deletions);
+    (adoption, deletions)
+}
+
+fn adopt_unmanaged_toml_tables_impl(text: &str, body: &str, syntax: CommentSyntax, adopted_deletions: &mut Vec<ByteRange>) -> TomlAdoption {
     let Some(managed) = headed_tables(body) else {
         return TomlAdoption::Unchanged;
     };
     if managed.is_empty() {
-        return adopt_unmanaged_root_settings(text, body, syntax);
+        return adopt_unmanaged_root_settings(text, body, syntax, adopted_deletions);
     }
 
     // Parse the host with its managed regions blanked out. Two things fall out
@@ -1107,9 +1142,7 @@ pub fn adopt_unmanaged_toml_tables(text: &str, body: &str, syntax: CommentSyntax
     // table's content runs until the next one starts. A managed region's
     // opening sentinel bounds it too, so an adopted table can never swallow the
     // sentinel of the region that follows it.
-    let mut boundaries: Vec<usize> = candidates.iter().map(|table| table.header.start).collect();
-    boundaries.extend(protected.iter().map(|range| range.start));
-    boundaries.sort_unstable();
+    let boundaries = adoption_boundaries(&candidates, &protected);
 
     for (legacy_id, parent) in [
         ("anvil-workspace-lints", ["workspace", "lints"].as_slice()),
@@ -1125,7 +1158,9 @@ pub fn adopt_unmanaged_toml_tables(text: &str, body: &str, syntax: CommentSyntax
             };
         }
     }
-    if let Some(adoption) = adopt_dotted_child_assignments(text, &managed, &candidates, &boundaries, &protected) {
+    if let Some(adoption) =
+        adopt_dotted_child_assignments_with_deletions(text, &managed, &candidates, &boundaries, &protected, adopted_deletions)
+    {
         return adoption;
     }
     let legacy_masked = mask_legacy_lint_region_to_header(text, syntax);
@@ -1136,7 +1171,14 @@ pub fn adopt_unmanaged_toml_tables(text: &str, body: &str, syntax: CommentSyntax
         // #[gamma::skip(stmt.delete_call, tag = "timeout", reason = "removing protected boundaries drives legacy adoption through an intentionally exhaustive malformed-input path that exceeds the campaign budget")]
         legacy_boundaries.extend(protected.iter().map(|range| range.start));
         sort_boundaries(&mut legacy_boundaries);
-        if let Some(adoption) = adopt_dotted_child_assignments(text, &managed, &legacy_candidates, &legacy_boundaries, &protected) {
+        if let Some(adoption) = adopt_dotted_child_assignments_with_deletions(
+            text,
+            &managed,
+            &legacy_candidates,
+            &legacy_boundaries,
+            &protected,
+            adopted_deletions,
+        ) {
             return adoption;
         }
     }
@@ -1200,19 +1242,32 @@ pub fn adopt_unmanaged_toml_tables(text: &str, body: &str, syntax: CommentSyntax
     // begins.
     // #[gamma::skip(iter.remove_sort, reason = "candidates comes from headed_tables in ascending header order, and each deletion is pushed once in that same traversal order")]
     deletions.sort_unstable_by_key(|range| range.start);
-    let mut out = String::with_capacity(text.len());
-    let mut cursor = 0;
-    for range in &deletions {
-        debug_assert!(range.start >= cursor, "adoption deletion ranges must not overlap");
-        out.push_str(&text[cursor..range.start]);
-        cursor = range.end;
-    }
-    out.push_str(&text[cursor..]);
+    let out = remove_adopted_ranges(text, &deletions);
+    *adopted_deletions = deletions;
 
     TomlAdoption::Adopted {
         text: out,
         residue: tidy_residue(&residue, text_newline(text)),
     }
+}
+
+fn adoption_boundaries(candidates: &[HeadedTable], protected: &[ByteRange]) -> Vec<usize> {
+    let mut boundaries: Vec<_> = candidates.iter().map(|table| table.header.start).collect();
+    boundaries.extend(protected.iter().map(|range| range.start));
+    boundaries.sort_unstable();
+    boundaries
+}
+
+fn remove_adopted_ranges(text: &str, deletions: &[ByteRange]) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut cursor = 0;
+    for range in deletions {
+        debug_assert!(range.start >= cursor, "adoption deletion ranges must not overlap");
+        out.push_str(&text[cursor..range.start]);
+        cursor = range.end;
+    }
+    out.push_str(&text[cursor..]);
+    out
 }
 
 fn mask_legacy_lint_region_to_header(text: &str, syntax: CommentSyntax) -> String {
@@ -1239,7 +1294,9 @@ fn restore_legacy_lint_header(masked: &mut [u8], text: &str, id: &str, header: &
     };
     let end = start + header.len();
     masked[start..end].copy_from_slice(&text.as_bytes()[start..end]);
-    if region.is_empty() {
+    if
+    // #[gamma::skip(cond.always_true, reason = "For a nonempty body this copies the exact header bytes already found at the selected span.", tag = "equivalent")]
+    region.is_empty() {
         masked[start..end].copy_from_slice(header.as_bytes());
     }
 }
@@ -1311,12 +1368,24 @@ pub(crate) fn lint_region_placement(region_id: &str, current: Option<&str>) -> O
 /// table. For example, introducing `[workspace.lints.rust]` must turn an
 /// existing `rust.missing_docs = "warn"` under `[workspace.lints]` into the
 /// bare `missing_docs = "warn"` residue that follows the new region.
+#[cfg(test)]
 fn adopt_dotted_child_assignments(
     text: &str,
     managed: &[HeadedTable],
     candidates: &[HeadedTable],
     boundaries: &[usize],
     protected: &[ByteRange],
+) -> Option<TomlAdoption> {
+    adopt_dotted_child_assignments_with_deletions(text, managed, candidates, boundaries, protected, &mut Vec::new())
+}
+
+fn adopt_dotted_child_assignments_with_deletions(
+    text: &str,
+    managed: &[HeadedTable],
+    candidates: &[HeadedTable],
+    boundaries: &[usize],
+    protected: &[ByteRange],
+    adopted_deletions: &mut Vec<ByteRange>,
 ) -> Option<TomlAdoption> {
     let [managed] = managed else {
         return None;
@@ -1394,11 +1463,12 @@ fn adopt_dotted_child_assignments(
 
     let mut out = String::with_capacity(text.len());
     let mut cursor = 0;
-    for range in deletions {
+    for range in &deletions {
         out.push_str(&text[cursor..range.start]);
         cursor = range.end;
     }
     out.push_str(&text[cursor..]);
+    *adopted_deletions = deletions;
     Some(TomlAdoption::Adopted {
         text: out,
         residue: tidy_residue(&residue, text_newline(text)),
@@ -1631,7 +1701,7 @@ pub(crate) fn canonical_value(value: &toml_edit::Value) -> String {
     }
 }
 
-fn adopt_unmanaged_root_settings(text: &str, body: &str, syntax: CommentSyntax) -> TomlAdoption {
+fn adopt_unmanaged_root_settings(text: &str, body: &str, syntax: CommentSyntax, adopted_deletions: &mut Vec<ByteRange>) -> TomlAdoption {
     let header_end = start_region_offset(text, syntax);
     let masked = mask_managed_regions(text, syntax);
     let (Ok(managed), Ok(document), Some(tables)) = (
@@ -1649,6 +1719,7 @@ fn adopt_unmanaged_root_settings(text: &str, body: &str, syntax: CommentSyntax) 
     let mut out = String::new();
     let mut cursor = 0;
     let mut adopted = false;
+    let mut deletions = Vec::new();
     let fallback_end = text.len();
     for entry in table_entries(document.as_table(), &masked) {
         let Some(value) = values.get(&entry.path) else { continue };
@@ -1662,14 +1733,17 @@ fn adopt_unmanaged_root_settings(text: &str, body: &str, syntax: CommentSyntax) 
         }
         // The parser attaches the file header to the first assignment, but
         // adopting that assignment must not discard the header.
-        out.push_str(&text[cursor..entry.span.start.max(header_end)]);
+        let start = entry.span.start.max(header_end);
+        out.push_str(&text[cursor..start]);
         cursor = entry.span.end.min(boundary_after(&boundaries, entry.span.start, fallback_end));
+        deletions.push(ByteRange { start, end: cursor });
         adopted = true;
     }
     if !adopted {
         return TomlAdoption::Unchanged;
     }
     out.push_str(&text[cursor..]);
+    *adopted_deletions = deletions;
     TomlAdoption::Adopted {
         text: out,
         residue: String::new(),
@@ -1949,6 +2023,148 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn json_scan_distinguishes_comment_delimiters_and_quoted_escapes() {
+        for text in [
+            "\"\"",
+            "'x'",
+            "// a \" quoted comment\n",
+            "// a ' quoted comment\r\n",
+            "/* comment */",
+            "/**/",
+            "\"escaped\\\"quote\"",
+            "\"escaped\\\\backslash\"",
+            "// comment\n\"closed\"",
+        ] {
+            super::validate_json_comment_scan(text).unwrap_or_else(|error| panic!("{text:?}: {error}"));
+        }
+        for text in ["/*/", "/* unterminated", "/ * \"", "// comment\n\"", "// comment\r\"", "\"\\\""] {
+            let error = super::validate_json_comment_scan(text).unwrap_err();
+            let expected = if text.starts_with("/*") {
+                "JSON-like host contains an unterminated block comment; close it before managing regions"
+            } else {
+                "JSON-like host contains an unterminated quoted string; close it before managing regions"
+            };
+            assert_eq!(error.to_string(), expected, "{text:?}");
+        }
+        let text = "/*/\n// hidden\n*/\n// visible\n";
+        assert_eq!(
+            super::json_comment_lines(text)
+                .map(|range| &text[range.start..range.end])
+                .collect::<Vec<_>>(),
+            ["// visible\n"]
+        );
+    }
+
+    #[test]
+    fn carriage_return_alone_is_a_complete_region_separator() {
+        for (text, expected) in [
+            ("repository-owned\r", "repository-owned\r\r"),
+            ("repository-owned\r\r", "repository-owned\r\r"),
+            ("repository-ownedx", "repository-ownedx\r\r"),
+            ("repository-owned\0", "repository-owned\0\r\r"),
+        ] {
+            let mut output = text.to_owned();
+            super::separate_region(&mut output, "\r");
+            assert_eq!(output, expected, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn removing_a_deeply_nested_array_region_preserves_adjacent_blank_lines() {
+        // Representative deep input, not a parser or traversal limit.
+        let table = format!("[{}leaf]\n", "nested.".repeat(60));
+        let source = format!("{table}values = [\n# >>> anvil-managed: x\n1,\n# <<< anvil-managed: x\n\n]\n");
+        toml_edit::Document::parse(source.as_str()).unwrap();
+        assert_eq!(
+            remove_toml_region(&source, "x", CommentSyntax::Hash).unwrap(),
+            format!("{table}values = [\n\n]\n")
+        );
+    }
+
+    #[test]
+    fn an_unpaired_marker_inside_xml_cdata_does_not_require_repair() {
+        let text = "<root><![CDATA[\n<!-- >>> anvil-managed: survivor -->\n]]></root>\n";
+        assert_eq!(
+            repair_markers(text, "survivor", CommentSyntax::Xml),
+            MarkerRepair::Repaired(text.to_owned())
+        );
+    }
+
+    #[test]
+    fn dotted_child_adoption_reports_the_exact_deleted_source_ranges() {
+        let text = "[workspace.lints]\nrust.unsafe_code = \"forbid\"\n";
+        let managed = headed_tables("[workspace.lints.rust]\nunsafe_code = \"forbid\"\n").unwrap();
+        let candidates = headed_tables(text).unwrap();
+        let boundaries = adoption_boundaries(&candidates, &[]);
+        let mut deletions = Vec::new();
+        let result = adopt_dotted_child_assignments_with_deletions(text, &managed, &candidates, &boundaries, &[], &mut deletions);
+        assert!(matches!(result, Some(TomlAdoption::Adopted { .. })));
+        assert_eq!(
+            deletions,
+            [ByteRange {
+                start: "[workspace.lints]\n".len(),
+                end: text.len(),
+            }]
+        );
+    }
+
+    #[test]
+    fn survivor_raw_markers_and_xml_ranges_use_their_distinct_scanners() {
+        for syntax in [CommentSyntax::Hash, CommentSyntax::SlashSlash, CommentSyntax::Xml] {
+            let opener = syntax.marker("survivor", true);
+            let closer = syntax.marker("survivor", false);
+            assert!(raw_marker_line_present(&format!("  {opener}\n"), "survivor", syntax));
+            assert!(raw_marker_line_present(&format!("{closer}\n"), "survivor", syntax));
+            assert!(!raw_marker_line_present("ordinary text\n", "survivor", syntax));
+            assert!(!raw_marker_line_present(&opener, "other", syntax));
+        }
+        let text = "<root>\n<!-- >>> anvil-managed: survivor -->\n<body />\n<!-- <<< anvil-managed: survivor -->\n</root>\n";
+        assert_eq!(
+            managed_region_ranges_with_ids(text, CommentSyntax::Xml),
+            [(
+                "survivor".to_owned(),
+                ByteRange {
+                    start: text.find("<!-- >>>").unwrap(),
+                    end: text.find("</root>").unwrap(),
+                }
+            )]
+        );
+        let cdata =
+            "<root>\n<![CDATA[\n<!-- >>> anvil-managed: survivor -->\n<body />\n<!-- <<< anvil-managed: survivor -->\n]]>\n</root>\n";
+        assert_eq!(managed_region_ranges_with_ids(cdata, CommentSyntax::Xml).len(), 0);
+        assert_eq!(
+            repair_markers(cdata, "survivor", CommentSyntax::Xml),
+            MarkerRepair::Repaired(cdata.to_owned())
+        );
+        assert!(CommentSyntax::Xml.is_header_comment("<!-- user guidance -->"));
+        assert!(!CommentSyntax::Xml.is_header_comment("<!-- user guidance"));
+    }
+
+    #[test]
+    fn survivor_xml_bounds_and_errors_preserve_nested_and_qualified_names() {
+        for text in ["</r>", "</r>\n", "  </r>\r\n", "  </r>  \n"] {
+            let start = text.find("</r>").unwrap();
+            assert_eq!(complete_line_start(text, start..start + 4), Some(0), "{text:?}");
+        }
+        for text in ["</r>x", "</r>\0", "prefix </r>", "</r><!-- trailing -->"] {
+            let start = text.find("</r>").unwrap();
+            assert_eq!(complete_line_start(text, start..start + 4), None, "{text:?}");
+        }
+        assert_eq!(
+            xml_document_root("<a:r><b:r></a:r>").unwrap_err(),
+            "the XML host closes `a:r` while `b:r` is still open"
+        );
+        assert_eq!(
+            xml_document_root("<outer><middle><inner>").unwrap_err(),
+            "the XML host has no closing element for `inner`"
+        );
+        let text = "<outer>\n<inner>\n</inner>\n</outer>";
+        let bounds = xml_document_root(text).unwrap().unwrap();
+        assert_eq!(bounds.opening_end, "<outer>".len());
+        assert_eq!(bounds.closing_start, text.find("</outer>").unwrap());
+        assert_eq!(bounds.closing_line_start, Some(text.find("</outer>").unwrap()));
+    }
     const SYN: CommentSyntax = CommentSyntax::Hash;
 
     #[test]
@@ -2137,7 +2353,7 @@ mod tests {
         let TomlAdoption::Adopted { text, residue } = adopt_unmanaged_toml_tables(text, body, CommentSyntax::Hash) else {
             panic!("equivalent parsed values should be emitted once");
         };
-        assert!(text.trim().is_empty());
+        assert_eq!(text.trim().len(), 0);
         assert_eq!(residue, "keep = 'ours'\n");
         let parsed = format!("{body}{residue}").parse::<toml_edit::DocumentMut>().unwrap();
         assert_eq!(parsed["settings"]["keep"].as_str(), Some("ours"));
@@ -4191,5 +4407,75 @@ mod tests {
                 assert_eq!(boundary_after(&boundaries, start, 12), expected);
             }
         }
+    }
+    #[test]
+    fn regression_json_comment_boundaries_preserve_exact_physical_lines() {
+        for (text, expected) in [
+            ("\"\"\n// actual\n", vec!["// actual\n"]),
+            ("'a\\'b'\n// actual\n", vec!["// actual\n"]),
+            ("\"\\\\\"\n// actual\n", vec!["// actual\n"]),
+            ("\"a\\\n// hidden\nb\"\n// actual\n", vec!["// actual\n"]),
+            ("/* *x\n// hidden\n*/\n// actual\n", vec!["// actual\n"]),
+            ("/**/\"x\n// hidden\n\"\n// actual\n", vec!["// actual\n"]),
+            ("/**//*\n// hidden\n*/\n// actual\n", vec!["// actual\n"]),
+            ("/* */'x\n// hidden\n'\n// actual\n", vec!["// actual\n"]),
+            ("// \" /*\n// actual\n", vec!["// \" /*\n", "// actual\n"]),
+            ("x/ x* \n// actual\n", vec!["// actual\n"]),
+            ("//\n// actual\n", vec!["//\n", "// actual\n"]),
+            (" /\n// actual\n", vec!["// actual\n"]),
+            (" /*/\n// hidden\n*/\n// actual\n", vec!["// actual\n"]),
+            ("/* * /\n// hidden\n*/\n// actual\n", vec!["// actual\n"]),
+            ("not a comment\n", vec![]),
+        ] {
+            assert_eq!(
+                json_comment_lines(text)
+                    .map(|range| &text[range.start..range.end])
+                    .collect::<Vec<_>>(),
+                expected,
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn regression_json_validation_handles_adjacent_lexical_delimiters() {
+        for text in [
+            "\"a\\\r\n\"",
+            "\"a\\\rb\"",
+            "\"a\\\r\"",
+            "\"\\\\\"",
+            "/**/x",
+            "//\r\n",
+            "/* * / */",
+            "//\"",
+        ] {
+            validate_json_comment_scan(text).unwrap_or_else(|error| panic!("{text:?}: {error}"));
+        }
+        let unterminated_quote = "JSON-like host contains an unterminated quoted string; close it before managing regions";
+        for (text, expected) in [
+            ("/**/\"", unterminated_quote),
+            ("/**//\"", unterminated_quote),
+            ("//\n\"", unterminated_quote),
+            ("\"a\\\r\n\"\n\"", unterminated_quote),
+            (
+                "\"a\\x\n\"",
+                "JSON-like host contains an unescaped line ending inside a quoted string; escape it or close the string",
+            ),
+            (
+                "/* * /",
+                "JSON-like host contains an unterminated block comment; close it before managing regions",
+            ),
+            ("'a\\'", unterminated_quote),
+        ] {
+            let error = validate_json_comment_scan(text).unwrap_err();
+            assert_eq!(error.to_string(), expected, "{text:?}");
+        }
+        let error = HostScanner::Json
+            .remove("/* unfinished", "id", CommentSyntax::SlashSlash)
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "JSON-like host contains an unterminated block comment; close it before managing regions"
+        );
     }
 }

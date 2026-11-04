@@ -150,7 +150,9 @@ pub(super) fn manifests_of(plan: &Plan, root: &Utf8Path, packages: &[String]) ->
         .iter()
         .filter_map(|package| plan.directory_of(package))
         .map(|directory| {
-            let absolute = if directory.as_str().is_empty() {
+            let absolute = if
+            // #[gamma::skip(cond.always_false, reason = "For empty directory, root.join(empty) and root.to_owned() both yield the same subsequent root/Cargo.toml path after joining that nonempty filename. Any temporary trailing separator is normalized by this final join; nonempty directories use the unchanged branch.", tag = "equivalent")]
+            directory.as_str().is_empty() {
                 root.to_owned()
             } else {
                 root.join(directory)

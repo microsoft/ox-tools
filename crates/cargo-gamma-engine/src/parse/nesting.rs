@@ -110,6 +110,7 @@ pub(super) fn beyond(text: &str, comments: &[Comment], limit: usize) -> Option<u
         if let Some(end) = literal_end(text, at) {
             if previous == Previous::Expression {
                 let inherited = base.get(depth).copied().unwrap_or_default();
+                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                 set(&mut path, depth, inherited);
             }
             // #[gamma::skip(all, reason = "not advancing past a literal retries it forever")]
@@ -123,9 +124,22 @@ pub(super) fn beyond(text: &str, comments: &[Comment], limit: usize) -> Option<u
                 .get(at..end)
                 .expect("identifier_end returns an ordered UTF-8-boundary range in this text");
 
-            if identifier == "else" && awaiting_else.get(depth).copied().unwrap_or(false) {
-                grow(&mut ladders, depth);
+            if identifier == "else"
+                && awaiting_else.get(depth).copied().unwrap_or(
+                    // #[gamma::skip(literal.bool_flip, reason = "awaiting_else starts with a root entry and both opening-delimiter branches set an entry at every new depth; closers only lower depth with saturation. Its get(depth) is always Some, so changing the unwrap_or fallback is unobservable.", tag = "equivalent")]
+                    false,
+                )
+            {
+                // #[gamma::skip(stmt.delete_call, reason = "ladders already contains the current root or a slot initialized by the opening delimiter before an else can be handled. grow at this point is a no-op; growing one extra future slot also has no effect because opening that depth overwrites its ladder value before reading it.", tag = "equivalent")]
+                // #[gamma::skip(call.replace_with_default, reason = "ladders already contains the current root or a slot initialized by the opening delimiter before an else can be handled. grow at this point is a no-op; growing one extra future slot also has no effect because opening that depth overwrites its ladder value before reading it.", tag = "equivalent")]
+                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
+                grow(
+                    &mut ladders,
+                    // #[gamma::skip(expr.increment, reason = "ladders already contains the current root or a slot initialized by the opening delimiter before an else can be handled. grow at this point is a no-op; growing one extra future slot also has no effect because opening that depth overwrites its ladder value before reading it.", tag = "equivalent")]
+                    depth,
+                );
                 ladders[depth] += 1;
+                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                 set_bool(&mut awaiting_else, depth, false);
 
                 if base.get(depth).copied().unwrap_or_default().saturating_add(ladders[depth]) > path_limit
@@ -135,6 +149,7 @@ pub(super) fn beyond(text: &str, comments: &[Comment], limit: usize) -> Option<u
                 }
                 previous = Previous::Other;
             } else if identifier == "as" {
+                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                 set_bool(&mut awaiting_else, depth, false);
                 previous = Previous::Other;
 
@@ -142,12 +157,18 @@ pub(super) fn beyond(text: &str, comments: &[Comment], limit: usize) -> Option<u
                     return Some(at);
                 }
             } else {
-                if awaiting_else.get(depth).copied().unwrap_or(false) {
+                if awaiting_else.get(depth).copied().unwrap_or(
+                    // #[gamma::skip(literal.bool_flip, reason = "awaiting_else starts with a root entry and both opening-delimiter branches set an entry at every new depth; closers only lower depth with saturation. Its get(depth) is always Some, so changing the unwrap_or fallback is unobservable.", tag = "equivalent")]
+                    false,
+                ) {
+                    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                     set(&mut ladders, depth, 0);
+                    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                     set_bool(&mut awaiting_else, depth, false);
                 }
                 if previous == Previous::Expression {
                     let inherited = base.get(depth).copied().unwrap_or_default();
+                    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                     set(&mut path, depth, inherited);
                 }
                 previous = Previous::Expression;
@@ -180,7 +201,10 @@ pub(super) fn beyond(text: &str, comments: &[Comment], limit: usize) -> Option<u
             b'(' | b'[' => {
                 let is_postfix = previous.can_end_expression();
 
-                if is_postfix && link(&mut path, &mut peak, depth, path_limit) {
+                if is_postfix &&
+                // #[gamma::skip(call_result.default, reason = "default_after preserves link's path and peak increments. If its true result is replaced by false, the immediately following inherited=path+CHAIN_FACTOR test still rejects at the same opener offset; nonoverflowing links follow the identical path.", tag = "equivalent")]
+                link(&mut path, &mut peak, depth, path_limit)
+                {
                     return Some(at);
                 }
 
@@ -191,10 +215,15 @@ pub(super) fn beyond(text: &str, comments: &[Comment], limit: usize) -> Option<u
                     return Some(at);
                 }
 
+                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                 set(&mut path, depth, inherited);
+                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                 set(&mut base, depth, inherited);
+                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                 set(&mut peak, depth, inherited);
+                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                 set(&mut ladders, depth, 0);
+                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                 set_bool(&mut awaiting_else, depth, false);
                 previous = Previous::Other;
             }
@@ -208,10 +237,15 @@ pub(super) fn beyond(text: &str, comments: &[Comment], limit: usize) -> Option<u
                     return Some(at);
                 }
 
+                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                 set(&mut path, depth, inherited);
+                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                 set(&mut base, depth, inherited);
+                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                 set(&mut peak, depth, inherited);
+                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                 set(&mut ladders, depth, 0);
+                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                 set_bool(&mut awaiting_else, depth, false);
                 previous = Previous::Other;
             }
@@ -222,7 +256,9 @@ pub(super) fn beyond(text: &str, comments: &[Comment], limit: usize) -> Option<u
             b')' | b']' => {
                 let nested = peak.get(depth).copied().unwrap_or_default();
                 depth = depth.saturating_sub(1);
+                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                 raise(&mut path, depth, nested);
+                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                 raise(&mut peak, depth, nested);
                 previous = Previous::Expression;
             }
@@ -230,8 +266,11 @@ pub(super) fn beyond(text: &str, comments: &[Comment], limit: usize) -> Option<u
             b'}' => {
                 let nested = peak.get(depth).copied().unwrap_or_default();
                 depth = depth.saturating_sub(1);
+                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                 raise(&mut path, depth, nested);
+                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                 raise(&mut peak, depth, nested);
+                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                 set_bool(&mut awaiting_else, depth, true);
                 previous = Previous::Expression;
             }
@@ -239,8 +278,11 @@ pub(super) fn beyond(text: &str, comments: &[Comment], limit: usize) -> Option<u
             // A chain cannot span a separator, so the count starts again after one.
             b';' | b',' => {
                 let inherited = base.get(depth).copied().unwrap_or_default();
+                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                 set(&mut path, depth, inherited);
+                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                 set(&mut ladders, depth, 0);
+                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                 set_bool(&mut awaiting_else, depth, false);
                 previous = Previous::Other;
             }
@@ -254,6 +296,7 @@ pub(super) fn beyond(text: &str, comments: &[Comment], limit: usize) -> Option<u
             byte if byte.is_ascii() => {
                 if previous == Previous::Expression {
                     let inherited = base.get(depth).copied().unwrap_or_default();
+                    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                     set(&mut path, depth, inherited);
                 }
                 previous = Previous::Expression;
@@ -275,7 +318,9 @@ pub(super) fn beyond(text: &str, comments: &[Comment], limit: usize) -> Option<u
 
 /// Counts one more link at `depth`, returning whether that took the chain past `limit`.
 fn link(path: &mut Vec<usize>, peak: &mut Vec<usize>, depth: usize, limit: usize) -> bool {
+    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
     grow(path, depth);
+    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
     grow(peak, depth);
 
     let links = path.get_mut(depth).expect("grow(path, depth) made `depth` a valid index");
@@ -288,12 +333,14 @@ fn link(path: &mut Vec<usize>, peak: &mut Vec<usize>, depth: usize, limit: usize
 
 /// Sets the path cost at `depth`.
 fn set(path: &mut Vec<usize>, depth: usize, value: usize) {
+    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
     grow(path, depth);
     path[depth] = value;
 }
 
 /// Retains the deeper of the current and completed nested paths.
 fn raise(path: &mut Vec<usize>, depth: usize, value: usize) {
+    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
     grow(path, depth);
     path[depth] = path[depth].max(value);
 }
@@ -336,7 +383,9 @@ fn identifier_end(text: &str, at: usize) -> Option<usize> {
 
     if !rustc_lexer::is_id_start(first) {
         // #[gamma::skip(option.none_to_some, reason = "claiming punctuation starts a zero-width identifier leaves the outer scanner non-progressing")]
-        return None;
+        return
+        // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+        None;
     }
 
     Some(
@@ -366,6 +415,49 @@ mod tests {
     use super::super::comment::scan_comments;
     use super::super::source_file::line_starts;
     use super::*;
+
+    #[test]
+    fn postfix_operator_markers_preserve_the_exact_last_link_before_an_open_delimiter() {
+        for operator in ["?", ">"] {
+            let at_limit = format!("{}()", operator.repeat(3));
+            let beyond_limit = format!("{}()", operator.repeat(4));
+            assert_eq!(beyond(&at_limit, &[], 2), None, "{at_limit}");
+            assert_eq!(beyond(&beyond_limit, &[], 2), Some(4), "{beyond_limit}");
+        }
+        for literal in ["\"text\"", "'q'", "r#\"text\"#"] {
+            let source = format!("++++{literal} \"second\" +");
+            assert_eq!(beyond(&source, &[], 1), None, "{source}");
+        }
+    }
+
+    #[test]
+    fn repeated_casts_and_unrelated_tokens_clear_only_current_else_markers() {
+        for separator in ["as T ", "value ", "\"text\" ", "; ", ", "] {
+            let source = format!("if ready {{}} {separator}else {{}}");
+            assert_eq!(beyond(&source, &[], 2), None, "{source}");
+        }
+        assert_eq!(beyond("((((1))))", &[], 4), None);
+        assert_eq!(beyond("((((1))))+", &[], 4), Some(9));
+    }
+
+    #[test]
+    fn a_cast_clears_the_current_else_marker_even_when_opaque_macro_tokens_omit_its_type() {
+        let source = "m!{ if a {} ++ as else }";
+        assert_eq!(beyond(source, &[], 3), None);
+    }
+
+    #[test]
+    fn nested_sibling_boundaries_keep_peak_and_base_costs_at_the_current_depth() {
+        for (source, limit, expected) in [
+            ("(------1;())+++", 3, Some(14)),
+            ("((1),(()))", 2, Some(6)),
+            ("!!!call(())", 3, None),
+            ("(())()", 3, Some(4)),
+            ("m!{----1 2 ++++++++}", 3, Some(18)),
+        ] {
+            assert_eq!(beyond(source, &[], limit), expected, "{source}");
+        }
+    }
 
     #[test]
     fn public_shape_guard_accumulates_unary_cost_across_mixed_groups() {

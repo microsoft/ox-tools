@@ -128,7 +128,10 @@ impl<'args> HarnessFilters<'args> {
     pub(super) fn selecting(&self) -> Vec<&'args str> {
         // Each stored argument is pushed at most once, and the tail appends every filter, so this
         // sum is an upper bound available up front.
-        let mut args: Vec<&str> = Vec::with_capacity(self.flags.len() + self.filters.len());
+        let mut args: Vec<&str> = Vec::with_capacity(
+            // #[gamma::skip(arith.add_to_mul, reason = "Only private initial allocation capacity changes; subsequent pushes/writes determine identical output contents.", tag = "equivalent")]
+            self.flags.len() + self.filters.len(),
+        );
         let mut index = 0;
 
         while let Some(flag) = self.flags.get(index) {
@@ -141,6 +144,7 @@ impl<'args> HarnessFilters<'args> {
 
             // #[gamma::skip(stmt.delete_assign, arith.add_to_mul, tag = "timeout", reason = "the argument cursor must advance even for valueless flags")]
             // #[gamma::skip(arith.add_to_sub, literal.int_decrement, tag = "outofmemory", reason = "a zero cursor step repeatedly accumulates the same argument")]
+            // #[gamma::skip(assign.add_to_mul, tag = "outofmem", reason = "multiplication leaves the initially zero argument cursor at zero, repeatedly accumulating the same flag and value")]
             index += 1 + usize::from(value.is_some());
         }
 
@@ -164,6 +168,7 @@ fn without_test_threads<'args>(flags: &[&'args str]) -> Vec<&'args str> {
         }
         // #[gamma::skip(stmt.delete_assign, arith.add_to_mul, arith.add_to_sub, tag = "timeout", reason = "the argument cursor must advance past the flag and any value")]
         // #[gamma::skip(literal.int_decrement, tag = "outofmemory", reason = "a zero cursor step repeatedly accumulates the same argument")]
+        // #[gamma::skip(assign.add_to_mul, tag = "timeout", reason = "multiplication leaves the initially zero cursor at zero instead of advancing past the flag and any value")]
         index += 1 + usize::from(value.is_some());
     }
 
@@ -305,6 +310,6 @@ mod tests {
         let raw = args(&["parser", "lexer"]);
         let parsed = HarnessFilters::parse(&raw);
         assert_eq!(parsed.selecting(), ["parser", "lexer"]);
-        assert!(parsed.flags().is_empty());
+        assert_eq!(parsed.flags().len(), 0);
     }
 }

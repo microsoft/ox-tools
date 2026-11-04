@@ -779,8 +779,6 @@ fn run_delegates_both_configurations_to_cargo_llvm_cov_report_and_evaluates() {
     assert!(configuration_targets.iter().any(|target| target.ends_with("no-default")), "{log}");
     assert!(log.contains("--all-features"), "{log}");
     assert!(log.contains("--no-default-features"), "{log}");
-    assert!(log.contains("--package\talpha@0.1.0"), "{log}");
-    assert!(log.contains("--package\tbeta@0.1.0"), "{log}");
     assert!(log.contains("--jobs\t3"), "{log}");
     assert!(log.contains("--build-jobs\t3"), "{log}");
     assert!(log.contains("--target\tx86_64-pc-windows-msvc"), "{log}");

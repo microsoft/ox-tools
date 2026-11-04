@@ -456,6 +456,30 @@ mod tests {
     }
 
     #[test]
+    fn dotted_metric_names_create_a_map_without_splitting_other_characters() {
+        static XRAY_DEF: MetricDef = MetricDef {
+            name: "xray.count",
+            description: "A metric whose prefix contains x",
+            category: MetricCategory::Community,
+            extractor: |_| None,
+            default_value: || None,
+        };
+        let metrics = [
+            Metric::with_value(&XRAY_DEF, MetricValue::UInt(7)),
+            Metric::with_value(&STARS_DEF, MetricValue::UInt(9)),
+        ];
+        let context = build_cel_context(&metrics, test_timestamp());
+        assert_eq!(
+            Program::compile("xray").unwrap().execute(&context).unwrap(),
+            Value::Map(Map::from(std::collections::HashMap::from([(
+                Arc::new("count".to_owned()),
+                Value::UInt(7),
+            )])))
+        );
+        assert_eq!(Program::compile("stars").unwrap().execute(&context).unwrap(), Value::UInt(9));
+    }
+
+    #[test]
     #[cfg_attr(miri, ignore)]
     fn test_multiple_dotted_prefixes() {
         let metrics = vec![

@@ -61,6 +61,7 @@ fn physical_with_filesystem(
                         Ok(symlink) => symlink,
 
                         Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => {
+                            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
                             append(
                                 &mut resolved,
                                 core::iter::once(*component).chain(components[at + 1..].iter().copied()),
@@ -92,7 +93,9 @@ fn physical_with_filesystem(
                         .map_err(|cause| error!("could not read the link `{candidate}` while resolving `{path}`").caused_by(cause))?;
                     let target = Utf8PathBuf::from_path_buf(target)
                         .map_err(|target| error!("the link `{candidate}` has a non-UTF-8 target `{}`", target.display()))?;
-                    let mut next = if target.is_absolute() { target } else { resolved.join(target) };
+                    let mut next = if
+                    // #[gamma::skip(cond.always_false, reason = "For an absolute target, Path::join replaces the base with that absolute target. Thus target directly versus resolved.join(target) yields the same absolute path on Unix and Windows; relative targets already take join in both versions.", tag = "equivalent")]
+                    target.is_absolute() { target } else { resolved.join(target) };
 
                     for remaining in &components[at + 1..] {
                         next.push(remaining.as_str());
@@ -162,7 +165,22 @@ pub(crate) fn reject_collisions(outputs: &[(&str, &Utf8Path)]) -> Result<()> {
 /// Parent components must survive until [`physical`] has followed preceding symlinks: `link/..`
 /// names the parent of the link's target, not necessarily the parent of the link itself.
 fn absolute(path: &Utf8Path) -> Result<Utf8PathBuf> {
-    absolute_with_current_dir(path, std::env::current_dir)
+    absolute_with_current_dir(path, current_directory)
+}
+
+#[cfg(test)]
+type CurrentDirectoryProvider = Box<dyn FnMut() -> std::io::Result<PathBuf>>;
+#[cfg(test)]
+thread_local! {
+    static CURRENT_DIRECTORY: std::cell::RefCell<Option<CurrentDirectoryProvider>> = const { std::cell::RefCell::new(None) };
+}
+
+fn current_directory() -> std::io::Result<PathBuf> {
+    #[cfg(test)]
+    if let Some(result) = CURRENT_DIRECTORY.with_borrow_mut(|provider| provider.as_mut().map(|provider| provider())) {
+        return result;
+    }
+    std::env::current_dir()
 }
 
 fn absolute_with_current_dir(path: &Utf8Path, current_dir: impl FnOnce() -> std::io::Result<PathBuf>) -> Result<Utf8PathBuf> {
@@ -187,6 +205,7 @@ fn lexical(path: &Utf8Path) -> Result<Utf8PathBuf> {
     let absolute = absolute(path)?;
     let mut normalized = Utf8PathBuf::new();
 
+    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
     append(&mut normalized, absolute.components());
 
     Ok(normalized)
@@ -244,6 +263,48 @@ mod current_directory_tests {
 #[cfg(all(test, not(miri)))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    #[cfg(windows)]
+    #[test]
+    fn recovered_drive_relative_symlink_target_propagates_the_restarted_current_directory_error() {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                CURRENT_DIRECTORY.with_borrow_mut(|provider| *provider = None);
+            }
+        }
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+        CURRENT_DIRECTORY.with_borrow_mut(|provider| {
+            assert!(provider.is_none());
+            *provider = Some(Box::new({
+                let calls = std::rc::Rc::clone(&calls);
+                move || {
+                    calls.set(calls.get() + 1);
+                    Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+                }
+            }));
+        });
+        let _reset = Reset;
+        let path = Utf8Path::new(r"C:\synthetic\alias");
+        let target = std::path::PathBuf::from(r"Q:relative");
+        assert!(!path.parent().unwrap().as_std_path().join(&target).is_absolute());
+        let mut links = 0;
+        let failure = physical_with_filesystem(
+            path,
+            |candidate| {
+                assert_eq!(candidate, path);
+                links += 1;
+                Ok(target.clone())
+            },
+            |candidate| Ok(candidate == path),
+        )
+        .unwrap_err();
+        assert_eq!(
+            failure.message(),
+            r"could not resolve the current directory while resolving `Q:relative`"
+        );
+        assert_eq!((links, calls.get()), (1, 1));
+    }
+
     use std::collections::VecDeque;
     #[cfg(any(unix, windows))]
     use std::ffi::OsString;

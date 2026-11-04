@@ -99,8 +99,15 @@ fn taplo_validates_emitted_toml_files() {
 #[test]
 fn actionlint_validates_emitted_workflows() {
     let tmp = run_with_backend("github");
+    let mut workflows = std::fs::read_dir(tmp.path().join(".github/workflows"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "yml" || extension == "yaml"))
+        .collect::<Vec<_>>();
+    workflows.sort();
+    assert!(!workflows.is_empty(), "the GitHub backend must emit workflows to validate");
     let mut cmd = Command::new("actionlint");
-    cmd.current_dir(tmp.path());
+    cmd.args(workflows).current_dir(tmp.path());
     let Some(out) = try_run(&mut cmd) else {
         eprintln!("skipping: actionlint not installed");
         return;
@@ -137,6 +144,7 @@ fn just_lists_emitted_recipes() {
         ("anvil-pr", "# Run all pull request checks."),
         ("anvil-pr-fast", "# Run the fast pull request checks."),
         ("anvil-pr-msrv", "# Run pull request compatibility tests under the declared MSRV."),
+        ("anvil-pr-fuzzing", "# Run the pull request fuzzing smoke checks."),
         ("anvil-pr-mutants", "# Run the pull request mutation tests."),
         ("anvil-pr-runtime-analysis", "# Run the pull request runtime analysis."),
         ("anvil-pr-slow", "# Run the slow pull request checks."),

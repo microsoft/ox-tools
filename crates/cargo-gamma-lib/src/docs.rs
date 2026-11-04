@@ -207,7 +207,12 @@ fn value_of(argument: &clap::Arg) -> String {
 fn help_of(argument: &clap::Arg) -> String {
     let mut text = argument.get_help().map(ToString::to_string).unwrap_or_default().replace('\n', " ");
 
-    if !text.is_empty() && !text.ends_with(['.', '!', '?']) {
+    if !text.is_empty()
+        && !text.ends_with(
+            // #[gamma::skip(collection.reverse_array, reason = "The character array is a pattern membership set; reversing its order leaves every match unchanged.", tag = "equivalent")]
+            ['.', '!', '?'],
+        )
+    {
         text.push('.');
     }
 

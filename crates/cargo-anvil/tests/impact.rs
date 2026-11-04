@@ -10,11 +10,11 @@
 //!
 //! These exercise the *runtime* behavior of the emitted `impact.just`
 //! recipe (not just its emitted text): the expensive base-ref snapshot
-//! (`baseline.json`, keyed on the *composite* of the base commit sha and the
-//! effective `.delta.toml` identity) is regenerated when the base moves *or*
-//! the cargo-delta config changes, the cheap working-tree snapshot
-//! (`current.json`, keyed on the HEAD sha) is regenerated only when HEAD
-//! moves, and a no-op invocation reuses both. (The config half of the
+//! (`baseline.json`, keyed on the base commit sha, effective `.delta.toml`
+//! identity, and pinned cargo-delta version) is regenerated when any input
+//! changes. The cheap working-tree snapshot (`current.json`, keyed on the HEAD
+//! sha and pinned tool version) is regenerated when either changes, and a no-op
+//! invocation reuses both. (The config input of the
 //! baseline key is what `baseline_regenerates_when_delta_config_changes_without_moving_the_base`
 //! pins -- it stops a warm cache from diffing snapshots taken under different
 //! cargo-delta rules.)
@@ -536,12 +536,12 @@ fn current_snapshot_ignores_tracked_target_changes_without_moving_head() {
     if !tools_available() {
         return;
     }
-    // The current-snapshot key is the HEAD sha ALONE -- deliberately NOT a hash
+    // The current-snapshot key uses HEAD and the pinned tool version, NOT a hash
     // of `git diff HEAD`, so that tracked content under `target/` (where the
     // impact cache itself lives) can never perturb it. This pins that contract:
     // a tracked `target/` file modified WITHOUT moving HEAD must be a full cache
     // hit. A `git diff`-based key would regenerate the current snapshot here;
-    // the HEAD-only key must not. (The dirty-tree guard also excludes `target/`,
+    // the HEAD-and-version key must not. (The dirty-tree guard also excludes `target/`,
     // so the modification does not widen either.)
     let tmp = workspace();
     let root = tmp.path();
@@ -1647,8 +1647,8 @@ fn consume_input_override_reads_complete_cache_and_fails_closed() {
 
 /// Invoke the emitted `_anvil-impact-format` helper directly against a
 /// hand-written impact JSON file, returning (trimmed stdout, stderr, success).
-/// This exercises the formatter's mapping logic -- name/lib/proc-macro
-/// resolution and fail-hard on unmappable names -- in isolation from the
+/// This exercises exact package-name resolution and fail-hard on unmappable
+/// names in isolation from the
 /// snapshot/cache machinery, which the snapshot tests only pin as emitted *text*.
 fn run_format(root: &Path, tier: &str, impact_json_rel: &str) -> (String, String, bool) {
     if !root.join("Cargo.lock").exists() {
@@ -1676,8 +1676,8 @@ fn impact_format_fails_hard_on_unmappable_name() {
     // A cargo-delta report naming a package that resolves to no workspace
     // member must fail the recipe (non-zero exit), NOT emit the mapped subset
     // or --skip -- either of which would silently UNDER-scope and skip a check
-    // that should run. cargo-delta reports (non-unique) library identifiers, so
-    // an unmappable name signals a gap in our reverse-mapping that must surface.
+    // that should run. An unmappable package name signals a report/metadata
+    // mismatch that must surface.
     let tmp = workspace();
     let root = tmp.path();
     // A valid member (`alpha`) plus a name that maps to nothing here.
@@ -1694,17 +1694,12 @@ fn impact_format_fails_hard_on_unmappable_name() {
 
 #[test]
 #[serial]
-fn impact_format_maps_proc_macro_target_name_to_its_package() {
+fn impact_format_resolves_proc_macro_by_package_name() {
     if !tools_available() {
         return;
     }
-    // cargo-delta reports *target* names (snake_case). A proc-macro crate whose
-    // package name differs from its target name (`my-macro` vs `my_macro`) must
-    // still resolve to `--package my-macro@<version>` via the proc-macro branch
-    // of the lib-target lookup. An unmappable target name no longer widens to
-    // --workspace -- `_anvil-impact-format` fails the whole run (see
-    // `impact_format_fails_hard_on_unmappable_name`) -- so a mapping miss here
-    // would abort scoping rather than silently cost a full-workspace run.
+    // The package name must resolve even when Cargo infers a different
+    // proc-macro target name (`my-macro` vs `my_macro`).
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();
     write(
@@ -1729,13 +1724,13 @@ fn impact_format_maps_proc_macro_target_name_to_its_package() {
     run_update(&Catalog::anvil(), &args, root).unwrap();
 
     let fixture = "impact-fixture.json";
-    write(&root.join(fixture), "{\"Affected\":[\"my_macro\"]}\n");
+    write(&root.join(fixture), "{\"Affected\":[\"my-macro\"]}\n");
 
     let (stdout, stderr, ok) = run_format(root, "affected", fixture);
     assert!(ok, "the formatter must exit 0:\nstderr: {stderr}");
     assert_eq!(
         stdout, "--package my-macro@0.3.0",
-        "the proc-macro target `my_macro` must map back to its package `my-macro`:\nstdout: {stdout}\nstderr: {stderr}"
+        "the proc-macro package `my-macro` must resolve by package name:\nstdout: {stdout}\nstderr: {stderr}"
     );
 }
 

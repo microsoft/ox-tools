@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 use ohno::{AppError, IntoAppError as _, bail};
 
 use crate::decision::Decision;
+#[cfg(any(test, feature = "test-util"))]
 use crate::io::resolve_existing_case_insensitive;
 use crate::manifest::{Manifest, RegionKey};
 
@@ -73,10 +74,10 @@ pub struct PlanItem {
     /// The full host-file body after a region write or removal.
     /// `None` for owned files; only owned files can produce proposals.
     pub spliced_host: Option<String>,
-    /// Checksum of [`Self::rendered`], populated when `rendered` is
-    /// `Some`. The manifest records it for `Write`, `Propose` and `InSync`
-    /// whenever it is present, so a decision that leaves it `None` leaves
-    /// the previously recorded checksum untouched.
+    /// Checksum of catalog-owned content. Repository-file patches and
+    /// marker-only repairs do not record a checksum. The manifest records
+    /// it for `Write`, `Propose` and `InSync` whenever it is present, so a
+    /// decision that leaves it `None` leaves the previous checksum untouched.
     pub rendered_checksum: Option<String>,
     /// Structural JSON array selector whose provenance must be retained in
     /// the manifest. `None` for every other plan item.
@@ -149,6 +150,20 @@ impl PlanItem {
             rendered: Some(rendered),
             spliced_host: None,
             rendered_checksum: Some(checksum),
+            json_array_path: None,
+            json_scanner: false,
+        }
+    }
+
+    /// Patch an existing repository-owned file without recording whole-file ownership.
+    #[must_use]
+    pub(crate) fn patch_file(path: impl Into<String>, rendered: String) -> Self {
+        Self {
+            target: Target::File { path: path.into() },
+            decision: Decision::Write,
+            rendered: Some(rendered),
+            spliced_host: None,
+            rendered_checksum: None,
             json_array_path: None,
             json_scanner: false,
         }
@@ -364,8 +379,7 @@ impl Plan {
     ///
     /// When `previous_manifest` is provided, `Write` items are split
     /// into "Will create" (no prior manifest entry) and "Will update"
-    /// (existing entry getting refreshed) per
-    /// [`updates.md §9`](../../docs/design/updates.md). The stale-entries
+    /// (existing entry getting refreshed). The stale-entries
     /// section enumerates manifest entries that were present before
     /// this run but are no longer in the plan; these are purged on
     /// non-dry-run application (see [`Plan::apply`]).
@@ -382,13 +396,14 @@ impl Plan {
         for item in &self.items {
             match item.decision {
                 Decision::Write => {
-                    let existed = previous_manifest.is_some_and(|m| match &item.target {
-                        Target::File { path } => m.files.contains_key(path),
-                        Target::Region { host, id } => m.regions.contains_key(&RegionKey {
-                            host: host.clone(),
-                            id: id.clone(),
-                        }),
-                    });
+                    let existed = matches!(&item.target, Target::File { .. }) && item.rendered_checksum.is_none()
+                        || previous_manifest.is_some_and(|m| match &item.target {
+                            Target::File { path } => m.files.contains_key(path),
+                            Target::Region { host, id } => m.regions.contains_key(&RegionKey {
+                                host: host.clone(),
+                                id: id.clone(),
+                            }),
+                        });
                     if existed {
                         updates.push(item);
                     } else {
@@ -444,8 +459,7 @@ impl Plan {
     /// - `Propose` items write a `.anvil-proposed` sibling and
     ///   bump the manifest entry to the new template checksum so
     ///   subsequent runs see the divergence as resolved
-    ///   (`LeaveAlone`) until the template moves again — see
-    ///   the [update protocol](../../docs/design/updates.md).
+    ///   (`LeaveAlone`) until the template moves again.
     /// - `InSync` items refresh their manifest checksum; `LeaveAlone`
     ///   items preserve their existing manifest entries.
     /// - Stale entries — items present in `previous_manifest` but not
@@ -463,15 +477,17 @@ impl Plan {
     /// items must carry a spliced host. These invariants are enforced
     /// by the `PlanItem::*` constructors, so violations only happen if
     /// callers build `PlanItem` directly with inconsistent fields.
+    #[cfg(any(test, feature = "test-util"))]
     pub fn apply(&self, repo_root: &Path, previous_manifest: &Manifest) -> Result<Manifest, AppError> {
         self.apply_files(repo_root)?;
         Ok(self.projected_manifest(previous_manifest))
     }
 
-    /// Apply only the owned-file and managed-region changes.
+    /// Apply owned-file changes, managed-region changes, and repository-file patches.
     ///
     /// Manifest projection is deliberately separate so dry-run and real
     /// application calculate the same next `.anvil.lock`.
+    #[cfg(any(test, feature = "test-util"))]
     pub(crate) fn apply_files(&self, repo_root: &Path) -> Result<(), AppError> {
         self.apply_files_with(
             repo_root,
@@ -485,7 +501,7 @@ impl Plan {
         clippy::expect_used,
         reason = "the expects encode invariants enforced by the PlanItem constructors"
     )]
-    fn apply_files_with(
+    pub(crate) fn apply_files_with(
         &self,
         repo_root: &Path,
         operations: (
@@ -626,7 +642,7 @@ fn write_section(out: &mut String, header: &str, items: &[&PlanItem]) {
 ///
 /// Returns an error if the repository root cannot be resolved, or if the path
 /// resolves outside it.
-fn contained_path(repo_root: &Path, relpath: &str) -> Result<PathBuf, AppError> {
+pub(crate) fn contained_path(repo_root: &Path, relpath: &str) -> Result<PathBuf, AppError> {
     let abs = repo_root.join(relpath);
     let root = repo_root
         .canonicalize()
@@ -663,7 +679,7 @@ fn contained_path(repo_root: &Path, relpath: &str) -> Result<PathBuf, AppError> 
     }
 }
 
-fn write_file(path: &Path, content: &str) -> Result<(), AppError> {
+pub(crate) fn write_file(path: &Path, content: &str) -> Result<(), AppError> {
     write_file_with(path, content, write_temporary_file)
 }
 
@@ -709,6 +725,59 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn ordinary_plan_items_never_claim_structural_json_ownership() {
+        let target = || Target::Region {
+            host: "settings.json".to_owned(),
+            id: "ordinary".to_owned(),
+        };
+        for item in [
+            PlanItem::repair_region("settings.json", "ordinary", "repaired".to_owned()),
+            PlanItem::noop(target(), Decision::LeaveAlone),
+            PlanItem::insync(target(), "checksum".to_owned()),
+            PlanItem::write_file("owned.json", "{}".to_owned(), "checksum".to_owned()),
+            PlanItem::patch_file("repository.json", "{}".to_owned()),
+            PlanItem::propose_file("owned.json", "{}".to_owned(), "checksum".to_owned()),
+            PlanItem::write_region(
+                "settings.json",
+                "ordinary",
+                "body".to_owned(),
+                "host".to_owned(),
+                "checksum".to_owned(),
+            ),
+            PlanItem::remove_file("owned.json"),
+            PlanItem::remove_region("settings.json", "ordinary", "remaining".to_owned()),
+            PlanItem::orphaned_kept(target()),
+        ] {
+            assert_eq!(item.json_array_path, None, "{item:?}");
+            assert!(!item.json_scanner, "{item:?}");
+            let mut plan = Plan::default();
+            plan.push(item);
+            let next = plan.projected_manifest(&Manifest::default());
+            assert!(next.json_array_paths.is_empty());
+            assert!(next.json_scanner_hosts.is_empty());
+        }
+    }
+
+    #[test]
+    fn scanner_provenance_survives_an_ordinary_in_sync_region() {
+        let mut plan = Plan::default();
+        plan.push(
+            PlanItem::insync(
+                Target::Region {
+                    host: "settings.json".to_owned(),
+                    id: "ordinary".to_owned(),
+                },
+                "checksum".to_owned(),
+            )
+            .with_json_scanner(),
+        );
+        let next = plan.projected_manifest(&Manifest::default());
+        assert_eq!(next.json_scanner_hosts, BTreeSet::from(["settings.json".to_owned()]));
+        assert!(next.json_array_paths.is_empty());
+        assert_eq!(next.region_checksum("settings.json", "ordinary"), Some("checksum"));
+    }
 
     #[test]
     fn checksum_update_requires_a_matching_region_with_a_rendered_checksum() {
@@ -923,12 +992,59 @@ mod tests {
     }
 
     #[test]
+    fn repository_file_patches_apply_without_claiming_ownership() {
+        let mut plan = Plan::default();
+        plan.push(PlanItem::patch_file(".github/dependabot.yml", "patched".to_owned()));
+        assert_eq!(plan.dry_run_exit_code(), 1);
+        assert_eq!(
+            plan.summary(None),
+            "cargo-anvil plan: 1 item(s)\nWill update: 1 item(s)\n  - .github/dependabot.yml\n"
+        );
+        assert_eq!(plan.projected_manifest(&Manifest::default()), Manifest::default());
+
+        let root = Path::new("memory");
+        let mut written = false;
+        plan.apply_files_with(
+            root,
+            (
+                |_, path| Ok(path.to_owned()),
+                |root, path| Ok(root.join(path)),
+                |path, text| {
+                    assert_eq!(path, root.join(".github/dependabot.yml"));
+                    assert_eq!(text, "patched");
+                    written = true;
+                    Ok(())
+                },
+                |_| panic!("patching a repository file must never delete anything"),
+            ),
+        )
+        .unwrap();
+        assert!(written);
+    }
+
+    #[test]
+    fn survivor_repository_patches_and_untracked_region_repairs_have_distinct_summaries() {
+        let mut plan = Plan::default();
+        plan.push(PlanItem::patch_file(".github/dependabot.yml", "patched".to_owned()));
+        plan.push(PlanItem::repair_region("config.toml", "settings", "repaired".to_owned()));
+        assert_eq!(
+            plan.summary(None),
+            concat!(
+                "cargo-anvil plan: 2 item(s)\n",
+                "Will create: 1 item(s)\n  - config.toml [settings]\n",
+                "Will update: 1 item(s)\n  - .github/dependabot.yml\n",
+            )
+        );
+    }
+
+    #[test]
     fn plan_item_constructors_set_only_their_documented_payloads() {
         let cases = [
             PlanItem::repair_region("host", "id", "spliced".to_owned()),
             PlanItem::noop(Target::File { path: "noop".to_owned() }, Decision::LeaveAlone),
             PlanItem::insync(Target::File { path: "sync".to_owned() }, "sync-sum".to_owned()),
             PlanItem::write_file("write", "body".to_owned(), "body-sum".to_owned()),
+            PlanItem::patch_file("repository", "patch".to_owned()),
             PlanItem::propose_file("propose", "proposal".to_owned(), "proposal-sum".to_owned()),
             PlanItem::write_region(
                 "host",
@@ -959,6 +1075,7 @@ mod tests {
                 (Decision::LeaveAlone, None, None, None),
                 (Decision::InSync, None, None, Some("sync-sum")),
                 (Decision::Write, Some("body"), None, Some("body-sum")),
+                (Decision::Write, Some("patch"), None, None),
                 (Decision::Propose, Some("proposal"), None, Some("proposal-sum")),
                 (Decision::Write, Some("region-body"), Some("region-splice"), Some("region-sum")),
                 (Decision::Remove, None, None, None),
@@ -1607,5 +1724,33 @@ mod tests {
         .expect_err("temporary write errors return instead of panicking");
         assert!(error.to_string().contains("injected temporary write failure"), "{error}");
         assert_eq!(fs::read_to_string(&destination).expect("destination remains readable"), "original");
+    }
+    #[test]
+    fn regression_structural_provenance_and_tracking_are_projected_without_io() {
+        let target = Target::Region {
+            host: "config.json".to_owned(),
+            id: "entries".to_owned(),
+        };
+        let item = PlanItem::insync(target.clone(), "checksum".to_owned()).with_json_array_path(vec!["items".to_owned()]);
+        assert!(item.json_scanner);
+        assert_eq!(item.json_array_path, Some(vec!["items".to_owned()]));
+        let mut previous = Manifest::default();
+        previous.json_scanner_hosts.insert("previous.json".to_owned());
+        let mut plan = Plan::default();
+        plan.push(item);
+        assert_eq!(
+            plan.projected_manifest(&previous).json_scanner_hosts,
+            BTreeSet::from(["config.json".to_owned(), "previous.json".to_owned()])
+        );
+        assert!(!plan.region_tracking_removed("config.json", "entries"));
+        plan.push(PlanItem::orphaned_kept(target));
+        assert!(plan.region_tracking_removed("config.json", "entries"));
+        assert!(!plan.region_tracking_removed("other.json", "entries"));
+        assert!(!plan.region_tracking_removed("config.json", "other"));
+        plan.set_json_scanner_hosts(BTreeSet::new());
+        assert_eq!(
+            plan.projected_manifest(&previous).json_scanner_hosts,
+            BTreeSet::from(["config.json".to_owned()])
+        );
     }
 }

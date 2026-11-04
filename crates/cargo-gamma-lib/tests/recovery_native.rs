@@ -126,7 +126,7 @@ fn survivor_resume_snapshot(
     artifacts: &[serde_json::Value],
 ) -> serde_json::Value {
     serde_json::json!({
-        "version": 2, "tool": env!("CARGO_PKG_VERSION"),
+        "version": 3, "tool": env!("CARGO_PKG_VERSION"),
         "platform": format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
         "plan": plan, "confidences": {}, "session": measured,
         "oracle": { "packages": ["subject"], "package_local": true, "whole_workspace": false },
@@ -138,7 +138,7 @@ fn survivor_resume_snapshot(
             "resources": { "capacities": {}, "binaries": {} }
         },
         "settings": { "jobs": 1, "mutators": "all", "timeout_floor": Duration::from_secs(1),
-            "confirm": false, "narrowed": false, "incremental": false },
+            "narrowed": false, "incremental": false },
         "killers": empty_execution_killers(),
         "record": {
             "report_info": serde_json::json!({"startedAt": 77, "populationComplete": true}),
@@ -450,7 +450,7 @@ fn recovery_finished_sweep_with_pending_mutants_reenters_execution_instead_of_pu
         snapshot
     );
     assert_eq!(fs::read(base.join("testing-phase.json")).unwrap(), phase);
-    assert!(fs::read(base.join("testing-verdicts.jsonl")).unwrap().is_empty());
+    assert_eq!(fs::read(base.join("testing-verdicts.jsonl")).unwrap(), [] as [u8; 0]);
 }
 
 #[test]
@@ -678,7 +678,7 @@ fn partial_exact_id_ledger_cannot_suppress_unrecorded_same_mutator_sites() {
     observed.outcome = Outcome::Timeout;
     let record = RunRecord::from_run(&root, &[observed], &ContextDigest::default(), &[root.join("src")]);
     let (plan, stale) = partial_plan(&root, &record).unwrap();
-    assert!(stale.is_empty());
+    assert_eq!(stale, [] as [std::string::String; 0]);
     assert!(plan.mutants.len() > 1);
     assert_eq!(plan.mutants.iter().filter(|mutant| mutant.outcome == Outcome::Timeout).count(), 1);
     assert!(

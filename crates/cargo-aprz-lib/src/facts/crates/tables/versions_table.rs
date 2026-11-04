@@ -234,7 +234,47 @@ impl VersionsTable {
 mod tests {
     use chrono::TimeZone as _;
 
+    use super::super::{RowReader, RowWriter, Table};
     use super::*;
+
+    #[test]
+    fn malformed_urls_are_logged_and_omitted_without_corrupting_the_version_row() {
+        let input = CsvVersionRow {
+            id: "1",
+            crate_id: "2",
+            num: "1.2.3",
+            downloads: "3",
+            edition: "2021",
+            created_at: "2020-01-01 00:00:00+00",
+            updated_at: "2020-01-02 00:00:00+00",
+            description: "kept description",
+            features: "{}",
+            license: "MIT",
+            rust_version: "1.70",
+            yanked: "t",
+            documentation: "[invalid",
+            homepage: "[invalid",
+        };
+        let mut bytes = Vec::new();
+        let logs = crate::facts::test_logging::capture_logs(|| {
+            let mut writer = RowWriter::new(&mut bytes);
+            VersionsTable::write_row(&input, &mut writer).unwrap();
+            writer.row_done().unwrap();
+        });
+        bytes.extend_from_slice(&[0; 10]);
+        let row = VersionsTable::read_row(&mut RowReader::new(&bytes));
+        assert_eq!(row.documentation(), None);
+        assert_eq!(row.homepage(), None);
+        assert_eq!(row.description, "kept description");
+        assert!(row.yanked);
+        assert_eq!(
+            logs.into_iter().map(|(_, _, message)| message).collect::<Vec<_>>(),
+            [
+                "invalid documentation URL in versions table for version 1.2.3 (crate '2'): unable to parse URL from '[invalid'",
+                "invalid homepage URL in versions table for version 1.2.3 (crate '2'): unable to parse URL from '[invalid'",
+            ]
+        );
+    }
 
     #[test]
     fn edition_maps_rust_2021_explicitly() {
