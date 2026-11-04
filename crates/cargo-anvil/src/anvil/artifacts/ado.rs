@@ -311,6 +311,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain generated-pipeline text contracts; artifact construction and focused template checks remain interpreted"
+    )]
     fn check_hooks_default_to_empty_steps_and_surround_check_work() {
         for artifact in [before_checks(), after_checks()] {
             let Artifact::OwnedFile(spec) = artifact else {
@@ -350,6 +354,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain generated-pipeline text contracts; artifact construction and focused template checks remain interpreted"
+    )]
     fn setup_step_takes_group_parameter_and_dispatches() {
         assert!(SETUP_STEP.contains("name: group"));
         assert!(SETUP_STEP.contains("just anvil-setup"));
@@ -444,6 +452,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain generated-pipeline text contracts; artifact construction and focused template checks remain interpreted"
+    )]
     fn job_wrapper_declares_expected_contract() {
         for needle in [
             "name: name",

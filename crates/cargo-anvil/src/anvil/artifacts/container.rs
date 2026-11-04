@@ -295,6 +295,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain the generated launcher snapshot; artifact construction and rendering remain interpreted"
+    )]
     fn container_launcher_recipe_contract() {
         let (_, launcher) = RECIPE
             .split_once("anvil-container *command:\n")
@@ -516,6 +520,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain generated-recipe text contracts; artifact construction and rendering remain interpreted"
+    )]
     fn the_tag_is_computed_in_exactly_one_place() {
         // `anvil-container-tag` is public so a publisher can name the image it
         // is about to build. That only holds while it is the same computation
@@ -593,6 +601,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain generated-recipe text contracts; artifact construction and rendering remain interpreted"
+    )]
     fn resolver_context_is_optional_and_uses_the_selected_engine() {
         assert!(RECIPE.contains("$resolveArgs = @{}"));
         assert!(RECIPE.contains("if ($parameters.ContainsKey('Engine') -and $parameters.ContainsKey('EnginePrefix'))"));
@@ -722,6 +734,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain generated-recipe text contracts; artifact construction and rendering remain interpreted"
+    )]
     fn hook_file_is_an_image_input_but_hook_output_is_not() {
         // A changed hook must rename the tag; a minted credential must not. The
         // hook is picked up by the walk of `.anvil/container/`, which is what
@@ -771,6 +787,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain generated-recipe text contracts; artifact construction and rendering remain interpreted"
+    )]
     fn empty_hook_values_fail_closed() {
         // Both phases, asserted independently: "for" alone is a substring of
         // the build-side message, so it would pass with the run-side guard
@@ -795,6 +815,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain generated-recipe text contracts; artifact construction and rendering remain interpreted"
+    )]
     fn wsl_calls_bypass_the_login_shell() {
         // `wsl.exe -- <cmd>` re-parses the command line through the default
         // shell: a path holding `$` is silently truncated (and wslpath still
@@ -817,6 +841,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain generated-recipe text contracts; artifact construction and rendering remain interpreted"
+    )]
     fn teardown_reports_a_removal_that_failed() {
         // $ErrorActionPreference does not cover native commands, and this is
         // the only way to clear a cache volume.
@@ -825,6 +853,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain generated-recipe text contracts; artifact construction and rendering remain interpreted"
+    )]
     fn a_mapped_user_gets_a_writable_home() {
         // A uid with no passwd entry is given HOME=/, which is not writable.
         assert!(RECIPE.contains("$runArgs += @('--user', \"${hostUid}:${hostGid}\")"));
@@ -1047,6 +1079,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain generated-recipe text contracts; artifact construction and rendering remain interpreted"
+    )]
     fn the_dockerfile_must_carry_the_canonical_name() {
         // The engine reads the ignore file as `<dockerfile>.dockerignore` and
         // anvil maintains it at `.anvil/container/Dockerfile.dockerignore`, so

@@ -490,6 +490,10 @@ mod tests {
 
     // Each resolver runs in its own PowerShell process and needs its own runtime checks.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain generated-recipe text contracts; artifact construction and focused recipe checks remain interpreted"
+    )]
     fn selection_resolvers_enable_strict_mode() {
         for declaration in ["_anvil-impact-exclude tier:", "_anvil-workspace-exclude +specs:"] {
             let (_, body) = IMPACT_JUST
@@ -529,6 +533,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain generated-recipe text contracts; artifact construction and focused recipe checks remain interpreted"
+    )]
     fn each_check_file_defines_its_own_check_recipe() {
         // The file `checks/<name>.just` must define `anvil-<name>` -- guards
         // against a mis-split that files a check's recipe under the wrong name.
@@ -912,6 +920,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain generated-recipe text contracts; artifact construction and focused recipe checks remain interpreted"
+    )]
     fn tiers_just_template_has_three_tiers() {
         for needle in ["anvil-pr:", "anvil-scheduled:", "anvil-full:", "_anvil-scheduled:", "_anvil-full:"] {
             assert!(TIERS_JUST.contains(needle), "tiers.just missing '{needle}'");
@@ -966,6 +978,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain generated-recipe text contracts; artifact construction and focused recipe checks remain interpreted"
+    )]
     fn versions_just_has_known_tools() {
         for needle in [
             "cargo_nextest_version",

@@ -221,6 +221,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain exhaustive built-in catalog membership; focused catalog mutation and artifact construction remain interpreted"
+    )]
     fn every_registry_entry_is_in_the_anvil_catalog() {
         let catalog = Catalog::anvil();
         let present = |artifact: &Artifact| catalog.artifacts().iter().any(|a| a == artifact);
@@ -296,6 +300,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain the generated-marker scan; artifact construction and rendering remain interpreted"
+    )]
     fn every_owned_file_identifies_cargo_anvil_as_its_generator() {
         for artifact in anvil_artifacts() {
             if let Artifact::OwnedFile(spec) = artifact {
@@ -312,6 +320,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain exhaustive built-in path validation; focused catalog path validation remains interpreted"
+    )]
     fn justfiles_only_contains_just_recipes() {
         // `CatalogBuilder::build` enforces this for every derived catalog;
         // `Catalog::anvil` is assembled directly from parts, so assert the

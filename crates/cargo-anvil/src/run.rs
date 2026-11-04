@@ -2424,6 +2424,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain the exhaustive resolver-error matrix; focused resolver and JSON planner tests remain interpreted"
+    )]
     fn regression_json_plan_propagates_each_resolution_boundary() {
         thread_local! {
             static RESOLUTION: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((usize::MAX, 0)) };
@@ -2869,6 +2873,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain multi-host refusal aggregation; focused JSON lexical validation and retirement tests remain interpreted"
+    )]
     fn every_unsafe_retiring_json_host_is_refused_once_and_other_hosts_still_retire() {
         let mut manifest = Manifest::default();
         manifest.set_file("a.json", checksum_str("{\"previously_owned\":true}\n"));
@@ -3133,6 +3141,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain missing-host orchestration; focused scaffolding, cache and JSON planner tests remain interpreted"
+    )]
     fn json_array_missing_host_skips_preflight_repair_and_scaffolds() {
         let catalog = Catalog::builder(test_cli())
             .with_json_array_region(crate::JsonArrayRegionSpec {
@@ -3202,6 +3214,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain both configuration spellings; focused Dependabot patching and in-memory planning remain interpreted"
+    )]
     fn github_generation_patches_either_dependabot_spelling_without_tracking_it() {
         let source = "version: 2\nupdates:\n- package-ecosystem: github-actions\n  directory: /\n  schedule: {interval: weekly}\n";
         for (configurations, path) in [
@@ -3393,6 +3409,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain refused configuration retirement policy; focused patching, refusal and retirement tests remain interpreted"
+    )]
     fn dependabot_patches_preserve_refused_retired_region_bodies() {
         let original = "version: 2\nupdates:\n- package-ecosystem: github-actions\n  directory: /\n";
         let edited = format!("{original}  schedule: {{interval: monthly}}\n");
@@ -3430,6 +3450,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain duplicate configuration retirement policy; focused configuration refusal and retirement tests remain interpreted"
+    )]
     fn dependabot_duplicate_spellings_include_refused_retired_configs() {
         let source = "version: 2\nupdates:\n- package-ecosystem: github-actions\n  directory: /\n";
         let edited = format!("{source}  schedule: {{interval: monthly}}\n");
@@ -3476,6 +3500,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain configuration retirement policy; focused Dependabot patching and retirement tests remain interpreted"
+    )]
     fn dependabot_file_removal_disambiguates_the_remaining_configuration() {
         let source = "version: 2\nupdates:\n- package-ecosystem: github-actions\n  directory: /\n";
         for (retired, remaining) in [
@@ -3511,6 +3539,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain customized configuration retirement policy; focused patching, refusal and retirement tests remain interpreted"
+    )]
     fn dependabot_customized_file_retirement_still_allows_the_unowned_patch() {
         let source = "version: 2\nupdates:\n- package-ecosystem: github-actions\n  directory: /\n";
         let catalog = Catalog::builder(test_cli())
@@ -3565,6 +3597,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain configuration ownership policy; focused Dependabot patching and ownership tests remain interpreted"
+    )]
     fn dependabot_patches_do_not_overwrite_catalog_owned_configuration() {
         let source = "version: 2\nupdates:\n- package-ecosystem: github-actions\n  directory: /\n";
         for owner in [
@@ -3668,6 +3704,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain the complete retirement policy scenario; focused retirement and lexical tests remain interpreted"
+    )]
     fn survivor_retirement_continues_after_ambiguity_and_ignores_xml_cdata_evidence() {
         let text = "<!--\n# >>> anvil-managed: retired\nhash\n# <<< anvil-managed: retired\n-->\n<root>\n\
                     <![CDATA[\n<!-- >>> anvil-managed: retired -->\nxml\n<!-- <<< anvil-managed: retired -->\n]]>\n</root>\n";
@@ -3703,11 +3743,19 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain every resolver failure; focused cache-error tests and successful planning remain interpreted"
+    )]
     fn survivor_every_host_resolution_failure_is_returned_before_publication() {
         assert_host_resolution_failures(Path::new("in-memory-owned-file-resolution"), true);
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain every resolver failure; focused cache-error tests and successful planning remain interpreted"
+    )]
     fn survivor_region_host_resolution_failures_are_returned_before_publication() {
         assert_host_resolution_failures(Path::new("in-memory-survivor-resolution"), false);
     }
@@ -3798,11 +3846,6 @@ mod tests {
             "the failure-injection loop must exercise at least one resolution boundary"
         );
         for fail_at in 0..calls {
-            // Native/cargo-careful cover every boundary; Miri retains early,
-            // intermediate, and late errors plus the complete successful plan.
-            if cfg!(miri) && fail_at != 0 && fail_at != calls / 2 && fail_at != calls - 1 {
-                continue;
-            }
             RESOLUTION.with(|state| state.set((fail_at, 0)));
             let error = run().unwrap_err().to_string();
             assert!(
@@ -3942,6 +3985,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain the cross-host identity scenario; focused catalog and single-host planning tests remain interpreted"
+    )]
     fn array_and_plain_regions_can_share_an_id_without_sharing_a_host() {
         let catalog = array_catalog(
             Some(RegionSpec {
@@ -3979,6 +4026,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain the retirement whitespace matrix; focused TOML splicing and planner lifecycle tests remain interpreted"
+    )]
     fn toml_array_retirement_preserves_adjacent_repository_bytes() {
         let catalog = array_catalog(None, true);
         let empty = Catalog::builder(catalog.cli().clone()).build().unwrap();
@@ -4026,7 +4077,8 @@ mod tests {
             .build()
             .unwrap();
         let empty = Catalog::builder(test_cli()).build().unwrap();
-        for newline in ["\n", "\r\n", "\r"] {
+        let newlines: &[&str] = if cfg!(miri) { &["\r\n"] } else { &["\n", "\r\n", "\r"] };
+        for &newline in newlines {
             let source = lf_source.replace('\n', newline);
             let introduced = json_array_plan(&source, &Manifest::default(), &catalog).unwrap();
             let managed = introduced.items()[0].spliced_host.as_deref().unwrap();
@@ -4068,6 +4120,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain the ownership migration scenario; focused JSON scanner, splicing and lifecycle tests remain interpreted"
+    )]
     fn introducing_json_array_retires_legacy_ordinary_region_with_recorded_scanner() {
         let array = crate::JsonArrayRegionSpec {
             region: RegionSpec {
@@ -4891,6 +4947,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain preflight repair orchestration; focused marker repair and JSON lifecycle tests remain interpreted"
+    )]
     fn json_array_live_region_repairs_redundant_marker_before_preflight() {
         let array = crate::JsonArrayRegionSpec {
             region: RegionSpec {
@@ -4911,6 +4971,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain preflight repair orchestration; focused marker repair and JSON lifecycle tests remain interpreted"
+    )]
     fn json_array_retirement_repairs_redundant_marker_before_preflight() {
         let empty = Catalog::builder(test_cli()).build().unwrap();
 
@@ -4922,6 +4986,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain multi-region preflight coalescing; focused preflight and marker-repair tests remain interpreted"
+    )]
     fn json_array_preflight_coalesces_repairs_for_multiple_regions() {
         let mut builder = Catalog::builder(test_cli());
         let mut manifest = Manifest::default();
@@ -5234,6 +5302,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain scanner-provenance policy; focused scanner and region-preservation tests remain interpreted"
+    )]
     fn edited_region_keeps_host_scanner_with_empty_catalog() {
         let source = concat!(
             "{\n",
@@ -5314,6 +5386,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain scanner-provenance retirement policy; focused scanner and JSON lifecycle tests remain interpreted"
+    )]
     fn ordinary_region_keeps_json_scanner_after_final_array_retirement() {
         let settings = RegionSpec {
             host: HostSelector::Path("config.json".to_owned()),
@@ -5411,6 +5487,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain renamed-selector provenance; focused selector, scanner and planning tests remain interpreted"
+    )]
     fn case_renamed_structural_region_keeps_selector_when_catalog_becomes_ordinary() {
         let ordinary = RegionSpec {
             host: HostSelector::Path("config.json".to_owned()),
@@ -5486,6 +5566,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain refused-region scanner policy; focused scanner, refusal and retirement tests remain interpreted"
+    )]
     fn untracked_refused_region_keeps_host_scanner_after_array_retirement() {
         let settings = RegionSpec {
             host: HostSelector::Path("config.json".to_owned()),
@@ -5594,6 +5678,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain the neighbor-order policy matrix; focused JSON duplicate validation and splicing tests remain interpreted"
+    )]
     fn json_array_required_entries_refuse_later_neighbor_duplicates_in_both_orders() {
         let array = crate::JsonArrayRegionSpec {
             region: RegionSpec {
@@ -5638,6 +5726,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain cross-region visibility policy; focused JSON lexical, marker and splicing tests remain interpreted"
+    )]
     fn json_array_required_entries_refuse_neighbor_that_hides_structural_region() {
         let neighbor = RegionSpec {
             host: HostSelector::Path("config.json".to_owned()),
@@ -5704,6 +5796,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain requirement application ordering; focused JSON validation and planner lifecycle tests remain interpreted"
+    )]
     fn json_array_updates_activate_requirements_in_application_order() {
         let array = |id: &'static str, path: &'static str, value: &str| crate::JsonArrayRegionSpec {
             region: RegionSpec {
@@ -5756,6 +5852,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain region/requirement application ordering; focused JSON validation and planner lifecycle tests remain interpreted"
+    )]
     fn ordinary_region_may_update_before_independent_json_array_requirement() {
         let source = concat!(
             "{\n",
@@ -5804,6 +5904,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain cross-region refusal policy; focused JSON duplicate validation and splicing tests remain interpreted"
+    )]
     fn json_array_plan_refuses_neighbor_that_introduces_duplicate_properties() {
         let catalog = json_array_catalog()
             .into_builder()
@@ -5837,6 +5941,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain cross-region refusal policy; focused JSON marker validation and splicing tests remain interpreted"
+    )]
     fn json_array_plan_refuses_neighbor_that_introduces_nested_markers() {
         let catalog = json_array_catalog()
             .into_builder()
@@ -5996,6 +6104,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain both neighbor orders; focused TOML splicing and planner lifecycle tests remain interpreted"
+    )]
     fn toml_array_plan_allows_independent_neighbors_in_either_order() {
         let source =
             "[plugins]\ndefault = [\"user\"]\n\n# >>> anvil-managed: settings\n[settings]\nmode = true\n# <<< anvil-managed: settings\n";
@@ -6020,6 +6132,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain the multi-deletion adoption matrix; focused Unicode, TOML adoption and planner lifecycle tests remain interpreted"
+    )]
     fn survivor_table_adoption_preserves_arrays_between_multiple_deletions() {
         for (source, body) in [
             (
@@ -6040,11 +6156,6 @@ mod tests {
                     syntax: CommentSyntax::Hash,
                 };
                 for array_first in [false, true] {
-                    // Native/cargo-careful retain the Cartesian matrix; Miri
-                    // pairs LF/CRLF with opposite orders for both TOML shapes.
-                    if cfg!(miri) && array_first != (newline == "\r\n") {
-                        continue;
-                    }
                     let catalog = array_catalog(Some(neighbor.clone()), array_first);
                     let plan = array_plan(&source, &Manifest::default(), &catalog).unwrap();
                     assert_eq!(plan.refusals().len(), 0);
@@ -6072,6 +6183,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain adoption error publication ordering; focused adoption, refusal and planner tests remain interpreted"
+    )]
     fn survivor_parent_table_adoption_returns_its_array_dependency_error_before_publication() {
         struct Restore(usize);
         impl Drop for Restore {
@@ -6099,6 +6214,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain both adoption orders and retirement; focused TOML adoption and planner lifecycle tests remain interpreted"
+    )]
     fn toml_array_neighbor_adoption_preserves_the_array_between_edits() {
         let source = "[settings]\nmode = true\n\n[plugins]\ndefault = [\"user\"]\n";
         let expected = "[plugins]\ndefault = [\n  # >>> anvil-managed: entries\n  \"required\",\n  # <<< anvil-managed: entries\n\"user\"]\n\n# >>> anvil-managed: settings\n[settings]\nmode = true\n# <<< anvil-managed: settings\n";
@@ -6236,6 +6355,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain the migration/refusal matrix; focused TOML validation, refusal and planning tests remain interpreted"
+    )]
     fn toml_array_plan_refuses_header_dependencies_and_partial_migrations() {
         let header = "# >>> anvil-managed: parent\n[plugins]\n# <<< anvil-managed: parent\n";
         let entries = "default = [\n# >>> anvil-managed: entries\n\"required\",\n# <<< anvil-managed: entries\n\"user\"]\n";
@@ -6364,6 +6487,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain syntax-alias policy; focused identity, resolution and TOML planning tests remain interpreted"
+    )]
     fn toml_array_plan_rejects_resolved_syntax_aliases_before_planning() {
         for selector in [
             HostSelector::WorkspaceCargoToml,
@@ -6423,6 +6550,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain alias-resolution policy; focused identity, resolution and TOML planning tests remain interpreted"
+    )]
     fn toml_array_plan_rejects_absent_owned_file_aliases() {
         for (array_host, owned_path) in [
             ("config.toml", "CONFIG.toml"),
@@ -8118,6 +8249,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain publication ordering across hosts; focused retirement, refusal and planning tests remain interpreted"
+    )]
     fn survivor_retirement_repairs_precede_live_writes_even_after_an_unrelated_refusal() {
         let catalog = Catalog::builder(test_cli())
             .with_artifact(Artifact::region(campaign_region("z.txt", "live", "new\n")))

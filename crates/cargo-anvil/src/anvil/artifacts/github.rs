@@ -219,6 +219,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain generated-workflow text contracts; artifact construction and focused template checks remain interpreted"
+    )]
     fn setup_action_takes_group_input_and_dispatches() {
         assert!(SETUP_ACTION.contains("group:"));
         assert!(SETUP_ACTION.contains("just anvil-setup binstall"));
@@ -255,6 +259,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain generated-workflow text contracts; artifact construction and focused template checks remain interpreted"
+    )]
     fn aggregate_gate_depends_on_every_validation_job() {
         let jobs = PR_IMPL_WORKFLOW.split_once("\njobs:\n").expect("PR workflow defines jobs").1;
         let all_jobs = jobs
@@ -339,6 +347,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain generated-workflow text contracts; artifact construction and focused template checks remain interpreted"
+    )]
     fn pr_groups_consume_downloaded_impact_while_scheduled_defaults_off() {
         // PR group jobs download the per-OS impact artifact and run in
         // `consume` mode; scoped checks read that downloaded cache.
@@ -643,6 +655,10 @@ export -f just
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain generated-workflow text contracts; artifact construction and focused template checks remain interpreted"
+    )]
     fn pr_workflow_scopes_publication_permissions_to_the_jobs_that_use_them() {
         assert!(PR_IMPL_WORKFLOW.contains("\npermissions:\n  contents: read\n"));
         for job in ["impact-linux", "impact-windows", "required-checks"] {
@@ -684,6 +700,10 @@ export -f just
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain generated-workflow text contracts; artifact construction and focused template checks remain interpreted"
+    )]
     fn scheduled_impl_workflow_has_expected_jobs() {
         for group in SCHEDULED_GROUPS {
             let needle = format!("{group}:");
