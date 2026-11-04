@@ -2,11 +2,38 @@
 
 ## [Unreleased]
 
-## [0.23.4] - 2026-11-04
+## [0.23.5] - 2026-11-04
 
 - 🐛 Bug Fixes
 
-  - cargo-anvil: pin cargo-coverage-gate 0.7.4
+  - cargo-anvil: pin cargo-coverage-gate 0.7.4 to preserve workspace package source identities.
+
+## [0.23.4] - 2026-11-03
+
+- ✨ Features
+
+  - cargo-anvil: pin cargo-coverage-gate 0.7.3 ([#329](https://github.com/microsoft/ox-tools/pull/329))
+
+- 🐛 Bug Fixes
+
+  - cargo-anvil: drop test-only PowerShell 7.6 restriction ([#337](https://github.com/microsoft/ox-tools/pull/337))
+  - make SemVer checks reproducible with locked API snapshots ([#334](https://github.com/microsoft/ox-tools/pull/334))
+  - cargo-anvil: isolate mutation diffs and normalize Git prefixes ([#323](https://github.com/microsoft/ox-tools/pull/323))
+  - cargo-anvil: prepare the Miri sysroot during setup
+
+- ✔️ Tasks
+
+  - update dependencies, build tools, actions, and Rust ([#330](https://github.com/microsoft/ox-tools/pull/330))
+  - cargo-anvil: refresh release notes for 0.21.1
+
+- 🧩 Miscellaneous
+
+  - Merge main and regenerate cargo-anvil 0.23.3 metadata
+  - Merge main and regenerate cargo-anvil 0.23.2 metadata
+  - Merge main and synchronize cargo-anvil 0.23.1 catalog metadata
+  - Adopt cargo-gamma in Anvil and remediate campaign survivors ([#327](https://github.com/microsoft/ox-tools/pull/327))
+  - Merge main and synchronize cargo-anvil 0.22.1 catalog metadata
+  - Merge main and synchronize cargo-anvil 0.21.2 metadata
 
 ## [0.23.3] - 2026-11-03
 
