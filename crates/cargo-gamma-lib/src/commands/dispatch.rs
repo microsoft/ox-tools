@@ -361,6 +361,12 @@ pub(super) fn dispatch<H: Host>(host: &mut H, cli: Cli, styler: Styler) -> crate
             {
                 return Ok(code);
             }
+            #[cfg(target_os = "linux")]
+            if args.resume_testing
+                && let Some(code) = super::run::resume_relaunch(host, &args)?
+            {
+                return Ok(code);
+            }
 
             let campaign = run_session(host, &args, args.progress, styler);
             let promotion = HintsArgs {

@@ -647,6 +647,11 @@ therefore fail when promotion fails. Normal nonzero mutation, expectation,
 score-gate, incomplete-population, and build-stuck outcomes still attempt
 promotion but retain the campaign exit code if promotion fails; an operational
 error that prevents a reportable campaign outcome does not attempt promotion.
+The option conflicts with `--dry-run`, because a preview writes no campaign
+record and therefore has no new hints to promote. When Linux resume testing
+delegates to a child process for memory control, that child owns both the
+campaign and any requested promotion; the parent returns its status without
+promoting again.
 The run's selected workspace and effective cache directory are passed to the
 existing hints command, preserving its locking, partial-record preference,
 merge, concurrency, and atomic-publication behavior.
