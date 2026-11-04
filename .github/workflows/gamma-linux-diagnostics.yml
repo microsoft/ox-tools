@@ -1,0 +1,83 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+name: Diagnose Linux exhaustive runner loss
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [makolnek-microsoft-scheduled-build-timings]
+    paths:
+      - .github/workflows/gamma-linux-diagnostics.yml
+      - scripts/gamma-linux-diagnostics.py
+
+permissions:
+  contents: read
+
+jobs:
+  scheduled-exhaustive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
+      checks: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          lfs: true
+      - name: Start crash-surviving diagnostics
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          python3 -u scripts/gamma-linux-diagnostics.py \
+            "$RUNNER_TEMP/anvil-scheduled-exhaustive.log" \
+            > "$RUNNER_TEMP/gamma-linux-monitor.log" 2>&1 &
+          echo "$!" > "$RUNNER_TEMP/gamma-linux-monitor.pid"
+          for attempt in {1..30}; do
+            if test -f "$RUNNER_TEMP/anvil-scheduled-exhaustive.log.ready"; then
+              cat "$RUNNER_TEMP/anvil-scheduled-exhaustive.log.ready"
+              exit 0
+            fi
+            if ! kill -0 "$(cat "$RUNNER_TEMP/gamma-linux-monitor.pid")" 2>/dev/null; then
+              cat "$RUNNER_TEMP/gamma-linux-monitor.log"
+              exit 1
+            fi
+            sleep 2
+          done
+          cat "$RUNNER_TEMP/gamma-linux-monitor.log"
+          echo "::error::Remote diagnostics did not become ready; refusing an unobserved rerun."
+          exit 1
+      - id: exhaustive
+        uses: ./.github/actions/anvil-run-group
+        with:
+          group: scheduled-exhaustive
+      - name: Finish diagnostics
+        if: always()
+        env:
+          EXHAUSTIVE_OUTCOME: ${{ steps.exhaustive.outcome }}
+        shell: bash
+        run: |
+          echo "$EXHAUSTIVE_OUTCOME" > "$RUNNER_TEMP/anvil-scheduled-exhaustive.log.done"
+          for attempt in {1..30}; do
+            if test -f "$RUNNER_TEMP/anvil-scheduled-exhaustive.log.finished"; then
+              cat "$RUNNER_TEMP/gamma-linux-monitor.log"
+              exit 0
+            fi
+            sleep 2
+          done
+          cat "$RUNNER_TEMP/gamma-linux-monitor.log"
+          echo "::error::Remote diagnostics did not finish."
+          exit 1
+      - name: Preserve local diagnostic history
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: gamma-linux-runner-diagnostics
+          path: |
+            ${{ runner.temp }}/gamma-linux-monitor.log
+            ${{ runner.temp }}/anvil-scheduled-exhaustive.log
+            ${{ runner.temp }}/anvil-scheduled-exhaustive.log.samples.jsonl
+          if-no-files-found: error
+          retention-days: 30
