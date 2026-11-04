@@ -799,7 +799,7 @@ mod tests {
     }
 
     #[test]
-    fn update_hints_forwards_run_paths_and_propagates_operational_errors() {
+    fn update_hints_forwards_run_paths() {
         let mut args = super::super::cli::RunArgs::default();
         args.select.dir = camino::Utf8PathBuf::from("selected-workspace");
         args.measure.cache_dir = Some(camino::Utf8PathBuf::from("effective-cache"));
@@ -807,7 +807,10 @@ mod tests {
         let promotion = promotion_args(&args);
         assert_eq!(promotion.dir, args.select.dir);
         assert_eq!(promotion.cache_dir, args.measure.cache_dir);
+    }
 
+    #[test]
+    fn update_hints_propagates_operational_errors_without_promotion() {
         let promoted = core::cell::Cell::new(false);
         let error = finish_run_command(
             &mut crate::testing::Sink::default(),
@@ -822,7 +825,10 @@ mod tests {
         .expect_err("an operational campaign error must propagate through command completion");
         assert_eq!(error.message(), "campaign broke");
         assert!(!promoted.get(), "an operational campaign error must not promote hints");
+    }
 
+    #[test]
+    fn update_hints_returns_successful_promotion_status() {
         let promoted = core::cell::Cell::new(false);
         let code = finish_run_command(&mut crate::testing::Sink::default(), Ok(EXIT_OK), true, Styler::new(false), |_| {
             promoted.set(true);
