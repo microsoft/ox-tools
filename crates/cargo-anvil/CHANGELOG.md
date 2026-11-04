@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-11-04
+
+- ⚡ Performance
+
+  - cargo-anvil: streamline PR checks and isolate Linux fuzzing ([#336](https://github.com/microsoft/ox-tools/pull/336))
+
 ## [0.23.5] - 2026-11-04
 
 - 🐛 Bug Fixes

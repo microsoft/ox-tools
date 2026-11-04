@@ -144,15 +144,41 @@ fn loom_does_not_globally_limit_exploration() {
 }
 
 #[test]
-fn bolero_uses_its_supported_release_profile_option() {
-    assert!(
-        BOLERO.contains("bolero test --profile release"),
-        "bolero execution must select the release profile with cargo-bolero's supported option"
-    );
+fn bolero_uses_the_nightly_host_and_supported_release_profile() {
+    for command in ["list", "test"] {
+        assert!(
+            BOLERO.contains(&format!("bolero {command} --profile release --target $hostTarget")),
+            "bolero {command} must select the same compiler host and supported release profile"
+        );
+    }
     assert!(
         !BOLERO.contains("bolero test --release"),
-        "cargo-bolero 0.13.4 does not accept Cargo's --release shorthand"
+        "cargo-bolero does not accept Cargo's --release shorthand"
     );
+}
+
+#[test]
+fn bolero_campaign_policy_defaults_to_fixed_pr_runs() {
+    let declaration = BOLERO
+        .lines()
+        .find(|line| line.starts_with("anvil-bolero "))
+        .expect("the Bolero template declares its parameterized recipe");
+    assert_eq!(declaration.split_once(':').unwrap().0, "anvil-bolero campaign=\"pr\"");
+    let policy = BOLERO
+        .split_once("    $campaignArgs = switch ($campaign) {\n")
+        .expect("the Bolero template selects a campaign argument set")
+        .1
+        .split_once("\n    }\n")
+        .expect("the campaign switch has a closing brace")
+        .0;
+    insta::assert_snapshot!(policy, @r#"
+        'pr' { @('--runs', '30000', '-S', '2027') }
+        'scheduled' { @('-T', '90s') }
+        default {
+            [Console]::Error.WriteLine("anvil-bolero: unknown campaign '$campaign'; expected 'pr' or 'scheduled'.")
+            exit 2
+        }
+    "#);
 }
 
 #[test]
@@ -2432,7 +2458,7 @@ fn bolero_full_workspace_discovery_enumerates_every_member() {
     );
     for package in ["fixture@0.1.0", "other-package@0.1.0"] {
         assert!(
-            calls.contains(&format!("each --package {package} -- cargo +nightly-test bolero test --profile release --target aarch64-unknown-linux-gnu --engine libfuzzer -T 60s --package {{cargo-spec}} fuzz_target")),
+            calls.contains(&format!("each --package {package} -- cargo +nightly-test bolero test --profile release --target aarch64-unknown-linux-gnu --engine libfuzzer --runs 30000 -S 2027 --package {{cargo-spec}} fuzz_target")),
             "discovery and execution must use the same pinned compiler host target:\n{calls}"
         );
     }

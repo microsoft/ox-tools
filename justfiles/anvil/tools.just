@@ -896,8 +896,8 @@ anvil-tool-cargo-audit-validate-prereqs: (_check-tool "cargo-audit" cargo_audit_
 # is likewise Linux-only. oxidizer's reference workflow runs bolero
 # exclusively on ubuntu, so anvil follows suit: the install/validate
 # pair and the anvil-bolero check self-skip on non-Linux hosts.
-# The pr-runtime-analysis Windows/ARM legs therefore
-# treat bolero as a no-op rather than a setup failure.
+# Local non-Linux invocations therefore treat bolero
+# as a no-op rather than a setup failure; CI schedules pr-fuzzing on Linux only.
 
 # Install the pinned `cargo-bolero` tool.
 [private]

@@ -47,11 +47,12 @@ flowchart LR
     pr_evt([PR build-validation<br/>branch policy]):::trigger
     pr_root[".pipelines/<br/>anvil-pr.yml<br/>(root, ~15 lines)"]:::root
     pr_stages[".pipelines/anvil/pr.yml<br/>(stages template)"]:::impl
-    impact_s["stage: impact_linux + stage: impact_windows<br/>(2 stages;<br/>outputs consumed by every group below)"]:::stage
+    impact_s["stage: impact<br/>(linux + windows jobs;<br/>artifacts consumed by every group below)"]:::stage
     pr_fast_s["stage: pr_fast<br/>linux + windows jobs"]:::stage
     pr_test_s["stage: pr_test<br/>linux + windows jobs"]:::stage
     pr_msrv_s["stage: pr_msrv<br/>linux + windows jobs"]:::stage
     pr_runtime_analysis_s["stage: pr_runtime_analysis<br/>linux + windows jobs"]:::stage
+    pr_fuzzing_s["stage: pr_fuzzing<br/>linux job only"]:::stage
     pr_mutants_s["stage: pr_mutants<br/>linux + windows jobs"]:::stage
     impact_step[".pipelines/anvil/<br/>steps/impact.yml"]:::step
     impact_setup[".pipelines/anvil/<br/>steps/setup.yml"]:::step
@@ -59,11 +60,13 @@ flowchart LR
     test_setup[".pipelines/anvil/<br/>steps/setup.yml"]:::step
     msrv_setup[".pipelines/anvil/<br/>steps/setup.yml"]:::step
     runtime_setup[".pipelines/anvil/<br/>steps/setup.yml"]:::step
+    fuzzing_setup[".pipelines/anvil/<br/>steps/setup.yml"]:::step
     mutants_setup[".pipelines/anvil/<br/>steps/setup.yml"]:::step
     fast_step[".pipelines/anvil/<br/>steps/pr-fast.yml"]:::step
     test_step[".pipelines/anvil/<br/>steps/pr-test.yml"]:::step
     msrv_step[".pipelines/anvil/<br/>steps/pr-msrv.yml"]:::step
     runtime_step[".pipelines/anvil/<br/>steps/pr-runtime-analysis.yml"]:::step
+    fuzzing_step[".pipelines/anvil/<br/>steps/pr-fuzzing.yml"]:::step
     mutants_step[".pipelines/anvil/<br/>steps/pr-mutants.yml"]:::step
     publish_coverage["PublishCodeCoverageResults@2"]:::external
     fast_just["just anvil-pr-fast"]:::recipe
@@ -76,6 +79,8 @@ flowchart LR
     msrv_setup_just["just anvil-setup"]:::recipe
     runtime_just["just anvil-pr-runtime-analysis"]:::recipe
     runtime_setup_just["just anvil-setup"]:::recipe
+    fuzzing_just["just anvil-pr-fuzzing"]:::recipe
+    fuzzing_setup_just["just anvil-setup"]:::recipe
     mutants_just["just anvil-pr-mutants"]:::recipe
     mutants_setup_just["just anvil-setup"]:::recipe
 
@@ -86,6 +91,7 @@ flowchart LR
     pr_stages --> pr_test_s
     pr_stages --> pr_msrv_s
     pr_stages --> pr_runtime_analysis_s
+    pr_stages --> pr_fuzzing_s
     pr_stages --> pr_mutants_s
 
     impact_s ==> impact_step
@@ -94,6 +100,7 @@ flowchart LR
     pr_msrv_s ==> msrv_step
     pr_test_s ==> publish_coverage
     pr_runtime_analysis_s ==> runtime_step
+    pr_fuzzing_s ==> fuzzing_step
     pr_mutants_s ==> mutants_step
 
     impact_step ==> impact_setup
@@ -106,6 +113,8 @@ flowchart LR
     msrv_step ==> msrv_just
     runtime_step ==> runtime_setup
     runtime_step ==> runtime_just
+    fuzzing_step ==> fuzzing_setup
+    fuzzing_step ==> fuzzing_just
     mutants_step ==> mutants_setup
     mutants_step ==> mutants_just
 
@@ -114,6 +123,7 @@ flowchart LR
     test_setup ==> test_setup_just
     msrv_setup ==> msrv_setup_just
     runtime_setup ==> runtime_setup_just
+    fuzzing_setup ==> fuzzing_setup_just
     mutants_setup ==> mutants_setup_just
 
     classDef trigger fill:#fff4d6,stroke:#b08800,stroke-width:1px;
@@ -125,7 +135,7 @@ flowchart LR
     classDef recipe fill:#f3e8ff,stroke:#6f42c1,stroke-width:1px;
 ```
 
-(Every job in `pr_fast`, `pr_test`, `pr_msrv`, `pr_runtime_analysis`, and
+(Every job in `pr_fast`, `pr_test`, `pr_msrv`, `pr_runtime_analysis`, `pr_fuzzing`, and
 `pr_mutants` is rendered through the per-job wrapper at `steps/job.yml`; that
 uniform indirection is elided from the diagram. See §4.1 for the wrapper's role
 as a 1ESPT extensibility point.)
@@ -226,6 +236,7 @@ Note the ADO topology differs from GitHub Actions in two places:
         ├── pr-test.yml            owned
         ├── pr-msrv.yml            owned
         ├── pr-runtime-analysis.yml            owned
+        ├── pr-fuzzing.yml            owned
         ├── pr-mutants.yml            owned
         ├── scheduled-test.yml        owned
         ├── scheduled-advisories.yml  owned
@@ -353,9 +364,9 @@ extends:
 
 The `extends:` keyword, the resources block, and the pool definitions are entirely the
 user's business. anvil's `pr.yml` is a plain stages template that drops in unchanged.
-The default matrix is Linux + Windows in all cases — adopters who want a narrower or
-wider matrix edit the emitted stages template directly (taking ownership via the
-dirty-file flow).
+The default matrix is Linux + Windows except for the Linux-only `pr_fuzzing`
+stage. Adopters who want a narrower or wider matrix edit the emitted stages
+template directly (taking ownership via the dirty-file flow).
 
 ## 4. Owned stages templates
 
@@ -376,7 +387,7 @@ wiring layer's. This means moving a check between groups (e.g. `clippy` from `pr
 `scheduled-advisories`) never changes the stages template.
 
 The PR template also contains a `pr_msrv` stage. It runs in parallel with
-`pr_test`, `pr_runtime_analysis`, and `pr_mutants`, uses the same Linux and Windows
+`pr_test`, `pr_runtime_analysis`, `pr_fuzzing`, and `pr_mutants`, uses the same Linux and Windows
 x86_64 jobs and per-OS affected-package impact sets as `pr_test`, and invokes
 `anvil-pr-msrv`. The stage consumes the per-OS impact artifact like the other PR
 groups; when the root manifest declares no MSRV, the recipe exits successfully
@@ -384,6 +395,14 @@ after reporting that it skipped the test. Otherwise it runs affected-package
 `cargo test --tests` in all-features and default-features configurations.
 Ordinary stable checks honor a caller-provided `RUSTUP_TOOLCHAIN`. The dedicated
 MSRV setup ensures the declared root MSRV is available through rustup.
+
+The independent `pr_fuzzing` stage contains only a Linux job and invokes
+`anvil-pr-fuzzing` after downloading `anvil-impact-linux`. It depends only on
+`impact`, so it runs alongside runtime analysis and mutation testing. No Windows
+job is emitted, avoiding fuzzing bootstrap and setup on unsupported hosts.
+Downstream catalogs that exclude Bolero can remove the entire `pr_fuzzing` block
+from their replacement stages artifact; check exclusion alone leaves the CI job
+and its setup in place.
 
 ### 4.1 Per-job wrapper (`steps/job.yml`) — the 1ESPT extensibility point
 
@@ -400,7 +419,7 @@ The contract is intentionally small and stable:
 | Parameter   | Type       | Required | Meaning                                                                                                                                                                                |
 |-------------|------------|----------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `name`      | `string`   | yes      | Job name; ADO derives the display name from it.                                                                                                                                        |
-| `stage`     | `string`   | no       | ADO stage this job belongs to — exactly what the stages template writes after `stage:`, and what `System.StageName` reports at runtime: `impact`, `pr_fast`, `pr_test`, `pr_msrv`, `pr_runtime_analysis`, `pr_mutants`, `scheduled_test`, `scheduled_advisories`, `scheduled_runtime_analysis`, `scheduled_exhaustive`. Per-OS job names repeat across stages, so `name` alone cannot identify one, and `templateContext:` is consumed at template-expansion time so a runtime condition on `System.StageName` is unavailable there. The default wrapper ignores it; it exists so an owned wrapper can apply per-stage settings. Unrelated to `group` in `steps/setup.yml`, which selects a check group's tool catalog. |
+| `stage`     | `string`   | no       | ADO stage this job belongs to — exactly what the stages template writes after `stage:`, and what `System.StageName` reports at runtime: `impact`, `pr_fast`, `pr_test`, `pr_msrv`, `pr_runtime_analysis`, `pr_fuzzing`, `pr_mutants`, `scheduled_test`, `scheduled_advisories`, `scheduled_runtime_analysis`, `scheduled_exhaustive`. Per-OS job names repeat across stages, so `name` alone cannot identify one, and `templateContext:` is consumed at template-expansion time so a runtime condition on `System.StageName` is unavailable there. The default wrapper ignores it; it exists so an owned wrapper can apply per-stage settings. Unrelated to `group` in `steps/setup.yml`, which selects a check group's tool catalog. |
 | `pool`      | `object`   | yes      | Pool block, passed verbatim to ADO's `pool:` key. `linuxPool` and `windowsPool` at the stage level are object parameters, so users can override their shape (e.g. `{ name, os, image }` for 1ESPT). |
 | `steps`     | `stepList` | yes      | Body of the job. Templated step lists are fine — the wrapper splices them in via `${{ each step in parameters.steps }}: - ${{ step }}`.                                                |
 | `inputArtifacts` | `object` | no  | List of pipeline artifacts to download *before* the steps run. Each item: `{ name: string, path: string }`. Default wrapper prepends one `DownloadPipelineArtifact@2` per entry; 1ESPT wrappers translate the same list into their own download mechanism (e.g. `templateContext.inputs`). This is how the impact set is shared — each PR group job downloads its OS's `anvil-impact-<os>` artifact into `target/anvil/impact` and its checks read the cache exactly as a local run. |
@@ -627,7 +646,8 @@ stages:
             - template: steps/pr-fast.yml
 
   # pr_test, pr_runtime_analysis, and pr_mutants each follow the same shape and
-  # run as independent parallel stages.
+  # run as independent parallel stages. pr_fuzzing is also independent, but
+  # contains only the Linux job.
 ```
 
 ### 4.3 How the impact result propagates between stages

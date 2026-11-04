@@ -43,7 +43,8 @@ repo/
 │   ├── groups/             one file per group: groups/<group>.just holds the
 │   │                       `anvil-<group>` recipe plus its `*-setup` /
 │   │                       `*-validate-prereqs` (anvil-pr-fast, anvil-pr-test,
-│   │                       anvil-pr-msrv, anvil-pr-runtime-analysis, anvil-pr-mutants,
+│   │                       anvil-pr-msrv, anvil-pr-runtime-analysis, anvil-pr-fuzzing,
+│   │                       anvil-pr-mutants,
 │   │                       anvil-scheduled-test, …). `anvil-pr-slow` is a
 │   │                       convenience umbrella over the pr-slow groups.
 │   ├── container.just      containerized execution (`anvil-container`). See containers.md.
@@ -147,27 +148,29 @@ any tier × group combination (e.g. the coverage-instrumented test check is name
 `llvm-cov`, not `test`, so that group names like `anvil-pr-test` unambiguously refer to a group recipe).
 
 The `pr-slow` work is split into independent cloud-workflow-visible groups
-(`pr-test`, `pr-msrv`, `pr-runtime-analysis`, `pr-mutants`) so they run as parallel cloud-workflow jobs/stages.
+(`pr-test`, `pr-msrv`, `pr-runtime-analysis`, `pr-fuzzing`, `pr-mutants`) so they run as parallel cloud-workflow jobs/stages.
 A convenience umbrella `anvil-pr-slow` recipe is also provided for local
-use; it invokes those groups sequentially. `pr-mutants` (mutants) is
-diff-scoped against the PR base; `scheduled-exhaustive` runs the
-full-workspace mutants recipe:
+use; it invokes those groups sequentially. `pr-fuzzing` runs affected-package
+Bolero smoke checks and is Linux-only in CI. `pr-mutants` is diff-scoped
+against the PR base; `scheduled-exhaustive` runs the full-workspace mutants recipe:
 
 ```just
-anvil-pr-fast: anvil-fmt anvil-clippy anvil-check-all-targets anvil-cargo-sort \
+anvil-pr-fast: anvil-fmt anvil-clippy anvil-cargo-sort \
                anvil-license-headers \
                anvil-ensure-no-cyclic-deps anvil-ensure-no-default-features \
                anvil-doc-build anvil-readme-check anvil-spellcheck anvil-pr-title \
                anvil-deny anvil-audit anvil-udeps anvil-semver-check \
                anvil-external-types anvil-aprz
 
-anvil-pr-slow: anvil-pr-test anvil-pr-msrv anvil-pr-runtime-analysis anvil-pr-mutants
+anvil-pr-slow: anvil-pr-test anvil-pr-msrv anvil-pr-runtime-analysis anvil-pr-fuzzing anvil-pr-mutants
 anvil-pr-test: anvil-llvm-cov anvil-doc-test anvil-examples
 anvil-pr-msrv: anvil-msrv-test
-anvil-pr-runtime-analysis: anvil-miri anvil-careful anvil-loom anvil-bolero
+anvil-pr-runtime-analysis: anvil-miri anvil-careful anvil-loom
+anvil-pr-fuzzing: anvil-bolero
 anvil-pr-mutants: anvil-mutants-diff
 
-anvil-scheduled-test: anvil-llvm-cov anvil-doc-test anvil-examples
+anvil-scheduled-test: anvil-check-all-targets anvil-llvm-cov anvil-doc-test anvil-examples \
+                      (anvil-bolero "scheduled")
 anvil-scheduled-advisories: anvil-deny anvil-audit anvil-aprz anvil-clippy
 anvil-scheduled-runtime-analysis: anvil-miri anvil-miri-tree-borrows \
                                   anvil-miri-strict-provenance anvil-miri-race-coverage
