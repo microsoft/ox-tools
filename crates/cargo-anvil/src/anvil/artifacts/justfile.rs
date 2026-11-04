@@ -451,6 +451,48 @@ mod tests {
         assert!(before_selection.contains("    $env:RUSTUP_TOOLCHAIN = '{{ rust_nightly }}'"));
     }
 
+    // Protect setup dependencies, the pinned command, and exit-forwarding syntax in memory;
+    // this does not execute setup or verify the prepared standard library.
+    #[test]
+    fn miri_setup_template_wires_pinned_sysroot_preparation() {
+        let miri = CHECK_FILES
+            .iter()
+            .find_map(|(path, body)| path.ends_with("/miri.just").then_some(*body))
+            .expect("miri.just is registered in CHECK_FILES");
+
+        let lines: Vec<_> = miri
+            .lines()
+            .filter(|line| !line.trim().is_empty() && !line.trim_start().starts_with('#'))
+            .collect();
+        let declaration = lines
+            .iter()
+            .position(|line| line.starts_with("anvil-miri-setup "))
+            .expect("miri.just must declare its setup recipe");
+        let start = lines[..declaration]
+            .iter()
+            .rposition(|line| !line.starts_with('['))
+            .map_or(0, |index| index + 1);
+        let end = lines[declaration + 1..]
+            .iter()
+            .position(|line| !line.starts_with("    "))
+            .map_or(lines.len(), |index| declaration + 1 + index);
+
+        assert_eq!(
+            &lines[start..end],
+            &[
+                "[private]",
+                "[script(\"pwsh\", \"-NoProfile\")]",
+                concat!(
+                    "anvil-miri-setup installer=\"install\": anvil-component-nightly-miri-install ",
+                    "anvil-component-nightly-rust-src-install",
+                ),
+                "    $ErrorActionPreference = 'Stop'",
+                "    & cargo '+{{ rust_nightly }}' miri setup",
+                "    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }",
+            ]
+        );
+    }
+
     // A missing MSRV skips without discovery; otherwise discovery inherits the validated compiler.
     #[test]
     fn msrv_selection_uses_the_validated_toolchain_after_the_no_msrv_skip() {

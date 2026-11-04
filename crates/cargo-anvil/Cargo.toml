@@ -3,7 +3,7 @@
 
 [package]
 name = "cargo-anvil"
-version = "0.23.3"
+version = "0.23.4"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
