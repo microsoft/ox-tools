@@ -1040,6 +1040,19 @@ mod tests {
     }
 
     #[test]
+    fn miri_setup_prepares_the_pinned_sysroot() {
+        let miri = CHECK_FILES
+            .iter()
+            .find_map(|(path, body)| path.ends_with("/miri.just").then_some(*body))
+            .expect("miri.just is registered in CHECK_FILES");
+        assert!(miri.contains(
+            "anvil-miri-setup installer=\"install\": anvil-component-nightly-miri-install anvil-component-nightly-rust-src-install"
+        ));
+        assert!(miri.contains("& cargo '+{{ rust_nightly }}' miri setup"));
+        assert!(miri.contains("if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }"));
+    }
+
+    #[test]
     fn impact_recipe_writes_direct_package_file_artifacts() {
         assert!(IMPACT_JUST.contains("anvil-impact:"));
         for tier in ["modified", "affected", "required"] {

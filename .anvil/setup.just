@@ -643,9 +643,13 @@ anvil-loom-validate-prereqs: anvil-tool-rustc-validate-prereqs anvil-tool-cargo-
 
 # --- pr-runtime-analysis members ---
 
-# Install prerequisites for the `anvil-miri` recipe.
+# Install prerequisites and prepare the sysroot for the `anvil-miri` recipe.
+[script("pwsh", "-NoProfile")]
 [private]
 anvil-miri-setup installer="install": anvil-component-nightly-miri-install anvil-component-nightly-rust-src-install
+    $ErrorActionPreference = 'Stop'
+    & cargo '+{{ rust_nightly }}' miri setup
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Validate prerequisites for the `anvil-miri` recipe.
 [private]

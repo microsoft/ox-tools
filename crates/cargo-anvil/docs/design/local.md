@@ -76,9 +76,9 @@ owns GitHub credential discovery.
 Scripts remain only where the domain tool has no equivalent interface:
 spell dictionary generation and container orchestration. README generation is
 two cargo-each package passes with crate-root working directories. Mutation
-diff preparation is a direct Git command guarded by cargo-each once-mode. Miri
-profiles use recipe-scoped Just environment
-attributes around a shared cargo-each runner. Cargo-careful uses an
+diff preparation is a direct Git command guarded by the affected package file.
+Miri profiles share a compile-once artifact runner with profile-specific
+environment. Cargo-careful uses an
 identity-keyed target directory; Bolero discovery uses a JSONL file consumed by
 cargo-each; PR-title policy is a Just regex; and the MSRV path uses cargo-each's
 optional workspace-version contract. The remaining scripts are not shared Anvil
@@ -157,6 +157,12 @@ run; otherwise cargo-each resolves `{workspace-rust-version}` for ordinary
 stable commands. An absent root declaration is an empty optional value:
 dedicated MSRV recipes are cargo-each `--none` no-ops, while ordinary stable
 commands use Cargo's default toolchain selection.
+
+`anvil-miri-setup` installs the Miri and rust-src components for the catalog
+nightly and runs `cargo +<nightly> miri setup`. Setup is complete only after the
+Miri sysroot is prepared successfully; repeated setup reuses Miri's cache. The
+test runner still requests `miri setup --print-sysroot` to locate the prepared
+sysroot when executing artifacts.
 
 ## 4. Impact scoping
 
