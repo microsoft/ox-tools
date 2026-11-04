@@ -184,6 +184,10 @@ fn lock_only_version_update_is_detected_and_then_idempotent() {
     assert!(update(&changed, &UpdateOptions::default(), &mut io).unwrap().in_sync);
 }
 
+#[cfg_attr(
+    miri,
+    ignore = "full-catalog generation and hashing are expensive to interpret; safe orchestration is covered by native tests and smaller Miri engine cases"
+)]
 #[test]
 fn full_catalog_workspace_discovery_and_case_resolution_use_memory() {
     let mut io = repository();
@@ -206,6 +210,10 @@ fn full_catalog_workspace_discovery_and_case_resolution_use_memory() {
     assert!(update(&Catalog::anvil(), &UpdateOptions::default(), &mut io).unwrap().in_sync);
 }
 
+#[cfg_attr(
+    miri,
+    ignore = "full-catalog generation and hashing are expensive to interpret; safe orchestration is covered by native tests and smaller Miri engine cases"
+)]
 #[test]
 fn equivalent_workspace_paths_resolve_to_the_same_memory_files() {
     for member in ["crates/alpha", "./crates/alpha", "crates/*", "./crates/*"] {
