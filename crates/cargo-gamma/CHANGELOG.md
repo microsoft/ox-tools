@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.5.0] - 2026-11-04
 
+- ✨ Features
+
+  - cargo-gamma: promote hints after runs
+
 - 🧩 Miscellaneous
 
   - Adopt cargo-gamma in Anvil and remediate campaign survivors ([#327](https://github.com/microsoft/ox-tools/pull/327))
