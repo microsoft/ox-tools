@@ -69,6 +69,19 @@ crate's dependency graph and must remain dependency-free.
 - Replaceable registry, cgroup, job-backend, and fault-injection mechanics are
   recorded in the [implementation guide](IMPLEMENTATION.md).
 
+## Process-group test isolation
+
+Invalid process-group identifiers are tested through the same rejection path
+as production, with the signalling syscall injected. A rejected identifier must
+never reach that syscall. In particular, a mutation that admits group `1` would
+otherwise make Linux's `killpg(1, SIGKILL)` broadcast to every permitted process,
+including the mutation-testing supervisor and CI runner; process-tree containment
+does not restrict which unrelated processes a signal can reach.
+
+The scripted guard tests remain mutation-tested and also run under Miri.
+Native acceptance still signals a real, freshly spawned process group and
+verifies both termination and the already-gone result.
+
 ## Portability
 
 Unix and Windows implementations are selected with target-specific

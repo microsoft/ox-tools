@@ -69,6 +69,25 @@ pub fn is_no_child_to_wait_for(cause: &io::Error) -> bool {
 /// broadcast operation. Other errors are the operating system's reason the group could not be
 /// signalled.
 pub fn kill(group: i32) -> io::Result<()> {
+    kill_with(group, |group| {
+        // SAFETY: there is no memory-safety precondition to discharge, and that is why this is sound:
+        // `killpg` is handed two integers and dereferences no caller pointer, so no value of `group` or
+        // of the signal can make it read or write memory it should not. The description follows from
+        // that — it names a group by id and delivers a signal — and its failure modes stay in-band: a
+        // group that no longer exists yields `ESRCH` through the return value, never through anything
+        // unsound. Whose group `group` names, and why the ordering around a reap matters, is a
+        // correctness obligation on the caller — see `ProcessTree::observe` in
+        // `cargo-gamma-process` — not a
+        // soundness one, because a wrong id can only signal the wrong group, not corrupt this process.
+        if unsafe { libc::killpg(group, libc::SIGKILL) } == 0 {
+            return Ok(());
+        }
+
+        map_killpg_error(io::Error::last_os_error())
+    })
+}
+
+fn kill_with(group: i32, signal: impl FnOnce(i32) -> io::Result<()>) -> io::Result<()> {
     if group <= 1 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -76,20 +95,7 @@ pub fn kill(group: i32) -> io::Result<()> {
         ));
     }
 
-    // SAFETY: there is no memory-safety precondition to discharge, and that is why this is sound:
-    // `killpg` is handed two integers and dereferences no caller pointer, so no value of `group` or
-    // of the signal can make it read or write memory it should not. The description follows from
-    // that — it names a group by id and delivers a signal — and its failure modes stay in-band: a
-    // group that no longer exists yields `ESRCH` through the return value, never through anything
-    // unsound. Whose group `group` names, and why the ordering around a reap matters, is a
-    // correctness obligation on the caller — see `ProcessTree::observe` in
-    // `cargo-gamma-process` — not a
-    // soundness one, because a wrong id can only signal the wrong group, not corrupt this process.
-    if unsafe { libc::killpg(group, libc::SIGKILL) } == 0 {
-        return Ok(());
-    }
-
-    map_killpg_error(io::Error::last_os_error())
+    signal(group)
 }
 
 /// Kills a group after its leader has been observed exiting without being reaped.
@@ -263,15 +269,6 @@ mod tests {
         let _status = child.wait().expect("reap");
     }
 
-    #[test]
-    fn killing_a_non_group_identifier_is_rejected_without_signalling() {
-        for group in [1, 0, -1, i32::MIN] {
-            let error = kill(group).expect_err("an identifier that is unsafe for killpg must be refused");
-
-            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-        }
-    }
-
     /// A real group with a live member is killed outright, and a group that has already gone is
     /// treated as a success rather than an error — `ESRCH` is what the kernel reports for both "no
     /// such process" and "no such group", so a caller sweeping a group whose leader already exited
@@ -328,6 +325,28 @@ mod tests {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod scripted_tests {
     use super::*;
+
+    #[test]
+    fn killing_a_non_group_identifier_is_rejected_without_signalling() {
+        for group in [1, 0, -1, i32::MIN] {
+            let error = kill_with(group, |group| panic!("the rejected group {group} must not reach signalling"))
+                .expect_err("an identifier that is unsafe for killpg must be refused");
+
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+            assert_eq!(error.to_string(), "process-group identifiers must be greater than one");
+        }
+    }
+
+    #[test]
+    fn killing_a_valid_group_passes_its_identifier_to_signalling_and_preserves_errors() {
+        let error = kill_with(2, |group| {
+            assert_eq!(group, 2);
+            Err(io::Error::from_raw_os_error(libc::EPERM))
+        })
+        .expect_err("the scripted signal reports a permission failure");
+
+        assert_eq!(error.raw_os_error(), Some(libc::EPERM));
+    }
 
     #[test]
     fn a_pending_waitid_result_is_not_an_exit() {
