@@ -1085,11 +1085,7 @@ mod tests {
                 .get(stem)
                 .unwrap_or_else(|| panic!("check '{stem}' is missing from EXPECTED_CHECK_POLICY; classify it explicitly"));
             let is_miri_profile = body.contains("(_anvil-miri-test \"");
-            let execution_body = if is_miri_profile {
-                miri_runner
-            } else {
-                body
-            };
+            let execution_body = if is_miri_profile { miri_runner } else { body };
 
             // Parse the package-file selector used by the recipe.
             let calls: Vec<&str> = ["modified", "affected", "required"]
