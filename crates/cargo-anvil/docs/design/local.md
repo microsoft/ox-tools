@@ -226,7 +226,7 @@ The full tool-version policy these recipes implement is detailed in §3 below.
 ### 3.1 Policy
 
 The catalog records, for each cargo subcommand, a **catalog version** (e.g.
-`cargo_nextest_version := "0.9.137"`). The pin is used two different ways:
+`cargo_nextest_version := "0.9.151"`). The pin is used two different ways:
 
 - **On install** (`anvil-tool-<bin>-install` writing into `~/.cargo/bin`): the recipe
   installs *exactly* that version (`--version '={{ pin }}'`), never `>=`. Pulling
