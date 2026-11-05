@@ -300,21 +300,13 @@ fn emit_reports_from<H: Host>(
     Ok(())
 }
 
-/// Says that the selection held no mutants, and writes the documents for that empty population.
+/// Says that the selection held no mutants, and writes the reports for that empty population.
 ///
-/// The documents replace a previous run's, which would otherwise read as this one's — to a reader,
+/// The reports replace a previous run's, which would otherwise read as this one's — to a reader,
 /// and to `explain` and `--only-survivors` alike.
-fn emit_empty<H: Host>(
-    host: &mut H,
-    args: &RunArgs,
-    plan: &Plan,
-    dropped: &[String],
-    started: Instant,
-    styler: Styler,
-) -> crate::Result<()> {
+fn emit_empty<H: Host>(host: &mut H, args: &RunArgs, plan: &Plan, dropped: &[String], styler: Styler) -> crate::Result<()> {
     writeln!(host.error(), "no mutants were generated")?;
-    emit_reports(host, args, plan, None, None, dropped, styler)?;
-    emit_diag(host, args, plan, None, started, styler)
+    emit_reports(host, args, plan, None, None, dropped, styler)
 }
 
 /// Writes the SARIF log and, when requested, the diff annotations and job summary.
@@ -1185,7 +1177,8 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
 
         progress.finish(host);
         if plan.mutants.is_empty() {
-            emit_empty(host, args, &plan, &[], started, styler)?;
+            emit_empty(host, args, &plan, &[], styler)?;
+            emit_diag(host, args, &plan, None, started, styler)?;
 
             return Ok(Executed {
                 plan: None,
@@ -1313,7 +1306,8 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
 
     report_cache(host, adopted, styler)?;
     if plan.mutants.is_empty() {
-        emit_empty(host, args, &plan, &dropped, started, styler)?;
+        emit_empty(host, args, &plan, &dropped, styler)?;
+        emit_diag(host, args, &plan, None, started, styler)?;
         warn_auxiliary(host, log_failure.as_ref(), styler);
 
         return Ok(Executed { plan: None, stuck });
@@ -6139,9 +6133,9 @@ mod tests {
         assert_eq!(code, EXIT_OK);
     }
 
-    /// An empty selection still writes its documents, which replace a previous run's.
+    /// An empty selection still writes its reports, which replace a previous run's.
     #[test]
-    fn an_empty_selection_writes_documents_for_an_empty_population() {
+    fn an_empty_selection_writes_reports_for_an_empty_population() {
         let dir = workdir("run-empty-documents-");
         let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("utf8");
         let args = RunArgs {
@@ -6163,7 +6157,7 @@ mod tests {
         };
         let mut host = Sink::default();
 
-        emit_empty(&mut host, &args, &plan, &[], Instant::now(), Styler::new(false)).expect("empty documents");
+        emit_empty(&mut host, &args, &plan, &[], Styler::new(false)).expect("empty reports");
 
         assert!(host.err().starts_with("no mutants were generated\n"), "{}", host.err());
         let documents = Documents::resolve(&args, &root);
@@ -6174,10 +6168,9 @@ mod tests {
         let sarif: Value = from_str(&fs::read_to_string(&documents.sarif).expect("SARIF")).expect("the SARIF log is JSON");
         assert_eq!(sarif["runs"][0]["results"], json!([]), "{sarif}");
         assert!(documents.html.is_file(), "{}", documents.html);
-        assert!(documents.diag.is_file(), "{}", documents.diag);
 
         fails_at_every_line(host.err().lines().count(), |host| {
-            emit_empty(host, &args, &plan, &[], Instant::now(), Styler::new(false))
+            emit_empty(host, &args, &plan, &[], Styler::new(false))
         });
     }
 
