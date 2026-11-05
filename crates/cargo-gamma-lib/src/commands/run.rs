@@ -1169,6 +1169,9 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
         progress.finish(host);
         if plan.mutants.is_empty() {
             let _ = writeln!(host.error(), "no mutants were generated");
+            // The empty documents replace a previous run's, which would otherwise read as this one's.
+            emit_reports(host, args, &plan, None, None, &[], styler)?;
+            emit_diag(host, args, &plan, None, started, styler)?;
 
             return Ok(Executed {
                 plan: None,
@@ -1297,6 +1300,9 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
     report_cache(host, adopted, styler)?;
     if plan.mutants.is_empty() {
         let _ = writeln!(host.error(), "no mutants were generated");
+        // The empty documents replace a previous run's, which would otherwise read as this one's.
+        emit_reports(host, args, &plan, None, None, &dropped, styler)?;
+        emit_diag(host, args, &plan, None, started, styler)?;
         warn_auxiliary(host, log_failure.as_ref(), styler);
 
         return Ok(Executed { plan: None, stuck });
@@ -6120,6 +6126,44 @@ mod tests {
         let code = run_session(&mut host, &args, When::Never, Styler::new(false)).expect("run session");
 
         assert_eq!(code, EXIT_OK);
+    }
+
+    /// An empty run still writes its documents. Leaving a previous run's in place would present
+    /// that run's mutants as this one's, to a reader and to `explain` or `--only-survivors` alike.
+    #[test]
+    fn a_run_with_nothing_to_test_replaces_the_previous_documents() {
+        for dry_run in [true, false] {
+            let dir = workdir("run-empty-documents-");
+            let root = subject_root(&dir);
+            fs::write(root.join("src/lib.rs"), "pub fn less(a: i32, b: i32) -> bool { a < b }\n").expect("lib");
+            let args = RunArgs {
+                select: crate::commands::SelectArgs {
+                    dir: root.clone(),
+                    exclude_files: vec!["**/*.rs".to_owned()],
+                    ..crate::commands::SelectArgs::default()
+                },
+                dry_run,
+                ..Default::default()
+            };
+            let documents = Documents::resolve(&args, &root);
+            fs::create_dir_all(Documents::directory(&args, &root)).expect("artifact directory");
+            for path in [&documents.json, &documents.html, &documents.sarif, &documents.diag] {
+                fs::write(path, "stale").expect("previous document");
+            }
+            let mut host = Sink::default();
+
+            let code = run_session(&mut host, &args, When::Never, Styler::new(false)).expect("run session");
+
+            assert_eq!(code, EXIT_OK, "{}", host.err());
+            assert!(host.err().contains("no mutants were generated"), "{}", host.err());
+            let report: Value = from_str(&fs::read_to_string(&documents.json).expect("report")).expect("the report is JSON");
+            assert_eq!(report["files"], json!({}), "{report}");
+            let sarif: Value = from_str(&fs::read_to_string(&documents.sarif).expect("SARIF")).expect("the SARIF log is JSON");
+            assert_eq!(sarif["runs"][0]["results"], json!([]), "{sarif}");
+            for path in [&documents.html, &documents.diag] {
+                assert_ne!(fs::read_to_string(path).expect("document"), "stale", "{path}");
+            }
+        }
     }
 
     /// A population that is not empty but holds nothing scorable — the shard that contained only

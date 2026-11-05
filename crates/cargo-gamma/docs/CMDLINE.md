@@ -317,6 +317,9 @@ completed population fails when either `--min-score` or `--max-flaky` is configu
 gate it remains a reportable result. Build convergence that leaves stuck mutants is still status
 `3`, because the selected population was not built completely enough to answer.
 
+A run that selects no mutants still writes its reports and diagnostics bundle, describing an empty
+population, so a previous run's reports are not left behind to be read as this run's.
+
 A failing baseline also returns status `3`. Cargo-gamma lets completing baseline binaries report
 all their test failures, writes each failure under
 `target/cargo-gamma/baseline-failures/<package>/<target>/` (or the equivalent beneath
