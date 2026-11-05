@@ -18,13 +18,447 @@ use super::calls::{Calls, OperatorResult};
 use super::indexes::{ScopePath, block_id, indexes_in, module_id};
 use super::resource::{Binding, Primitive};
 use super::{Collector, lexical, temporaries};
-use crate::HashMap;
 use crate::cfg::CfgSet;
 use crate::ops::collect::{Confidence, Defaults, collect_with};
 use crate::ops::registry::Selection;
 use crate::parse::SourceFile;
+use crate::{HashMap, HashSet};
 
 const ROOT: ScopePath = Vec::new();
+
+#[test]
+fn ci_bound_alias_default_proof_overrides_uncertain_name_only_evidence() {
+    let file = SourceFile::parse(
+        "fixture.rs",
+        "struct Real; type Middle = Real; type Outer = Middle;
+         impl Default for Outer { fn default() -> Self { Real } }"
+            .into(),
+    )
+    .unwrap();
+    let selection = Selection::everything();
+    let cfg = CfgSet::parse("");
+    let mut defaults = Defaults::of_source_in(&file.ast, &cfg, "fixture.rs");
+    defaults.bind_sources(&[("fixture.rs".into(), "fixture.rs".into(), Vec::new())]);
+    assert!(defaults.generic_default_is_unproven("Real"));
+    let collector = Collector::new(&file, &selection, &[], &cfg, &defaults);
+    for ty in [parse_quote!(Real), parse_quote!(Middle), parse_quote!(Outer)] {
+        assert!(collector.types().has_proven_default(&ty), "{ty:?}");
+        assert_eq!(
+            super::values::values_for(&ty, 0, &collector.types()),
+            [("fn_value.default", "Default::default()".into(), Confidence::Proven)]
+        );
+    }
+}
+
+#[test]
+fn ci_iterator_enumeration_checks_owner_identity_payload_and_call_shape() {
+    with_collector("", |collector| {
+        for root in ["std", "core"] {
+            let ty: Type = parse_str(&format!("{root}::iter::Enumerate<std::str::Chars<'a>>")).unwrap();
+            assert_eq!(collector.inferred_iterator_item(&ty), Some(parse_quote!((usize, char))));
+        }
+        for ty in [
+            "foreign::iter::Enumerate<std::str::Chars<'a>>",
+            "std::other::Enumerate<std::str::Chars<'a>>",
+            "std::iter::Other<std::str::Chars<'a>>",
+            "std::iter::Enumerate",
+            "std::iter::Enumerate<Unknown>",
+        ] {
+            assert_eq!(collector.inferred_iterator_item(&parse_str(ty).unwrap()), None, "{ty}");
+        }
+        collector.bind_type("chars".into(), parse_quote!(std::str::Chars<'a>));
+        collector.bind_type("unknown".into(), parse_quote!(Unknown));
+        for (expression, expected) in [
+            ("chars.enumerate()", Some(parse_quote!(std::iter::Enumerate<std::str::Chars<'a>>))),
+            ("chars.unrecognized()", None),
+            ("chars.enumerate(true)", None),
+            ("unknown.enumerate()", None),
+        ] {
+            assert_eq!(
+                collector.inferred_expression_type(&parse_str(expression).unwrap()),
+                expected,
+                "{expression}"
+            );
+        }
+    });
+}
+
+#[test]
+fn ci_temporal_fallback_inference_checks_each_namespace_and_factory_component() {
+    with_collector("", |collector| {
+        for (name, method, expected) in [
+            ("Instant", "now", parse_quote!(std::time::Instant)),
+            ("SystemTime", "now", parse_quote!(std::time::SystemTime)),
+            ("Duration", "default", parse_quote!(std::time::Duration)),
+        ] {
+            let expression = format!("std::time::{name}::{method}()");
+            assert_eq!(
+                collector.inferred_call_type(&parse_str(&expression).unwrap()),
+                Some(expected),
+                "{expression}"
+            );
+            for parts in [
+                ["foreign", "time", name, method],
+                ["std", "other", name, method],
+                ["std", "time", "Other", method],
+                ["std", "time", name, "other"],
+            ] {
+                let expression = format!("{}()", parts.join("::"));
+                assert_eq!(collector.inferred_call_type(&parse_str(&expression).unwrap()), None, "{expression}");
+            }
+        }
+        for method in [
+            "new",
+            "default",
+            "from_secs",
+            "from_millis",
+            "from_micros",
+            "from_nanos",
+            "from_secs_f32",
+            "from_secs_f64",
+        ] {
+            let expression = format!("core::time::Duration::{method}()");
+            assert_eq!(
+                collector.inferred_call_type(&parse_str(&expression).unwrap()),
+                Some(parse_quote!(std::time::Duration)),
+                "{expression}"
+            );
+        }
+        collector.bind_type("foreign".into(), parse_quote!(foreign::time::Duration));
+        assert_eq!(collector.inferred_expression_type(&parse_quote!(foreign.saturating_mul(2))), None);
+        collector.bind("std".into(), false);
+        assert_eq!(collector.inferred_expression_type(&parse_quote!(std::time::UNIX_EPOCH)), None);
+    });
+}
+
+#[test]
+fn ci_closed_method_inventory_distinguishes_local_owners_from_open_worlds() {
+    for (source, expected) in [
+        ("struct Owner; enum Choice { A }", true),
+        ("#![transform] struct Owner; enum Choice { A }", false),
+        ("#[derive(Generated)] struct Owner; enum Choice { A }", false),
+        (
+            "#[cfg_attr(feature = \"x\", derive(Generated))] struct Owner; enum Choice { A }",
+            false,
+        ),
+        ("struct Owner; enum Choice { A } impl External for Owner {}", false),
+        ("struct Owner; enum Choice { A } impl Owner { fn missing(&self) {} }", false),
+    ] {
+        with_calls(source, |_, calls, imports| {
+            for ty in ["Owner", "&Owner", "Choice", "&Choice"] {
+                assert_eq!(
+                    calls.method_absent(&parse_str(ty).unwrap(), "missing", &ROOT, imports),
+                    expected,
+                    "{source}: {ty}"
+                );
+            }
+        });
+    }
+    with_calls("struct Owner; enum Choice { A }", |_, calls, imports| {
+        for ty in ["bool", "u8", "(Owner,)", "Foreign", "foreign::Owner"] {
+            assert!(!calls.method_absent(&parse_str(ty).unwrap(), "missing", &ROOT, imports), "{ty}");
+        }
+    });
+    with_calls("struct u8;", |_, calls, imports| {
+        assert!(!calls.method_absent(&parse_quote!(u8), "missing", &ROOT, imports));
+    });
+}
+
+#[test]
+fn ci_option_returning_take_keeps_an_expression_guard_instead_of_an_iterator_guard() {
+    let source = "struct Owner;
+                  impl Owner {
+                      fn take(&self, n: usize) -> Option<u8> { None }
+                      fn skip(&self, n: usize) -> Option<u8> { None }
+                  }
+                  fn f(owner: Owner) { owner.take(2); }";
+    let file = SourceFile::parse("fixture.rs", source.into()).unwrap();
+    let candidates = collect_with(
+        &file,
+        &Selection::parse("iter.take_to_skip").unwrap(),
+        &CfgSet::parse(""),
+        &Defaults::of(&file.ast),
+    );
+    assert_eq!(
+        candidates
+            .iter()
+            .map(|candidate| (candidate.mutator, candidate.replacement.as_str(), candidate.shape))
+            .collect::<Vec<_>>(),
+        [("iter.take_to_skip", "owner.skip(2)", super::Shape::Expr)]
+    );
+}
+
+#[test]
+fn ci_method_absence_checks_imports_in_the_calling_lexical_scope() {
+    for (body, expected) in [
+        ("fn f(owner: Owner) -> bool { owner.first() }", false),
+        (
+            "fn f(owner: Owner) -> bool { trait Extension { fn len(&self) -> usize; } owner.first() }",
+            true,
+        ),
+        ("fn f(owner: Owner) -> bool { use dep::LastExt; owner.first() }", true),
+        ("fn f(owner: Owner) -> bool { use dep::LastExt as Extension; owner.first() }", true),
+        ("fn f(owner: Owner) -> bool { use dep::LastExt as _; owner.first() }", true),
+        ("fn f(owner: Owner) -> bool { use dep::*; owner.first() }", true),
+        ("fn f(owner: Owner) -> bool { use ::dep::LastExt; owner.first() }", true),
+        ("fn f(owner: Owner) -> bool { { use dep::LastExt; owner.first() } }", true),
+        ("fn f(owner: Owner) -> bool { (|| { use dep::LastExt; owner.first() })() }", true),
+        ("fn f(owner: Owner) -> bool { use dep::LastExt; (|| owner.first())() }", true),
+        (
+            "fn f(owner: Owner) -> bool { let result = owner.first(); use dep::LastExt; result }",
+            true,
+        ),
+        (
+            "fn unrelated() { use dep::LastExt; } fn f(owner: Owner) -> bool { owner.first() }",
+            false,
+        ),
+        ("fn f(owner: Owner) -> bool { { use dep::LastExt; } owner.first() }", false),
+        (
+            "fn f(owner: Owner) -> bool { let _ = || { use dep::LastExt; }; owner.first() }",
+            false,
+        ),
+        ("fn f(owner: Owner) -> bool { use std::fmt::Display; owner.first() }", false),
+        ("fn f(owner: Owner) -> bool { use ::core::fmt::Debug as _; owner.first() }", false),
+        ("fn f(owner: Owner) -> bool { use crate::Other; owner.first() }", false),
+        ("fn f(owner: Owner) -> bool { struct A; struct B; owner.first() }", false),
+        (
+            "fn f(owner: Owner) -> bool { #[cfg(any())] use dep::LastExt; owner.first() }",
+            false,
+        ),
+        ("fn f(owner: Owner) -> bool { #[cfg(all())] use dep::LastExt; owner.first() }", true),
+    ] {
+        let source = format!("struct Owner; struct Other; impl Owner {{ fn first(&self) -> bool {{ true }} }} {body}");
+        let file = SourceFile::parse("fixture.rs", source).unwrap();
+        let selection = Selection::parse("iter.first_to_last").unwrap();
+        let cfg = CfgSet::parse("");
+        for bound in [false, true] {
+            let mut defaults = Defaults::of_source_in(&file.ast, &cfg, "fixture.rs");
+            if bound {
+                defaults.bind_sources(&[("fixture.rs".into(), "fixture.rs".into(), Vec::new())]);
+            }
+            let candidates = collect_with(&file, &selection, &cfg, &defaults);
+            assert_eq!(
+                candidates
+                    .iter()
+                    .map(|candidate| candidate.replacement.as_str())
+                    .collect::<Vec<_>>(),
+                if expected { vec!["owner.last()"] } else { vec![] },
+                "{body}; bound={bound}"
+            );
+        }
+    }
+}
+
+#[test]
+fn impl_item_macros_keep_unknown_method_counterparts_eligible() {
+    for (invocation, expected) in [
+        ("dependency::methods!();", true),
+        ("#[cfg(all())] dependency::methods!();", true),
+        ("#[cfg(any())] dependency::methods!();", false),
+        ("", false),
+    ] {
+        let file = SourceFile::parse(
+            "fixture.rs",
+            format!(
+                "struct Owner; impl Owner {{ {invocation} fn first(&self) -> bool {{ true }} }}
+                 fn f(owner: Owner) -> bool {{ owner.first() }}"
+            ),
+        )
+        .unwrap();
+        let selection = Selection::parse("iter.first_to_last").unwrap();
+        let cfg = CfgSet::parse("");
+        for bound in [false, true] {
+            let mut defaults = Defaults::of_source_in(&file.ast, &cfg, "fixture.rs");
+            if bound {
+                defaults.bind_sources(&[("fixture.rs".into(), "fixture.rs".into(), Vec::new())]);
+            }
+            let found = collect_with(&file, &selection, &cfg, &defaults);
+            assert_eq!(
+                found.iter().map(|candidate| candidate.replacement.as_str()).collect::<Vec<_>>(),
+                if expected { vec!["owner.last()"] } else { vec![] },
+                "{invocation}; bound={bound}"
+            );
+        }
+    }
+}
+
+#[test]
+fn ci_method_absence_checks_nested_module_lexical_imports() {
+    for (import, expected) in [("", false), ("use dep::LastExt;", true), ("use super::Other;", false)] {
+        let source = format!(
+            "struct Other; mod nested {{ struct Owner; impl Owner {{ fn first(&self) -> bool {{ true }} }}
+             fn f(owner: Owner) -> bool {{ {import} owner.first() }} }}"
+        );
+        let file = SourceFile::parse("fixture.rs", source).unwrap();
+        let cfg = CfgSet::parse("");
+        let selection = Selection::parse("iter.first_to_last").unwrap();
+        let mut defaults = Defaults::of_source_in(&file.ast, &cfg, "fixture.rs");
+        defaults.bind_sources(&[("fixture.rs".into(), "fixture.rs".into(), Vec::new())]);
+        let candidates = collect_with(&file, &selection, &cfg, &defaults);
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.replacement.as_str())
+                .collect::<Vec<_>>(),
+            if expected { vec!["owner.last()"] } else { vec![] },
+            "{import}"
+        );
+    }
+}
+
+#[test]
+fn ci_multiple_source_method_inventory_cannot_prove_a_replacement_absent() {
+    let source = "struct Owner; impl Owner { fn first(&self) -> bool { true } }";
+    let file = SourceFile::parse("fixture.rs", source.into()).unwrap();
+    let selection = Selection::everything();
+    let cfg = CfgSet::parse("");
+    let mut defaults = Defaults::of_source_in(&file.ast, &cfg, "fixture.rs");
+    defaults.absorb(Defaults::of_source_in(&parse_file("struct Other;").unwrap(), &cfg, "other.rs"));
+    defaults.bind_sources(&[
+        ("fixture.rs".into(), "fixture.rs".into(), Vec::new()),
+        ("other.rs".into(), "other.rs".into(), Vec::new()),
+    ]);
+    assert!(defaults.resource_sources().closed_methods_for(file.path.as_ref(), &[]));
+    let mut collector = Collector::new(&file, &selection, &[], &cfg, &defaults);
+    collector.bind_type("owner".into(), parse_quote!(Owner));
+    assert!(
+        collector
+            .calls
+            .method_absent(&parse_quote!(Owner), "last", &ROOT, collector.current_imports())
+    );
+    assert!(!collector.method_substitution_unsupported(&parse_quote!(owner.first()), "last"));
+}
+
+#[test]
+fn method_absence_import_closure_does_not_treat_protected_extern_metadata_as_a_trait_import() {
+    let file = SourceFile::parse("fixture.rs", "struct Owner; impl Owner { fn first(&self) -> bool { true } }".into()).unwrap();
+    let cfg = CfgSet::parse("");
+    let defaults = Defaults::of_source_in(&file.ast, &cfg, "fixture.rs");
+    let selection = Selection::parse("iter.first_to_last").unwrap();
+    let mut collector = Collector::new(&file, &selection, &[], &cfg, &defaults);
+    collector.bind_type("owner".into(), parse_quote!(Owner));
+    collector.root_imports.insert(
+        format!("{}external", super::indexes::EXTERN_ROOT_PREFIX),
+        Some(vec![super::ABSOLUTE_ROOT.into(), "foreign".into()]),
+    );
+    assert!(collector.method_substitution_unsupported(&parse_quote!(owner.first()), "last"));
+}
+
+#[test]
+fn method_absence_requires_namespace_closure_even_when_all_imports_are_standard() {
+    for root in ["core", "std"] {
+        let file = SourceFile::parse(
+            "fixture.rs",
+            format!("extern crate {root}; struct Owner; impl Owner {{ fn first(&self) -> bool {{ true }} }}"),
+        )
+        .unwrap();
+        let cfg = CfgSet::parse("");
+        let defaults = Defaults::of_source_in(&file.ast, &cfg, "fixture.rs");
+        let selection = Selection::parse("iter.first_to_last").unwrap();
+        let mut collector = Collector::new(&file, &selection, &[], &cfg, &defaults);
+        collector.bind_type("owner".into(), parse_quote!(Owner));
+        assert!(!defaults.resource_sources().closed_methods_for("fixture.rs", &[]));
+        assert!(
+            collector
+                .calls
+                .method_absent(&parse_quote!(Owner), "last", &ROOT, collector.current_imports())
+        );
+        assert!(
+            !collector.method_substitution_unsupported(&parse_quote!(owner.first()), "last"),
+            "{root}"
+        );
+    }
+}
+
+#[test]
+fn ci_typed_block_tail_protection_is_scoped_even_without_a_value_tail() {
+    with_collector("", |collector| {
+        let block = parse_quote!({
+            stop();
+        });
+        let outer = core::iter::once(900..910).collect::<Vec<_>>();
+        collector.undeletable_statements = outer.clone();
+        collector.in_typed_block(&block, &parse_quote!(!), |collector| {
+            let mut expected = outer.clone();
+            expected.push(block.stmts[0].span().byte_range());
+            assert_eq!(collector.undeletable_statements, expected);
+        });
+        assert_eq!(collector.undeletable_statements, outer);
+    });
+}
+
+#[test]
+fn ci_mandatory_tail_prefixes_distinguish_literals_from_possible_divergence() {
+    for (source, expected) in [
+        ("{ let value = 1; stop(); }", vec!["stop();"]),
+        ("{ let value; stop(); }", vec!["stop();"]),
+        ("{ 1; stop(); }", vec!["stop();"]),
+        ("{ let value = unknown(); stop(); }", vec![]),
+        ("{ let value = 1 else { return }; stop(); }", vec![]),
+        ("{ unknown(); stop(); }", vec![]),
+    ] {
+        let expression = parse_str(source).unwrap();
+        let mut spans = Vec::new();
+        super::mandatory_tail_statements(&expression, &mut spans);
+        assert_eq!(
+            spans.iter().map(|range| &source[range.clone()]).collect::<Vec<_>>(),
+            expected,
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn ci_import_value_shadow_inventory_is_filtered_and_does_not_cross_modules() {
+    let file = parse_file(
+        "use std::time::Instant;
+         fn Instant() {}
+         fn unrelated() {}
+         mod child { fn local() {} }
+         fn body() { let value = 1; }",
+    )
+    .unwrap();
+    let indexes = indexes_in(&file, &Selection::everything(), &CfgSet::parse(""));
+    assert_eq!(
+        indexes.scope_value_items.get(&ROOT).unwrap(),
+        &core::iter::once("Instant".to_owned()).collect()
+    );
+    let Item::Mod(child) = &file.items[3] else {
+        panic!("the fourth fixture item is the child module")
+    };
+    let child = module_id(&child.ident);
+    assert_eq!(
+        indexes.scope_value_items.get(&vec![child]).cloned().unwrap_or_default(),
+        HashSet::default()
+    );
+}
+
+#[test]
+fn ci_assignment_temporary_scan_reaches_borrowed_rhs_consumers() {
+    let source = "fn f() { target = consume(&make()); }";
+    let sites = temporaries::consuming_sites(&parse_file(source).unwrap());
+    assert_eq!(
+        sites.get(&span(source, "&make()")),
+        Some(&span(source, "target = consume(&make())"))
+    );
+}
+
+#[test]
+fn ci_const_parameter_defaults_reserve_sites_without_emitting_runtime_guards() {
+    let source = "struct Value<const N: usize = 1>;";
+    let file = SourceFile::parse("fixture.rs", source.into()).unwrap();
+    let selection = Selection::parse("literal.int_increment").unwrap();
+    let cfg = CfgSet::parse("");
+    let defaults = Defaults::of(&file.ast);
+    let mut collector = Collector::new(&file, &selection, &[], &cfg, &defaults);
+    syn::visit::Visit::visit_file(&mut collector, &file.ast);
+    assert_eq!(
+        collector.identity_sites.keys().map(|(_, range)| range.clone()).collect::<Vec<_>>(),
+        core::iter::once(span(source, "1")).collect::<Vec<_>>()
+    );
+    assert_eq!(collector.candidates.len(), 0);
+    assert_eq!(collector.const_guard_depth, 0);
+}
 
 #[test]
 fn inferred_open_options_and_slice_iterators_follow_reference_chains_and_reject_wrong_arity() {
@@ -3123,12 +3557,18 @@ fn resource_binding_kinds_preserve_primitive_collection_and_reference_distinctio
         ("struct HashMap<K, V>(K, V);", "HashMap<char, bool>"),
         ("mod std {}", "std::primitive::u8"),
         ("mod std {}", "std::collections::HashMap<u32, bool>"),
-        ("mod std {}", "::std::vec::Vec<u8>"),
+        ("extern crate foreign as std;", "::std::vec::Vec<u8>"),
     ] {
         with_collector(source, |collector| {
             assert_eq!(collector.resource_binding(&parse_str(ty).unwrap(), &ROOT), None, "{source} / {ty}");
         });
     }
+    with_collector("mod std {}", |collector| {
+        assert_eq!(
+            collector.resource_binding(&parse_quote!(::std::vec::Vec<u8>), &ROOT),
+            Some(Binding::Vec)
+        );
+    });
     with_collector("struct char;", |collector| {
         assert_eq!(collector.resource_binding(&parse_quote!(Vec<char>), &ROOT), Some(Binding::Vec));
     });

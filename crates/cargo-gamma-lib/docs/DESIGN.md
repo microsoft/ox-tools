@@ -14,6 +14,9 @@ This crate coordinates cargo-gamma campaigns: configuration, discovery,
 scratch workspaces, instrumented builds, test selection, process supervision,
 verdicts, incremental reuse, reporting, and command dispatch.
 
+Configuration comes from `gamma.toml` or an explicit `--config` path.
+Gamma does not probe for `.cargo/mutants.toml` or emit a hint about it.
+
 ## Boundaries
 
 - Rust parsing and instrumentation are delegated to `cargo-gamma-engine`.
@@ -194,6 +197,14 @@ Isolation reuses the initial pristine validation instead of launching new
 pristine controls. Compilation failures are published as they are established,
 not deferred until a package-selected convergence finishes.
 
+Generated whole-function replacements require positive source-visible evidence
+for every `Default` construction, including nested payloads. Unknown trait
+implementations do not produce speculative default replacements. Discovery
+omissions are not compiler exclusions. There is no separate Default-only
+compiler pass: all selected candidates go directly to full-schema convergence
+within `Excluding unviable mutants`, which still handles residual compiler
+failures.
+
 `compiler-exclusions.json` in the campaign cache is a cumulative inventory of
 exact mutant IDs previously established as individually unviable. On first use,
 it imports compiler failures from completed and incomplete campaign records and
@@ -208,6 +219,18 @@ is independent of incremental verdict reuse and deliberately ignores changes to
 compiler context: an inventory entry remains excluded until explicitly removed.
 The existing inventory is authoritative, so removing an entry is not undone by
 reimporting older records. Raw mutant listings still describe source candidates.
+Attribution and schema repairs are an explicit exception to historical proof
+reuse, not a compiler-context cache reset. Version-1 inventories carry evidence
+revision 2 and separate pending attribution/schema revalidation sets. Legacy
+positional deletions, legacy isolation-only verdicts, and matching repaired
+schema cohorts require a new proof before exclusion. Unaffected exact evidence,
+the original recorded reasons, and authoritative removals remain intact.
+This includes imported `try.propagate_to_unwrap` entries whose generic historical
+reason lacks the original compiler diagnostic: those cannot establish whether
+the added `ControlFlow` support repairs the failure.
+Reconfirmation clears the pending marker and survives serialization; repaired
+mutants that compile remain eligible on later runs. Future evidence revisions
+fail closed rather than being silently interpreted.
 
 New individual compiler failures are atomically added before another convergence
 round starts, so interruption does not lose them. Mutation-interaction exclusions,
@@ -252,6 +275,11 @@ final verdict before claiming another mutant:
    is refined by compiler-proven source linkage where available; proven
    unlinked binaries are excluded, while incomplete linkage remains conservative
    rather than becoming evidence of no coverage.
+
+Resource-bearing direct libtest launches place their single-thread override
+before the user's arguments, so an argument terminator cannot turn the override
+into positional filters. Conflicting user thread counts are removed without
+changing literal filters after the terminator.
 
 Fallback retains own-package precedence, then orders each package tier by
 descending distinct-mutant kill count. Baseline runtime and stable binary
@@ -348,12 +376,14 @@ The testing progress display reports completed and total mutants plus observed
 verdict counts. It does not predict completion time: scheduling, contention,
 timeouts, and learned test selection make a live ETA misleading.
 
-Current reports advertise mutant-ID scheme 7, which includes normalized
-stated-value replacement expressions. Explicit scheme-6 reports cannot be merged
-with scheme-7 reports, even when they represent different shards.
+Current reports advertise mutant-ID scheme 8, which includes normalized
+stated-value expressions and composed return replacements. Pruning unproven
+default alternatives cannot transfer cached verdicts to different values at
+compacted replacement indices. Earlier-scheme reports cannot be merged
+with scheme-8 reports, even when they represent different shards.
 Reports that omit `config.mutantIdVersion`, including reports without run metadata,
 use historical identity scheme 5, not the scheme of the reader. They can merge
-with other scheme-5 reports but cannot contribute IDs to a scheme-7 population.
+with other scheme-5 reports but cannot contribute IDs to a scheme-8 population.
 Survivor-only selection likewise rejects unstamped historical reports, and
 `explain` identifies their historical scheme.
 An explicit different version is excluded from a merge because its identifiers
@@ -380,6 +410,11 @@ includes both failure to acquire the startup environment and a guard reached
 before the runtime constructor installed its selection; either fixed marker
 disqualifies the process as mutation-score evidence.
 
+Baseline and mutant test launches set `RUST_MIN_STACK` to at least 32 MiB.
+This restores headroom consumed by instrumented stack frames. A larger inherited
+value is preserved. The launch environment is derived once per workspace and
+applied to each child without changing the coordinator's own environment.
+
 Source-declared test resources are recovered from ignored harness markers
 before baseline execution. A function annotation maps a resource to one
 qualified test name; an inline module annotation maps it to every launch of
@@ -392,10 +427,52 @@ Custom harnesses have no libtest marker registry and therefore contribute no
 source-declared resources. Resource-bearing nextest launches additionally limit
 the runner to one concurrent test process.
 
+Failed marker or selected-test enumeration reports the launch or containment error,
+exit status (including hexadecimal Windows status), timeout, or incomplete output
+instead of treating these failures as an empty listing. Both output pipes are drained
+concurrently with a 4 MiB capture limit per stream and a 30-second enumeration budget;
+termination permits a further bounded 100 ms for readers to publish captured output.
+Failure excerpts use the same labeled stderr/stdout formatter as Cargo failures,
+limited to 30 lines and 16 KiB per displayed stream. The error supplies a shell-quoted
+retry command including the working directory without exposing configured environment
+values. Both the instrumented workspace and build artifacts are retained automatically
+on enumeration failure, even without `--leak-dirs`. Retry with the same configured test
+environment before another campaign replaces that state.
+
 When `--show-build` is enabled, Cargo's leading erase control is consumed
 rather than rendered visibly and its color styling remains intact. Without
 that flag, Cargo progress and convergence diagnostics remain hidden behind the
 stable cargo-gamma phase line.
+
+Compile-fail advice is one warning, with each affected test target on its own
+continuation line naming its package and compiler-test harness. It says that
+the test binaries may have cases that invoke the Rust compiler and may lead
+to very long mutation test runs, rather than asserting measured behavior.
+It suggests omitting specific test cases using harness `--skip` filters, not
+excluding whole binaries; no case is excluded automatically.
+Detection requires a `trybuild` or `compiletest_rs` dev-dependency and a matching
+Rust identifier in the target's root source. Comments and string literals,
+including documentation, do not count as harness usage. This remains a
+root-source heuristic rather than proof of compiler invocation.
+Detection applies the same nonrecursive nesting limit as source analysis before
+tokenization; overly nested roots are omitted from this optional advice.
+Multi-line warnings label only their first line and align subsequent lines
+under the message.
+
+When a failed Cargo invocation has no structured compiler errors, gamma does
+not infer that the compiler was never reached. Pristine validation reports
+`'cargo check --tests' failed, mutation testing cannot proceed` (or names
+`cargo test --no-run --lib` for library-only validation). A blank line separates
+the headline from Cargo's exit information, followed by blank-line-separated
+`Cargo Arguments` and `Cargo Stderr` headings with their dumps on the next line.
+Relevant stdout follows under `Cargo Stdout` when available.
+Cargo and enumeration failure excerpts share the same 30-line, 16 KiB display bounds.
+Failure reports retain Cargo's actual exit
+status (including an OS exception or signal when available), its argument
+vector, and bounded excerpts from stderr and non-artifact stdout, including
+compiler notes. Excerpts strip ANSI styling and erase controls before removing
+Cargo progress and collapse consecutive blank lines. A silent exit remains
+an unknown cause, not a guessed build-script or dependency failure.
 
 Each Cargo output stream is retained up to 256 MiB for artifact and diagnostic
 processing, and each logical line is bounded at 1 MiB. The buffers grow with
@@ -470,6 +547,11 @@ retain their narrowed graph throughout.
 
 Structured compiler messages carry package, target, diagnostic, and primary
 span context. Direct generated-text blame withdraws a mutant immediately.
+Deletion containment supplies proof candidates, never a permanent verdict.
+Their bounded confirmation retains the exact failed Cargo invocation and
+target/feature selection. A passing deletion subset widens the search to its
+item/file to distinguish an invalid child from an interaction; inconclusive
+proofs exclude nothing.
 Otherwise diagnostics first consider the enclosing item's likely mutations,
 then the whole item. Ownership failures prioritize control-flow and state-update
 mutations. Item envelopes use the guards'
@@ -764,6 +846,14 @@ from the source-tree scan, including when reading older checkpoints that
 captured such files. Explicitly captured build-script output trees, package
 executables, and test binaries remain checked even when located under that tree.
 Other source directories named `target` remain part of the frozen source tree.
+Directory symlinks are captured as links without traversing them. Their target
+must resolve inside an independently captured real input directory, outside
+excluded generated output. The snapshot records the link spelling and resolved
+target identity; the ordinary input scan records the target files. This supports
+aliases and ancestor cycles without recursive link walks. Links to external or
+otherwise uncaptured directories are rejected, as are linked roots whose contents
+were not scanned independently. Resume repeats the same coverage and identity
+checks in addition to validating the recorded target files.
 Resume checks the recorded files, not whether the tree gained new files:
 tests may create temporary inputs anywhere in their working directory.
 New files are permitted without rediscovery or rebuilding; recorded prepared

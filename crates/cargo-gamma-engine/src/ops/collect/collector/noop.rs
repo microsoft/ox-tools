@@ -696,6 +696,7 @@ mod tests {
     use syn::parse_quote;
 
     use super::*;
+    use crate::ops::collect::collector::indexes::{ABSOLUTE_ROOT, EXTERN_ROOT_PREFIX};
 
     #[test]
     fn verified_resource_modules_can_clear_root_or_module_opacity_but_never_block_opacity() {
@@ -984,7 +985,13 @@ mod tests {
 
     #[test]
     fn constructor_proofs_check_absolute_roots_on_both_sides_of_the_comparison() {
-        let imports = HashMap::from_iter([("std".into(), None)]);
+        let imports = HashMap::from_iter([
+            ("std".into(), None),
+            (
+                format!("{EXTERN_ROOT_PREFIX}std"),
+                Some(vec![ABSOLUTE_ROOT.into(), "foreign".into()]),
+            ),
+        ]);
         let declarations = crate::ops::collect::Defaults::default();
         let types = Types {
             abstracts: &[],

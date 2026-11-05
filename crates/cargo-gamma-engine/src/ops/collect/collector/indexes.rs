@@ -19,6 +19,7 @@ use crate::ops::registry::Selection;
 use crate::{HashMap, HashSet};
 
 pub(super) const ABSOLUTE_ROOT: &str = "<absolute>";
+pub(super) const EXTERN_ROOT_PREFIX: &str = "<gamma-extern-root>";
 pub(super) type ScopePath = Vec<(usize, usize)>;
 
 pub(super) fn module_id(ident: &syn::Ident) -> (usize, usize) {
@@ -81,6 +82,9 @@ pub(in crate::ops::collect) struct Indexes {
     /// Imports and shadows visible in each nested lexical scope.
     pub(super) scope_imports: HashMap<ScopePath, HashMap<String, Option<Vec<String>>>>,
 
+    /// Value items that can shadow imported names, visible even before their declaration.
+    pub(super) scope_value_items: HashMap<ScopePath, HashSet<String>>,
+
     /// Scope paths that inherit bindings from their lexical parent.
     pub(super) block_scopes: HashSet<ScopePath>,
 
@@ -106,6 +110,9 @@ pub(in crate::ops::collect) struct Indexes {
 
 impl Indexes {
     fn canonicalize_imports(&mut self) {
+        for items in self.scope_value_items.values_mut() {
+            items.retain(|name| self.imports.contains_key(name));
+        }
         let imports = self.imports.clone();
         for (name, path) in &mut self.imports {
             if
@@ -131,21 +138,30 @@ impl Indexes {
                 .get(&scope)
                 .expect("every recorded lexical scope has an import index")
                 .clone();
-            let parent = self.block_scopes.contains(&scope).then(|| {
+            let mut value_items = if self.block_scopes.contains(&scope) {
+                self.scope_value_items.get(&scope[..scope.len() - 1]).cloned().unwrap_or_default()
+            } else {
+                HashSet::default()
+            };
+            value_items.retain(|name| !local.contains_key(name));
+            value_items.extend(self.scope_value_items.remove(&scope).unwrap_or_default());
+            let _previous = self.scope_value_items.insert(scope.clone(), value_items);
+            let parent = {
                 let imports = if scope.len() == 1 {
                     &self.root_imports
                 } else {
                     self.scope_imports
                         .get(&scope[..scope.len() - 1])
-                        .expect("a block's enclosing lexical scope has an import index")
+                        .expect("every recorded lexical scope has an enclosing import index")
                 };
                 imports
                     .iter()
+                    .filter(|(name, _)| self.block_scopes.contains(&scope) || name.starts_with(EXTERN_ROOT_PREFIX))
                     .filter(|(name, _)| !self.scope_aliases.get(&scope).is_some_and(|aliases| aliases.contains_key(*name)))
                     .map(|(name, path)| (name.clone(), path.clone().map(protect_import)))
                     .collect::<HashMap<_, _>>()
-            });
-            let mut visible = parent.clone().unwrap_or_default();
+            };
+            let mut visible = parent.clone();
             visible.extend(local.clone());
             for (name, path) in &mut local {
                 if
@@ -154,10 +170,8 @@ impl Indexes {
                     *path = canonical_import(name, &visible);
                 }
             }
-            if let Some(parent) = parent {
-                for (name, path) in parent {
-                    let _inherited = local.entry(name).or_insert(path);
-                }
+            for (name, path) in parent {
+                let _inherited = local.entry(name).or_insert(path);
             }
             let _previous = self.scope_imports.insert(scope, local);
         }
@@ -414,6 +428,7 @@ pub(super) struct Walk<'cfg> {
 impl Walk<'_> {
     pub(super) fn on_item_fn(&mut self, node: &ItemFn) {
         if self.type_evidence {
+            self.value_item(&node.sig.ident);
             self.indexes.local_calls.function(node, &self.scope_path);
         }
     }
@@ -426,8 +441,18 @@ impl Walk<'_> {
 
     pub(super) fn on_value_name(&mut self, name: &syn::Ident) {
         if self.type_evidence {
+            self.value_item(name);
             self.indexes.local_calls.value_name(name);
         }
+    }
+
+    fn value_item(&mut self, name: &syn::Ident) {
+        let _inserted = self
+            .indexes
+            .scope_value_items
+            .entry(self.scope_path.clone())
+            .or_default()
+            .insert(name.to_string());
     }
 
     pub(super) fn on_opaque_macro(&mut self) {
@@ -443,7 +468,9 @@ impl Walk<'_> {
     pub(super) fn on_item_extern_crate(&mut self, node: &syn::ItemExternCrate) {
         if self.type_evidence {
             let name = node.rename.as_ref().map_or(&node.ident, |(_, name)| name);
-            self.imported(name.to_string(), &[node.ident.to_string()]);
+            let path = [ABSOLUTE_ROOT.to_owned(), node.ident.to_string()];
+            self.imported(name.to_string(), &path);
+            self.imported(format!("{EXTERN_ROOT_PREFIX}{name}"), &path);
         }
     }
 
@@ -1105,6 +1132,7 @@ impl<'cfg> Walk<'cfg> {
                 imports: HashMap::default(),
                 root_imports: HashMap::default(),
                 scope_imports: HashMap::default(),
+                scope_value_items: HashMap::default(),
                 block_scopes: HashSet::default(),
                 numeric_uses: NumericUses::default(),
                 constants: HashMap::default(),
@@ -1848,6 +1876,7 @@ mod tests {
                 imports: HashMap::default(),
                 root_imports: HashMap::default(),
                 scope_imports: HashMap::default(),
+                scope_value_items: HashMap::default(),
                 block_scopes: HashSet::default(),
                 numeric_uses: NumericUses::default(),
                 constants: HashMap::default(),

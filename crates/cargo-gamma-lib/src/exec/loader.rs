@@ -35,10 +35,10 @@ pub(super) const STACK_VAR: &str = "RUST_MIN_STACK";
 
 /// The stack a test thread gets when the caller has not asked for a size, in bytes.
 ///
-/// Eight times the usual two megabyte default, chosen to swallow the frame growth instrumentation
+/// Sixteen times the usual two megabyte default, chosen to swallow the frame growth instrumentation
 /// causes without being large enough to matter on a machine running many test processes at once,
 /// since a thread stack is reserved lazily and only the pages actually touched are committed.
-const STACK_FLOOR: usize = 16 * 1024 * 1024;
+const STACK_FLOOR: usize = 32 * 1024 * 1024;
 
 /// Everything about a test binary's environment that is fixed for the whole run.
 ///
@@ -193,6 +193,13 @@ fn append_toolchain_libraries(libraries: &mut Vec<Utf8PathBuf>, printed: &str) {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stack_floor_covers_large_instrumented_frames() {
+        assert_eq!(stack_floor(None), "33554432");
+        assert_eq!(stack_floor(Some("16777216")), "33554432");
+        assert_eq!(stack_floor(Some("67108864")), "67108864");
+    }
 
     /// A caller that already exported a larger stack size than the floor keeps its own choice.
     ///

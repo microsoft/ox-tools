@@ -51,7 +51,7 @@ fn package_scan(root: &Utf8Path, selected: &[&str], selectors: &str) -> Scan {
 }
 
 #[test]
-fn checked_in_multifile_reexports_use_the_real_package_index_even_when_only_the_consumer_is_selected() {
+fn checked_in_multifile_reexports_preserve_proven_shapes_and_withhold_open_defaults() {
     let scanned = package_scan(&fixture_root(), &["consumers.rs"], "fn_value,option.some_to_none");
     assert!(scanned.skipped.is_empty(), "{:?}", scanned.skipped);
     let has = |item: &str, selector: &str| {
@@ -66,24 +66,24 @@ fn checked_in_multifile_reexports_use_the_real_package_index_even_when_only_the_
         ("qualified", "fn_value.default"),
         ("relocated", "fn_value.default"),
         ("artifacts", "fn_value.one_element"),
-        ("local_feature", "option.some_to_none"),
     ] {
         assert!(!has(item, selector), "{item}: {selector}: {:?}", scanned.mutants);
     }
+    assert!(!has("local_feature", "option.some_to_none"), "{:?}", scanned.mutants);
     for (item, selector) in [
         ("artifacts", "fn_value.empty_collection"),
         ("alternate", "fn_value.default"),
         ("manual", "fn_value.default"),
-        ("configured", "fn_value.default"),
         ("dependency_alias", "option.some_to_none"),
         ("custom_paired", "option.some_to_none"),
     ] {
         assert!(has(item, selector), "{item}: {selector}: {:?}", scanned.mutants);
     }
+    assert!(!has("configured", "fn_value.default"), "{:?}", scanned.mutants);
 }
 
 #[test]
-fn artifact_reexports_retain_empty_vectors_but_reject_default_elements() {
+fn artifact_reexports_retain_empty_vectors_without_guessing_element_defaults() {
     let scanned = package_scan(&fixture_root(), &["consumers.rs"], "fn_value.empty_collection,fn_value.one_element");
     assert!(scanned.skipped.is_empty(), "{:?}", scanned.skipped);
     for item in ["artifacts", "renamed_artifacts", "qualified_artifacts"] {
@@ -96,10 +96,10 @@ fn artifact_reexports_retain_empty_vectors_but_reject_default_elements() {
             scanned.mutants
         );
         assert!(
-            !scanned
+            scanned
                 .mutants
                 .iter()
-                .any(|mutant| mutant.item_path.as_ref() == item && mutant.mutator.as_ref() == "fn_value.one_element"),
+                .all(|mutant| mutant.item_path.as_ref() != item || mutant.mutator.as_ref() != "fn_value.one_element"),
             "{item}: {:?}",
             scanned.mutants
         );
@@ -131,15 +131,9 @@ fn conditional_paths_and_multiply_mounted_files_remain_unknown() {
     for fixture in ["conditional_modules", "ambiguous_modules"] {
         let root = fixture_root().parent().unwrap().join(fixture);
         let scanned = package_scan(&root, &["lib.rs"], "fn_value.empty_collection,fn_value.one_element");
-        for selector in ["fn_value.empty_collection", "fn_value.one_element"] {
-            assert!(
-                scanned
-                    .mutants
-                    .iter()
-                    .any(|mutant| mutant.item_path.as_ref() == "values" && mutant.mutator.as_ref() == selector),
-                "{fixture}: {selector}: {:?}",
-                scanned.mutants
-            );
-        }
+        assert_eq!(scanned.mutants.len(), 1, "{fixture}: {:?}", scanned.mutants);
+        assert_eq!(scanned.mutants[0].item_path.as_ref(), "values", "{fixture}");
+        assert_eq!(scanned.mutants[0].mutator.as_ref(), "fn_value.empty_collection", "{fixture}");
+        assert_eq!(scanned.mutants[0].replacement, "Vec::new()", "{fixture}");
     }
 }

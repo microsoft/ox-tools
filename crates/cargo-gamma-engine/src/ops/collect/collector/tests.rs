@@ -23,6 +23,232 @@ fn with_source_facts(source: &str, selector: &str, check: impl FnOnce(&mut Colle
 }
 
 #[test]
+fn control_flow_default_markers_require_a_matching_expected_type_and_unary_constructor() {
+    with_source_facts("", "control_flow", |collector| {
+        let types = collector.types();
+        for (text, expected, admitted) in [
+            (
+                "core::ops::ControlFlow::Break(1)",
+                syn::parse_quote!(core::ops::ControlFlow<u8>),
+                true,
+            ),
+            (
+                "core::ops::ControlFlow::Break()",
+                syn::parse_quote!(core::ops::ControlFlow<u8>),
+                false,
+            ),
+            (
+                "core::ops::ControlFlow::Break(1, 2)",
+                syn::parse_quote!(core::ops::ControlFlow<u8>),
+                false,
+            ),
+            ("core::ops::ControlFlow::Break(1)", syn::parse_quote!(Other<u8, ()>), false),
+        ] {
+            let expression: Expr = syn::parse_str(text).unwrap();
+            let mut spans = Vec::new();
+            super::admissible_default_spans(&expression, &expected, &types, &mut spans);
+            let expected_spans = if admitted {
+                vec![expression.span().byte_range()]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(spans, expected_spans, "{text}: {expected:?}");
+        }
+    });
+}
+
+#[test]
+fn cold_campaign_const_filtering_preserves_runtime_identity_occurrences() {
+    let source = r"
+        struct Buffer<const N: usize = { 7 + 7 }>;
+        fn f() { let _ = 7; let _ = const { 7 }; let _ = 7; }
+    ";
+    let file = SourceFile::parse("fixture.rs", source.into()).unwrap();
+    let found = collect_in(&file, &Selection::parse("literal.int_to_zero").unwrap(), &CfgSet::unconditional());
+    assert_eq!(found.len(), 2);
+    assert!(found.iter().all(|candidate| candidate.item_path.as_ref() == "f"));
+    assert_eq!(found[0].identity_occurrence, Some(0));
+    assert_eq!(found[1].identity_occurrence, Some(2));
+    assert_ne!(found[0].identity_occurrence, found[1].identity_occurrence);
+}
+
+#[test]
+fn cold_campaign_opaque_shadows_witness_the_original_type() {
+    let source = "fn f(callback: Option<impl FnOnce()>) { if let Some(callback) = callback { callback(); } }";
+    let file = SourceFile::parse("fixture.rs", source.into()).unwrap();
+    let found = collect_in(
+        &file,
+        &Selection::parse("parameter.default_shadow").unwrap(),
+        &CfgSet::unconditional(),
+    );
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].replacement.contains("::gamma_rt::default_like(&callback)"), "{found:?}");
+    assert!(!found[0].replacement.contains("let callback:"));
+}
+
+#[test]
+fn cold_campaign_enumerated_characters_keep_iterator_case_conversion() {
+    let source = "fn f(text: &str) { for (_, character) in text.chars().enumerate() { consume(character.to_uppercase()); } }";
+    let file = SourceFile::parse("fixture.rs", source.into()).unwrap();
+    let found = collect_in(&file, &Selection::parse("string.upper_to_lower").unwrap(), &CfgSet::unconditional());
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].shape, Shape::IterExpr);
+}
+
+#[test]
+fn cold_campaign_cfg_fallbacks_must_survive_library_and_unit_compilation() {
+    for (attributes, ordinary, testing) in [
+        ("", 1, 1),
+        ("#[cfg(unix)]", 1, 1),
+        ("#[cfg(windows)]", 0, 0),
+        ("#[cfg(not(test))]", 1, 0),
+        ("#[cfg(version(\"1.95\"))]", 0, 0),
+    ] {
+        let source = format!("fn f(value: u8) -> u8 {{ match value {{ 0 => 1, {attributes} _ => 2 }} }}");
+        let file = SourceFile::parse("fixture.rs", source).unwrap();
+        let selection = Selection::parse("match_arm.never_matches").unwrap();
+        assert_eq!(
+            collect_in(&file, &selection, &CfgSet::parse("unix")).len(),
+            ordinary,
+            "{attributes}"
+        );
+        assert_eq!(
+            collect_in(&file, &selection, &CfgSet::parse("unix").with_test()).len(),
+            testing,
+            "{attributes}"
+        );
+    }
+    let source = "fn f(value: u8) -> u8 { match value { #[cfg(not(test))] 0 => 1, #[cfg(not(test))] _ => 2, #[cfg(test)] _ => 3 } }";
+    assert_eq!(
+        mutators(source, "match_arm.never_matches", &CfgSet::parse("unix").with_test()),
+        ["match_arm.never_matches"]
+    );
+}
+
+#[test]
+fn cold_campaign_noniterator_method_contracts_do_not_require_either_iterator() {
+    let source = r"
+        struct Reader;
+        impl Reader {
+            fn take(&self, _: usize) -> Result<u8, ()> { Ok(1) }
+            fn skip(&self, _: usize) -> Result<u8, ()> { Ok(2) }
+        }
+        fn f(reader: Reader) -> Result<u8, ()> { reader.take(1) }
+        fn unknown(reader: External) { reader.take(1); }
+    ";
+    let file = SourceFile::parse("fixture.rs", source.into()).unwrap();
+    let found = collect_in(&file, &Selection::parse("iter.take_to_skip").unwrap(), &CfgSet::unconditional());
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert_eq!(found[0].shape, Shape::Expr);
+    assert_eq!(found[1].shape, Shape::IterExpr);
+    assert!(found.iter().all(|candidate| candidate.confidence == Confidence::Optimistic));
+}
+
+#[test]
+fn cold_campaign_method_absence_requires_a_closed_local_contract() {
+    for (prefix, methods, expected) in [
+        ("", "", 0),
+        ("", "fn skip(&self, _: usize) -> u8 { 2 }", 1),
+        ("#[derive(Clone)]", "", 1),
+        ("#[custom]", "", 1),
+    ] {
+        let source = format!(
+            "{prefix} struct Reader; impl Reader {{ fn take(&self, _: usize) -> u8 {{ 1 }} {methods} }} fn f(reader: Reader) {{ reader.take(1); }}"
+        );
+        assert_eq!(
+            mutators(&source, "iter.take_to_skip", &CfgSet::unconditional()).len(),
+            expected,
+            "{source}"
+        );
+    }
+    for source in [
+        "use dependency::Extension; struct Reader; impl Reader {fn take(&self, _:usize)->u8{1}} fn f(reader:Reader){reader.take(1);}",
+        "trait Extension {fn skip(&self,_:usize)->u8{2}} struct Reader; impl Extension for Reader {} impl Reader {fn take(&self,_:usize)->u8{1}} fn f(reader:Reader){reader.take(1);}",
+        "fn f<T>(reader:T){reader.take(1);}",
+        "fn f(reader:dependency::Reader){reader.take(1);}",
+    ] {
+        assert_eq!(mutators(source, "iter.take_to_skip", &CfgSet::unconditional()).len(), 1, "{source}");
+    }
+}
+
+#[test]
+fn cold_campaign_operator_contracts_resolve_temporal_factories_and_constants() {
+    for (expression, expected) in [
+        ("std::time::SystemTime::now() - std::time::UNIX_EPOCH", 0),
+        (
+            "std::time::Duration::from_secs(2) + std::time::Duration::from_secs(1).mul_f64(2.0)",
+            1,
+        ),
+    ] {
+        let source = format!("fn f() {{ consume({expression}); }}");
+        let file = SourceFile::parse("fixture.rs", source).unwrap();
+        let found = collect_in(&file, &Selection::parse("arith").unwrap(), &CfgSet::unconditional());
+        assert!(
+            found
+                .iter()
+                .all(|candidate| !matches!(candidate.mutator, "arith.add_to_mul" | "arith.sub_to_div")),
+            "{found:?}"
+        );
+        assert_eq!(found.len(), expected, "{expression}: {found:?}");
+    }
+    with_source_facts("use std::time::Duration;", "arith", |collector| {
+        assert!(
+            collector
+                .inferred_call_type(&syn::parse_quote!(Duration::try_from_secs_f64(1.0)))
+                .is_none()
+        );
+    });
+}
+
+#[test]
+fn cold_campaign_required_divergence_keeps_nonunit_function_tails() {
+    for output in ["!", "u8", "Option<u8>"] {
+        let source = format!("fn f() -> {output} {{ abort(); }}");
+        assert!(
+            mutators(&source, "stmt.delete_call", &CfgSet::unconditional()).is_empty(),
+            "{output}"
+        );
+    }
+    assert_eq!(
+        mutators("fn f() { abort(); }", "stmt.delete_call", &CfgSet::unconditional()),
+        ["stmt.delete_call"]
+    );
+    assert_eq!(
+        mutators("fn f() -> u8 { log(); 1 }", "stmt.delete_call", &CfgSet::unconditional()),
+        ["stmt.delete_call"]
+    );
+    assert_eq!(
+        mutators("fn f<T>() -> T { abort(); }", "stmt.delete_call", &CfgSet::unconditional()),
+        ["stmt.delete_call"]
+    );
+    assert_eq!(
+        mutators("fn f() -> u8 { return 1; log(); }", "stmt.delete_call", &CfgSet::unconditional()),
+        ["stmt.delete_call"]
+    );
+    assert_eq!(
+        mutators("fn f() -> u8 { unknown(); log(); }", "stmt.delete_call", &CfgSet::unconditional()).len(),
+        2
+    );
+    assert_eq!(
+        mutators(
+            "fn f() -> u8 { let value = 1; abort(); }",
+            "stmt.delete_call",
+            &CfgSet::unconditional()
+        )
+        .len(),
+        0
+    );
+    assert_eq!(
+        mutators(
+            "fn f(flag: bool) -> Option<u8> { let value = match flag { true => Some(1u8), false => { return None; log(); } }; value }",
+            "stmt.delete_call",
+            &CfgSet::unconditional()
+        ),
+        ["stmt.delete_call"]
+    );
+}
+
+#[test]
 fn campaign_generic_types_without_default_keep_only_constructible_return_alternatives() {
     let source = r"
         struct Region<'a>(&'a str);
@@ -49,14 +275,13 @@ fn campaign_generic_types_without_default_keep_only_constructible_return_alterna
         [
             ("optional", "fn_value.none", "None"),
             ("regions", "fn_value.empty_collection", "Vec::new()"),
-            ("unknown", "fn_value.default", "Default::default()"),
         ]
     );
-    assert_eq!(found.last().unwrap().confidence, super::Confidence::Optimistic);
+    assert!(found.iter().all(|candidate| candidate.confidence == super::Confidence::Proven));
 }
 
 #[test]
-fn campaign_conditional_generic_defaults_remain_eligible_without_unconditional_proof() {
+fn campaign_conditional_generic_defaults_require_unconditional_proof() {
     let source = r"
         struct Holder<T>(T);
         impl<T: Default> Default for Holder<T> {
@@ -71,10 +296,7 @@ fn campaign_conditional_generic_defaults_remain_eligible_without_unconditional_p
         &CfgSet::unconditional(),
         &Defaults::of(&file.ast),
     );
-    assert!(
-        found.iter().any(|candidate| candidate.item_path.as_ref() == "holder"),
-        "a bounded generic implementation must not be mistaken for absence: {found:?}"
-    );
+    assert!(found.is_empty(), "{found:?}");
 }
 
 #[test]
@@ -1756,7 +1978,7 @@ fn scoped_resource_aliases_keep_nominal_comparisons_and_do_not_cycle() {
 }
 
 #[test]
-fn aliases_and_reexports_keep_imported_default_candidates_despite_nominal_collisions() {
+fn aliases_and_reexports_do_not_invent_imported_default_proofs_from_nominal_collisions() {
     for export in [
         "pub type Artifact = std::time::Duration;",
         "pub use std::time::Duration as Artifact;",
@@ -1773,7 +1995,7 @@ fn aliases_and_reexports_keep_imported_default_candidates_despite_nominal_collis
         for selector in ["all", "fn_value.default"] {
             let found = collect_with(&subject, &Selection::parse(selector).unwrap(), &CfgSet::unconditional(), &defaults);
             assert!(
-                found.iter().any(|candidate| candidate.mutator == "fn_value.default"),
+                found.iter().all(|candidate| candidate.mutator != "fn_value.default"),
                 "{export}: {found:?}"
             );
         }
@@ -3087,7 +3309,7 @@ fn inert_const_syntax_still_reserves_identity_and_runtime_children_are_visited()
     ";
     let file = SourceFile::parse("fixture.rs", source.to_owned()).unwrap();
     let candidates = collect_in(&file, &Selection::parse("literal.int_to_zero").unwrap(), &CfgSet::unconditional());
-    assert_eq!(candidates.len(), 6, "{candidates:?}");
+    assert_eq!(candidates.len(), 5, "{candidates:?}");
     assert!(
         candidates
             .iter()
@@ -3095,13 +3317,12 @@ fn inert_const_syntax_still_reserves_identity_and_runtime_children_are_visited()
     );
     assert_eq!(
         candidates.iter().map(|candidate| &*candidate.item_path).collect::<Vec<_>>(),
-        ["T::method", "<S as T>::method", "f", "f", "f", "f"]
+        ["T::method", "<S as T>::method", "f", "f", "f"]
     );
     let runtime: Vec<_> = candidates.iter().filter(|candidate| &*candidate.item_path == "f").collect();
     assert_eq!(
         runtime.iter().map(|candidate| candidate.span.start).collect::<Vec<_>>(),
         [
-            source.find("const { 7 }").unwrap() + "const { ".len(),
             source.find("[7; 7]").unwrap() + 1,
             source.find("helper::<7>(7)").unwrap() + "helper::<7>(".len(),
             source.rfind("let _ = 7;").unwrap() + "let _ = ".len(),
@@ -3109,7 +3330,7 @@ fn inert_const_syntax_still_reserves_identity_and_runtime_children_are_visited()
     );
     assert_eq!(
         runtime.iter().map(|candidate| candidate.identity_occurrence).collect::<Vec<_>>(),
-        [Some(0), Some(1), Some(2), Some(3)]
+        [Some(1), Some(2), Some(3)]
     );
 }
 
@@ -3817,7 +4038,12 @@ fn alias_and_associated_return_evidence_preserves_default_recursion_exclusions()
         ),
     ] {
         let file = SourceFile::parse("fixture.rs", source.to_owned()).unwrap();
-        let candidates = collect_in(&file, &Selection::parse(selector).unwrap(), &CfgSet::unconditional());
+        let candidates = collect_with(
+            &file,
+            &Selection::parse(selector).unwrap(),
+            &CfgSet::unconditional(),
+            &Defaults::of(&file.ast),
+        );
         assert_eq!(candidates.len(), 1, "{source}: {candidates:?}");
         assert_eq!(candidates[0].replacement, expected);
         assert_eq!(&*candidates[0].item_path, path);
