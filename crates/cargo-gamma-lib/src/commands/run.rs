@@ -300,6 +300,23 @@ fn emit_reports_from<H: Host>(
     Ok(())
 }
 
+/// Says that the selection held no mutants, and writes the documents for that empty population.
+///
+/// The documents replace a previous run's, which would otherwise read as this one's — to a reader,
+/// and to `explain` and `--only-survivors` alike.
+fn emit_empty<H: Host>(
+    host: &mut H,
+    args: &RunArgs,
+    plan: &Plan,
+    dropped: &[String],
+    started: Instant,
+    styler: Styler,
+) -> crate::Result<()> {
+    writeln!(host.error(), "no mutants were generated")?;
+    emit_reports(host, args, plan, None, None, dropped, styler)?;
+    emit_diag(host, args, plan, None, started, styler)
+}
+
 /// Writes the SARIF log and, when requested, the diff annotations and job summary.
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn emit_ci<H: Host>(host: &mut H, args: &RunArgs, plan: &Plan, advice: Option<&str>, styler: Styler) -> crate::Result<()> {
@@ -1168,10 +1185,7 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
 
         progress.finish(host);
         if plan.mutants.is_empty() {
-            let _ = writeln!(host.error(), "no mutants were generated");
-            // The empty documents replace a previous run's, which would otherwise read as this one's.
-            emit_reports(host, args, &plan, None, None, &[], styler)?;
-            emit_diag(host, args, &plan, None, started, styler)?;
+            emit_empty(host, args, &plan, &[], started, styler)?;
 
             return Ok(Executed {
                 plan: None,
@@ -1299,10 +1313,7 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
 
     report_cache(host, adopted, styler)?;
     if plan.mutants.is_empty() {
-        let _ = writeln!(host.error(), "no mutants were generated");
-        // The empty documents replace a previous run's, which would otherwise read as this one's.
-        emit_reports(host, args, &plan, None, None, &dropped, styler)?;
-        emit_diag(host, args, &plan, None, started, styler)?;
+        emit_empty(host, args, &plan, &dropped, started, styler)?;
         warn_auxiliary(host, log_failure.as_ref(), styler);
 
         return Ok(Executed { plan: None, stuck });
@@ -6128,42 +6139,46 @@ mod tests {
         assert_eq!(code, EXIT_OK);
     }
 
-    /// An empty run still writes its documents. Leaving a previous run's in place would present
-    /// that run's mutants as this one's, to a reader and to `explain` or `--only-survivors` alike.
+    /// An empty selection still writes its documents, which replace a previous run's.
     #[test]
-    fn a_run_with_nothing_to_test_replaces_the_previous_documents() {
-        for dry_run in [true, false] {
-            let dir = workdir("run-empty-documents-");
-            let root = subject_root(&dir);
-            fs::write(root.join("src/lib.rs"), "pub fn less(a: i32, b: i32) -> bool { a < b }\n").expect("lib");
-            let args = RunArgs {
-                select: crate::commands::SelectArgs {
-                    dir: root.clone(),
-                    exclude_files: vec!["**/*.rs".to_owned()],
-                    ..crate::commands::SelectArgs::default()
-                },
-                dry_run,
-                ..Default::default()
-            };
-            let documents = Documents::resolve(&args, &root);
-            fs::create_dir_all(Documents::directory(&args, &root)).expect("artifact directory");
-            for path in [&documents.json, &documents.html, &documents.sarif, &documents.diag] {
-                fs::write(path, "stale").expect("previous document");
-            }
-            let mut host = Sink::default();
+    fn an_empty_selection_writes_documents_for_an_empty_population() {
+        let dir = workdir("run-empty-documents-");
+        let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("utf8");
+        let args = RunArgs {
+            artifact_dir: Some(root.join("reports")),
+            ..Default::default()
+        };
+        let plan = Plan {
+            root: root.clone(),
+            files: Vec::new(),
+            mutants: Vec::new(),
+            suppressed: 0,
+            idle: Vec::new(),
+            sharded_out: 0,
+            settled_out: 0,
+            skipped: Vec::new(),
+            digests: HashMap::default(),
+            reach: HashMap::default(),
+            specs: HashMap::default(),
+        };
+        let mut host = Sink::default();
 
-            let code = run_session(&mut host, &args, When::Never, Styler::new(false)).expect("run session");
+        emit_empty(&mut host, &args, &plan, &[], Instant::now(), Styler::new(false)).expect("empty documents");
 
-            assert_eq!(code, EXIT_OK, "{}", host.err());
-            assert!(host.err().contains("no mutants were generated"), "{}", host.err());
-            let report: Value = from_str(&fs::read_to_string(&documents.json).expect("report")).expect("the report is JSON");
-            assert_eq!(report["files"], json!({}), "{report}");
-            let sarif: Value = from_str(&fs::read_to_string(&documents.sarif).expect("SARIF")).expect("the SARIF log is JSON");
-            assert_eq!(sarif["runs"][0]["results"], json!([]), "{sarif}");
-            for path in [&documents.html, &documents.diag] {
-                assert_ne!(fs::read_to_string(path).expect("document"), "stale", "{path}");
-            }
-        }
+        assert!(host.err().starts_with("no mutants were generated\n"), "{}", host.err());
+        let documents = Documents::resolve(&args, &root);
+        let report: Value = from_str(&fs::read_to_string(&documents.json).expect("report")).expect("the report is JSON");
+        assert_eq!(report["files"], json!({}), "{report}");
+        // No baseline ran, so the report claims no test count.
+        assert_eq!(report["config"]["tests"], Value::Null, "{report}");
+        let sarif: Value = from_str(&fs::read_to_string(&documents.sarif).expect("SARIF")).expect("the SARIF log is JSON");
+        assert_eq!(sarif["runs"][0]["results"], json!([]), "{sarif}");
+        assert!(documents.html.is_file(), "{}", documents.html);
+        assert!(documents.diag.is_file(), "{}", documents.diag);
+
+        fails_at_every_line(host.err().lines().count(), |host| {
+            emit_empty(host, &args, &plan, &[], Instant::now(), Styler::new(false))
+        });
     }
 
     /// A population that is not empty but holds nothing scorable — the shard that contained only
