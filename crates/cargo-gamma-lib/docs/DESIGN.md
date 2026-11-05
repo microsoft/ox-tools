@@ -723,6 +723,21 @@ updated, removed, and preserved; aggregate hint and mutant counts remain
 available from the artifact rather than being repeated in the command status
 line.
 
+`cargo gamma run --update-hints` performs that same ordinary incremental
+promotion after the campaign reaches a reportable outcome. Successful campaigns
+therefore fail when promotion fails. Normal nonzero mutation, expectation,
+score-gate, incomplete-population, and build-stuck outcomes still attempt
+promotion but retain the campaign exit code if promotion fails; an operational
+error that prevents a reportable campaign outcome does not attempt promotion.
+The option conflicts with `--dry-run`, because a preview writes no campaign
+record and therefore has no new hints to promote. When Linux resume testing
+delegates to a child process for memory control, that child owns both the
+campaign and any requested promotion; the parent returns its status without
+promoting again.
+The run's selected workspace and effective cache directory are passed to the
+existing hints command, preserving its locking, partial-record preference,
+merge, concurrency, and atomic-publication behavior.
+
 Campaign records use schema version 12 and contain a complete outcome ledger:
 stable mutant ID, outcome, workspace-relative file, mutator, source-site
 identity and location, replacement identity, existing suppression state, and

@@ -1254,6 +1254,12 @@ context is provenance, not an admission gate: it records the repository HEAD SHA
 date. Killer hints require fresh execution; imported compiler exclusions follow
 the explicit inventory policy instead.
 
+`cargo gamma run --update-hints` performs that ordinary incremental promotion after the campaign
+reaches a reportable outcome. A successful campaign returns a promotion failure, while normal
+nonzero mutation and gate outcomes retain their campaign status if promotion fails. Operational
+errors do not promote. The option conflicts with `--dry-run`, and a delegated Linux resume owns
+both the campaign and promotion so the parent does not promote a second time.
+
 Automatic hint consumption remains best-effort: malformed or unsupported knowledge is ignored
 because an optimization cannot be allowed to stop a run. Explicit incremental promotion has the
 opposite failure policy. It refuses an existing artifact it cannot understand rather than replacing

@@ -438,12 +438,6 @@ pub(super) fn distinguish(score: f64, minimum: f64) -> (String, String) {
 // #[gamma::skip(all, reason = "exit-code gating is covered end-to-end through the injected Host; private branch mutants duplicate the directly tested gate predicates and rendered diagnostics")]
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub(super) fn run_session<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: Styler) -> crate::Result<i32> {
-    #[cfg(target_os = "linux")]
-    if args.resume_testing
-        && let Some(code) = resume_relaunch(host, args)?
-    {
-        return Ok(code);
-    }
     let executed = measured(host, args, progress_when, styler)?;
     Ok(finish_run(host, args, styler, executed))
 }
@@ -569,7 +563,7 @@ fn finish_run<H: Host>(host: &mut H, args: &RunArgs, styler: Styler, executed: E
 }
 
 #[cfg(target_os = "linux")]
-fn resume_relaunch<H: Host>(host: &H, args: &RunArgs) -> crate::Result<Option<i32>> {
+pub(super) fn resume_relaunch<H: Host>(host: &H, args: &RunArgs) -> crate::Result<Option<i32>> {
     resume_relaunch_with(
         args,
         host.may_replace_process(),
