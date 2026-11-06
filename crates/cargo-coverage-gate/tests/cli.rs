@@ -741,6 +741,8 @@ fn run_delegates_both_configurations_to_cargo_llvm_cov_report_and_evaluates() {
             "--target",
             "x86_64-pc-windows-msvc",
         ])
+        .env_remove("CARGO_BUILD_TARGET")
+        .env_remove("FAKE_CARGO_CONFIG_JSON")
         .arg("--coverage-dir")
         .arg(&coverage_dir)
         .env("CARGO", &tools.cargo)
