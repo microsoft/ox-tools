@@ -1,0 +1,119 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+name: Diagnose protected Linux mutation run
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [makolnek-microsoft-scheduled-build-timings]
+    paths:
+      - .github/workflows/gamma-linux-diagnostics.yml
+      - scripts/gamma-linux-diagnostics.py
+
+permissions:
+  contents: read
+
+jobs:
+  diagnostic:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    permissions:
+      contents: read
+      checks: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          lfs: true
+          persist-credentials: false
+      - uses: ./.github/actions/anvil-setup
+        with:
+          group: scheduled-exhaustive
+      - name: Build temporary diagnostic coordinator
+        shell: bash
+        run: |
+          cargo build --locked --release -p cargo-gamma --bin cargo-gamma
+          mkdir -p "$RUNNER_TEMP/gamma-diagnostic-bin" "$RUNNER_TEMP/gamma-diagnostic"
+          cp target/release/cargo-gamma "$RUNNER_TEMP/gamma-diagnostic-bin/"
+          echo "$RUNNER_TEMP/gamma-diagnostic-bin" >> "$GITHUB_PATH"
+      - name: Start independent diagnostics
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          python3 -u scripts/gamma-linux-diagnostics.py observe \
+            "$RUNNER_TEMP/gamma-diagnostic" "gamma-diagnostic-$GITHUB_RUN_ID.scope" \
+            > "$RUNNER_TEMP/gamma-diagnostic/observer.log" 2>&1 &
+          echo "$!" > "$RUNNER_TEMP/gamma-diagnostic/observer.pid"
+          for attempt in {1..30}; do
+            if test -f "$RUNNER_TEMP/gamma-diagnostic/ready"; then
+              cat "$RUNNER_TEMP/gamma-diagnostic/ready"
+              exit 0
+            fi
+            if ! kill -0 "$(cat "$RUNNER_TEMP/gamma-diagnostic/observer.pid")" 2>/dev/null; then
+              cat "$RUNNER_TEMP/gamma-diagnostic/observer.log"
+              exit 1
+            fi
+            sleep 2
+          done
+          echo "::error::Diagnostics did not become ready; refusing an unobserved run."
+          exit 1
+      - name: Run unchanged exhaustive group inside external limits
+        id: campaign
+        env:
+          ANVIL_IMPACT: off
+          GAMMA_DIAGNOSTIC_LAUNCH_LOG: ${{ runner.temp }}/gamma-diagnostic/launches.jsonl
+        shell: bash
+        run: |
+          set +e
+          systemd-run --user --scope --quiet --collect \
+            --unit="gamma-diagnostic-$GITHUB_RUN_ID.scope" \
+            --property=Delegate=yes --property=MemoryAccounting=yes \
+            --property=MemoryMax=10G --property=MemorySwapMax=0 \
+            --property=MemoryOOMGroup=yes --property=TasksMax=1024 \
+            --property=RuntimeMaxSec=18000 \
+            python3 scripts/gamma-linux-diagnostics.py run \
+              "$RUNNER_TEMP/gamma-diagnostic" \
+            2>&1 | tee "$RUNNER_TEMP/gamma-diagnostic/group.log"
+          status=${PIPESTATUS[0]}
+          set -e
+          echo "$status" > "$RUNNER_TEMP/gamma-diagnostic/campaign-exit"
+          if test -f "$RUNNER_TEMP/gamma-diagnostic/controlled-stop.json"; then
+            echo "::error::External safety threshold reached; this is not a successful exhaustive check."
+            exit 1
+          fi
+          exit "$status"
+      - name: Finish diagnostics
+        if: always()
+        env:
+          CAMPAIGN_OUTCOME: ${{ steps.campaign.outcome }}
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/gamma-diagnostic"
+          echo "$CAMPAIGN_OUTCOME" > "$RUNNER_TEMP/gamma-diagnostic/done"
+          if ! test -f "$RUNNER_TEMP/gamma-diagnostic/observer.pid"; then exit 0; fi
+          for attempt in {1..40}; do
+            if test -f "$RUNNER_TEMP/gamma-diagnostic/finished"; then
+              cat "$RUNNER_TEMP/gamma-diagnostic/observer.log"
+              exit 0
+            fi
+            if ! kill -0 "$(cat "$RUNNER_TEMP/gamma-diagnostic/observer.pid")" 2>/dev/null; then
+              cat "$RUNNER_TEMP/gamma-diagnostic/observer.log"
+              echo "::error::Independent diagnostic observer exited unexpectedly."
+              exit 1
+            fi
+            sleep 2
+          done
+          echo "::error::Independent diagnostics did not finish."
+          exit 1
+      - name: Preserve diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: gamma-protected-linux-diagnostics
+          path: |
+            ${{ runner.temp }}/gamma-diagnostic/
+            target/cargo-gamma/gamma-report.*
+            target/cargo-gamma/gamma-diagnostics.json
+            target/cargo-gamma/gamma-perf-advice.md
+          if-no-files-found: error
+          retention-days: 30
