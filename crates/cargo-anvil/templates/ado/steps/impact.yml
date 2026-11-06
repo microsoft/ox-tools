@@ -12,13 +12,15 @@
 steps:
   # Reuse the per-job setup (toolchain, cargo cache, just install) so
   # cargo + just are on PATH and ~/.cargo/bin is restored from cache.
-  # group=none skips the full catalog install -- impact only needs
-  # cargo-delta, which we install on the next step.
+  # group=none skips the full catalog install. Install only the two tools used
+  # by the shared impact recipe in the next step.
   - template: setup.yml
     parameters:
       group: none
-  - pwsh: just anvil-tool-cargo-delta-install install
-    displayName: anvil impact (install cargo-delta)
+  - pwsh: |
+      just anvil-tool-cargo-each-install install
+      just anvil-tool-cargo-delta-install install
+    displayName: anvil impact (install tools)
   - pwsh: just anvil-impact
     # Run the shared anvil-impact recipe -- the same impact building block
     # adopters run locally. It resolves the base ref (_anvil-base-ref),

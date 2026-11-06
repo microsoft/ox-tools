@@ -10,5 +10,5 @@ _default:
     @just --list
 
 # >>> anvil-managed: anvil-imports
-import 'justfiles/anvil/mod.just'
+import '.anvil/anvil.just'
 # <<< anvil-managed: anvil-imports

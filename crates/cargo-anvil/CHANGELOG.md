@@ -2,44 +2,102 @@
 
 ## [Unreleased]
 
-## [0.25.0] - 2026-11-04
+## [0.26.0] - 2026-11-06
 
-- ⚡ Performance
+- ⚠️ Breaking
 
-  - cargo-anvil: streamline PR checks and isolate Linux fuzzing ([#336](https://github.com/microsoft/ox-tools/pull/336))
-
-## [0.23.5] - 2026-11-04
-
-- 🐛 Bug Fixes
-
-  - cargo-anvil: pin cargo-coverage-gate 0.7.4 to preserve workspace package source identities.
-
-## [0.23.4] - 2026-11-03
+  - cargo-anvil: narrow public setup recipes
+  - cargo-anvil: remove SemVer advisory check
 
 - ✨ Features
 
-  - cargo-anvil: pin cargo-coverage-gate 0.7.3 ([#329](https://github.com/microsoft/ox-tools/pull/329))
+  - cargo-anvil: split generated recipe roles
+  - cargo-anvil: release v0.20.0
+  - cargo-anvil: consolidate generated infrastructure
 
 - 🐛 Bug Fixes
 
-  - cargo-anvil: drop test-only PowerShell 7.6 restriction ([#337](https://github.com/microsoft/ox-tools/pull/337))
-  - make SemVer checks reproducible with locked API snapshots ([#334](https://github.com/microsoft/ox-tools/pull/334))
-  - cargo-anvil: isolate mutation diffs and normalize Git prefixes ([#323](https://github.com/microsoft/ox-tools/pull/323))
-  - cargo-anvil: prepare the Miri sysroot during setup
+  - cargo-anvil: preserve consolidated update engine
+  - cargo-anvil: preserve merged recipe behavior
+  - cargo-anvil: keep setup independent of workspace tools
+  - cargo-anvil: decouple tool installs from workspace toolchain
+  - cargo-anvil: bootstrap cargo-each before recipe evaluation
+  - cargo-anvil: allow rich recipe help
+  - cargo-anvil: collapse unreleased version bumps
+  - cargo-anvil: retain consolidated impact action path
+  - cargo-anvil: require cargo-each 0.7.0
+  - cargo-anvil: reconcile consolidation with current main
 
-- ✔️ Tasks
+- 📚 Documentation
 
-  - update dependencies, build tools, actions, and Rust ([#330](https://github.com/microsoft/ox-tools/pull/330))
-  - cargo-anvil: refresh release notes for 0.21.1
+  - cargo-anvil: simplify generated recipe help
+
+- ♻️ Code Refactoring
+
+  - cargo-anvil: keep helpers recipes private
+  - cargo-anvil: mark hidden recipes private
+  - cargo-anvil: unify example target selection
+  - cargo-anvil: make README checks shell-free
+  - cargo-anvil: make mutants diff shell-free
+  - cargo-anvil: make Miri recipes shell-free
+  - cargo-anvil: remove portable recipe PowerShell
 
 - 🧩 Miscellaneous
 
-  - Merge main and regenerate cargo-anvil 0.23.3 metadata
-  - Merge main and regenerate cargo-anvil 0.23.2 metadata
-  - Merge main and synchronize cargo-anvil 0.23.1 catalog metadata
-  - Adopt cargo-gamma in Anvil and remediate campaign survivors ([#327](https://github.com/microsoft/ox-tools/pull/327))
-  - Merge main and synchronize cargo-anvil 0.22.1 catalog metadata
-  - Merge main and synchronize cargo-anvil 0.21.2 metadata
+  - Merge current main into cargo-anvil consolidation
+  - Merge current main into cargo-anvil consolidation
+  - Merge current main into cargo-anvil consolidation
+  - Merge current main into cargo-anvil consolidation
+  - Merge current main into cargo-anvil consolidation
+  - Merge current main into cargo-anvil consolidation
+
+## [0.24.0] - 2026-11-04
+
+- ⚠️ Breaking
+
+  - cargo-anvil: narrow public setup recipes
+  - cargo-anvil: remove SemVer advisory check
+
+- ✨ Features
+
+  - cargo-anvil: split generated recipe roles
+  - cargo-anvil: release v0.20.0
+  - cargo-anvil: consolidate generated infrastructure
+
+- 🐛 Bug Fixes
+
+  - cargo-anvil: preserve merged recipe behavior
+  - cargo-anvil: prepare the Miri sysroot during setup ([#328](https://github.com/microsoft/ox-tools/pull/328))
+  - cargo-anvil: keep setup independent of workspace tools
+  - cargo-anvil: decouple tool installs from workspace toolchain
+  - cargo-anvil: bootstrap cargo-each before recipe evaluation
+  - cargo-anvil: allow rich recipe help
+  - cargo-anvil: collapse unreleased version bumps
+  - cargo-anvil: retain consolidated impact action path
+  - cargo-anvil: require cargo-each 0.7.0
+  - cargo-anvil: reconcile consolidation with current main
+
+- 📚 Documentation
+
+  - cargo-anvil: simplify generated recipe help
+
+- ♻️ Code Refactoring
+
+  - cargo-anvil: keep helpers recipes private
+  - cargo-anvil: mark hidden recipes private
+  - cargo-anvil: unify example target selection
+  - cargo-anvil: make README checks shell-free
+  - cargo-anvil: make mutants diff shell-free
+  - cargo-anvil: make Miri recipes shell-free
+  - cargo-anvil: remove portable recipe PowerShell
+
+- 🧩 Miscellaneous
+
+  - Merge current main into cargo-anvil consolidation
+  - Merge current main into cargo-anvil consolidation
+  - Merge current main into cargo-anvil consolidation
+  - Merge current main into cargo-anvil consolidation
+  - Merge current main into cargo-anvil consolidation
 
 ## [0.23.3] - 2026-11-03
 
@@ -115,32 +173,49 @@
 
 ## [0.22.0] - 2026-11-02
 
+- ⚠️ Breaking
+
+  - cargo-anvil: narrow public setup recipes
+  - cargo-anvil: remove SemVer advisory check
+
 - ✨ Features
 
-  - cargo-anvil: pin coverage-gate 0.7.3
+  - cargo-anvil: pin cargo-coverage-gate 0.7.3 ([#329](https://github.com/microsoft/ox-tools/pull/329))
+  - cargo-anvil: split generated recipe roles
+  - cargo-anvil: release v0.20.0
+  - cargo-anvil: consolidate generated infrastructure
 
 - 🐛 Bug Fixes
 
+  - cargo-anvil: keep setup independent of workspace tools
+  - cargo-anvil: decouple tool installs from workspace toolchain
+  - cargo-anvil: bootstrap cargo-each before recipe evaluation
+  - cargo-anvil: allow rich recipe help
+  - cargo-anvil: collapse unreleased version bumps
+  - cargo-anvil: retain consolidated impact action path
   - cargo-anvil: isolate mutation diffs and normalize Git prefixes ([#323](https://github.com/microsoft/ox-tools/pull/323))
+  - cargo-anvil: require cargo-each 0.7.0
+  - cargo-anvil: reconcile consolidation with current main
 
-- ✔️ Tasks
+- 📚 Documentation
 
-  - cargo-anvil: refresh 0.23.0 changelog
+  - cargo-anvil: simplify generated recipe help
 
-## [0.21.1] - 2026-10-30
+- ♻️ Code Refactoring
 
-- 🐛 Bug Fixes
-
-  - cargo-anvil: isolate mutation diffs and normalize Git prefixes
-  - cargo-anvil: install APRZ 1.2.1 from crates.io ([#313](https://github.com/microsoft/ox-tools/pull/313))
-
-- ✔️ Tasks
-
-  - cargo-anvil: pin cargo-delta 0.5.0 ([#311](https://github.com/microsoft/ox-tools/pull/311))
+  - cargo-anvil: keep helpers recipes private
+  - cargo-anvil: mark hidden recipes private
+  - cargo-anvil: unify example target selection
+  - cargo-anvil: make README checks shell-free
+  - cargo-anvil: make mutants diff shell-free
+  - cargo-anvil: make Miri recipes shell-free
+  - cargo-anvil: remove portable recipe PowerShell
 
 - 🧩 Miscellaneous
 
-  - Kill a bunch of mutants ([#315](https://github.com/microsoft/ox-tools/pull/315))
+  - Merge current main into cargo-anvil consolidation
+  - Merge current main into cargo-anvil consolidation
+  - Merge current main into cargo-anvil consolidation
 
 ## [0.21.0] - 2026-10-29
 

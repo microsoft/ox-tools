@@ -54,7 +54,7 @@ fn upgraded_catalog() -> Catalog {
 fn historical() -> MemoryRepository {
     let mut io = repository();
     io.insert(".gitattributes", HISTORICAL_HOST);
-    io.insert(".anvil.lock", HISTORICAL_LOCK);
+    io.insert(".anvil/manifest.toml", HISTORICAL_LOCK);
     io
 }
 
@@ -77,8 +77,8 @@ fn fresh_generation_selects_only_explicit_backends_and_deduplicates() {
         assert_eq!(io.files.contains_key(".azuredevops/test.yml"), ado);
         assert_eq!(result.backends.len(), usize::from(github) + usize::from(ado));
         assert_eq!(io.files["owned.just"], "new recipe\n");
-        assert!(io.files[".anvil.lock"].contains("tool_version = \"1.0.0\""));
-        assert!(io.files[".anvil.lock"].contains("catalog_checksum = \"sha256:"));
+        assert!(io.files[".anvil/manifest.toml"].contains("tool_version = \"1.0.0\""));
+        assert!(io.files[".anvil/manifest.toml"].contains("catalog_checksum = \"sha256:"));
     }
 }
 
@@ -92,7 +92,7 @@ fn unchanged_historical_region_upgrades_and_preserves_surrounding_content() {
         assert!(result.summary.contains("Will update: 1 item(s)"), "{}", result.summary);
         let expected = "*.png binary\n\n# >>> anvil-managed: anvil-gitattributes\n*.rs text eol=lf\n*.sh text eol=lf\n*.ps1 text eol=lf\n# <<< anvil-managed: anvil-gitattributes\n\n# repository-owned suffix\n";
         assert_eq!(io.files[".gitattributes"], expected.replace('\n', newline));
-        assert_ne!(io.files[".anvil.lock"], HISTORICAL_LOCK);
+        assert_ne!(io.files[".anvil/manifest.toml"], HISTORICAL_LOCK);
         let generated = io.files.clone();
         let again = update(&upgraded_catalog(), &UpdateOptions::default(), &mut io).unwrap();
         assert!(again.in_sync, "{}", again.summary);
@@ -110,7 +110,7 @@ fn edited_historical_region_is_refused_not_overwritten() {
     assert!(!result.in_sync);
     assert!(!result.refusals.is_empty(), "{}", result.summary);
     assert_eq!(io.files[".gitattributes"], edited);
-    assert!(io.files[".anvil.lock"].contains("b91854c7f0e6d14c74751f607d2c0e3dfcefef55f5178bbafae59d47e577aa1a"));
+    assert!(io.files[".anvil/manifest.toml"].contains("b91854c7f0e6d14c74751f607d2c0e3dfcefef55f5178bbafae59d47e577aa1a"));
     assert_eq!(io.files["owned.just"], "new recipe\n");
 }
 
@@ -178,7 +178,7 @@ fn lock_only_version_update_is_detected_and_then_idempotent() {
     let artifacts = io.files.clone();
     let result = update(&changed, &UpdateOptions::default(), &mut io).unwrap();
     assert!(result.has_changes);
-    assert!(io.files[".anvil.lock"].contains("tool_version = \"1.1.0\""));
+    assert!(io.files[".anvil/manifest.toml"].contains("tool_version = \"1.1.0\""));
     assert_eq!(io.files["owned.just"], artifacts["owned.just"]);
     assert_eq!(io.files[".gitattributes"], artifacts[".gitattributes"]);
     assert!(update(&changed, &UpdateOptions::default(), &mut io).unwrap().in_sync);
@@ -230,7 +230,10 @@ fn equivalent_workspace_paths_resolve_to_the_same_memory_files() {
 #[test]
 fn ownership_guard_precedes_workspace_reads_and_force_switches_owner() {
     let mut io = historical();
-    io.insert(".anvil.lock", &HISTORICAL_LOCK.replace("tool = \"anvil\"", "tool = \"another\""));
+    io.insert(
+        ".anvil/manifest.toml",
+        &HISTORICAL_LOCK.replace("tool = \"anvil\"", "tool = \"another\""),
+    );
     io.insert("Cargo.toml", "invalid TOML");
     let error = update(&upgraded_catalog(), &UpdateOptions::default(), &mut io).unwrap_err();
     assert!(error.to_string().contains("managed by 'another'"));
@@ -239,7 +242,7 @@ fn ownership_guard_precedes_workspace_reads_and_force_switches_owner() {
     let mut options = UpdateOptions::default();
     options.force = true;
     update(&upgraded_catalog(), &options, &mut io).unwrap();
-    assert!(io.files[".anvil.lock"].contains("tool = \"anvil\""));
+    assert!(io.files[".anvil/manifest.toml"].contains("tool = \"anvil\""));
 }
 
 #[test]
@@ -253,7 +256,7 @@ fn disabling_a_backend_removes_only_unchanged_owned_files() {
     update(&upgraded_catalog(), &options, &mut io).unwrap();
     assert!(!io.files.contains_key(".github/workflows/test.yml"));
     assert_eq!(io.files[".azuredevops/test.yml"], "customized pipeline\n");
-    assert!(!io.files[".anvil.lock"].contains(".azuredevops/test.yml"));
+    assert!(!io.files[".anvil/manifest.toml"].contains(".azuredevops/test.yml"));
     assert!(
         io.mutations
             .iter()
@@ -274,7 +277,7 @@ struct FailingIo {
 
 impl UpdateIo for FailingIo {
     fn read_file(&self, path: &Path) -> Result<Option<String>, AppError> {
-        if path == Path::new(".anvil.lock") {
+        if path == Path::new(".anvil/manifest.toml") {
             self.lock_reads.set(self.lock_reads.get() + 1);
             if self.fail_second_lock_read && self.lock_reads.get() == 2 {
                 return Err(app_err!("late lock read failed"));
@@ -312,7 +315,7 @@ impl UpdateIo for FailingIo {
 fn read_directory_and_late_lock_failures_stop_before_publication() {
     for (read, directory, late, expected) in [
         (Some("Cargo.toml"), None, false, "scripted read failure"),
-        (Some(".anvil.lock"), None, false, "scripted read failure"),
+        (Some(".anvil/manifest.toml"), None, false, "scripted read failure"),
         (Some(".gitattributes"), None, false, "scripted read failure"),
         (Some("owned.just"), None, false, "scripted read failure"),
         (None, Some(""), false, "scripted directory failure"),
@@ -342,7 +345,7 @@ fn read_directory_and_late_lock_failures_stop_before_publication() {
 
 #[test]
 fn failed_artifact_or_lock_writes_do_not_publish_a_successful_lock() {
-    for path in [".gitattributes", "owned.just", ".anvil.lock"] {
+    for path in [".gitattributes", "owned.just", ".anvil/manifest.toml"] {
         let mut io = FailingIo {
             repository: historical(),
             write: Some(path.to_owned()),
@@ -350,7 +353,7 @@ fn failed_artifact_or_lock_writes_do_not_publish_a_successful_lock() {
         };
         let error = update(&upgraded_catalog(), &UpdateOptions::default(), &mut io).unwrap_err();
         assert!(error.to_string().contains("scripted write failure"));
-        assert_eq!(io.repository.files[".anvil.lock"], HISTORICAL_LOCK);
+        assert_eq!(io.repository.files[".anvil/manifest.toml"], HISTORICAL_LOCK);
     }
 }
 
@@ -363,12 +366,12 @@ fn removal_failure_prevents_lock_publication() {
     let mut options = UpdateOptions::default();
     options.backends = vec![Backend::GitHub];
     update(&upgraded_catalog(), &options, &mut io).unwrap();
-    let lock = io.repository.files[".anvil.lock"].clone();
+    let lock = io.repository.files[".anvil/manifest.toml"].clone();
     io.remove = Some(".github/workflows/test.yml".to_owned());
     options.backends.clear();
     let error = update(&upgraded_catalog(), &options, &mut io).unwrap_err();
     assert!(error.to_string().contains("scripted delete failure"));
-    assert_eq!(io.repository.files[".anvil.lock"], lock);
+    assert_eq!(io.repository.files[".anvil/manifest.toml"], lock);
 }
 
 #[test]
@@ -383,7 +386,7 @@ fn proposal_failure_preserves_the_original_and_previous_lock() {
     assert!(error.to_string().contains("scripted write failure"));
     assert_eq!(io.repository.files["owned.just"], "host recipe\n");
     assert!(!io.repository.files.contains_key("owned.just.anvil-proposed"));
-    assert_eq!(io.repository.files[".anvil.lock"], HISTORICAL_LOCK);
+    assert_eq!(io.repository.files[".anvil/manifest.toml"], HISTORICAL_LOCK);
 }
 
 #[test]
@@ -462,7 +465,7 @@ fn artifact_writes_reject_file_directory_collisions_before_lock_publication() {
         assert!(error.to_string().contains(expected), "{error}");
         assert_eq!(io.files[first], "first\n");
         assert!(!io.files.contains_key(second));
-        assert!(!io.files.contains_key(".anvil.lock"));
+        assert!(!io.files.contains_key(".anvil/manifest.toml"));
         assert_eq!(io.mutations, vec![format!("write {first}")]);
     }
 }
@@ -476,14 +479,18 @@ fn invalid_manifests_and_ambiguous_casing_fail_without_mutation() {
             "[workspace]\nmembers = []\n",
             "workspace at the repository root resolved to zero members",
         ),
-        (".anvil.lock", "not valid manifest TOML", "failed to parse manifest at .anvil.lock"),
         (
-            ".anvil.lock",
+            ".anvil/manifest.toml",
+            "not valid manifest TOML",
+            "failed to parse manifest at .anvil/manifest.toml",
+        ),
+        (
+            ".anvil/manifest.toml",
             "version = 999\n",
             "manifest schema version 999 is newer than supported",
         ),
         (
-            ".anvil.lock",
+            ".anvil/manifest.toml",
             "version = 2\n[[file]]\npath = \"../escape\"\nchecksum = \"old\"\n",
             "[[file]] entry '../escape' must be a relative path inside the repository",
         ),

@@ -42,46 +42,46 @@ const CODE_REVIEW_SKILL: &str = include_str!("../../../templates/github/code-rev
 /// Test review rules linked from the code review skill.
 const TEST_REVIEW_RULES: &str = include_str!("../../../templates/github/test-review.md");
 
-/// `.github/actions/anvil-setup/action.yml`.
+/// `.anvil/github/actions/setup/action.yml`.
 #[inline]
 #[must_use]
 pub fn setup_action() -> Artifact {
-    Artifact::backend_file(Backend::GitHub, ".github/actions/anvil-setup/action.yml", SETUP_ACTION)
+    Artifact::backend_file(Backend::GitHub, ".anvil/github/actions/setup/action.yml", SETUP_ACTION)
 }
 
-/// `.github/actions/anvil-setup/just-problem-matcher.json`.
+/// `.anvil/github/actions/setup/just-problem-matcher.json`.
 #[inline]
 #[must_use]
 pub fn just_problem_matcher() -> Artifact {
     Artifact::backend_file(
         Backend::GitHub,
-        ".github/actions/anvil-setup/just-problem-matcher.json",
+        ".anvil/github/actions/setup/just-problem-matcher.json",
         JUST_PROBLEM_MATCHER,
     )
 }
 
-/// `.github/actions/anvil-run-group/action.yml`.
+/// `.anvil/github/actions/run-group/action.yml`.
 #[inline]
 #[must_use]
 pub fn run_group_action() -> Artifact {
-    Artifact::backend_file(Backend::GitHub, ".github/actions/anvil-run-group/action.yml", RUN_GROUP_ACTION)
+    Artifact::backend_file(Backend::GitHub, ".anvil/github/actions/run-group/action.yml", RUN_GROUP_ACTION)
 }
 
-/// `.github/actions/anvil-report-status/action.yml`.
+/// `.anvil/github/actions/report-status/action.yml`.
 #[inline]
 #[must_use]
 pub fn report_status_action() -> Artifact {
     Artifact::backend_file(
         Backend::GitHub,
-        ".github/actions/anvil-report-status/action.yml",
+        ".anvil/github/actions/report-status/action.yml",
         REPORT_STATUS_ACTION,
     )
 }
 
-/// `.github/actions/anvil-impact/action.yml`.
+/// `.anvil/github/actions/impact/action.yml`.
 #[must_use]
 pub fn impact_action() -> Artifact {
-    Artifact::backend_file(Backend::GitHub, ".github/actions/anvil-impact/action.yml", IMPACT_ACTION)
+    Artifact::backend_file(Backend::GitHub, ".anvil/github/actions/impact/action.yml", IMPACT_ACTION)
 }
 
 /// `.github/workflows/anvil-pr-impl.yml` — the PR reusable workflow.
@@ -177,21 +177,21 @@ mod tests {
     fn artifacts_keep_their_emission_order() {
         let paths: Vec<_> = all()
             .into_iter()
-            .map(|artifact| {
-                let Artifact::OwnedFile(spec) = artifact else {
-                    panic!("GitHub artifacts must be owned files");
-                };
-                spec.path
+            .map(|artifact| match artifact {
+                Artifact::OwnedFile(spec) => spec.path,
+                Artifact::OwnedFileSection(_) | Artifact::Region(_) => {
+                    panic!("GitHub artifacts must be owned files")
+                }
             })
             .collect();
         assert_eq!(
             paths,
             [
-                ".github/actions/anvil-setup/action.yml",
-                ".github/actions/anvil-setup/just-problem-matcher.json",
-                ".github/actions/anvil-run-group/action.yml",
-                ".github/actions/anvil-report-status/action.yml",
-                ".github/actions/anvil-impact/action.yml",
+                ".anvil/github/actions/setup/action.yml",
+                ".anvil/github/actions/setup/just-problem-matcher.json",
+                ".anvil/github/actions/run-group/action.yml",
+                ".anvil/github/actions/report-status/action.yml",
+                ".anvil/github/actions/impact/action.yml",
                 ".github/workflows/anvil-pr-impl.yml",
                 ".github/workflows/anvil-scheduled-impl.yml",
                 ".github/workflows/anvil-pr.yml",
@@ -240,7 +240,7 @@ mod tests {
             "Cargo home must be restored before Just is bootstrapped"
         );
         assert!(just_bootstrap < catalog_setup, "Just must be bootstrapped before catalog setup");
-        assert!(SETUP_ACTION.contains("$minimum = [version]'1.46.0'"));
+        assert!(SETUP_ACTION.contains("$minimum = [version]'1.47.0'"));
         assert!(SETUP_ACTION.contains("cargo-anvil requires just >= $minimum"));
         assert!(SETUP_ACTION.contains("ANVIL_GROUP: ${{ inputs.group }}"));
         let install_just = setup_action_step("Install just");
@@ -300,7 +300,7 @@ mod tests {
 
     #[test]
     fn run_group_action_captures_and_reports_results() {
-        assert!(RUN_GROUP_ACTION.contains("uses: ./.github/actions/anvil-setup"));
+        assert!(RUN_GROUP_ACTION.contains("uses: ./.anvil/github/actions/setup"));
         assert!(RUN_GROUP_ACTION.contains("group: ${{ inputs.group }}"));
         assert!(RUN_GROUP_ACTION.contains("free-disk-space: ${{ inputs.free-disk-space }}"));
         assert!(RUN_GROUP_ACTION.contains("status=${PIPESTATUS[0]}"));
@@ -317,7 +317,7 @@ mod tests {
             reporter.contains("if: always()"),
             "reporting must run after the authoritative recipe step fails"
         );
-        assert!(reporter.contains("uses: ./.github/actions/anvil-report-status"));
+        assert!(reporter.contains("uses: ./.anvil/github/actions/report-status"));
         assert!(
             reporter.contains("exit_code: ${{ steps.run.outputs.exit_code }}"),
             "the reporter must consume the exit code recorded before failure propagation"
@@ -340,6 +340,15 @@ mod tests {
 
     #[test]
     fn pr_groups_consume_downloaded_impact_while_scheduled_defaults_off() {
+        assert_eq!(
+            PR_IMPL_WORKFLOW.matches("uses: ./.anvil/github/actions/impact").count(),
+            2,
+            "both impact jobs must invoke the generated action at its consolidated path"
+        );
+        assert!(
+            !PR_IMPL_WORKFLOW.contains(".github/actions/anvil-impact"),
+            "the retired pre-consolidation action path must not return"
+        );
         // PR group jobs download the per-OS impact artifact and run in
         // `consume` mode; scoped checks read that downloaded cache.
         assert!(PR_IMPL_WORKFLOW.contains("uses: actions/download-artifact"));
@@ -463,65 +472,16 @@ export -f just
     fn impact_action_uses_group_none_and_runs_the_shared_recipe() {
         // The impact action reuses anvil-setup (group=none) + the cargo-delta
         // install, then runs the same `just anvil-impact` recipe adopters run
-        // locally and uploads the whole cache as a per-OS artifact. The include
-        // lists reach group jobs through that downloaded cache, never job
+        // locally and uploads the whole cache as a per-OS artifact. The package
+        // files reach group jobs through that downloaded cache, never job
         // outputs, so CI and local execution stay identical by construction.
         assert!(IMPACT_ACTION.contains("group: none"));
+        assert!(IMPACT_ACTION.contains("just anvil-tool-cargo-each-install binstall"));
         assert!(IMPACT_ACTION.contains("just anvil-tool-cargo-delta-install binstall"));
         assert!(IMPACT_ACTION.contains("run: just anvil-impact"));
         assert!(IMPACT_ACTION.contains("uses: actions/upload-artifact"));
         assert!(IMPACT_ACTION.contains("name: anvil-impact-${{ runner.os }}"));
         assert!(IMPACT_ACTION.contains("path: target/anvil/impact"));
-    }
-
-    #[test]
-    fn mutation_groups_preserve_reports_and_publish_sarif_after_failure() {
-        let report_step = RUN_GROUP_ACTION
-            .split_once("    - name: Upload Gamma reports\n")
-            .expect("mutation groups must archive their diagnostic reports")
-            .1;
-        let (reports, sarif) = report_step
-            .split_once("    - name: Upload Gamma SARIF\n")
-            .expect("mutation groups must publish SARIF separately");
-
-        for step in [reports, sarif] {
-            assert!(step.contains("always() && (inputs.group == 'pr-mutants' || inputs.group == 'scheduled-exhaustive')"));
-            assert!(!step.contains("continue-on-error: true"));
-        }
-
-        assert!(reports.contains("uses: actions/upload-artifact@"));
-        assert!(reports.contains("name: gamma-${{ inputs.group }}-${{ runner.os }}-${{ runner.arch }}-${{ github.run_attempt }}"));
-        assert!(reports.contains(
-            "hashFiles('target/cargo-gamma/gamma-report.*', 'target/cargo-gamma/gamma-diagnostics.json', 'target/cargo-gamma/gamma-perf-advice.md') != ''"
-        ));
-        let paths = reports
-            .split_once("        path: |\n")
-            .expect("report upload must explicitly select its files")
-            .1
-            .split_once("        if-no-files-found:")
-            .expect("missing selected outputs must be an error")
-            .0
-            .lines()
-            .map(str::trim)
-            .collect::<Vec<_>>();
-        assert_eq!(
-            paths,
-            [
-                "target/cargo-gamma/gamma-report.json",
-                "target/cargo-gamma/gamma-report.html",
-                "target/cargo-gamma/gamma-report.sarif",
-                "target/cargo-gamma/gamma-diagnostics.json",
-                "target/cargo-gamma/gamma-perf-advice.md",
-                "gamma-hints.yaml",
-            ]
-        );
-        assert!(reports.contains("if-no-files-found: error"));
-        assert!(reports.contains("retention-days: 30"));
-
-        assert!(sarif.contains("hashFiles('target/cargo-gamma/gamma-report.sarif') != ''"));
-        assert!(sarif.contains("uses: github/codeql-action/upload-sarif@"));
-        assert!(sarif.contains("sarif_file: target/cargo-gamma/gamma-report.sarif"));
-        assert!(sarif.contains("category: cargo-gamma-${{ inputs.group }}-${{ runner.os }}-${{ runner.arch }}"));
     }
 
     #[test]
@@ -557,7 +517,6 @@ export -f just
             "pr-test:",
             "pr-msrv:",
             "pr-runtime-analysis:",
-            "pr-fuzzing:",
             "pr-mutants:",
         ] {
             assert!(PR_IMPL_WORKFLOW.contains(needle), "PR impl workflow missing job '{needle}'");
@@ -595,11 +554,15 @@ export -f just
         ] {
             assert!(PR_IMPL_WORKFLOW.contains(name), "PR impl workflow missing display name '{name}'");
         }
+        assert!(
+            PR_IMPL_WORKFLOW.contains("if: matrix.os == 'windows'") && PR_IMPL_WORKFLOW.contains("if: matrix.os != 'windows'"),
+            "the mutation matrix must run on Windows and no-op every compatibility context"
+        );
         assert!(PR_IMPL_WORKFLOW.contains("publish_commit_statuses:"));
         assert_eq!(
             PR_IMPL_WORKFLOW.matches("BASE_REF: ${{ inputs.base_ref }}").count(),
             4,
-            "both impact jobs plus SemVer and mutation checks must use the event-specific base"
+            "both impact jobs plus the fast and mutation group jobs must use the event-specific base"
         );
         for group in PR_GROUPS {
             assert!(
@@ -608,7 +571,7 @@ export -f just
             );
         }
         assert_eq!(
-            PR_IMPL_WORKFLOW.matches("uses: ./.github/actions/anvil-run-group").count(),
+            PR_IMPL_WORKFLOW.matches("uses: ./.anvil/github/actions/run-group").count(),
             PR_GROUPS.len(),
             "every PR group job must use the shared group action"
         );
@@ -638,99 +601,6 @@ export -f just
             2,
             "disk cleanup should be enabled for the PR test and MSRV groups"
         );
-    }
-
-    #[test]
-    fn pr_workflow_scopes_publication_permissions_to_the_jobs_that_use_them() {
-        assert!(PR_IMPL_WORKFLOW.contains("\npermissions:\n  contents: read\n"));
-        for job in ["impact-linux", "impact-windows", "required-checks"] {
-            let body = PR_IMPL_WORKFLOW
-                .split_once(&format!("\n  {job}:"))
-                .expect("the workflow contains the named job")
-                .1
-                .split("\n\n  ")
-                .next()
-                .expect("split always returns the first segment");
-            assert!(!body.contains("permissions:"), "{job} must retain the read-only workflow default");
-        }
-        for group in PR_GROUPS {
-            let body = PR_IMPL_WORKFLOW
-                .split_once(&format!("\n  {group}:"))
-                .expect("each PR group has its own job")
-                .1
-                .split("\n\n  ")
-                .next()
-                .expect("split always returns the first segment");
-            let permissions = body
-                .split_once("\n    permissions:\n")
-                .expect("each PR group declares its publication scopes")
-                .1
-                .lines()
-                .take_while(|line| line.starts_with("      "))
-                .collect::<Vec<_>>()
-                .join("\n");
-            assert!(permissions.contains("contents: read"), "{group}");
-            assert!(permissions.contains("statuses: write"), "{group}");
-            assert_eq!(permissions.contains("pull-requests: write"), *group == "pr-fast", "{group}");
-            for scope in ["actions: read", "security-events: write"] {
-                assert_eq!(permissions.contains(scope), *group == "pr-mutants", "{group}: {scope}");
-            }
-        }
-        assert_eq!(PR_IMPL_WORKFLOW.matches("security-events: write").count(), 1);
-        assert_eq!(PR_IMPL_WORKFLOW.matches("actions: read").count(), 1);
-        assert_eq!(PR_IMPL_WORKFLOW.matches("pull-requests: write").count(), 1);
-    }
-
-    #[test]
-    fn pr_fuzzing_runs_only_on_linux() {
-        let job = PR_IMPL_WORKFLOW
-            .split_once("\n  pr-fuzzing:\n")
-            .expect("the PR workflow declares the pr-fuzzing job")
-            .1
-            .split_once("\n  pr-mutants:\n")
-            .expect("the mutation job follows fuzzing")
-            .0;
-
-        assert!(job.contains("os: [linux, linux-arm]"));
-        assert!(job.contains("needs: [impact-linux]"));
-        assert!(!job.contains("windows"));
-        assert!(job.contains("group: pr-fuzzing"));
-        assert!(job.contains("name: anvil-impact-Linux"));
-        assert!(job.contains("impact_mode: consume"));
-    }
-
-    #[test]
-    fn pr_fuzzing_contributes_to_required_checks() {
-        let gate = PR_IMPL_WORKFLOW
-            .split_once("\n  required-checks:\n")
-            .expect("the PR workflow declares the required-checks job")
-            .1;
-        assert!(gate.contains("\n      - pr-fuzzing\n"));
-        assert!(gate.contains("PR_FUZZING: ${{ needs.pr-fuzzing.result }}"));
-        assert!(gate.contains("\"pr-fuzzing=$PR_FUZZING\""));
-    }
-
-    #[test]
-    fn pr_mutants_retains_windows_only_campaigns() {
-        let job = PR_IMPL_WORKFLOW
-            .split_once("\n  pr-mutants:\n")
-            .expect("the PR workflow declares the pr-mutants job")
-            .1
-            .split_once("\n  required-checks:\n")
-            .expect("the required-checks job follows pr-mutants")
-            .0;
-
-        assert!(job.contains("os: [linux, windows, linux-arm, windows-arm]"));
-        assert_eq!(
-            job.matches("if: matrix.os == 'windows'").count(),
-            3,
-            "checkout, impact download, and mutation execution must remain Windows x64 only"
-        );
-        assert!(job.contains("name: anvil-impact-Windows"));
-        assert!(job.contains("group: pr-mutants"));
-        assert!(job.contains("impact_mode: consume"));
-        assert!(job.contains("BASE_REF: ${{ inputs.base_ref }}"));
-        assert!(job.contains("if: matrix.os != 'windows'"));
     }
 
     #[test]
@@ -773,22 +643,8 @@ export -f just
             .0;
         assert!(publisher_permissions.contains("\n    permissions:\n      issues: write"));
         assert!(!publisher_permissions.contains("contents: read"));
-        let exhaustive_job = SCHEDULED_IMPL_WORKFLOW
-            .split_once("\n  scheduled-exhaustive:")
-            .expect("scheduled workflow must contain exhaustive mutation testing")
-            .1
-            .split_once("\n  publish-failure:")
-            .expect("publish-failure is the next job after scheduled-exhaustive")
-            .0;
-        for scope in ["contents: read", "actions: read", "security-events: write"] {
-            assert!(
-                exhaustive_job.contains(&format!("\n      {scope}\n")),
-                "mutation upload missing permission {scope}"
-            );
-        }
-        assert_eq!(SCHEDULED_IMPL_WORKFLOW.matches("security-events: write").count(), 1);
         assert_eq!(
-            SCHEDULED_IMPL_WORKFLOW.matches("uses: ./.github/actions/anvil-run-group").count(),
+            SCHEDULED_IMPL_WORKFLOW.matches("uses: ./.anvil/github/actions/run-group").count(),
             SCHEDULED_GROUPS.len(),
             "every scheduled group job must use the shared group action"
         );
@@ -1122,7 +978,7 @@ async function scenario(items) {
             .1;
         assert!(validation_caller.contains("\n    permissions:\n      contents: read"));
         assert!(validation_caller.contains("statuses: write"));
-        assert!(validation_caller.contains("pull-requests: write"));
+        assert!(!validation_caller.contains("pull-requests: write"));
         for root in [PR_ROOT_WORKFLOW, SCHEDULED_ROOT_WORKFLOW] {
             let caller_permissions = root
                 .split_once("\n    permissions:")

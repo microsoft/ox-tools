@@ -41,15 +41,14 @@ from ambiguity detection.
 
 ## Pull request title validation
 
-The `pr-title.just` template owns both title validation and its failure diagnostic. The ordered
-human-readable pattern list is the source of truth: the PowerShell recipe expands its placeholders
-into regular-expression fragments and uses the same list verbatim in the error message. Allowed
-types are likewise defined once and used for both case-insensitive matching and diagnostics.
+The `pr-title.just` template owns both title validation and its failure diagnostic.
+Just reads `PR_TITLE`, applies one anchored case-insensitive regular expression,
+and raises `error(...)` with the accepted forms and types when it does not match.
+An unset or empty title expands to one portable `echo` invocation for the skip
+notice. No PowerShell prerequisite or script body is involved.
 
-Changes to accepted title syntax must therefore modify the pattern or type data rather than adding
-a separate regular expression. Pattern expansion escapes the display syntax before injecting the
-trusted regular-expression fragments; the reverse order would escape the fragments themselves and
-match them literally.
+Changes to accepted title syntax must update the regex and its human-readable
+diagnostic together.
 
 The skip path is shared by an unset and an explicitly empty `PR_TITLE`, because cloud backends
 publish an empty value outside a pull request context. Snapshot tests pin the emitted template,
@@ -68,50 +67,12 @@ The modified impact category is only a run-or-skip gate. It never supplies
 package arguments to the formatter, so cargo-each's workspace-member selection
 remains the formatter's input boundary.
 
-## Semantic-version candidate selection
-
-The SemVer recipe builds candidates from Cargo metadata before intersecting them
-with the affected package set. Cargo serializes unrestricted publication as
-`null`, forbidden publication as an empty array, and named-registry restrictions
-as a nonempty array. Only the empty-array form is excluded; library targets in
-the other two forms remain candidates.
-
-The canonical recipe owns this mapping, baseline availability checks, and
-per-package execution. Focused contract tests cover every publication form,
-while generated copies and snapshots detect drift from the template.
-
-For the [locked snapshot contract](./design/checks.md#locked-semver-snapshots),
-the recipe creates a temporary local shared Git clone and checks out the
-resolved PR target commit. Sharing Git objects avoids copying the repository's
-history, while a separate checkout protects the original repository and its
-historical manifests. LFS smudging is disabled so the local origin need not
-provide LFS assets. A PowerShell `finally` block removes the clone even when
-snapshot generation or comparison fails.
-
-`Get-RustdocSnapshot` invokes `cargo rustdoc --locked --lib` separately for each
-revision, using that revision's source-qualified Cargo metadata package ID to
-avoid ambiguity with same-name dependencies. Both invocations use the current
-checkout's selected compiler and target, with separate target directories.
-`RUSTC_BOOTSTRAP=1` enables unstable rustdoc JSON output on that compiler,
-matching the checker's own generation path. Each revision supplies its own
-metadata feature list; defaults remain enabled and case-sensitive exclusions
-preserve the checker's feature-selection heuristic when using file inputs.
-
-Cargo JSON commands capture stdout separately from stderr so warnings do not
-corrupt metadata or target-configuration parsing. Successful commands replay
-stderr, and failed commands retain it in diagnostics. Snapshot generation
-removes any previous JSON artifact before building so a stale file cannot turn
-a failed or incomplete build into an apparently successful comparison.
-
 ## Stable toolchain selection and setup
 
-The stable selector has two canonical implementation sites because it must run
-before Cargo can parse the root manifest. `versions.just` owns the lazy
-per-command argument expression; `tools.just` owns provisioning, workspace-MSRV
-validation, and the dedicated MSRV-test selection. Their small line-oriented
-root-manifest scanners intentionally duplicate the same accepted syntax and
-`workspace.package`-before-`package` precedence. Changes to one scanner must
-update the other and their focused resolver tests in the same patch.
+Cargo-each 0.4 owns root compatibility-floor resolution. A lazy dry run with a
+stable marker exposes `{workspace-rust-version}` to Just without parsing TOML in
+a recipe. The value is the root floor or an empty string when none is declared;
+malformed or inconsistent declarations still fail.
 
 Both implementations enforce the same ordinary-check decision table:
 
@@ -119,34 +80,37 @@ Both implementations enforce the same ordinary-check decision table:
 2. the presence of either root toolchain-file spelling emits no explicit
    argument;
 3. otherwise the root MSRV emits `+<MSRV>`;
-4. absence of every source fails.
+4. without any source, use Cargo's default selection and do not provision an
+   additional stable toolchain.
 
 The empty argument in the first two cases is load-bearing. It preserves
 rustup's native environment and working-directory-sensitive toolchain-file
 behavior, including profiles, components, targets, and path channels, without
 Anvil parsing or replaying suppressed options.
 
-`_anvil-resolve-stable` owns the setup actions. The optional
-`ANVIL_MSRV_TOOLCHAIN` maps only the dedicated MSRV run and is rejected as an
-unpaired stable configuration when no ordinary stable selector exists.
-Workspace-MSRV validation is read-only: it confirms rustup is present and the
-exact root-MSRV toolchain is installed before invoking metadata, so Cargo
-cannot auto-install a compiler during validation. Installation uses the same
-anchored toolchain-list match and emits a dedicated rustup bootstrap diagnostic
-when the executable is absent.
+The dedicated MSRV run always names the exact version declared by the root
+manifest. Setup installs that public toolchain through rustup; prerequisite
+validation is read-only and verifies the same version with `rustup run` before
+tests start. When the declaration is absent, cargo-each receives `--none`, so
+setup, validation, and tests are successful no-ops without a shell guard.
+Environments substituting an internally built compiler must expose it through
+rustup under the declared public name rather than supplying a separate Anvil
+mapping.
 
 `tools.just` additionally exposes the declared root MSRV as the `root-msrv`
 action, answering with the version or `none`. It exists for the container image
 tag, which hashes that value, and being total matters there: an empty answer and
-an unasked question must not hash alike. It reads the manifest through the same
-scanner as every other path.
+an unasked question must not hash alike. This container-only boundary retains
+its manifest scanner because image construction can run before cargo-each is
+available and can receive `ANVIL_RUST_VERSION` when manifests are outside the
+build context.
 
 Setup dependencies, rather than the cloud templates, route provisioning.
-Cargo-tool installers, default-component installers, and stable-only setup
-leaves depend on `anvil-toolchain-stable-install`; group and tier fan-out lets
-Just deduplicate that prerequisite. GitHub and ADO setup restore Cargo home,
-bootstrap Just, and invoke the selected catalog setup recipe. Neither backend
-adds a duplicate standalone stable-provisioning step.
+Cargo-tool installers use the caller's Cargo; default-component installers act
+on rustup's selected toolchain; stable-only setup leaves install cargo-each but
+do not provision the manifest-selected workspace compiler. Group and tier
+fan-out lets Just deduplicate those prerequisites. GitHub and ADO setup restore
+Cargo home, bootstrap Just, and invoke the selected catalog setup recipe.
 
 Cloud Cargo-home keys include `.cargo/config.toml`, both repository
 toolchain-file spellings, and `versions.just`. They deliberately exclude
@@ -159,17 +123,16 @@ Canonical recipes and workflow fragments live under `templates/`. The artifact
 registry embeds those files, renderer tests pin conditional substitutions such
 as ADO's `pr-fast`-only title lookup, and snapshot tests pin complete emitted
 backends. After a canonical change, run cargo-anvil against this repository to
-refresh owned mirrors and `.anvil.lock`; regenerate crate README content from
+refresh owned mirrors and `.anvil/manifest.toml`; regenerate crate README content from
 `src/lib.rs`, never by editing `README.md`.
 
 ## Miri compile-once runner
 
-The public Miri contract is behavioral: compile the selected package scope
-together once, run the resulting Miri test executables concurrently, preserve
-workspace feature unification, honor package exclusions and worker limits, and
-report deterministic output with aggregate failure. The exact Cargo message
-schema and the hidden cargo-miri runner phase are implementation details tied
-to the catalog-pinned nightly.
+The Miri recipes compile the selected package scope together, preserving
+workspace feature unification, and then run the emitted Miri test executables
+concurrently. Anvil owns artifact discovery, the cargo-miri runner environment,
+package-root working directories, deterministic log replay, and aggregate
+failure.
 
 ### Ownership and recipe graph
 
@@ -180,85 +143,42 @@ The canonical recipe set comprises
 `templates/justfiles/anvil/checks/miri-race-coverage.just`. `miri.just` owns the
 shared implementation, while the three stricter profile templates contain only
 their public recipe and setup leaves. Each public recipe uses a parameterized
-`_anvil-miri-test` dependency, keeping the main execution path and failure
-propagation in Just's dependency graph. The shared recipe owns impact
-resolution, profile-specific environment setup, compilation, discovery,
-execution, reporting, and cleanup.
+`_anvil-miri-test` dependency, keeping one shared execution path. The shared
+recipe maps the profile to `MIRIFLAGS` and `RUSTFLAGS`, validates explicit
+test/example arguments, resolves impact-selected packages, and performs the
+compile-and-execute protocol.
 
 `src/anvil/artifacts/justfile.rs` registers these templates and structurally
 pins the public-to-private delegation. Full emitted-tree snapshots pin the
 canonical/generated boundary. Any template change must regenerate the in-tree
-copies and `.anvil.lock`.
+copies and `.anvil/manifest.toml`.
 
-### Scope, metadata, and compilation
+### Scope and execution
 
-The shared recipe queries `_anvil-impact-include affected` after its
-`anvil-impact` prerequisite has refreshed the cache. It maps the standard,
-Tree Borrows, strict-provenance, and race-coverage parameter values to their
-recipe names and profile flags before invoking Cargo.
+After `anvil-impact` refreshes the cache, the shared recipe reads
+`affected.packages` and converts each source-qualified member into a Cargo
+`--package` argument. A local `--package` replaces that selection, and
+`ANVIL_IMPACT=off` selects the workspace. Metadata-based Miri exclusions remove
+only a member's own targets, leaving it available as a dependency.
 
-Metadata comes from the same pinned nightly Cargo that compiles the artifacts.
-It supplies the workspace-member set, package labels, manifest
-directories, and `[package.metadata.anvil.miri] exclude` policy. Selection is
-`--workspace --exclude ...`, and Miri opt-outs are added to the exclusions; an
-explicitly selected opted-out package skips before compilation. Excluded
-packages remain available as dependencies.
-
-The compile phase uses `cargo miri test --all-features --tests --no-run` with
-Cargo's JSON diagnostic stream. Executable `compiler-artifact` records whose
-test profile is active are admitted as Miri test executables; exact executable
-paths are de-duplicated defensively. Each admitted artifact must map back to
-workspace metadata so execution can restore its package working directory and
-produce a stable package/target label. Build scripts and ordinary executables
-are not admitted. A successful compile with no admitted artifacts is a
-successful no-op.
-
-### Pinned cargo-miri runner protocol
-
-The compile and execute phases form one protocol owned by the pinned Miri
-toolchain. Cargo-miri serializes the build-time invocation state used by its
-hidden runner phase. Before dispatching an artifact, the recipe prepares the
-Miri sysroot, resolves the pinned toolchain sysroot, locates cargo-miri under
-that toolchain, and establishes the ambient rustc-mode sentinel expected by
-the serialized run information. The runner then restores the recorded state
-and starts Miri interpretation from the artifact's package directory. Runtime
-arguments are not part of that serialized state when `--no-run` suppresses
-Cargo's runner invocation, so a requested libtest filter is passed explicitly
-to every hidden runner invocation.
-
-These steps are not a public cargo-anvil API and may change when the pinned
-nightly changes. A nightly update must therefore revalidate sysroot discovery,
-cargo-miri lookup, the ambient sentinel, serialized environment restoration,
-working-directory restoration, and hidden runner invocation through the
-executable contract tests.
-
-### Parallel execution and reporting
-
-Artifacts are sorted by package label, target kind, target name, and path
-before assigning stable indices. PowerShell dispatches them with
-`ForEach-Object -Parallel`, throttled by `ANVIL_MIRI_JOBS` or the host logical
-processor count and always clamped to the artifact count. Each worker restores
-the owning package directory, invokes cargo-miri for one executable, and writes
-combined output to an isolated log.
-
-After every worker completes, the parent replays logs by stable artifact index,
-using backend-native output groups when available. It reports all failed
-labels together and returns failure only after every executable has completed.
-A unique temporary directory owns the artifact manifest and worker logs and is
-removed from a `finally` block on every exit path.
+For tests, one `cargo miri test --no-run --message-format=json-render-diagnostics`
+invocation emits the runnable libtest artifacts. The recipe restores the
+prepared cargo-miri sysroot and runner environment, then runs artifacts from
+their package roots. `ANVIL_MIRI_JOBS` controls artifact concurrency; logs are
+buffered independently and replayed in stable artifact order before failures
+are aggregated. A libtest filter is forwarded to each executable. Explicit
+examples still use `cargo miri run` and require an explicit package.
 
 ### Verification boundaries
 
 Three layers guard different parts of the subsystem:
 
 - structural tests in `src/anvil/artifacts/justfile.rs` pin parameterized
-  delegation, bounded parallelism, deterministic ordering, and grouped output;
-- executable contracts in `tests/recipe_contracts.rs` fake Cargo, rustc, and
-  cargo-miri to verify metadata/artifact identity, exclusions, environment and
-  working-directory restoration, profile flags, concurrency, no-work behavior,
-  deterministic replay, and aggregate failure;
+  delegation and the compile-once protocol;
+- executable contracts in `tests/recipe_contracts.rs` verify profile-specific
+  `MIRIFLAGS` and `RUSTFLAGS` at the child-command boundary;
 - backend snapshots pin every emitted recipe copy, while the regeneration
-  check verifies the repository copies and `.anvil.lock`.
+  check verifies the repository copies and `.anvil/manifest.toml`.
 
 ## Impact scoping and tier routing
 
@@ -292,10 +212,10 @@ The subsystem is deliberately split so each fact has exactly one owner:
 - **Design docs are the contract.** They describe observable behavior; they are not consulted
   by the code and must not be cited from it (see the root `AGENTS.md`).
 
-The `every_check_matches_its_declared_impact_policy` test in `justfile.rs` is the guard that
-keeps the per-check policy table, the emitted recipes, and the documented mapping in agreement:
-each check's structural `_anvil-impact-include <category>` call (or its absence) is pinned to an
-expected category, so a check silently gaining, losing, or changing scoping fails there.
+The `every_check_matches_its_declared_impact_policy` test in `justfile.rs` keeps
+the per-check policy table, emitted package-file selection, and documented
+mapping in agreement. A check silently gaining, losing, or changing scoping
+fails there.
 
 ### Cache identity and invalidation
 

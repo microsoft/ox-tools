@@ -13,22 +13,10 @@ anvil-pr-fuzzing: anvil-pr-fuzzing-validate-prereqs \
 
 # Install prerequisites for the `anvil-pr-fuzzing` recipe.
 [private]
-[script("pwsh", "-NoProfile")]
 anvil-pr-fuzzing-setup installer="install":
-    if (-not $IsLinux) {
-        Write-Host 'anvil-pr-fuzzing-setup: non-Linux host -- skipping'
-        exit 0
-    }
-    & "{{ just_executable() }}" anvil-tool-cargo-delta-install '{{installer}}' anvil-bolero-setup '{{installer}}'
-    exit $LASTEXITCODE
+    {{ bolero_command_prefix }}{{ just_executable() }} anvil-tool-cargo-delta-install {{ installer }} anvil-bolero-setup {{ installer }}
 
 # Validate prerequisites for the `anvil-pr-fuzzing` recipe.
 [private]
-[script("pwsh", "-NoProfile")]
 anvil-pr-fuzzing-validate-prereqs:
-    if (-not $IsLinux) {
-        Write-Host 'anvil-pr-fuzzing-validate-prereqs: non-Linux host -- skipping'
-        exit 0
-    }
-    & "{{ just_executable() }}" anvil-tool-cargo-delta-validate-prereqs anvil-bolero-validate-prereqs
-    exit $LASTEXITCODE
+    {{ bolero_command_prefix }}{{ just_executable() }} anvil-tool-cargo-delta-validate-prereqs anvil-bolero-validate-prereqs

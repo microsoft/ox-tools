@@ -19,6 +19,9 @@ repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-cover
 [package.metadata.docs.rs]
 all-features = true
 
+[package.metadata.anvil]
+catalog-tool = "cargo-coverage-gate"
+
 [package.metadata.cargo_check_external_types]
 # The `#[ohno::error]` attribute on `CoverageGateError` implements
 # traits in `ohno` that transitively appear in the public API. Allow
