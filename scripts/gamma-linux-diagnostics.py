@@ -46,7 +46,9 @@ def own_group():
 
 
 def run(output):
-    group = own_group()
+    own = own_group()
+    boundary = os.environ["GAMMA_DIAGNOSTIC_BOUNDARY"]
+    group = next(path for path in (own, *own.parents) if path.name == boundary)
     limits = cgroup(group)
     if limits["memory.max"] != str(10 * 1024**3) or limits["memory.swap.max"] != "0" or limits["pids.max"] != "1024":
         raise RuntimeError(f"Refusing a run without the expected external limits: {limits}")
@@ -194,7 +196,7 @@ def observe(output, unit):
                 if memory >= 9 * 1024**3 or tasks >= 768 or limit_activity or int(pids.get("max", 0)) > 0:
                     stopped.write_text(json.dumps({"time": now(), "cgroup": path, "limits": limits}, indent=2))
                     print(f"{now()} stopping at the external safety threshold: {limits}", flush=True)
-                    subprocess.run(["systemctl", "--user", "stop", unit], check=True, timeout=30)
+                    subprocess.run(["systemctl", "stop", unit], check=True, timeout=30)
             done = (output / "done").exists()
             if time.monotonic() - published >= 30 or done:
                 active = [process for process in state["processes"] if process["activeOrdinal"] is not None]
@@ -231,8 +233,8 @@ def observe(output, unit):
             time.sleep(2)
     finally:
         if not (output / "finished").exists():
-            print("Observer failed; stopping the diagnostic scope rather than continuing unobserved.", flush=True)
-            subprocess.run(["systemctl", "--user", "stop", unit], check=False, timeout=30)
+            print("Observer failed; stopping the diagnostic user slice rather than continuing unobserved.", flush=True)
+            subprocess.run(["systemctl", "stop", unit], check=False, timeout=30)
 
 
 if __name__ == "__main__":

@@ -35,13 +35,38 @@ jobs:
           mkdir -p "$RUNNER_TEMP/gamma-diagnostic-bin" "$RUNNER_TEMP/gamma-diagnostic"
           cp target/release/cargo-gamma "$RUNNER_TEMP/gamma-diagnostic-bin/"
           echo "$RUNNER_TEMP/gamma-diagnostic-bin" >> "$GITHUB_PATH"
+      - name: Prepare isolated campaign identity and external limits
+        shell: bash
+        run: |
+          sudo useradd --create-home --shell /bin/bash gamma-diagnostic
+          uid=$(id -u gamma-diagnostic)
+          home=/home/gamma-diagnostic
+          sudo mkdir -p "$home/.cargo" "$home/tmp"
+          for name in bin registry .crates.toml .crates2.json; do
+            if test -e "$HOME/.cargo/$name"; then
+              sudo cp -a "$HOME/.cargo/$name" "$home/.cargo/"
+            fi
+          done
+          sudo cp -a "$HOME/.rustup" "$home/"
+          sudo chown -R gamma-diagnostic:gamma-diagnostic \
+            "$home" "$GITHUB_WORKSPACE" "$RUNNER_TEMP/gamma-diagnostic"
+          sudo loginctl enable-linger gamma-diagnostic
+          sudo systemctl start "user@$uid.service"
+          sudo systemctl set-property --runtime "user-$uid.slice" \
+            MemoryAccounting=yes MemoryMax=10G MemorySwapMax=0 MemoryOOMGroup=yes TasksMax=1024
+          sudo systemctl show "user-$uid.slice" \
+            --property=ControlGroup,MemoryMax,MemorySwapMax,MemoryOOMGroup,TasksMax \
+            | tee "$RUNNER_TEMP/gamma-diagnostic/systemd-boundary.txt"
+          echo "DIAGNOSTIC_UID=$uid" >> "$GITHUB_ENV"
+          echo "DIAGNOSTIC_BOUNDARY=user-$uid.slice" >> "$GITHUB_ENV"
       - name: Start independent diagnostics
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          python3 -u scripts/gamma-linux-diagnostics.py observe \
-            "$RUNNER_TEMP/gamma-diagnostic" "gamma-diagnostic-$GITHUB_RUN_ID.scope" \
+          sudo --preserve-env=GH_TOKEN,GITHUB_API_URL,GITHUB_REPOSITORY,GITHUB_SHA,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_SERVER_URL,GITHUB_ACTIONS,RUNNER_ENVIRONMENT \
+            python3 -u scripts/gamma-linux-diagnostics.py observe \
+            "$RUNNER_TEMP/gamma-diagnostic" "$DIAGNOSTIC_BOUNDARY" \
             > "$RUNNER_TEMP/gamma-diagnostic/observer.log" 2>&1 &
           echo "$!" > "$RUNNER_TEMP/gamma-diagnostic/observer.pid"
           for attempt in {1..30}; do
@@ -49,7 +74,7 @@ jobs:
               cat "$RUNNER_TEMP/gamma-diagnostic/ready"
               exit 0
             fi
-            if ! kill -0 "$(cat "$RUNNER_TEMP/gamma-diagnostic/observer.pid")" 2>/dev/null; then
+            if ! sudo kill -0 "$(cat "$RUNNER_TEMP/gamma-diagnostic/observer.pid")" 2>/dev/null; then
               cat "$RUNNER_TEMP/gamma-diagnostic/observer.log"
               exit 1
             fi
@@ -57,21 +82,27 @@ jobs:
           done
           echo "::error::Diagnostics did not become ready; refusing an unobserved run."
           exit 1
-      - name: Run unchanged exhaustive group inside external limits
+      - name: Run unchanged exhaustive group inside external user limits
         id: campaign
-        env:
-          ANVIL_IMPACT: off
-          GAMMA_DIAGNOSTIC_LAUNCH_LOG: ${{ runner.temp }}/gamma-diagnostic/launches.jsonl
         shell: bash
         run: |
           set +e
-          systemd-run --user --scope --quiet --collect \
-            --unit="gamma-diagnostic-$GITHUB_RUN_ID.scope" \
-            --property=Delegate=yes --property=MemoryAccounting=yes \
-            --property=MemoryMax=10G --property=MemorySwapMax=0 \
-            --property=MemoryOOMGroup=yes --property=TasksMax=1024 \
-            --property=RuntimeMaxSec=18000 \
-            python3 scripts/gamma-linux-diagnostics.py run \
+          sudo -u gamma-diagnostic env -i \
+            HOME=/home/gamma-diagnostic USER=gamma-diagnostic LOGNAME=gamma-diagnostic \
+            PATH="$RUNNER_TEMP/gamma-diagnostic-bin:/home/gamma-diagnostic/.cargo/bin:/usr/local/bin:/usr/bin:/bin" \
+            RUSTUP_HOME=/home/gamma-diagnostic/.rustup CARGO_HOME=/home/gamma-diagnostic/.cargo \
+            TMPDIR=/home/gamma-diagnostic/tmp RUNNER_TEMP=/home/gamma-diagnostic/tmp \
+            XDG_RUNTIME_DIR="/run/user/$DIAGNOSTIC_UID" \
+            DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$DIAGNOSTIC_UID/bus" \
+            CI=true GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted ANVIL_IMPACT=off \
+            GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
+            GAMMA_DIAGNOSTIC_BOUNDARY="$DIAGNOSTIC_BOUNDARY" \
+            GAMMA_DIAGNOSTIC_LAUNCH_LOG="$RUNNER_TEMP/gamma-diagnostic/launches.jsonl" \
+            systemd-run --user --scope --quiet --collect --same-dir \
+              --unit="gamma-diagnostic-$GITHUB_RUN_ID.scope" \
+              --property=Delegate=yes --property=MemoryAccounting=yes \
+              --property=RuntimeMaxSec=18000 \
+              python3 scripts/gamma-linux-diagnostics.py run \
               "$RUNNER_TEMP/gamma-diagnostic" \
             2>&1 | tee "$RUNNER_TEMP/gamma-diagnostic/group.log"
           status=${PIPESTATUS[0]}
@@ -89,6 +120,9 @@ jobs:
         shell: bash
         run: |
           mkdir -p "$RUNNER_TEMP/gamma-diagnostic"
+          if test -n "${DIAGNOSTIC_BOUNDARY:-}"; then
+            sudo systemctl stop "$DIAGNOSTIC_BOUNDARY"
+          fi
           echo "$CAMPAIGN_OUTCOME" > "$RUNNER_TEMP/gamma-diagnostic/done"
           if ! test -f "$RUNNER_TEMP/gamma-diagnostic/observer.pid"; then exit 0; fi
           for attempt in {1..40}; do
@@ -96,7 +130,7 @@ jobs:
               cat "$RUNNER_TEMP/gamma-diagnostic/observer.log"
               exit 0
             fi
-            if ! kill -0 "$(cat "$RUNNER_TEMP/gamma-diagnostic/observer.pid")" 2>/dev/null; then
+            if ! sudo kill -0 "$(cat "$RUNNER_TEMP/gamma-diagnostic/observer.pid")" 2>/dev/null; then
               cat "$RUNNER_TEMP/gamma-diagnostic/observer.log"
               echo "::error::Independent diagnostic observer exited unexpectedly."
               exit 1
