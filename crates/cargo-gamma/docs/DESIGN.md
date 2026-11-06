@@ -490,7 +490,21 @@ authoritative; deleting the whole file instead permits historical evidence to be
 imported again. Dry runs apply this policy without writing the inventory; raw
 candidate listings do not apply it.
 
-All remaining selected target packages are instrumented before compilation begins. cargo-gamma asks Cargo to
+Known attribution and mutation-generation repairs require fresh compiler proof
+before their affected historical exclusions apply. Imported `try.propagate_to_unwrap`
+entries with no original diagnostic also require revalidation because added
+`ControlFlow` support may make them viable. A fresh individual failure clears
+that entry's pending marker without replacing its original recorded reason.
+
+Generated whole-function replacements require positive source-visible evidence
+for each `Default` construction, including recursively generated payloads.
+Unknown implementations are omitted rather than classified as unviable.
+Independent alternatives such as `None` and empty standard collections remain
+eligible. This intentionally omits otherwise viable defaults hidden behind
+unresolved dependency paths or opaque macros. No Default-only compiler pass
+runs between pristine validation and full-schema validation.
+
+All remaining selected target packages are then instrumented. cargo-gamma asks Cargo to
 check their test targets together, letting Cargo schedule independent packages concurrently and one
 compiler round withdraw failures from unrelated packages without repeatedly paying for code
 generation and linking. After check convergence, one build produces the test binaries consumed by
@@ -1142,9 +1156,12 @@ Comments and insignificant inter-token whitespace do not move an identity; liter
 Occurrence positions are reserved before confidence-based default selection, so a site present in
 both default and explicit populations keeps the same identity when an earlier optimistic site is
 withheld from the default population.
-Identity scheme 7 assigns those reservations in source order and distinguishes complete
-implementation self-type scopes. Stated-value replacement expressions are token-normalized:
+Identity scheme 8 assigns those reservations in source order and distinguishes complete
+implementation self-type scopes. Stated-value replacement expressions and composed return
+replacements (`tuple`, `Some`, `Ok`, and one-element constructions) are token-normalized:
 formatting and comments do not change their identities, but literal contents and operators do.
+Including composed replacement text prevents a pruned alternative from transferring its
+cached verdict to a different value at the same replacement index.
 Reports stamped with an earlier scheme are incompatible and cannot contribute persisted verdicts
 to the current population.
 The digest is rendered as twelve hex characters. The identity joins reports, shards, suppressions,
@@ -1236,6 +1253,12 @@ Ordinary promotion updates knowledge produced by the selected run and preserves 
 context is provenance, not an admission gate: it records the repository HEAD SHA and UTC generation
 date. Killer hints require fresh execution; imported compiler exclusions follow
 the explicit inventory policy instead.
+
+`cargo gamma run --update-hints` performs that ordinary incremental promotion after the campaign
+reaches a reportable outcome. A successful campaign returns a promotion failure, while normal
+nonzero mutation and gate outcomes retain their campaign status if promotion fails. Operational
+errors do not promote. The option conflicts with `--dry-run`, and a delegated Linux resume owns
+both the campaign and promotion so the parent does not promote a second time.
 
 Automatic hint consumption remains best-effort: malformed or unsupported knowledge is ignored
 because an optimization cannot be allowed to stop a run. Explicit incremental promotion has the
@@ -1372,11 +1395,13 @@ generation that the campaign measured.
 Prepared snapshots capture regular-file type and Unix executable bits as
 well as content digests. Symlink artifacts record their target spelling;
 links to regular files also validate target bytes and executable bits.
-Directory symlinks are rejected during prepared snapshot capture and resume
-validation. Their target contents
-cannot be frozen by recording only the link spelling. The error directs the
-user to replace the link with a real directory and start a new campaign.
-Tree capture never follows ancestor links or walks linked external directories.
+Directory symlinks retain both their target spelling and resolved target identity.
+Their target must lie in an independently captured real input directory, outside
+excluded generated output. The ordinary input scan freezes the target files.
+Aliases and ancestor cycles are supported without following directory links.
+Links to uncaptured external directories or unscanned linked roots are rejected
+with guidance to move the target into a captured input tree. Resume checks this
+coverage again, along with link identity and recorded target-file contents.
 
 Captured dynamic libraries remain integrity-checked even beneath generated
 target directories. Snapshots freeze each artifact's generated-output
@@ -1632,6 +1657,12 @@ baseline, mutant, and confirmation launches so calibration and verdict
 execution observe the same contention policy. Gamma discovers declarations
 through ignored test-harness markers and refuses to run when a selected libtest harness
 cannot be enumerated, because source text cannot reliably reveal imported or renamed attributes.
+Enumeration failures distinguish process launch and containment errors, exit statuses
+(including hexadecimal Windows codes), the 30-second timeout, and incomplete or invalid output.
+They show bounded `Test Stderr` and `Test Stdout` sections using the same formatting as Cargo
+failures, followed by a shell-quoted retry command with its working directory. Configured
+environment values are not printed. The workspace and executable are kept automatically;
+retry in the same configured test environment before another campaign replaces them.
 A custom harness that has no libtest registry cannot contain those markers and contributes no
 declarations. A launch that may consume a declared resource runs its libtest harness with one test
 thread, keeping the admitted process from consuming the same resource concurrently from several

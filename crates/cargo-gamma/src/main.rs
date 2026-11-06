@@ -353,27 +353,19 @@
 //!
 //! #### Compile-fail targets
 //!
-//! A `trybuild` or `compiletest_rs` target is an expensive special case, and a run says so before it
-//! builds anything:
+//! Before building, Gamma warns about test binaries whose root source names a `trybuild` or
+//! `compiletest_rs` dev-dependency:
 //!
 //! ```text
-//! warning 1 test target invokes the compiler once per case, so every mutant pays for a full rustc run
-//!         and almost none are convicted by it: `router_compile_fail` in routerama (trybuild).
-//!         If it is not part of what should be judging these mutants, exclude it with
-//!         `--exclude-test router_compile_fail`.
-//!         Left in, it is likely to make this run take hours.
+//! warning 1 test binary may have test cases that invoke the Rust compiler, which may lead to very long mutation test runs:
+//!           `router_compile_fail` in routerama (trybuild)
+//!         Consider omitting the specific test cases using `--skip` harness filters.
 //! ```
 //!
-//! The cost is real: such a target has been measured putting a single mutant at one to two minutes,
-//! which turns a run of a few thousand mutants into a multi-day one. What it asserts is that some code
-//! *fails* to compile, and a mutated function body in another crate almost never changes that — so
-//! nearly every mutant pays the full price and is convicted by something else anyway.
-//!
-//! Nothing is excluded for you. On a proc-macro crate `trybuild` is often the *primary* oracle: a
-//! mutant that corrupts a diagnostic message is caught there and nowhere else, so excluding it by
-//! default would gut the oracle for exactly the code the technique suits best, and the mutants would
-//! come back as survivors rather than as anything visibly wrong. Whether the catch rate justifies the
-//! price is yours to weigh, so the run states the price and the flag and leaves the decision alone.
+//! This is a static heuristic, not evidence that a particular case runs the compiler or makes the
+//! campaign slow. Comments and string literals do not trigger it. Review the cases in each named
+//! binary and use [`--skip` harness filters](docs/CONFIG.md#excluding-individual-test-cases) for
+//! those that should not judge mutants. Nothing is excluded automatically.
 //!
 //! ### Controlling a run
 //!
@@ -1157,12 +1149,12 @@
 //!
 //! Doctests are not built or run, so a mutant whose only coverage is a doctest is reported as a survivor.
 //!
-//! Types are read syntactically rather than resolved, so a type alias is not seen through and falls
-//! back to `Default::default()`. Where the tool can tell that no such guess could hold — a bare type
-//! parameter, an associated type projected out of one, a `Box<dyn Trait>`, or an `impl Trait` that is
-//! not an iterator — it withholds the mutant instead of generating one that cannot compile. The same
-//! absence of type resolution is why `expr` occasionally perturbs an expression that turns out not to
-//! be numeric.
+//! Types are analyzed from source rather than fully resolved by the compiler. A generated
+//! `Default::default()` requires positive evidence that the type supports it; unresolved aliases
+//! and dependency types receive no guessed default. Independent alternatives such as `None` and
+//! empty collections remain available. Use [`#[gamma::value(...)]`](docs/MUTATORS.md#stating-the-value-yourself)
+//! to supply a known replacement when source analysis cannot establish one. The absence of full
+//! type resolution also means `expr` occasionally perturbs an expression that turns out not to be numeric.
 //!
 //! An `impl Trait` return that is not an iterator is still passed over. `impl Future` is the case that
 //! comes up most, and cargo-mutants does not cover it either.

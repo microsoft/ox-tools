@@ -4,7 +4,7 @@
 [package]
 name = "cargo-gamma-lib"
 description = "Internal library for cargo-gamma"
-version = "0.4.0"
+version = "0.5.0"
 readme = "README.md"
 keywords = ["cargo", "mutation-testing", "testing"]
 categories = ["development-tools::testing"]
@@ -89,6 +89,7 @@ bolero-engine = { workspace = true, features = ["any"] }
 cargo-gamma-attrs-impl = { path = "../cargo-gamma-attrs-impl", features = ["agreement"] }
 cargo-gamma-process = { workspace = true, features = ["fault-injection"] }
 chrono = { workspace = true, features = ["std"] }
+quote = { workspace = true }
 tempfile = { workspace = true }
 tick = { workspace = true, features = ["test-util"] }
 

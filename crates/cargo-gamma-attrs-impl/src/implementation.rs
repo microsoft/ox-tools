@@ -90,24 +90,9 @@ pub fn resource(attr: TokenStream, item: TokenStream) -> TokenStream {
     };
 
     let target = if let Ok(function) = syn::parse2::<ItemFn>(item.clone()) {
-        if !function
-            .attrs
-            .iter()
-            .any(|attribute| attribute.path().segments.last().is_some_and(|segment| segment.ident == "test"))
-        {
+        let Some(marker_attributes) = test_marker_attributes(&function) else {
             return invalid_resource(ResourceError::NonTestFunction, item);
-        }
-        // The generated marker must exist under exactly the same conditional compilation as the
-        // annotated test. Other attributes affect execution or diagnostics and do not belong on
-        // scheduling metadata.
-        let marker_attributes = function
-            .attrs
-            .iter()
-            .filter(|attribute| attribute.path().is_ident("cfg") || attribute.path().is_ident("cfg_attr"))
-            .fold(TokenStream::new(), |mut tokens, attribute| {
-                attribute.to_tokens(&mut tokens);
-                tokens
-            });
+        };
         ResourceTarget::Function {
             suffix: format!(
                 "{RESOURCE_TEST_SEPARATOR}{}",
@@ -142,6 +127,26 @@ pub fn resource(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
     output.extend(marker);
     output
+}
+
+fn test_marker_attributes(function: &ItemFn) -> Option<TokenStream> {
+    if !function
+        .attrs
+        .iter()
+        .any(|attribute| attribute.path().segments.last().is_some_and(|segment| segment.ident == "test"))
+    {
+        return None;
+    }
+    Some(
+        function
+            .attrs
+            .iter()
+            .filter(|attribute| attribute.path().is_ident("cfg") || attribute.path().is_ident("cfg_attr"))
+            .fold(TokenStream::new(), |mut tokens, attribute| {
+                attribute.to_tokens(&mut tokens);
+                tokens
+            }),
+    )
 }
 
 fn invalid_resource(error: ResourceError, item: TokenStream) -> TokenStream {

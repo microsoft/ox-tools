@@ -10,6 +10,63 @@ identity, mutator selection, and mutant-schema instrumentation.
 
 ## Discovery model
 
+Standard `ControlFlow` mutations exchange `Break` and `Continue` constructors
+only when the destination payload has source-visible `Default` evidence,
+including the implicit unit continuation payload. A payload that shadows a standard
+type name requires its own proven implementation or applicable bound; its name alone
+does not justify a default. Like Option/Result constructor
+mutations, these replacements discard the original payload expression.
+Qualified collection and standard-wrapper payloads also require genuine external
+`std`, `core`, or `alloc` roots: a foreign `extern crate` alias cannot supply
+standard API or default evidence. That provenance follows lexical scopes and
+import aliases without treating ordinary local module or type shadows as
+shadows of absolute standard paths.
+Absolute enum and `Default` paths retain that distinction through import and
+type-alias resolution, including identity checks that omit equivalent
+whole-function alternatives. Generated absolute replacements choose a genuine
+external root independently of ordinary local `core` or `std` shadows.
+Renamed `extern crate` bindings preserve external provenance in ordinary imports
+too, so a local module with the original crate name cannot capture the alias.
+Generic payloads require their own `Default` bound rather than inheriting
+evidence from a same-named nominal declaration, in both explicit constructors
+and expected-type admission.
+Predicates exchange `is_break` and `is_continue`. Standard `Ordering` value
+expressions replace each of `Less`, `Equal`, and `Greater` with either other
+variant; predicates exchange complementary pairs (`is_lt`/`is_ge`,
+`is_le`/`is_gt`, and `is_eq`/`is_ne`). Predicate receivers must have positive
+standard-enum type evidence. Imports and aliases are resolved conservatively;
+same-named user types and atomic `Ordering` are not standard comparison enums.
+Relative type and variant paths whose written root names a generic type parameter
+are rejected before expanding imports, including parameters with `Default` bounds;
+those bounds still permit the generic default replacement. Scoped const parameters
+shadow imported value variants in functions, traits, and impls without hiding
+qualified standard variants.
+Value-namespace const, static, and function items shadow imported variants throughout
+their lexical scope, including before their declaration; a nearer import can restore
+the standard variant. This shadow check also covers single-segment relative callees
+with explicit generic arguments. Parentheses and token groups around constructor callees retain
+explicit generic destination-payload evidence without requiring an expected type.
+Function-return replacements include all three comparison orderings and
+defaultable `ControlFlow` branches, composing with existing nested return values.
+When a function consists only of a standard `Ordering` variant expression or
+return, the equivalent whole-function alternative is omitted after resolving
+imports and aliases. Bodies with additional statements or shadowing bindings
+retain their alternatives.
+Likewise, a body consisting only of a standard `ControlFlow` constructor or
+return omits the same-branch default alternative when its payload is a known
+default literal (including unit) or a resolved standard `Default::default()`
+call. Constructor imports and aliases use the same standard-root, generic-name,
+and value-binding protections as ordering identities. Opposite-branch alternatives
+remain; nondefault, unknown, effectful, attributed, and shadowed payloads or
+constructors do not establish an identity.
+Constructor and function-return payloads qualify the standard `Default` trait
+so a consumer's trait names cannot change the proven standard-default semantics.
+Enum values and their default payloads prefer `::core`; if that root is a
+foreign extern binding, they use the proven `::std` root instead. A foreign
+standard-crate binding cannot qualify a generated enum or default call.
+Patterns and const contexts remain excluded. New mutators are enabled by default
+and included in the applicable semantic, boundary, and control presets.
+
 Discovery first performs a configuration-aware syntax-tree pre-pass. It audits
 stated-value attributes and builds per-file indexes of source-visible type
 evidence, aliases, local signatures, numeric uses, and imported paths. Candidate
@@ -34,7 +91,7 @@ configuration and therefore audits the whole file.
   nested delimiters, including unary operators before block expressions.
   Sibling separators reset to their inherited cost; nested `else` ladders share
   that budget rather than receiving a fresh root-level allowance.
-- Stable identities use scheme 7 and are content-derived so reports and incremental knowledge
+- Stable identities use scheme 8 and are content-derived so reports and incremental knowledge
   remain meaningful as unrelated source changes.
   Stated-value identities additionally include the token-normalized replacement
   expression: correcting only a `#[gamma::value(...)]` attribute invalidates its
@@ -44,6 +101,13 @@ configuration and therefore audits the whole file.
   stated candidates must contain valid Rust expressions; invalid ones are caller
   programming errors. Named error replacements retain their existing
   replacement-text discriminator.
+  Newly filtered inline-const and const-parameter-default sites reserve their
+  former occurrence positions, so otherwise identical runtime siblings do not
+  inherit another site's historical verdict.
+  Recognized `ControlFlow` constructor sites also reserve occurrences before
+  filtering on destination `Default` proof. Adding proof for an earlier
+  constructor therefore cannot transfer a later identical constructor's ID
+  or ID-based suppression to the newly admitted site.
 - Expression mutation families do not descend into patterns, including literal
   and range patterns in `let ... else` declarations. Evaluated initializers,
   diverging `else` expressions, and later statements remain eligible for mutation.
@@ -108,6 +172,14 @@ configuration and therefore audits the whole file.
   shadow evidence is also kept per lexical scope, so a wildcard import or local
   trait in one module or block does not weaken otherwise proven candidates in
   a sibling module or function.
+  Bare prelude trait names do not establish positive evidence under glob-import
+  uncertainty, and relative standard roots must not be shadowed. Absolute
+  standard paths and their explicitly imported aliases retain positive evidence
+  under local type/module shadows. Explicit `extern crate` bindings are tracked
+  separately: aliasing a foreign crate to `core` or `std` prevents either relative
+  or absolute paths through that root from establishing standard-trait evidence.
+  Active extern bindings apply throughout their lexical scope, including earlier
+  imports; genuine standard-crate declarations and renames retain their provenance.
   Generic aliases are instantiated before querying their payload's default
   obligations or synthesizing a return shape. Standard `Box<str>`, `Rc<str>`,
   and `Arc<str>` retain their specialized empty-string defaults even though
@@ -155,8 +227,8 @@ configuration and therefore audits the whole file.
   Nominal alias targets remain relative
   to the declaring file's module, including inline modules, rather than assuming
   that file is the crate root. Conditional or arbitrary bounded generic implementations are
-  not proof that a concrete instantiation is defaultable: otherwise admissible
-  whole-function fallbacks remain optimistic compiler-oracle candidates.
+  not proof that a concrete instantiation is defaultable: whole-function
+  replacements requiring that default are omitted.
   A defaultable set element or map key does not itself establish the ordering
   or hashing traits required to collect a synthesized element. Supported
   primitive/string keys and recursively supported standard options, results,
@@ -169,6 +241,17 @@ configuration and therefore audits the whole file.
   paths. Qualified local declarations, renamed imports, aliases, and same-crate
   re-export chains resolve by that identity, including literal `#[path]`
   modules. Separate same-named types do not borrow each other's evidence.
+  Bounded local-glob resolution follows uniquely indexed exports, including
+  cross-file re-exports. Unknown external globs cannot establish absence;
+  unrelated globs do not erase an explicitly qualified identity. Conditional
+  declarations and implementations, custom derives, and macros that may
+  introduce implementations defeat negative local `Default` evidence.
+  Block-local imports affect only expressions that use them. Unrelated inherent
+  impls and impls of lexically declared nonstandard traits do not erase absence
+  evidence; actual or unresolved `Default` impls remain conservative. Known
+  built-in derives and nested standard value macros are checked in their block
+  scope, distinguishing macro calls from boolean negation and preserving
+  uncertainty for unknown expansions and implementation-bearing arguments.
   Missing, conditional, duplicate, ambiguous, or unlabeled module evidence and
   unresolved dependency paths remain unknown. A single-source index does not
   infer a qualified path's negative evidence from an unrelated root declaration
@@ -186,11 +269,19 @@ configuration and therefore audits the whole file.
   blanket `Default` implementation for the container.
   A `Self::Assoc` projection is resolved
   through the enclosing impl when that impl declares the associated type;
-  unresolved trait-associated types remain abstract. An unresolved concrete
-  dependency type remains an optimistic fallback candidate unless source-visible
-  evidence proves it non-defaultable. It remains in the default campaign because
-  completed-run evidence shows exclusive killing tests for this class; confidence
-  telemetry keeps its compilation cost measurable. Expected types flow
+  unresolved trait-associated types remain abstract. Whole-function replacements
+  require positive evidence for every `Default` construction, including nested
+  options, results, collection elements, tuples, arrays, wrappers, and iterator
+  items. This applies to explicit selection too. Unknown dependency types,
+  opaque macro-provided implementations, conditional implementations, and
+  unresolved array lengths do not supply fallback values. Independent
+  alternatives such as `None` and empty standard collections remain eligible;
+  omissions are not compiler failures. Custom collection hashers must also have
+  positive default evidence when the replacement defaults the collection.
+  Composed tuple, `Some`, `Ok`, and one-element replacements include normalized
+  replacement text in their identities, so pruning choices cannot transfer a
+  cached verdict to a different value at a compacted replacement index.
+  Expected types flow
   through nested blocks, branches, closures, returns, local
   annotations, and assignment targets. When no default exists, a type-identical
   copy-safe parameter may be reused as the opposite payload only while that
@@ -204,14 +295,17 @@ configuration and therefore audits the whole file.
   as the proposed `Default::default()` replacement and produces no mutant.
   Arrays follow the standard library's implemented lengths and element bounds,
   and known standard types without `Default` are rejected only after their
-  complete import-resolved path identifies them. A wrapper contributes proven
+  complete import-resolved path identifies them. These include `Poll`,
+  `NonNull`, and raw pointers whose known pointees require wide metadata.
+  Unknown pointee metadata remains a compiler-oracle case. A wrapper contributes proven
   default evidence only when its path resolves to a supported standard wrapper
   and its payload is also proven defaultable.
 - Whole-function replacements preserve the written return shape. Alias
   parameters are substituted by their declared roles before `Option` or
   `Result` payload values are chosen. Renamed imports of standard `Option`
   and `Result` preserve those container shapes rather than falling back to a
-  default of the entire container. Unresolved foreign imports remain optimistic.
+  default of the entire container. Unresolved foreign imports do not justify
+  default constructions; non-default alternatives retain their confidence.
   Collection
   aliases use `Default::default()` rather than rebuilding a standard
   constructor with different generic defaults. Imported aliases whose source
@@ -238,7 +332,12 @@ configuration and therefore audits the whole file.
   compile hazards: deferred-binding initialization, explicit `drop` calls, and
   branch/loop type transitions already proven by local syntax. The divergent
   tail of a `let`-`else` remains intact, and a `continue` is not changed to a
-  valueless `break` when the target loop must produce a value. Ordinary calls,
+  valueless `break` when the target loop must produce a value. A known nonunit
+  or never-returning function also requires its terminal statement when the
+  preceding statements are only simple, nondiverging declarations or literals.
+  Value-required block and match tails use the same conservative prefix check;
+  earlier exits and unknown calls do not establish that the tail must execute.
+  Ordinary calls,
   assignments, and viable loop transitions remain candidates. Source-visible
   moves and restorations can require a wider guard even when each individual
   edit is viable: those edits lift to the nearest loop, or otherwise the
@@ -275,6 +374,22 @@ configuration and therefore audits the whole file.
   standard `str::chars`, `next`, loops, and callbacks retain casing mutations
   through iterator-shaped `Either` guards, preserving the distinct concrete
   uppercase and lowercase iterator types.
+  Standard iterator `enumerate` retains its `(usize, Item)` binding types.
+  Resolved custom `take`/`skip` methods returning standard `Option` or `Result`
+  use same-type expression branches instead of an invalid iterator adapter;
+  unresolved counterparts remain optimistic compiler-oracle candidates.
+  Negative local method evidence requires a complete single-source inventory,
+  an unambiguous nominal owner, a positively resolved original method signature,
+  closed lexical trait imports, and no trait
+  implementation, derive, transformation, unexpanded impl-item macro, or matching
+  method that could supply the counterpart. Cfg-disabled impl-item macros do not
+  reopen the inventory. Incomplete package graphs and external extension traits
+  retain candidates. This includes imports in the calling function, nested
+  blocks, and closures, with aliases, anonymous imports, and wildcard imports
+  treated conservatively. Imports outside the calling scope do not reopen its
+  inventory. Filtered sites reserve occurrence identities.
+  Bare primitive-spelled inferred types cannot borrow negative evidence from
+  same-named local declarations.
   Compatible custom variant rewrites preserve their qualifier. Unknown
   receivers and external aliases remain compiler-oracle cases rather than
   being rejected merely for lacking standard API evidence.
@@ -290,8 +405,13 @@ configuration and therefore audits the whole file.
   rejecting proven unsupported combinations. Field and propagated local-call
   evidence can supply these types; custom operators, ambiguous fields, and
   unresolved nominal identities never inherit an unrelated standard contract.
+  Standard time constructors are identified by their qualified owner and
+  supported signature, not merely a method name. Fallible constructors do not
+  inherit the owner's return type. `UNIX_EPOCH` and duration-scaling methods
+  supply bounded operand evidence.
 - Propagation-to-panic mutation preserves the successful value and evaluates the
-  operand once without requiring the error to implement `Debug`. Error and
+  operand once without requiring the error to implement `Debug`. This includes
+  `ControlFlow`, where `Continue` is preserved and `Break` panics. Error and
   payload type constraints supplied by the original propagation context remain
   available where source evidence establishes them. An async function's declared
   output is not treated as the type of its unawaited call.
@@ -318,7 +438,10 @@ configuration and therefore audits the whole file.
   Array reversal is withheld when guarding would shorten the
   lifetime of a borrowed array temporary. Parameter shadowing supports opaque
   iterator returns through the same iterator/container unification; unsupported
-  opaque contracts remain excluded. Regex mutation is confined to string
+  opaque contracts remain excluded. Nested opaque parameter types are witnessed
+  through `default_like(&parameter)` rather than copied into an illegal local
+  `impl Trait` annotation; the original parameter is not consumed or dropped
+  early. Regex mutation is confined to string
   literals passed to a path ending in `Regex::new`; both the original and each
   replacement must parse with `regex-syntax`.
 - Guard placement preserves temporary-borrow lifetimes by lifting affected
@@ -334,6 +457,18 @@ configuration and therefore audits the whole file.
   closures, and async bodies. Source attributes remain outside generated
   expression operators, and configuration-selected function tails retain their
   original value type.
+  Qualified constructors propagate borrowed-temporary evidence to their consumer.
+  Array reversals in assignment destinations guard the whole assignment, retaining
+  valid places and evaluating the right-hand side once. This includes arrays nested
+  in tuple, struct, and parenthesized destructuring destinations, but not arrays
+  inside unrelated index or other place computations. Block-leading expression
+  tails are parenthesized inside original branches so comparisons and casts keep
+  their expression grammar. Inline const blocks and const-parameter defaults
+  cannot receive runtime guards. Match-arm disabling requires a catch-all that
+  is definitely active across every modeled library and unit-test compilation;
+  an undecidable `cfg` is not proof of exhaustiveness. A semicolon-terminated
+  tail required by a known nonunit or never return cannot be deleted, while
+  unknown return types retain the compiler oracle.
 - Proven no-ops are omitted under every selector, including `all`. For
   `call_result.default`, a separate positive callee index recognizes only a
   directly named, non-async free function whose declaration is lexically

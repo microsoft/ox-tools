@@ -5954,8 +5954,7 @@ mod tests {
             .scan(None, &Selection::parse("fn_value.default").expect("selection"), &mut ordinals)
             .expect("scan");
 
-        assert_eq!(scanned.mutants.len(), 1, "{:?}", scanned.mutants);
-        assert_eq!(scanned.mutants[0].replacement, "Default::default()");
+        assert!(scanned.mutants.is_empty(), "{:?}", scanned.mutants);
     }
 
     #[test]
@@ -5989,7 +5988,7 @@ mod tests {
     }
 
     #[test]
-    fn a_skipped_file_disables_negative_default_evidence_for_its_package() {
+    fn a_skipped_file_cannot_supply_a_positive_default_proof() {
         let (_directory, root) = workspace();
         let deep = format!(
             "impl Default for crate::Config {{ fn default() -> Self {{ crate::Config }} }}\n{}",
@@ -6010,8 +6009,7 @@ mod tests {
             .expect("scan");
 
         assert_eq!(scanned.skipped.len(), 1, "{:?}", scanned.skipped);
-        assert_eq!(scanned.mutants.len(), 1, "{:?}", scanned.mutants);
-        assert_eq!(scanned.mutants[0].replacement, "Default::default()");
+        assert!(scanned.mutants.is_empty(), "{:?}", scanned.mutants);
     }
 
     #[test]
@@ -6439,7 +6437,7 @@ mod tests {
     }
 
     #[test]
-    fn evidence_only_aliases_and_reexports_do_not_suppress_imported_default_mutants() {
+    fn evidence_only_aliases_and_reexports_do_not_invent_imported_default_proofs() {
         for export in [
             "pub type Artifact = std::time::Duration;",
             "pub use std::time::Duration as Artifact;",
@@ -6467,10 +6465,7 @@ mod tests {
                 for selector in ["all", "fn_value.default"] {
                     let scanned = survey.scan(Some("core"), &Selection::parse(selector).unwrap(), &mut 0).unwrap();
                     assert!(
-                        scanned
-                            .mutants
-                            .iter()
-                            .any(|mutant| mutant.file.as_str() == "core/src/lib.rs" && mutant.mutator.as_ref() == "fn_value.default"),
+                        scanned.mutants.iter().all(|mutant| mutant.mutator.as_ref() != "fn_value.default"),
                         "{export}: {selector}"
                     );
                     assert!(
@@ -6536,8 +6531,8 @@ mod tests {
 
             assert_eq!(
                 found,
-                [("ready", "Default::default()"), ("external", "Default::default()")],
-                "filters must preserve cross-file implementations and unknown external types, but screen Missing"
+                [("ready", "Default::default()")],
+                "filters must preserve proven cross-file implementations without guessing defaults for Missing or external types"
             );
             assert!(
                 scanned.mutants.iter().all(|mutant| mutant.file.as_str() == "core/src/lib.rs"),
@@ -6607,9 +6602,7 @@ mod tests {
             .scan(None, &selection, &mut 0)
             .expect("a skippable source does not abort discovery");
         assert_eq!(scanned.skipped.len(), 1, "{:?}", scanned.skipped);
-        assert_eq!(scanned.mutants.len(), 1, "{:?}", scanned.mutants);
-        assert_eq!(scanned.mutants[0].package.as_ref(), "core");
-        assert_eq!(scanned.mutants[0].replacement, "Default::default()");
+        assert!(scanned.mutants.is_empty(), "{:?}", scanned.mutants);
     }
 
     /// A diff path that cannot be read at all has to fail the survey up front, naming the diff,

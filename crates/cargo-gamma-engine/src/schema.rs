@@ -465,6 +465,44 @@ fn attach<'a>(node: Node<'a>, stack: &mut [Node<'a>], roots: &mut Vec<Node<'a>>)
     }
 }
 
+fn block_leading_expression(source: &str) -> bool {
+    fn leading(expression: &syn::Expr) -> bool {
+        match expression {
+            syn::Expr::Binary(binary) => leading(&binary.left),
+            syn::Expr::Cast(cast) => leading(&cast.expr),
+            syn::Expr::Block(_)
+            | syn::Expr::Unsafe(_)
+            | syn::Expr::Const(_)
+            | syn::Expr::If(_)
+            | syn::Expr::Match(_)
+            | syn::Expr::Loop(_)
+            | syn::Expr::While(_)
+            | syn::Expr::ForLoop(_)
+            | syn::Expr::TryBlock(_) => true,
+            _ => false,
+        }
+    }
+    let source = source.trim_start();
+    if
+    // #[gamma::skip(cond.always_false, tag = "equivalent", reason = "This is only a parser-work prefilter. A parsed Binary/Cast whose leftmost expression is block-like necessarily starts with one of these delimiters, comments, attributes, labels or keywords. The following parsed structural predicate rejects every other expression independently.")]
+    !source.starts_with(
+        // #[gamma::skip(collection.reverse_array, tag = "equivalent", reason = "starts_with with a char array tests membership; reversing these distinct prefix characters changes no boolean result.")]
+        ['{', '/', '#', '\''],
+    ) && !
+        // #[gamma::skip(collection.reverse_array, tag = "equivalent", reason = "This prefix array is consumed only through side-effect-free iter().any; reversing its order preserves the membership result.")]
+        // #[gamma::skip(literal.str_to_empty, tag = "equivalent", reason = "Any empty prefix makes starts_with(\"\") true, disabling only this parser-work prefilter. The subsequent parsed Binary/Cast-and-leading predicate still makes exactly the same structural decision.")]
+        ["unsafe", "const", "if", "match", "loop", "while", "for", "try"]
+            .iter()
+            .any(|prefix| source.starts_with(prefix))
+    {
+        return
+        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "This return has inferred bool type and is already false, exactly bool::default().")]
+        false;
+    }
+    syn::parse_str::<syn::Expr>(source)
+        .is_ok_and(|expression| matches!(expression, syn::Expr::Binary(_) | syn::Expr::Cast(_)) && leading(&expression))
+}
+
 /// Writes the instrumented form of one node, recording the output each guard covers.
 fn render(
     text: &str,
@@ -475,6 +513,7 @@ fn render(
 ) {
     let own_returns = iterator_returns(text, node);
     let returns = own_returns.as_ref().or(returns);
+    let group_original = node.shape == Shape::Expr && block_leading_expression(copy(text, node.span.clone()));
     let start = out.len();
     let mut mutated = Vec::with_capacity(node.mutants.len());
 
@@ -543,6 +582,9 @@ fn render(
     if let Some(returns) = &own_returns {
         let _ = write!(out, "'{}: {{ ", returns.label);
     }
+    if group_original {
+        out.push('(');
+    }
     let mut cursor = node.span.start;
 
     for child in &node.children {
@@ -557,6 +599,9 @@ fn render(
     write_return_text(text, cursor..node.span.end, out, returns);
     if own_returns.is_some() {
         out.push_str(" }");
+    }
+    if group_original {
+        out.push(')');
     }
 
     // An arm is disabled by a guard trailing its pattern. Several mutants on one arm chain with
@@ -1269,6 +1314,76 @@ mod tests {
         let out = apply(text, &[mutant(span_of(text, "a < b"), 7, "(a) <= (b)", Shape::Expr)]);
 
         _ = parse_file(&out).expect("the instrumented source does not parse");
+    }
+
+    #[test]
+    fn ci_block_leading_classification_preserves_nonblock_and_prefixed_expressions() {
+        for source in [
+            "value",
+            "value + 1",
+            "value as usize",
+            "/* comment */ value + 1",
+            "/* comment */ value as usize",
+            "/* comment */ (value + 1) as usize",
+            "/* comment */ -value + 1",
+            "{ value }",
+            "unsafe { value }",
+            "const { 1 }",
+            "if flag { 1 } else { 2 }",
+            "match flag { _ => 1 }",
+            "loop { break 1 }",
+            "while flag {}",
+            "for value in values {}",
+            "try { value }",
+        ] {
+            assert!(!super::block_leading_expression(source), "{source}");
+        }
+        for source in [
+            "  { value } + 1",
+            "{ value } + 1 + 2",
+            "{ value } as usize as u64",
+            "/* comment */ { value } + 1",
+            "const { 1 } + 1",
+            "while flag {} == ()",
+            "for value in values {} == ()",
+            "try { value } == other",
+        ] {
+            assert!(super::block_leading_expression(source), "{source}");
+            let text = format!("fn f() {{ consume({source}); }}");
+            let out = apply(&text, &[mutant(span_of(&text, source), 1, "other", Shape::Expr)]);
+            assert_eq!(
+                out,
+                format!("fn f() {{ consume((if ::gamma_rt::a(1u32) {{ other }} else {{ ({source}) }})); }}")
+            );
+        }
+    }
+
+    #[test]
+    fn ci_iterator_expression_keeps_its_original_branch_without_expression_only_grouping() {
+        let text = "fn f() { consume({ values } + other); }";
+        assert_eq!(
+            apply(text, &[mutant(span_of(text, "{ values } + other"), 1, "empty()", Shape::IterExpr)]),
+            "fn f() { consume((if ::gamma_rt::a(1u32) { ::gamma_rt::Either::L(empty()) } else { ::gamma_rt::Either::R({ values } + other) })); }"
+        );
+    }
+
+    #[test]
+    fn block_leading_expression_branches_preserve_expression_grammar() {
+        for expression in [
+            "unsafe { read() } == 0",
+            "{ value } + 1",
+            "if condition { 1 } else { 2 } == 1",
+            "match value { _ => 1 } == 1",
+            "loop { break 1 } == 1",
+            "unsafe { read() } as usize",
+            "'value: { break 'value 1 } == 1",
+            "#[allow(unused_braces)] { value } + 1",
+        ] {
+            let text = format!("fn f() {{ consume({expression}); }}");
+            let out = apply(&text, &[mutant(span_of(&text, expression), 1, "other", Shape::Expr)]);
+            assert!(out.contains(&format!("else {{ ({expression}) }}")), "{out}");
+            assert!(parse_file(&out).is_ok(), "{out}");
+        }
     }
 
     #[test]

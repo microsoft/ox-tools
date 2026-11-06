@@ -379,6 +379,7 @@ cargo gamma run [OPTIONS] [-- <TEST_ARGS>...]
 | Option | Value | What it does |
 | --- | --- | --- |
 | `--resume-testing` |  | Continue the interrupted campaign's testing phase using its existing prepared tree. |
+| `--update-hints` |  | Promote the campaign's learned hints after it reaches a reportable outcome. |
 | `--progress` | `<WHEN>` | When to show the progress display. Defaults to `auto`. |
 | `--dashboard` |  | Show a live testing dashboard instead of the progress bar. |
 | `--min-score` | `<PERCENT>` | Fail the run if the assertion-killed mutation score is below this percentage. |

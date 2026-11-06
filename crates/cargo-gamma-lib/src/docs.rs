@@ -339,6 +339,8 @@ fn question(family: &str) -> &'static str {
         "struct_field" => "Does this field's value matter, or is the default good enough?",
         "option" => "Is the present case distinguished from the absent one?",
         "result" => "Is success distinguished from failure?",
+        "control_flow" => "Is early termination distinguished from continuing?",
+        "ordering" => "Does comparison distinguish less, equal, and greater?",
         "try" => "Does anything distinguish propagation with `?` from a panic?",
         "fallback" => "Does the absent or error path produce the right fallback value?",
         "iter" => "Does anything observe that this was ordered, deduplicated, or taken from one end?",

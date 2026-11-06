@@ -31,13 +31,16 @@ constraints of the expression being mutated:
 
 - `default_after<T: Default>` evaluates its argument once, drops that result,
   then constructs its default. Original call side effects still occur.
+- `default_like<T: Default>(&T)` witnesses an opaque parameter's actual type
+  without consuming it, preserving the original parameter's drop timing.
 - `increment` and `decrement` use the primitive `Boundary` implementations to
   add or subtract one without changing the result type. Floating-point
   implementations use `1.0`; integer arithmetic retains its normal overflow
   behavior.
-- `panic_on_failure` accepts `Option` and `Result` through `PanicOnFailure`,
+- `panic_on_failure` accepts `Option`, `Result`, and `ControlFlow` through `PanicOnFailure`,
   returns a successful container unchanged, and panics on failure without a
-  `Debug` bound. Generated source retains the surrounding `?` so its original
+  `Debug` bound. `ControlFlow::Continue` is successful; `Break` is failure.
+  Generated source retains the surrounding `?` so its original
   error-conversion and inference constraints remain available.
 
 The helpers require no allocation or standard library of their own; an
@@ -90,7 +93,12 @@ the same infrastructure-failure status used on Unix.
 
 On hosted Unix and Windows targets, the cached selection starts in a transient
 uninstalled state until this crate's native constructor publishes the captured
-environment. If instrumented code in an earlier native constructor reaches a
+environment. On Windows, the runtime uses `.CRT$XCT`, ordered before the ordinary
+`.CRT$XCU` user constructors, so those constructors can execute instrumented code
+with the selection and observation registration already installed. This ordering
+uses the Windows linker's alphabetical CRT-subsection ordering; it does not
+promise initialization before TLS callbacks or arbitrary earlier native hooks.
+If instrumented code in an earlier native constructor reaches a
 guard during that window, the runtime writes a fixed diagnostic and terminates
 through `_exit` or `ExitProcess` with the infrastructure-failure status.
 Termination does not unwind, so constructor code cannot catch the failure,
@@ -127,6 +135,7 @@ repository.
 | Family in `runtime.rs::tests` | Break rejected by the oracle | Isolation |
 | --- | --- | --- |
 | Startup selection and cached guards | Wrong ordinal, reserved ordinal activated, environment reread, or changed post-startup selection | Child launch environments select cases; native environment mutation happens only in constructors that exit before libtest starts threads |
+| Windows constructor ordering (`tests/windows_startup.rs`) | Runtime initialization occurs after user constructors, a startup guard silently selects baseline, or a constructor probe never executes | In-process native constructors at `.CRT$XCTU` and `.CRT$XCU` capture selection and guard results before libtest; no environment writes or child launches |
 | Allocation measurements | Inactive guard allocation or a disabled allocation/reallocation counter | Per-thread counters have a positive alloc/realloc control and a handshaken allocating sibling |
 | Bounded copies and environment scanning | Missing terminator, prefix accepted as a full value, cross-chunk key/value corruption, failure mistaken for absence, or unbounded EINTR retry | Local buffers and finite scripted reads; call counts and copied bytes accompany classified outcomes |
 | Native environment outcomes and exit registration | Empty/absent/error conflated or failed reach registration changing mutant selection | Pure injected results and callbacks; no shared environment writes |

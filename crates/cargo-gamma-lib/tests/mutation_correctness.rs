@@ -10,6 +10,10 @@
 extern crate gamma_rt as runtime;
 extern crate self as gamma_rt;
 
+// Compiler fixtures must use checkout helpers even when an older Gamma vendors its runtime.
+#[path = "../../cargo-gamma-rt/src/mutation.rs"]
+mod mutation_runtime;
+
 use core::num::NonZeroU8;
 
 #[expect(dead_code, reason = "immutable compiler-backed sources retain every inference shape")]
@@ -83,7 +87,8 @@ use cargo_gamma_lib::internals::ops::collect::{self, Candidate, Shape};
 use cargo_gamma_lib::internals::ops::registry::Selection;
 use cargo_gamma_lib::internals::parse::SourceFile;
 use cargo_gamma_lib::internals::schema;
-pub use runtime::{Either, decrement, default_after, increment, panic_on_failure};
+pub use mutation_runtime::{decrement, default_after, default_like, increment, panic_on_failure};
+pub use runtime::Either;
 use syn::spanned::Spanned as _;
 use syn::visit::{self, Visit};
 
@@ -168,6 +173,221 @@ mod campaign;
 #[path = "fixtures/correctness/generation.expected.rs"]
 mod generation;
 
+#[expect(
+    unused_parens,
+    unused_braces,
+    reason = "the module is the exact emitted schema for standard enum mutations"
+)]
+#[path = "fixtures/correctness/std_enums.expected.rs"]
+mod std_enums;
+
+#[expect(
+    unused_parens,
+    unused_braces,
+    clippy::needless_bool,
+    clippy::unused_enumerate_index,
+    clippy::unused_self,
+    clippy::unnecessary_wraps,
+    clippy::unnecessary_semicolon,
+    clippy::semicolon_if_nothing_returned,
+    clippy::partialeq_to_none,
+    reason = "compiler-backed cold-campaign fixtures preserve exact guards and source inference shapes"
+)]
+#[path = "fixtures/correctness/cold_campaign.expected.rs"]
+mod cold_campaign;
+
+#[test]
+fn cold_campaign_encodings_compile_and_preserve_inactive_behavior() {
+    use core::ops::ControlFlow::{Break, Continue};
+
+    struct DropRecorder<'a>(&'a RefCell<Vec<&'static str>>);
+    impl Drop for DropRecorder<'_> {
+        fn drop(&mut self) {
+            self.0.borrow_mut().push("drop");
+        }
+    }
+
+    assert_schema(
+        include_str!("fixtures/correctness/cold_campaign.rs"),
+        include_str!("fixtures/correctness/cold_campaign.expected.rs"),
+        &[
+            ("block_compare", "relational.eq_to_ne", "({ value }) != (7)"),
+            (
+                "callback",
+                "parameter.default_shadow",
+                "{ let callback = ::gamma_rt::default_like(&callback); if let Some(callback) = callback { callback(); } after(); }",
+            ),
+            ("assign", "collection.reverse_array", "[*right, *left] = values()"),
+            (
+                "borrowed@Some(std::ffi::OsStr::new(&make())) == Some(std::ffi::OsStr::new(\"x\"))",
+                "option.some_to_none",
+                "None == Some(std::ffi::OsStr::new(\"x\"))",
+            ),
+            ("slices", "fn_value.one_element", "core::iter::once::<&'static [u8]>(&[])"),
+            ("characters", "string.upper_to_lower", "character.to_lowercase()"),
+            ("flow", "try.propagate_to_unwrap", "::gamma_rt::panic_on_failure(value)?"),
+            ("logical", "logical.and_to_or", "({ left() }) || (right())"),
+            ("custom", "iter.take_to_skip", "reader.skip(1)"),
+            ("nested_assign", "collection.reverse_array", "([*right, *left], *other) = values()"),
+        ],
+    );
+    assert!(cold_campaign::block_compare(7));
+    assert!(!active(1, || cold_campaign::block_compare(7)));
+    let calls = Cell::new(0);
+    cold_campaign::callback(Some(|| calls.set(calls.get() + 1)), || {});
+    active(2, || cold_campaign::callback(Some(|| calls.set(calls.get() + 1)), || {}));
+    assert_eq!(calls.get(), 1);
+    let order = RefCell::new(Vec::new());
+    let recorder = DropRecorder(&order);
+    active(2, || {
+        cold_campaign::callback(Some(move || drop(recorder)), || order.borrow_mut().push("body"));
+    });
+    assert_eq!(*order.borrow(), ["body", "drop"]);
+    for (ordinal, expected) in [(0, (1, 2)), (3, (2, 1))] {
+        let (mut left, mut right) = (0, 0);
+        let calls = Cell::new(0);
+        active(ordinal, || {
+            cold_campaign::assign(&mut left, &mut right, || {
+                calls.set(calls.get() + 1);
+                [1, 2]
+            });
+        });
+        assert_eq!((left, right), expected);
+        assert_eq!(calls.get(), 1);
+    }
+    let calls = Cell::new(0);
+    assert!(cold_campaign::borrowed(|| {
+        calls.set(calls.get() + 1);
+        String::from("x")
+    }));
+    assert!(!active(4, || cold_campaign::borrowed(|| {
+        calls.set(calls.get() + 1);
+        String::from("x")
+    })));
+    assert_eq!(calls.get(), 1);
+    assert_eq!(cold_campaign::slices().collect::<Vec<_>>(), [b"ab".as_slice()]);
+    assert_eq!(active(5, || cold_campaign::slices().collect::<Vec<_>>()), [b"".as_slice()]);
+    assert_eq!(cold_campaign::characters("a"), "A");
+    assert_eq!(active(6, || cold_campaign::characters("A")), "a");
+    assert_eq!(cold_campaign::flow(Break(4)), Break(4));
+    assert_eq!(active(7, || cold_campaign::flow(Continue(8))), Continue(8));
+    assert_propagation_panic(|| active(7, || cold_campaign::flow(Break(4))));
+    let calls = Cell::new(0);
+    assert!(!cold_campaign::logical(
+        || false,
+        || {
+            calls.set(calls.get() + 1);
+            true
+        }
+    ));
+    assert_eq!(calls.get(), 0);
+    assert!(active(8, || cold_campaign::logical(
+        || false,
+        || {
+            calls.set(calls.get() + 1);
+            true
+        }
+    )));
+    assert_eq!(calls.get(), 1);
+    assert!(active(8, || cold_campaign::logical(
+        || true,
+        || {
+            calls.set(calls.get() + 1);
+            false
+        }
+    )));
+    assert_eq!(calls.get(), 1);
+    assert_eq!(cold_campaign::custom(&cold_campaign::Reader), Ok(b"x".as_slice()));
+    assert_eq!(active(9, || cold_campaign::custom(&cold_campaign::Reader)), Ok(b"y".as_slice()));
+}
+
+#[test]
+fn nested_assignee_reversal_preserves_unrelated_places_and_single_evaluation() {
+    for (ordinal, expected) in [(0, (1, 2, 3)), (10, (2, 1, 3))] {
+        let (mut left, mut right, mut other) = (0, 0, 0);
+        let calls = Cell::new(0);
+        active(ordinal, || {
+            cold_campaign::nested_assign(&mut left, &mut right, &mut other, || {
+                calls.set(calls.get() + 1);
+                ([1, 2], 3)
+            });
+        });
+        assert_eq!((left, right, other), expected);
+        assert_eq!(calls.get(), 1);
+    }
+}
+
+#[test]
+fn standard_enum_mutations_compile_and_select_only_the_active_alternative() {
+    use core::cmp::Ordering::{Equal, Greater, Less};
+    use core::ops::ControlFlow::{Break, Continue};
+
+    assert_eq!(std_enums::shadowed_defaults(), (99, true));
+    assert_schema(
+        include_str!("fixtures/correctness/std_enums.rs"),
+        include_str!("fixtures/correctness/std_enums.expected.rs"),
+        &[
+            (
+                "stop",
+                "control_flow.break_to_continue",
+                "::core::ops::ControlFlow::Continue(::core::default::Default::default())",
+            ),
+            (
+                "proceed",
+                "control_flow.continue_to_break",
+                "::core::ops::ControlFlow::Break(::core::default::Default::default())",
+            ),
+            ("order", "ordering.less_to_greater", "::core::cmp::Ordering::Greater"),
+            ("ordering_predicate", "ordering.is_lt_to_is_ge", "value.is_ge()"),
+            ("flow_predicate", "control_flow.is_break_to_is_continue", "value.is_continue()"),
+            ("comparison", "fn_value.equal", "::core::cmp::Ordering::Equal"),
+            ("partial", "fn_value.some", "Some(::core::cmp::Ordering::Greater)"),
+            (
+                "flow",
+                "fn_value.break_default",
+                "::core::ops::ControlFlow::Break(::core::default::Default::default())",
+            ),
+            (
+                "parenthesized_stop",
+                "control_flow.break_to_continue",
+                "::core::ops::ControlFlow::Continue(::core::default::Default::default())",
+            ),
+            (
+                "parenthesized_proceed",
+                "control_flow.continue_to_break",
+                "::core::ops::ControlFlow::Break(::core::default::Default::default())",
+            ),
+            (
+                "continued_flow",
+                "fn_value.continue_default",
+                "::core::ops::ControlFlow::Continue(::core::default::Default::default())",
+            ),
+        ],
+    );
+    assert_eq!(std_enums::stop(), Break(7));
+    assert_eq!(active(1, std_enums::stop), Continue(false));
+    assert_eq!(std_enums::proceed(), Continue(true));
+    assert_eq!(active(2, std_enums::proceed), Break(0));
+    assert_eq!(std_enums::order(), Less);
+    assert_eq!(active(3, std_enums::order), Greater);
+    assert!(std_enums::ordering_predicate(Less));
+    assert!(!active(4, || std_enums::ordering_predicate(Less)));
+    assert!(std_enums::flow_predicate(Break(1)));
+    assert!(!active(5, || std_enums::flow_predicate(Break(1))));
+    assert_eq!(std_enums::comparison(2, 1), Greater);
+    assert_eq!(active(6, || std_enums::comparison(2, 1)), Equal);
+    assert_eq!(std_enums::partial(Some(Less)), Some(Less));
+    assert_eq!(active(7, || std_enums::partial(Some(Less))), Some(Greater));
+    assert_eq!(std_enums::flow(Continue(true)), Continue(true));
+    assert_eq!(active(8, || std_enums::flow(Continue(true))), Break(0));
+    assert!(std_enums::parenthesized_stop());
+    assert!(!active(9, std_enums::parenthesized_stop));
+    assert!(std_enums::parenthesized_proceed());
+    assert!(!active(10, std_enums::parenthesized_proceed));
+    assert_eq!(std_enums::continued_flow(Break(7)), Break(7));
+    assert_eq!(active(11, || std_enums::continued_flow(Break(7))), Continue(false));
+}
+
 thread_local! {
     static ACTIVE: Cell<u32> = const { Cell::new(0) };
     static HITS: Cell<usize> = const { Cell::new(0) };
@@ -229,6 +449,12 @@ fn tokens(source: &str) -> String {
     let mut source = source.to_owned();
     for span in punctuation.0.into_iter().rev() {
         source.replace_range(span, "");
+    }
+    if let Ok(file) = syn::parse_file(&source) {
+        return quote::quote!(#file).to_string();
+    }
+    if let Ok(expression) = syn::parse_str::<syn::Expr>(&source) {
+        return quote::quote!(#expression).to_string();
     }
     source
         .parse::<proc_macro2::TokenStream>()

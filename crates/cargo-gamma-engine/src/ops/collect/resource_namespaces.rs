@@ -173,6 +173,30 @@ impl Namespaces {
         self.closed_methods(root, &prefix.iter().chain(inline).cloned().collect::<Vec<_>>())
     }
 
+    pub(super) fn method_imports_closed_for<'a>(
+        &self,
+        source: &str,
+        inline: &[String],
+        mut imports: impl Iterator<Item = Option<&'a [String]>>,
+    ) -> bool {
+        let (root, module) = if self.bound {
+            let Some(Some((root, prefix))) = self.contexts.get(&source.replace('\\', "/")) else {
+                return
+                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "The inferred bool default is already false.")]
+                false;
+            };
+            (root.as_str(), prefix.iter().chain(inline).cloned().collect::<Vec<_>>())
+        } else {
+            ("", inline.to_vec())
+        };
+        let Some(Some(namespace)) = self.modules(root).and_then(|modules| modules.scopes.get(&module)) else {
+            return
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "The inferred bool default is already false.")]
+            false;
+        };
+        imports.all(|path| path.is_some_and(|path| self.closed_method_import(root, &module, namespace, path)))
+    }
+
     pub(super) fn primitive_scope_for(&self, source: &str, inline: &[String]) -> bool {
         if !self.bound {
             return self.primitive_scope("", inline);
@@ -369,17 +393,25 @@ impl Namespaces {
             false;
         };
         (
-        // #[gamma::skip(logical.and_remove_right, reason = "Modules::transparent first rejects the current namespace wildcard and then tests opaque for every prefix including the current namespace. Thus each separately removed opaque/wildcard disjunct is implied by !transparent, and the removed closed-method !wildcard conjunct is implied by transparent. Conjoining the two redundant disjuncts also leaves the dominating !transparent disjunct unchanged.", tag = "equivalent")]
-        self.modules(root).is_some_and(|modules| modules.transparent(module, |namespace| self.opaque(root, namespace)))
-            && !namespace.wildcard) && namespace.trait_methods.values().map(Option::as_ref).all(nonconflicting_trait)
-            && namespace.imports.values().chain(&namespace.anonymous).all(|path| {
-            matches!(path.first().map(String::as_str), Some("std" | "core" | "alloc"))
-                || matches!(path.as_slice(), [alias, name] if direct_alias(namespace, alias) && matches!(name.as_str(), "UnicodeWidthChar" | "UnicodeWidthStr")
-                    && self.dependency(root, alias, "unicode-width", "0.2.2"))
-                || matches!(path.as_slice(), [alias, name] if direct_alias(namespace, alias) && name == "Style" && self.dependency(root, alias, "owo-colors", "4.4.0"))
-                || self.grouping_import(root, namespace, path)
-                || self.nontrait(root, module, path)
-        })
+            // #[gamma::skip(logical.and_remove_right, reason = "Modules::transparent first rejects the current namespace wildcard and then tests opaque for every prefix including the current namespace. Thus each separately removed opaque/wildcard disjunct is implied by !transparent, and the removed closed-method !wildcard conjunct is implied by transparent. Conjoining the two redundant disjuncts also leaves the dominating !transparent disjunct unchanged.", tag = "equivalent")]
+            self.modules(root)
+                .is_some_and(|modules| modules.transparent(module, |namespace| self.opaque(root, namespace)))
+                && !namespace.wildcard
+        ) && namespace.trait_methods.values().map(Option::as_ref).all(nonconflicting_trait)
+            && namespace
+                .imports
+                .values()
+                .chain(&namespace.anonymous)
+                .all(|path| self.closed_method_import(root, module, namespace, path))
+    }
+
+    fn closed_method_import(&self, root: &str, module: &[String], namespace: &Namespace, path: &[String]) -> bool {
+        matches!(path.first().map(String::as_str), Some("std" | "core" | "alloc"))
+            || matches!(path, [alias, name] if direct_alias(namespace, alias) && matches!(name.as_str(), "UnicodeWidthChar" | "UnicodeWidthStr")
+                && self.dependency(root, alias, "unicode-width", "0.2.2"))
+            || matches!(path, [alias, name] if direct_alias(namespace, alias) && name == "Style" && self.dependency(root, alias, "owo-colors", "4.4.0"))
+            || self.grouping_import(root, namespace, path)
+            || self.nontrait(root, module, path)
     }
 
     fn grouping_import(&self, root: &str, namespace: &Namespace, path: &[String]) -> bool {
@@ -1710,6 +1742,8 @@ mod coverage_tests;
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use core::iter::{empty, once};
+
     use super::*;
 
     fn path(parts: &[&str]) -> Vec<String> {
@@ -1721,6 +1755,23 @@ mod tests {
             &syn::parse_file(source).expect("checked-in Rust fixture parses"),
             &CfgSet::unconditional(),
         )
+    }
+
+    #[test]
+    fn method_import_closure_normalizes_bound_sources_and_rejects_missing_contexts_and_scopes() {
+        let mut ns = namespaces("struct Owner; mod nested {}");
+        ns.label("source/file.rs");
+        ns.bind(&[("source/file.rs".into(), "root.rs".into(), Vec::new())]);
+        let imported = path(&["core", "cmp", "Ordering"]);
+        for source in ["source/file.rs", "source\\file.rs"] {
+            assert!(ns.method_imports_closed_for(source, &[], once(Some(imported.as_slice()))));
+            assert!(!ns.method_imports_closed_for(source, &[], once(None)));
+            assert!(!ns.method_imports_closed_for(source, &path(&["missing"]), empty()));
+        }
+        assert!(!ns.method_imports_closed_for("unknown.rs", &[], empty()));
+        ns.alias("source/file.rs", "ambiguous.rs");
+        ns.alias("source/file.rs", "ambiguous.rs");
+        assert!(!ns.method_imports_closed_for("ambiguous.rs", &[], empty()));
     }
 
     fn attributes(source: &str) -> Vec<Attribute> {

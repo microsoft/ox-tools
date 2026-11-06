@@ -665,10 +665,22 @@ pub(crate) const CONFIRM_FACTOR: u32 = 3;
 /// imposing one here would make it resolve the whole workspace relative to a single package.
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn launcher(work: &Workspace, binary: &TestBinary, only: Only<'_>, fail_fast: bool) -> Result<Command, Verdict> {
+    let names = only.names();
+    let user = HarnessFilters::parse(work.test_arguments());
+    let allowed: Vec<&str> = names.iter().copied().filter(|name| user.admits(name)).collect();
+    if !names.is_empty() && allowed.is_empty() {
+        return Err(Verdict::Unjudged(format!(
+            "the test selection this run made for `{}` names nothing the harness filters allow, \
+             so it was refused rather than run as a wider selection",
+            binary.path
+        )));
+    }
     let Some(harness) = work.runner() else {
         let mut command = Command::new(binary.path.as_std_path());
-        let names = only.names();
         let resource_bearing = !work.required_resources(binary, only).is_empty();
+        if resource_bearing {
+            let _ = command.args(["--test-threads", "1"]);
+        }
 
         if names.is_empty() {
             // The whole binary runs, so the user's arguments are the whole selection and go through
@@ -684,17 +696,6 @@ fn launcher(work: &Workspace, binary: &TestBinary, only: Only<'_>, fail_fast: bo
             // it — and a mutant could be convicted by a test the user deliberately excluded. The
             // intersection libtest cannot express is computed here instead: the user's filters
             // decide which of the chosen names may run, and only the survivors are passed.
-            let user = HarnessFilters::parse(work.test_arguments());
-            let allowed: Vec<&str> = names.iter().copied().filter(|name| user.admits(name)).collect();
-
-            if allowed.is_empty() {
-                return Err(Verdict::Unjudged(format!(
-                    "the test selection this run made for `{}` names nothing the harness filters allow, \
-                     so it was refused rather than run as a wider selection",
-                    binary.path
-                )));
-            }
-
             // The user's positional filters are not repeated here: `admits` has already applied
             // them, and leaving them out is what lets `--exact` pin this run's own names without
             // also silently converting the user's substring filter into a whole-name match.
@@ -704,9 +705,6 @@ fn launcher(work: &Workspace, binary: &TestBinary, only: Only<'_>, fail_fast: bo
                 let _ = command.args(user.flags());
             }
             let _ = command.args(allowed).arg("--exact");
-        }
-        if resource_bearing {
-            let _ = command.args(["--test-threads", "1"]);
         }
         let _ = command.current_dir(working_directory(work, binary).as_std_path());
         work.inherit_test_cache_home(&mut command);
@@ -3336,7 +3334,24 @@ mod final_survivor_tests {
             work.set_resources(Resources::fake_binary(&binary));
             let command = launcher(&work, &binary, Only::One("chosen"), true).unwrap();
             let arguments: Vec<_> = command.get_args().map(|argument| argument.to_string_lossy().into_owned()).collect();
-            assert_eq!(arguments, ["chosen", "--exact", "--test-threads", "1"]);
+            assert_eq!(arguments, ["--test-threads", "1", "chosen", "--exact"]);
+        }
+    }
+
+    #[test]
+    fn whole_binary_resource_thread_override_precedes_literal_filters() {
+        for arguments in [
+            vec!["--", "--literal"],
+            vec!["--test-threads=8", "--", "--literal"],
+            vec!["--test-threads", "8", "--", "--literal"],
+        ] {
+            let mut work = policy_workspace();
+            let binary = crate::testing::test_binary("literal-resource");
+            work.set_test_args(arguments.into_iter().map(str::to_owned).collect());
+            work.set_resources(Resources::fake_binary(&binary));
+            let command = launcher(&work, &binary, Only::All, true).unwrap();
+            let arguments: Vec<_> = command.get_args().map(|argument| argument.to_string_lossy().into_owned()).collect();
+            assert_eq!(arguments, ["--test-threads", "1", "--", "--literal"]);
         }
     }
 

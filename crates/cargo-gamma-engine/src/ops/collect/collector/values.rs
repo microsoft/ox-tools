@@ -30,8 +30,17 @@ fn proven(name: &'static str, text: impl Into<CompactString>) -> ReplacementValu
     (name, text.into(), Confidence::Proven)
 }
 
+#[cfg(test)]
 fn optimistic(name: &'static str, text: impl Into<CompactString>) -> ReplacementValue {
     (name, text.into(), Confidence::Optimistic)
+}
+
+fn default_values(name: &'static str, ty: &Type, types: &Types<'_>) -> Vec<ReplacementValue> {
+    if types.has_proven_default(ty) {
+        vec![proven(name, "Default::default()")]
+    } else {
+        Vec::new()
+    }
 }
 
 fn combined_confidence(left: Confidence, right: Confidence) -> Confidence {
@@ -61,9 +70,8 @@ fn some_value((name, text, confidence): ReplacementValue, outer_confidence: Conf
 /// than looked up so that nested types compose: a `Result<Option<bool>, E>` is a `Result` whose
 /// success values are the `Option` values, which are in turn the `bool` values.
 ///
-/// The type is read syntactically, so an alias, a generic parameter or an associated type falls
-/// through to `Default::default()`, which may not compile — an acceptable trade, since a bad guess
-/// costs one rollback round rather than losing the mutant entirely.
+/// Default-dependent values require positive source-visible evidence, including after resolving
+/// aliases and composing nested payloads. Unknown implementations do not supply a fallback.
 pub(super) fn return_values(output: &ReturnType, types: &Types<'_>) -> Vec<ReplacementValue> {
     let ReturnType::Type(_arrow, ty) = output else {
         return vec![proven("fn_value.unit", "()")];
@@ -74,8 +82,7 @@ pub(super) fn return_values(output: &ReturnType, types: &Types<'_>) -> Vec<Repla
 
 /// The replacement values for one type, recursing through its parameters.
 ///
-/// `depth` bounds the recursion; at zero the type contributes `Default::default()` rather than
-/// nothing, because a value that type-checks is still worth trying even when its shape is unknown.
+/// `depth` bounds the recursion; at zero only a proven default contributes a value.
 #[expect(clippy::too_many_lines, reason = "the match exhaustively maps every return-type kind")]
 pub(super) fn values_for(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<ReplacementValue> {
     let alias_resolved = types.resolve_alias(ty);
@@ -102,11 +109,37 @@ pub(super) fn values_for(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Repl
         Vec::new();
     }
 
-    // Withhold an unknown concrete type only when source-visible evidence proves it cannot be
-    // defaulted. An unresolved dependency type stays eligible: the compile oracle can withdraw a
-    // bad guess, while dropping the candidate here would make a real `Default` implementation
-    // impossible to discover.
-    if kind == Kind::Unknown && types.lacks_default(resolved) {
+    if depth > 0 && types.supports_ordering_api(resolved) {
+        let root = types.standard_enum_root();
+        return vec![
+            proven("fn_value.less", format_compact!("::{root}::cmp::Ordering::Less")),
+            proven("fn_value.equal", format_compact!("::{root}::cmp::Ordering::Equal")),
+            proven("fn_value.greater", format_compact!("::{root}::cmp::Ordering::Greater")),
+        ];
+    }
+    if types.supports_control_flow_api(resolved) {
+        return if depth == 0 {
+            Vec::new()
+        } else {
+            let root = types.standard_enum_root();
+            [(0, "fn_value.break_default", "Break"), (1, "fn_value.continue_default", "Continue")]
+                .into_iter()
+                .filter_map(|(index, name, variant)| {
+                    let payload = types.control_flow_payload(resolved, index)?;
+                    types.has_proven_default(&payload).then(|| {
+                        proven(
+                            name,
+                            format_compact!("::{root}::ops::ControlFlow::{variant}(::{root}::default::Default::default())"),
+                        )
+                    })
+                })
+                .collect()
+        };
+    }
+
+    if
+    // #[gamma::skip(cond.always_false, tag = "equivalent", reason = "For Unknown without proven Default, both the depth-zero path and the final Unknown match arm call pure default_values, which repeats has_proven_default and returns the same empty vector. This is only an early empty-result return.")]
+    kind == Kind::Unknown && !types.has_proven_default(resolved) {
         return
         // #[gamma::skip(return_value.default, reason = "The original Vec::new() already constructs the default value of its inferred return type.", tag = "equivalent")]
         Vec::new();
@@ -123,26 +156,15 @@ pub(super) fn values_for(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Repl
     // An alias must preserve its declared constructor shape rather than borrowing the standard
     // collection spelling of the type it resolves to.
     if aliased && matches!(kind, Kind::Collection | Kind::Map) && !types.has_default(resolved) && !types.lacks_default(resolved) {
-        return vec![optimistic("fn_value.default", "Default::default()")];
+        return
+        // #[gamma::skip(call_result.default, return_value.default, tag = "equivalent", reason = "For Collection/Map, has_proven_default implies has_default: standard collections have intrinsic defaults subject to stricter proven hasher checks; source/local proofs also satisfy package_has_default/local_generic_default; rustc_hash is accepted by both queries. This branch requires !has_default, so default_values returns an empty Vec, exactly its Default.")]
+        default_values(
+            // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, tag = "equivalent", reason = "This Collection/Map alias branch requires !has_default, which excludes every proven collection default. default_values therefore returns empty before using its candidate name.")]
+            "fn_value.default", resolved, types);
     }
 
     if depth == 0 {
-        let eligible = types.has_default(resolved)
-            || kind == Kind::Array && types.array_may_default(resolved)
-            ||
-            // #[gamma::skip(logical.and_remove_right, reason = "Unknown kinds lacking Default return early before eligibility is computed. Removing the later repeated lacks_default restriction cannot admit any additional reachable kind.", tag = "equivalent")]
-            kind == Kind::Unknown && !types.lacks_default(resolved);
-        return if
-        // #[gamma::skip(logical.and_remove_left, reason = "Result has no Default proof and cannot match the Array or Unknown eligibility branches, so eligibility is false for every Result before the repeated Result exclusion is reached.", tag = "equivalent")]
-        kind != Kind::Result && eligible {
-            vec![if types.has_proven_default(resolved) {
-                proven("fn_value.default", "Default::default()")
-            } else {
-                optimistic("fn_value.default", "Default::default()")
-            }]
-        } else {
-            Vec::new()
-        };
+        return default_values("fn_value.default", resolved, types);
     }
 
     match kind {
@@ -199,18 +221,11 @@ pub(super) fn values_for(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Repl
             let inner = inner_values(source, 0, depth, types);
 
             if inner.is_empty() {
-                if let Some(inner) = types.payload(source, 0).filter(|inner| types.has_default(inner)) {
+                if types.payload(source, 0).is_some_and(|inner| types.has_proven_default(&inner)) {
                     values.push((
                         "fn_value.some_default",
                         CompactString::new("Some(Default::default())"),
-                        combined_confidence(
-                            if types.has_proven_default(&inner) {
-                                Confidence::Proven
-                            } else {
-                                Confidence::Optimistic
-                            },
-                            outer_confidence,
-                        ),
+                        outer_confidence,
                     ));
                 }
             } else {
@@ -231,12 +246,8 @@ pub(super) fn values_for(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Repl
             };
             let inner = inner_values(source, 0, depth, types);
             let mut values = if inner.is_empty() {
-                if let Some(inner) = types.payload(source, 0).filter(|inner| types.has_default(inner)) {
-                    vec![if types.has_proven_default(&inner) && outer_confidence == Confidence::Proven {
-                        proven("fn_value.ok_default", "Ok(Default::default())")
-                    } else {
-                        optimistic("fn_value.ok_default", "Ok(Default::default())")
-                    }]
+                if types.payload(source, 0).is_some_and(|inner| types.has_proven_default(&inner)) {
+                    vec![("fn_value.ok_default", CompactString::new("Ok(Default::default())"), outer_confidence)]
                 } else {
                     Vec::new()
                 }
@@ -258,17 +269,8 @@ pub(super) fn values_for(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Repl
                     .collect()
             };
 
-            // The error type is only named when the path spells it. `type Result<T> =
-            // core::result::Result<T, MyError>` is everywhere in real crates, and there the error
-            // is whatever the alias fixed it to — almost never something with a `Default`. Offering
-            // `Err(Default::default())` on a guess buys one mutant that usually cannot compile, so
-            // it is offered only when the second argument is present and not abstract.
-            if let Some(inner) = types.payload(source, 1).filter(|inner| types.has_default(inner)) {
-                values.push(if types.has_proven_default(&inner) && outer_confidence == Confidence::Proven {
-                    proven("fn_value.err_default", "Err(Default::default())")
-                } else {
-                    optimistic("fn_value.err_default", "Err(Default::default())")
-                });
+            if types.payload(source, 1).is_some_and(|inner| types.has_proven_default(&inner)) {
+                values.push(("fn_value.err_default", CompactString::new("Err(Default::default())"), outer_confidence));
             }
 
             cap(values)
@@ -284,19 +286,11 @@ pub(super) fn values_for(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Repl
                 Confidence::Optimistic
             };
             let mut values = if aliased && !types.lacks_default(resolved) || types.prefers_default_constructor(resolved) {
-                vec![if types.has_proven_default(resolved) {
-                    proven("fn_value.empty_collection", "Default::default()")
-                } else {
-                    optimistic("fn_value.empty_collection", "Default::default()")
-                }]
+                default_values("fn_value.empty_collection", resolved, types)
             } else if types.is_local_type(resolved) {
                 Vec::new()
             } else if !constructor_supported {
-                vec![if types.has_proven_default(resolved) {
-                    proven("fn_value.empty_collection", "Default::default()")
-                } else {
-                    optimistic("fn_value.empty_collection", "Default::default()")
-                }]
+                default_values("fn_value.empty_collection", resolved, types)
             } else {
                 vec![proven(
                     "fn_value.empty_collection",
@@ -333,19 +327,11 @@ pub(super) fn values_for(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Repl
                 Confidence::Optimistic
             };
             let mut values = if aliased && !types.lacks_default(resolved) || types.prefers_default_constructor(resolved) {
-                vec![if types.has_proven_default(resolved) {
-                    proven("fn_value.empty_collection", "Default::default()")
-                } else {
-                    optimistic("fn_value.empty_collection", "Default::default()")
-                }]
+                default_values("fn_value.empty_collection", resolved, types)
             } else if types.is_local_type(resolved) {
                 Vec::new()
             } else if !constructor_supported {
-                vec![if types.has_proven_default(resolved) {
-                    proven("fn_value.empty_collection", "Default::default()")
-                } else {
-                    optimistic("fn_value.empty_collection", "Default::default()")
-                }]
+                default_values("fn_value.empty_collection", resolved, types)
             } else {
                 vec![proven(
                     "fn_value.empty_collection",
@@ -463,7 +449,11 @@ pub(super) fn values_for(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Repl
                         .map(|(_name, text, confidence)| {
                             (
                                 "fn_value.one_element",
-                                format_compact!("core::iter::once({text})"),
+                                if matches!(strip(item), Type::Reference(reference) if matches!(strip(&reference.elem), Type::Slice(_))) {
+                                    format_compact!("core::iter::once::<{}>({text})", quote::quote!(#item))
+                                } else {
+                                    format_compact!("core::iter::once({text})")
+                                },
                                 combined_confidence(confidence, outer_confidence),
                             )
                         }),
@@ -474,25 +464,12 @@ pub(super) fn values_for(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Repl
         }
         // #[gamma::skip(expr.increment, expr.decrement, reason = "reference_values deliberately ignores its depth parameter and constructs only the shared empty slice")]
         Kind::Reference => reference_values(resolved, depth, types),
-        Kind::Array => {
-            if types.has_proven_default(resolved) {
-                vec![proven("fn_value.default", "Default::default()")]
-            } else if types.array_may_default(resolved) {
-                vec![optimistic("fn_value.default", "Default::default()")]
-            } else {
-                Vec::new()
-            }
-        }
+        Kind::Array | Kind::Unknown => default_values("fn_value.default", resolved, types),
 
         // Every combination of the elements' values, which is where the product bound earns its
         // keep: three fields with three values each is twenty-seven mutants for one function.
         Kind::Tuple => tuple_values(resolved, depth, types),
 
-        Kind::Unknown => vec![if types.has_proven_default(resolved) {
-            proven("fn_value.default", "Default::default()")
-        } else {
-            optimistic("fn_value.default", "Default::default()")
-        }],
     }
 }
 
@@ -501,7 +478,7 @@ pub(super) fn values_for(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Repl
 /// user has to read every one of them.
 pub(super) fn tuple_values(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<ReplacementValue> {
     let Type::Tuple(tuple) = strip(ty) else {
-        return vec![optimistic("fn_value.default", "Default::default()")];
+        return default_values("fn_value.default", ty, types);
     };
 
     let mut combinations: Vec<(Vec<CompactString>, Confidence)> = vec![(Vec::new(), Confidence::Proven)];
@@ -821,8 +798,8 @@ pub(super) fn primitive_kind(name: &str) -> Option<Kind> {
 /// would take any type whose final segment reads `Vec` for the standard one, so the count of type
 /// arguments is checked as well: a `Vec` that takes none is somebody else's `Vec`, and treating it
 /// as the standard one produces a mutant that cannot compile. A name that carries the wrong number
-/// of type arguments is therefore classified as unknown, which still offers `Default::default()`
-/// and so keeps a guess without pretending to know the shape.
+/// of type arguments is therefore classified as unknown, whose default replacement requires
+/// separate positive trait evidence.
 ///
 /// A local type that shadows a standard name *and* matches its arity — a bare `struct String` —
 /// remains indistinguishable and will yield a mutant that does not compile. That mutant is
@@ -938,7 +915,256 @@ mod tests {
     }
 
     #[test]
-    fn map_payloads_spend_the_same_depth_for_keys_and_values_and_keep_optimistic_value_confidence() {
+    fn ci_explicit_defaultable_map_hashers_keep_the_named_empty_default_candidate() {
+        let defaults = Defaults::default();
+        let imports = HashMap::default();
+        let types = test_types(&[], &imports, &defaults);
+        assert_eq!(
+            values_for(
+                &parse_quote!(std::collections::HashMap<bool, bool, std::collections::hash_map::RandomState>),
+                2,
+                &types,
+            ),
+            [
+                proven("fn_value.empty_collection", "Default::default()"),
+                optimistic("fn_value.one_element", "core::iter::once((true, true)).collect()"),
+            ]
+        );
+    }
+
+    #[test]
+    fn ci_iterator_slice_references_keep_the_explicit_once_item_type() {
+        let defaults = Defaults::default();
+        let imports = HashMap::default();
+        let types = test_types(&[], &imports, &defaults);
+        assert_eq!(
+            values_for(&parse_quote!(impl Iterator<Item = &[u8]>), 3, &types),
+            [
+                proven("fn_value.empty_collection", "core::iter::empty()"),
+                proven("fn_value.one_element", "core::iter::once::<& [u8]>(&[])"),
+            ]
+        );
+    }
+
+    #[test]
+    fn default_requirements_withhold_unsupported_and_unproven_types() {
+        let defaults = Defaults::default();
+        let imports = HashMap::from_iter([
+            ("Poll".into(), Some(vec!["core".into(), "task".into(), "Poll".into()])),
+            ("NonNull".into(), Some(vec!["std".into(), "ptr".into(), "NonNull".into()])),
+        ]);
+        let types = test_types(&[], &imports, &defaults);
+        for text in [
+            "core::task::Poll<u8>",
+            "std::ptr::NonNull<u8>",
+            "Poll<bool>",
+            "NonNull<u8>",
+            "*const [u8]",
+            "*mut dyn core::fmt::Debug",
+            "*const str",
+        ] {
+            let ty = syn::parse_str(text).unwrap();
+            for depth in [0, 3] {
+                assert!(values_for(&ty, depth, &types).is_empty(), "{text}, depth={depth}");
+            }
+        }
+        for text in [
+            "dependency::Poll<u8>",
+            "dependency::NonNull<u8>",
+            "*const T",
+            "*mut T",
+            "*const u8",
+            "*const [u8; 3]",
+        ] {
+            let ty = syn::parse_str(text).unwrap();
+            assert!(values_for(&ty, 3, &types).is_empty(), "{text}");
+        }
+        let _: *const u8 = Default::default();
+        let _: *mut [u8; 3] = Default::default();
+        let shadowed = HashMap::from_iter([("std".into(), None), ("core".into(), None)]);
+        let types = test_types(&[], &shadowed, &defaults);
+        for text in ["std::task::Poll<u8>", "core::ptr::NonNull<u8>", "Poll<u8>", "NonNull<u8>"] {
+            assert!(values_for(&syn::parse_str(text).unwrap(), 3, &types).is_empty(), "{text}");
+        }
+        assert_eq!(values_for(&parse_quote!(::std::task::Poll<u8>), 3, &types).len(), 0);
+    }
+
+    #[test]
+    fn custom_constructors_remain_eligible_but_unknown_defaults_are_withheld() {
+        let cfg = crate::cfg::CfgSet::parse("").with_undecided(["custom".into()]);
+        for source in [
+            "struct Box<T>(T); impl<T> Box<T> { fn new(value: T) -> Self { Self(value) } }",
+            "struct Arc<T>(T); impl<T> Arc<T> { fn new(value: T) -> Self { Self(value) } }",
+            "#[derive(CustomDefault)] struct Shape;",
+            "struct Shape; impl Default for Shape where u8: Custom {}",
+            "struct Shape; implement_default!(Shape);",
+            "#[cfg_attr(custom, derive(Default))] struct Shape;",
+        ] {
+            let file = syn::parse_file(source).unwrap();
+            let mut defaults = Defaults::of_source_in(&file, &cfg, "fixture.rs");
+            defaults.bind_sources(&[("fixture.rs".into(), "fixture.rs".into(), Vec::new())]);
+            let imports = HashMap::from_iter([(super::super::types::SOURCE_FILE.into(), Some(vec!["fixture.rs".into()]))]);
+            let types = test_types(&[], &imports, &defaults);
+            let ty = if source.contains("Box<T>") {
+                parse_quote!(Box<bool>)
+            } else if source.contains("Arc<T>") {
+                parse_quote!(Arc<bool>)
+            } else {
+                parse_quote!(Shape)
+            };
+            let values = values_for(&ty, 3, &types);
+            if source.contains("Box<T>") || source.contains("Arc<T>") {
+                assert_eq!(values.len(), 2, "{source}");
+                assert!(values.iter().all(|(_, text, _)| !text.contains("Default::default()")), "{source}");
+            } else {
+                assert!(values.is_empty(), "{source}");
+            }
+        }
+    }
+
+    #[test]
+    fn p17_explicit_local_glob_exports_supply_negative_default_but_partial_indexes_do_not() {
+        let cfg = crate::cfg::CfgSet::parse("");
+        let file = syn::parse_file(
+            "mod options {
+                #[cfg_attr(any(), derive(Default))] pub struct ProbesOptions;
+                #[derive(Default)] pub struct Ready;
+             }
+             pub(crate) use options::*;",
+        )
+        .unwrap();
+        let imports = HashMap::from_iter([
+            (super::super::types::SOURCE_FILE.into(), Some(vec!["fixture.rs".into()])),
+            ("*".into(), None),
+        ]);
+        let mut defaults = Defaults::of_source_in(&file, &cfg, "fixture.rs");
+        defaults.bind_sources(&[("fixture.rs".into(), "fixture.rs".into(), Vec::new())]);
+        let types = test_types(&[], &imports, &defaults);
+        assert_eq!(values_for(&parse_quote!(crate::ProbesOptions), 3, &types).len(), 0);
+        assert_eq!(
+            values_for(&parse_quote!(crate::Ready), 3, &types),
+            [proven("fn_value.default", "Default::default()")]
+        );
+        assert_eq!(values_for(&parse_quote!(dependency::ProbesOptions), 3, &types).len(), 0);
+        defaults.mark_incomplete();
+        assert_eq!(
+            values_for(&parse_quote!(crate::ProbesOptions), 3, &test_types(&[], &imports, &defaults)).len(),
+            0
+        );
+    }
+
+    #[test]
+    fn p17_discarded_default_guesses_preserve_retained_mutant_ids_and_occurrences() {
+        use crate::cfg::CfgSet;
+        use crate::ops::collect::{collect_with, into_definitions};
+        use crate::ops::registry::Selection;
+        use crate::parse::SourceFile;
+
+        let file = SourceFile::parse(
+            "fixture.rs",
+            "mod options { pub struct ProbesOptions; }
+             pub(crate) use options::*;
+             fn rejected() -> crate::ProbesOptions { original() }
+             fn retained() -> bool { original() }"
+                .into(),
+        )
+        .unwrap();
+        let cfg = CfgSet::parse("");
+        let selection = Selection::parse("fn_value").unwrap();
+        let mut defaults = Defaults::of_source_in(&file.ast, &cfg, "fixture.rs");
+        defaults.bind_sources(&[("fixture.rs".into(), "fixture.rs".into(), Vec::new())]);
+        let retained = collect_with(&file, &selection, &cfg, &defaults);
+        assert_eq!(retained.len(), 2);
+        assert!(retained.iter().all(|candidate| candidate.item_path.as_ref() == "retained"));
+        let complete = into_definitions(&file, retained);
+        defaults.mark_incomplete();
+        let baseline = collect_with(&file, &selection, &cfg, &defaults);
+        assert!(baseline.iter().all(|candidate| candidate.item_path.as_ref() == "retained"));
+        let baseline = into_definitions(&file, baseline);
+        let retained_baseline = baseline
+            .iter()
+            .filter(|definition| definition.item_path.as_ref() == "retained")
+            .map(|definition| (&definition.id, definition.occurrence, definition.replacement_index))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            complete
+                .iter()
+                .map(|definition| (&definition.id, definition.occurrence, definition.replacement_index))
+                .collect::<Vec<_>>(),
+            retained_baseline
+        );
+    }
+
+    #[test]
+    fn standard_enum_values_respect_the_return_depth_budget() {
+        let defaults = Defaults::default();
+        let imports = HashMap::default();
+        let types = test_types(&[], &imports, &defaults);
+        let ordering = parse_quote!(core::cmp::Ordering);
+        assert_eq!(values_for(&ordering, 0, &types).len(), 0);
+        assert_eq!(
+            values_for(&ordering, 1, &types),
+            [
+                proven("fn_value.less", "::core::cmp::Ordering::Less"),
+                proven("fn_value.equal", "::core::cmp::Ordering::Equal"),
+                proven("fn_value.greater", "::core::cmp::Ordering::Greater"),
+            ]
+        );
+        let flow = parse_quote!(core::ops::ControlFlow<u8, bool>);
+        assert_eq!(values_for(&flow, 0, &types).len(), 0);
+        assert_eq!(
+            values_for(&flow, 1, &types),
+            [
+                proven(
+                    "fn_value.break_default",
+                    "::core::ops::ControlFlow::Break(::core::default::Default::default())"
+                ),
+                proven(
+                    "fn_value.continue_default",
+                    "::core::ops::ControlFlow::Continue(::core::default::Default::default())"
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn control_flow_returns_with_missing_payload_evidence_are_withheld_without_panicking() {
+        let defaults = Defaults::default();
+        let imports = HashMap::default();
+        let types = test_types(&[], &imports, &defaults);
+        assert_eq!(values_for(&parse_quote!(core::ops::ControlFlow), RETURN_DEPTH, &types).len(), 0);
+    }
+
+    #[test]
+    fn control_flow_returns_require_each_payloads_default_proof_independently() {
+        let defaults = Defaults::of(
+            &syn::parse_file(
+                "struct Conditional; impl Default for Conditional where u8: Copy {
+                    fn default() -> Self { Conditional }
+                }",
+            )
+            .unwrap(),
+        );
+        let imports = HashMap::default();
+        let types = test_types(&[], &imports, &defaults);
+        assert_eq!(
+            values_for(&parse_quote!(core::ops::ControlFlow<Conditional>), RETURN_DEPTH, &types),
+            [proven(
+                "fn_value.continue_default",
+                "::core::ops::ControlFlow::Continue(::core::default::Default::default())"
+            )]
+        );
+        assert_eq!(
+            values_for(&parse_quote!(core::ops::ControlFlow<u8, Conditional>), RETURN_DEPTH, &types),
+            [proven(
+                "fn_value.break_default",
+                "::core::ops::ControlFlow::Break(::core::default::Default::default())"
+            )]
+        );
+    }
+
+    #[test]
+    fn map_payloads_spend_the_same_depth_and_withhold_unproven_defaults() {
         let defaults = Defaults::default();
         let imports = HashMap::default();
         let types = test_types(&[], &imports, &defaults);
@@ -950,37 +1176,20 @@ mod tests {
             ],
         );
         let values = values_for(&parse_quote!(HashMap<bool, dependency::Value>), 2, &types);
-        let one_element = values.iter().find(|(name, _, _)| *name == "fn_value.one_element").unwrap();
-        assert_eq!(
-            *one_element,
-            optimistic("fn_value.one_element", "core::iter::once((true, Default::default())).collect()")
-        );
+        assert_eq!(values, [proven("fn_value.empty_collection", "HashMap::new()")]);
         let values = values_for(&parse_quote!(HashMap<dependency::Key, bool>), 2, &types);
-        let one_element = values.iter().find(|(name, _, _)| *name == "fn_value.one_element").unwrap();
-        assert_eq!(
-            *one_element,
-            optimistic("fn_value.one_element", "core::iter::once((Default::default(), true)).collect()")
-        );
+        assert_eq!(values, [proven("fn_value.empty_collection", "HashMap::new()")]);
     }
 
     #[test]
-    fn map_keys_with_symbolic_array_lengths_keep_optimistic_default_confidence() {
+    fn map_keys_with_symbolic_array_lengths_keep_only_the_empty_constructor() {
         let defaults = Defaults::default();
         let imports = HashMap::default();
         let types = test_types(&[], &imports, &defaults);
         let ty = parse_quote!(HashMap<[bool; N], bool>);
         assert!(types.collection_elements_proven(&ty));
         assert!(!types.has_proven_default(&parse_quote!([bool; N])));
-        assert_eq!(
-            values_for(&ty, 1, &types),
-            [
-                proven("fn_value.empty_collection", "HashMap::new()"),
-                optimistic(
-                    "fn_value.one_element",
-                    "core::iter::once((Default::default(), Default::default())).collect()"
-                ),
-            ]
-        );
+        assert_eq!(values_for(&ty, 1, &types), [proven("fn_value.empty_collection", "HashMap::new()")]);
     }
 
     #[test]
@@ -1008,25 +1217,25 @@ mod tests {
     }
 
     #[test]
-    fn option_fallback_confidence_tracks_default_evidence_when_abstract_payload_choices_are_empty() {
+    fn option_fallback_requires_proven_default_when_abstract_payload_choices_are_empty() {
         let defaults = Defaults::default();
         let abstracts = ["u8".into()];
-        for (imports, confidence) in [
-            (HashMap::default(), Confidence::Proven),
-            (
-                HashMap::from_iter([("u8".into(), Some(vec!["dependency".into(), "u8".into()]))]),
-                Confidence::Optimistic,
-            ),
+        for imports in [
+            HashMap::default(),
+            HashMap::from_iter([("u8".into(), Some(vec!["dependency".into(), "u8".into()]))]),
         ] {
-            let types = test_types(&abstracts, &imports, &defaults);
-            assert_eq!(values_for(&parse_quote!(u8), 2, &types).len(), 0);
-            assert_eq!(
-                values_for(&parse_quote!(Option<u8>), 3, &types),
-                [
-                    proven("fn_value.none", "None"),
-                    ("fn_value.some_default", "Some(Default::default())".into(), confidence),
-                ],
-            );
+            for default_proven in [false, true] {
+                let types = Types {
+                    defaulted: if default_proven { &abstracts } else { &[] },
+                    ..test_types(&abstracts, &imports, &defaults)
+                };
+                assert_eq!(values_for(&parse_quote!(u8), 2, &types).len(), 0);
+                let mut expected = vec![proven("fn_value.none", "None")];
+                if default_proven {
+                    expected.push(proven("fn_value.some_default", "Some(Default::default())"));
+                }
+                assert_eq!(values_for(&parse_quote!(Option<u8>), 3, &types), expected);
+            }
         }
     }
 
@@ -1118,13 +1327,7 @@ mod tests {
         for text in ["[u8; 33]", "[Missing; 1]", "Missing", "std::io::Error", "Result<bool,u8>"] {
             assert!(values_for(&syn::parse_str(text).unwrap(), 0, &types).is_empty(), "{text}");
         }
-        assert_eq!(
-            values_for(&syn::parse_quote!((Unknown, bool)), 2, &types),
-            [
-                optimistic("fn_value.tuple", "(Default::default(), true)"),
-                optimistic("fn_value.tuple", "(Default::default(), false)"),
-            ]
-        );
+        assert_eq!(values_for(&syn::parse_quote!((Unknown, bool)), 2, &types).len(), 0);
     }
 
     #[test]
@@ -1149,11 +1352,7 @@ mod tests {
         );
         assert_eq!(
             values_for(&syn::parse_quote!(Result<bool, foreign::bool>), 3, &types),
-            [
-                proven("fn_value.ok", "Ok(true)"),
-                proven("fn_value.ok", "Ok(false)"),
-                optimistic("fn_value.err_default", "Err(Default::default())"),
-            ]
+            [proven("fn_value.ok", "Ok(true)"), proven("fn_value.ok", "Ok(false)")]
         );
         assert!(!is_unsized_string_wrapper(&syn::parse_quote!(Vec<str>)));
         assert!(!is_unsized_string_wrapper(&syn::parse_quote!(Option<str>)));
@@ -1326,11 +1525,14 @@ mod tests {
                 proven("fn_value.bool_false", "Cow::Owned(false)"),
             ]
         );
-        for text in ["HashMap<Unknown,u8>", "HashMap<u8,Unknown>", "HashMap<u8,u8,Unknown>"] {
+        for text in ["HashMap<Unknown,u8>", "HashMap<u8,Unknown>"] {
             let values = values_for(&syn::parse_str(text).unwrap(), RETURN_DEPTH, &types);
-            assert_eq!(values.len(), 2, "{text}: {values:?}");
-            assert_eq!(values[1].2, Confidence::Optimistic, "{text}");
+            assert_eq!(values, [proven("fn_value.empty_collection", "HashMap::new()")], "{text}");
         }
+        assert_eq!(
+            values_for(&parse_quote!(HashMap<u8,u8,Unknown>), RETURN_DEPTH, &types),
+            [optimistic("fn_value.one_element", "core::iter::once((0, 0)).collect()")]
+        );
         for text in [
             "other::Option<bool>",
             "other::Result<bool,u8>",
@@ -1348,8 +1550,8 @@ mod tests {
         }
         for (text, expected) in [
             ("bool", vec![proven("fn_value.default", "Default::default()")]),
-            ("[u8; N]", vec![optimistic("fn_value.default", "Default::default()")]),
-            ("Unknown", vec![optimistic("fn_value.default", "Default::default()")]),
+            ("[u8; N]", vec![]),
+            ("Unknown", vec![]),
             ("Result<bool,u8>", vec![]),
             ("&u8", vec![]),
             ("Missing", vec![]),
@@ -1408,14 +1610,8 @@ mod tests {
             self_type: None,
             self_associated: None,
         };
-        assert_eq!(
-            values_for(&parse_quote!(Foreign), RETURN_DEPTH, &types),
-            [optimistic("fn_value.default", "Default::default()")]
-        );
-        assert_eq!(
-            values_for(&parse_quote!(ForeignMap), RETURN_DEPTH, &types),
-            [optimistic("fn_value.default", "Default::default()")]
-        );
+        assert_eq!(values_for(&parse_quote!(Foreign), RETURN_DEPTH, &types).len(), 0);
+        assert_eq!(values_for(&parse_quote!(ForeignMap), RETURN_DEPTH, &types).len(), 0);
         let standard = values_for(&parse_quote!(Standard), RETURN_DEPTH, &types);
         assert_eq!(standard[0], proven("fn_value.empty_collection", "Default::default()"));
         let map = values_for(&parse_quote!(StandardMap), RETURN_DEPTH, &types);
@@ -1521,7 +1717,7 @@ mod tests {
     }
 
     #[test]
-    fn hash_collections_with_known_bad_hashers_are_withheld_while_unresolved_hashers_remain_eligible() {
+    fn hash_collection_defaults_require_positive_hasher_evidence() {
         let abstracts = Vec::new();
         let imports = HashMap::default();
         let defaults = Defaults::of(&syn::parse_file("struct NoDefault;").expect("the default fixture parses"));
@@ -1562,27 +1758,37 @@ mod tests {
             parse_quote!(dependency::HashSet<bool, NoDefault>),
             parse_quote!(dependency::HashMap<bool, bool, NoDefault>),
         ] {
-            assert!(
-                values_for(&ty, RETURN_DEPTH, &types)
-                    .iter()
-                    .any(|value| value.1 == "Default::default()" && value.2 == Confidence::Optimistic),
-                "{ty:?}"
-            );
+            let values = values_for(&ty, RETURN_DEPTH, &types);
+            assert!(!values.is_empty(), "{ty:?}");
+            assert!(values.iter().all(|value| !value.1.contains("Default::default()")), "{ty:?}");
         }
     }
 
     #[test]
-    fn nested_unknown_values_preserve_optimistic_confidence() {
+    fn nested_unknown_values_withhold_defaults_but_preserve_other_alternatives() {
         let abstracts = Vec::new();
         let imports = HashMap::default();
         let defaults = Defaults::default();
         let types = test_types(&abstracts, &imports, &defaults);
 
+        for (text, expected) in [
+            ("Option<dependency::Value>", vec![proven("fn_value.none", "None")]),
+            (
+                "Result<dependency::Value, String>",
+                vec![proven("fn_value.err_default", "Err(Default::default())")],
+            ),
+            ("Vec<dependency::Value>", vec![proven("fn_value.empty_collection", "Vec::new()")]),
+            ("(bool, dependency::Value)", vec![]),
+            ("Box<dependency::Value>", vec![]),
+            ("Cow<'static, dependency::Value>", vec![]),
+            (
+                "impl Iterator<Item = dependency::Value>",
+                vec![proven("fn_value.empty_collection", "core::iter::empty()")],
+            ),
+        ] {
+            assert_eq!(values_for(&syn::parse_str(text).unwrap(), RETURN_DEPTH, &types), expected, "{text}");
+        }
         for (ty, mutator) in [
-            (parse_quote!(Option<dependency::Value>), "fn_value.some_default"),
-            (parse_quote!(Result<dependency::Value, String>), "fn_value.ok_default"),
-            (parse_quote!(Vec<dependency::Value>), "fn_value.one_element"),
-            (parse_quote!((bool, dependency::Value)), "fn_value.tuple"),
             (parse_quote!(dependency::Box<bool>), "fn_value.bool_true"),
             (parse_quote!(dependency::Box<str>), "fn_value.empty_string"),
             (parse_quote!(dependency::Cow<'static, bool>), "fn_value.bool_true"),
@@ -1658,16 +1864,13 @@ mod tests {
     }
 
     #[test]
-    fn unresolved_array_lengths_remain_optimistic() {
+    fn unresolved_array_lengths_do_not_supply_default_evidence() {
         let abstracts = Vec::new();
         let imports = HashMap::default();
         let defaults = Defaults::default();
         let types = test_types(&abstracts, &imports, &defaults);
 
-        assert_eq!(
-            values_for(&parse_quote!([bool; LENGTH]), RETURN_DEPTH, &types),
-            vec![optimistic("fn_value.default", "Default::default()")]
-        );
+        assert_eq!(values_for(&parse_quote!([bool; LENGTH]), RETURN_DEPTH, &types).len(), 0);
     }
 
     #[test]
@@ -1844,12 +2047,7 @@ mod tests {
                 RETURN_DEPTH,
                 &types
             )),
-            [
-                "fn_value.none:None",
-                "fn_value.some:Some(None)",
-                "fn_value.some:Some(Some(None))",
-                "fn_value.some:Some(Some(Some(Default::default())))",
-            ]
+            ["fn_value.none:None", "fn_value.some:Some(None)", "fn_value.some:Some(Some(None))",]
         );
         assert_eq!(
             texts(values_for(&parse_quote!(Box<bool>), RETURN_DEPTH, &types)),
@@ -1885,10 +2083,7 @@ mod tests {
         assert!(iterator.iter().all(|value| value.2 == Confidence::Optimistic));
         assert_eq!(values_for(&parse_quote!([std::num::NonZeroU8; 1]), RETURN_DEPTH, &types).len(), 0);
         for depth in [0, RETURN_DEPTH] {
-            assert_eq!(
-                values_for(&parse_quote!([dependency::Box<bool>; 1]), depth, &types),
-                vec![optimistic("fn_value.default", "Default::default()")]
-            );
+            assert_eq!(values_for(&parse_quote!([dependency::Box<bool>; 1]), depth, &types).len(), 0);
         }
         assert_eq!(type_argument_values(&parse_quote!(impl Send)).len(), 0);
     }

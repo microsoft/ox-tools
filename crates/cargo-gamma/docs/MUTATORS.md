@@ -87,7 +87,7 @@ cargo gamma explain relational.lt_to_le   # what one does, and how to switch it 
 
 | Family | Mutators | What it asks |
 | --- | ---: | --- |
-| [`fn_value`](#fn_value) | 21 | Does anything check what this function returns? |
+| [`fn_value`](#fn_value) | 26 | Does anything check what this function returns? |
 | [`relational`](#relational) | 10 | Is this comparison's boundary the right one? |
 | [`arith`](#arith) | 11 | Does this calculation's operator matter? |
 | [`bitwise`](#bitwise) | 4 | Is this mask or flag combination correct? |
@@ -108,6 +108,8 @@ cargo gamma explain relational.lt_to_le   # what one does, and how to switch it 
 | [`expr`](#expr) | 2 | Would an off-by-one here be caught? |
 | [`option`](#option) | 4 | Is the present case distinguished from the absent one? |
 | [`result`](#result) | 4 | Is success distinguished from failure? |
+| [`control_flow`](#control_flow) | 4 | Is early termination distinguished from continuing? |
+| [`ordering`](#ordering) | 12 | Does comparison distinguish less, equal, and greater? |
 | [`try`](#try) | 1 | Does anything distinguish propagation with `?` from a panic? |
 | [`fallback`](#fallback) | 4 | Does the absent or error path produce the right fallback value? |
 | [`iter`](#iter) | 12 | Does anything observe that this was ordered, deduplicated, or taken from one end? |
@@ -118,7 +120,7 @@ cargo gamma explain relational.lt_to_le   # what one does, and how to switch it 
 | [`call_result`](#call_result) | 1 | Does this call's result matter independently of its side effects? |
 | [`parameter`](#parameter) | 1 | Does this function parameter contribute to behavior? |
 | [`regex`](#regex) | 6 | Does this pattern's matching semantics matter? |
-| **Total** | **146** | |
+| **Total** | **167** | |
 
 <!-- end generated -->
 
@@ -133,9 +135,10 @@ entries, so any of them can be passed to `explain`.
 ### `fn_value`
 
 Replaces an entire function body with a fixed value of the same type. The family covers unit and
-boolean values, small signed and unsigned numbers, empty and sentinel strings, defaults, option and
-result variants, tuples, empty iterators and collections, and values stated explicitly with an
-attribute. A surviving mutant here says that nothing calling this function checks its return value
+boolean values, small signed and unsigned numbers, empty and sentinel strings, defaults, option,
+result and `ControlFlow` variants, comparison `Ordering` values, tuples, empty iterators and
+collections, and values stated explicitly with an attribute. A surviving mutant here says that
+nothing calling this function checks its return value
 at all — the function could be replaced by a constant and the suite would not notice.
 
 ```rust
@@ -160,9 +163,9 @@ returning `impl Iterator` is the exception: the schema wraps original and replac
 its shared `Either` type, as described below. When a workspace-defined type shadows a standard
 collection name and positively implements `Default`, its empty replacement uses that proved default
 rather than assuming the shadow also provides the standard type's `new` constructor.
-Gamma keeps this evidence separate per package and applies it to unambiguous unqualified names, so
-an unrelated same-named type elsewhere in the workspace cannot change the decision. Qualified
-local paths and aliases remain unresolved rather than borrowing evidence by their final segment. A
+Gamma keeps this evidence separate per package and resolves declarations, imports, and aliases
+only when their source identities are unambiguous. Qualified local paths do not borrow evidence
+by their final segment, and unrelated same-named types cannot change the decision. A
 **resolved package Default type** is a local type whose declarations establish `Default`; an
 **unresolved concrete type or alias** has no such positive evidence.
 
@@ -512,6 +515,33 @@ The same conservative check omits `Ok`-to-`Err` and `Err`-to-`Ok` candidates whe
 expected type proves that the synthesized payload cannot implement `Default`. Ambiguous cases
 remain eligible for compiler withdrawal.
 
+### `control_flow`
+
+Exchanges standard `ControlFlow::Break(value)` and `ControlFlow::Continue(value)`
+when source-visible type evidence supports `Default` for the destination payload.
+The two payload types need not match. The implicit continuation payload in
+`ControlFlow<B>` is unit, so replacing `Break(value)` with `Continue(())` remains
+possible even when `B` has no default. As with Option/Result constructor mutations,
+the original payload expression is not evaluated by the replacement.
+
+The family also exchanges `is_break()` and `is_continue()` on receivers known to
+be standard `ControlFlow`. Whole-function replacements use
+`fn_value.break_default` and `fn_value.continue_default`.
+
+### `ordering`
+
+Replaces each standard comparison `Ordering` variant with either of the other
+two. It also exchanges complementary zero-argument predicates:
+`is_lt`/`is_ge`, `is_le`/`is_gt`, and `is_eq`/`is_ne`. Patterns are not rewritten.
+Imports and aliases are recognized; user-defined enums and
+`std::sync::atomic::Ordering` do not qualify.
+
+Functions returning comparison `Ordering`, including `Ord::cmp` implementations,
+can receive `fn_value.less`, `fn_value.equal`, and `fn_value.greater` body
+replacements. These values compose with existing nested return-value generation,
+including `Option<Ordering>` for partial comparisons; non-default `Some(...)`
+body replacements retain the existing opt-in `fn_value.some` policy.
+
 ### `iter`
 
 Swaps a standard-library iterator method for a nearby one: `any`/`all`, `min`/`max`,
@@ -594,6 +624,11 @@ the mutator runs when `--mutators` is not given.
 | `fn_value.some_default` | replace the body with Some(Default::default()) |  | yes |
 | `fn_value.ok_default` | replace the body with Ok(Default::default()) |  | yes |
 | `fn_value.err_default` | replace the body with Err(Default::default()) |  | yes |
+| `fn_value.break_default` | replace the body with ControlFlow::Break(::core::default::Default::default()) |  | yes |
+| `fn_value.continue_default` | replace the body with ControlFlow::Continue(::core::default::Default::default()) |  | yes |
+| `fn_value.less` | replace the body with Ordering::Less |  | yes |
+| `fn_value.equal` | replace the body with Ordering::Equal |  | yes |
+| `fn_value.greater` | replace the body with Ordering::Greater |  | yes |
 | `fn_value.err_with` | replace the body with Err(v) for each --error value |  | yes |
 | `fn_value.two` | replace the body with 2 |  | yes |
 | `fn_value.some` | replace the body with Some(value) |  | no |
@@ -791,6 +826,32 @@ the mutator runs when `--mutators` is not given.
 | `result.is_ok_to_is_err` | replace is_ok with is_err | `EVR` | yes |
 | `result.is_err_to_is_ok` | replace is_err with is_ok | `EVR` | yes |
 
+#### `control_flow`
+
+| Mutator | What it does | Alias | Default |
+| --- | --- | --- | --- |
+| `control_flow.break_to_continue` | replace Break(value) with Continue(Default::default()) | `EVR` | yes |
+| `control_flow.continue_to_break` | replace Continue(value) with Break(Default::default()) | `EVR` | yes |
+| `control_flow.is_break_to_is_continue` | replace is_break with is_continue | `EVR` | yes |
+| `control_flow.is_continue_to_is_break` | replace is_continue with is_break | `EVR` | yes |
+
+#### `ordering`
+
+| Mutator | What it does | Alias | Default |
+| --- | --- | --- | --- |
+| `ordering.less_to_equal` | replace Ordering::Less with Ordering::Equal | `EVR` | yes |
+| `ordering.less_to_greater` | replace Ordering::Less with Ordering::Greater | `EVR` | yes |
+| `ordering.equal_to_less` | replace Ordering::Equal with Ordering::Less | `EVR` | yes |
+| `ordering.equal_to_greater` | replace Ordering::Equal with Ordering::Greater | `EVR` | yes |
+| `ordering.greater_to_less` | replace Ordering::Greater with Ordering::Less | `EVR` | yes |
+| `ordering.greater_to_equal` | replace Ordering::Greater with Ordering::Equal | `EVR` | yes |
+| `ordering.is_lt_to_is_ge` | replace Ordering::is_lt with is_ge | `EVR` | yes |
+| `ordering.is_ge_to_is_lt` | replace Ordering::is_ge with is_lt | `EVR` | yes |
+| `ordering.is_le_to_is_gt` | replace Ordering::is_le with is_gt | `EVR` | yes |
+| `ordering.is_gt_to_is_le` | replace Ordering::is_gt with is_le | `EVR` | yes |
+| `ordering.is_eq_to_is_ne` | replace Ordering::is_eq with is_ne | `EVR` | yes |
+| `ordering.is_ne_to_is_eq` | replace Ordering::is_ne with is_eq | `EVR` | yes |
+
 #### `try`
 
 | Mutator | What it does | Alias | Default |
@@ -934,19 +995,21 @@ code is well tested.
 ### How return values are synthesized
 
 `fn_value` recurses through the return type rather than reaching straight for `Default::default()`.
-A `Result<Option<bool>, E>` yields `Err(Default::default())`, `Ok(None)`, `Ok(Some(true))` and
-`Ok(Some(false))`, and the same recursion covers tuples, collections, maps, `Box`, `Rc`, `Arc`,
+A `Result<Option<bool>, E>` yields `Ok(None)`, `Ok(Some(true))` and
+`Ok(Some(false))`, plus `Err(Default::default())` when `E` has proven default evidence.
+The same recursion covers tuples, collections, maps, `Box`, `Rc`, `Arc`,
 `Cow` and `NonZero`. Depth and width are bounded so a deeply generic signature cannot generate an
 unbounded population.
 
-Where the tool cannot name a value of a type it falls back to `Default::default()` for a resolved
-package Default type, or as a conservative guess for an unresolved concrete type or alias. It
-withholds that guess for a bare type parameter, an
-unresolved associated type such as `D::Error` or `Self::Value`, an `impl Trait` that is not an
-iterator, a trait object, or a package type whose declarations establish no `Default`
-implementation. A parameter declared `T: Default` keeps its mutant, because there the promise is
-explicit. Where you know a value the signature accepts, [state it](#stating-the-value-yourself) and
-the mutant comes back.
+Every generated `Default::default()` requires positive source-visible evidence for the
+type being defaulted. This applies recursively and under explicit mutator selection too.
+Supported standard types, resolved package derives or implementations, and applicable
+`Default` bounds can provide that evidence. Unresolved dependency types, opaque macros,
+conditional implementations, and unresolved array lengths do not justify a default.
+Independent alternatives such as `None` and empty standard collections remain available
+without a payload default. This intentionally omits some viable macro- or dependency-provided
+defaults that source analysis cannot establish. Where you know a value the signature accepts,
+[state it](#stating-the-value-yourself).
 
 To reach an error type that has no `Default`, name the values yourself:
 
@@ -956,16 +1019,16 @@ cargo gamma run --error 'MyError::Io' --error 'MyError::Eof'
 
 Each becomes its own `fn_value.err_with` mutant on every function returning a `Result`.
 
-That guess is only made when the return type actually spells the error. The widespread crate-local
-alias `pub type Result<T> = std::result::Result<T, MyError>` does not, so functions returning it get
-their `Ok` mutants and no `Err` one — the alias fixed the error to something the tool cannot see,
-and it is rarely a type with a `Default`. Use `--error` to supply values for it.
+An error default requires positive evidence for the resolved error payload, including one
+fixed by a crate-local alias such as `pub type Result<T> = std::result::Result<T, MyError>`.
+Without that evidence, the function keeps its constructible `Ok` replacements but receives
+no generated `Err` default. Use `--error` to supply error values explicitly.
 
 Types are recognized by the last segment of their path, because a standard type may be written
 bare, fully qualified, or re-exported and there is no name resolution here to tell those apart. To
 stop that taking every type ending in `Vec` for the standard one, the type arguments are counted as
 well: your own `Vec` carrying none is not the standard `Vec`, which carries an element type, so it
-falls back to `Default::default()` instead of being handed `Vec::new()`. A type that shadows a
+requires its own `Default` evidence instead of being handed `Vec::new()`. A type that shadows a
 standard name and matches its shape remains ambiguous only without positive workspace `Default`
 evidence. With that evidence it uses `Default::default()`; without it, the guessed standard
 constructor may produce an unviable mutant.
@@ -1017,8 +1080,8 @@ It is worth reaching for in two situations:
   ones at that site rather than joining them, so `#[gamma::value(u32::MAX)]` on a function the tool
   would have handed `0` asks the question you meant to ask instead of one more you did not.
 
-Behind an unresolved concrete type or alias, `Default::default()` may still be a guess. Stating a
-value is how that hope becomes a fact.
+An unresolved concrete type or alias receives no guessed default. A stated value supplies
+the replacement explicitly and is still validated by the compiler.
 
 The rules are deliberately few:
 
@@ -1092,12 +1155,12 @@ cargo gamma run --mutators @numeric,!literal.int_increment  # a preset, less one
 | `@all` | every registered mutator | `*` |
 | `@default` | the mutators enabled when none are named | `@default` |
 | `@pedantic` | additional low-yield mutations excluded from the default selection | `fn_value.some` |
-| `@boundary` | relational and boundary conditions | `relational`, `range` |
+| `@boundary` | relational and boundary conditions | `relational`, `range`, `ordering` |
 | `@arithmetic` | arithmetic, bitwise, shift and compound assignment | `arith`, `bitwise`, `shift`, `assign` |
 | `@logical` | logical operators and branch conditions | `logical`, `bool_expr`, `cond`, `match_guard` |
-| `@control` | the choices control flow makes: conditions, guards, arms and loop exits | `cond`, `match_guard`, `match_arm`, `loop`, `return_value` |
+| `@control` | the choices control flow makes: conditions, guards, arms and loop exits | `cond`, `match_guard`, `match_arm`, `loop`, `return_value`, `control_flow` |
 | `@removal` | statement and side-effect deletion | `stmt`, `unary`, `match_arm`, `struct_field`, `collection.omit_element`, `call` |
-| `@semantics` | Rust and library meaning: propagation, fallbacks, calls, iterators, regexes and collections | `option`, `result`, `try`, `fallback`, `iter`, `string`, `collection`, `assign_value`, `call_result`, `regex` |
+| `@semantics` | Rust and library meaning: propagation, fallbacks, calls, iterators, regexes and collections | `option`, `result`, `control_flow`, `ordering`, `try`, `fallback`, `iter`, `string`, `collection`, `assign_value`, `call_result`, `regex` |
 | `@literals` | literal and constant replacement | `literal` |
 | `@numeric` | literal replacement and focused numeric expression perturbation | `literal.int_to_zero`, `literal.int_to_one`, `literal.int_increment`, `literal.int_decrement`, `literal.float_to_zero`, `literal.float_to_one`, `literal.float_negate`, `expr` |
 | `@extreme` | a synonym for `all`, kept because scripts name it | `*` |

@@ -39,11 +39,40 @@ pub(super) struct Calls {
     operators: Vec<(Vec<String>, String, Type, Type)>,
     // Negative operator evidence is usable only while the local inventory is complete.
     closed: bool,
+    open_methods: bool,
 }
 
 impl Calls {
     pub(super) fn has_method_named(&self, name: &str) -> bool {
         self.named_methods.contains(name)
+    }
+
+    pub(super) fn method_absent(&self, ty: &Type, name: &str, scope: &ScopePath, imports: &HashMap<String, Option<Vec<String>>>) -> bool {
+        if !self.closed || self.open_methods || self.named_methods.contains(name) {
+            return
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "This return has inferred bool type and is already false, exactly bool::default().")]
+            false;
+        }
+        let ty = match super::values::strip(ty) {
+            Type::Reference(reference) => super::values::strip(&reference.elem),
+            other => other,
+        };
+        let Type::Path(path) = ty else {
+            return
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "This return has inferred bool type and is already false, exactly bool::default().")]
+            false;
+        };
+        if path
+            .path
+            .get_ident()
+            .is_some_and(|name| super::values::primitive_kind(&name.to_string()).is_some())
+        {
+            return
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "This return has inferred bool type and is already false, exactly bool::default().")]
+            false;
+        }
+        self.nominal_path(&path.path, scope, imports)
+            .is_some_and(|owner| self.structures.contains(&owner) || self.enums.contains(&owner))
     }
 
     /// Resolves an inherent method through its nominal owner, withholding ambiguous signatures.
@@ -795,6 +824,15 @@ impl<'ast> Visit<'ast> for Walk<'_> {
     }
     fn visit_item(&mut self, node: &'ast syn::Item) {
         if !self.cfg.skip_gate(item_attrs(node)) {
+            // #[gamma::skip(assign.or_to_and, stmt.delete_assign, tag = "equivalent", reason = "Only derive/cfg_attr can set open_methods here. Both are rejected by the immediately following nontransforming_attributes check, permanently clearing closed. method_absent is the only reader of open_methods and already rejects every !closed inventory. The separate trait-impl assignment is not covered.")]
+            self.calls.open_methods |= item_attrs(node).iter().any(|attribute|
+                    // #[gamma::skip(logical.or_remove_left, logical.or_remove_right, logical.or_to_and, tag = "equivalent", reason = "Either recognized attribute independently clears closed in the following nontransforming_attributes check. Narrowing only this open_methods predicate cannot change method_absent, which rejects !closed first.")]
+                    attribute.path().is_ident(
+                        // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, tag = "equivalent", reason = "Removing this derive recognition only narrows open_methods; the original derive attribute still permanently clears closed in the following nontransforming_attributes check, so method_absent rejects the inventory regardless.")]
+                        "derive")
+                        || attribute.path().is_ident(
+                            // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, tag = "equivalent", reason = "Removing this cfg_attr recognition only narrows open_methods; the original cfg_attr attribute still permanently clears closed in the following nontransforming_attributes check, so method_absent rejects the inventory regardless.")]
+                            "cfg_attr"));
             self.calls.closed &= super::noop::LocalCalls::nontransforming_attributes(item_attrs(node));
             let outer = self.structural_trusted;
             self.structural_trusted &= super::super::default_identity::nominal_attributes(item_attrs(node));
@@ -804,6 +842,7 @@ impl<'ast> Visit<'ast> for Walk<'_> {
     }
     fn visit_impl_item(&mut self, node: &'ast syn::ImplItem) {
         if !self.cfg.skip_gate(impl_item_attrs(node)) {
+            self.calls.open_methods |= matches!(node, syn::ImplItem::Macro(_));
             visit::visit_impl_item(self, node);
         }
     }
@@ -838,6 +877,7 @@ impl<'ast> Visit<'ast> for Walk<'_> {
         let _scope = self.scope.pop();
     }
     fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
+        self.calls.open_methods |= node.trait_.is_some();
         self.operator(node);
         let owner = match &*node.self_ty {
             Type::Path(path) if node.trait_.is_none() => self.calls.nominal_path(
@@ -868,6 +908,10 @@ impl<'ast> Visit<'ast> for Walk<'_> {
         }
         visit::visit_impl_item_fn(self, node);
     }
+    fn visit_trait_item_fn(&mut self, node: &'ast syn::TraitItemFn) {
+        let _inserted = self.calls.named_methods.insert(node.sig.ident.to_string());
+        visit::visit_trait_item_fn(self, node);
+    }
     fn visit_item_const(&mut self, node: &'ast syn::ItemConst) {
         let _previous = self.calls.free.insert((self.scope.clone(), node.ident.to_string()), None);
         visit::visit_item_const(self, node);
@@ -894,6 +938,28 @@ mod tests {
     use super::super::indexes::indexes_in;
     use super::*;
     use crate::ops::registry::Selection;
+
+    #[test]
+    fn self_associated_calls_require_a_path_owner() {
+        let file = parse_file("struct Owner; impl Owner { fn helper() -> u8 { 1 } }").unwrap();
+        let cfg = CfgSet::unconditional();
+        let indexes = indexes_in(&file, &Selection::everything(), &cfg);
+        let calls = Calls::of(&file, &cfg, &indexes);
+        let callee = parse_quote!(Self::helper);
+        let owner = parse_quote!(Owner);
+        assert!(
+            calls
+                .signature(&callee, &Vec::new(), &indexes.root_imports, Some(&owner), |_| false)
+                .is_some()
+        );
+        for owner in [parse_quote!((Owner,)), parse_quote!(&Owner), parse_quote!([Owner; 1])] {
+            assert!(
+                calls
+                    .signature(&callee, &Vec::new(), &indexes.root_imports, Some(&owner), |_| false)
+                    .is_none()
+            );
+        }
+    }
 
     #[test]
     fn missing_free_call_stops_at_the_root_scope_without_repeating_it() {

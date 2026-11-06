@@ -9,10 +9,15 @@ const SOURCE: &str = include_str!("../fixtures/correctness/type_evidence.rs");
 
 #[test]
 fn exact_type_negative_population_is_removed_and_supported_mutants_still_compile() {
-    let (file, found) = candidates(
-        SOURCE,
-        "fn_value,arith,iter.take_to_skip,option.some_to_none,loop.break_value_default",
-    );
+    // The compile-contract assertions are not mutation subjects. Unexpanded item macros can
+    // supply implementations, so including that scaffolding intentionally prevents absence proofs.
+    let subject = SOURCE.split_once("macro_rules! not_implemented").unwrap().0;
+    let file = super::SourceFile::parse("correctness.rs", subject.to_owned()).unwrap();
+    let cfg = super::CfgSet::parse("");
+    let mut defaults = super::collect::Defaults::of_source_in(file.ast(), &cfg, "correctness.rs");
+    defaults.bind_sources(&[("correctness.rs".into(), "correctness.rs".into(), Vec::new())]);
+    let selection = super::Selection::parse("fn_value,arith,iter.take_to_skip,option.some_to_none,loop.break_value_default").unwrap();
+    let found = super::collect::collect_with(&file, &selection, &cfg, &defaults);
     let invalid = [
         ("qualified", "fn_value.default"),
         ("missing::local", "fn_value.default"),
@@ -49,8 +54,8 @@ fn exact_type_negative_population_is_removed_and_supported_mutants_still_compile
         ("empty_wrapper", "fn_value.empty_collection"),
         ("defaulted", "fn_value.default"),
         ("ready::local", "fn_value.default"),
-        ("configured", "fn_value.default"),
         ("alias_defaulted", "fn_value.default"),
+        ("configured", "fn_value.default"),
         ("field_duration", "arith.mul_to_div"),
         ("field_numeric", "arith.mul_to_add"),
         ("propagated", "arith.mul_to_div"),
@@ -70,6 +75,11 @@ fn exact_type_negative_population_is_removed_and_supported_mutants_still_compile
             "{item}: supported {mutator} was lost: {found:#?}"
         );
     }
+    assert!(found.iter().any(|candidate| {
+        candidate.item_path.as_ref() == "alias_defaulted"
+            && candidate.mutator == "fn_value.default"
+            && candidate.confidence == Confidence::Proven
+    }));
     assert!(found.iter().any(|candidate| {
         candidate.item_path.as_ref() == "field_duration"
             && candidate.mutator == "arith.mul_to_div"

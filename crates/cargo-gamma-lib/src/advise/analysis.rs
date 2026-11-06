@@ -3,7 +3,6 @@
 
 //! Turning a completed run into measured findings and per-family yields.
 
-use core::cmp::Ordering;
 use core::time::Duration;
 
 use camino::Utf8Path;
@@ -158,8 +157,7 @@ pub fn yields(mutants: &[Mutant]) -> Vec<Yield> {
     rows.sort_by(|left, right| {
         right
             .per_cpu_hour()
-            .partial_cmp(&left.per_cpu_hour())
-            .unwrap_or(Ordering::Equal)
+            .total_cmp(&left.per_cpu_hour())
             .then_with(|| left.family.cmp(&right.family))
     });
 
