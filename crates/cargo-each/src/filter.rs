@@ -18,7 +18,7 @@
 //!   compare when both sides parse as a number, else string compare).
 
 use cargo_metadata::TargetKind;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::error::{EachError, InvalidFilterExpressionError, InvalidTargetMetadataError};
 use crate::workspace::{Member, parse_target_kind};
@@ -187,6 +187,38 @@ impl Expression<TargetAtom> {
     }
 }
 
+impl Expression<JsonAtom> {
+    /// Parse a Boolean filter expression over dotted JSON field paths.
+    pub(crate) fn parse(spec: &str) -> Result<Self, EachError> {
+        ExpressionParser::new(spec, Self::parse_atom, false)?.parse()
+    }
+
+    fn parse_atom(spec: &str) -> Result<JsonAtom, EachError> {
+        if let Some((path, expected)) = spec.split_once('=') {
+            validate_json_filter_path(spec, path)?;
+            Ok(JsonAtom::Equals {
+                path: path.to_owned(),
+                expected: parse_json_filter_value(spec, expected)?,
+            })
+        } else {
+            validate_json_filter_path(spec, spec)?;
+            Ok(JsonAtom::Present(spec.to_owned()))
+        }
+    }
+
+    /// Evaluate this expression against one JSON object.
+    #[must_use]
+    pub(crate) fn matches(&self, fields: &Map<String, Value>) -> bool {
+        match self {
+            Self::And(predicates) => predicates.iter().all(|predicate| predicate.matches(fields)),
+            Self::Or(predicates) => predicates.iter().any(|predicate| predicate.matches(fields)),
+            Self::Not(predicate) => !predicate.matches(fields),
+            Self::Atom(JsonAtom::Present(path)) => lookup_fields(fields, path).is_some_and(|value| !value.is_null()),
+            Self::Atom(JsonAtom::Equals { path, expected }) => lookup_fields(fields, path) == Some(expected),
+        }
+    }
+}
+
 /// An atomic package predicate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PackageAtom {
@@ -222,8 +254,18 @@ pub(crate) enum TargetAtom {
     NameInMetadata(String),
 }
 
+/// An atomic predicate over a JSON object's dotted field path.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum JsonAtom {
+    /// `<path>`: the field exists and is not JSON null.
+    Present(String),
+    /// `<path>=<value>`: the field equals the typed JSON scalar.
+    Equals { path: String, expected: Value },
+}
+
 pub(crate) type PackagePredicate = Expression<PackageAtom>;
 pub(crate) type TargetPredicate = Expression<TargetAtom>;
+pub(crate) type JsonPredicate = Expression<JsonAtom>;
 
 /// Parse the portion of a `metadata:` predicate after the prefix.
 fn parse_metadata(spec: &str, rest: &str) -> Result<PackageAtom, EachError> {
@@ -268,6 +310,34 @@ fn parse_metadata_value(spec: &str, value: &str) -> Result<String, EachError> {
         }
     }
     Ok(parsed)
+}
+
+fn parse_json_filter_value(spec: &str, value: &str) -> Result<Value, EachError> {
+    if value.starts_with('"') {
+        return parse_metadata_value(spec, value).map(Value::String);
+    }
+    if value.contains('"') {
+        return Err(invalid(spec, "double quotes must surround the complete JSON filter value"));
+    }
+    match value {
+        "true" => Ok(Value::Bool(true)),
+        "false" => Ok(Value::Bool(false)),
+        "null" => Ok(Value::Null),
+        _ => match serde_json::from_str::<Value>(value) {
+            Ok(number @ Value::Number(_)) => Ok(number),
+            _ => Ok(Value::String(value.to_owned())),
+        },
+    }
+}
+
+fn validate_json_filter_path(spec: &str, path: &str) -> Result<(), EachError> {
+    if path.is_empty() {
+        return Err(invalid(spec, "empty JSON field path"));
+    }
+    if path.split('.').any(str::is_empty) {
+        return Err(invalid(spec, "JSON field path must have non-empty dotted segments"));
+    }
+    Ok(())
 }
 
 /// Reject metadata keys that are not a valid dotted path — empty, or with any
@@ -515,6 +585,20 @@ fn lookup<'v>(metadata: &'v Value, dotted_key: &str) -> Option<&'v Value> {
     for segment in dotted_key.split('.') {
         node = node.get(segment)?;
     }
+
+    Some(node)
+}
+
+/// Walk a dotted path into a top-level JSON object.
+pub(crate) fn lookup_fields<'v>(fields: &'v Map<String, Value>, dotted_path: &str) -> Option<&'v Value> {
+    let (first, rest) = dotted_path.split_once('.').unwrap_or((dotted_path, ""));
+    let mut node = fields.get(first)?;
+    if rest.is_empty() {
+        return Some(node);
+    }
+    for segment in rest.split('.') {
+        node = node.get(segment)?;
+    }
     Some(node)
 }
 
@@ -664,6 +748,50 @@ mod tests {
                 ]),
             ])
         );
+    }
+
+    #[test]
+    fn json_filters_match_nested_typed_values_and_presence() {
+        let fields = json!({
+            "reason": "compiler-artifact",
+            "profile": {"test": true},
+            "executable": "/ws/target/test",
+            "count": 2,
+            "missing_executable": null
+        })
+        .as_object()
+        .expect("object")
+        .clone();
+        for (expression, expected) in [
+            ("reason=compiler-artifact", true),
+            ("profile.test=true", true),
+            ("profile.test=false", false),
+            ("count=2", true),
+            ("count=\"2\"", false),
+            ("executable", true),
+            ("missing_executable", false),
+            ("missing", false),
+            ("reason=compiler-artifact and profile.test=true and executable", true),
+            ("reason=compiler-message or profile.test=true", true),
+            ("not executable", false),
+        ] {
+            let predicate = JsonPredicate::parse(expression).expect("JSON filter");
+            assert_eq!(predicate.matches(&fields), expected, "{expression}");
+        }
+    }
+
+    #[test]
+    fn json_filters_reject_invalid_paths_and_quotes() {
+        for (expression, expected) in [
+            ("", "empty expression"),
+            (".reason=value", "JSON field path"),
+            ("profile..test=true", "JSON field path"),
+            ("reason=\"unfinished", "unclosed double quote"),
+            ("reason=bad\"quote", "unclosed double quote"),
+        ] {
+            let error = JsonPredicate::parse(expression).expect_err("invalid JSON filter");
+            assert!(error.to_string().contains(expected), "{expression}: {error}");
+        }
     }
 
     #[test]
