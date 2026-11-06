@@ -523,8 +523,11 @@ configuration cannot redirect collection. An empty `build.target` array selects
 no target and needs no override. The collector reads effective configuration
 with nightly Cargo's `--color=never -Zunstable-options config get build.target --format=json`.
 The leaf query includes environment overrides without printing unrelated
-`CARGO_*` values, such as registry tokens. Only Cargo's exact exit-101 unset-key
-diagnostic is treated as an absent target; other query and JSON errors stop
+`CARGO_*` values, such as registry tokens. Cargo's exact exit-101 unset-key
+diagnostic with empty stdout is treated as an absent target, including when
+preceded by its known filename warnings for deprecated `.cargo/config` or
+coexisting `config` and `config.toml` files. Those warnings are forwarded
+unchanged. Unrecognized warnings, other query errors, and JSON errors stop
 collection with diagnostics. With an explicit target, Cargo applies `RUSTFLAGS`
 only to target compilations, so proc-macro and build-script builds receive no
 instrumentation when the wrapper is disabled. On Windows, host-only proc-macro

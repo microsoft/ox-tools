@@ -331,10 +331,13 @@ impl EffectiveTarget {
         let display = command_display(&command);
         let output = read(&mut command).into_app_err(format!("failed to execute `{display}` for Cargo build-target discovery"))?;
         let stderr = String::from_utf8(output.stderr).into_app_err("Cargo build-target discovery stderr was not UTF-8")?;
-        // Cargo exits 101 for an unset leaf; only this exact diagnostic means no target.
-        // Keeping colors disabled makes it recognizable without hiding other query failures.
-        if output.status.code() == Some(101) && output.stdout.is_empty() && stderr.trim() == "error: config value `build.target` is not set"
+        // An unset leaf exits 101, sometimes preceded by nonfatal config-filename warnings.
+        // Recognize only that outcome without hiding other query failures.
+        if output.status.code() == Some(101)
+            && output.stdout.is_empty()
+            && let Some(warnings) = unset_target_warnings(&stderr)
         {
+            write_stderr(warnings);
             return Ok(None);
         }
         if !output.status.success() {
@@ -379,6 +382,37 @@ impl EffectiveTarget {
             rustc_version: Some(rustc_version),
         })
     }
+}
+
+fn unset_target_warnings(stderr: &str) -> Option<&str> {
+    let stderr = stderr.trim_end();
+    let mut lines = stderr.lines();
+    let error = lines.next_back()?;
+    if error != "error: config value `build.target` is not set" {
+        return None;
+    }
+    let is_config = |path: &str| path.rsplit(['/', '\\']).next() == Some("config");
+    while let Some(line) = lines.next() {
+        if let Some(path) = line
+            .strip_prefix("warning: `")
+            .and_then(|line| line.strip_suffix("` is deprecated in favor of `config.toml`"))
+        {
+            if !is_config(path)
+                || lines.next() != Some("  |")
+                || lines.next() != Some("  = help: if you need to support cargo 1.38 or earlier, you can symlink `config` to `config.toml`")
+            {
+                return None;
+            }
+        } else {
+            let message = line.strip_prefix("warning: both `")?.strip_suffix('`')?;
+            let (files, used) = message.split_once("` exist. Using `")?;
+            let (legacy, toml) = files.split_once("` and `")?;
+            if !is_config(legacy) || used != legacy || toml.strip_suffix(".toml") != Some(legacy) {
+                return None;
+            }
+        }
+    }
+    stderr.strip_suffix(error)
 }
 
 impl WorkspaceInfo {
@@ -2397,6 +2431,45 @@ mod tests {
     }
 
     #[test]
+    fn native_collection_preserves_filename_warnings_for_an_unset_target() {
+        let workspace = workspace(Path::new("repo"));
+        let tools = ToolPrograms {
+            cargo: "cargo-custom".into(),
+            rustc: "unused-rustc".into(),
+        };
+        let deprecated = "warning: `repo/.cargo/config` is deprecated in favor of `config.toml`\n\
+                          \x20 |\n\
+                          \x20 = help: if you need to support cargo 1.38 or earlier, you can symlink `config` to `config.toml`\n";
+        let duplicate = "warning: both `repo/.cargo/config` and `repo/.cargo/config.toml` exist. Using `repo/.cargo/config`\n";
+        for warnings in [
+            deprecated.to_owned(),
+            deprecated.replace('/', "\\").replace('\n', "\r\n"),
+            duplicate.to_owned(),
+            duplicate.replace('/', "\\").replace('\n', "\r\n"),
+            format!("{deprecated}{duplicate}"),
+        ] {
+            for explicit in [None, Some("native")] {
+                let effective =
+                    EffectiveTarget::resolve_with_reader(&workspace, explicit, &tools, |_, _, _| Ok("host: native\n".to_owned()))
+                        .expect("scripted native target");
+                let stderr = format!("{warnings}error: config value `build.target` is not set\n");
+                let mut forwarded = String::new();
+                let target = EffectiveTarget::collection_target(
+                    &workspace,
+                    &tools,
+                    &effective.triple,
+                    "host: native\n",
+                    |_| Ok(process_output_with_code(101, b"", stderr.as_bytes())),
+                    |text| forwarded.push_str(text),
+                )
+                .expect("known Cargo filename warnings do not invalidate an unset target");
+                assert_eq!(target, None);
+                assert_eq!(forwarded, warnings);
+            }
+        }
+    }
+
+    #[test]
     fn collection_target_does_not_hide_query_failures_as_an_unset_target() {
         let workspace = workspace(Path::new("repo"));
         let tools = ToolPrograms {
@@ -2412,6 +2485,18 @@ mod tests {
                 "warning: invalid configuration\nerror: config value `build.target` is not set",
             ),
             (101, "unexpected output", "error: config value `build.target` is not set"),
+            (
+                1,
+                "",
+                "warning: both `repo/.cargo/config` and `repo/.cargo/config.toml` exist. Using `repo/.cargo/config`\n\
+                 error: config value `build.target` is not set",
+            ),
+            (
+                101,
+                "{}",
+                "warning: both `repo/.cargo/config` and `repo/.cargo/config.toml` exist. Using `repo/.cargo/config`\n\
+                 error: config value `build.target` is not set",
+            ),
         ] {
             let output = process_output_with_code(code, stdout.as_bytes(), stderr.as_bytes());
             let status = output.status;
@@ -2434,6 +2519,31 @@ mod tests {
                 )
             );
         }
+    }
+
+    #[test]
+    fn unset_target_warnings_rejects_unrecognized_or_incomplete_diagnostics() {
+        for warnings in [
+            "warning: invalid configuration\n",
+            "error: failed to load Cargo configuration\n",
+            "warning: `repo/.cargo/config` is deprecated in favor of `config.toml`\n",
+            "warning: `repo/.cargo/config` is deprecated in favor of `config.toml`\n  |\n",
+            "warning: `repo/.cargo/config` is deprecated in favor of `config.toml`\n  |\n  = help: different advice\n",
+            "warning: `repo/.cargo/other` is deprecated in favor of `config.toml`\n\
+             \x20 |\n\
+             \x20 = help: if you need to support cargo 1.38 or earlier, you can symlink `config` to `config.toml`\n",
+            "warning: both `repo/.cargo/other` and `repo/.cargo/other.toml` exist. Using `repo/.cargo/other`\n",
+            "warning: both `repo/.cargo/config` and `repo/.cargo/config.toml` exist. Using `repo/.cargo/config.toml`\n",
+            "warning: both `repo/.cargo/config` and `elsewhere/config.toml` exist. Using `repo/.cargo/config`\n",
+            "warning: both `repo/.cargo/config` exist. Using `repo/.cargo/config`\n",
+            "warning: both `repo/.cargo/config` and `repo/.cargo/config.toml` exist\n",
+            "warning: both `repo/.cargo/config` and `repo/.cargo/config.toml` exist. Using `repo/.cargo/config\n",
+        ] {
+            let stderr = format!("{warnings}error: config value `build.target` is not set\n");
+            assert_eq!(unset_target_warnings(&stderr), None, "{stderr}");
+        }
+        assert_eq!(unset_target_warnings(""), None);
+        assert_eq!(unset_target_warnings("error: failed to load Cargo configuration\n"), None);
     }
 
     #[test]

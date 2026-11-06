@@ -31,8 +31,11 @@ The optional `run` mode keeps collection and evaluation separated internally:
    `--color=never -Zunstable-options config get build.target --format=json`.
    Unlike a table query, this leaf query includes environment overrides and
    does not print unrelated `CARGO_*` values. Cargo's exact exit-101 unset-key
-   diagnostic or an empty target array permits native mode; all other query
-   failures preserve their diagnostics and stop collection. Cross-target runs and configured targets
+   diagnostic with empty stdout permits native mode, including when preceded
+   by known deprecation or duplicate-config filename warnings, which are
+   forwarded unchanged. An empty target array also permits native mode;
+   unrecognized warnings and all other query failures preserve their
+   diagnostics and stop collection. Cross-target runs and configured targets
    retain the explicit argument, so `CARGO_BUILD_TARGET` and Cargo `build.target`
    cannot select a different collection target. Evaluation always receives the
    resolved triple. Instrumented runs validate that the effective
