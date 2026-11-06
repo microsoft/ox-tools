@@ -959,7 +959,9 @@ fn validate_expanded_section_ownership(workspace: &Workspace, backends: &[Backen
         };
         for host in region_host_paths(workspace, spec) {
             if let Some(section_path) = section_paths.iter().find(|path| path.eq_ignore_ascii_case(host)) {
-                bail!("owned-file sections composing '{section_path}' conflict with managed-region host '{host}' after workspace expansion");
+                bail!(
+                    "owned-file sections composing '{section_path}' conflict with managed-region host '{host}' after workspace expansion"
+                );
             }
         }
     }
@@ -1311,12 +1313,7 @@ fn push_region_at_with_scanner(
     Ok(())
 }
 
-fn seed_justfile_scaffold_if_absent(
-    hosts: &mut HostTextCache,
-    host: &str,
-    spec: &RegionSpec,
-    current: Option<String>,
-) -> Option<String> {
+fn seed_justfile_scaffold_if_absent(hosts: &mut HostTextCache, host: &str, spec: &RegionSpec, current: Option<String>) -> Option<String> {
     if current.is_some()
         || !host.eq_ignore_ascii_case(artifacts::justfile::JUSTFILE_PATH)
         || spec.id.as_str() != artifacts::justfile::JUSTFILE_REGION_ID

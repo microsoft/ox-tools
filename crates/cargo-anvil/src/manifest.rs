@@ -21,7 +21,6 @@ use toml_edit::{Array, ArrayOfTables, DocumentMut, Item, Table, value};
 
 /// Repository-relative path of the current manifest.
 pub const MANIFEST_FILE_NAME: &str = ".anvil/manifest.toml";
-pub const MANIFEST_PATH: &str = MANIFEST_FILE_NAME;
 
 /// Repository-relative path used before generated-file consolidation.
 pub const LEGACY_MANIFEST_FILE_NAME: &str = ".anvil.lock";
@@ -169,7 +168,12 @@ impl Manifest {
         let legacy_path = repo_root.join(LEGACY_MANIFEST_FILE_NAME);
         let current = read_optional(&current_path)?;
         let legacy = read_optional(&legacy_path)?;
-        Self::from_sources(current, legacy, &current_path.display().to_string(), &legacy_path.display().to_string())
+        Self::from_sources(
+            current,
+            legacy,
+            &current_path.display().to_string(),
+            &legacy_path.display().to_string(),
+        )
     }
 
     pub(crate) fn from_sources(
@@ -502,6 +506,7 @@ pub(crate) fn save_text(repo_root: &Path, text: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+#[cfg(any(test, feature = "test-util"))]
 fn read_optional(path: &Path) -> Result<Option<String>, AppError> {
     match std::fs::read_to_string(path) {
         Ok(text) => Ok(Some(text)),

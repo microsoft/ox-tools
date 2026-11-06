@@ -485,7 +485,7 @@ pub mod test_support {
     pub use crate::checksum::checksum_str;
     pub use crate::cli::Cli;
     pub use crate::decision::Decision;
-    pub use crate::manifest::{MANIFEST_PATH, Manifest, RegionKey};
+    pub use crate::manifest::{MANIFEST_FILE_NAME as MANIFEST_PATH, Manifest, RegionKey};
     pub use crate::plan::Target;
     pub use crate::region::upsert_region;
     pub use crate::run::{RunOutcome, run_update};

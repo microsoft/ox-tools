@@ -301,7 +301,7 @@ fn setup_uses_lazy_inventory_and_exact_install_policy() {
     assert!(!recipes.contains(r#"source_command=(if name == "cargo-each""#));
     assert!(!recipes.contains("anvil-toolchain-stable-install"));
     assert!(generated.setup.contains("set lazy"));
-    assert!(!recipes.contains("--disable-strategies compile"));
+    assert!(recipes.contains("--disable-strategies compile"));
 }
 
 #[test]
@@ -382,7 +382,7 @@ fn released_domain_tool_versions_are_pinned() {
     let recipes = &generated.setup;
     for pin in [
         "cargo_aprz_version := \"1.2.2\"",
-        "cargo_coverage_gate_version := \"0.7.3\"",
+        "cargo_coverage_gate_version := \"0.7.4\"",
         "cargo_delta_version := \"0.5.0\"",
         "cargo_each_version := \"0.7.0\"",
     ] {

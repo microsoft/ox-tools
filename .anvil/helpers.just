@@ -546,9 +546,11 @@ _anvil-readme mode: anvil-readme-check-validate-prereqs
 # Used by anvil-scheduled-test to run its full-workspace check fan-out.
 [private]
 _anvil-scheduled-test: anvil-scheduled-test-validate-prereqs \
+    anvil-check-all-targets \
     anvil-llvm-cov \
     anvil-doc-test \
-    anvil-examples
+    anvil-examples \
+    (anvil-bolero "scheduled")
 
 # Used by anvil-scheduled-advisories to run its full-workspace check fan-out.
 [private]
