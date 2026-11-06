@@ -1027,10 +1027,10 @@ fn all_targets_checks_packages_in_both_configurations_and_preserves_exit_codes()
             fs::read_to_string(&log).unwrap().lines().collect::<Vec<_>>(),
             [
                 format!(
-                    "+stable-test each {selection} --keep-going -- cargo +stable-test check --package {{cargo-spec}} --all-targets --locked --config build.warnings=\"deny\""
+                    "+stable-test each {selection} --keep-going -- cargo +stable-test check --package {{cargo-spec}} --all-targets --locked --config build.warnings='deny'"
                 ),
                 format!(
-                    "+stable-test each {selection} --keep-going -- cargo +stable-test check --package {{cargo-spec}} --all-targets --no-default-features --locked --config build.warnings=\"deny\""
+                    "+stable-test each {selection} --keep-going -- cargo +stable-test check --package {{cargo-spec}} --all-targets --no-default-features --locked --config build.warnings='deny'"
                 ),
             ],
             "both configurations must check packages independently, with both Cargo processes selecting stable"
@@ -1067,8 +1067,8 @@ fn all_targets_checks_packages_in_both_configurations_and_preserves_exit_codes()
     assert_eq!(
         fs::read_to_string(&log).unwrap().lines().collect::<Vec<_>>(),
         [
-            "+stable-test each --workspace --keep-going -- cargo +stable-test check --package {cargo-spec} --all-targets --locked --config build.warnings=\"deny\"",
-            "+stable-test each --workspace --keep-going -- cargo +stable-test check --package {cargo-spec} --all-targets --no-default-features --locked --config build.warnings=\"deny\"",
+            "+stable-test each --workspace --keep-going -- cargo +stable-test check --package {cargo-spec} --all-targets --locked --config build.warnings='deny'",
+            "+stable-test each --workspace --keep-going -- cargo +stable-test check --package {cargo-spec} --all-targets --no-default-features --locked --config build.warnings='deny'",
         ]
     );
 }
@@ -1092,69 +1092,33 @@ fn all_targets_skips_empty_affected_selection() {
 }
 
 #[test]
-fn all_targets_rejects_warnings_without_replacing_compiler_flags() {
-    if !tools_available() {
-        return;
-    }
-    let tmp = all_targets_fixture();
-    let justfile_path = tmp.path().join("Justfile");
-    let justfile = fs::read_to_string(&justfile_path).unwrap().replace("'+stable-test'", "@()");
-    write(&justfile_path, &justfile);
-    seed_include(tmp.path(), "affected", "--workspace");
-    write(
-        &tmp.path().join(".cargo/config.toml"),
-        "[target.'cfg(all())']\nrustflags = ['--cfg', 'anvil_fixture']\n",
+fn all_targets_emits_warning_errors_and_propagates_check_failures() {
+    let execution = CHECK_ALL_TARGETS
+        .split_once("    $configs = ")
+        .unwrap()
+        .1
+        .split_once("\n# Install prerequisites")
+        .unwrap()
+        .0;
+
+    // Literal TOML quotes survive legacy PowerShell native argument passing.
+    assert_eq!(
+        execution.trim_end(),
+        concat!(
+            "@(\n",
+            "        @{ name = 'default';    flags = @() },\n",
+            "        @{ name = 'no-default'; flags = @('--no-default-features') }\n",
+            "    )\n",
+            "    foreach ($cfg in $configs) {\n",
+            "        Write-Host \"anvil-check-all-targets: checking $($cfg.name) features\"\n",
+            "        $featureArgs = $cfg.flags\n",
+            "        & cargo {{_anvil_stable_toolchain_args}} each @pkg --keep-going '--' cargo {{_anvil_stable_toolchain_args}} check --package '{cargo-spec}' --all-targets @featureArgs --locked --config \"build.warnings='deny'\"\n",
+            "        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n",
+            "    }",
+        )
     );
-    let source = tmp.path().join("src/lib.rs");
-    write(
-        &source,
-        "#![allow(unexpected_cfgs)]\n\
-         #[cfg(not(anvil_fixture))]\ncompile_error!(\"compiler flags were lost\");\n\
-         #[cfg(not(feature = \"quiet\"))]\nfn unused_helper() {}\n",
-    );
-
-    // Both flag environment variables override Cargo configuration.
-    for (rustflags, encoded) in [("", ""), ("--cfg anvil_fixture", ""), ("", "--cfg\u{1f}anvil_fixture")] {
-        for defaults in ["[]", "[\"quiet\"]"] {
-            write(
-                &tmp.path().join("Cargo.toml"),
-                &format!(
-                    "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\
-                     [features]\ndefault = {defaults}\nquiet = []\n"
-                ),
-            );
-            let lockfile = Command::new("cargo")
-                .args(["generate-lockfile", "--offline"])
-                .current_dir(tmp.path())
-                .output()
-                .unwrap();
-            assert!(lockfile.status.success());
-
-            let mut command = Command::new("just");
-            command.arg("anvil-check-all-targets").current_dir(tmp.path());
-            for name in ["ANVIL_IMPACT", "ANVIL_IMPACT_INPUT_DIR", "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS"] {
-                command.env_remove(name);
-            }
-            if !rustflags.is_empty() {
-                command.env("RUSTFLAGS", rustflags);
-            }
-            if !encoded.is_empty() {
-                command.env("CARGO_ENCODED_RUSTFLAGS", encoded);
-            }
-            let output = {
-                let _powershell = powershell_process_lock();
-                command.output().unwrap()
-            };
-
-            // A feature can hide the warning in the default pass only.
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            assert_failed(&output, "unused helper in an isolated configuration");
-            assert!(stderr.contains("function `unused_helper` is never used"), "{stderr}");
-            assert!(!stderr.contains("compiler flags were lost"), "{stderr}");
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            assert_eq!(stdout.contains("checking no-default features"), defaults != "[]", "{stdout}");
-        }
-    }
+    assert!(!CHECK_ALL_TARGETS.contains("$env:RUSTFLAGS"));
+    assert!(!CHECK_ALL_TARGETS.contains("$env:CARGO_ENCODED_RUSTFLAGS"));
 }
 
 #[test]

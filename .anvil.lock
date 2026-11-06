@@ -1,7 +1,7 @@
 version = 2
 tool = "anvil"
 tool_version = "0.26.0"
-catalog_checksum = "sha256:75c61c9f14991c7f60fc768af31f643848d7b43e8399eee7caf8de507037d22a"
+catalog_checksum = "sha256:c41e8dd369ab66f18c707356620a5c4dfc6576b7ba164483882840f97c5ca05f"
 
 [[file]]
 path = ".anvil/container/Dockerfile.dockerignore"
@@ -89,7 +89,7 @@ checksum = "sha256:4d9f6f8911fd3697b50998988f981e5ce28e4683ada2b9d7593da6a46239d
 
 [[file]]
 path = "justfiles/anvil/checks/check-all-targets.just"
-checksum = "sha256:d76551a003e4d1b81ad21ada8491b4277a444ac216cc573271b623bd4d6d36f3"
+checksum = "sha256:791102b9449ddf94b86fa33d8a3fb4006e1f83cb83810da79aae3eeae365eda1"
 
 [[file]]
 path = "justfiles/anvil/checks/clippy.just"
