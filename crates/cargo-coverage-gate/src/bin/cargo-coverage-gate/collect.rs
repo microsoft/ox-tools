@@ -391,7 +391,7 @@ fn unset_target_warnings(stderr: &str) -> Option<&str> {
     if error != "error: config value `build.target` is not set" {
         return None;
     }
-    let is_config = |path: &str| path.rsplit(['/', '\\']).next() == Some("config");
+    let is_config = |path: &str| path.rsplit(|separator| separator == '/' || separator == '\\').next() == Some("config");
     while let Some(line) = lines.next() {
         if let Some(path) = line
             .strip_prefix("warning: `")
@@ -2526,6 +2526,9 @@ mod tests {
         for warnings in [
             "warning: invalid configuration\n",
             "error: failed to load Cargo configuration\n",
+            "note: `repo/.cargo/config` is deprecated in favor of `config.toml`\n\
+             \x20 |\n\
+             \x20 = help: if you need to support cargo 1.38 or earlier, you can symlink `config` to `config.toml`\n",
             "warning: `repo/.cargo/config` is deprecated in favor of `config.toml`\n",
             "warning: `repo/.cargo/config` is deprecated in favor of `config.toml`\n  |\n",
             "warning: `repo/.cargo/config` is deprecated in favor of `config.toml`\n  |\n  = help: different advice\n",
@@ -2536,6 +2539,7 @@ mod tests {
             "warning: both `repo/.cargo/config` and `repo/.cargo/config.toml` exist. Using `repo/.cargo/config.toml`\n",
             "warning: both `repo/.cargo/config` and `elsewhere/config.toml` exist. Using `repo/.cargo/config`\n",
             "warning: both `repo/.cargo/config` exist. Using `repo/.cargo/config`\n",
+            "warning: both `repo/.cargo/config` and `repo/.cargo/config.toml`\n",
             "warning: both `repo/.cargo/config` and `repo/.cargo/config.toml` exist\n",
             "warning: both `repo/.cargo/config` and `repo/.cargo/config.toml` exist. Using `repo/.cargo/config\n",
         ] {
