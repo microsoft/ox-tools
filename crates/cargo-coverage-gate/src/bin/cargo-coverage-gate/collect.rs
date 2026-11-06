@@ -2383,7 +2383,6 @@ mod tests {
             "host: native\n",
             |command| {
                 command.env("CARGO_BUILD_TARGET", "cross-target");
-                command.env("CARGO_REGISTRY_TOKEN", "synthetic-token");
                 let config = if command.get_args().any(|arg| arg == "build.target") {
                     r#"{"build":{"target":"cross-target"}}"#
                 } else {
