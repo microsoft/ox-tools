@@ -5,12 +5,12 @@
 //! filtered member set, an execution [`Mode`], and the command template.
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use cargo_metadata::TargetKind;
 
-use crate::error::{ChdirConflictsWithOnceError, EachError, MissingTargetPerPackageError};
-use crate::filter::TargetPredicate;
+use crate::error::{ChdirConflictsWithOnceError, EachError, JsonRecordWorkDirError, MissingTargetPerPackageError};
+use crate::filter::{TargetPredicate, lookup_fields};
 use crate::json_lines::JsonRecord;
 use crate::substitute::{Placeholders, substitute, substitute_json_prevalidated, validate_json_placeholders, validate_placeholders};
 use crate::workspace::Member;
@@ -77,17 +77,29 @@ pub(crate) struct BuildOptions<'a> {
     pub(crate) workspace_rust_version: Option<&'a str>,
 }
 
+/// How JSON-record mode derives an invocation's working directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum JsonWorkDir<'a> {
+    /// Use the dotted string field as the directory.
+    Field(&'a str),
+    /// Use the parent directory of the path in the dotted string field.
+    ParentOf(&'a str),
+}
+
 impl Plan {
     /// Build one invocation per JSON object in input order.
-    pub(crate) fn build_json(records: &[JsonRecord], command: &[String]) -> Result<Self, EachError> {
+    pub(crate) fn build_json(records: &[JsonRecord], command: &[String], work_dir: Option<JsonWorkDir<'_>>) -> Result<Self, EachError> {
         validate_json_placeholders(command)?;
+        if let Some(work_dir) = work_dir {
+            validate_json_path(work_dir.path())?;
+        }
         let invocations = records
             .iter()
             .map(|record| {
                 Ok(Invocation {
                     label: Some(record.label()),
                     argv: substitute_json_prevalidated(command, &record.fields, &record.source, record.line)?,
-                    work_dir: None,
+                    work_dir: work_dir.map(|work_dir| resolve_json_work_dir(record, work_dir)).transpose()?,
                 })
             })
             .collect::<Result<Vec<_>, EachError>>()?;
@@ -224,6 +236,78 @@ impl Plan {
     }
 }
 
+impl<'a> JsonWorkDir<'a> {
+    fn path(self) -> &'a str {
+        match self {
+            Self::Field(path) | Self::ParentOf(path) => path,
+        }
+    }
+}
+
+fn validate_json_path(path: &str) -> Result<(), EachError> {
+    if path.is_empty() || path.split('.').any(str::is_empty) {
+        return Err(crate::error::PlaceholderMisuseError::new(
+            path.to_owned(),
+            "JSON working-directory field must be a dotted path with non-empty segments".to_owned(),
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn resolve_json_work_dir(record: &JsonRecord, work_dir: JsonWorkDir<'_>) -> Result<PathBuf, EachError> {
+    let path = work_dir.path();
+    let Some(value) = lookup_fields(&record.fields, path) else {
+        return Err(JsonRecordWorkDirError::new(
+            record.source.to_string(),
+            record.line,
+            path.to_owned(),
+            "field is missing".to_owned(),
+        )
+        .into());
+    };
+    let Some(value) = value.as_str() else {
+        return Err(JsonRecordWorkDirError::new(
+            record.source.to_string(),
+            record.line,
+            path.to_owned(),
+            "field is not a string".to_owned(),
+        )
+        .into());
+    };
+    if value.is_empty() {
+        return Err(
+            JsonRecordWorkDirError::new(record.source.to_string(), record.line, path.to_owned(), "field is empty".to_owned()).into(),
+        );
+    }
+    if value.contains('\0') {
+        return Err(JsonRecordWorkDirError::new(
+            record.source.to_string(),
+            record.line,
+            path.to_owned(),
+            "field contains a NUL byte, which cannot be used as a process working directory".to_owned(),
+        )
+        .into());
+    }
+    let value = PathBuf::from(value);
+    match work_dir {
+        JsonWorkDir::Field(_) => Ok(value),
+        JsonWorkDir::ParentOf(_) => value
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map(Path::to_path_buf)
+            .ok_or_else(|| {
+                JsonRecordWorkDirError::new(
+                    record.source.to_string(),
+                    record.line,
+                    path.to_owned(),
+                    "path has no parent directory".to_owned(),
+                )
+                .into()
+            }),
+    }
+}
+
 fn validate_build(command: &[String], options: BuildOptions<'_>) -> Result<(), EachError> {
     if options.chdir && options.mode == Mode::Once {
         return Err(ChdirConflictsWithOnceError::new().into());
@@ -351,13 +435,69 @@ mod tests {
             record("file.jsonl", 3, "beta"),
             record("inline", 1, "alpha"),
         ];
-        let plan = Plan::build_json(&records, &cmd(&["echo", "{json:value}"])).expect("build JSON plan");
+        let plan = Plan::build_json(&records, &cmd(&["echo", "{json:value}"]), None).expect("build JSON plan");
         assert_eq!(plan.invocations.len(), 3);
         assert_eq!(plan.invocations[0].argv, ["echo", "alpha"]);
         assert_eq!(plan.invocations[1].argv, ["echo", "beta"]);
         assert_eq!(plan.invocations[2].argv, ["echo", "alpha"]);
         assert_eq!(plan.invocations[1].label.as_deref(), Some("file.jsonl:3"));
         assert!(plan.invocations.iter().all(|invocation| invocation.work_dir.is_none()));
+    }
+
+    #[test]
+    fn json_plan_resolves_nested_placeholders_and_working_directories() {
+        let record = JsonRecord {
+            fields: json!({
+                "target": {"name": "alpha_tests"},
+                "paths": {
+                    "package": "/ws/alpha",
+                    "manifest": "/ws/alpha/Cargo.toml"
+                }
+            })
+            .as_object()
+            .expect("object")
+            .clone(),
+            source: std::sync::Arc::from("cargo.jsonl"),
+            line: 4,
+        };
+        let command = cmd(&["runner", "{json:target.name}"]);
+        let direct = Plan::build_json(std::slice::from_ref(&record), &command, Some(JsonWorkDir::Field("paths.package")))
+            .expect("direct JSON working directory");
+        assert_eq!(direct.invocations[0].argv, ["runner", "alpha_tests"]);
+        assert_eq!(direct.invocations[0].work_dir, Some(PathBuf::from("/ws/alpha")));
+
+        let parent = Plan::build_json(
+            std::slice::from_ref(&record),
+            &command,
+            Some(JsonWorkDir::ParentOf("paths.manifest")),
+        )
+        .expect("parent JSON working directory");
+        assert_eq!(parent.invocations[0].work_dir, Some(PathBuf::from("/ws/alpha")));
+    }
+
+    #[test]
+    fn json_working_directory_errors_are_preflighted() {
+        let record = JsonRecord {
+            fields: json!({"missing": null, "number": 7, "root": "Cargo.toml"})
+                .as_object()
+                .expect("object")
+                .clone(),
+            source: std::sync::Arc::from("records.jsonl"),
+            line: 2,
+        };
+        for (work_dir, expected) in [
+            (JsonWorkDir::Field("absent"), "field is missing"),
+            (JsonWorkDir::Field("number"), "field is not a string"),
+            (JsonWorkDir::ParentOf("root"), "path has no parent directory"),
+        ] {
+            let error = Plan::build_json(std::slice::from_ref(&record), &cmd(&["runner"]), Some(work_dir))
+                .expect_err("invalid JSON working directory");
+            let rendered = error.to_string();
+            assert!(rendered.contains("records.jsonl") && rendered.contains("line 2") && rendered.contains(expected));
+        }
+        let error = Plan::build_json(&[], &cmd(&["runner"]), Some(JsonWorkDir::Field("bad..path")))
+            .expect_err("invalid path must fail even for empty input");
+        assert!(error.to_string().contains("non-empty segments"), "{error}");
     }
 
     #[test]

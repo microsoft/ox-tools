@@ -98,8 +98,11 @@ atoms:
 * `--once`: run the command exactly once when the set is non-empty (skip
   when empty), using the `{packages}` placeholder to inject the selection.
 * `--json-lines` / `--json-lines-file`: bypass Cargo selection and run once
-  per JSON object, substituting top-level string fields through
-  `{json:key}`.
+  per selected JSON object. Nested string fields use dotted paths through
+  `{json:dotted.path}`. `--json-filter` selects records
+  with Boolean expressions over dotted paths and typed scalar equality.
+  `--json-work-dir` and `--json-work-dir-parent` derive each invocation’s
+  working directory from a string field.
 * `--each-target <KIND>`: run once per matching Cargo target, using
   `{target}` plus the package placeholders. Repeated kinds are OR-combined;
   repeated `--target-filter` expressions are AND-combined after kind
@@ -147,8 +150,8 @@ Substituted inside each command argument:
   or root `[package].rust-version` in a single-package repository; valid in
   Cargo-backed per-package, per-target, and `--once` modes. Expands to an
   empty string when the root declaration is absent.
-* `{json:key}` — the top-level string field named `key` in the current
-  record; valid only in JSON-record mode.
+* `{json:dotted.path}` — the nested string field at `dotted.path` in the
+  current record; valid only in JSON-record mode.
 
 Using a placeholder in the wrong mode is a usage error. Every `{json:…}`
 sequence is validated as a JSON placeholder. Other unrecognized `{…}`
@@ -174,10 +177,11 @@ package without a matching target in deterministic package order and exits
 2, regardless of `--jobs`, `--keep-going`, `--timeout`, or `--chdir`.
 
 JSON-record mode requires one JSON object per nonempty input line and does
-not load Cargo metadata. Referenced `{json:key}` fields must exist and be
-strings. Invalid input is rejected before any command is spawned, records
-retain input order and duplicates, and an empty record set is a successful
-no-op.
+not load Cargo metadata. JSON filters run before selected records are
+validated. Referenced `{json:dotted.path}` and working-directory fields
+must exist and be strings. Invalid input is rejected before any command is
+spawned, records retain input order and duplicates, and an empty
+post-filter record set is a successful no-op.
 
 The effective worker count is the requested `--jobs` value capped by plan
 size. An effective count of one uses sequential
@@ -253,6 +257,16 @@ Run every Cargo test target that requires the `loom` feature:
 cargo each --workspace --filter feature:loom --each-target test \
     --target-filter required-feature:loom --require-target-per-package -- \
     cargo test -p {name} --test {target} --features loom
+```
+
+Consume executable test artifacts from a previously captured Cargo JSON
+stream:
+
+```text
+cargo each --json-lines-file target/test-artifacts.jsonl \
+    --json-filter 'reason=compiler-artifact and profile.test=true and executable' \
+    --json-work-dir-parent manifest_path -- \
+    miri {json:executable}
 ```
 
 

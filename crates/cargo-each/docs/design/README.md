@@ -40,8 +40,8 @@ The same four chores, re-spelled per recipe, are the bulk of the PowerShell in
 cargo-style package selection (optionally filtered by metadata) or reads JSON
 Lines records, then runs a command over the result with placeholder
 substitution. Cargo-backed execution runs once per package, once per matching
-target, or exactly once for the whole set; record-backed execution runs once
-per object.
+target, or exactly once for the whole set; record-backed execution filters and
+runs once per selected object.
 
 ## 2. Goals
 
@@ -63,8 +63,10 @@ per object.
    the package placeholders and adding `{target}`. The workspace-scoped
    `{workspace-rust-version}` placeholder exposes the root compatibility floor
    to commands that provision or validate a shared toolchain. *JSON-record*
-   runs once per input object without loading Cargo metadata and expands
-   top-level string fields through `{json:key}`.
+   runs once per input object without loading Cargo metadata, filters records
+   through Boolean expressions over dotted JSON paths, expands nested string
+   fields through `{json:dotted.path}`, and can derive each invocation's
+   working directory from a record field.
 4. **Small, general filter languages** with `not`, `and`, `or`, and
    parentheses over cargo metadata — target kinds, resolved doctest capability,
    publication state, declared features and dependencies, and
@@ -94,6 +96,9 @@ per object.
   `rustup` or another installer when the caller asks it to, but it does not
   decide which tools a repository needs, select binary versus source
   installation, inspect Git, collect coverage, or understand Anvil tiers.
+- **Producing JSON input.** The caller owns discovery, compilation, and output
+  redirection. cargo-each consumes completed JSON Lines input; it does not add
+  a prepare phase or own the producer's command, flags, and environment.
 - **A public library API.** `cargo-each` ships as an executable only. Its
   modules are crate-internal (`pub(crate)`), so there is no semver-committed
   library surface, no `check-external-types` obligation, and nothing to consume
@@ -319,6 +324,9 @@ domain-specific target rules.
 | `--once` | **once**: run `<COMMAND>` exactly once when the set is non-empty (skip when empty). Use `{packages}` to inject the selection. |
 | `--json-lines <JSONL>` | **JSON-record mode**: parse one JSON object per nonempty line in the provided value and run `<COMMAND>` once per record. Repeatable. Mutually exclusive with Cargo package selection, filters, target/once modes, `--chdir`, `--manifest-path`, and workspace Rust-version behavior. |
 | `--json-lines-file <PATH>` | Read JSON records from UTF-8 files instead of command-line values. Repeatable and may be combined with `--json-lines`; inline values are processed first, followed by files in argument order within each source. |
+| `--json-filter <EXPR>` | Retain JSON records matching the Boolean expression. Repeatable; expressions are AND-combined. Atoms are dotted paths (present and non-null) or typed scalar equality checks such as `reason=compiler-artifact`, `profile.test=true`, `count=2`, or `name="two words"`. Uses the shared `not` / `and` / `or` / parentheses grammar. Requires JSON input. |
+| `--json-work-dir <DOTTED_PATH>` | Run each selected JSON record from the directory named by this string field. Requires JSON input and conflicts with `--json-work-dir-parent`. |
+| `--json-work-dir-parent <DOTTED_PATH>` | Run each selected JSON record from the parent directory of the path in this string field. Requires JSON input and conflicts with `--json-work-dir`. |
 | `--each-target <KIND>` | **per-target**: run once for each selected member target of `KIND`. Repeatable; kinds are OR-combined and each target runs at most once. Mutually exclusive with `--once`. |
 | `--target-filter <EXPR>` | In per-target mode, retain targets matching the target Boolean expression. Repeatable; expressions are AND-combined. Requires `--each-target`. |
 | `--require-target-per-package` | In per-target mode, require every selected package to retain at least one target after kind and target filtering. Requires `--each-target`. Reports all failing packages and exits 2 before execution. |
@@ -343,7 +351,7 @@ Substituted inside each `ARG` of the command template:
 | `{target}` | Cargo target name | per-target |
 | `{packages}` | the cargo selection flags for the resolved set: `--workspace` when the whole workspace was selected via `--workspace`/`--all` with no excludes **and no package filters applied**, else `--package name@version …` (one pair per member). Only valid as a standalone `ARG`; it expands to multiple tokens. | once |
 | `{workspace-rust-version}` | Root `[workspace.package].rust-version`, or root `[package].rust-version` in a single-package repository; empty when the root declaration is absent. | Cargo-backed per-package, per-target, once |
-| `{json:key}` | The top-level string field named `key` from the current JSON object. Missing or non-string referenced fields are errors. Inserted values are not rescanned for placeholder-shaped text. | JSON-record |
+| `{json:dotted.path}` | The nested string field at `dotted.path` in the current JSON object. Missing or non-string referenced fields are errors. Inserted values are not rescanned for placeholder-shaped text. | JSON-record |
 
 Per-target mode accepts all per-package placeholders plus `{target}`. Using a
 per-package or per-target token in `--once` mode, `{target}` in per-package
@@ -369,10 +377,15 @@ declared version.
 
 JSON-record mode does not load Cargo metadata or require a `Cargo.toml`. Each
 nonempty input line must be a JSON object. Objects may contain arbitrary JSON
-values, but every field referenced by `{json:key}` must exist and be a string.
-Records preserve source and line order, including duplicates. All records and
-placeholder references are validated before any child process is spawned.
-An empty record set is a successful no-op.
+values, but every field referenced by `{json:dotted.path}` or a working-directory
+option must exist at that dotted path and be a string in every selected record.
+`--json-work-dir-parent` additionally requires the string path to have a parent
+directory. Filters run before placeholder and working-directory validation, so
+mixed JSON streams can select one record shape without unrelated records
+causing type errors. Records preserve source and line order, including
+duplicates. All selected records and placeholder references are validated
+before any child process is spawned. An empty post-filter record set is a
+successful no-op.
 
 Targets run in package-name order and then target-name order. A target matching
 more than one requested kind runs once. Target filters do not duplicate
@@ -402,8 +415,9 @@ targets. No matching targets is a successful no-op unless
   has no declaration. Malformed TOML and invalid or inconsistent metadata still
   fail before execution.
 - **JSON input is strict and shell-free.** Invalid JSON, non-object records,
-  malformed JSON placeholders, and missing or non-string referenced fields are
-  usage/configuration errors before execution. Record values become argv text
+  malformed JSON placeholders or filter expressions, and missing or
+  type-incompatible referenced fields are usage/configuration errors before
+  execution. Record values become argv text or working-directory paths
   directly; they are never interpreted by a shell.
 - **No shell.** The command is spawned directly (argv, not a shell string), so
   there is no quoting/dialect surface. Placeholder expansion is textual and
@@ -578,6 +592,21 @@ cargo each --json-lines '{"package":"alpha","test":"fuzz_one"}' -- \
     cargo bolero test --package {json:package} {json:test}
 ```
 
+A caller can compile test artifacts once, then execute each harness from its
+owning package root without rebuilding:
+
+```text
+cargo test --workspace --no-run --message-format=json > target/test-artifacts.jsonl
+cargo each --json-lines-file target/test-artifacts.jsonl \
+    --json-filter 'reason=compiler-artifact and profile.test=true and executable' \
+    --json-work-dir-parent manifest_path -- \
+    miri {json:executable}
+```
+
+The producer command and redirection stay outside cargo-each. Nested Cargo
+fields remain available through ordinary JSON placeholders such as
+`{json:target.name}`.
+
 ## 7. Rejected alternatives
 
 - **Extend cargo-delta to emit ready-to-run commands.** Couples impact analysis
@@ -586,9 +615,11 @@ cargo each --json-lines '{"package":"alpha","test":"fuzz_one"}' -- \
 - **A pure `--print` resolver (emit the `--package` list, let the recipe run
   cargo).** Keeps the per-recipe splat/skip shell that is the thing we set out
   to delete. Owning execution (per-package and once) is what removes it.
-- **A generic expression language for filters.** Over-built for the handful of
-  predicates the recipes actually need; the fixed predicate set covers every
-  current `cargo metadata` filter and stays trivially auditable.
+- **A generic prepare/execute pipeline.** Rejected: it would make cargo-each
+  responsible for producer command quoting, environment, failure policy, and
+  output redirection. JSON-record mode consumes a completed file and reuses the
+  existing executor; preparation remains an explicit preceding command owned
+  by the caller.
 - **An Anvil-aware selection source.** Rejected: cargo-each does not accept a
   tier name, inspect `ANVIL_IMPACT`, or assume a `target/anvil` layout.
   `--package-file` is deliberately generic: one Cargo package spec per line,
