@@ -6,6 +6,7 @@
 
 - 🐛 Bug Fixes
 
+  - cargo-coverage-gate: preserve Cargo filename warnings ([#347](https://github.com/microsoft/ox-tools/pull/347))
   - cargo-coverage-gate: query only the effective build target ([#347](https://github.com/microsoft/ox-tools/pull/347))
   - cargo-coverage-gate: restore native proc-macro coverage ([#347](https://github.com/microsoft/ox-tools/pull/347))
 
