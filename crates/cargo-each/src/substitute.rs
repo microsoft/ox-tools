@@ -17,6 +17,8 @@
 //!   per-package, per-target, and once modes. An absent root declaration
 //!   expands to an empty string.
 //! - JSON-record fields through `{json:key}`, valid only in JSON-record mode.
+//! - Cargo-artifact fields `{artifact}`, `{manifest}`, `{package-dir}`,
+//!   `{package-id}`, and `{target}`, valid only in Cargo-artifact mode.
 //!
 //! Using a token in the wrong mode is a usage error ([`PlaceholderMisuseError`]).
 //!
@@ -26,6 +28,7 @@
 //! **verbatim** to the spawned command. There is no brace-escape mechanism, so
 //! this passthrough is a deliberate part of the contract, not an oversight.
 
+use crate::cargo_artifacts::CargoArtifact;
 use crate::error::{EachError, JsonRecordFieldError, PlaceholderMisuseError};
 use crate::plan::Mode;
 
@@ -39,6 +42,8 @@ const PACKAGES_TOKEN: &str = "{packages}";
 const WORKSPACE_RUST_VERSION_TOKEN: &str = "{workspace-rust-version}";
 /// Prefix of a dynamic JSON-record field placeholder.
 const JSON_TOKEN_PREFIX: &str = "{json:";
+/// Cargo-artifact-only placeholder tokens.
+const ARTIFACT_ONLY_TOKENS: [&str; 3] = ["{artifact}", "{package-dir}", "{package-id}"];
 
 /// The substitution context for one command invocation.
 #[derive(Debug, Clone)]
@@ -201,6 +206,9 @@ pub(crate) fn uses_workspace_rust_version(args: &[String]) -> bool {
 /// embedded in a larger argument rather than standing alone.
 pub(crate) fn validate_placeholders(args: &[String], mode: Mode) -> Result<(), EachError> {
     for arg in args {
+        if let Some(token) = ARTIFACT_ONLY_TOKENS.iter().find(|token| arg.contains(**token)) {
+            return Err(PlaceholderMisuseError::new((*token).to_owned(), "only valid in Cargo-artifact mode".to_owned()).into());
+        }
         if arg.contains(JSON_TOKEN_PREFIX) {
             return Err(PlaceholderMisuseError::new("{json:key}".to_owned(), "only valid in JSON-record mode".to_owned()).into());
         }
@@ -239,6 +247,9 @@ pub(crate) fn validate_placeholders(args: &[String], mode: Mode) -> Result<(), E
 /// Validate placeholders accepted by JSON-record mode.
 pub(crate) fn validate_json_placeholders(args: &[String]) -> Result<(), EachError> {
     for arg in args {
+        if let Some(token) = ARTIFACT_ONLY_TOKENS.iter().find(|token| arg.contains(**token)) {
+            return Err(PlaceholderMisuseError::new((*token).to_owned(), "only valid in Cargo-artifact mode".to_owned()).into());
+        }
         for token in PER_PACKAGE_TOKENS
             .into_iter()
             .chain([TARGET_TOKEN, PACKAGES_TOKEN, WORKSPACE_RUST_VERSION_TOKEN])
@@ -250,6 +261,67 @@ pub(crate) fn validate_json_placeholders(args: &[String]) -> Result<(), EachErro
         visit_json_tokens(arg, |_start, _end, _key| Ok(()))?;
     }
     Ok(())
+}
+
+/// Validate placeholders accepted by Cargo-artifact mode.
+pub(crate) fn validate_cargo_artifact_placeholders(args: &[String]) -> Result<(), EachError> {
+    for arg in args {
+        if arg.contains(JSON_TOKEN_PREFIX) {
+            return Err(PlaceholderMisuseError::new("{json:key}".to_owned(), "not valid in Cargo-artifact mode".to_owned()).into());
+        }
+        for token in [
+            "{name}",
+            "{spec}",
+            "{cargo-spec}",
+            "{version}",
+            PACKAGES_TOKEN,
+            WORKSPACE_RUST_VERSION_TOKEN,
+        ] {
+            if arg.contains(token) {
+                return Err(PlaceholderMisuseError::new(token.to_owned(), "not valid in Cargo-artifact mode".to_owned()).into());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Expand Cargo-artifact placeholders after validation succeeds.
+pub(crate) fn substitute_cargo_artifact_prevalidated(args: &[String], artifact: &CargoArtifact) -> Vec<String> {
+    let executable = artifact.executable.to_string_lossy();
+    let manifest = artifact.manifest.to_string_lossy();
+    let package_dir = artifact.package_dir.to_string_lossy();
+    args.iter()
+        .map(|arg| {
+            replace_tokens(
+                arg,
+                &[
+                    ("{artifact}", executable.as_ref()),
+                    ("{manifest}", manifest.as_ref()),
+                    ("{package-dir}", package_dir.as_ref()),
+                    ("{package-id}", artifact.package_id.as_str()),
+                    (TARGET_TOKEN, artifact.target.as_str()),
+                ],
+            )
+        })
+        .collect()
+}
+
+fn replace_tokens(arg: &str, replacements: &[(&str, &str)]) -> String {
+    let mut rest = arg;
+    let mut replaced = String::with_capacity(arg.len());
+    while let Some((offset, token, value)) = replacements
+        .iter()
+        .filter_map(|&(token, value)| rest.find(token).map(|offset| (offset, token, value)))
+        .min_by_key(|&(offset, _, _)| offset)
+    {
+        let (literal, token_and_rest) = rest.split_at(offset);
+        let (_, remaining) = token_and_rest.split_at(token.len());
+        replaced.push_str(literal);
+        replaced.push_str(value);
+        rest = remaining;
+    }
+    replaced.push_str(rest);
+    replaced
 }
 
 /// Expand JSON placeholders after [`validate_json_placeholders`] succeeds.
@@ -707,5 +779,59 @@ mod tests {
     fn ordinary_modes_reject_json_placeholders() {
         let error = substitute(&args(&["echo", "{json:value}"]), &pkg()).expect_err("JSON placeholder outside JSON mode must fail");
         assert!(error.to_string().contains("only valid in JSON-record mode"));
+    }
+
+    #[test]
+    fn cargo_artifact_placeholders_expand_without_rescanning() {
+        let artifact = CargoArtifact {
+            executable: "/ws/target/{target}/alpha".into(),
+            manifest: "/ws/alpha/Cargo.toml".into(),
+            package_dir: "/ws/alpha".into(),
+            package_id: "path+file:///ws/alpha#0.1.0".to_owned(),
+            target: "alpha_tests".to_owned(),
+        };
+        let command = args(&[
+            "{artifact}",
+            "{manifest}",
+            "{package-dir}",
+            "{package-id}",
+            "{target}",
+            "{package-dir}:{target}",
+        ]);
+        validate_cargo_artifact_placeholders(&command).expect("artifact placeholders");
+        assert_eq!(
+            substitute_cargo_artifact_prevalidated(&command, &artifact),
+            [
+                "/ws/target/{target}/alpha",
+                "/ws/alpha/Cargo.toml",
+                "/ws/alpha",
+                "path+file:///ws/alpha#0.1.0",
+                "alpha_tests",
+                "/ws/alpha:alpha_tests",
+            ]
+        );
+    }
+
+    #[test]
+    fn cargo_artifact_placeholder_modes_are_disjoint() {
+        for token in ARTIFACT_ONLY_TOKENS {
+            let command = args(&[token]);
+            let ordinary = validate_placeholders(&command, Mode::PerPackage).expect_err("artifact token outside artifact mode");
+            assert!(ordinary.to_string().contains("Cargo-artifact mode"), "{ordinary}");
+            let json = validate_json_placeholders(&command).expect_err("artifact token outside artifact mode");
+            assert!(json.to_string().contains("Cargo-artifact mode"), "{json}");
+        }
+        for token in [
+            "{name}",
+            "{spec}",
+            "{cargo-spec}",
+            "{version}",
+            "{packages}",
+            "{workspace-rust-version}",
+            "{json:key}",
+        ] {
+            let error = validate_cargo_artifact_placeholders(&args(&[token])).expect_err("foreign placeholder in artifact mode");
+            assert!(error.to_string().contains("Cargo-artifact mode"), "{token}: {error}");
+        }
     }
 }

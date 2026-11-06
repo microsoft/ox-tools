@@ -65,6 +65,11 @@ pub(crate) struct EachArgs {
     #[arg(long = "json-lines-file", value_name = "PATH")]
     pub(crate) json_lines_files: Vec<PathBuf>,
 
+    /// Read a complete Cargo JSON message stream from a UTF-8 file and run
+    /// once per executable test-profile compiler artifact.
+    #[arg(long = "cargo-artifacts-file", value_name = "PATH")]
+    pub(crate) cargo_artifacts_file: Option<PathBuf>,
+
     // --- filtering ---
     /// Keep only members matching this Boolean expression. Repeatable;
     /// expressions are AND-combined. Supports `not`, `and`, `or`, and
@@ -108,10 +113,11 @@ pub(crate) struct EachArgs {
     #[arg(long)]
     pub(crate) keep_going: bool,
 
-    /// Run at most N per-package, per-target, or JSON-record commands concurrently. Use
-    /// `auto` to detect available parallelism once. Defaults to 1. Buffered
-    /// output is redirected to unique temporary files and emitted in plan order.
-    /// Only an effective count above 1 disconnects child standard input for capture.
+    /// Run at most N per-package, per-target, JSON-record, or Cargo-artifact
+    /// commands concurrently. Use `auto` to detect available parallelism once.
+    /// Defaults to 1. Buffered output is redirected to unique temporary files
+    /// and emitted in plan order. Only an effective count above 1 disconnects
+    /// child standard input for capture.
     #[arg(long, default_value_t = NonZeroUsize::MIN, value_name = "N|auto", value_parser = parse_jobs)]
     pub(crate) jobs: NonZeroUsize,
 

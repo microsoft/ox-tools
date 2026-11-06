@@ -40,11 +40,16 @@
     PackageFileUtf8Error,
     InvalidPackageFileLineError,
     JsonInputConflictError,
+    CargoArtifactInputConflictError,
     JsonLinesFileReadError,
     JsonLinesFileUtf8Error,
     JsonLineParseError,
     JsonRecordShapeError,
     JsonRecordFieldError,
+    CargoArtifactsFileReadError,
+    CargoArtifactsFileUtf8Error,
+    CargoArtifactMessageError,
+    CargoArtifactMetadataError,
     WorkspaceManifestReadError,
     WorkspaceManifestParseError,
     WorkspaceRustVersionError
@@ -150,6 +155,13 @@ pub(crate) struct JsonInputConflictError {
     pub(crate) option: String,
 }
 
+/// Cargo-artifact input was combined with another input or selection option.
+#[ohno::error]
+#[display("Cargo-artifact mode cannot be combined with `{option}`")]
+pub(crate) struct CargoArtifactInputConflictError {
+    pub(crate) option: String,
+}
+
 /// A `--json-lines-file` could not be read.
 #[ohno::error]
 #[display("could not read JSON Lines file `{path}`")]
@@ -191,6 +203,43 @@ pub(crate) struct JsonRecordFieldError {
     pub(crate) source: String,
     pub(crate) line: usize,
     pub(crate) key: String,
+    pub(crate) reason: String,
+}
+
+/// A `--cargo-artifacts-file` could not be read.
+#[ohno::error]
+#[display("could not read Cargo artifact message file `{path}`")]
+#[from(std::io::Error)]
+pub(crate) struct CargoArtifactsFileReadError {
+    pub(crate) path: String,
+}
+
+/// A `--cargo-artifacts-file` line was not valid UTF-8.
+#[ohno::error]
+#[display("Cargo artifact message file `{path}` at line {line} is not valid UTF-8")]
+#[from(std::str::Utf8Error)]
+pub(crate) struct CargoArtifactsFileUtf8Error {
+    pub(crate) path: String,
+    pub(crate) line: usize,
+}
+
+/// A nonempty Cargo message line was not a standard Cargo JSON message.
+#[ohno::error]
+#[display("invalid Cargo JSON message in `{path}` at line {line}, column {column}: {reason}")]
+pub(crate) struct CargoArtifactMessageError {
+    pub(crate) path: String,
+    pub(crate) line: usize,
+    pub(crate) column: usize,
+    pub(crate) reason: String,
+}
+
+/// A selected Cargo artifact lacked trustworthy execution metadata.
+#[ohno::error]
+#[display("invalid Cargo artifact metadata in `{path}` at line {line} for `{record}`: {reason}")]
+pub(crate) struct CargoArtifactMetadataError {
+    pub(crate) path: String,
+    pub(crate) line: usize,
+    pub(crate) record: String,
     pub(crate) reason: String,
 }
 

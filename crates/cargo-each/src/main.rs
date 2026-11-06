@@ -1,8 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! `cargo-each`: run a command over Cargo workspace members or JSON Lines
-//! records.
+//! `cargo-each`: run a command over Cargo workspace members, JSON Lines
+//! records, or executable Cargo artifacts.
 //!
 //! `cargo-each` resolves either a package selection expressed with the same
 //! selectors as `cargo build` or a stream of JSON objects. It optionally
@@ -29,8 +29,9 @@
 //!
 //! Everything after `--` is the command template; `cargo-each` spawns it
 //! directly (argv, not a shell string) after substituting placeholders.
-//! Input is either a Cargo workspace selection or JSON Lines records; the two
-//! sources are deliberately mutually exclusive.
+//! Input is a Cargo workspace selection, generic JSON Lines records, or one
+//! Cargo JSON artifact-message file; the sources are deliberately mutually
+//! exclusive.
 //!
 //! ## Selection (mirrors `cargo build`)
 //!
@@ -90,6 +91,9 @@
 //! - `--json-lines` / `--json-lines-file`: bypass Cargo selection and run once
 //!   per JSON object, substituting top-level string fields through
 //!   `{json:key}`.
+//! - `--cargo-artifacts-file`: consume the complete JSON message output from a
+//!   separate successful Cargo compilation, forward rendered diagnostics, and
+//!   run once per executable test-profile artifact from its package directory.
 //! - `--each-target <KIND>`: run once per matching Cargo target, using
 //!   `{target}` plus the package placeholders. Repeated kinds are OR-combined;
 //!   repeated `--target-filter` expressions are AND-combined after kind
@@ -139,6 +143,11 @@
 //!   empty string when the root declaration is absent.
 //! - `{json:key}` — the top-level string field named `key` in the current
 //!   record; valid only in JSON-record mode.
+//! - `{artifact}` — executable path reported by Cargo (Cargo-artifact mode).
+//! - `{package-dir}` — package manifest directory and invocation working
+//!   directory (Cargo-artifact mode).
+//! - `{package-id}` — opaque Cargo package ID (Cargo-artifact mode).
+//! - `{manifest}` and `{target}` are also available in Cargo-artifact mode.
 //!
 //! Using a placeholder in the wrong mode is a usage error. Every `{json:…}`
 //! sequence is validated as a JSON placeholder. Other unrecognized `{…}`
@@ -168,6 +177,15 @@
 //! strings. Invalid input is rejected before any command is spawned, records
 //! retain input order and duplicates, and an empty record set is a successful
 //! no-op.
+//!
+//! Cargo-artifact mode requires a complete UTF-8 stream of standard Cargo JSON
+//! messages ending in a successful `build-finished` record. It selects only
+//! test-profile `compiler-artifact` messages with an executable, preserves
+//! message order and duplicates, validates absolute executable and manifest
+//! paths before execution, and forwards rendered `compiler-message`
+//! diagnostics to stderr. An input with no selected executable artifacts is a
+//! successful no-op. The producer Cargo command and output redirection remain
+//! outside cargo-each.
 //!
 //! The effective worker count is the requested `--jobs` value capped by plan
 //! size. An effective count of one uses sequential
@@ -247,6 +265,7 @@
 
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
+mod cargo_artifacts;
 mod cli;
 mod error;
 mod filter;

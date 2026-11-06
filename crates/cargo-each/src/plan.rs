@@ -9,10 +9,14 @@ use std::path::PathBuf;
 
 use cargo_metadata::TargetKind;
 
+use crate::cargo_artifacts::CargoArtifact;
 use crate::error::{ChdirConflictsWithOnceError, EachError, MissingTargetPerPackageError};
 use crate::filter::TargetPredicate;
 use crate::json_lines::JsonRecord;
-use crate::substitute::{Placeholders, substitute, substitute_json_prevalidated, validate_json_placeholders, validate_placeholders};
+use crate::substitute::{
+    Placeholders, substitute, substitute_cargo_artifact_prevalidated, substitute_json_prevalidated, validate_cargo_artifact_placeholders,
+    validate_json_placeholders, validate_placeholders,
+};
 use crate::workspace::Member;
 
 /// How the command is run over the selected set.
@@ -78,6 +82,20 @@ pub(crate) struct BuildOptions<'a> {
 }
 
 impl Plan {
+    /// Build one invocation per executable Cargo test artifact in message order.
+    pub(crate) fn build_cargo_artifacts(artifacts: &[CargoArtifact], command: &[String]) -> Result<Self, EachError> {
+        validate_cargo_artifact_placeholders(command)?;
+        let invocations = artifacts
+            .iter()
+            .map(|artifact| Invocation {
+                label: Some(format!("{} ({})", artifact.target, artifact.package_id)),
+                argv: substitute_cargo_artifact_prevalidated(command, artifact),
+                work_dir: Some(artifact.package_dir.clone()),
+            })
+            .collect();
+        Ok(Self { invocations })
+    }
+
     /// Build one invocation per JSON object in input order.
     pub(crate) fn build_json(records: &[JsonRecord], command: &[String]) -> Result<Self, EachError> {
         validate_json_placeholders(command)?;
@@ -321,6 +339,37 @@ mod tests {
 
     fn cmd(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn cargo_artifacts_build_in_order_with_package_working_directories() {
+        let artifact = |package: &str, target: &str| CargoArtifact {
+            executable: PathBuf::from(format!("/ws/target/{target}")),
+            manifest: PathBuf::from(format!("/ws/{package}/Cargo.toml")),
+            package_dir: PathBuf::from(format!("/ws/{package}")),
+            package_id: format!("path+file:///ws/{package}#{package}@0.1.0"),
+            target: target.to_owned(),
+        };
+        let artifacts = [artifact("beta", "beta_tests"), artifact("alpha", "alpha_tests")];
+        let plan = Plan::build_cargo_artifacts(
+            &artifacts,
+            &cmd(&["runner", "{artifact}", "{manifest}", "{package-dir}", "{package-id}", "{target}"]),
+        )
+        .expect("artifact plan");
+        assert_eq!(plan.invocations.len(), 2);
+        assert_eq!(plan.invocations[0].work_dir, Some(PathBuf::from("/ws/beta")));
+        assert_eq!(
+            plan.invocations[0].argv,
+            [
+                "runner",
+                "/ws/target/beta_tests",
+                "/ws/beta/Cargo.toml",
+                "/ws/beta",
+                "path+file:///ws/beta#beta@0.1.0",
+                "beta_tests",
+            ]
+        );
+        assert_eq!(plan.invocations[1].work_dir, Some(PathBuf::from("/ws/alpha")));
     }
 
     fn build(members: &[&Member], mode: Mode, chdir: bool, packages: PackagesExpansion, command: &[String]) -> Result<Plan, EachError> {

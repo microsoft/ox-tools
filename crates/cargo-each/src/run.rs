@@ -21,13 +21,13 @@ use ohno::{AppError, IntoAppError};
 use tempfile::NamedTempFile;
 
 use crate::cli::EachArgs;
-use crate::error::{EachError, InvalidTargetKindError, JobsConflictWithOnceError, JsonInputConflictError};
+use crate::error::{CargoArtifactInputConflictError, EachError, InvalidTargetKindError, JobsConflictWithOnceError, JsonInputConflictError};
 use crate::filter::{PackagePredicate, TargetPredicate};
-use crate::json_lines;
 use crate::plan::{BuildOptions, Invocation, Mode, PackagesExpansion, Plan};
 use crate::select::Selection;
 use crate::substitute::uses_workspace_rust_version;
 use crate::workspace::{Member, Workspace};
+use crate::{cargo_artifacts, json_lines};
 
 #[cfg(test)]
 const WORKER_PANIC_TEST_PROGRAM: &str = "__cargo_each_injected_worker_panic";
@@ -46,6 +46,9 @@ const WORKSPACE_RUST_VERSION_CONTEXT: &str = "failed to resolve workspace Rust v
 const PLAN_BUILD_CONTEXT: &str = "failed to build command plan";
 
 pub(crate) fn run(args: &EachArgs) -> Result<ExitCode, AppError> {
+    if args.cargo_artifacts_file.is_some() {
+        return run_cargo_artifacts(args);
+    }
     if !args.json_lines.is_empty() || !args.json_lines_files.is_empty() {
         return run_json(args);
     }
@@ -159,8 +162,41 @@ fn run_json_with(
     execute_plan(&plan, args.keep_going, args.jobs, args.timeout)
 }
 
+fn run_cargo_artifacts(args: &EachArgs) -> Result<ExitCode, AppError> {
+    run_cargo_artifacts_with(args, |diagnostic| eprint!("{diagnostic}"), execute)
+}
+
+fn run_cargo_artifacts_with(
+    args: &EachArgs,
+    mut emit_diagnostic: impl FnMut(&str),
+    execute_plan: impl FnOnce(&Plan, bool, NonZeroUsize, Option<Duration>) -> Result<ExitCode, AppError>,
+) -> Result<ExitCode, AppError> {
+    validate_cargo_artifact_mode(args)?;
+    let path = args
+        .cargo_artifacts_file
+        .as_deref()
+        .expect("run_cargo_artifacts_with is called only when --cargo-artifacts-file is present");
+    let input = cargo_artifacts::load(path).into_app_err("failed to read Cargo artifact input")?;
+    let plan = Plan::build_cargo_artifacts(&input.artifacts, &args.command).into_app_err(PLAN_BUILD_CONTEXT)?;
+    for diagnostic in &input.diagnostics {
+        emit_diagnostic(diagnostic);
+    }
+    if plan.invocations.is_empty() {
+        eprintln!("cargo each: Cargo artifact input resolved to no work; nothing to do");
+        return Ok(ExitCode::SUCCESS);
+    }
+    if args.dry_run {
+        for invocation in &plan.invocations {
+            println!("{}", display_invocation(invocation));
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+    execute_plan(&plan, args.keep_going, args.jobs, args.timeout)
+}
+
 fn validate_json_mode(args: &EachArgs) -> Result<(), AppError> {
     let conflicts = [
+        (args.cargo_artifacts_file.is_some(), "--cargo-artifacts-file"),
         (!args.packages.is_empty(), "--package"),
         (!args.package_files.is_empty(), "--package-file"),
         (args.workspace, "--workspace"),
@@ -176,6 +212,29 @@ fn validate_json_mode(args: &EachArgs) -> Result<(), AppError> {
     ];
     if let Some((_, option)) = conflicts.into_iter().find(|(present, _)| *present) {
         return Err(JsonInputConflictError::new(option.to_owned())).into_app_err(EXECUTION_CONFIGURATION_CONTEXT);
+    }
+    Ok(())
+}
+
+fn validate_cargo_artifact_mode(args: &EachArgs) -> Result<(), AppError> {
+    let conflicts = [
+        (!args.packages.is_empty(), "--package"),
+        (!args.package_files.is_empty(), "--package-file"),
+        (args.workspace, "--workspace"),
+        (!args.exclude.is_empty(), "--exclude"),
+        (args.none, "--none"),
+        (!args.json_lines.is_empty(), "--json-lines"),
+        (!args.json_lines_files.is_empty(), "--json-lines-file"),
+        (!args.filters.is_empty(), "--filter"),
+        (args.once, "--once"),
+        (!args.each_targets.is_empty(), "--each-target"),
+        (!args.target_filters.is_empty(), "--target-filter"),
+        (args.require_target_per_package, "--require-target-per-package"),
+        (args.chdir, "--chdir"),
+        (args.manifest_path.is_some(), "--manifest-path"),
+    ];
+    if let Some((_, option)) = conflicts.into_iter().find(|(present, _)| *present) {
+        return Err(CargoArtifactInputConflictError::new(option.to_owned())).into_app_err(EXECUTION_CONFIGURATION_CONTEXT);
     }
     Ok(())
 }
@@ -1060,9 +1119,10 @@ mod tests {
         display_duration, display_invocation, effective_worker_count, emit_buffered_to, emit_label_to, execute_parallel,
         execute_parallel_with, exit_byte, failure_stops_launching, finish_capture, panic_description, parallel_failure_exit_code,
         parse_package_predicates, parse_target_kinds, parse_target_predicates, record_emitted_failure, run, run_captured,
-        run_captured_with, run_cargo_with, run_streamed, run_streamed_group_control_with, run_streamed_with_timeout,
-        run_streamed_with_timeout_with, shell_join, spawn_group, spawn_worker, spawn_worker_with, terminate_child, terminate_group,
-        validate_json_mode, wait_for_process, wait_for_process_with, wait_for_worker, wait_for_worker_with, with_cleanup_failure,
+        run_captured_with, run_cargo_artifacts_with, run_cargo_with, run_streamed, run_streamed_group_control_with,
+        run_streamed_with_timeout, run_streamed_with_timeout_with, shell_join, spawn_group, spawn_worker, spawn_worker_with,
+        terminate_child, terminate_group, validate_cargo_artifact_mode, validate_json_mode, wait_for_process, wait_for_process_with,
+        wait_for_worker, wait_for_worker_with, with_cleanup_failure,
     };
     use crate::cli::CargoCli;
     use crate::workspace::{Member, MemberTarget, Workspace};
@@ -1175,6 +1235,82 @@ mod tests {
             let error = validate_json_mode(&args).expect_err("conflict priority is deterministic");
             assert!(error.to_string().contains("with `--package`"), "{error}");
         }
+    }
+
+    #[test]
+    fn cargo_artifact_mode_names_each_conflicting_option_and_preserves_precedence() {
+        let options = [
+            "--package",
+            "--package-file",
+            "--workspace",
+            "--exclude",
+            "--none",
+            "--json-lines",
+            "--json-lines-file",
+            "--filter",
+            "--once",
+            "--each-target",
+            "--target-filter",
+            "--require-target-per-package",
+            "--chdir",
+            "--manifest-path",
+        ];
+        for option in options {
+            let CargoCli::Each(mut args) =
+                CargoCli::try_parse_from(["cargo", "each", "--cargo-artifacts-file", "artifacts.jsonl", "--", "echo"])
+                    .expect("baseline arguments are valid");
+            match option {
+                "--package" => args.packages.push("fixture".to_owned()),
+                "--package-file" => args.package_files.push("packages.txt".into()),
+                "--workspace" => args.workspace = true,
+                "--exclude" => args.exclude.push("fixture".to_owned()),
+                "--none" => args.none = true,
+                "--json-lines" => args.json_lines.push("{}".to_owned()),
+                "--json-lines-file" => args.json_lines_files.push("records.jsonl".into()),
+                "--filter" => args.filters.push("publishable".to_owned()),
+                "--once" => args.once = true,
+                "--each-target" => args.each_targets.push("test".to_owned()),
+                "--target-filter" => args.target_filters.push("name:fixture".to_owned()),
+                "--require-target-per-package" => args.require_target_per_package = true,
+                "--chdir" => args.chdir = true,
+                "--manifest-path" => args.manifest_path = Some("Cargo.toml".into()),
+                _ => unreachable!("options lists only Cargo-artifact-mode conflicts"),
+            }
+
+            let error = validate_cargo_artifact_mode(&args).expect_err("option conflicts with Cargo-artifact mode");
+            assert!(error.to_string().contains(&format!("with `{option}`")), "{error}");
+            args.packages.push("highest-priority".to_owned());
+            args.manifest_path = Some("Cargo.toml".into());
+            let error = validate_cargo_artifact_mode(&args).expect_err("conflict priority is deterministic");
+            assert!(error.to_string().contains("with `--package`"), "{error}");
+        }
+    }
+
+    #[test]
+    fn json_and_cargo_artifact_modes_conflict_symmetrically() {
+        let CargoCli::Each(args) = CargoCli::try_parse_from([
+            "cargo",
+            "each",
+            "--json-lines",
+            "{}",
+            "--cargo-artifacts-file",
+            "artifacts.jsonl",
+            "--",
+            "echo",
+        ])
+        .expect("clap accepts modes for actionable validation");
+        assert!(
+            validate_json_mode(&args)
+                .expect_err("artifact file conflicts with JSON mode")
+                .to_string()
+                .contains("--cargo-artifacts-file")
+        );
+        assert!(
+            validate_cargo_artifact_mode(&args)
+                .expect_err("JSON input conflicts with artifact mode")
+                .to_string()
+                .contains("--json-lines")
+        );
     }
 
     #[test]
@@ -1320,6 +1456,59 @@ mod tests {
             .expect("the executor result is returned");
             assert_eq!(result, ExitCode::FAILURE);
         }
+    }
+
+    #[test]
+    fn cargo_artifact_execution_forwards_diagnostics_context_and_executor_controls() {
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("cargo-artifacts.jsonl");
+        let CargoCli::Each(mut args) = CargoCli::try_parse_from([
+            std::ffi::OsString::from("cargo"),
+            std::ffi::OsString::from("each"),
+            std::ffi::OsString::from("--cargo-artifacts-file"),
+            fixture.into_os_string(),
+            std::ffi::OsString::from("--"),
+            std::ffi::OsString::from("runner"),
+            std::ffi::OsString::from("{artifact}"),
+            std::ffi::OsString::from("{manifest}"),
+            std::ffi::OsString::from("{package-dir}"),
+            std::ffi::OsString::from("{package-id}"),
+            std::ffi::OsString::from("{target}"),
+        ])
+        .expect("Cargo-artifact arguments");
+        args.keep_going = true;
+        args.jobs = NonZeroUsize::new(2).expect("two workers");
+        args.timeout = Some(Duration::from_secs(3));
+        let diagnostics = RefCell::new(String::new());
+        let result = run_cargo_artifacts_with(
+            &args,
+            |diagnostic| diagnostics.borrow_mut().push_str(diagnostic),
+            |plan, keep_going, jobs, timeout| {
+                assert_eq!(diagnostics.borrow().as_str(), "warning: fixture diagnostic\n");
+                assert_eq!(plan.invocations.len(), 3);
+                assert_eq!(plan.invocations[0], plan.invocations[2]);
+                assert_eq!(plan.invocations[0].work_dir, Some(PathBuf::from("C:/workspace/alpha")));
+                assert_eq!(
+                    plan.invocations[0].argv,
+                    [
+                        "runner",
+                        "C:/workspace/target/debug/deps/alpha_tests.exe",
+                        "C:/workspace/alpha/Cargo.toml",
+                        "C:/workspace/alpha",
+                        "path+file:///workspace/alpha#0.1.0",
+                        "alpha_tests",
+                    ]
+                );
+                assert!(keep_going);
+                assert_eq!(jobs, args.jobs);
+                assert_eq!(timeout, args.timeout);
+                Ok(ExitCode::FAILURE)
+            },
+        )
+        .expect("validated input reaches the executor");
+        assert_eq!(result, ExitCode::FAILURE);
     }
 
     #[test]
