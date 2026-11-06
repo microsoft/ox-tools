@@ -391,7 +391,7 @@ fn unset_target_warnings(stderr: &str) -> Option<&str> {
     if error != "error: config value `build.target` is not set" {
         return None;
     }
-    let is_config = |path: &str| path.rsplit(|separator| separator == '/' || separator == '\\').next() == Some("config");
+    let is_config = |path: &str| path == "config" || path.ends_with("/config") || path.ends_with("\\config");
     while let Some(line) = lines.next() {
         if let Some(path) = line
             .strip_prefix("warning: `")
@@ -2443,8 +2443,10 @@ mod tests {
         let duplicate = "warning: both `repo/.cargo/config` and `repo/.cargo/config.toml` exist. Using `repo/.cargo/config`\n";
         for warnings in [
             deprecated.to_owned(),
+            deprecated.replace("repo/.cargo/", ""),
             deprecated.replace('/', "\\").replace('\n', "\r\n"),
             duplicate.to_owned(),
+            duplicate.replace("repo/.cargo/", ""),
             duplicate.replace('/', "\\").replace('\n', "\r\n"),
             format!("{deprecated}{duplicate}"),
         ] {
