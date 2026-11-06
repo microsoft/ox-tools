@@ -42,6 +42,16 @@ jobs:
           uid=$(id -u gamma-diagnostic)
           echo "DIAGNOSTIC_UID=$uid" >> "$GITHUB_ENV"
           echo "DIAGNOSTIC_BOUNDARY=user-$uid.slice" >> "$GITHUB_ENV"
+          if ! command -v setfacl >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq acl
+          fi
+          parent=$(dirname "$GITHUB_WORKSPACE")
+          while test "$parent" != /home && test "$parent" != /; do
+            sudo setfacl --modify=user:gamma-diagnostic:--x "$parent"
+            parent=$(dirname "$parent")
+          done
+          sudo setfacl --modify=user:gamma-diagnostic:--x "$RUNNER_TEMP"
           home=/home/gamma-diagnostic
           sudo mkdir -p "$home/.cargo" "$home/tmp"
           for name in bin registry .crates.toml .crates2.json; do
@@ -54,6 +64,9 @@ jobs:
             "$home" "$GITHUB_WORKSPACE"
           sudo chown "$USER:gamma-diagnostic" "$RUNNER_TEMP/gamma-diagnostic"
           sudo chmod 2775 "$RUNNER_TEMP/gamma-diagnostic"
+          sudo -u gamma-diagnostic test -r "$GITHUB_WORKSPACE/scripts/gamma-linux-diagnostics.py"
+          sudo -u gamma-diagnostic test -x "$RUNNER_TEMP/gamma-diagnostic-bin/cargo-gamma"
+          sudo -u gamma-diagnostic test -w "$RUNNER_TEMP/gamma-diagnostic"
           sudo loginctl enable-linger gamma-diagnostic
           sudo systemctl start "user@$uid.service"
           sudo systemctl set-property --runtime "user-$uid.slice" \
