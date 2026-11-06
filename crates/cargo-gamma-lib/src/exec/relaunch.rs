@@ -104,7 +104,7 @@ fn scope_command(exe: OsString, args: Vec<OsString>) -> Command {
 /// swallowing: the user asked for a bound, something was supposed to provide it, and it did not.
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub(crate) fn relaunch() -> Result<Option<i32>, Refusal> {
-    relaunch_unless(relaunched())
+    relaunch_unless(relaunched(), relaunch_in_scope)
 }
 
 /// Relaunches unless this process is already the relaunched one.
@@ -112,12 +112,16 @@ pub(crate) fn relaunch() -> Result<Option<i32>, Refusal> {
 /// The guard is a parameter rather than a call so that the recursion case can be tested without
 /// setting an environment variable, which in a threaded test binary is a change every other test
 /// sees.
-#[cfg_attr(coverage_nightly, coverage(off))]
-fn relaunch_unless(marked: bool) -> Result<Option<i32>, Refusal> {
+fn relaunch_unless(marked: bool, attempt: impl FnOnce() -> Result<Option<i32>, Refusal>) -> Result<Option<i32>, Refusal> {
     if marked {
         return Err(Refusal::AlreadyInScope);
     }
 
+    attempt()
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn relaunch_in_scope() -> Result<Option<i32>, Refusal> {
     let Ok(exe) = env::current_exe() else {
         return Err(Refusal::Unavailable);
     };
@@ -197,7 +201,28 @@ mod tests {
     /// each generation would print the same note and start the same run.
     #[test]
     fn a_process_already_inside_a_scope_refuses_to_relaunch_again() {
-        assert_eq!(relaunch_unless(true), Err(Refusal::AlreadyInScope));
+        let attempted = core::cell::Cell::new(false);
+        let result = relaunch_unless(true, || {
+            attempted.set(true);
+            Err(Refusal::Unavailable)
+        });
+
+        assert_eq!(result, Err(Refusal::AlreadyInScope));
+        assert!(!attempted.get(), "an already-marked process must not attempt a relaunch");
+    }
+
+    #[test]
+    fn an_unmarked_process_attempts_relaunch_once_and_preserves_its_result() {
+        let attempts = core::cell::Cell::new(0);
+        let result = relaunch_unless(false, || {
+            attempts.set(attempts.get() + 1);
+            Ok(Some(23))
+        });
+
+        assert_eq!(result, Ok(Some(23)));
+        assert_eq!(attempts.get(), 1);
+        assert_eq!(relaunch_unless(false, || Ok(None)), Ok(None));
+        assert_eq!(relaunch_unless(false, || Err(Refusal::Unavailable)), Err(Refusal::Unavailable));
     }
 
     /// A program that is not on `PATH` must not be reported as found, or the relaunch spawns

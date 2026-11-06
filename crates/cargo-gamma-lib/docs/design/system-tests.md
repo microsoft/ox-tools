@@ -190,6 +190,12 @@ child and `--exact` survive command construction without launching anything.
 Selection-widening mutations can therefore be reproduced through argument
 inspection, without executing the widened suite.
 
+The once-only systemd relaunch policy is exercised with a supplied callback,
+not the native relaunch adapter. A mutation that ignores the already-in-scope
+marker must fail against that callback without starting another copy of the
+test executable in a sibling systemd scope. Unmarked cases separately verify
+one attempt and unchanged success, exit-code and refusal results.
+
 ## Native command and storage acceptance
 
 The non-default `system-tests` feature also selects narrow private native
