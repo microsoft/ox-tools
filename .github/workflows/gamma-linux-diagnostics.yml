@@ -59,9 +59,12 @@ jobs:
               sudo cp -a "$HOME/.cargo/$name" "$home/.cargo/"
             fi
           done
-          # Cargo searches CARGO_HOME/bin before PATH for external subcommands.
-          sudo cp "$RUNNER_TEMP/gamma-diagnostic-bin/cargo-gamma" "$home/.cargo/bin/cargo-gamma"
-          sudo cmp "$RUNNER_TEMP/gamma-diagnostic-bin/cargo-gamma" "$home/.cargo/bin/cargo-gamma"
+          # Apply the private umask at the coordinator boundary, after recipe interpreters.
+          printf '#!/bin/sh\numask 077\nexec "%s" "$@"\n' \
+            "$RUNNER_TEMP/gamma-diagnostic-bin/cargo-gamma" \
+            | sudo tee "$home/.cargo/bin/cargo-gamma" > /dev/null
+          sudo chmod 755 "$home/.cargo/bin/cargo-gamma"
+          cmp target/release/cargo-gamma "$RUNNER_TEMP/gamma-diagnostic-bin/cargo-gamma"
           sha256sum "$RUNNER_TEMP/gamma-diagnostic-bin/cargo-gamma"
           sudo cp -a "$HOME/.rustup" "$home/"
           sudo chown -R gamma-diagnostic:gamma-diagnostic \

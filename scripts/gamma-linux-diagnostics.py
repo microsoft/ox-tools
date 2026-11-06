@@ -94,7 +94,7 @@ def sample(unit):
         processes.append({
             "pid": int(entry.name), "ppid": int(fields["PPid"]), "name": name,
             "rssKiB": int(fields["VmRSS"].split()[0]), "threads": int(fields["Threads"]),
-            "activeOrdinal": active, "cgroup": group_text,
+            "activeOrdinal": active, "cgroup": group_text, "umask": fields.get("Umask"),
         })
     memory = dict(line.split(":", 1) for line in Path("/proc/meminfo").read_text().splitlines())
     return {
