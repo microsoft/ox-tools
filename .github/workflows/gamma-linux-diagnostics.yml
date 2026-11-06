@@ -66,6 +66,8 @@ jobs:
           sudo cp -a "$HOME/.rustup" "$home/"
           sudo chown -R gamma-diagnostic:gamma-diagnostic \
             "$home" "$GITHUB_WORKSPACE"
+          sudo chmod 700 "$home" "$home/tmp"
+          sudo stat --format='%a %U %n' "$home" "$home/tmp"
           sudo chown "$USER:gamma-diagnostic" "$RUNNER_TEMP/gamma-diagnostic"
           sudo chmod 2775 "$RUNNER_TEMP/gamma-diagnostic"
           sudo -u gamma-diagnostic test -r "$GITHUB_WORKSPACE/scripts/gamma-linux-diagnostics.py"
@@ -108,6 +110,7 @@ jobs:
         id: campaign
         shell: bash
         run: |
+          umask 077
           set +e
           sudo -u gamma-diagnostic env -i \
             HOME=/home/gamma-diagnostic USER=gamma-diagnostic LOGNAME=gamma-diagnostic \
