@@ -6,7 +6,12 @@
 
 - 🐛 Bug Fixes
 
+  - cargo-coverage-gate: query only the effective build target ([#347](https://github.com/microsoft/ox-tools/pull/347))
   - cargo-coverage-gate: restore native proc-macro coverage ([#347](https://github.com/microsoft/ox-tools/pull/347))
+
+- ✔️ Tasks
+
+  - cargo-coverage-gate: prepare 0.7.5 release ([#347](https://github.com/microsoft/ox-tools/pull/347))
 
 ## [0.7.4] - 2026-11-02
 
