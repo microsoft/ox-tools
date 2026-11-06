@@ -181,6 +181,15 @@ Production launches retain their configured supervision budgets. Native
 acceptance is not a substitute for controlled policy coverage, nor are test
 helper bodies counted as production coverage.
 
+The direct stable-libtest acceptance validates its exact child selection
+before executing the constructed command. A mutation that removes the filter
+must fail before it can re-execute the entire test suite, including the
+acceptance itself. A separate construction-only regression uses a synthetic
+workspace and executable with no user arguments to check that the selected
+child and `--exact` survive command construction without launching anything.
+Selection-widening mutations can therefore be reproduced through argument
+inspection, without executing the widened suite.
+
 ## Native command and storage acceptance
 
 The non-default `system-tests` feature also selects narrow private native
