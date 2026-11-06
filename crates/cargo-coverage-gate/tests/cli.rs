@@ -781,7 +781,12 @@ fn run_delegates_both_configurations_to_cargo_llvm_cov_report_and_evaluates() {
     assert!(log.contains("--no-default-features"), "{log}");
     assert!(log.contains("--jobs\t3"), "{log}");
     assert!(log.contains("--build-jobs\t3"), "{log}");
-    assert!(log.contains("--target\tx86_64-pc-windows-msvc"), "{log}");
+    let collection_targets = log
+        .lines()
+        .filter(|line| line.starts_with("cargo\tllvm-cov\tnextest") || line.starts_with("cargo\tllvm-cov\treport"))
+        .flat_map(|line| line.split('\t').skip(2).filter(|argument| *argument == "--target"))
+        .collect::<Vec<_>>();
+    assert_eq!(collection_targets, Vec::<&str>::new(), "{log}");
     assert_eq!(log.matches("\t--locked").count(), 2, "{log}");
     assert_eq!(log.matches("cargo\tllvm-cov\treport\t--lcov").count(), 2, "{log}");
     assert!(!log.contains("--cargo-message-format"), "{log}");
@@ -1108,12 +1113,13 @@ fn run_preserves_nextest_output_and_rendered_compiler_diagnostics() {
 
 #[test]
 #[cfg_attr(miri, ignore = "spawns the binary and fake coverage tools")]
-fn run_rejects_stable_rust_and_old_cargo_llvm_cov() {
+fn run_rejects_invalid_instrumentation_prerequisites() {
     for (variable, value, expected) in [
         ("FAKE_FAIL_CARGO_VERSION", "1", "cargo toolchain validation failed"),
         ("FAKE_STABLE_CARGO", "1", "requires nightly Cargo"),
         ("FAKE_STABLE_RUSTC", "1", "requires nightly rustc"),
         ("FAKE_LLVM_COV_VERSION", "0.8.7", "requires cargo-llvm-cov >= 0.9.0"),
+        ("FAKE_CARGO_CONFIG_JSON", "{", "failed to parse Cargo configuration JSON"),
     ] {
         let tmp = TempDir::new().expect("tempdir");
         make_workspace(tmp.path(), &[("alpha", Some("100"))], None);
@@ -1241,6 +1247,7 @@ fn omitted_target_uses_one_host_for_collection_and_evaluation() {
 
     fake_collection_command(tmp.path(), &tools, &object)
         .env("CARGO_BUILD_TARGET", "aarch64-pc-windows-msvc")
+        .env("FAKE_CARGO_CONFIG_JSON", r#"{"build":{"target":"aarch64-pc-windows-msvc"}}"#)
         .env("FAKE_LCOV_HITS", "0")
         .assert()
         .success()

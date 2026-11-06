@@ -24,9 +24,15 @@ The optional `run` mode keeps collection and evaluation separated internally:
    inherited `CARGO`, `RUSTC`, `RUSTUP_TOOLCHAIN`, `PATH`, and related
    variables, with the report-only Windows `MSYSTEM` exception described
    below. One effective target is resolved from explicit `--target` or the
-   rustc host. The resolved target is supplied explicitly to collection and
-   evaluation, so `CARGO_BUILD_TARGET` and Cargo `build.target` cannot select a
-   different collection target. Instrumented runs validate that the effective
+   rustc host. Instrumented collection omits `--target` when the resolved
+   target equals the host and Cargo has no configured build target. Both an
+   omitted CLI target and an explicit host triple use this native mode.
+   The collector reads effective Cargo configuration with
+   `-Zunstable-options config get --format=json`; an absent target or an empty
+   target array permits native mode. Cross-target runs and configured targets
+   retain the explicit argument, so `CARGO_BUILD_TARGET` and Cargo `build.target`
+   cannot select a different collection target. Evaluation always receives the
+   resolved triple. Instrumented runs validate that the effective
    Cargo and rustc are nightly and that cargo-llvm-cov is 0.9.0 or newer. Host
    discovery output is reused for rustc validation. Version 0.9.0 is required
    because it introduced `--workspace` support for the `report` subcommand used
@@ -134,6 +140,10 @@ The same tests check that native command adapters select the running host's
 policy, so reversing host detection cannot silently select the other mode.
 Package-selection tests exercise both policies too, but assert only their own
 selection contract so unrelated platform flags cannot invalidate them.
+Target-policy tests inject rustc output and effective Cargo configuration,
+including strings and arrays, without consulting the test host. Command tests
+check that native collection and reporting both omit `--target` for each
+feature configuration while retaining the Windows wrapper workaround.
 
 ## Diagnostic pipeline
 

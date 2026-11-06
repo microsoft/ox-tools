@@ -213,10 +213,17 @@
 //! `RUSTC`, `RUSTUP_TOOLCHAIN`, and `PATH` rather than selecting a toolchain
 //! itself. Every selected package is instrumented regardless of its coverage
 //! policy. Callers may repeat `--no-coverage-target <TRIPLE>` to explicitly run
-//! plain nextest without LCOV or gating on listed targets. `run` resolves one
-//! effective target from explicit `--target` or the rustc host, then passes it
-//! explicitly to test execution, reporting, and evaluation. This deliberately
-//! overrides `CARGO_BUILD_TARGET` and Cargo `build.target` configuration.
+//! plain nextest without LCOV or gating on listed targets.
+//!
+//! `run` resolves one effective target from explicit `--target` or the rustc
+//! host. Policy evaluation and plain nextest always use that target explicitly.
+//! Collection and reporting pass `--target` for cross-target runs or when Cargo
+//! configures a build target. This prevents `CARGO_BUILD_TARGET` and Cargo
+//! `build.target` from redirecting collection.
+//!
+//! For native runs without a configured build target, collection and reporting
+//! omit `--target`. Cargo then also instruments host-only proc-macro builds
+//! through `RUSTFLAGS`.
 //! `--quiet` suppresses all collection and verdict stdout while preserving
 //! stderr diagnostics and summary output.
 //!

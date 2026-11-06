@@ -145,7 +145,8 @@ Flags:
 - `--target <triple>` — collect coverage and evaluate target-specific package
   policies for the supplied Rust target. For standalone evaluation, omission
   resolves the rustc host only when target policies exist. `run` always
-  resolves the rustc host when omitted and passes it explicitly to collection.
+  resolves the rustc host when omitted. Native collection omits `--target`
+  when Cargo has no configured build target.
 - `--summary-file <path>` — write a Markdown verdict table to this file.
   When unset, the tool honors the environment variables
   `GITHUB_STEP_SUMMARY` (GitHub Actions) and
@@ -358,8 +359,9 @@ Resolution follows Cargo's precedence:
 The CLI accepts `--target <triple>`. When omitted, standalone evaluation
 obtains the rustc host target from `rustc -vV` only if a package declares
 target policies. `run` instead resolves the host once on every omitted-target
-invocation, passes that triple explicitly to collection and evaluation, and
-reuses the same `rustc -vV` output for nightly validation.
+invocation and reuses the same `rustc -vV` output for nightly validation.
+Evaluation always uses that triple. Native collection omits redundant target
+arguments as described in the collection sequence.
 
 ### 5.4 The verdict table
 
@@ -508,8 +510,23 @@ On Windows, collection passes `--no-rustc-wrapper` to cargo-llvm-cov. Cargo can
 retry long compiler commands with response files, but cargo-llvm-cov 0.9's
 wrapper does not inspect those files before it selects coverage flags.
 The option puts instrumentation flags into Cargo's compiler arguments instead.
-With an explicit target, this mode does not instrument host-only proc-macro
-or build-script builds. Coverage thresholds remain unchanged.
+
+On every platform, collection and reporting omit `--target` for a native
+target with no Cargo build-target configuration. Cargo then also instruments
+host-only proc-macro builds through `RUSTFLAGS`. This applies whether the
+caller omits `--target` or explicitly names the rustc host. Policy evaluation
+still uses the resolved host triple. Coverage thresholds remain unchanged.
+
+Cross-target collection retains `--target`. Native collection also retains it
+when `CARGO_BUILD_TARGET` or Cargo `build.target` selects a target, so caller
+configuration cannot redirect collection. An empty `build.target` array selects
+no target and needs no override. The collector reads effective configuration
+with nightly Cargo's `-Zunstable-options config get --format=json`. Query and
+JSON errors stop collection. With an explicit target, Cargo applies `RUSTFLAGS`
+only to target compilations, so proc-macro and build-script builds receive no
+instrumentation when the wrapper is disabled. On Windows, host-only proc-macro
+coverage remains unavailable when an explicit or configured target is
+necessary.
 
 This repository's Windows diagnostic workflow also runs the collector from the
 checkout. On failure, it uploads raw
@@ -1084,21 +1101,28 @@ scratch. It never invokes workspace-wide cargo-llvm-cov cleanup.
 cargo-coverage-gate itself performs no network calls or privileged operations.
 Its Cargo and nextest children follow the caller's Cargo configuration and may
 fetch locked dependencies when they are not cached.
-The effective target is the deliberate exception: `run` always supplies
-`--target <triple>`, so `CARGO_BUILD_TARGET` and Cargo `build.target`
-configuration cannot select a different collection target. Callers that
+The effective target is the deliberate exception: `run` supplies
+`--target <triple>` for cross-target collection or when Cargo has a configured
+build target. Otherwise native collection omits the redundant argument.
+`CARGO_BUILD_TARGET` and Cargo `build.target` therefore cannot select a
+different collection target. Callers that
 require network isolation must configure Cargo offline mode outside this tool.
 
 Workspace discovery invokes the read-only `cargo metadata` command through
 `cargo_metadata::MetadataCommand::exec()` to enumerate workspace members and
-resolve the workspace root. When any package declares target-specific policy,
+resolve the workspace root. For native instrumented collection, `run` also
+invokes the read-only `cargo -Zunstable-options config get --format=json`
+command to read the effective Cargo build target.
+
+When any package declares target-specific policy,
 evaluation also invokes the executable selected by `RUSTC` (or `rustc` when
 unset). It runs `rustc -vV` when it must discover the host target, then runs
 `rustc --print cfg --target <triple>` for both explicit and discovered targets.
 When `--target` is omitted, `run` always reads the host triple once and reuses
-that version output for instrumentation validation. It passes the resulting
-triple explicitly to instrumented nextest, `cargo llvm-cov report`, plain
-nextest on a `--no-coverage-target` match, and policy evaluation.
+that version output for instrumentation validation. Instrumented nextest and
+`cargo llvm-cov report` share the same target-argument policy described above.
+Plain nextest on a `--no-coverage-target` match always receives the effective
+target explicitly. Policy evaluation also uses that effective triple.
 
 Child processes receive arguments directly rather than through a shell.
 Package selectors are resolved against workspace metadata before execution;
@@ -1159,7 +1183,7 @@ Rust with `cargo-llvm-cov ≥ 0.9`**. Four reasons:
 `cargo coverage-gate run` enforces these prerequisites before instrumented
 collection. Invoke the command through the intended nightly Cargo/toolchain;
 the collector honors inherited `CARGO`, `RUSTC`, `RUSTUP_TOOLCHAIN`, `PATH`,
-and related configuration except that its explicit effective `--target`
+and related configuration except that its effective target selection
 overrides Cargo build-target configuration. Only an explicit
 `--no-coverage-target` match takes the plain-test no-gate path and avoids the
 cargo-llvm-cov requirement.

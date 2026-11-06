@@ -59,6 +59,10 @@ fn run_cargo(args: &[std::ffi::OsString]) -> Result<(), String> {
         println!("release: {release}");
         return Ok(());
     }
+    if args == ["-Zunstable-options", "config", "get", "--format=json"] {
+        println!("{}", env::var("FAKE_CARGO_CONFIG_JSON").unwrap_or_else(|_| "{}".to_owned()));
+        return Ok(());
+    }
     if args.first().is_some_and(|arg| arg == "llvm-cov") && args.iter().any(|arg| arg == "--version") {
         let version = env::var("FAKE_LLVM_COV_VERSION").unwrap_or_else(|_| "0.9.0".to_owned());
         println!("cargo-llvm-cov {version}");
