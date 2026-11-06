@@ -521,8 +521,11 @@ Cross-target collection retains `--target`. Native collection also retains it
 when `CARGO_BUILD_TARGET` or Cargo `build.target` selects a target, so caller
 configuration cannot redirect collection. An empty `build.target` array selects
 no target and needs no override. The collector reads effective configuration
-with nightly Cargo's `-Zunstable-options config get --format=json`. Query and
-JSON errors stop collection. With an explicit target, Cargo applies `RUSTFLAGS`
+with nightly Cargo's `--color=never -Zunstable-options config get build.target --format=json`.
+The leaf query includes environment overrides without printing unrelated
+`CARGO_*` values, such as registry tokens. Only Cargo's exact exit-101 unset-key
+diagnostic is treated as an absent target; other query and JSON errors stop
+collection with diagnostics. With an explicit target, Cargo applies `RUSTFLAGS`
 only to target compilations, so proc-macro and build-script builds receive no
 instrumentation when the wrapper is disabled. On Windows, host-only proc-macro
 coverage remains unavailable when an explicit or configured target is
@@ -1111,8 +1114,10 @@ require network isolation must configure Cargo offline mode outside this tool.
 Workspace discovery invokes the read-only `cargo metadata` command through
 `cargo_metadata::MetadataCommand::exec()` to enumerate workspace members and
 resolve the workspace root. For native instrumented collection, `run` also
-invokes the read-only `cargo -Zunstable-options config get --format=json`
-command to read the effective Cargo build target.
+invokes the read-only
+`cargo --color=never -Zunstable-options config get build.target --format=json`
+command to read only the effective Cargo build target, including environment
+overrides.
 
 When any package declares target-specific policy,
 evaluation also invokes the executable selected by `RUSTC` (or `rustc` when

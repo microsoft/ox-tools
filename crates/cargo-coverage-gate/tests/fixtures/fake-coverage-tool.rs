@@ -59,8 +59,15 @@ fn run_cargo(args: &[std::ffi::OsString]) -> Result<(), String> {
         println!("release: {release}");
         return Ok(());
     }
-    if args == ["-Zunstable-options", "config", "get", "--format=json"] {
-        println!("{}", env::var("FAKE_CARGO_CONFIG_JSON").unwrap_or_else(|_| "{}".to_owned()));
+    if args == ["--color=never", "-Zunstable-options", "config", "get", "build.target", "--format=json"] {
+        if let Ok(json) = env::var("FAKE_CARGO_CONFIG_JSON") {
+            println!("{json}");
+        } else if let Ok(target) = env::var("CARGO_BUILD_TARGET") {
+            println!(r#"{{"build":{{"target":"{target}"}}}}"#);
+        } else {
+            eprintln!("error: config value `build.target` is not set");
+            std::process::exit(101);
+        }
         return Ok(());
     }
     if args.first().is_some_and(|arg| arg == "llvm-cov") && args.iter().any(|arg| arg == "--version") {

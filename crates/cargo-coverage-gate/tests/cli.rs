@@ -1247,7 +1247,6 @@ fn omitted_target_uses_one_host_for_collection_and_evaluation() {
 
     fake_collection_command(tmp.path(), &tools, &object)
         .env("CARGO_BUILD_TARGET", "aarch64-pc-windows-msvc")
-        .env("FAKE_CARGO_CONFIG_JSON", r#"{"build":{"target":"aarch64-pc-windows-msvc"}}"#)
         .env("FAKE_LCOV_HITS", "0")
         .assert()
         .success()
