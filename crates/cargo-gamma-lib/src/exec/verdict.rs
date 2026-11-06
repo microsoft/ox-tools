@@ -924,34 +924,6 @@ fn configured_launcher(work: &Workspace, binary: &TestBinary, attempt: Attempt<'
     Ok(command)
 }
 
-// #[gamma::skip(all, reason = "temporary diagnostic-run launch journal; removed after dispatch")]
-fn diagnostic_launch(event: &str, binary: &TestBinary, attempt: Attempt<'_>, child_pid: Option<u32>) -> io::Result<()> {
-    use std::io::Write as _;
-
-    static WRITER: Mutex<()> = Mutex::new(());
-    let Some(path) = env::var_os("GAMMA_DIAGNOSTIC_LAUNCH_LOG") else {
-        return Ok(());
-    };
-    let _writer = WRITER.lock().map_err(|cause| io::Error::other(cause.to_string()))?;
-    let mut file = fs::OpenOptions::new().create(true).append(true).open(path)?;
-    let record = serde_json::json!({
-        "event": event,
-        "unixMillis": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(io::Error::other)?.as_millis(),
-        "controllerPid": std::process::id(),
-        "childPid": child_pid,
-        "ordinal": attempt.active,
-        "package": binary.package,
-        "target": binary.target,
-        "tests": attempt.only.names(),
-        "limitBytes": attempt.request.limit,
-        "meter": attempt.request.meter,
-        "calibrating": attempt.request.calibrating,
-    });
-    serde_json::to_writer(&mut file, &record).map_err(io::Error::other)?;
-    file.write_all(b"\n")?;
-    file.sync_data()
-}
-
 /// Runs one binary, publishing the harness's progress into `progress` as it goes.
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -991,30 +963,10 @@ fn run_with_observation(
     // all of that on stdout, and its stderr carries only panic noise that no verdict is read from.
     let under_nextest = work.runner().is_some();
 
-    // #[gamma::skip(stmt.delete_call, reason = "temporary diagnostic-run isolation; removed after dispatch")]
-    let _ = command.env_remove("GAMMA_DIAGNOSTIC_LAUNCH_LOG");
-    // #[gamma::skip(all, reason = "temporary diagnostic-run launch journal; removed after dispatch")]
-    if let Err(cause) = diagnostic_launch("launch.requested", binary, attempt, None) {
-        return (
-            Verdict::Unmetered(format!("diagnostic launch journal failed: {cause}")),
-            MemoryUsage::default(),
-            None,
-        );
-    }
-
     let spawned = match start_or_verdict(command, binary, request) {
         Ok(started) => started,
         Err((verdict, usage)) => return (verdict, usage, None),
     };
-
-    // #[gamma::skip(all, reason = "temporary diagnostic-run launch journal; removed after dispatch")]
-    if let Err(cause) = diagnostic_launch("launch.spawned", binary, attempt, Some(spawned.id())) {
-        return (
-            Verdict::Unmetered(format!("diagnostic launch journal failed: {cause}")),
-            MemoryUsage::default(),
-            None,
-        );
-    }
 
     // Adopted before anything is read from the child, so the typestate bundle cannot sit with its
     // interrupt window open while a grandchild starts outside the containment.
