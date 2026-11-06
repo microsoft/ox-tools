@@ -273,13 +273,16 @@ text for parser and discovery tests. The collector's
 define the accepted layouts.
 
 The generated recipe intentionally omits the collector's `--target` option.
-`cargo-coverage-gate run` resolves the invoking rustc host and passes that target
-explicitly, overriding `CARGO_BUILD_TARGET` and Cargo `build.target`
-configuration. Each Anvil matrix leg therefore measures its native target,
-rather than inheriting a configured cross-target from the checkout. Repositories
-that require coverage for a non-host target must provide a native runner for
-that target or retain a documented repository-specific check until the catalog
-supports explicit coverage-target configuration.
+`cargo-coverage-gate run` resolves the invoking rustc host as its effective
+target. Native collection and reporting omit `--target` when Cargo has no
+build-target configuration, allowing coverage flags to instrument host-only
+proc-macro builds. When `CARGO_BUILD_TARGET` or Cargo `build.target` selects a
+target, the collector retains an explicit host-target override. Each Anvil
+matrix leg therefore measures its native target, rather than inheriting a
+configured cross-target from the checkout. Repositories that require coverage
+for a non-host target must provide a native runner for that target or retain a
+documented repository-specific check until the catalog supports explicit
+coverage-target configuration.
 
 When the workspace owns a `cargo-coverage-gate` package with a
 `cargo-coverage-gate` binary target, the recipe runs that binary from the
