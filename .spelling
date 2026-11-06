@@ -22,6 +22,8 @@ quiesces
 unmerged
 unselected
 unvalidated
+unexpanded
+revalidation
 acyclic
 addrs
 ado

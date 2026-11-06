@@ -83,12 +83,16 @@ mod tests {
 
 /// A crate whose only mutant cannot compile, so `suppress --eligible unviable` has something to write.
 ///
-/// `iter.take_to_skip` replaces `.take(1)` with `.skip(1)`. `Value` intentionally defines `take`
-/// but not `skip`, keeping that replacement unviable.
+/// The trait-provided `take` leaves counterpart evidence open, so the compiler oracle
+/// must reject the nonexistent `skip` rather than discovery filtering the candidate.
 const UNVIABLE: &str = "
 pub struct Value;
 
-impl Value {
+trait Take {
+    fn take(self, count: usize) -> Self;
+}
+
+impl Take for Value {
     fn take(self, _count: usize) -> Self {
         self
     }
@@ -1320,26 +1324,6 @@ fn a_misspelled_config_key_stops_the_run() {
 
     assert_ne!(code, EXIT_OK, "{output}");
     assert!(output.contains("unknown field"), "{output}");
-}
-
-#[test]
-fn a_foreign_config_is_reported_as_unread() {
-    step_aside_if_nested!();
-    let dir = workspace(SUBJECT);
-
-    fs::create_dir_all(dir.path().join(".cargo")).expect("could not create .cargo");
-    fs::write(dir.path().join(".cargo/mutants.toml"), "exclude_re = [\"impl Debug\"]\n").expect("could not write the foreign config");
-
-    let (code, output) = session(&dir, &["--dry-run", "--progress", "always"]);
-
-    assert_eq!(code, EXIT_OK, "{output}");
-    assert!(output.contains(".cargo/mutants.toml is not supported or read"), "{output}");
-    let note = output
-        .find(".cargo/mutants.toml is not supported or read")
-        .expect("foreign-config note");
-    let analyzing = output.find("Analyzing the workspace").expect("analysis phase");
-
-    assert!(note < analyzing, "{output}");
 }
 
 #[test]

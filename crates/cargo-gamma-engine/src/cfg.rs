@@ -152,6 +152,71 @@ impl CfgSet {
         self.holds_effective(&self.effective(attrs))
     }
 
+    /// Returns whether attributes keep an item in every represented compilation context.
+    ///
+    /// Unlike `holds_for`, uncertainty cannot establish a required match fallback.
+    ///
+    /// ```rust
+    /// use cargo_gamma_engine::cfg::CfgSet;
+    /// use syn::parse_quote;
+    ///
+    /// let cfg = CfgSet::parse("unix\n");
+    /// assert!(cfg.guaranteed_for(&[parse_quote!(#[cfg(unix)])]));
+    /// assert!(!cfg.guaranteed_for(&[parse_quote!(#[cfg(windows)])]));
+    /// ```
+    #[must_use]
+    pub fn guaranteed_for(&self, attrs: &[Attribute]) -> bool {
+        let mut pending = attrs.iter().map(|attribute| attribute.meta.clone()).collect::<Vec<_>>();
+        while let Some(attribute) = pending.pop() {
+            if attribute.path().is_ident("cfg") {
+                if cfg_predicate(&attribute).is_none_or(|predicate| self.verdict(&predicate) != Verdict::Yes) {
+                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "the inferred bool default is already false")]
+                    return false;
+                }
+            } else if attribute.path().is_ident("cfg_attr") {
+                let Some((condition, nested)) = cfg_attr(&attribute) else {
+                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "the inferred bool default is already false")]
+                    return false;
+                };
+                match self.verdict(&condition) {
+                    Verdict::Yes | Verdict::Unknown => pending.extend(nested),
+                    Verdict::No => {}
+                }
+            }
+        }
+        true
+    }
+
+    /// Returns whether an item is present whenever another item's identical cfg restrictions hold.
+    ///
+    /// `attrs` are the candidate item's attributes. `required` are the reference item's
+    /// attributes, whose restrictions the caller already requires to hold. Identical `cfg` and
+    /// `cfg_attr` attributes in both slices need no additional proof; every remaining restriction
+    /// on the candidate must hold in every represented context.
+    ///
+    /// ```rust
+    /// use cargo_gamma_engine::cfg::CfgSet;
+    /// use syn::{Attribute, parse_quote};
+    ///
+    /// let cfg = CfgSet::parse("");
+    /// let shared: Attribute = parse_quote!(#[cfg(feature = "optional")]);
+    /// assert!(!cfg.guaranteed_for(&[shared.clone()]));
+    /// assert!(cfg.guaranteed_when(&[shared.clone()], &[shared]));
+    /// ```
+    #[must_use]
+    pub fn guaranteed_when(&self, attrs: &[Attribute], required: &[Attribute]) -> bool {
+        let remaining = attrs
+            .iter()
+            .filter(|attribute| {
+                // #[gamma::skip(logical.and_remove_left, tag = "equivalent", reason = "removing the cfg-name check only additionally drops shared non-cfg attributes, which guaranteed_for ignores")]
+                !((attribute.path().is_ident("cfg") || attribute.path().is_ident("cfg_attr"))
+                    && required.iter().any(|required| required.meta == attribute.meta))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        self.guaranteed_for(&remaining)
+    }
+
     /// Returns whether effective attributes confine an item to test code.
     ///
     /// `cfg_attr` can add either `cfg(test)` or a test attribute itself. Both have to be read
@@ -528,6 +593,66 @@ fn combine(answers: &mut dyn Iterator<Item = Verdict>, settles: Verdict, otherwi
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guaranteed_presence_requires_every_compilation_context() {
+        let ordinary = CfgSet::parse("unix");
+        let testing = ordinary.clone().with_test();
+        for (text, ordinary_expected, testing_expected) in [
+            ("", true, true),
+            ("#[cfg(unix)]", true, true),
+            ("#[cfg(windows)]", false, false),
+            ("#[cfg(not(test))]", true, false),
+            ("#[cfg(test)]", false, false),
+            ("#[cfg(version(\"1.95\"))]", false, false),
+            ("#[cfg_attr(windows, cfg(windows))]", true, true),
+            ("#[cfg_attr(unix, cfg(unix))]", true, true),
+            ("#[cfg_attr(version(\"1.95\"), cfg(unix))]", true, true),
+            ("#[cfg_attr(version(\"1.95\"), cfg(windows))]", false, false),
+            ("#[cfg_attr(unix, cfg_attr(unix, cfg(not(test))))]", true, false),
+            ("#[cfg_attr(version(\"1.95\"), doc = \"explanation\")]", true, true),
+            ("#[cfg_attr()]", false, false),
+        ] {
+            let attrs = attribute(text);
+            assert_eq!(ordinary.guaranteed_for(&attrs), ordinary_expected, "{text}");
+            assert_eq!(testing.guaranteed_for(&attrs), testing_expected, "{text}");
+        }
+        assert!(testing.guaranteed_when(&attribute("#[cfg(not(test))]"), &attribute("#[cfg(not(test))]")));
+        assert!(testing.guaranteed_when(&attribute("#[cfg(version(\"1.95\"))]"), &attribute("#[cfg(version(\"1.95\"))]")));
+        assert!(!testing.guaranteed_when(&attribute("#[cfg(not(test))]"), &attribute("#[cfg(unix)]")));
+    }
+
+    #[test]
+    fn guaranteed_when_exempts_only_identical_shared_restrictions() {
+        let cfg = CfgSet::parse("unix");
+        for (candidate, required, expected) in [
+            ("#[cfg_attr(unix, cfg(windows))]", "#[cfg_attr(unix, cfg(windows))]", true),
+            ("#[cfg_attr(unix, cfg(windows))]", "#[cfg_attr(windows, cfg(windows))]", false),
+            (
+                "#[cfg_attr(unix, cfg(windows))] #[cfg(windows)]",
+                "#[cfg_attr(unix, cfg(windows))]",
+                false,
+            ),
+            (
+                "#[cfg_attr(unix, cfg(windows))] #[cfg(unix)]",
+                "#[cfg_attr(unix, cfg(windows))]",
+                true,
+            ),
+            (
+                "#[cfg_attr(version(\"1.95\"), cfg(windows))]",
+                "#[cfg_attr(version(\"1.95\"), cfg(windows))]",
+                true,
+            ),
+            ("#[doc = \"shared\"] #[cfg(windows)]", "#[doc = \"shared\"]", false),
+            ("#[doc = \"shared\"] #[cfg(unix)]", "#[doc = \"shared\"]", true),
+        ] {
+            assert_eq!(
+                cfg.guaranteed_when(&attribute(candidate), &attribute(required)),
+                expected,
+                "{candidate}; required={required}"
+            );
+        }
+    }
 
     #[test]
     fn ordinary_build_test_predicates_use_declared_cfg_not_hypothetical_unit_target() {

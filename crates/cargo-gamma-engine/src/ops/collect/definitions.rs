@@ -18,8 +18,9 @@ use crate::parse::SourceFile;
 ///
 /// # Panics
 ///
-/// Panics if a caller supplies a `fn_value.stated` candidate whose replacement is not a Rust
-/// expression. Collected stated candidates have already passed expression validation.
+/// Panics if a caller supplies a stated or composed return candidate whose replacement is not a
+/// Rust expression. Collected stated candidates have already passed expression validation, and
+/// generated composed replacements are valid expressions.
 #[must_use]
 pub fn into_definitions(file: &SourceFile, candidates: Vec<Candidate>) -> Vec<MutantDefinition> {
     // One copy of the path for the whole file, rather than one per mutation.
@@ -102,8 +103,20 @@ pub fn into_definitions(file: &SourceFile, candidates: Vec<Candidate>) -> Vec<Mu
                 .to_token_stream()
                 .to_string()
         });
+        // Pruning an unproven nested default can compact a Cartesian product's indices.
+        let composed = matches!(
+            candidate.mutator,
+            "fn_value.tuple" | "fn_value.some" | "fn_value.ok" | "fn_value.one_element"
+        )
+        .then(|| {
+            syn::parse_str::<syn::Expr>(&candidate.replacement)
+                .expect("composed return candidates must contain valid Rust expressions")
+                .to_token_stream()
+                .to_string()
+        });
         let discriminator = stated
             .as_deref()
+            .or(composed.as_deref())
             .or_else(|| (candidate.mutator == "fn_value.err_with").then_some(candidate.replacement.as_str()));
 
         definitions.push(MutantDefinition {
@@ -138,6 +151,28 @@ mod tests {
     use crate::cfg::CfgSet;
     use crate::ops::collect::collect_in;
     use crate::ops::registry::Selection;
+
+    #[test]
+    fn composed_return_identities_do_not_reuse_compacted_replacement_slots() {
+        let file = SourceFile::parse("fixture.rs", "fn f() -> (bool, bool) { original() }".into()).unwrap();
+        let template = collect_in(&file, &Selection::parse("fn_value.tuple").unwrap(), &CfgSet::unconditional())
+            .into_iter()
+            .next()
+            .unwrap();
+        for mutator in ["fn_value.tuple", "fn_value.some", "fn_value.ok", "fn_value.one_element"] {
+            let mut first = template.clone();
+            first.mutator = mutator;
+            first.replacement_index = 2;
+            first.replacement = "(true, false)".into();
+            let mut compacted = first.clone();
+            compacted.replacement = "(false, true)".into();
+            let first_id = into_definitions(&file, vec![first])[0].id.clone();
+            let compacted_id = into_definitions(&file, vec![compacted.clone()])[0].id.clone();
+            assert_ne!(first_id, compacted_id, "{mutator}");
+            compacted.replacement = "( false , true )".into();
+            assert_eq!(compacted_id, into_definitions(&file, vec![compacted])[0].id, "{mutator}");
+        }
+    }
 
     #[test]
     #[should_panic(expected = "fn_value.stated candidates must contain a valid Rust expression")]

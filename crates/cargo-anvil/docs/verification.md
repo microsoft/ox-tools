@@ -78,7 +78,7 @@ self-hosting pipeline described above.
 
 The formatter alias-rejection and name-collision tests separately execute Just
 and PowerShell against controlled Cargo metadata. These behavior checks run
-with the `internals` feature enabled and require both executables on `PATH`.
+with the `test-util` feature enabled and require both executables on `PATH`.
 If either is missing, they fail with an actionable prerequisite message rather
 than silently passing.
 

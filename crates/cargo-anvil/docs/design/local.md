@@ -104,6 +104,7 @@ anvil-pr-fast
 anvil-pr-test
 anvil-pr-msrv
 anvil-pr-runtime-analysis
+anvil-pr-fuzzing
 anvil-pr-mutants
 anvil-scheduled-test
 anvil-scheduled-advisories
@@ -206,9 +207,7 @@ and zero unresolved flaky outcomes.
 succeeds; promotion failure fails an otherwise successful campaign. GitHub runs
 also write reports and SARIF under `target/cargo-gamma`.
 
-## 6. Remaining shell-backed check boundaries
-
-### Bolero
+## 6. Bolero handoff
 
 For each affected package the recipe runs
 `cargo bolero list --profile release --target <nightly-host> --package <name>` and redirects the
@@ -226,6 +225,9 @@ commands. `--keep-going` preserves aggregate failure behavior, and an empty file
 is cargo-each's successful no-op. A successful run removes the JSONL file.
 Failed discovery or execution leaves the PID-scoped file in place for
 diagnostics; the next Just process uses a different name.
+
+The PR campaign uses `--runs 30000 -S 2027`; the scheduled campaign uses
+`-T 90s`. Both the check and the `pr-fuzzing` setup wrappers are shell-free.
 
 ### Spell dictionary preparation
 

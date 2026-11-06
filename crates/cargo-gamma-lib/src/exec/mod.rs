@@ -34,6 +34,7 @@ pub mod memory;
 #[cfg(not(feature = "internals"))]
 mod memory;
 mod nextest;
+mod process_output;
 mod progress;
 #[cfg(target_os = "linux")]
 pub(crate) mod relaunch;

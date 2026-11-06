@@ -37,7 +37,7 @@ cargo-aprz-lib = { path = "crates/cargo-aprz-lib", default-features = false, ver
 cargo-gamma-attrs = { path = "crates/cargo-gamma-attrs", default-features = false, version = "0.4.0" }
 cargo-gamma-attrs-impl = { path = "crates/cargo-gamma-attrs-impl", default-features = false, version = "0.4.0" }
 cargo-gamma-engine = { path = "crates/cargo-gamma-engine", default-features = false, version = "0.4.0" }
-cargo-gamma-lib = { path = "crates/cargo-gamma-lib", default-features = false, version = "0.4.0" }
+cargo-gamma-lib = { path = "crates/cargo-gamma-lib", default-features = false, version = "0.5.0" }
 cargo-gamma-process = { path = "crates/cargo-gamma-process", default-features = false, version = "0.4.0" }
 cargo-gamma-rt = { path = "crates/cargo-gamma-rt", default-features = false, version = "0.4.0" }
 cargo-gamma-unsafe = { path = "crates/cargo-gamma-unsafe", default-features = false, version = "0.4.0" }

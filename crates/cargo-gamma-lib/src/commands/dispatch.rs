@@ -352,7 +352,7 @@ fn relaunch_for_memory_control<H: Host>(host: &H, args: &super::cli::RunArgs) ->
 pub(super) fn dispatch<H: Host>(host: &mut H, cli: Cli, styler: Styler) -> crate::Result<i32> {
     match cli.command {
         Command::Run(mut args) => {
-            configure(host, &mut args, styler)?;
+            configure(&mut args)?;
             check_run_shard(&args)?;
 
             #[cfg(target_os = "linux")]
@@ -361,18 +361,16 @@ pub(super) fn dispatch<H: Host>(host: &mut H, cli: Cli, styler: Styler) -> crate
             {
                 return Ok(code);
             }
+            #[cfg(target_os = "linux")]
+            if args.resume_testing
+                && let Some(code) = super::run::resume_relaunch(host, &args)?
+            {
+                return Ok(code);
+            }
 
             let campaign = run_session(host, &args, args.progress, styler);
-            let promotion = HintsArgs {
-                dir: args.select.dir.clone(),
-                cache_dir: args.measure.cache_dir.clone(),
-                ..HintsArgs::default()
-            };
-            let (code, promotion_error) = finish_campaign(campaign, args.update_hints, || hints(host, &promotion, styler))?;
-            if let Some(error) = promotion_error {
-                let _ = writeln!(host.error(), "{} could not update hints: {error}", styler.error("error:"));
-            }
-            Ok(code)
+            let promotion = promotion_args(&args);
+            finish_run_command(host, campaign, args.update_hints, styler, |host| hints(host, &promotion, styler))
         }
 
         Command::List(args) => list(host, &args, styler),
@@ -396,6 +394,28 @@ pub(super) fn dispatch<H: Host>(host: &mut H, cli: Cli, styler: Styler) -> crate
 
         Command::Completions(args) => Ok(completions(host, &args)),
     }
+}
+
+fn promotion_args(args: &super::cli::RunArgs) -> HintsArgs {
+    HintsArgs {
+        dir: args.select.dir.clone(),
+        cache_dir: args.measure.cache_dir.clone(),
+        ..HintsArgs::default()
+    }
+}
+
+fn finish_run_command<H: Host>(
+    host: &mut H,
+    campaign: crate::Result<i32>,
+    update_hints: bool,
+    styler: Styler,
+    promote: impl FnOnce(&mut H) -> crate::Result<i32>,
+) -> crate::Result<i32> {
+    let (code, promotion_error) = finish_campaign(campaign, update_hints, || promote(host))?;
+    if let Some(error) = promotion_error {
+        let _ = writeln!(host.error(), "{} could not update hints: {error}", styler.error("error:"));
+    }
+    Ok(code)
 }
 
 /// Promotes learned hints only after a campaign reached a reportable process outcome.
@@ -749,6 +769,10 @@ mod tests {
                 .message(),
             "promotion broke"
         );
+        let (code, promotion_error) =
+            finish_campaign(Ok(EXIT_OK), true, || Ok(EXIT_USAGE)).expect("a successful campaign returns the promotion status");
+        assert_eq!(code, EXIT_USAGE);
+        assert!(promotion_error.is_none());
         let (code, promotion_error) = finish_campaign(Ok(EXIT_GATE_FAILED), true, || Err(crate::error::error!("promotion broke")))
             .expect("a failed gate remains a reportable campaign outcome");
         assert_eq!(code, EXIT_GATE_FAILED);
@@ -772,6 +796,47 @@ mod tests {
         assert_eq!(code, EXIT_OK);
         assert!(promotion_error.is_none());
         assert!(!promoted.get(), "an ordinary run must not promote hints");
+    }
+
+    #[test]
+    fn update_hints_forwards_run_paths() {
+        let mut args = super::super::cli::RunArgs::default();
+        args.select.dir = camino::Utf8PathBuf::from("selected-workspace");
+        args.measure.cache_dir = Some(camino::Utf8PathBuf::from("effective-cache"));
+
+        let promotion = promotion_args(&args);
+        assert_eq!(promotion.dir, args.select.dir);
+        assert_eq!(promotion.cache_dir, args.measure.cache_dir);
+    }
+
+    #[test]
+    fn update_hints_propagates_operational_errors_without_promotion() {
+        let promoted = core::cell::Cell::new(false);
+        let error = finish_run_command(
+            &mut crate::testing::Sink::default(),
+            Err(crate::error::error!("campaign broke")),
+            true,
+            Styler::new(false),
+            |_| {
+                promoted.set(true);
+                Ok(EXIT_OK)
+            },
+        )
+        .expect_err("an operational campaign error must propagate through command completion");
+        assert_eq!(error.message(), "campaign broke");
+        assert!(!promoted.get(), "an operational campaign error must not promote hints");
+    }
+
+    #[test]
+    fn update_hints_returns_successful_promotion_status() {
+        let promoted = core::cell::Cell::new(false);
+        let code = finish_run_command(&mut crate::testing::Sink::default(), Ok(EXIT_OK), true, Styler::new(false), |_| {
+            promoted.set(true);
+            Ok(EXIT_USAGE)
+        })
+        .expect("a requested successful promotion returns through command completion");
+        assert_eq!(code, EXIT_USAGE);
+        assert!(promoted.get(), "the command-finishing helper must honor the promotion request");
     }
 
     /// A crate small enough to enumerate mutants in, with whatever configuration the test needs.

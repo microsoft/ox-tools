@@ -1060,7 +1060,7 @@ mod tests {
         let ListCommand::Presets(args) = &mut listing.command else {
             panic!("expected preset listing");
         };
-        args.mutators = Some("relational,range".to_owned());
+        args.mutators = Some("relational,range,ordering".to_owned());
 
         let code = list(&mut host, &listing, Styler::new(false)).expect("list presets");
         let text = String::from_utf8(host.out).expect("utf-8");
@@ -1078,7 +1078,7 @@ mod tests {
         assert_eq!(code, EXIT_OK);
         assert_eq!(entries.len(), registry::PRESETS.len(), "{text}");
         assert!(enabled("boundary"), "a preset whose every member was selected reads as off: {text}");
-        assert!(!enabled("semantics"), "a preset no selected mutator belongs to reads as on: {text}");
+        assert!(!enabled("semantics"), "a partially selected preset reads as on: {text}");
         assert!(entries.iter().all(|entry| entry["description"].is_string()), "{text}");
         assert!(entries.iter().all(|entry| entry["members"].is_array()), "{text}");
     }

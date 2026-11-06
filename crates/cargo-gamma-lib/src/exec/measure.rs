@@ -663,14 +663,7 @@ fn measure_with_locks(
     }
     let started = Instant::now();
 
-    let support = runner_memory_support(
-        // #[gamma::skip(bool_expr.negate, tag = "native", reason = "this call combines the live host memory probe with runner selection; runner_memory_support exhaustively tests the platform/runner policy without native preparation")]
-        config.nextest,
-        // #[gamma::skip(bool_expr.negate, tag = "native", reason = "the compiled host platform is not an input a unit test can change; runner_memory_support tests both platform values explicitly")]
-        cfg!(target_os = "macos"),
-        memory::support().map_err(|reason| reason.to_string()),
-    );
-    let (memory, unbounded) = settle_memory_control(config, support)?;
+    let (memory, unbounded) = settle_memory_control(config, memory::support().map_err(|reason| reason.to_string()))?;
 
     // Resource discovery also uses the baseline limit, even with --no-baseline, so those
     // launches still need the soft-bound warning. Enforcement reaches here only with a
@@ -679,10 +672,10 @@ fn measure_with_locks(
     #[cfg(target_os = "macos")]
     if memory.enforcing() || memory.baseline_limit.is_some() {
         events.warn(&format!(
-            "memory enforcement on macOS samples the process group's physical footprint every {} ms: \
-             the bound is soft, allocation can overshoot between samples, descendants that leave \
-             the process group are neither counted nor stopped, and members owned by another user \
-             cannot be read and are not counted",
+            "memory enforcement on macOS samples the process tree's physical footprint every {} ms: \
+             the bound is soft, allocation can overshoot between samples, a descendant that leaves \
+             the process group and outlives its parent is neither counted nor stopped, and members \
+             owned by another user cannot be read and are not counted",
             cargo_gamma_process::SAMPLE_INTERVAL.as_millis(),
         ));
     }
@@ -762,16 +755,16 @@ fn measure_with_locks(
         });
     }
 
-    // Check the complete schema to convergence, then generate its test binaries. The successful
-    // build's artifact stream is retained for the baseline, so convergence does not end with a
-    // redundant cache-hit Cargo invocation.
-    // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
-    begin_schema_build(events, converger.historical_exclusions);
-
     // Build only packages whose tests can actually be selected: the rest would be compiled,
     // baselined and never consulted. All target packages have already been instrumented, so this
     // one convergence sees every mutation that can affect those test targets.
     let select = build_packages(&plan, &scope);
+    // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
+    begin_schema_build(events, converger.historical_exclusions.saturating_add(converger.census.len()));
+
+    // Check the complete schema to convergence, then generate its test binaries. The successful
+    // build's artifact stream is retained for the baseline, so convergence does not end with a
+    // redundant cache-hit Cargo invocation.
     let mut build = converger.finish(&work, &mut plan, select.as_deref(), config.build, events)?;
     // From this point onward compiler convergence has produced durable score-neutral learning.
     // If a later preparation step fails, move the plan into `failed` on that error path so the
@@ -1474,17 +1467,6 @@ fn baseline_memory_request(memory: &MemoryPolicy) -> MemoryRequest {
     }
 }
 
-fn runner_memory_support(nextest: bool, macos: bool, support: Result<(), String>) -> Result<(), String> {
-    if macos && nextest {
-        Err(
-            "nextest puts each test in its own process group, outside macOS sampled memory control; drop `--nextest` to use memory control"
-                .to_owned(),
-        )
-    } else {
-        support
-    }
-}
-
 /// Describes what the baseline measured, for the line that replaces its announcement.
 ///
 /// The test count is omitted rather than guessed when no harness announced one, which is what a
@@ -1592,7 +1574,7 @@ mod tests {
         assert_eq!(failure.message(), "owned runtime link refusal");
         assert_eq!(
             from_slice::<Value>(&std::fs::read(base.join("compiler-exclusions.json")).unwrap()).unwrap(),
-            json!({"version": 1, "mutants": {}})
+            json!({"version": 1, "evidence_revision": 2, "mutants": {}})
         );
     }
 
@@ -3763,107 +3745,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn macos_nextest_disables_inherited_memory_control_with_a_reason() {
-        let config = Config {
-            nextest: true,
-            ..Config::default()
-        };
-        let support = runner_memory_support(config.nextest, true, Ok(()));
-        let (settled, note) = settle_memory_control(&config, support).unwrap();
-        assert_eq!(settled, config.memory.disabled());
-        assert!(!settled.enforcing());
-        assert_eq!(settled.baseline_limit, None);
-        assert_eq!(
-            note.as_deref(),
-            Some(
-                "nextest puts each test in its own process group, outside macOS sampled memory control; drop `--nextest` to use memory control"
-            )
-        );
-    }
-
-    #[test]
-    fn macos_nextest_refuses_stated_memory_control_and_limits() {
-        for memory in [
-            MemoryPolicy {
-                control: MemoryControl::Measure,
-                demand: Demand::Stated,
-                ..MemoryPolicy::default()
-            },
-            MemoryPolicy {
-                demand: Demand::Stated,
-                ..MemoryPolicy::default()
-            },
-            MemoryPolicy {
-                demand: Demand::Stated,
-                limit: Some(100),
-                ..MemoryPolicy::default()
-            },
-            MemoryPolicy {
-                control: MemoryControl::Measure,
-                demand: Demand::Stated,
-                baseline_limit: Some(100),
-                ..MemoryPolicy::default()
-            },
-        ] {
-            let config = Config {
-                nextest: true,
-                memory,
-                ..Config::default()
-            };
-            let support = runner_memory_support(config.nextest, true, Ok(()));
-            let error = settle_memory_control(&config, support).unwrap_err();
-            assert_eq!(
-                error.to_string(),
-                "memory control was asked for, but it is not available here: nextest puts each test in its own process group, outside macOS sampled memory control; drop `--nextest` to use memory control.\nRun with `--memory off` to continue without it."
-            );
-        }
-    }
-
-    #[test]
-    fn runner_memory_support_preserves_supported_combinations_and_host_failures() {
-        for (macos, nextest) in [(true, false), (false, true), (false, false)] {
-            let config = Config {
-                nextest,
-                ..Config::default()
-            };
-            let support = runner_memory_support(config.nextest, macos, Ok(()));
-            let (settled, note) = settle_memory_control(&config, support).unwrap();
-            assert_eq!(settled, config.memory);
-            assert_eq!(note, None);
-            assert_eq!(
-                runner_memory_support(nextest, macos, Err("host unavailable".to_owned())),
-                Err("host unavailable".to_owned())
-            );
-        }
-    }
-
-    #[test]
-    fn macos_nextest_allows_explicitly_disabled_memory_control() {
-        let config = Config {
-            nextest: true,
-            memory: MemoryPolicy {
-                control: MemoryControl::Off,
-                demand: Demand::Stated,
-                limit: Some(100),
-                baseline_limit: Some(200),
-                ..MemoryPolicy::default()
-            },
-            ..Config::default()
-        };
-        let support = runner_memory_support(config.nextest, true, Ok(()));
-        let (settled, note) = settle_memory_control(&config, support).unwrap();
-        assert_eq!(
-            settled,
-            MemoryPolicy {
-                limit: None,
-                baseline_limit: None,
-                ..config.memory
-            }
-        );
-        assert_eq!(note, None);
-    }
-
     /// A stated policy this host *can* deliver still errors when there is no baseline to derive a
     /// ceiling from, because a ceiling invented with no measurement behind it would be presented
     /// with exactly the confidence of a measured one.
@@ -3981,8 +3862,12 @@ mod tests {
             panic!("one admitted target is one warning, got {:?}", events.warnings);
         };
 
-        assert!(warning.contains("router_compile_fail"), "{warning}");
-        assert!(warning.contains("--exclude-test router_compile_fail"), "{warning}");
+        assert_eq!(
+            warning,
+            "1 test binary may have test cases that invoke the Rust compiler, which may lead to very long mutation test runs:\n  \
+             `router_compile_fail` in routerama (trybuild)\n\
+             Consider omitting the specific test cases using `--skip` harness filters."
+        );
     }
 
     /// A caller who has already acted on the advice must not be given it again, or the warning
@@ -4036,7 +3921,7 @@ mod tests {
 
         assert!(warning.contains("router_compile_fail"), "{warning}");
         assert!(!warning.contains("internity"), "{warning}");
-        assert!(!warning.contains("--exclude-test compile_fail"), "{warning}");
+        assert!(!warning.contains("`compile_fail` in internity"), "{warning}");
     }
 
     #[test]
@@ -4054,7 +3939,12 @@ mod tests {
         let [warning] = events.warnings.as_slice() else {
             panic!("a workspace-wide oracle must include the external compile-fail target");
         };
-        assert!(warning.contains("--exclude-test external_compile_fail"), "{warning}");
+        assert!(warning.contains("`external_compile_fail` in external"), "{warning}");
+        assert!(
+            warning.contains("Consider omitting the specific test cases using `--skip` harness filters."),
+            "{warning}"
+        );
+        assert!(!warning.contains("--exclude-test"), "{warning}");
     }
 
     /// The ordinary case is a workspace with no such target at all, which must say nothing.

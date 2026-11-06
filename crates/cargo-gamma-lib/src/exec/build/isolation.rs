@@ -471,14 +471,7 @@ fn extend_affected_packages(affected: &mut HashSet<String>, reach: &HashMap<Stri
 }
 
 impl Converger {
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "isolation needs the failed build's complete invocation context and proof limits"
-    )]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one bounded isolation pass keeps component preservation, tier recovery, and immediate verdict publication together"
-    )]
+    #[expect(clippy::too_many_arguments, reason = "proofs retain the failed invocation and its limits")]
     pub fn isolate_scoped(
         &mut self,
         work: &Workspace,
@@ -488,6 +481,28 @@ impl Converger {
         roots: Option<&[String]>,
         limits: BuildLimits,
         events: &mut dyn Events,
+    ) -> Result<Vec<Isolation>> {
+        self.isolate_with_candidates(work, plan, stdout, failed_verb, roots, limits, events, None)
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "isolation needs the failed build's complete invocation context and proof limits"
+    )]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one bounded isolation pass keeps component preservation, tier recovery, and immediate verdict publication together"
+    )]
+    pub(super) fn isolate_with_candidates(
+        &mut self,
+        work: &Workspace,
+        plan: &Plan,
+        stdout: &str,
+        failed_verb: &[&str],
+        roots: Option<&[String]>,
+        limits: BuildLimits,
+        events: &mut dyn Events,
+        positional: Option<&HashSet<u32>>,
     ) -> Result<Vec<Isolation>> {
         let by_package = isolation_population(plan, &self.withdrawn);
         let contexts = prioritized_contexts(failure_contexts(stdout, plan, &work.root, failed_verb), plan, &by_package);
@@ -514,7 +529,18 @@ impl Converger {
                 continue;
             }
 
-            let (tiers, diagnostic_end) = context_tiers(self, &context, plan, &by_package, &packages, &dependencies, &envelopes);
+            let (mut tiers, mut diagnostic_end) = context_tiers(self, &context, plan, &by_package, &packages, &dependencies, &envelopes);
+            if let Some(positional) = positional {
+                let candidates = positional.intersection(&dependencies).copied().collect::<HashSet<_>>();
+                // Containment narrows the first proof, but a passing deletion tier must still
+                // widen to the diagnostic item/file to find an invalid child or an interaction.
+                if
+                // #[gamma::skip(logical.and_remove_left, tag = "equivalent", reason = "an empty prepended tier performs no proof or publication; shifting both subsequent tier indexes and diagnostic_end by one preserves every progress boundary")]
+                !candidates.is_empty() && candidates.len() <= MAX_ISOLATION_CANDIDATES {
+                    tiers.insert(0, candidates);
+                    diagnostic_end += 1;
+                }
+            }
 
             // #[gamma::skip(call.replace_with_default, call_result.default, cond.always_false, tag = "outofmemory", reason = "bypassing the admissible-tier budget guard exhausted memory in campaign isolation")]
             if self
@@ -539,7 +565,10 @@ impl Converger {
                 // #[gamma::skip(literal.bool_flip, reason = "This literal initializes only BuildScope.publish_progress in isolate_scoped's local proof scope. That scope is passed to isolate_candidates/subset_fails/run_proof, where only roots and mutants are read. Proof activity and immediate singleton progress are unconditional with respect to this field; no call to converge_scoped consumes this scope. Changing the unread proof-scope field from false to true has no behavior.", tag = "equivalent")]
                 false,
             };
-            let verb = if self.fixed_roots.is_some() {
+            let verb = if positional.is_some() {
+                // A positional suspicion is not evidence in a different target/feature graph.
+                failed_verb.iter().map(|argument| (*argument).to_owned()).collect()
+            } else if self.fixed_roots.is_some() {
                 self.check_verb().iter().map(|argument| (*argument).to_owned()).collect()
             } else {
                 context.verb()
@@ -2055,6 +2084,169 @@ mod tests {
     fn memory_workspace() -> Workspace {
         let root = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/isolation-graph/application");
         Workspace::adopt(root.clone(), root.join("target"))
+    }
+
+    #[test]
+    fn cor2_positional_confirmation_preserves_the_failed_verb_even_with_frozen_roots() {
+        let work = memory_workspace();
+        let plan = plan(&work.root, 1);
+        let roots = vec!["subject".to_owned()];
+        for frozen in [false, true] {
+            let mut converger = Converger::default();
+            if frozen {
+                converger.freeze_context(Some(&roots));
+            }
+            let result = super::super::with_compiler(
+                |_work, arguments, _budget, _events| {
+                    assert_eq!(
+                        arguments,
+                        [
+                            "build",
+                            "--lib",
+                            "--features",
+                            "special",
+                            "--message-format=json",
+                            "--package",
+                            "subject"
+                        ]
+                    );
+                    Err(error!("the positional proof retained its original invocation"))
+                },
+                || {
+                    converger.isolate_with_candidates(
+                        &work,
+                        &plan,
+                        &error_stream(),
+                        &["build", "--lib", "--features", "special"],
+                        Some(&roots),
+                        BuildLimits::default(),
+                        &mut ProofEvents::default(),
+                        Some(&HashSet::from_iter([1])),
+                    )
+                },
+            );
+            assert_eq!(
+                result.unwrap_err().message(),
+                "the positional proof retained its original invocation"
+            );
+            assert_eq!(converger.isolation_budget.proofs, 1);
+            assert!(converger.census.is_empty());
+            assert!(converger.withdrawn.is_empty());
+        }
+    }
+
+    #[test]
+    fn cor2_inconclusive_positional_proofs_preserve_all_candidates_without_exclusion() {
+        let work = memory_workspace();
+        let plan = plan(&work.root, 2);
+        let mut converger = Converger {
+            subset_oracle: Some(|_| None),
+            ..Converger::default()
+        };
+        let results = converger
+            .isolate_with_candidates(
+                &work,
+                &plan,
+                &error_stream(),
+                &["check", "--tests"],
+                None,
+                BuildLimits::default(),
+                &mut ProofEvents::default(),
+                Some(&HashSet::from_iter([1])),
+            )
+            .unwrap();
+        assert!(matches!(results.as_slice(), [Isolation::Unresolved { ordinals, .. }]
+            if ordinals.iter().copied().collect::<HashSet<_>>() == HashSet::from_iter([1, 2])));
+        assert!(converger.census.is_empty());
+        assert!(converger.withdrawn.is_empty());
+        assert!(converger.isolation_budget.proofs <= MAX_ISOLATION_PROOFS);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "checks the production 4096-candidate boundary with a native-scale population")]
+    fn positional_tiers_are_first_intersect_dependencies_and_obey_the_inclusive_size_limit() {
+        thread_local! {
+            static PROOFS: std::cell::RefCell<Vec<Vec<u32>>> = const { std::cell::RefCell::new(Vec::new()) };
+        }
+        let work = memory_workspace();
+        let mut plan = plan(&work.root, 4097);
+        for mutant in &mut plan.mutants {
+            mutant.item_path = "same_item".into();
+        }
+        for (positional, expected_first, expected_proofs) in [
+            (HashSet::from_iter([2, 9999]), vec![2], 3),
+            ((2..=4097).collect(), (2..=4097).collect(), 3),
+            ((1..=4097).collect(), (1..=4096).collect(), 2),
+            (HashSet::default(), (1..=4096).collect(), 2),
+            (HashSet::from_iter([9999]), (1..=4096).collect(), 2),
+        ] {
+            PROOFS.with_borrow_mut(Vec::clear);
+            let mut converger = Converger {
+                subset_oracle: Some(|active| {
+                    let mut active = active.iter().copied().collect::<Vec<_>>();
+                    active.sort_unstable();
+                    PROOFS.with_borrow_mut(|proofs| proofs.push(active));
+                    None
+                }),
+                ..Converger::default()
+            };
+            let mut events = ProofEvents::default();
+            let results = converger
+                .isolate_with_candidates(
+                    &work,
+                    &plan,
+                    &error_stream(),
+                    &["check", "--tests"],
+                    None,
+                    BuildLimits::default(),
+                    &mut events,
+                    Some(&positional),
+                )
+                .unwrap();
+            PROOFS.with_borrow(|proofs| {
+                assert_eq!(proofs.first(), Some(&expected_first));
+                assert_eq!(proofs.len(), expected_proofs);
+                assert!(proofs.iter().all(|proof| !proof.is_empty() && proof.len() <= 4096));
+            });
+            let [Isolation::Unresolved { ordinals, .. }] = results.as_slice() else {
+                panic!("inconclusive proofs must preserve the complete unresolved context: {results:?}");
+            };
+            assert_eq!(ordinals.iter().copied().collect::<HashSet<_>>(), (1..=4097).collect());
+            assert!(converger.withdrawn.is_empty());
+            assert!(converger.census.is_empty());
+            assert_eq!(
+                events.warnings,
+                [format!(
+                    "left subject (lib) unresolved after {expected_proofs} local and {expected_proofs} invocation proof builds"
+                )]
+            );
+        }
+    }
+
+    #[test]
+    fn a_confirmed_positional_tier_stops_before_proving_unrelated_diagnostic_tiers() {
+        let work = memory_workspace();
+        let plan = plan(&work.root, 3);
+        let mut converger = Converger {
+            subset_oracle: Some(|active| Some(active.contains(&2) || active.contains(&3))),
+            ..Converger::default()
+        };
+        let results = converger
+            .isolate_with_candidates(
+                &work,
+                &plan,
+                &error_stream(),
+                &["check", "--tests"],
+                None,
+                BuildLimits::default(),
+                &mut ProofEvents::default(),
+                Some(&HashSet::from_iter([2])),
+            )
+            .unwrap();
+        assert!(matches!(results.as_slice(), [Isolation::Blamed(ordinals)] if ordinals == &[2]));
+        assert_eq!(converger.withdrawn, HashSet::from_iter([2]));
+        assert_eq!(converger.census.keys().copied().collect::<HashSet<_>>(), HashSet::from_iter([2]));
+        assert_eq!(converger.isolation_budget.proofs, 1);
     }
 
     #[test]

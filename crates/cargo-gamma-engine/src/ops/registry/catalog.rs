@@ -33,6 +33,11 @@ mutators! {
     "fn_value.some_default",     true,  &[],      "replace the body with Some(Default::default())";
     "fn_value.ok_default",       true,  &[],      "replace the body with Ok(Default::default())";
     "fn_value.err_default",      true,  &[],      "replace the body with Err(Default::default())";
+    "fn_value.break_default",    true,  &[],      "replace the body with ControlFlow::Break(::core::default::Default::default())";
+    "fn_value.continue_default", true,  &[],      "replace the body with ControlFlow::Continue(::core::default::Default::default())";
+    "fn_value.less",             true,  &[],      "replace the body with Ordering::Less";
+    "fn_value.equal",            true,  &[],      "replace the body with Ordering::Equal";
+    "fn_value.greater",          true,  &[],      "replace the body with Ordering::Greater";
     "fn_value.err_with",         true , &[],      "replace the body with Err(v) for each --error value";
     "fn_value.two",              true,  &[],      "replace the body with 2";
     "fn_value.some",             false, &[],      "replace the body with Some(value)";
@@ -162,6 +167,24 @@ mutators! {
     "result.is_ok_to_is_err",    true,  &["EVR"], "replace is_ok with is_err";
     "result.is_err_to_is_ok",    true,  &["EVR"], "replace is_err with is_ok";
 
+    // Standard control-flow and comparison enums.
+    "control_flow.break_to_continue", true, &["EVR"], "replace Break(value) with Continue(Default::default())";
+    "control_flow.continue_to_break", true, &["EVR"], "replace Continue(value) with Break(Default::default())";
+    "control_flow.is_break_to_is_continue", true, &["EVR"], "replace is_break with is_continue";
+    "control_flow.is_continue_to_is_break", true, &["EVR"], "replace is_continue with is_break";
+    "ordering.less_to_equal",    true,  &["EVR"], "replace Ordering::Less with Ordering::Equal";
+    "ordering.less_to_greater",  true,  &["EVR"], "replace Ordering::Less with Ordering::Greater";
+    "ordering.equal_to_less",    true,  &["EVR"], "replace Ordering::Equal with Ordering::Less";
+    "ordering.equal_to_greater", true,  &["EVR"], "replace Ordering::Equal with Ordering::Greater";
+    "ordering.greater_to_less",  true,  &["EVR"], "replace Ordering::Greater with Ordering::Less";
+    "ordering.greater_to_equal", true,  &["EVR"], "replace Ordering::Greater with Ordering::Equal";
+    "ordering.is_lt_to_is_ge",   true,  &["EVR"], "replace Ordering::is_lt with is_ge";
+    "ordering.is_ge_to_is_lt",   true,  &["EVR"], "replace Ordering::is_ge with is_lt";
+    "ordering.is_le_to_is_gt",   true,  &["EVR"], "replace Ordering::is_le with is_gt";
+    "ordering.is_gt_to_is_le",   true,  &["EVR"], "replace Ordering::is_gt with is_le";
+    "ordering.is_eq_to_is_ne",   true,  &["EVR"], "replace Ordering::is_eq with is_ne";
+    "ordering.is_ne_to_is_eq",   true,  &["EVR"], "replace Ordering::is_ne with is_eq";
+
     // Propagation and fallback semantics.
     "try.propagate_to_unwrap",   true,  &["EVR"], "replace ? propagation with unwrap";
     "fallback.unwrap_or_to_default", true, &["EVR"], "replace unwrap_or with unwrap_or_default";
@@ -238,7 +261,7 @@ pub const PRESETS: &[Preset] = &[
     Preset {
         name: "boundary",
         description: "relational and boundary conditions",
-        members: &["relational", "range"],
+        members: &["relational", "range", "ordering"],
     },
     Preset {
         name: "arithmetic",
@@ -253,7 +276,7 @@ pub const PRESETS: &[Preset] = &[
     Preset {
         name: "control",
         description: "the choices control flow makes: conditions, guards, arms and loop exits",
-        members: &["cond", "match_guard", "match_arm", "loop", "return_value"],
+        members: &["cond", "match_guard", "match_arm", "loop", "return_value", "control_flow"],
     },
     Preset {
         name: "removal",
@@ -266,6 +289,8 @@ pub const PRESETS: &[Preset] = &[
         members: &[
             "option",
             "result",
+            "control_flow",
+            "ordering",
             "try",
             "fallback",
             "iter",

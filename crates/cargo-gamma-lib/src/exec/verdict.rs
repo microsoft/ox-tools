@@ -665,10 +665,22 @@ pub(crate) const CONFIRM_FACTOR: u32 = 3;
 /// imposing one here would make it resolve the whole workspace relative to a single package.
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn launcher(work: &Workspace, binary: &TestBinary, only: Only<'_>, fail_fast: bool) -> Result<Command, Verdict> {
+    let names = only.names();
+    let user = HarnessFilters::parse(work.test_arguments());
+    let allowed: Vec<&str> = names.iter().copied().filter(|name| user.admits(name)).collect();
+    if !names.is_empty() && allowed.is_empty() {
+        return Err(Verdict::Unjudged(format!(
+            "the test selection this run made for `{}` names nothing the harness filters allow, \
+             so it was refused rather than run as a wider selection",
+            binary.path
+        )));
+    }
     let Some(harness) = work.runner() else {
         let mut command = Command::new(binary.path.as_std_path());
-        let names = only.names();
         let resource_bearing = !work.required_resources(binary, only).is_empty();
+        if resource_bearing {
+            let _ = command.args(["--test-threads", "1"]);
+        }
 
         if names.is_empty() {
             // The whole binary runs, so the user's arguments are the whole selection and go through
@@ -684,17 +696,6 @@ fn launcher(work: &Workspace, binary: &TestBinary, only: Only<'_>, fail_fast: bo
             // it — and a mutant could be convicted by a test the user deliberately excluded. The
             // intersection libtest cannot express is computed here instead: the user's filters
             // decide which of the chosen names may run, and only the survivors are passed.
-            let user = HarnessFilters::parse(work.test_arguments());
-            let allowed: Vec<&str> = names.iter().copied().filter(|name| user.admits(name)).collect();
-
-            if allowed.is_empty() {
-                return Err(Verdict::Unjudged(format!(
-                    "the test selection this run made for `{}` names nothing the harness filters allow, \
-                     so it was refused rather than run as a wider selection",
-                    binary.path
-                )));
-            }
-
             // The user's positional filters are not repeated here: `admits` has already applied
             // them, and leaving them out is what lets `--exact` pin this run's own names without
             // also silently converting the user's substring filter into a whole-name match.
@@ -704,9 +705,6 @@ fn launcher(work: &Workspace, binary: &TestBinary, only: Only<'_>, fail_fast: bo
                 let _ = command.args(user.flags());
             }
             let _ = command.args(allowed).arg("--exact");
-        }
-        if resource_bearing {
-            let _ = command.args(["--test-threads", "1"]);
         }
         let _ = command.current_dir(working_directory(work, binary).as_std_path());
         work.inherit_test_cache_home(&mut command);
@@ -1193,6 +1191,11 @@ fn supervise(
                     announce_partial(binary);
                 }
 
+                #[cfg(unix)]
+                if let Some(verdict) = stopped_by_ceiling(under_nextest, code, usage.peak, ceiling) {
+                    return (verdict, usage, evidence);
+                }
+
                 // Asked before the ceiling is turned into a verdict, because the harness's own
                 // report is the more useful of the two: a named test is somewhere a reader can go,
                 // and a memory verdict that pre-empted it would leave them with a number and no
@@ -1502,6 +1505,18 @@ fn prefer_named(verdict: Verdict, peak: Option<u64>, ceiling: Option<u64>) -> Ve
         // Not a verdict about the mutant at all, and a ceiling does not make it one.
         other => other,
     }
+}
+
+/// The verdict for a runner that its memory ceiling stopped before it could report a test.
+///
+/// On macOS the sampler ends cargo-nextest together with the test that passed the ceiling, so the
+/// runner exits by signal instead of reporting a failed test. Without a ceiling breach, a signal
+/// from nextest is still not a verdict about the mutant. Only Unix ends a process by signal.
+#[cfg(unix)]
+fn stopped_by_ceiling(under_nextest: bool, code: Option<i32>, peak: Option<u64>, ceiling: Option<u64>) -> Option<Verdict> {
+    ceiling
+        .filter(|_limit| under_nextest && code.is_none())
+        .map(|limit| Verdict::MemoryLimit { peak, limit })
 }
 
 /// The verdict a run cut short by a failure the harness announced reaches.
@@ -2960,6 +2975,7 @@ mod final_survivor_tests {
         stopped: Option<bool>,
         collected: std::cell::Cell<bool>,
         stop_error: Option<String>,
+        usage: MemoryUsage,
     }
 
     impl ScriptedSupervision {
@@ -2970,6 +2986,7 @@ mod final_survivor_tests {
                 stopped: None,
                 collected: std::cell::Cell::new(false),
                 stop_error: None,
+                usage: MemoryUsage::default(),
             }
         }
     }
@@ -2991,7 +3008,7 @@ mod final_survivor_tests {
         }
         fn usage(&self) -> MemoryUsage {
             assert!(self.collected.get(), "completed output is collected before usage");
-            MemoryUsage::default()
+            self.usage
         }
         fn cut_short(&mut self, settled: bool) -> Result<(MemoryUsage, Option<u64>), (Verdict, MemoryUsage)> {
             assert!(self.stopped.replace(settled).is_none(), "only one termination is scripted");
@@ -3068,6 +3085,27 @@ mod final_survivor_tests {
                 assert_eq!(supervision.stopped, None);
             }
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_nextest_runner_signalled_after_its_ceiling_was_passed_is_out_of_memory() {
+        use std::os::unix::process::ExitStatusExt as _;
+
+        let binary = crate::testing::test_binary("ceiling-evidence");
+        let progress = Mutex::new(Progress::new(Watch::Off));
+        let mut supervision = ScriptedSupervision::new(Ok(Some(ExitStatus::from_raw(libc::SIGKILL))), (false, false));
+        supervision.usage = MemoryUsage {
+            peak: Some(7),
+            exhausted: true,
+        };
+        let request = MemoryRequest {
+            limit: Some(5),
+            ..MemoryRequest::default()
+        };
+        let (verdict, usage, _evidence) = supervise(&mut supervision, &binary, Some(37), true, request, &progress, false);
+        assert_eq!(verdict, Verdict::MemoryLimit { peak: Some(7), limit: 5 });
+        assert_eq!(usage, supervision.usage);
     }
 
     #[test]
@@ -3296,7 +3334,24 @@ mod final_survivor_tests {
             work.set_resources(Resources::fake_binary(&binary));
             let command = launcher(&work, &binary, Only::One("chosen"), true).unwrap();
             let arguments: Vec<_> = command.get_args().map(|argument| argument.to_string_lossy().into_owned()).collect();
-            assert_eq!(arguments, ["chosen", "--exact", "--test-threads", "1"]);
+            assert_eq!(arguments, ["--test-threads", "1", "chosen", "--exact"]);
+        }
+    }
+
+    #[test]
+    fn whole_binary_resource_thread_override_precedes_literal_filters() {
+        for arguments in [
+            vec!["--", "--literal"],
+            vec!["--test-threads=8", "--", "--literal"],
+            vec!["--test-threads", "8", "--", "--literal"],
+        ] {
+            let mut work = policy_workspace();
+            let binary = crate::testing::test_binary("literal-resource");
+            work.set_test_args(arguments.into_iter().map(str::to_owned).collect());
+            work.set_resources(Resources::fake_binary(&binary));
+            let command = launcher(&work, &binary, Only::All, true).unwrap();
+            let arguments: Vec<_> = command.get_args().map(|argument| argument.to_string_lossy().into_owned()).collect();
+            assert_eq!(arguments, ["--test-threads", "1", "--", "--literal"]);
         }
     }
 
@@ -3339,6 +3394,30 @@ mod final_survivor_tests {
         let progress = recorded_failures(false);
         assert_eq!(unfinished_nextest_failure(false, &progress), None);
         assert!(matches!(unfinished_nextest_failure(true, &progress), Some(Verdict::Unmetered(_))));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_nextest_runner_ended_by_signal_after_a_breach_is_out_of_memory() {
+        assert_eq!(
+            stopped_by_ceiling(true, None, Some(7), Some(5)),
+            Some(Verdict::MemoryLimit { peak: Some(7), limit: 5 })
+        );
+        assert_eq!(
+            stopped_by_ceiling(true, None, Some(7), None),
+            None,
+            "a signal without a breach is not a verdict"
+        );
+        assert_eq!(
+            stopped_by_ceiling(true, Some(100), Some(7), Some(5)),
+            None,
+            "an exit code is settled by nextest's meaning"
+        );
+        assert_eq!(
+            stopped_by_ceiling(false, None, Some(7), Some(5)),
+            None,
+            "a direct binary keeps the existing path"
+        );
     }
 
     #[test]

@@ -152,6 +152,54 @@ mod tests {
     }
 
     #[test]
+    fn p17_bound_local_glob_reexports_follow_physical_sources_without_cross_root_leakage() {
+        let mut sources = Sources::default();
+        sources.insert("lib.rs", identities("mod options; pub(crate) use options::*;"));
+        sources.insert(
+            "options.rs",
+            identities(
+                "pub(crate) struct ProbesOptions;
+                 #[derive(Default)] pub struct Ready;
+                 pub type Alias = ProbesOptions;",
+            ),
+        );
+        sources.insert("consumer.rs", identities("use crate::ProbesOptions as Local;"));
+        sources.insert("other.rs", identities("#[derive(Default)] struct ProbesOptions;"));
+        sources.bind(&[
+            ("lib.rs".into(), "lib.rs".into(), Vec::new()),
+            ("options.rs".into(), "lib.rs".into(), path(&["options"])),
+            ("consumer.rs".into(), "lib.rs".into(), path(&["consumer"])),
+            ("other.rs".into(), "other.rs".into(), Vec::new()),
+        ]);
+        assert_eq!(sources.default_for("lib.rs", &[], &path(&["crate", "ProbesOptions"])), Some(false));
+        assert_eq!(sources.default_for("consumer.rs", &[], &path(&["Local"])), Some(false));
+        assert_eq!(sources.default_for("lib.rs", &[], &path(&["crate", "Ready"])), Some(true));
+        assert_eq!(sources.default_for("other.rs", &[], &path(&["ProbesOptions"])), Some(true));
+        assert!(sources.same_type("consumer.rs", &[], &path(&["Local"]), &path(&["crate", "options", "ProbesOptions"])));
+        assert!(sources.same_type("lib.rs", &[], &path(&["Alias"]), &path(&["options", "ProbesOptions"])));
+    }
+
+    #[test]
+    fn p17_rebinding_recomputes_globs_and_does_not_invent_missing_module_contents() {
+        let mut sources = Sources::default();
+        sources.insert("lib.rs", identities("mod options; pub use options::*;"));
+        sources.bind(&[("lib.rs".into(), "lib.rs".into(), Vec::new())]);
+        assert_eq!(sources.default_for("lib.rs", &[], &path(&["Shape"])), None);
+        sources.insert("options.rs", identities("pub struct Shape;"));
+        sources.bind(&[("options.rs".into(), "lib.rs".into(), path(&["options"]))]);
+        assert_eq!(sources.default_for("lib.rs", &[], &path(&["Shape"])), Some(false));
+        sources.bind(&[]);
+        assert_eq!(sources.default_for("lib.rs", &[], &path(&["Shape"])), Some(false));
+
+        sources.insert(
+            "extra.rs",
+            identities("pub struct Shape; implement_default!(crate::options::Shape);"),
+        );
+        sources.bind(&[("extra.rs".into(), "lib.rs".into(), path(&["extra"]))]);
+        assert_eq!(sources.default_for("lib.rs", &[], &path(&["Shape"])), None);
+    }
+
+    #[test]
     fn a_third_duplicate_source_cannot_resurrect_declaration_evidence() {
         let mut sources = Sources::default();
         for definition in ["struct First;", "struct Second;", "#[derive(Default)] struct Third;"] {

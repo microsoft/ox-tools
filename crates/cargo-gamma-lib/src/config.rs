@@ -32,9 +32,6 @@ use crate::{Result, bounds};
 /// Where the file lives, relative to the directory being analyzed.
 const RELATIVE_PATH: &str = "gamma.toml";
 
-/// A foreign configuration file that is noticed but deliberately not read.
-const FOREIGN_PATH: &str = ".cargo/mutants.toml";
-
 /// A parsed `gamma.toml`.
 ///
 /// Every field is optional: a file that sets one key is a valid file, and the rest keep whatever
@@ -346,15 +343,6 @@ impl Config {
         }
 
         Ok(())
-    }
-
-    /// Reports whether a foreign configuration file exists but is not being read.
-    ///
-    /// A project with only this foreign file would otherwise see its settings silently do nothing,
-    /// so the run says so out loud.
-    #[must_use]
-    pub fn foreign_present(dir: &Utf8Path) -> bool {
-        dir.join(FOREIGN_PATH).is_file() && !dir.join(RELATIVE_PATH).is_file()
     }
 
     pub(crate) fn apply_reporting_gates(&self, args: &mut RunArgs) {
@@ -1520,49 +1508,6 @@ mod tests {
 
         assert!(cause.is_usage(), "{cause}");
         assert!(cause.to_string().contains("gamma.toml"), "{cause}");
-    }
-
-    #[test]
-    fn a_foreign_config_file_is_noticed_but_never_read() {
-        // Reading it would mean another tool's settings quietly changing which mutants are
-        // suppressed here. Noticing it is what lets the run say so out loud.
-        let dir = TempDir::new().expect("a temporary directory");
-        let path = Utf8Path::from_path(dir.path()).expect("path is not UTF-8");
-
-        fs::create_dir_all(path.join(".cargo")).expect("could not create .cargo");
-        fs::write(path.join(FOREIGN_PATH), "exclude_re = [\"impl Debug\"]\n").expect("could not write the foreign config");
-
-        assert!(Config::foreign_present(path));
-
-        let config = Config::load(path).expect("the foreign file must not be parsed as ours");
-
-        assert!(config.mutators.is_none());
-    }
-
-    #[test]
-    fn foreign_project_detection_distinguishes_every_marker_combination() {
-        let detected = |foreign: bool, native: bool| {
-            let dir = TempDir::new().expect("a temporary directory");
-            let path = Utf8Path::from_path(dir.path()).expect("path is not UTF-8");
-
-            if foreign {
-                fs::create_dir_all(path.join(".cargo")).expect("could not create .cargo");
-                fs::write(path.join(FOREIGN_PATH), "foreign").expect("could not write the foreign marker");
-            }
-            if native {
-                fs::write(path.join(RELATIVE_PATH), "native").expect("could not write the native marker");
-            }
-
-            Config::foreign_present(path)
-        };
-
-        assert!(!detected(false, false), "no markers are not a foreign configuration");
-        assert!(detected(true, false), "the foreign marker alone must be noticed");
-        assert!(!detected(false, true), "the native marker alone is not foreign");
-        assert!(
-            !detected(true, true),
-            "a native configuration makes the foreign marker non-actionable"
-        );
     }
 
     #[test]

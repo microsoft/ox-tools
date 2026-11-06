@@ -339,7 +339,7 @@ fn one_row_of_every_generated_block_is_pinned_to_a_hand_written_expectation() {
         "the mutator row is not rendered as expected:\n{mutators}"
     );
     assert!(
-        presets.contains("| `@boundary` | relational and boundary conditions | `relational`, `range` |"),
+        presets.contains("| `@boundary` | relational and boundary conditions | `relational`, `range`, `ordering` |"),
         "the preset row is not rendered as expected:\n{presets}"
     );
     assert!(

@@ -12,6 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ✨ Features
 
   - cargo-gamma: promote hints after runs
+  - cargo-gamma: release v0.5.0
+
+- 📚 Documentation
+
+  - cargo-gamma: regenerate command reference
 
 - 🧩 Miscellaneous
 

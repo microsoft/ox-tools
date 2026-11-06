@@ -153,9 +153,12 @@ impl<H: Host> crate::exec::Events for ConsoleEvents<'_, H> {
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn warn(&mut self, message: &str) {
-        let label = self.styler.warning();
-
-        for line in message.lines() {
+        for (index, line) in message.lines().enumerate() {
+            let label = if index == 0 {
+                self.styler.warning()
+            } else {
+                crate::report::continuation()
+            };
             if self.dashboard.is_active() {
                 self.dashboard.line(self.host, &label, line);
             } else {
@@ -893,12 +896,9 @@ mod tests {
         assert!(host.err().contains("--exclude-test router_compile_fail"), "{}", host.err());
     }
 
-    /// A multi-line warning is written line by line, because the status column is per line and a
-    /// message written as one string would put the second line under the label rather than beside
-    /// it.
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn a_multi_line_warning_is_labelled_on_every_line() {
+    fn a_multi_line_warning_has_one_label_and_aligned_continuations() {
         let mut host = Sink::default();
         let mut events = ConsoleEvents {
             host: &mut host,
@@ -913,7 +913,13 @@ mod tests {
 
         assert_eq!(
             host.err().lines().filter(|line| line.contains("warning")).count(),
-            2,
+            1,
+            "{}",
+            host.err()
+        );
+        assert_eq!(
+            host.err().lines().last(),
+            Some(format!("{} second", crate::report::continuation()).as_str()),
             "{}",
             host.err()
         );

@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 use ohno::{AppError, IntoAppError as _, bail};
 
 use crate::decision::Decision;
+#[cfg(any(test, feature = "test-util"))]
 use crate::io::resolve_existing_case_insensitive;
 use crate::manifest::{Manifest, RegionKey};
 
@@ -297,7 +298,6 @@ impl Plan {
     }
 
     /// User-visible diagnostics accumulated while planning.
-    #[cfg(any(test, feature = "internals"))]
     #[must_use]
     pub fn notes(&self) -> &[String] {
         &self.notes
@@ -311,7 +311,6 @@ impl Plan {
     }
 
     /// Artifact-management refusals accumulated while planning.
-    #[cfg(any(test, feature = "internals"))]
     #[must_use]
     pub fn refusals(&self) -> &[String] {
         &self.refusals
@@ -478,7 +477,7 @@ impl Plan {
     /// items must carry a spliced host. These invariants are enforced
     /// by the `PlanItem::*` constructors, so violations only happen if
     /// callers build `PlanItem` directly with inconsistent fields.
-    #[cfg(any(test, feature = "internals"))]
+    #[cfg(any(test, feature = "test-util"))]
     pub fn apply(&self, repo_root: &Path, previous_manifest: &Manifest) -> Result<Manifest, AppError> {
         self.apply_files(repo_root)?;
         Ok(self.projected_manifest(previous_manifest))
@@ -488,6 +487,7 @@ impl Plan {
     ///
     /// Manifest projection is deliberately separate so dry-run and real
     /// application calculate the same next `.anvil/manifest.toml`.
+    #[cfg(any(test, feature = "test-util"))]
     pub(crate) fn apply_files(&self, repo_root: &Path) -> Result<(), AppError> {
         self.apply_files_with(
             repo_root,
@@ -501,7 +501,7 @@ impl Plan {
         clippy::expect_used,
         reason = "the expects encode invariants enforced by the PlanItem constructors"
     )]
-    fn apply_files_with(
+    pub(crate) fn apply_files_with(
         &self,
         repo_root: &Path,
         operations: (
@@ -642,7 +642,7 @@ fn write_section(out: &mut String, header: &str, items: &[&PlanItem]) {
 ///
 /// Returns an error if the repository root cannot be resolved, or if the path
 /// resolves outside it.
-fn contained_path(repo_root: &Path, relpath: &str) -> Result<PathBuf, AppError> {
+pub(crate) fn contained_path(repo_root: &Path, relpath: &str) -> Result<PathBuf, AppError> {
     let abs = repo_root.join(relpath);
     let root = repo_root
         .canonicalize()
@@ -679,7 +679,7 @@ fn contained_path(repo_root: &Path, relpath: &str) -> Result<PathBuf, AppError> 
     }
 }
 
-fn write_file(path: &Path, content: &str) -> Result<(), AppError> {
+pub(crate) fn write_file(path: &Path, content: &str) -> Result<(), AppError> {
     write_file_with(path, content, write_temporary_file)
 }
 

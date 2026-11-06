@@ -31,6 +31,7 @@ anvil-mutants-diff
 anvil-mutants-full
 anvil-pr
 anvil-pr-fast
+anvil-pr-fuzzing
 anvil-pr-msrv
 anvil-pr-mutants
 anvil-pr-runtime-analysis

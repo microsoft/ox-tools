@@ -630,7 +630,7 @@ pub struct RunArgs {
     ///
     /// Uses the same incremental merge and publication behavior as `cargo gamma hints`. A failed
     /// mutation or score gate keeps its campaign exit code even if promotion fails.
-    #[arg(long, help_heading = "Run control")]
+    #[arg(long, conflicts_with = "dry_run", help_heading = "Run control")]
     pub update_hints: bool,
 
     /// Which mutants to consider.
@@ -1597,6 +1597,14 @@ mod tests {
             Command::Run(args) => assert!(args.update_hints),
             _ => panic!("expected run"),
         }
+    }
+
+    #[test]
+    fn run_update_hints_rejects_dry_runs() {
+        let error = Cli::try_parse_from(["cargo gamma", "run", "--dry-run", "--update-hints"])
+            .expect_err("a preview cannot promote a previous campaign's hints");
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     /// Every flag taking a filesystem path presents the same `<PATH>` placeholder.

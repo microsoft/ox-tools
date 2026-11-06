@@ -60,22 +60,11 @@ fn stats(session: &exec::Session, elapsed: Duration) -> Stats {
 }
 
 /// Loads `gamma.toml` and folds it into `args`.
-pub(super) fn configure<H: Host>(host: &mut H, args: &mut RunArgs, styler: Styler) -> crate::Result<()> {
+pub(super) fn configure(args: &mut RunArgs) -> crate::Result<()> {
     if args.resume_testing {
         Config::resolve_reporting_gates(&args.select)?.apply_reporting_gates(args);
         return Ok(());
     }
-    // Said before anything is loaded, because the settings in that file are about to not happen and
-    // the run would otherwise look like it honoured them.
-    if Config::foreign_present(&args.select.dir) && !args.select.config.no_config && args.select.config.path.is_none() {
-        let hint = styler.note("Hint");
-
-        writeln!(
-            host.error(),
-            "{hint} .cargo/mutants.toml is not supported or read; configure gamma.toml explicitly"
-        )?;
-    }
-
     Config::resolve(&args.select)?.apply(args)?;
 
     Ok(())
@@ -300,6 +289,15 @@ fn emit_reports_from<H: Host>(
     Ok(())
 }
 
+/// Says that the selection held no mutants, and writes the reports for that empty population.
+///
+/// The reports replace a previous run's, which would otherwise read as this one's — to a reader,
+/// and to `explain` and `--only-survivors` alike.
+fn emit_empty<H: Host>(host: &mut H, args: &RunArgs, plan: &Plan, dropped: &[String], styler: Styler) -> crate::Result<()> {
+    writeln!(host.error(), "no mutants were generated")?;
+    emit_reports(host, args, plan, None, None, dropped, styler)
+}
+
 /// Writes the SARIF log and, when requested, the diff annotations and job summary.
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn emit_ci<H: Host>(host: &mut H, args: &RunArgs, plan: &Plan, advice: Option<&str>, styler: Styler) -> crate::Result<()> {
@@ -449,12 +447,6 @@ pub(super) fn distinguish(score: f64, minimum: f64) -> (String, String) {
 // #[gamma::skip(all, reason = "exit-code gating is covered end-to-end through the injected Host; private branch mutants duplicate the directly tested gate predicates and rendered diagnostics")]
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub(super) fn run_session<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: Styler) -> crate::Result<i32> {
-    #[cfg(target_os = "linux")]
-    if args.resume_testing
-        && let Some(code) = resume_relaunch(host, args)?
-    {
-        return Ok(code);
-    }
     let executed = measured(host, args, progress_when, styler)?;
     Ok(finish_run(host, args, styler, executed))
 }
@@ -580,7 +572,7 @@ fn finish_run<H: Host>(host: &mut H, args: &RunArgs, styler: Styler, executed: E
 }
 
 #[cfg(target_os = "linux")]
-fn resume_relaunch<H: Host>(host: &H, args: &RunArgs) -> crate::Result<Option<i32>> {
+pub(super) fn resume_relaunch<H: Host>(host: &H, args: &RunArgs) -> crate::Result<Option<i32>> {
     resume_relaunch_with(
         args,
         host.may_replace_process(),
@@ -1168,7 +1160,8 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
 
         progress.finish(host);
         if plan.mutants.is_empty() {
-            let _ = writeln!(host.error(), "no mutants were generated");
+            emit_empty(host, args, &plan, &[], styler)?;
+            emit_diag(host, args, &plan, None, started, styler)?;
 
             return Ok(Executed {
                 plan: None,
@@ -1296,7 +1289,8 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
 
     report_cache(host, adopted, styler)?;
     if plan.mutants.is_empty() {
-        let _ = writeln!(host.error(), "no mutants were generated");
+        emit_empty(host, args, &plan, &dropped, styler)?;
+        emit_diag(host, args, &plan, None, started, styler)?;
         warn_auxiliary(host, log_failure.as_ref(), styler);
 
         return Ok(Executed { plan: None, stuck });
@@ -3844,44 +3838,24 @@ mod tests {
 
     #[test]
     #[cfg(feature = "system-tests")]
-    fn survivor_configuration_warning_and_resume_gates_respect_every_effective_source() {
+    fn survivor_configuration_and_resume_gates_respect_every_effective_source() {
         let directory = workdir("run-config-conditions-");
         let root = Utf8Path::from_path(directory.path()).unwrap();
-        fs::create_dir(root.join(".cargo")).unwrap();
-        let foreign = root.join(".cargo/mutants.toml");
         let custom = root.join("custom.toml");
         fs::write(&custom, "jobs = 7\n").unwrap();
-        for (present, no_config, explicit, warning) in [
-            (false, false, false, false),
-            (true, false, false, true),
-            (true, true, false, false),
-            (true, false, true, false),
-        ] {
-            if present {
-                fs::write(&foreign, "not gamma syntax").unwrap();
-            }
+        for (no_config, explicit) in [(false, false), (true, false), (false, true)] {
             let mut args = RunArgs::default();
             args.select.dir = root.to_owned();
             args.select.config.no_config = no_config;
             args.select.config.path = explicit.then(|| custom.clone());
-            let mut host = Sink::default();
-            configure(&mut host, &mut args, Styler::new(true)).unwrap();
-            assert_eq!(host.err().contains(".cargo/mutants.toml is not supported or read"), warning);
-            assert_eq!(
-                host.err().contains('\u{1b}'),
-                warning,
-                "the supplied colored warning style must survive forwarding"
-            );
+            configure(&mut args).unwrap();
             assert_eq!(args.measure.jobs, explicit.then_some(7));
-            if present {
-                fs::remove_file(&foreign).unwrap();
-            }
         }
         fs::write(root.join("gamma.toml"), "jobs = 7\nfeatures = ['configured']\nmin-score = 82.5\n").unwrap();
         let mut args = RunArgs::default();
         args.select.dir = root.to_owned();
         args.resume_testing = true;
-        configure(&mut Sink::default(), &mut args, Styler::new(false)).unwrap();
+        configure(&mut args).unwrap();
         assert_eq!(args.min_score, Some(82.5));
         assert_eq!(
             args.measure.jobs, None,
@@ -3890,11 +3864,10 @@ mod tests {
         assert_eq!(args.select.features.features.len(), 0);
         fs::write(root.join("gamma.toml"), "[").unwrap();
         args.resume_testing = false;
-        configure(&mut Sink::default(), &mut args, Styler::new(false)).expect_err("malformed ordinary configuration must return an error");
+        configure(&mut args).expect_err("malformed ordinary configuration must return an error");
         fs::write(root.join("gamma.toml"), "workspace = true\n").unwrap();
         args.select.packages = vec!["subject".into()];
-        configure(&mut Sink::default(), &mut args, Styler::new(false))
-            .expect_err("a configured workspace cannot be combined with an explicit package selection");
+        configure(&mut args).expect_err("a configured workspace cannot be combined with an explicit package selection");
     }
 
     #[test]
@@ -5501,30 +5474,6 @@ mod tests {
         assert!(base.join("gamma-perf-advice.md").exists());
     }
 
-    /// A leftover foreign config is called out, because the run does not honour it.
-    #[test]
-    fn a_foreign_config_is_called_out_before_anything_is_loaded() {
-        let dir = workdir("run-foreign-");
-        let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("utf8");
-        fs::create_dir_all(root.join(".cargo")).expect("cargo dir");
-        fs::write(root.join(".cargo/mutants.toml"), "examine_globs = [\"src/**\"]\n").expect("foreign");
-
-        let mut args = RunArgs {
-            select: crate::commands::SelectArgs {
-                dir: root,
-                ..crate::commands::SelectArgs::default()
-            },
-            ..Default::default()
-        };
-        let mut host = Sink::default();
-
-        configure(&mut host, &mut args, Styler::new(false)).expect("configure");
-
-        assert!(host.err().contains("Hint"), "{}", host.err());
-        assert!(host.err().contains("is not supported or read"), "{}", host.err());
-        assert!(host.err().contains("configure gamma.toml explicitly"), "{}", host.err());
-    }
-
     #[test]
     fn resumed_environment_is_checked_only_when_mutants_remain_pending() {
         for outcomes in [vec![], vec![Outcome::Killed, Outcome::Survived], vec![Outcome::NoCoverage]] {
@@ -5578,37 +5527,11 @@ mod tests {
                 ..Default::default()
             };
             args.select.config.no_config = disabled;
-            configure(&mut Sink::default(), &mut args, Styler::new(false)).unwrap();
+            configure(&mut args).unwrap();
             assert_eq!(args.min_score, if disabled { None } else { Some(80.0) });
             assert_eq!(args.max_flaky, if disabled { None } else { Some(2) });
             assert_eq!(args.measure.jobs, None);
         }
-    }
-
-    /// Asking not to read config suppresses the note along with the loading.
-    #[test]
-    fn a_foreign_config_is_not_mentioned_when_config_is_disabled() {
-        let dir = workdir("run-foreign-off-");
-        let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("utf8");
-        fs::create_dir_all(root.join(".cargo")).expect("cargo dir");
-        fs::write(root.join(".cargo/mutants.toml"), "examine_globs = [\"src/**\"]\n").expect("foreign");
-
-        let mut select = crate::commands::SelectArgs {
-            dir: root,
-            ..crate::commands::SelectArgs::default()
-        };
-
-        select.config.no_config = true;
-
-        let mut args = RunArgs {
-            select,
-            ..Default::default()
-        };
-        let mut host = Sink::default();
-
-        configure(&mut host, &mut args, Styler::new(false)).expect("configure");
-
-        assert!(host.err().is_empty(), "{}", host.err());
     }
 
     /// A directive that suppressed nothing must be named with enough to go and find it: the file,
@@ -6122,6 +6045,47 @@ mod tests {
         assert_eq!(code, EXIT_OK);
     }
 
+    /// An empty selection still writes its reports, which replace a previous run's.
+    #[test]
+    fn an_empty_selection_writes_reports_for_an_empty_population() {
+        let dir = workdir("run-empty-documents-");
+        let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("utf8");
+        let args = RunArgs {
+            artifact_dir: Some(root.join("reports")),
+            ..Default::default()
+        };
+        let plan = Plan {
+            root: root.clone(),
+            files: Vec::new(),
+            mutants: Vec::new(),
+            suppressed: 0,
+            idle: Vec::new(),
+            sharded_out: 0,
+            settled_out: 0,
+            skipped: Vec::new(),
+            digests: HashMap::default(),
+            reach: HashMap::default(),
+            specs: HashMap::default(),
+        };
+        let mut host = Sink::default();
+
+        emit_empty(&mut host, &args, &plan, &[], Styler::new(false)).expect("empty reports");
+
+        assert!(host.err().starts_with("no mutants were generated\n"), "{}", host.err());
+        let documents = Documents::resolve(&args, &root);
+        let report: Value = from_str(&fs::read_to_string(&documents.json).expect("report")).expect("the report is JSON");
+        assert_eq!(report["files"], json!({}), "{report}");
+        // No baseline ran, so the report claims no test count.
+        assert_eq!(report["config"]["tests"], Value::Null, "{report}");
+        let sarif: Value = from_str(&fs::read_to_string(&documents.sarif).expect("SARIF")).expect("the SARIF log is JSON");
+        assert_eq!(sarif["runs"][0]["results"], json!([]), "{sarif}");
+        assert!(documents.html.is_file(), "{}", documents.html);
+
+        fails_at_every_line(host.err().lines().count(), |host| {
+            emit_empty(host, &args, &plan, &[], Styler::new(false))
+        });
+    }
+
     /// A population that is not empty but holds nothing scorable — the shard that contained only
     /// suppressed mutants — is the same failure wearing a different hat: the score is a ratio with
     /// nothing in its denominator, and a threshold judged against it never ran.
@@ -6151,28 +6115,6 @@ mod tests {
 
         assert_eq!(code, EXIT_GATE_FAILED);
         assert!(host.err().contains("never evaluated"), "{}", host.err());
-    }
-
-    /// And from the foreign-config note.
-    #[test]
-    fn a_closed_stream_is_reported_by_the_foreign_config_note() {
-        let dir = workdir("run-foreign-broken-");
-        let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("utf8");
-        fs::create_dir_all(root.join(".cargo")).expect("cargo dir");
-        fs::write(root.join(".cargo/mutants.toml"), "examine_globs = [\"src/**\"]\n").expect("foreign");
-
-        // `configure` folds the file into `args`, so each attempt needs its own copy of them.
-        fails_at_every_line(1, |host| {
-            let mut args = RunArgs {
-                select: crate::commands::SelectArgs {
-                    dir: root.clone(),
-                    ..crate::commands::SelectArgs::default()
-                },
-                ..Default::default()
-            };
-
-            configure(host, &mut args, Styler::new(false))
-        });
     }
 
     /// A run whose build cannot be made to compile still reports, and still fails.

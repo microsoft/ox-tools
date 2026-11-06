@@ -9,6 +9,102 @@ use super::*;
 use crate::cfg::CfgSet;
 
 #[test]
+fn resolved_generic_roots_reject_relative_aliases_but_not_absolute_external_paths() {
+    with_types("", |types| {
+        let imports = HashMap::from_iter([("Alias".into(), Some(vec!["core".into(), "cmp".into(), "Ordering".into()]))]);
+        let shadows = vec!["core".into()];
+        for defaulted in [false, true] {
+            let scoped = Types {
+                imports: &imports,
+                abstracts: if defaulted { &[] } else { &shadows },
+                defaulted: if defaulted { &shadows } else { &[] },
+                ..*types
+            };
+            assert_eq!(scoped.unshadowed_path(&parse_quote!(Alias)), None);
+            assert_eq!(
+                scoped.unshadowed_path(&parse_quote!(::core::cmp::Ordering)),
+                Some(vec!["core".into(), "cmp".into(), "Ordering".into()])
+            );
+        }
+    });
+}
+
+#[test]
+fn absolute_empty_constructors_ignore_generic_root_spellings_and_reject_foreign_external_roots() {
+    with_types("", |types| {
+        let shadows = vec!["std".into()];
+        for defaulted in [false, true] {
+            let scoped = Types {
+                abstracts: if defaulted { &[] } else { &shadows },
+                defaulted: if defaulted { &shadows } else { &[] },
+                ..*types
+            };
+            assert!(scoped.supports_empty_default_constructor(&parse_quote!(::std::vec::Vec<u8>)));
+            assert!(scoped.supports_empty_default_constructor(&parse_quote!(::std::string::String)));
+        }
+        for root in ["core", "std", "alloc"] {
+            let imports = HashMap::from_iter([(
+                format!("{EXTERN_ROOT_PREFIX}{root}"),
+                Some(vec![ABSOLUTE_ROOT.into(), "foreign".into()]),
+            )]);
+            let scoped = Types {
+                imports: &imports,
+                ..*types
+            };
+            assert!(!scoped.standard_root_unshadowed(&[root.into()]), "{root}");
+            for name in ["vec::Vec<u8>", "string::String", "collections::BTreeMap<u8, u8>"] {
+                let ty = parse_str(&format!("::{root}::{name}")).unwrap();
+                assert!(!scoped.supports_empty_default_constructor(&ty), "{root}::{name}");
+            }
+            if root != "alloc" {
+                let ty = parse_str(&format!("::{root}::primitive::u8")).unwrap();
+                assert!(!scoped.supports_primitive_kind(&ty, Kind::Unsigned), "{root}");
+            }
+        }
+    });
+}
+
+#[test]
+fn concrete_strings_have_proven_defaults_but_same_named_local_types_do_not() {
+    with_types("", |types| {
+        for source in ["String", "std::string::String", "alloc::string::String"] {
+            assert!(types.has_proven_default(&parse_str(source).unwrap()), "{source}");
+        }
+    });
+    with_types("struct String;", |types| {
+        assert!(!types.has_proven_default(&parse_quote!(String)));
+    });
+}
+
+#[test]
+fn ci_fat_pointer_defaults_and_standard_nondefault_types_remain_distinct() {
+    with_types("", |types| {
+        for (source, expected) in [
+            ("*const [u8]", true),
+            ("*mut dyn core::fmt::Debug", true),
+            ("*const str", true),
+            ("*mut core::primitive::str", true),
+            ("*const u8", false),
+            ("*mut bool", false),
+            ("std::time::Instant", true),
+            ("std::time::SystemTime", true),
+            ("core::cmp::Ordering", true),
+            ("std::task::Poll<u8>", true),
+            ("std::ptr::NonNull<u8>", true),
+        ] {
+            assert_eq!(types.lacks_default(&parse_str(source).unwrap()), expected, "{source}");
+        }
+        for (source, expected) in [
+            ("Vec<std::fs::File>", true),
+            ("std::collections::HashMap<bool, bool>", true),
+            ("std::collections::HashSet<bool, std::fs::File>", false),
+        ] {
+            assert_eq!(types.has_proven_default(&parse_str(source).unwrap()), expected, "{source}");
+        }
+    });
+}
+
+#[test]
 fn block_type_negative_evidence_checks_the_qualified_root_not_the_terminal_name() {
     with_types("mod child { pub struct Missing; }", |types| {
         let ty = parse_quote!(child::Missing);
@@ -332,6 +428,26 @@ fn malformed_or_ambiguous_type_paths_fail_closed_without_panicking() {
             assert!(types.has_default(&parse_quote!(HashMap<u8, bool>)));
         },
     );
+}
+
+#[test]
+fn collection_default_proofs_reject_hashers_from_foreign_primitive_paths() {
+    with_types("", |types| {
+        let imports = HashMap::from_iter([(
+            format!("{EXTERN_ROOT_PREFIX}core"),
+            Some(vec![ABSOLUTE_ROOT.into(), "foreign".into()]),
+        )]);
+        let scoped = Types {
+            imports: &imports,
+            ..*types
+        };
+        for source in ["HashMap<u8, u8, ::core::primitive::u8>", "HashSet<u8, ::core::primitive::u8>"] {
+            let ty = parse_str(source).unwrap();
+            assert!(types.has_proven_default(&ty), "{source}");
+            assert!(scoped.has_default(&ty), "{source}: the weaker fallback trusts primitive spellings");
+            assert!(!scoped.has_proven_default(&ty), "{source}");
+        }
+    });
 }
 
 fn with_types(source: &str, check: impl FnOnce(&Types<'_>)) {
@@ -810,8 +926,11 @@ fn direct_unshadowed_path_queries_keep_each_ambiguity_guard_and_do_not_confuse_n
             imports: &imports,
             ..*types
         };
-        assert_eq!(scoped.unshadowed_type_path(&parse_quote!(std::VecDeque<u8>)), None);
-        assert!(!scoped.supports_empty_default_constructor(&parse_quote!(std::VecDeque<u8>)));
+        assert_eq!(
+            scoped.unshadowed_type_path(&parse_quote!(std::VecDeque<u8>)),
+            Some(vec!["std".into(), "collections".into(), "VecDeque".into()])
+        );
+        assert!(scoped.supports_empty_default_constructor(&parse_quote!(std::VecDeque<u8>)));
         imports.insert("other".into(), Some(vec![ABSOLUTE_ROOT.into(), "other".into(), "nested".into()]));
         let scoped = Types {
             imports: &imports,
@@ -1411,7 +1530,7 @@ fn labeled_type_identity_handles_enum_aliases_relative_modules_and_shadowing() {
     assert!(!check(&imports, &defaults).source_is_enum(&parse_quote!(Alias)));
     assert!(!check(&imports, &defaults).package_declares_default(&parse_quote!(Alias)));
     imports.insert("*".into(), None);
-    assert!(!check(&imports, &defaults).source_is_enum(&parse_quote!(crate::Choice)));
+    assert!(check(&imports, &defaults).source_is_enum(&parse_quote!(crate::Choice)));
 }
 
 #[test]

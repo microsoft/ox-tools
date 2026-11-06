@@ -63,6 +63,7 @@ const GROUPS: &[&str] = &[
     "pr-test",
     "pr-msrv",
     "pr-runtime-analysis",
+    "pr-fuzzing",
     "pr-mutants",
     "scheduled-test",
     "scheduled-advisories",
@@ -225,6 +226,7 @@ pub(crate) const GROUP_STEPS: &[(&str, &str)] = &[
     ("pr-test", ".anvil/ado/steps/pr-test.yml"),
     ("pr-msrv", ".anvil/ado/steps/pr-msrv.yml"),
     ("pr-runtime-analysis", ".anvil/ado/steps/pr-runtime-analysis.yml"),
+    ("pr-fuzzing", ".anvil/ado/steps/pr-fuzzing.yml"),
     ("pr-mutants", ".anvil/ado/steps/pr-mutants.yml"),
     ("scheduled-test", ".anvil/ado/steps/scheduled-test.yml"),
     ("scheduled-advisories", ".anvil/ado/steps/scheduled-advisories.yml"),
@@ -463,19 +465,22 @@ mod tests {
             (PR_STAGES, "pr-stages.yml", &pr_stages),
             (SCHEDULED_STAGES, "scheduled-stages.yml", &scheduled_stages),
         ] {
+            let mut expected_jobs = 0;
             for stage in expected {
+                let jobs_in_stage = if stage == "pr_fuzzing" { 1 } else { 2 };
+                expected_jobs += jobs_in_stage;
                 // The 10-space indent is the `parameters:` form; it does not
                 // match the `  - stage:` declaration that opens the stage.
                 assert_eq!(
                     template.matches(&format!("\n          stage: {stage}\n")).count(),
-                    2,
-                    "{label} must pass `stage: {stage}` on both per-OS jobs"
+                    jobs_in_stage,
+                    "{label} must pass `stage: {stage}` on all jobs"
                 );
             }
             let jobs = template.matches("- template: steps/job.yml").count();
             assert_eq!(
                 jobs,
-                expected.len() * 2,
+                expected_jobs,
                 "{label} renders {jobs} jobs but {} stages are expected",
                 expected.len()
             );
@@ -555,6 +560,7 @@ mod tests {
             "stage: pr_fast",
             "stage: pr_test",
             "stage: pr_runtime_analysis",
+            "stage: pr_fuzzing",
             "stage: pr_mutants",
         ] {
             assert!(PR_STAGES.contains(needle), "PR stages missing '{needle}'");
@@ -599,8 +605,8 @@ mod tests {
         // Every pr-* stage depends on the single impact stage.
         assert_eq!(
             PR_STAGES.matches("dependsOn: [impact]").count(),
-            5,
-            "each of the five pr-* stages must depend on the single impact stage"
+            6,
+            "each of the six pr-* stages must depend on the single impact stage"
         );
     }
 

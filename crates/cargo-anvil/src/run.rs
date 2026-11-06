@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::{env, io};
 
-use ohno::{AppError, app_err, bail};
+use ohno::{AppError, IntoAppError as _, app_err, bail};
 use tracing::info;
 
 use crate::anvil::artifacts;
@@ -44,10 +44,8 @@ pub struct RunOutcome {
     /// distinguished, and so stale entries can be enumerated).
     pub previous_manifest: Manifest,
     /// Whether the plan was actually applied to disk.
-    #[cfg(any(test, feature = "internals"))]
     pub applied: bool,
     /// The resolved backend set.
-    #[cfg(any(test, feature = "internals"))]
     pub backends: Vec<Backend>,
 }
 
@@ -76,31 +74,94 @@ fn run_with_current_dir(catalog: &Catalog, cli: &Cli, current_dir: io::Result<Pa
 /// Propagates errors from any subsystem (workspace discovery, manifest
 /// I/O, emitter, plan application).
 pub fn run_update(catalog: &Catalog, args: &Cli, start_dir: &Path) -> Result<RunOutcome, AppError> {
+    let root = workspace::find_workspace_root(start_dir)?;
+    let mut io = crate::io::RepositoryIo { root: &root };
+    update_with_backend_resolution(catalog, args, &mut io, || {
+        let backends = backend::resolve(&args.backends, args.no_backends, &root)?;
+        info!(
+            repo_root = %root.display(),
+            backends = ?backends.iter().map(|b| b.name()).collect::<Vec<_>>(),
+            dry_run = args.dry_run,
+            "anvil"
+        );
+        Ok(backends)
+    })
+    .into_app_err_with(|| format!("in repository {}", root.display()))
+}
+
+pub(crate) fn update_with_io(
+    catalog: &Catalog,
+    options: &crate::UpdateOptions,
+    io: &mut dyn crate::UpdateIo,
+) -> Result<RunOutcome, AppError> {
+    let mut backends = options.backends.clone();
+    backends.sort_unstable();
+    backends.dedup();
+    let args = Cli {
+        dry_run: options.dry_run,
+        force: options.force,
+        ..Cli::default()
+    };
+    update_with_backend_resolution(catalog, &args, io, || Ok(backends))
+}
+
+fn update_with_backend_resolution(
+    catalog: &Catalog,
+    args: &Cli,
+    io: &mut dyn crate::UpdateIo,
+    backends: impl FnOnce() -> Result<Vec<Backend>, AppError>,
+) -> Result<RunOutcome, AppError> {
+    let shared = std::cell::RefCell::new(io);
+    let root = PathBuf::new();
     run_update_with(
         catalog,
         args,
-        start_dir,
-        |start| {
-            let root = workspace::find_workspace_root(start)?;
-            let manifest = Manifest::load(&root)?;
-            Ok((root, manifest))
+        &root,
+        |_| {
+            let current = shared.borrow().read_file(Path::new(crate::manifest::MANIFEST_FILE_NAME))?;
+            let legacy = shared.borrow().read_file(Path::new(crate::manifest::LEGACY_MANIFEST_FILE_NAME))?;
+            let manifest = Manifest::from_sources(
+                current,
+                legacy,
+                crate::manifest::MANIFEST_FILE_NAME,
+                crate::manifest::LEGACY_MANIFEST_FILE_NAME,
+            )?;
+            Ok((root.clone(), manifest))
         },
         |root, manifest| {
-            let ws = workspace::load_workspace(root)?;
-            let backends = backend::resolve(&args.backends, args.no_backends, root)?;
-            info!(
-                repo_root = %root.display(),
-                backends = ?backends.iter().map(|b| b.name()).collect::<Vec<_>>(),
-                dry_run = args.dry_run,
-                "anvil"
-            );
-            let plan = build_plan(root, &ws, manifest, &backends, catalog)?;
+            let io = shared.borrow();
+            let io = &**io;
+            let workspace = workspace::load_workspace_with_io(io)?;
+            let backends = backends()?;
+            let mut hosts = HostTextCache {
+                io: Some(io),
+                ..HostTextCache::default()
+            };
+            let plan = build_plan_with_hosts(root, &workspace, manifest, &backends, catalog, &mut hosts)?;
             Ok((plan, backends))
         },
-        read_file_if_present,
+        |path| shared.borrow().read_file(path),
         |root, plan, next| {
-            plan.apply_files(root)?;
-            next.save(root)
+            plan.apply_files_with(
+                root,
+                (
+                    |root, path| crate::io::resolve_with_io(&**shared.borrow(), root, path),
+                    |root, path| Ok(root.join(path)),
+                    |path, text| shared.borrow_mut().write_file(path, text),
+                    |path| shared.borrow_mut().remove_file(path),
+                ),
+            )?;
+            shared
+                .borrow_mut()
+                .write_file(Path::new(crate::manifest::MANIFEST_FILE_NAME), &next.to_toml())?;
+            match shared
+                .borrow_mut()
+                .remove_file(Path::new(crate::manifest::LEGACY_MANIFEST_FILE_NAME))
+            {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error).into_app_err("failed to retire legacy manifest"),
+            }
         },
     )
 }
@@ -132,8 +193,6 @@ fn run_update_with(
     enforce_single_tool_guard(catalog, args, &manifest)?;
 
     let (mut plan, backends) = plan_update(&repo_root, &manifest)?;
-    #[cfg(not(any(test, feature = "internals")))]
-    drop(backends);
     let mut next = plan.projected_manifest(&manifest);
     next.tool = Some(catalog.cli().subcommand.clone());
     next.tool_version = Some(catalog.cli().version.clone());
@@ -151,9 +210,7 @@ fn run_update_with(
     Ok(RunOutcome {
         plan,
         previous_manifest: manifest,
-        #[cfg(any(test, feature = "internals"))]
         applied,
-        #[cfg(any(test, feature = "internals"))]
         backends,
     })
 }
@@ -214,7 +271,7 @@ fn live_region_keys(
             continue;
         };
         for host in region_host_paths(workspace, spec) {
-            let host = (hosts.resolve)(repo_root, host)?;
+            let host = hosts.resolve_path(repo_root, host)?;
             if !identities.insert((
                 // #[gamma::skip(string.lower_to_upper, reason = "ASCII lower- and uppercase induce identical equality classes for this private case-insensitive deduplication key.", tag = "equivalent")]
                 host.to_ascii_lowercase(),
@@ -228,6 +285,7 @@ fn live_region_keys(
     Ok(keys)
 }
 
+#[cfg(test)]
 fn build_plan(
     repo_root: &Path,
     workspace: &Workspace,
@@ -235,7 +293,6 @@ fn build_plan(
     backends: &[Backend],
     catalog: &Catalog,
 ) -> Result<Plan, AppError> {
-    validate_expanded_section_ownership(workspace, backends, catalog)?;
     let mut hosts = HostTextCache::default();
     build_plan_with_hosts(repo_root, workspace, manifest, backends, catalog, &mut hosts)
 }
@@ -248,6 +305,7 @@ fn build_plan_with_hosts(
     catalog: &Catalog,
     hosts: &mut HostTextCache,
 ) -> Result<Plan, AppError> {
+    validate_expanded_section_ownership(workspace, backends, catalog)?;
     let mut plan = Plan::default();
     // Hosts already reported as unsafe to compose. Every region targeting one
     // hits the same fault, and four copies of one message is noise.
@@ -266,7 +324,7 @@ fn build_plan_with_hosts(
             .map(|(host, _)| host)
             .chain(manifest.regions.keys().map(|key| &key.host))
         {
-            let other = (hosts.resolve)(repo_root, other)?;
+            let other = hosts.resolve_path(repo_root, other)?;
             if host != &other && host.eq_ignore_ascii_case(&other) {
                 bail!("ambiguous casing for {} array host: {host} and {other}", array_host.format.name());
             }
@@ -279,7 +337,7 @@ fn build_plan_with_hosts(
     // by `push_region_at` when it plans the region, with that region's declared
     // comment syntax.
     for (key, recorded_checksum) in &manifest.regions {
-        let host = (hosts.resolve)(repo_root, &key.host)?;
+        let host = hosts.resolve_path(repo_root, &key.host)?;
         if !composed.live.contains(&(host.clone(), key.id.clone())) {
             // An unpaired result is left for the path that plans the region:
             // it refuses there, where the region's own id is being handled.
@@ -321,8 +379,10 @@ fn build_plan_with_hosts(
     }
 
     for file in compose_owned_file_sections(catalog, backends) {
-        let path = resolve_existing_case_insensitive(repo_root, file.path)?;
-        plan.push(plan_owned_file(repo_root, manifest, &path, &file.body, read_file_if_present)?);
+        let path = hosts.resolve_path(repo_root, file.path)?;
+        plan.push(plan_owned_file(repo_root, manifest, &path, &file.body, |path| {
+            hosts.read_file(path)
+        })?);
     }
 
     plan_removals_with_array_hosts(repo_root, manifest, &mut plan, hosts, &composed, &recorded_json_scanner_hosts)?;
@@ -335,7 +395,7 @@ fn build_plan_with_hosts(
         .cloned()
         .collect();
     for key in manifest.regions.keys() {
-        let resolved = (hosts.resolve)(repo_root, &key.host)?;
+        let resolved = hosts.resolve_path(repo_root, &key.host)?;
         if json_scanner_hosts.contains(&resolved) && !plan.region_tracking_removed(&key.host, &key.id) {
             retained_scanner_hosts.insert(key.host.clone());
         }
@@ -365,17 +425,17 @@ fn plan_dependabot_exclusions(
     for item in plan.items() {
         match (&item.target, item.decision) {
             (Target::File { path }, Decision::Remove) => {
-                retired_files.insert((hosts.resolve)(repo_root, path)?);
+                retired_files.insert(hosts.resolve_path(repo_root, path)?);
             }
             (Target::Region { host, .. }, Decision::LeaveAlone) => {
-                refused_region_hosts.insert((hosts.resolve)(repo_root, host)?);
+                refused_region_hosts.insert(hosts.resolve_path(repo_root, host)?);
             }
             _ => {}
         }
     }
     let mut configurations = Vec::new();
     for path in [".github/dependabot.yml", ".github/dependabot.yaml"] {
-        let path = (hosts.resolve)(repo_root, path)?;
+        let path = hosts.resolve_path(repo_root, path)?;
         if retired_files.contains(&path) {
             continue;
         }
@@ -398,7 +458,7 @@ fn plan_dependabot_exclusions(
     }
     let resolved_paths = paths
         .iter()
-        .map(|path| (hosts.resolve)(repo_root, path))
+        .map(|path| hosts.resolve_path(repo_root, path))
         .collect::<Result<Vec<_>, _>>()?;
     let paths: Vec<_> = resolved_paths.iter().map(String::as_str).collect();
     match crate::dependabot::update(&text, &paths) {
@@ -434,7 +494,7 @@ fn validate_projected_json_placements(
 ) -> Result<(), AppError> {
     let projected = plan.projected_manifest(manifest);
     for (key, path) in &projected.json_array_paths {
-        let host = (hosts.resolve)(repo_root, &key.host)?;
+        let host = hosts.resolve_path(repo_root, &key.host)?;
         let text = hosts.get_or_read(repo_root, &host)?.unwrap_or_default();
         crate::emit::json_array_region::validate_recorded_placement(&text, &key.id, path)
             .map_err(|refusal| json_array_plan_refusal(&host, &refusal))?;
@@ -457,7 +517,7 @@ fn repair_structural_json_markers(
         {
             for host in region_host_paths(workspace, spec) {
                 regions
-                    .entry((hosts.resolve)(repo_root, host)?)
+                    .entry(hosts.resolve_path(repo_root, host)?)
                     .or_default()
                     .insert(spec.id.as_str().to_owned());
             }
@@ -465,7 +525,7 @@ fn repair_structural_json_markers(
     }
     for key in manifest.json_array_paths.keys() {
         regions
-            .entry((hosts.resolve)(repo_root, &key.host)?)
+            .entry(hosts.resolve_path(repo_root, &key.host)?)
             .or_default()
             .insert(key.id.clone());
     }
@@ -502,7 +562,7 @@ fn validate_array_plan(
         let Target::Region { host, id } = &item.target else {
             continue;
         };
-        let host = (hosts.resolve)(repo_root, host)?;
+        let host = hosts.resolve_path(repo_root, host)?;
         let Some(array_host) = array_hosts.get(&host) else {
             continue;
         };
@@ -594,8 +654,10 @@ fn plan_catalog_artifact(
     match artifact {
         Artifact::OwnedFile(spec) => {
             if spec.gate.is_none_or(|gate| backends.contains(&gate)) {
-                let path = (hosts.resolve)(repo_root, spec.path)?;
-                plan.push(plan_owned_file(repo_root, manifest, &path, &spec.body, hosts.read)?);
+                let path = hosts.resolve_path(repo_root, spec.path)?;
+                plan.push(plan_owned_file(repo_root, manifest, &path, &spec.body, |path| {
+                    hosts.read_file(path)
+                })?);
             }
         }
         Artifact::Region(spec) => {
@@ -605,7 +667,7 @@ fn plan_catalog_artifact(
                     path: path.to_vec(),
                 };
                 for host in region_host_paths(workspace, spec) {
-                    let host = (hosts.resolve)(repo_root, host)?;
+                    let host = hosts.resolve_path(repo_root, host)?;
                     let current = hosts.get_or_read(repo_root, &host)?;
                     let item = crate::emit::json_array_region::plan_json_array_region(manifest, current.as_deref(), &host, &array)
                         .map_err(|refusal| json_array_plan_refusal(&host, &refusal))?;
@@ -620,7 +682,7 @@ fn plan_catalog_artifact(
                     path: path.to_vec(),
                 };
                 for host in region_host_paths(workspace, spec) {
-                    let host = (hosts.resolve)(repo_root, host)?;
+                    let host = hosts.resolve_path(repo_root, host)?;
                     // #[gamma::skip(try.propagate_to_unwrap, reason = "array_host_inputs already cached this exact host; this lookup cannot perform new IO.", tag = "equivalent")]
                     let current = hosts.get_or_read(repo_root, &host)?;
                     let item = crate::emit::toml_array_region::plan_toml_array_region(manifest, current.as_deref(), &host, &array)
@@ -689,7 +751,7 @@ fn array_host_inputs(
             {
                 if let Some(path) = path {
                     for host in region_host_paths(workspace, spec) {
-                        let host = (hosts.resolve)(repo_root, host)?;
+                        let host = hosts.resolve_path(repo_root, host)?;
                         let entry = paths.entry(host).or_insert_with(|| ArrayHost {
                             format,
                             paths: Vec::new(),
@@ -718,7 +780,7 @@ fn array_host_inputs(
     let live = live_region_keys(repo_root, workspace, catalog, hosts)?;
     let mut retiring = BTreeSet::new();
     for key in manifest.regions.keys() {
-        let host = (hosts.resolve)(repo_root, &key.host)?;
+        let host = hosts.resolve_path(repo_root, &key.host)?;
         if !live.contains(&(host.clone(), key.id.clone())) {
             retiring.insert((host, key.id.clone()));
         }
@@ -741,7 +803,7 @@ fn array_host_inputs(
                 }
                 if format == ArrayFormat::Json {
                     for (key, path) in &manifest.json_array_paths {
-                        let recorded_host = (hosts.resolve)(repo_root, &key.host)?;
+                        let recorded_host = hosts.resolve_path(repo_root, &key.host)?;
                         if recorded_host.eq_ignore_ascii_case(&host) {
                             crate::emit::json_array_region::validate_recorded_placement(&text, &key.id, path)
                                 .map_err(|refusal| json_array_plan_refusal(&host, &refusal))?;
@@ -790,7 +852,7 @@ fn add_historical_array_inputs(
             None
         };
         if let Some(format) = format {
-            let host = (hosts.resolve)(repo_root, &key.host)?;
+            let host = hosts.resolve_path(repo_root, &key.host)?;
             candidates.insert(host.clone(), format);
             if let Some(path) = manifest.json_array_paths.get(key) {
                 paths
@@ -812,7 +874,7 @@ fn recorded_json_scanner_hosts(repo_root: &Path, manifest: &Manifest, hosts: &Ho
     let mut scanner_hosts = BTreeSet::new();
     for host in &manifest.json_scanner_hosts {
         if crate::emit::json_array_region::is_json_host(host) {
-            scanner_hosts.insert((hosts.resolve)(repo_root, host)?);
+            scanner_hosts.insert(hosts.resolve_path(repo_root, host)?);
         }
     }
     Ok(scanner_hosts)
@@ -842,7 +904,7 @@ fn validate_array_host_overlaps(
     for artifact in catalog.artifacts() {
         if let Artifact::Region(spec) = artifact {
             for host in region_host_paths(workspace, spec) {
-                let host = (hosts.resolve)(repo_root, host)?;
+                let host = hosts.resolve_path(repo_root, host)?;
                 if let Some(array_host) = paths.get(&host)
                     && spec.syntax
                         != match array_host.format {
@@ -859,7 +921,7 @@ fn validate_array_host_overlaps(
             }
         }
         if let Artifact::OwnedFile(spec) = artifact {
-            let path = (hosts.resolve)(repo_root, spec.path)?;
+            let path = hosts.resolve_path(repo_root, spec.path)?;
             if let Some((_, array_host)) = paths.iter().find(|(host, _)| host.eq_ignore_ascii_case(&path)) {
                 bail!(
                     "a {} array host cannot also be an owned file: {}",
@@ -870,7 +932,7 @@ fn validate_array_host_overlaps(
         }
     }
     for file in manifest.files.keys() {
-        let path = (hosts.resolve)(repo_root, file)?;
+        let path = hosts.resolve_path(repo_root, file)?;
         if let Some((_, array_host)) = paths.iter().find(|(host, _)| host.eq_ignore_ascii_case(&path)) {
             bail!(
                 "retire whole-file ownership separately before managing {} array entries: {file}",
@@ -897,9 +959,7 @@ fn validate_expanded_section_ownership(workspace: &Workspace, backends: &[Backen
         };
         for host in region_host_paths(workspace, spec) {
             if let Some(section_path) = section_paths.iter().find(|path| path.eq_ignore_ascii_case(host)) {
-                bail!(
-                    "owned-file sections composing '{section_path}' conflict with managed-region host '{host}' after workspace expansion"
-                );
+                bail!("owned-file sections composing '{section_path}' conflict with managed-region host '{host}' after workspace expansion");
             }
         }
     }
@@ -954,26 +1014,42 @@ fn compose_owned_file_sections(catalog: &Catalog, backends: &[Backend]) -> Vec<C
 /// but the last). Instead, the first region to touch a host seeds the
 /// cache from disk; every subsequent region splices against — and, when it
 /// writes, updates — the accumulated in-memory text, so the composed
-/// result preserves every region. See `updates.md`.
-struct HostTextCache {
+/// result preserves every region.
+struct HostTextCache<'a> {
     texts: HashMap<String, Option<String>>,
     newlines: HashMap<String, &'static str>,
     resolve: fn(&Path, &str) -> Result<String, AppError>,
     read: fn(&Path) -> Result<Option<String>, AppError>,
+    io: Option<&'a dyn crate::UpdateIo>,
 }
 
-impl Default for HostTextCache {
+impl Default for HostTextCache<'_> {
     fn default() -> Self {
         Self {
             texts: HashMap::new(),
             newlines: HashMap::new(),
             resolve: resolve_existing_case_insensitive,
             read: read_file_if_present,
+            io: None,
         }
     }
 }
 
-impl HostTextCache {
+impl HostTextCache<'_> {
+    fn resolve_path(&self, root: &Path, path: &str) -> Result<String, AppError> {
+        match self.io {
+            Some(io) => crate::io::resolve_with_io(io, root, path),
+            None => (self.resolve)(root, path),
+        }
+    }
+
+    fn read_file(&self, path: &Path) -> Result<Option<String>, AppError> {
+        match self.io {
+            Some(io) => io.read_file(path),
+            None => (self.read)(path),
+        }
+    }
+
     /// The current in-memory text for `host`, reading from disk on first
     /// access. `None` means the host file does not (yet) exist on disk and
     /// no in-memory write has created it.
@@ -981,7 +1057,7 @@ impl HostTextCache {
         if let Some(text) = self.texts.get(host) {
             return Ok(text.clone());
         }
-        let text = (self.read)(&repo_root.join(host))?;
+        let text = self.read_file(&repo_root.join(host))?;
         self.newlines.insert(
             host.to_owned(),
             crate::region::text_newline(text.as_deref().unwrap_or(
@@ -1057,7 +1133,7 @@ fn push_region(
     spec: &RegionSpec,
 ) -> Result<(), AppError> {
     for host in region_host_paths(workspace, spec) {
-        let resolved = (hosts.resolve)(repo_root, host)?;
+        let resolved = hosts.resolve_path(repo_root, host)?;
         let scanner = if json_scanner_hosts.contains(&resolved) {
             HostScanner::Json
         } else {
@@ -1115,7 +1191,7 @@ fn push_region_at_with_scanner(
     spec: &RegionSpec,
     scanner: HostScanner,
 ) -> Result<(), AppError> {
-    let host = (hosts.resolve)(repo_root, host)?;
+    let host = hosts.resolve_path(repo_root, host)?;
     let current = hosts.get_or_read(repo_root, &host)?;
     if let Some(text) = current.as_deref()
         && let Err(error) = scanner.validate_marker_scan(text)
@@ -1148,6 +1224,7 @@ fn push_region_at_with_scanner(
     {
         return Ok(());
     }
+    // #[gamma::skip(try.propagate_to_unwrap, reason = "successful marker repair already cached this exact host, including absent files; the repeated lookup cannot perform I/O or return Err")]
     let cached = hosts.get_or_read(repo_root, &host)?;
     let current = seed_justfile_scaffold_if_absent(hosts, &host, spec, cached);
     validate_composed_host_region(&host, spec, composed_host)?;
@@ -1234,6 +1311,37 @@ fn push_region_at_with_scanner(
     Ok(())
 }
 
+fn seed_justfile_scaffold_if_absent(
+    hosts: &mut HostTextCache,
+    host: &str,
+    spec: &RegionSpec,
+    current: Option<String>,
+) -> Option<String> {
+    if current.is_some()
+        || !host.eq_ignore_ascii_case(artifacts::justfile::JUSTFILE_PATH)
+        || spec.id.as_str() != artifacts::justfile::JUSTFILE_REGION_ID
+    {
+        return current;
+    }
+    let scaffold = artifacts::justfile::scaffold().to_owned();
+    hosts.set(host, scaffold.clone());
+    Some(scaffold)
+}
+
+fn validate_composed_host_region(host: &str, spec: &RegionSpec, composed_host: Option<ComposedHost>) -> Result<(), AppError> {
+    if let Some(declared) = composed_host
+        && !declared.order.contains(&spec.id.as_str())
+    {
+        bail!(
+            "region '{}' targets the composed host '{host}', whose region order is semantic, \
+             but is not declared in that order. Add it to the host's `ComposedHost::order` \
+             at the position it must occupy.",
+            spec.id.as_str()
+        );
+    }
+    Ok(())
+}
+
 fn repair_tracked_json_body_for_scan(
     manifest: &Manifest,
     host: &str,
@@ -1253,35 +1361,6 @@ fn repair_tracked_json_body_for_scan(
     }
     scanner.find(&repaired, spec.id.as_str(), spec.syntax).ok().flatten()?;
     Some(repaired)
-}
-
-fn seed_justfile_scaffold_if_absent(hosts: &mut HostTextCache, host: &str, spec: &RegionSpec, current: Option<String>) -> Option<String> {
-    if current.is_some()
-        || !host.eq_ignore_ascii_case(artifacts::justfile::JUSTFILE_PATH)
-        || spec.id.as_str() != artifacts::justfile::JUSTFILE_REGION_ID
-    {
-        return current;
-    }
-    let scaffold = artifacts::justfile::scaffold().to_owned();
-    hosts.set(host, scaffold.clone());
-    Some(scaffold)
-}
-
-fn validate_composed_host_region(host: &str, spec: &RegionSpec, composed_host: Option<ComposedHost>) -> Result<(), AppError> {
-    if let Some(declared) = composed_host
-        && !declared.order.contains(&spec.id.as_str())
-    {
-        // End-of-file is wrong here by construction: it lands below the region
-        // that closes the file. Built-ins are covered by the registry test, but
-        // downstream catalogs can add regions at run time.
-        bail!(
-            "region '{}' targets the composed host '{host}', whose region order is semantic, \
-             but is not declared in that order. Add it to the host's `ComposedHost::order` \
-             at the position it must occupy.",
-            spec.id.as_str()
-        );
-    }
-    Ok(())
 }
 
 fn region_placement_or_refuse(
@@ -2015,7 +2094,7 @@ fn plan_removals_with_array_hosts(
         // the two are compared through the same resolution. Without it a
         // case-only rename makes anvil's own file look retired and the removal
         // below deletes the artifact this very pass just wrote.
-        let resolved = (hosts.resolve)(repo_root, path)?;
+        let resolved = hosts.resolve_path(repo_root, path)?;
         if live_files.contains(&resolved) {
             continue;
         }
@@ -2042,7 +2121,7 @@ fn plan_removals_with_array_hosts(
         // Read under the resolved casing: a lock entry recorded before a
         // case-only rename would otherwise find nothing on disk, classify a
         // file that is still present as `AlreadyGone`, and delete it.
-        let disk = (hosts.read)(&repo_root.join(&resolved))?;
+        let disk = hosts.read_file(&repo_root.join(&resolved))?;
         let disk_checksum = disk.as_deref().map(checksum_str);
         match decide_removal(last, disk_checksum.as_deref()) {
             // A file still matching its last render is safe to delete; an
@@ -2077,7 +2156,7 @@ fn plan_removals_with_array_hosts(
         // No `resolved_host != key.host` guard: the `continue` above has
         // already established that the recorded key is not live, so when the
         // resolution changes nothing this lookup repeats it and fails.
-        let resolved_host = (hosts.resolve)(repo_root, &key.host)?;
+        let resolved_host = hosts.resolve_path(repo_root, &key.host)?;
         // A refused host was not opened, and "nothing was written to it" has to
         // be true of the lock as well as the file -- the same invariant the
         // owned-file loop above keeps. A lock entry naming a region the catalog
@@ -3259,14 +3338,14 @@ mod tests {
         assert!(scanner_hosts.is_empty());
     }
 
-    fn memory_hosts() -> HostTextCache {
+    fn memory_hosts() -> HostTextCache<'static> {
         HostTextCache {
             resolve: |root, path| crate::io::resolve_case_insensitive_with(root, path, |_, _| Ok(None)),
             ..HostTextCache::default()
         }
     }
 
-    fn dependabot_plan(configurations: [Option<&str>; 2], backends: &[Backend]) -> (Plan, HostTextCache) {
+    fn dependabot_plan(configurations: [Option<&str>; 2], backends: &[Backend]) -> (Plan, HostTextCache<'static>) {
         let catalog = Catalog::builder(test_cli())
             .with_artifact(artifacts::github::setup_action())
             .with_artifact(artifacts::github::pr_impl_workflow())
@@ -3676,7 +3755,7 @@ mod tests {
         }
     }
 
-    fn case_renamed_json_hosts() -> HostTextCache {
+    fn case_renamed_json_hosts() -> HostTextCache<'static> {
         HostTextCache {
             resolve: |root, path| {
                 crate::io::resolve_case_insensitive_with(root, path, |_, name| {
@@ -3998,7 +4077,7 @@ mod tests {
         }
     }
 
-    fn managed_region_plan(text: Option<&str>, manifest: &Manifest, spec: &RegionSpec) -> (Plan, HostTextCache) {
+    fn managed_region_plan(text: Option<&str>, manifest: &Manifest, spec: &RegionSpec) -> (Plan, HostTextCache<'static>) {
         let HostSelector::Path(host) = &spec.host else {
             panic!("the managed-region test helper requires HostSelector::Path");
         };
@@ -4929,7 +5008,7 @@ mod tests {
         assert!(error.contains("No plan was produced; no files were changed"), "{error}");
     }
 
-    fn redundant_json_marker_plan(catalog: &Catalog) -> (Plan, HostTextCache) {
+    fn redundant_json_marker_plan(catalog: &Catalog) -> (Plan, HostTextCache<'static>) {
         let source = concat!(
             "{\n",
             "  \"entries\": [\n",
@@ -6594,91 +6673,6 @@ mod tests {
             fs::create_dir_all(parent).unwrap();
         }
         fs::write(path, contents).unwrap();
-    }
-
-    #[test]
-    fn owned_file_sections_compose_in_catalog_order_with_canonical_spacing() {
-        use crate::catalog::CliMeta;
-
-        let catalog = Catalog::builder(CliMeta::new("anvil"))
-            .with_artifact(Artifact::owned_file_section(".anvil/example", "first", "first\n\n"))
-            .with_artifact(Artifact::owned_file_section(".anvil/example", "second", "\nsecond"))
-            .build()
-            .unwrap();
-
-        let files = compose_owned_file_sections(&catalog, &[]);
-
-        assert_eq!(files.len(), 1);
-        assert_eq!(files[0].path, ".anvil/example");
-        assert_eq!(files[0].body, "first\n\nsecond\n");
-    }
-
-    #[test]
-    fn backend_gated_sections_emit_only_for_the_selected_backend() {
-        use crate::catalog::CliMeta;
-
-        let catalog = Catalog::builder(CliMeta::new("anvil"))
-            .with_artifact(Artifact::backend_file_section(Backend::GitHub, ".anvil/example", "github", "body"))
-            .build()
-            .unwrap();
-
-        assert!(compose_owned_file_sections(&catalog, &[]).is_empty());
-        assert_eq!(compose_owned_file_sections(&catalog, &[Backend::GitHub])[0].body, "body\n");
-    }
-
-    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
-    #[test]
-    fn member_region_conflicts_with_a_section_after_workspace_expansion() {
-        use crate::catalog::{CliMeta, RegionId};
-
-        let temp = empty_workspace();
-        let catalog = Catalog::builder(CliMeta::new("anvil"))
-            .with_artifact(Artifact::member_region(RegionId::new("member"), "workspace = true\n"))
-            .with_artifact(Artifact::owned_file_section("crates/alpha/Cargo.toml", "part", "section"))
-            .build()
-            .unwrap();
-
-        let error = run_update(&catalog, &local_only(), temp.path()).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("conflict with managed-region host 'crates/alpha/Cargo.toml'"),
-            "{error}"
-        );
-    }
-
-    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
-    #[test]
-    fn member_region_conflict_honors_the_section_backend_gate() {
-        use crate::catalog::{CliMeta, RegionId};
-
-        let catalog = Catalog::builder(CliMeta::new("anvil"))
-            .with_artifact(Artifact::member_region(RegionId::new("member"), "workspace = true\n"))
-            .with_artifact(Artifact::backend_file_section(
-                Backend::GitHub,
-                "crates/alpha/Cargo.toml",
-                "part",
-                "section",
-            ))
-            .build()
-            .unwrap();
-
-        let local = empty_workspace();
-        run_update(&catalog, &local_only(), local.path()).unwrap();
-
-        let github = empty_workspace();
-        let args = Cli {
-            backends: vec!["github".to_owned()],
-            no_backends: false,
-            ..local_only()
-        };
-        let error = run_update(&catalog, &args, github.path()).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("conflict with managed-region host 'crates/alpha/Cargo.toml'"),
-            "{error}"
-        );
     }
 
     /// `plan_removals` resolves the host's casing before deciding what to
@@ -8904,7 +8898,7 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("managed by 'forge2'"), "got: {msg}");
         assert!(msg.contains("--force"), "refusal should suggest --force; got: {msg}");
-        assert!(!tmp.path().join("justfiles/anvil/tools.just").exists(), "guard must write nothing");
+        assert!(!tmp.path().join(".anvil/anvil.just").exists(), "guard must write nothing");
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
@@ -9198,6 +9192,7 @@ mod tests {
             ".anvil/ado/steps/pr-test.yml",
             ".anvil/ado/steps/pr-msrv.yml",
             ".anvil/ado/steps/pr-runtime-analysis.yml",
+            ".anvil/ado/steps/pr-fuzzing.yml",
             ".anvil/ado/steps/pr-mutants.yml",
             ".anvil/ado/steps/scheduled-test.yml",
             ".anvil/ado/steps/scheduled-advisories.yml",

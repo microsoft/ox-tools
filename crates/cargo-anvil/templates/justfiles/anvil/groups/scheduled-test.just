@@ -10,20 +10,26 @@ anvil-scheduled-test: (_anvil-unscoped "scheduled-test")
 # Used by anvil-scheduled-test to run its full-workspace check fan-out.
 [private]
 _anvil-scheduled-test: anvil-scheduled-test-validate-prereqs \
+    anvil-check-all-targets \
     anvil-llvm-cov \
     anvil-doc-test \
-    anvil-examples
+    anvil-examples \
+    (anvil-bolero "scheduled")
 
 # Install prerequisites for the `anvil-scheduled-test` recipe.
 [private]
 anvil-scheduled-test-setup installer="install": \
+    (anvil-check-all-targets-setup installer) \
     (anvil-llvm-cov-setup installer) \
     (anvil-doc-test-setup installer) \
-    (anvil-examples-setup installer)
+    (anvil-examples-setup installer) \
+    (anvil-bolero-setup installer)
 
 # Validate prerequisites for the `anvil-scheduled-test` recipe.
 [private]
 anvil-scheduled-test-validate-prereqs: \
+    anvil-check-all-targets-validate-prereqs \
     anvil-llvm-cov-validate-prereqs \
     anvil-doc-test-validate-prereqs \
-    anvil-examples-validate-prereqs
+    anvil-examples-validate-prereqs \
+    anvil-bolero-validate-prereqs

@@ -58,7 +58,7 @@
 //! fn scaled(a: i64, b: i64) -> i64 { a * b / 1000 }
 //! ```
 //!
-//! If the crate uses only [`macro@resource`] on tests or test modules, a dev-dependency is enough:
+//! If the crate uses only [`macro@resource`] on tests, a dev-dependency is enough:
 //!
 //! ```toml
 //! [dev-dependencies]
@@ -67,7 +67,7 @@
 //!
 //! # The vocabulary
 //!
-//! Arguments are the same selector language the command line and the config file use, so one name
+//! Mutation-control arguments use the same selector language as the command line and config file, so one name
 //! learned is one name that works everywhere. A selector is a mutator name (`arith.add_to_sub`), a
 //! family prefix (`arith`), a profile (`@arithmetic`), or an academic alias (`ROR`); `!` in front
 //! removes one from the set, and selectors apply left to right, so `arith, !arith.add_to_sub`
@@ -223,7 +223,7 @@
 //!
 //! # Stating a value
 //!
-//! [`macro@value`] is the one macro that is not about suppression. It states the expression
+//! [`macro@value`] states the expression
 //! `cargo-gamma` substitutes for a function's body when it mutates the value that function
 //! returns, in place of the one it would otherwise guess from the return type:
 //!

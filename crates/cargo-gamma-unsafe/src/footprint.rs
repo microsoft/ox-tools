@@ -6,8 +6,9 @@
 use core::mem::MaybeUninit;
 use std::io;
 
-// `sys/proc_info.h` defines this selector; libc exposes the call but not the constant.
+// `sys/proc_info.h` defines these selectors; libc exposes the call but not the constants.
 const PROC_PGRP_ONLY: u32 = 2;
+const PROC_PPID_ONLY: u32 = 6;
 
 /// A process's current and lifetime maximum physical footprint, including compressed memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,17 +33,39 @@ pub fn members(group: i32) -> io::Result<Vec<i32>> {
         .filter(|group| *group > 1)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "process-group identifiers must be greater than one"))?;
 
+    list_pids(PROC_PGRP_ONLY, group)
+}
+
+/// Lists the processes whose parent is currently `parent`.
+///
+/// Like [`members`], this is a snapshot. A child that has left its parent's process group is
+/// still listed, which is how descendants in groups of their own are found.
+///
+/// # Errors
+///
+/// Returns the operating system's reason when listing fails, or rejects an invalid parent id
+/// or a listing too large for the platform's buffer size.
+pub fn children(parent: i32) -> io::Result<Vec<i32>> {
+    let parent = u32::try_from(parent)
+        .ok()
+        .filter(|parent| *parent > 1)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "parent process identifiers must be greater than one"))?;
+
+    list_pids(PROC_PPID_ONLY, parent)
+}
+
+fn list_pids(selector: u32, id: u32) -> io::Result<Vec<i32>> {
     list_with(|members| {
         let bytes = i32::try_from(size_of_val(members))
-            .map_err(|_too_large| io::Error::other("process-group listing exceeds the platform buffer size"))?;
+            .map_err(|_too_large| io::Error::other("process listing exceeds the platform buffer size"))?;
         // SAFETY: __error has no preconditions and returns this thread's errno cell.
         let errno = unsafe { libc::__error() };
         // SAFETY: errno points to this thread's writable cell. libproc maps a syscall failure
         // to zero, also the valid empty-list count, so clear errno to distinguish them.
         unsafe { *errno = 0 };
         // SAFETY: `members` is initialized, writable pid_t storage, `bytes` is its exact byte
-        // length, and proc_listpids writes at most that length. The selector takes a numeric pgid.
-        let listed = unsafe { libc::proc_listpids(PROC_PGRP_ONLY, group, members.as_mut_ptr().cast(), bytes) };
+        // length, and proc_listpids writes at most that length. Both selectors take a numeric id.
+        let listed = unsafe { libc::proc_listpids(selector, id, members.as_mut_ptr().cast(), bytes) };
         // SAFETY: errno still points to this thread's initialized cell; no other call intervenes.
         let error = unsafe { *errno };
         listing_result(listed, error)
@@ -69,7 +92,7 @@ fn list_with(mut list: impl FnMut(&mut [i32]) -> io::Result<usize>) -> io::Resul
             .len()
             .checked_mul(2)
             .filter(|length| *length <= i32::MAX as usize / size_of::<i32>())
-            .ok_or_else(|| io::Error::other("process-group listing exceeds the platform buffer size"))?;
+            .ok_or_else(|| io::Error::other("process listing exceeds the platform buffer size"))?;
         members.resize(length, 0);
     }
 }

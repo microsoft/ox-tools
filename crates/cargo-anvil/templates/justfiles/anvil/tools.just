@@ -14,6 +14,73 @@ cargo_binstall_version := replace_regex(installed_cargo_tools, '(?ms)\A.*^cargo-
 cargo_binstall_found := if cargo_binstall_version == installed_cargo_tools { "false" } else { "true" }
 bolero_command_prefix := if os() == "linux" { "" } else { "# " }
 
+# Check cargo-spellcheck source-build prerequisites.
+[private]
+[script("pwsh", "-NoProfile")]
+anvil-tool-cargo-spellcheck-source-deps-check:
+    $ErrorActionPreference = 'Stop'
+    $missing = @()
+    $libclangFiles = @('libclang.dll', 'libclang.so', 'libclang.so.1', 'libclang.dylib')
+    $libclangDir = $null
+    if ($env:LIBCLANG_PATH) {
+        foreach ($file in $libclangFiles) {
+            if (Test-Path (Join-Path $env:LIBCLANG_PATH $file)) { $libclangDir = $env:LIBCLANG_PATH; break }
+        }
+    }
+    if (-not $libclangDir) {
+        $probes = if ($IsWindows) {
+            @('C:\Program Files\LLVM\bin', "$env:USERPROFILE\scoop\apps\llvm\current\bin")
+        } elseif ($IsMacOS) {
+            @('/usr/local/opt/llvm/lib', '/opt/homebrew/opt/llvm/lib')
+        } else {
+            @('/usr/lib/x86_64-linux-gnu', '/usr/lib/aarch64-linux-gnu', '/usr/lib64')
+        }
+        foreach ($directory in $probes) {
+            foreach ($file in $libclangFiles) {
+                if (Test-Path (Join-Path $directory $file)) { $libclangDir = $directory; break }
+            }
+            if ($libclangDir) { break }
+        }
+        if (-not $libclangDir -and -not $IsWindows -and -not $IsMacOS) {
+            $glob = Get-ChildItem -Path '/usr/lib','/usr/lib64','/usr/lib/x86_64-linux-gnu','/usr/lib/aarch64-linux-gnu' -Filter 'libclang*.so*' -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($glob) { $libclangDir = $glob.DirectoryName }
+        }
+    }
+    if (-not $libclangDir) {
+        $missing += [pscustomobject]@{
+            name = 'libclang'
+            why = 'cargo-spellcheck (clang-sys/hunspell-rs) needs libclang at build time'
+            hints = @(
+                'Linux (Ubuntu/Debian):    sudo apt-get install -y libclang-dev'
+                'Linux (Azure Linux/RHEL): sudo tdnf install -y clang-devel'
+                'macOS (homebrew):         brew install llvm'
+                'Windows (scoop):          scoop install llvm'
+                'Windows (winget, admin):  winget install LLVM.LLVM, then add LLVM\bin to PATH'
+            )
+        }
+    } elseif ($IsWindows) {
+        $pathDirs = ($env:PATH -split ';') | ForEach-Object { $_.Trim().TrimEnd('\') } | Where-Object { $_ }
+        if ($pathDirs -notcontains $libclangDir.Trim().TrimEnd('\')) {
+            $missing += [pscustomobject]@{
+                name = 'libclang (present but not on PATH)'
+                why = "libclang.dll exists at '$libclangDir' but that directory is not on PATH"
+                hints = @(
+                    "Set LIBCLANG_PATH to '$libclangDir' and add that directory to PATH"
+                    'Or install via scoop: scoop install llvm'
+                )
+            }
+        }
+    }
+    if ($missing.Count -gt 0) {
+        foreach ($item in $missing) {
+            Write-Host "anvil: missing system dependency '$($item.name)'" -ForegroundColor Yellow
+            Write-Host "  why: $($item.why)"
+            Write-Host '  install:'
+            foreach ($hint in $item.hints) { Write-Host "    $hint" }
+        }
+        exit 1
+    }
+
 # Install exactly the catalog version when the installed version is too old.
 # A newer local version is accepted. `binstall` prefers a prebuilt binary and
 # lets cargo-binstall compile when no binary strategy succeeds; installer mode
@@ -29,6 +96,20 @@ _install-tool name minimum installer="install" \
     binary_command=("cargo binstall --no-confirm --locked --version =" + minimum + " " + name):
     {{ if satisfied == "true" { "# cargo-binstall not needed" } else if installer == "binstall" { if cargo_binstall_found == "true" { "# cargo-binstall already available" } else { "cargo install --locked cargo-binstall" } } else { "# cargo-binstall not needed" } }}
     {{ if satisfied == "true" { "# " + name + " " + installed + " satisfies >= " + minimum } else if installer == "install" { source_command } else { binary_command } }}
+
+[private]
+_install-source-tool name minimum prerequisite \
+    extracted=(replace_regex(installed_cargo_tools, ('(?ms)\A.*^' + name + ' v([^:\r\n]+):\r?$.*\z'), '$1')) \
+    found=(if extracted == installed_cargo_tools { "false" } else { "true" }) \
+    satisfied=(if found == "true" { semver_matches(extracted, ">=" + minimum) } else { "false" }):
+    {{ if satisfied == "true" { "# binary install satisfied the requirement" } else { just_executable() + " " + prerequisite } }}
+    {{ if satisfied == "true" { "# source fallback not needed" } else { "cargo install --locked --version =" + minimum + " " + name } }}
+
+[private]
+_binstall-with-source-fallback name minimum prerequisite:
+    {{ if cargo_binstall_found == "true" { "# cargo-binstall already available" } else { "cargo install --locked cargo-binstall" } }}
+    -cargo binstall --no-confirm --locked --disable-strategies compile --version ={{ minimum }} {{ name }}
+    {{ just_executable() }} _install-source-tool {{ name }} {{ minimum }} {{ prerequisite }}
 
 # Fail before a check starts when a required Cargo tool is missing or too old.
 [private]
@@ -203,7 +284,8 @@ anvil-tool-cargo-sort-install installer="install": (_install-tool "cargo-sort" c
 anvil-tool-cargo-sort-validate-prereqs: (_check-tool "cargo-sort" cargo_sort_version)
 
 [group("anvil-setup")]
-anvil-tool-cargo-spellcheck-install installer="install": (_install-tool "cargo-spellcheck" cargo_spellcheck_version installer)
+anvil-tool-cargo-spellcheck-install installer="install":
+    {{ if installer == "install" { just_executable() + " _install-source-tool cargo-spellcheck " + cargo_spellcheck_version + " anvil-tool-cargo-spellcheck-source-deps-check" } else if installer == "binstall" { just_executable() + " _binstall-with-source-fallback cargo-spellcheck " + cargo_spellcheck_version + " anvil-tool-cargo-spellcheck-source-deps-check" } else { error("invalid installer '" + installer + "'; expected install or binstall") } }}
 [group("anvil-setup")]
 anvil-tool-cargo-spellcheck-validate-prereqs: (_check-tool "cargo-spellcheck" cargo_spellcheck_version)
 

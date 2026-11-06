@@ -58,7 +58,7 @@ dedicated job, and only then runs. A child that cannot enter a job already creat
 rejected because an inherited job cannot be opened later to terminate its descendants. A peak
 that reached the limit is therefore enforced by the kernel rather than inferred after the fact.
 macOS enforcement is sampled and soft: allocation can overshoot between readings, and a
-descendant that leaves the group escapes both accounting and termination.
+descendant that leaves the group and outlives its parent escapes both accounting and termination.
 
 Because the Linux boundary is installed as a pre-exec step naming one particular leaf, and a
 [`Command`][__link6] accumulates every such step it is given, a command can only

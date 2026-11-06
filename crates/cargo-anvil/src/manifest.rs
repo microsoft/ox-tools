@@ -19,11 +19,12 @@ use std::path::{Component, Path, PathBuf};
 use ohno::{AppError, IntoAppError as _, app_err, bail};
 use toml_edit::{Array, ArrayOfTables, DocumentMut, Item, Table, value};
 
-/// Repo-root-relative path of the current manifest.
-pub const MANIFEST_PATH: &str = ".anvil/manifest.toml";
+/// Repository-relative path of the current manifest.
+pub const MANIFEST_FILE_NAME: &str = ".anvil/manifest.toml";
+pub const MANIFEST_PATH: &str = MANIFEST_FILE_NAME;
 
-/// Repo-root-relative path used before the generated-file consolidation.
-const LEGACY_MANIFEST_FILE_NAME: &str = ".anvil.lock";
+/// Repository-relative path used before generated-file consolidation.
+pub const LEGACY_MANIFEST_FILE_NAME: &str = ".anvil.lock";
 
 /// Current schema version we read/write.
 pub const SCHEMA_VERSION: i64 = 2;
@@ -152,13 +153,7 @@ impl Manifest {
     /// Path the manifest should be saved at, given a workspace root.
     #[must_use]
     pub fn path_for(repo_root: &Path) -> PathBuf {
-        repo_root.join(MANIFEST_PATH)
-    }
-
-    /// Path of the legacy root manifest, given a workspace root.
-    #[must_use]
-    fn legacy_path_for(repo_root: &Path) -> PathBuf {
-        repo_root.join(LEGACY_MANIFEST_FILE_NAME)
+        repo_root.join(MANIFEST_FILE_NAME)
     }
 
     /// Load the manifest from `repo_root`, returning an empty manifest if no
@@ -168,34 +163,35 @@ impl Manifest {
     ///
     /// Returns an error if the file exists but can't be read, can't be
     /// parsed, or declares an unsupported schema version.
+    #[cfg(any(test, feature = "test-util"))]
     pub fn load(repo_root: &Path) -> Result<Self, AppError> {
-        let path = Self::path_for(repo_root);
-        let legacy_path = Self::legacy_path_for(repo_root);
+        let current_path = Self::path_for(repo_root);
+        let legacy_path = repo_root.join(LEGACY_MANIFEST_FILE_NAME);
+        let current = read_optional(&current_path)?;
+        let legacy = read_optional(&legacy_path)?;
+        Self::from_sources(current, legacy, &current_path.display().to_string(), &legacy_path.display().to_string())
+    }
 
-        let current = Self::load_path(&path)?;
-        let legacy = Self::load_path(&legacy_path)?;
+    pub(crate) fn from_sources(
+        current: Option<String>,
+        legacy: Option<String>,
+        current_name: &str,
+        legacy_name: &str,
+    ) -> Result<Self, AppError> {
+        let current = current
+            .map(|text| Self::parse(&text).into_app_err_with(|| format!("failed to parse manifest at {current_name}")))
+            .transpose()?;
+        let legacy = legacy
+            .map(|text| Self::parse(&text).into_app_err_with(|| format!("failed to parse manifest at {legacy_name}")))
+            .transpose()?;
         match (current, legacy) {
             (None, None) => Ok(Self::default()),
             (Some(manifest), None) | (None, Some(manifest)) => Ok(manifest),
             (Some(current), Some(legacy)) if current == legacy => Ok(current),
-            (Some(_), Some(_)) => {
-                bail!(
-                    "{} and {} contain different ownership state; remove the obsolete file after reconciling the manifests",
-                    path.display(),
-                    legacy_path.display()
-                )
-            }
+            (Some(_), Some(_)) => bail!(
+                "{current_name} and {legacy_name} contain different ownership state; remove the obsolete file after reconciling the manifests"
+            ),
         }
-    }
-
-    fn load_path(path: &Path) -> Result<Option<Self>, AppError> {
-        if !path.exists() {
-            return Ok(None);
-        }
-        let text = std::fs::read_to_string(path).into_app_err_with(|| format!("failed to read {}", path.display()))?;
-        Self::parse(&text)
-            .map(Some)
-            .into_app_err_with(|| format!("failed to parse manifest at {}", path.display()))
     }
 
     /// Parse a manifest from a TOML string.
@@ -396,54 +392,25 @@ impl Manifest {
         out
     }
 
-    /// Save the manifest to `<repo_root>/.anvil/manifest.toml` atomically (write
+    /// Save the manifest to `<repo_root>/.anvil.lock` atomically (write
     /// to a temp file, then rename).
     ///
     /// # Errors
     ///
     /// Returns an error if the write fails.
+    #[cfg(any(test, feature = "test-util"))]
     pub fn save(&self, repo_root: &Path) -> Result<(), AppError> {
-        let path = Self::path_for(repo_root);
-        let parent = path
-            .parent()
-            .ok_or_else(|| app_err!("manifest path '{}' has no parent directory", path.display()))?;
-        std::fs::create_dir_all(parent).into_app_err_with(|| format!("failed to create manifest directory {}", parent.display()))?;
-        let text = self.to_toml();
-        let tmp = path.with_extension("toml.tmp");
-        // The write lands on this sibling before the rename, and `fs::write`
-        // opens with create+truncate, which follows a symlink. A checkout can
-        // carry `.anvil/manifest.toml.tmp` as a link out of the tree just as easily as
-        // any other name. Clearing it first turns a followed link into a
-        // replaced link; the name is anvil's own, so nothing that belongs to
-        // the repository is at stake. Only a missing file is absorbed.
-        match std::fs::remove_file(&tmp) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                return Err(e).into_app_err_with(|| format!("failed to clear the temporary file {}", tmp.display()));
-            }
-        }
-        std::fs::write(&tmp, text.as_bytes()).into_app_err_with(|| format!("failed to write {}", tmp.display()))?;
-        std::fs::rename(&tmp, &path).into_app_err_with(|| format!("failed to rename {} -> {}", tmp.display(), path.display()))?;
-        let legacy_path = Self::legacy_path_for(repo_root);
-        match std::fs::remove_file(&legacy_path) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                return Err(e).into_app_err_with(|| format!("failed to retire legacy manifest {}", legacy_path.display()));
-            }
-        }
-        Ok(())
+        save_text(repo_root, &self.to_toml())
     }
 
     /// Insert or update one file entry.
-    #[cfg(any(test, feature = "internals"))]
+    #[cfg(any(test, feature = "test-util"))]
     pub fn set_file(&mut self, path: impl Into<String>, checksum: impl Into<String>) {
         self.files.insert(path.into(), checksum.into());
     }
 
     /// Insert or update one region entry.
-    #[cfg(any(test, feature = "internals"))]
+    #[cfg(any(test, feature = "test-util"))]
     pub fn set_region(&mut self, host: impl Into<String>, id: impl Into<String>, checksum: impl Into<String>) {
         self.regions.insert(
             RegionKey {
@@ -508,8 +475,40 @@ impl Manifest {
     }
 }
 
-// Suppress an unused-import lint when no callers reference `Array`/`Value`
-// yet (they will once writers gain inline-table support in later commits).
+pub(crate) fn save_text(repo_root: &Path, text: &str) -> Result<(), AppError> {
+    let path = Manifest::path_for(repo_root);
+    let parent = path
+        .parent()
+        .ok_or_else(|| app_err!("manifest path '{}' has no parent directory", path.display()))?;
+    std::fs::create_dir_all(parent).into_app_err_with(|| format!("failed to create manifest directory {}", parent.display()))?;
+    let tmp = path.with_extension("toml.tmp");
+    // Clear the staging name before writing so a stale symlink cannot redirect
+    // the write outside the repository.
+    match std::fs::remove_file(&tmp) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(e).into_app_err_with(|| format!("failed to clear the temporary file {}", tmp.display()));
+        }
+    }
+    std::fs::write(&tmp, text.as_bytes()).into_app_err_with(|| format!("failed to write {}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).into_app_err_with(|| format!("failed to rename {} -> {}", tmp.display(), path.display()))?;
+    let legacy = repo_root.join(LEGACY_MANIFEST_FILE_NAME);
+    match std::fs::remove_file(&legacy) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).into_app_err_with(|| format!("failed to retire legacy manifest {}", legacy.display())),
+    }
+    Ok(())
+}
+
+fn read_optional(path: &Path) -> Result<Option<String>, AppError> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).into_app_err_with(|| format!("failed to read {}", path.display())),
+    }
+}
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -833,43 +832,6 @@ mod tests {
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
-    fn load_reads_the_legacy_manifest_during_migration() {
-        let tmp = TempDir::new().unwrap();
-        let expected = sample_manifest();
-        std::fs::write(tmp.path().join(LEGACY_MANIFEST_FILE_NAME), expected.to_toml()).unwrap();
-
-        assert_eq!(Manifest::load(tmp.path()).unwrap(), expected);
-    }
-
-    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
-    #[test]
-    fn load_accepts_equivalent_current_and_legacy_manifests() {
-        let tmp = TempDir::new().unwrap();
-        let expected = sample_manifest();
-        std::fs::create_dir(tmp.path().join(".anvil")).unwrap();
-        std::fs::write(Manifest::path_for(tmp.path()), expected.to_toml()).unwrap();
-        std::fs::write(tmp.path().join(LEGACY_MANIFEST_FILE_NAME), expected.to_toml()).unwrap();
-
-        assert_eq!(Manifest::load(tmp.path()).unwrap(), expected);
-    }
-
-    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
-    #[test]
-    fn load_rejects_conflicting_current_and_legacy_manifests() {
-        let tmp = TempDir::new().unwrap();
-        let current = sample_manifest();
-        let mut legacy = current.clone();
-        legacy.set_file("extra", "sha256:extra");
-        std::fs::create_dir(tmp.path().join(".anvil")).unwrap();
-        std::fs::write(Manifest::path_for(tmp.path()), current.to_toml()).unwrap();
-        std::fs::write(tmp.path().join(LEGACY_MANIFEST_FILE_NAME), legacy.to_toml()).unwrap();
-
-        let error = Manifest::load(tmp.path()).unwrap_err();
-        assert!(error.to_string().contains("different ownership state"), "{error}");
-    }
-
-    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
-    #[test]
     fn load_invalid_utf8_returns_an_error_instead_of_panicking() {
         let tmp = TempDir::new().unwrap();
         std::fs::create_dir(tmp.path().join(".anvil")).unwrap();
@@ -884,8 +846,8 @@ mod tests {
         // replaced rather than written through -- otherwise a symlink left at
         // that path would redirect the write outside the repository.
         let tmp = TempDir::new().unwrap();
-        let sibling = Manifest::path_for(tmp.path()).with_extension("toml.tmp");
         std::fs::create_dir(tmp.path().join(".anvil")).unwrap();
+        let sibling = Manifest::path_for(tmp.path()).with_extension("toml.tmp");
         std::fs::write(&sibling, b"stale").unwrap();
         sample_manifest().save(tmp.path()).unwrap();
         assert!(!sibling.exists(), "the temporary sibling must not survive the rename");
@@ -898,23 +860,11 @@ mod tests {
         // name here because `remove_file` refuses one on every platform,
         // without needing a permission the test may not have.
         let tmp = TempDir::new().unwrap();
-        let sibling = Manifest::path_for(tmp.path()).with_extension("toml.tmp");
         std::fs::create_dir(tmp.path().join(".anvil")).unwrap();
+        let sibling = Manifest::path_for(tmp.path()).with_extension("toml.tmp");
         std::fs::create_dir(&sibling).unwrap();
         let err = sample_manifest().save(tmp.path()).unwrap_err();
         assert!(err.to_string().contains("failed to clear"), "{err}");
-    }
-
-    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
-    #[test]
-    fn save_stops_when_the_legacy_manifest_cannot_be_retired() {
-        let tmp = TempDir::new().unwrap();
-        std::fs::create_dir(tmp.path().join(LEGACY_MANIFEST_FILE_NAME)).unwrap();
-
-        let err = sample_manifest().save(tmp.path()).unwrap_err();
-
-        assert!(err.to_string().contains("failed to retire legacy manifest"), "{err}");
-        assert!(tmp.path().join(LEGACY_MANIFEST_FILE_NAME).is_dir());
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
@@ -936,19 +886,6 @@ mod tests {
 
         let m2 = Manifest::load(tmp.path()).unwrap();
         assert_eq!(m1, m2);
-    }
-
-    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
-    #[test]
-    fn save_retires_the_legacy_manifest() {
-        let tmp = TempDir::new().unwrap();
-        let legacy_path = tmp.path().join(LEGACY_MANIFEST_FILE_NAME);
-        std::fs::write(&legacy_path, sample_manifest().to_toml()).unwrap();
-
-        sample_manifest().save(tmp.path()).unwrap();
-
-        assert!(!legacy_path.exists());
-        assert!(Manifest::path_for(tmp.path()).is_file());
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]

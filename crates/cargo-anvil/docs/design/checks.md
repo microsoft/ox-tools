@@ -47,6 +47,7 @@ flowchart LR
     pr_slow --> pr_test[anvil-pr-test]:::group
     pr_slow --> pr_msrv[anvil-pr-msrv]:::group
     pr_slow --> pr_runtime_analysis[anvil-pr-runtime-analysis]:::group
+    pr_slow --> pr_fuzzing[anvil-pr-fuzzing]:::group
     pr_slow --> pr_mutants[anvil-pr-mutants]:::group
 
     sched --> s_test[anvil-scheduled-test]:::group
@@ -118,11 +119,12 @@ jobs/stages. Locally, `just anvil-pr-slow` invokes those groups in order, and
 | `pr-fast`          | Linux x86_64 + Windows x86_64 + Linux aarch64 + Windows aarch64 (GH) / Linux x86_64 + Windows x86_64 (ADO) | All static analysis: clippy, `udeps`, `external-types`, plus the text/metadata checks (fmt, license-headers, ...). Cross-OS because clippy, doc-build, udeps, and external-types compile per host target. Text/metadata checks run on every leg too; the redundancy cost is negligible compared to a separate job's setup overhead. |
 | `pr-test`         | Same default as `pr-fast`             | Tests + coverage: `cargo-coverage-gate run` orchestrates instrumented `nextest`, followed by `doc-test` and `examples`. Coverage is uploaded once from the canonical x86_64 Linux leg. |
 | `pr-msrv`         | Same default as `pr-test`             | Affected-package all-target tests under the declared MSRV, in all-features and default-features configurations. The recipe is a no-op when no root MSRV is declared. |
-| `pr-runtime-analysis`         | Same default as `pr-fast`             | Stricter-runtime correctness: `miri`, `careful`, `loom` (concurrency model checking), `bolero` (short-duration fuzzing smoke). Impact-scoped to the affected set so wall-clock is proportional to the PR's blast radius; the cheap checks (loom/bolero) self-skip when no affected crate ships their harness. |
+| `pr-runtime-analysis`         | Same default as `pr-fast`             | Stricter-runtime correctness: `miri`, `careful`, and `loom`. Impact-scoped to the affected set so wall-clock is proportional to the PR's blast radius. |
+| `pr-fuzzing`                  | GH: Linux x86_64 + Linux aarch64. ADO: Linux x86_64 | Bolero fuzzing smoke checks use a fixed PR run count and seed. Non-Linux jobs are not created. |
 | `pr-mutants`         | GH: Windows x86_64 executes; other stable contexts are compatibility no-ops. ADO: Linux x86_64 + Windows x86_64 | Diff-scoped cargo-gamma mutation testing with report and hint publication. |
 
 The `pr-slow` groups are independent: failures in `pr-test` don't block
-`pr-msrv`, `pr-runtime-analysis`, or `pr-mutants`, and overall PR wall-clock is
+`pr-msrv`, `pr-runtime-analysis`, `pr-fuzzing`, or `pr-mutants`, and overall PR wall-clock is
 their maximum rather than their sum. Locally, `just anvil-pr-slow` is an umbrella
 recipe that invokes those groups sequentially.
 
@@ -130,7 +132,7 @@ recipe that invokes those groups sequentially.
 
 | Group                | OS scope                  | Purpose                                                                                                                                |
 |----------------------|---------------------------|----------------------------------------------------------------------------------------------------------------------------------------|
-| `scheduled-test`       | Same default as `pr-test` | Re-runs the test suite on `main` (with coverage instrumentation) to catch flakes/environment-dependent failures and to publish a full coverage snapshot of the current `main`. |
+| `scheduled-test`       | Same default as `pr-test` | Re-runs all-target compilation, tests, coverage, doctests, examples, and a time-bounded Bolero campaign on `main`. |
 | `scheduled-advisories` | Same default as `pr-fast` | Runs checks whose outcome can change without a commit to this repo: `deny`, `audit`, `aprz` (external databases), `clippy` (lint set evolves with toolchain). Cross-OS because clippy compiles per host. |
 | `scheduled-runtime-analysis` | Same default as `pr-runtime-analysis` | Whole-workspace runtime correctness under `miri`, tree-borrows, strict-provenance, and race-coverage. One job per OS leg runs the four profiles sequentially so they share setup and cache state; parallelism is across OS legs. |
 | `scheduled-exhaustive` | Linux x86_64 + Windows x86_64 | Full cargo-gamma, cargo-hack feature powerset, and benchmark compilation. The existing x86-only schedule bounds recurring cost. |
@@ -194,7 +196,7 @@ read-only.
 ### `pr-slow` umbrella
 
 The PR-tier slow checks are split into independent cloud-workflow-visible groups —
-`pr-test`, `pr-msrv`, `pr-runtime-analysis`, `pr-mutants` — that each run as their own job (GitHub) or
+`pr-test`, `pr-msrv`, `pr-runtime-analysis`, `pr-fuzzing`, `pr-mutants` — that each run as their own job (GitHub) or
 stage (ADO) in parallel. An umbrella `anvil-pr-slow` recipe is also provided in
 `groups.just` for local use; it invokes those groups sequentially so
 adopters can type one command to run "everything slow" without needing the cloud workflow
@@ -275,14 +277,12 @@ mutation jobs retain Gamma reports, hints, and SARIF after failures.
 
 ### `scheduled-test`
 
-Same three checks as `pr-test` -- `llvm-cov`, `doc-test`, `examples` -- and the same
-recipe invocations. `ANVIL_IMPACT=off` changes cargo-coverage-gate's selection
+Includes `check-all-targets`, `llvm-cov`, `doc-test`, `examples`, and
+`anvil-bolero scheduled`. `ANVIL_IMPACT=off` changes package selection
 from the affected package file to the complete workspace; collection and
-artifact paths remain owned by cargo-coverage-gate. Only the surrounding cloud
-workflow wiring differs: PR and scheduled runs upload the tool's completed
-reports under their respective stream labels. Two purposes for re-running
-on scheduled: catch flakes/environmental sensitivities that didn't trip in PR, and
-publish a full-coverage snapshot for the current state of `main`.
+artifact paths remain owned by cargo-coverage-gate. The scheduled Bolero
+campaign uses a 90-second target budget rather than the PR campaign's fixed
+30,000 runs and seed.
 
 ### `scheduled-advisories`
 

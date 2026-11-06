@@ -7,6 +7,12 @@ pub fn default_after<T: Default>(value: T) -> T {
     T::default()
 }
 
+/// Constructs the default of a witnessed type without consuming or dropping the witness.
+#[must_use]
+pub fn default_like<T: Default>(_: &T) -> T {
+    T::default()
+}
+
 /// A standard propagation container whose failure can be replaced by a panic.
 pub trait PanicOnFailure {
     /// Returns the original success, or panics without formatting the failure.
@@ -32,6 +38,15 @@ impl<T> PanicOnFailure for Option<T> {
         match self {
             Some(value) => Some(value),
             None => panic!("gamma: propagation replaced by panic"),
+        }
+    }
+}
+
+impl<B, C> PanicOnFailure for core::ops::ControlFlow<B, C> {
+    fn panic_on_failure(self) -> Self {
+        match self {
+            Self::Continue(value) => Self::Continue(value),
+            Self::Break(_) => panic!("gamma: propagation replaced by panic"),
         }
     }
 }

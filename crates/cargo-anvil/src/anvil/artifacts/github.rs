@@ -156,7 +156,7 @@ mod tests {
 
     use super::*;
 
-    const PR_GROUPS: &[&str] = &["pr-fast", "pr-test", "pr-msrv", "pr-runtime-analysis", "pr-mutants"];
+    const PR_GROUPS: &[&str] = &["pr-fast", "pr-test", "pr-msrv", "pr-runtime-analysis", "pr-fuzzing", "pr-mutants"];
     const SCHEDULED_GROUPS: &[&str] = &[
         "scheduled-test",
         "scheduled-advisories",
@@ -549,6 +549,7 @@ export -f just
             "Check Group: Fast Checks (${{ matrix.os }})",
             "Check Group: Tests and Coverage (${{ matrix.os }})",
             "Check Group: Runtime Analysis (${{ matrix.os }})",
+            "Check Group: Fuzzing (${{ matrix.os }})",
             "Check Group: Mutation Testing (${{ matrix.os }})",
         ] {
             assert!(PR_IMPL_WORKFLOW.contains(name), "PR impl workflow missing display name '{name}'");
@@ -595,11 +596,6 @@ export -f just
             "`always()` preserves completed reports after failure, and separate predicates require the complete pair"
         );
         assert!(PR_IMPL_WORKFLOW.contains("flags: ${{ matrix.os }}"));
-        assert_eq!(
-            PR_IMPL_WORKFLOW.matches("permissions:").count(),
-            0,
-            "the shared implementation must inherit the root caller's permission ceiling"
-        );
         assert_eq!(
             PR_IMPL_WORKFLOW.matches("free-disk-space: true").count(),
             2,

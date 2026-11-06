@@ -317,6 +317,9 @@ completed population fails when either `--min-score` or `--max-flaky` is configu
 gate it remains a reportable result. Build convergence that leaves stuck mutants is still status
 `3`, because the selected population was not built completely enough to answer.
 
+A run that selects no mutants still writes its reports and diagnostics bundle, describing an empty
+population, so a previous run's reports are not left behind to be read as this run's.
+
 A failing baseline also returns status `3`. Cargo-gamma lets completing baseline binaries report
 all their test failures, writes each failure under
 `target/cargo-gamma/baseline-failures/<package>/<target>/` (or the equivalent beneath
@@ -379,6 +382,7 @@ cargo gamma run [OPTIONS] [-- <TEST_ARGS>...]
 | Option | Value | What it does |
 | --- | --- | --- |
 | `--resume-testing` |  | Continue the interrupted campaign's testing phase using its existing prepared tree. |
+| `--update-hints` |  | Promote the campaign's learned hints after it reaches a reportable outcome. |
 | `--progress` | `<WHEN>` | When to show the progress display. Defaults to `auto`. |
 | `--dashboard` |  | Show a live testing dashboard instead of the progress bar. |
 | `--min-score` | `<PERCENT>` | Fail the run if the assertion-killed mutation score is below this percentage. |

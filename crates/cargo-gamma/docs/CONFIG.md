@@ -19,6 +19,7 @@ with its default. For the command-line flags these mirror, see [CMDLINE.md](CMDL
 * [Cargo features](#cargo-features)
 * [Building](#building)
 * [Running tests](#running-tests)
+* [Excluding individual test cases](#excluding-individual-test-cases)
 * [Baseline](#baseline)
 * [Memory](#memory)
 * [Run control](#run-control)
@@ -39,10 +40,10 @@ Two flags change this:
 * `--no-config` reads no file at all, which is what makes a scripted run reproducible regardless of
   what the project happens to have committed.
 
-`.cargo/mutants.toml` is noticed and deliberately not read. Its keys overlap only partly, and the
+`.cargo/mutants.toml` is ignored without a diagnostic. Its keys overlap only partly, and the
 ones that look identical do not always mean the same thing, so reading it would produce a run that
 silently differs from what either tool would do. It is unsupported; configure Gamma independently
-in `gamma.toml`. When it is present and `gamma.toml` is not, the tool says so.
+in `gamma.toml`.
 
 `gamma-hints.yaml` may sit beside it. It is not configuration and has no user-editable settings: it
 is a generated artifact written by `cargo gamma hints`, holding the parts of previous runs that
@@ -315,6 +316,26 @@ incomplete observations never prove absence.
 
 `whole-test-binaries = true` (or `--whole-test-binaries`) explicitly forbids case-level selection
 and deterministic reach narrowing. Target and package filters remain intact.
+
+### Excluding individual test cases
+
+`exclude-tests` excludes entire test targets (usually test binaries), not individual cases within
+them. To exclude cases by harness name, pass a `--skip` filter:
+
+```toml
+cargo-test-args = ["--skip", "compiler_contracts"]
+```
+
+The equivalent command-line spelling is:
+
+```bash
+cargo gamma run -- --skip compiler_contracts
+```
+
+These filters apply to every test binary and use substring matching by default.
+Add `--exact` to match fully qualified test names instead. `#[gamma::skip]`
+suppresses mutations in code; it does not exclude test cases from execution.
+It also does not change ordinary `cargo test` execution, unlike Rust's built-in `#[ignore]`.
 
 ## Baseline
 

@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! macOS process-group sampling, owned and stopped by the launch's boundary.
+//! macOS process-tree sampling, owned and stopped by the launch's boundary.
 
 use core::panic::AssertUnwindSafe;
 use std::io;
@@ -12,7 +12,7 @@ use std::time::Instant;
 use cargo_gamma_unsafe::footprint::{self, Footprint};
 use cargo_gamma_unsafe::{PlatformError, Situation};
 
-use crate::{MemoryRequest, MemoryUsage, SAMPLE_INTERVAL};
+use crate::{MemoryRequest, MemoryUsage, SAMPLE_INTERVAL, descendants};
 
 #[derive(Debug)]
 pub(super) struct Sampler {
@@ -29,7 +29,7 @@ impl Sampler {
         request: MemoryRequest,
         kill: impl Fn() -> io::Result<()> + Send + 'static,
     ) -> Result<Self, PlatformError> {
-        Self::start_with(request, move || footprint::members(group), footprint::read, kill)
+        Self::start_with(request, move || descendants::tree(group), footprint::read, kill)
     }
 
     fn start_with(
