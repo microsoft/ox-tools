@@ -646,7 +646,9 @@ only after resolving the locator back to that record.
 Normal runs publish `gamma-report.json`, `gamma-report.html`, `gamma-report.sarif`,
 `gamma-perf-advice.md`, and `gamma-diagnostics.json` under the original workspace's
 `target/cargo-gamma/`. `last-gamma-run.json`, `gamma-progress.log`, and
-`gamma-selection.jsonl` remain reusable cache state rather than published artifacts. The selection
+`gamma-selection.jsonl` remain reusable cache state rather than published artifacts. A run that
+selects no mutants still publishes the three reports and the diagnostics bundle, describing an empty
+population, so a previous run's documents cannot stand in for its result. The selection
 journal is append-only, flushed during the campaign, and remains non-verdict scheduling telemetry.
 It retains at most 64 MiB per campaign, ending with an explicit truncation record when further
 attempts are omitted; reaching that diagnostic ceiling never stops mutant execution.
@@ -1501,7 +1503,8 @@ its genuine survivor IDs with the population discovered from the current source.
 directory is `target/cargo-gamma` by default or the value of `--artifact-dir` when configured.
 Timeout and memory-limit outcomes are not selected even though the interchange schema exports them
 as `Survived`. This supports focused confirmation after tests are added without carrying any prior
-verdict forward.
+verdict forward. A report written by a run that selected no mutants holds no survivors, so it
+selects none.
 
 Command help follows the workspace Cargo-tool convention: green bold headings and usage,
 cyan bold literals, cyan placeholders, and package author/version metadata.
