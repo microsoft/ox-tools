@@ -4,6 +4,7 @@
 
 import collections
 import datetime
+import errno
 import json
 import os
 from pathlib import Path
@@ -62,7 +63,7 @@ def run(output):
 
 def sample(unit):
     processes = []
-    groups = set()
+    groups = {Path("/sys/fs/cgroup/user.slice") / unit}
     process_count = 0
     for entry in Path("/proc").iterdir():
         if not entry.name.isdigit():
@@ -96,13 +97,21 @@ def sample(unit):
             "rssKiB": int(fields["VmRSS"].split()[0]), "threads": int(fields["Threads"]),
             "activeOrdinal": active, "cgroup": group_text, "umask": fields.get("Umask"),
         })
+    counters = {}
+    for path in sorted(groups):
+        try:
+            counters[str(path)] = cgroup(path)
+        except OSError as error:
+            if error.errno != errno.ENODEV or path.name == unit:
+                raise
+            print(f"{now()} transient test cgroup disappeared while sampling: {path}", flush=True)
     memory = dict(line.split(":", 1) for line in Path("/proc/meminfo").read_text().splitlines())
     return {
         "time": now(), "processCount": process_count,
         "availableKiB": int(memory["MemAvailable"].split()[0]),
         "swapFreeKiB": int(memory["SwapFree"].split()[0]),
         "processes": processes,
-        "cgroups": {str(path): cgroup(path) for path in sorted(groups)},
+        "cgroups": counters,
     }
 
 
@@ -189,6 +198,8 @@ def observe(output, unit):
             for path, limits in state["cgroups"].items():
                 if Path(path).name != unit or stopped.exists():
                     continue
+                if any(limits[name] is None for name in ("memory.current", "pids.current", "memory.events.local", "pids.events")):
+                    raise RuntimeError(f"External safety counters became unavailable: {path}: {limits}")
                 memory = int(limits["memory.current"] or "0")
                 tasks = int(limits["pids.current"] or "0")
                 events = dict(line.split() for line in (limits["memory.events.local"] or "").splitlines())
