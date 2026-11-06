@@ -73,14 +73,8 @@ jobs:
           sudo -u gamma-diagnostic test -r "$GITHUB_WORKSPACE/scripts/gamma-linux-diagnostics.py"
           sudo -u gamma-diagnostic test -x "$RUNNER_TEMP/gamma-diagnostic-bin/cargo-gamma"
           sudo -u gamma-diagnostic test -w "$RUNNER_TEMP/gamma-diagnostic"
-          # Scope commands inherit the user manager's umask, not the submitting shell's.
-          sudo mkdir -p "/etc/systemd/system/user@$uid.service.d"
-          printf '[Service]\nUMask=0077\n' \
-            | sudo tee "/etc/systemd/system/user@$uid.service.d/privacy.conf" > /dev/null
-          sudo systemctl daemon-reload
           sudo loginctl enable-linger gamma-diagnostic
-          sudo systemctl restart "user@$uid.service"
-          test "$(sudo systemctl show "user@$uid.service" --property=UMask --value)" = 0077
+          sudo systemctl start "user@$uid.service"
           sudo systemctl set-property --runtime "user-$uid.slice" \
             MemoryAccounting=yes MemoryMax=10G MemorySwapMax=0 TasksMax=1024
           group=$(sudo systemctl show "user-$uid.slice" --property=ControlGroup --value)

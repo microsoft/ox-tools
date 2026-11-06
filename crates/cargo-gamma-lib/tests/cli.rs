@@ -11,7 +11,7 @@ use std::fs;
 use std::process::{Command, Stdio};
 
 use camino::Utf8PathBuf;
-use cargo_gamma_lib::testing::{Sink, gamma_base, run, write_fixture, write_project};
+use cargo_gamma_lib::testing::{Sink, gamma_base, private_system_tempdir, run, write_fixture, write_project};
 use tempfile::TempDir;
 
 /// Exit code for a run in which every gate passed.
@@ -22,7 +22,7 @@ const EXIT_USAGE: i32 = 1;
 
 /// Builds a throwaway single-package workspace containing `source` as its library.
 fn workspace(source: &str) -> TempDir {
-    let dir = TempDir::new().expect("could not create a temporary directory");
+    let dir = private_system_tempdir("gamma-cli-");
     write_project(dir.path(), &[("src/lib.rs", source)]);
 
     dir

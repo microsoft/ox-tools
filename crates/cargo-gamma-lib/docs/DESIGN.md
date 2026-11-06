@@ -901,6 +901,8 @@ baseline-runtime estimate avoided by successful explicit or inferred hints.
 
 On Unix, cargo-gamma creates a previously absent redirected cache with
 permissions limited to the invoking user, independently of the process umask.
+Workspace preparation uses the same private creation policy for scratch and
+campaign directories before claiming the cache.
 It does not change permissions on a pre-existing directory: the directory and
 its physical ancestry must already be owned by the invoking user or root and
 must not permit another user to replace entries. Sticky shared ancestors such

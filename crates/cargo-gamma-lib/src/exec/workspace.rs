@@ -375,10 +375,9 @@ impl Workspace {
 
         events.begin("Copying", "Copied", "the workspace");
 
-        fs::create_dir_all(scratch.as_std_path())
+        create_private_dir_all(&scratch)
             .map_err(|cause| error!("could not create the scratch directory at `{scratch}`").caused_by(cause))?;
-        fs::create_dir_all(base.as_std_path())
-            .map_err(|cause| error!("could not create the campaign cache at `{base}`").caused_by(cause))?;
+        create_private_dir_all(&base).map_err(|cause| error!("could not create the campaign cache at `{base}`").caused_by(cause))?;
 
         let locks = match locks {
             Some(locks) => locks,
