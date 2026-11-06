@@ -40,6 +40,8 @@ jobs:
         run: |
           sudo useradd --create-home --shell /bin/bash gamma-diagnostic
           uid=$(id -u gamma-diagnostic)
+          echo "DIAGNOSTIC_UID=$uid" >> "$GITHUB_ENV"
+          echo "DIAGNOSTIC_BOUNDARY=user-$uid.slice" >> "$GITHUB_ENV"
           home=/home/gamma-diagnostic
           sudo mkdir -p "$home/.cargo" "$home/tmp"
           for name in bin registry .crates.toml .crates2.json; do
@@ -49,16 +51,19 @@ jobs:
           done
           sudo cp -a "$HOME/.rustup" "$home/"
           sudo chown -R gamma-diagnostic:gamma-diagnostic \
-            "$home" "$GITHUB_WORKSPACE" "$RUNNER_TEMP/gamma-diagnostic"
+            "$home" "$GITHUB_WORKSPACE"
+          sudo chown "$USER:gamma-diagnostic" "$RUNNER_TEMP/gamma-diagnostic"
+          sudo chmod 2775 "$RUNNER_TEMP/gamma-diagnostic"
           sudo loginctl enable-linger gamma-diagnostic
           sudo systemctl start "user@$uid.service"
           sudo systemctl set-property --runtime "user-$uid.slice" \
-            MemoryAccounting=yes MemoryMax=10G MemorySwapMax=0 MemoryOOMGroup=yes TasksMax=1024
+            MemoryAccounting=yes MemoryMax=10G MemorySwapMax=0 TasksMax=1024
+          group=$(sudo systemctl show "user-$uid.slice" --property=ControlGroup --value)
+          test "$group" = "/user.slice/user-$uid.slice"
+          echo 1 | sudo tee "/sys/fs/cgroup$group/memory.oom.group"
           sudo systemctl show "user-$uid.slice" \
-            --property=ControlGroup,MemoryMax,MemorySwapMax,MemoryOOMGroup,TasksMax \
+            --property=ControlGroup,MemoryMax,MemorySwapMax,TasksMax \
             | tee "$RUNNER_TEMP/gamma-diagnostic/systemd-boundary.txt"
-          echo "DIAGNOSTIC_UID=$uid" >> "$GITHUB_ENV"
-          echo "DIAGNOSTIC_BOUNDARY=user-$uid.slice" >> "$GITHUB_ENV"
       - name: Start independent diagnostics
         env:
           GH_TOKEN: ${{ github.token }}

@@ -14,7 +14,7 @@ import urllib.request
 
 
 CGROUP_FILES = (
-    "memory.max", "memory.current", "memory.peak", "memory.swap.max",
+    "memory.max", "memory.current", "memory.peak", "memory.oom.group", "memory.swap.max",
     "memory.swap.current", "memory.events", "memory.events.local",
     "pids.max", "pids.current", "pids.events",
 )
@@ -50,7 +50,8 @@ def run(output):
     boundary = os.environ["GAMMA_DIAGNOSTIC_BOUNDARY"]
     group = next(path for path in (own, *own.parents) if path.name == boundary)
     limits = cgroup(group)
-    if limits["memory.max"] != str(10 * 1024**3) or limits["memory.swap.max"] != "0" or limits["pids.max"] != "1024":
+    if (limits["memory.max"] != str(10 * 1024**3) or limits["memory.swap.max"] != "0"
+            or limits["pids.max"] != "1024" or limits["memory.oom.group"] != "1"):
         raise RuntimeError(f"Refusing a run without the expected external limits: {limits}")
     if limits["memory.events.local"] is None or limits["pids.events"] is None:
         raise RuntimeError(f"Refusing a run without resource-limit counters: {limits}")
