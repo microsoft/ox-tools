@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.7.5] - 2026-11-06
+
+- 🐛 Bug Fixes
+
+  - cargo-coverage-gate: restore native proc-macro coverage ([#347](https://github.com/microsoft/ox-tools/pull/347))
+
 ## [0.7.4] - 2026-11-02
 
 - 🐛 Bug Fixes
