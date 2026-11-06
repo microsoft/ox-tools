@@ -431,7 +431,7 @@ publish a full-coverage snapshot for the current state of `main`.
 
 | Check | Invocation | Source |
 |-------|------------|--------|
-| `check-all-targets` | `cargo each --workspace --keep-going -- cargo check --package '{cargo-spec}' --all-targets --locked`, with default features and again with `--no-default-features`. Checks each package independently with the selected stable compiler; `{cargo-spec}` (cargo-each 0.6.0+) is a source-qualified selector, so a member that shares its name and version with a registry dependency stays unambiguous. | none |
+| `check-all-targets` | `cargo each --workspace --keep-going -- cargo check --package '{cargo-spec}' --all-targets --locked --config "build.warnings='deny'"`, with default features and again with `--no-default-features`. Requires Cargo 1.97 or newer. Checks each package independently with the selected stable compiler; `{cargo-spec}` (cargo-each 0.6.0+) is a source-qualified selector, so a member that shares its name and version with a registry dependency stays unambiguous. | none |
 | `bolero` | Same discovery and target execution as the PR check, but over every workspace member with `-T 90s` per discovered target and no seed argument. Runs last, after examples; an earlier check failure skips the campaign. Non-Linux hosts skip the libfuzzer campaign. | oxidizer-github |
 
 #### Package-isolated all-target compilation
@@ -444,7 +444,8 @@ not remove that blind spot.
 
 The scheduled group checks every workspace package one at a time, first with
 default features and then with defaults disabled. Both configurations reuse
-Cargo's normal build cache.
+Cargo's normal build cache and reject compiler lint warnings from local packages
+through `build.warnings = "deny"`, which requires Cargo 1.97 or newer.
 `--all-targets` includes unit and integration tests, examples, and benchmarks,
 so test-only dependency omissions are checked as well as the library and binaries.
 For example, a module enabled by `cfg(test)` may reference an optional dependency
