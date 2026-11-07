@@ -216,6 +216,13 @@ The selected Cargo build settings also determine the active `cfg` predicates. Tr
 the build never compiles as ordinary live code would create mutants no test could execute and
 misreport them as test-suite failures.
 
+Return-tail analysis and call-argument mutation use only statements and arguments active under
+these predicates; disabled branches cannot supply a return value or shift argument types.
+Disabled item declarations inside a block also cannot hide its active return tail.
+With `--all-features`, selected packages have complete feature sets even when dependency feature
+activation is otherwise uncertain. Unselected dependencies retain conservative feature handling.
+Unknown predicates remain eligible; runtime CPU dispatch does not exclude compiled code.
+
 The source engine parses Rust for structure and spans but rewrites the original bytes rather than
 pretty-printing an AST. Textual rewriting preserves comments, formatting, macros, and literal
 spelling. Byte-accurate spans are therefore part of the correctness model, not merely an
@@ -1565,16 +1572,19 @@ executed campaign, an actionable `Note   :` and indented entries for idle direct
 conditional suppression note, the conditional hints-promotion reminder, then one `Wrote  :` line
 per published artifact. The stats line reports elapsed wall time, distinct participating test
 binaries, mutant-test subprocess launches, and exact-hint plus inferred-test probes that killed
-their mutant. It is absent for dry runs and runs that never reached test execution. All labels
-start in column one, use the same width and styled emphasis, and artifact paths use the host's
+their mutant. It is absent for dry runs and runs that never reached test execution. The summary
+omits the cached-verdict count; that count remains available in diagnostics. All labels start
+in column one, use the same width and styled emphasis, and artifact paths use the host's
 native separators. Hints promotion is recommended only when the successfully persisted campaign
 state is resolvable through the same locator used by the command and would add, correct, or remove
 exact killer or compiler-ordering knowledge in the checked-in hints artifact. Generalized
 seed/transfer counter churn alone does not trigger the reminder. Suppression is recommended only
 when that same resolvable state contains the timeout or out-of-memory outcomes the command will
 consume.
-Incomplete, truncated, or unsaved output is labelled `warning`. Routine internal adjustments are
-silent.
+Incomplete test-process output does not produce a console warning; exit status still decides the
+verdict, and failed-baseline diagnostics retain the truncation flag. Other incomplete, truncated,
+or unsaved output is labelled `warning`. Routine internal adjustments are silent.
+Compiler-driving test detection does not produce console warnings or exclude tests from the oracle.
 
 Everything a rendered artifact shows that the repository controls — paths, source fragments, test
 names, mutator notes, and a build tool's own diagnostics — is control-character encoded before it

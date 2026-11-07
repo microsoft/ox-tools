@@ -285,9 +285,13 @@ pub(super) fn values_for(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Repl
             } else {
                 Confidence::Optimistic
             };
-            let mut values = if aliased && !types.lacks_default(resolved) || types.prefers_default_constructor(resolved) {
+            let mut values = if
+            // #[gamma::skip(logical.and_remove_right, tag = "equivalent", reason = "When an aliased collection lacks Default, default_values and its local or unsupported-constructor fallback both return empty; payload candidates are appended identically.")]
+            aliased && !types.lacks_default(resolved) || types.prefers_default_constructor(resolved) {
                 default_values("fn_value.empty_collection", resolved, types)
-            } else if types.is_local_type(resolved) {
+            } else if
+            // #[gamma::skip(cond.always_false, tag = "equivalent", reason = "A local collection with proven Default already takes prefers_default_constructor above. Otherwise its constructor is unsupported and default_values returns the same empty vector. Bare non-generic collection names are Kind::Unknown and never reach this arm.")]
+            types.is_local_type(resolved) {
                 Vec::new()
             } else if !constructor_supported {
                 default_values("fn_value.empty_collection", resolved, types)
@@ -326,9 +330,13 @@ pub(super) fn values_for(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Repl
             } else {
                 Confidence::Optimistic
             };
-            let mut values = if aliased && !types.lacks_default(resolved) || types.prefers_default_constructor(resolved) {
+            let mut values = if
+            // #[gamma::skip(logical.and_remove_right, tag = "equivalent", reason = "When an aliased map lacks Default, default_values and its local or unsupported-constructor fallback both return empty; payload candidates are appended identically.")]
+            aliased && !types.lacks_default(resolved) || types.prefers_default_constructor(resolved) {
                 default_values("fn_value.empty_collection", resolved, types)
-            } else if types.is_local_type(resolved) {
+            } else if
+            // #[gamma::skip(cond.always_false, tag = "equivalent", reason = "A local map with proven Default already takes prefers_default_constructor above. Otherwise its constructor is unsupported and default_values returns the same empty vector. Bare non-generic map names are Kind::Unknown and never reach this arm.")]
+            types.is_local_type(resolved) {
                 Vec::new()
             } else if !constructor_supported {
                 default_values("fn_value.empty_collection", resolved, types)
@@ -912,6 +920,87 @@ mod tests {
             self_type: None,
             self_associated: None,
         }
+    }
+
+    #[test]
+    fn nov7_collection_and_tuple_confidence_preserves_unknown_components() {
+        let defaults = Defaults::default();
+        let imports = HashMap::default();
+        let types = test_types(&[], &imports, &defaults);
+        for text in ["external::Vec<bool>", "external::HashMap<bool, bool>"] {
+            let values = values_for(&syn::parse_str(text).unwrap(), RETURN_DEPTH, &types);
+            assert!(!values.is_empty(), "{text}");
+            assert!(
+                values.iter().all(|(_, _, confidence)| *confidence == Confidence::Optimistic),
+                "{text}: {values:?}"
+            );
+        }
+        for text in ["Vec<external::bool>", "std::collections::HashMap<bool, external::bool>"] {
+            let values = values_for(&syn::parse_str(text).unwrap(), RETURN_DEPTH, &types);
+            assert!(values.len() > 1, "{text}: {values:?}");
+            assert_eq!(values[0].2, Confidence::Proven, "{text}: {values:?}");
+            assert!(
+                values[1..].iter().all(|(_, _, confidence)| *confidence == Confidence::Optimistic),
+                "{text}: {values:?}"
+            );
+        }
+        let fx_imports = HashMap::from_iter([("HashMap".into(), Some(vec!["rustc_hash".into(), "FxHashMap".into()]))]);
+        let fx_types = test_types(&[], &fx_imports, &defaults);
+        let values = values_for(&parse_quote!(HashMap<external::bool, bool>), RETURN_DEPTH, &fx_types);
+        assert_eq!(
+            values[1],
+            optimistic("fn_value.one_element", "core::iter::once((true, true)).collect()")
+        );
+        for text in [
+            "(external::bool, bool)",
+            "(bool, external::bool)",
+            "(external::bool, external::bool)",
+        ] {
+            let values = tuple_values(&syn::parse_str(text).unwrap(), RETURN_DEPTH, &types);
+            assert_eq!(values.len(), 4, "{text}");
+            assert!(
+                values.iter().all(|(_, _, confidence)| *confidence == Confidence::Optimistic),
+                "{text}: {values:?}"
+            );
+        }
+        assert_eq!(
+            tuple_values(&parse_quote!((bool, bool)), RETURN_DEPTH, &types)[0],
+            proven("fn_value.tuple", "(true, true)")
+        );
+    }
+
+    #[test]
+    fn non_generic_local_collection_names_do_not_gain_empty_collection_candidates() {
+        for name in ["Vec", "HashMap"] {
+            let defaults = Defaults::of(&syn::parse_file(&format!("#[derive(Default)] struct {name};")).unwrap());
+            let imports = HashMap::default();
+            let types = test_types(&[], &imports, &defaults);
+            let ty = syn::parse_str(name).unwrap();
+
+            assert!(types.has_proven_default(&ty), "{name}");
+            assert!(!types.prefers_default_constructor(&ty), "{name}");
+            assert_eq!(types.value_kind(&ty), Kind::Unknown, "{name}");
+            assert_eq!(
+                values_for(&ty, RETURN_DEPTH, &types),
+                [proven("fn_value.default", "Default::default()")],
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn nov7_defaultable_local_map_uses_its_proven_default_constructor() {
+        let defaults = Defaults::of(
+            &syn::parse_file(
+                "#[derive(Default)]
+                 struct HashMap<K, V>(std::marker::PhantomData<(K, V)>);",
+            )
+            .unwrap(),
+        );
+        let imports = HashMap::default();
+        let types = test_types(&[], &imports, &defaults);
+        let values = values_for(&parse_quote!(HashMap<bool, bool>), RETURN_DEPTH, &types);
+        assert_eq!(values[0], proven("fn_value.empty_collection", "Default::default()"));
     }
 
     #[test]

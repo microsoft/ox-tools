@@ -119,6 +119,9 @@ With no active mutant it records no guards. A variable this process could not *r
 is a startup failure, not an absent one. A read interrupted by a signal is retried rather than
 counted as a failure, since an interruption is not evidence of anything.
 
+On Windows, the runtime installs its captured state before ordinary `.CRT$XCU` user
+constructors, so instrumented code in those constructors can use guards normally.
+
 Two further failure shapes exist because “captured, but wrong” is worse than either of the
 above:
 
@@ -218,23 +221,23 @@ how nearly every `no_std` library is tested anyway.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-gamma-rt">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbsh7x2mCzv-kbYJkjySbnBsIb0yTS9VDwrb4bqqehjM5c8v9hZIGDbmNhcmdvLWdhbW1hLXJ0ZTAuNC4wbmNhcmdvX2dhbW1hX3J0
- [__link0]: https://docs.rs/cargo-gamma-rt/0.4.0/cargo_gamma_rt/?search=a
- [__link1]: https://docs.rs/cargo-gamma-rt/0.4.0/cargo_gamma_rt/?search=a
- [__link10]: https://docs.rs/cargo-gamma-rt/0.4.0/cargo_gamma_rt/?search=a
- [__link11]: https://docs.rs/cargo-gamma-rt/0.4.0/cargo_gamma_rt/?search=default_after
- [__link12]: https://docs.rs/cargo-gamma-rt/0.4.0/cargo_gamma_rt/?search=increment
- [__link13]: https://docs.rs/cargo-gamma-rt/0.4.0/cargo_gamma_rt/?search=decrement
- [__link14]: https://docs.rs/cargo-gamma-rt/0.4.0/cargo_gamma_rt/?search=panic_on_failure
- [__link15]: https://docs.rs/cargo-gamma-rt/0.4.0/cargo_gamma_rt/?search=active
- [__link16]: https://docs.rs/cargo-gamma-rt/0.4.0/cargo_gamma_rt/?search=any
- [__link17]: https://docs.rs/cargo-gamma-rt/0.4.0/cargo_gamma_rt/?search=Either
- [__link18]: https://docs.rs/cargo-gamma-rt/0.4.0/cargo_gamma_rt/?search=Either
- [__link2]: https://docs.rs/cargo-gamma-rt/0.4.0/cargo_gamma_rt/?search=ACTIVE_VAR
- [__link3]: https://docs.rs/cargo-gamma-rt/0.4.0/cargo_gamma_rt/?search=NONE
- [__link4]: https://docs.rs/cargo-gamma-rt/0.4.0/cargo_gamma_rt/?search=NONE
- [__link5]: https://docs.rs/cargo-gamma-rt/0.4.0/cargo_gamma_rt/?search=ENVIRONMENT_ERROR_MARKER
- [__link6]: https://docs.rs/cargo-gamma-rt/0.4.0/cargo_gamma_rt/?search=REACH_VAR
- [__link7]: https://docs.rs/cargo-gamma-rt/0.4.0/cargo_gamma_rt/?search=ACTIVE_VAR
- [__link8]: https://docs.rs/cargo-gamma-rt/0.4.0/cargo_gamma_rt/?search=ACTIVE_VAR
- [__link9]: https://docs.rs/cargo-gamma-rt/0.4.0/cargo_gamma_rt/?search=ENVIRONMENT_ERROR_MARKER
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbTTxXy_yoWDwbrm4AvjVZJYsbg1C4Hd-RZs4bs4e-38V8CWRhZIGDbmNhcmdvLWdhbW1hLXJ0ZTAuNi4wbmNhcmdvX2dhbW1hX3J0
+ [__link0]: https://docs.rs/cargo-gamma-rt/0.6.0/cargo_gamma_rt/?search=a
+ [__link1]: https://docs.rs/cargo-gamma-rt/0.6.0/cargo_gamma_rt/?search=a
+ [__link10]: https://docs.rs/cargo-gamma-rt/0.6.0/cargo_gamma_rt/?search=a
+ [__link11]: https://docs.rs/cargo-gamma-rt/0.6.0/cargo_gamma_rt/?search=default_after
+ [__link12]: https://docs.rs/cargo-gamma-rt/0.6.0/cargo_gamma_rt/?search=increment
+ [__link13]: https://docs.rs/cargo-gamma-rt/0.6.0/cargo_gamma_rt/?search=decrement
+ [__link14]: https://docs.rs/cargo-gamma-rt/0.6.0/cargo_gamma_rt/?search=panic_on_failure
+ [__link15]: https://docs.rs/cargo-gamma-rt/0.6.0/cargo_gamma_rt/?search=active
+ [__link16]: https://docs.rs/cargo-gamma-rt/0.6.0/cargo_gamma_rt/?search=any
+ [__link17]: https://docs.rs/cargo-gamma-rt/0.6.0/cargo_gamma_rt/?search=Either
+ [__link18]: https://docs.rs/cargo-gamma-rt/0.6.0/cargo_gamma_rt/?search=Either
+ [__link2]: https://docs.rs/cargo-gamma-rt/0.6.0/cargo_gamma_rt/?search=ACTIVE_VAR
+ [__link3]: https://docs.rs/cargo-gamma-rt/0.6.0/cargo_gamma_rt/?search=NONE
+ [__link4]: https://docs.rs/cargo-gamma-rt/0.6.0/cargo_gamma_rt/?search=NONE
+ [__link5]: https://docs.rs/cargo-gamma-rt/0.6.0/cargo_gamma_rt/?search=ENVIRONMENT_ERROR_MARKER
+ [__link6]: https://docs.rs/cargo-gamma-rt/0.6.0/cargo_gamma_rt/?search=REACH_VAR
+ [__link7]: https://docs.rs/cargo-gamma-rt/0.6.0/cargo_gamma_rt/?search=ACTIVE_VAR
+ [__link8]: https://docs.rs/cargo-gamma-rt/0.6.0/cargo_gamma_rt/?search=ACTIVE_VAR
+ [__link9]: https://docs.rs/cargo-gamma-rt/0.6.0/cargo_gamma_rt/?search=ENVIRONMENT_ERROR_MARKER

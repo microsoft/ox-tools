@@ -647,15 +647,6 @@ const fn no_target_selection<T>() -> Option<T> {
     None
 }
 
-/// Whether a target name survives the include and exclude patterns.
-///
-/// Exclusion is checked first and wins, which is what makes `--include-test "*"` plus a few
-/// exclusions mean what it looks like. An empty include list admits everything, so exclusion alone
-/// is a subtraction from the whole suite rather than a selection of nothing.
-pub(super) fn admits_target(name: &str, include: &[String], exclude: &[String]) -> bool {
-    TargetPatterns::new(include, exclude).admits(name)
-}
-
 /// Returns the first `--include-test` or `--exclude-test` pattern that names no test target.
 ///
 /// A pattern matching nothing is the failure these options exist to prevent. An `--exclude-test`
