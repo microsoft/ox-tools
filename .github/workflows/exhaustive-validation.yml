@@ -77,12 +77,12 @@ jobs:
           sudo loginctl enable-linger gamma-diagnostic
           sudo systemctl start "user@$uid.service"
           sudo systemctl set-property --runtime "user-$uid.slice" \
-            MemoryAccounting=yes MemoryMax=10G MemorySwapMax=0 TasksMax=1024
+            MemoryAccounting=yes MemoryHigh=7G MemoryMax=10G MemorySwapMax=0 TasksMax=1024
           group=$(sudo systemctl show "user-$uid.slice" --property=ControlGroup --value)
           test "$group" = "/user.slice/user-$uid.slice"
           echo 1 | sudo tee "/sys/fs/cgroup$group/memory.oom.group"
           sudo systemctl show "user-$uid.slice" \
-            --property=ControlGroup,MemoryMax,MemorySwapMax,TasksMax \
+            --property=ControlGroup,MemoryHigh,MemoryMax,MemorySwapMax,TasksMax \
             | tee "$RUNNER_TEMP/gamma-diagnostic/systemd-boundary.txt"
       - name: Start independent diagnostics
         env:

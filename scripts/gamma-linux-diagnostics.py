@@ -15,7 +15,7 @@ import urllib.request
 
 
 CGROUP_FILES = (
-    "memory.max", "memory.current", "memory.peak", "memory.oom.group", "memory.swap.max",
+    "memory.max", "memory.high", "memory.current", "memory.peak", "memory.oom.group", "memory.swap.max",
     "memory.swap.current",     "memory.events", "memory.events.local", "memory.stat",
     "pids.max", "pids.current", "pids.events",
 )
@@ -51,7 +51,8 @@ def run(output):
     boundary = os.environ["GAMMA_DIAGNOSTIC_BOUNDARY"]
     group = next(path for path in (own, *own.parents) if path.name == boundary)
     limits = cgroup(group)
-    if (limits["memory.max"] != str(10 * 1024**3) or limits["memory.swap.max"] != "0"
+    if (limits["memory.max"] != str(10 * 1024**3) or limits["memory.high"] != str(7 * 1024**3)
+            or limits["memory.swap.max"] != "0"
             or limits["pids.max"] != "1024" or limits["memory.oom.group"] != "1"):
         raise RuntimeError(f"Refusing a run without the expected external limits: {limits}")
     if limits["memory.events.local"] is None or limits["pids.events"] is None:
@@ -228,7 +229,7 @@ def observe(output, unit):
                 }
                 payload = {"output": {
                     "title": f"Last protected heartbeat: {state['time']}",
-                    "summary": "\U0001f916 Feature-powerset and benchmark-compilation verification with external 10 GiB memory, zero swap and 1024-task limits. "
+                    "summary": "\U0001f916 Feature-powerset and benchmark-compilation verification with early reclaim at 7 GiB, external 10 GiB memory, zero swap and 1024-task limits. "
                                "A limit-triggered stop is not a successful exhaustive check. "
                                "Only GAMMA_ACTIVE is inspected from child environments; saved workspace environments are not published.",
                     "text": "```json\n" + json.dumps(text, indent=2).replace("```", "~~~") + "\n```",
