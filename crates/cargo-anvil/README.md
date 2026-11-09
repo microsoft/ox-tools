@@ -52,6 +52,13 @@ repository must assemble differently.
 
 ### Install and adopt
 
+Supported adopter toolchains are **Rust and Cargo 1.95 or newer**, including
+the repository’s declared MSRV. Building this release of cargo-anvil from
+source requires **Rust 1.97 or newer**. Generated recipes require
+**Just 1.46.0 or newer**, PowerShell Core (`pwsh`), Git, and rustup.
+They target one Cargo workspace or single-crate package at the repository root.
+Older adopter toolchains and multi-workspace orchestration are unsupported.
+
 Install the generator:
 
 ```console
@@ -214,10 +221,6 @@ above compose these recipes into the default policy:
   [`cargo-gamma`][__link23] runs,
   [`cargo-hack`][__link24] feature-powerset
   checks, and benchmark compilation.
-
-`docs/design/checks.md` records the exact commands, impact scope, feature
-configurations, operating-system matrix, tier placement, and rationale for
-each check.
 
 ### Configuring checks
 
@@ -430,8 +433,9 @@ fn main() -> ExitCode {
 }
 ```
 
-The engine format remains `anvil`-named on disk so tools built on it can
-coexist safely and share the same update rules.
+The engine format remains `anvil`-named on disk. Only one tool manages a
+repository at a time; switching tools requires `--force` and preserves the
+normal content-conflict protections.
 
 ### In-process catalog updates
 
@@ -463,7 +467,7 @@ More detailed design and operational guidance is available in the
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbH0-cuopID70bo-mb5dV3gXwbQze916l8QEkbJrG28YyukvFhZIGDa2NhcmdvLWFudmlsZjAuMjUuMGtjYXJnb19hbnZpbA
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbBB0rQ4OCwxEbsR1IHqTyVmAbLictnbHgN60bG7Uxykcwxd5hZIGDa2NhcmdvLWFudmlsZjAuMjUuMGtjYXJnb19hbnZpbA
  [__link0]: https://github.com/casey/just
  [__link1]: https://rust-lang.github.io/rustfmt/
  [__link10]: https://www.conventionalcommits.org/
