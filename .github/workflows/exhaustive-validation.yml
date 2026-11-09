@@ -121,7 +121,7 @@ jobs:
             XDG_RUNTIME_DIR="/run/user/$DIAGNOSTIC_UID" \
             DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$DIAGNOSTIC_UID/bus" \
             CI=true GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted \
-            ANVIL_IMPACT=off CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 \
+            ANVIL_IMPACT=off CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 \
             GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
             GAMMA_DIAGNOSTIC_BOUNDARY="$DIAGNOSTIC_BOUNDARY" \
             systemd-run --user --scope --quiet --collect --same-dir \

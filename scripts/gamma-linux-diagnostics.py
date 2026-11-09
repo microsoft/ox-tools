@@ -16,7 +16,7 @@ import urllib.request
 
 CGROUP_FILES = (
     "memory.max", "memory.current", "memory.peak", "memory.oom.group", "memory.swap.max",
-    "memory.swap.current", "memory.events", "memory.events.local",
+    "memory.swap.current",     "memory.events", "memory.events.local", "memory.stat",
     "pids.max", "pids.current", "pids.events",
 )
 JOURNALS = ("gamma-progress.log", "gamma-selection.jsonl", "testing-verdicts.jsonl", "testing-phase.json")
