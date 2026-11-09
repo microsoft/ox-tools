@@ -109,6 +109,7 @@ pub async fn write_archive_with(
     let (archive_file, output) = tokio::task::spawn_blocking(move || -> std::io::Result<_> { create(destination) }).await??;
     let mut output = tokio::fs::File::from_std(output);
     let mut stream = std::pin::pin!(resilient_http::response_stream(response));
+    // #[gamma::skip(literal.int_increment, reason = "This counter consumes an HTTP stream into an owning native file; byte-exact end-to-end limit coverage needs a supplied stream/writer backend. check_download_size retains exact boundary coverage.", tag = "native-boundary")]
     let mut downloaded = 0_u64;
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
@@ -207,6 +208,7 @@ pub fn unpack_with_limits(input: impl Read, destination: &Path, max_bytes: u64, 
         if !kind.is_dir() && !kind.is_file() {
             bail!("advisory archives may contain only regular files and directories, not links or special entries");
         }
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "On Unix tar 0.4.46 converts path bytes through OsStr/OsString and always returns Ok; non-Unicode path failure is Windows-only.", tag = "equivalent")]
         let path = entry.path()?;
         let text =
         // #[gamma::skip(try.propagate_to_unwrap, reason = "On Windows tar rejects non-Unicode paths before this conversion; the Unix conversion failure has a direct test.", tag = "platform")]

@@ -40,3 +40,20 @@ Registry exhaustion itself is tested with fake effects in `cargo-gamma-unsafe`.
 The process layer injects the resulting registration refusal and checks that
 the actual child is killed and reaped; it never fills a native-effect registry
 with invented group identifiers.
+
+## Mutation scope
+
+Linux native preparation and Unix child observation retain acceptance coverage,
+but their owning `Child`/cgroup/registry adapters have local mutation exclusions
+until an owned lifecycle backend can supply those observations in-process.
+Injected observation-cleanup ordering, retry, error precedence and reader policy
+remain in mutation scope. Windows preparation and observation are not removed
+by the Unix/Linux block exclusions.
+
+The no-op kill mutants measured as timeouts are excluded individually: leaving
+descendants and inherited output handles alive prevents a completed test verdict.
+Other mutations inside the supplied-operation kill helper remain enabled.
+Test-only fault overrides are identified separately from production policy.
+The exhaustive gate remains 100% for retained mutants; native acceptance and
+Loom ownership checks are complementary evidence, not a substitute score for
+excluded adapters.

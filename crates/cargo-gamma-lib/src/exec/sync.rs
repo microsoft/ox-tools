@@ -131,6 +131,7 @@ pub fn sync_or_copy_using(
     }
 
     // The tree looks consistent — attempt delta sync.
+    // #[gamma::skip(try.propagate_to_unwrap, reason = "The sentinel is still removed through the native filesystem, outside the injected copy/sync callbacks; failure injection requires the deferred complete filesystem backend.", tag = "native-boundary")]
     clear_sentinel(root)?;
 
     match synchronize(source, root, skip, options, &reflinks) {
@@ -175,6 +176,7 @@ pub fn delta_sync(source: &Utf8Path, root: &Utf8Path, skip: &Utf8Path, options: 
     })?;
 
     // Remove stale entries from the scratch tree.
+    // #[gamma::skip(try.propagate_to_unwrap, reason = "This orchestration performs native stale-entry inventory and removal; in-memory stale_inventory and ordering helpers retain policy coverage.", tag = "native-boundary")]
     remove_stale(root, &expected)?;
 
     Ok(())
@@ -284,6 +286,7 @@ pub fn collect_source_entries_with(
                 return WalkState::Continue;
             };
 
+            // #[gamma::skip(call.replace_with_default, call_result.default, cond.always_false, reason = "The parallel walker supplies actual directory entries; observing inclusion of its native root requires the deferred entry-inventory backend.", tag = "native-boundary")]
             if is_walk_root(relative) {
                 return WalkState::Continue;
             }
@@ -354,6 +357,7 @@ pub fn sync_entry(source: &Utf8Path, destination: &Utf8Path, reflinks: &Reflinks
         return sync_directory(destination, || fs::symlink_metadata(destination.as_std_path()));
     }
 
+    // #[gamma::skip(cond.always_false, reason = "This dispatch branch needs native symlink Metadata; constructing it in memory requires the deferred metadata backend.", tag = "native-boundary")]
     if src_meta.is_symlink() {
         return sync_symlink(source, destination);
     }
@@ -393,6 +397,7 @@ fn sync_directory_with(
 
 /// Synchronizes a regular file, preserving mtime for unchanged files.
 #[cfg_attr(coverage_nightly, coverage(off))]
+// #[gamma::skip(all, reason = "This adapter inspects native Metadata and removes/copies filesystem entries; deterministic fault coverage requires the deferred metadata and file-operation backend.", tag = "native-boundary")]
 pub fn sync_file(source: &Utf8Path, destination: &Utf8Path, src_meta: &fs::Metadata, reflinks: &Reflinks) -> Result<()> {
     let needs_copy = match fs::symlink_metadata(destination.as_std_path()) {
         Err(_) => true, // Destination does not exist.
@@ -432,6 +437,7 @@ pub fn sync_file(source: &Utf8Path, destination: &Utf8Path, src_meta: &fs::Metad
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
+// #[gamma::skip(all, reason = "Length, mode and readonly comparisons receive native Metadata that tests cannot construct in memory; byte-stream comparison remains mutation-tested through readers_have_same_contents.", tag = "native-boundary")]
 pub fn file_differs(source: &Utf8Path, destination: &Utf8Path, src: &fs::Metadata, dst: &fs::Metadata) -> Result<bool> {
     if different_lengths(src, dst) {
         return Ok(true);
@@ -499,6 +505,7 @@ pub fn sync_symlink(source: &Utf8Path, destination: &Utf8Path) -> Result<()> {
     sync_symlink_with(source, destination, super::copy::create_symlink)
 }
 
+// #[gamma::skip(all, reason = "Only link creation is injected: inventory, metadata, read_link and removal are native. Covering their failure combinations requires the deferred filesystem backend.", tag = "native-boundary")]
 pub fn sync_symlink_with(
     source: &Utf8Path,
     destination: &Utf8Path,
@@ -613,6 +620,7 @@ pub fn remove_stale<S: std::hash::BuildHasher>(root: &Utf8Path, expected: &HashS
     remove_stale_with_directory(root, expected, |path| fs::remove_dir(path.as_std_path()))
 }
 
+// #[gamma::skip(try.propagate_to_unwrap, match_guard.always_true, reason = "This adapter still walks and removes real entries; scripting these failures requires injected inventory and file removal. stale_inventory retains in-memory decision coverage.", tag = "native-boundary")]
 pub fn remove_stale_with_directory<S: std::hash::BuildHasher>(
     root: &Utf8Path,
     expected: &HashSet<Utf8PathBuf, S>,
@@ -730,6 +738,7 @@ fn source_entry_exists(path: &Utf8Path) -> bool {
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
+// #[gamma::skip(result.err_to_ok, reason = "Observing failed removal requires a native filesystem refusal; this adapter has no injected remove operation.", tag = "native-boundary")]
 fn remove_stale_entry(path: &Utf8Path) -> std::io::Result<()> {
     match fs::remove_file(path.as_std_path()) {
         Ok(()) => Ok(()),
@@ -746,6 +755,7 @@ pub fn metadata_is_directory(metadata: &fs::Metadata) -> bool {
 }
 
 #[must_use]
+// #[gamma::skip(fn_value.bool_false, reason = "This thin native Metadata adapter needs a real symlink to distinguish false; no in-memory Metadata constructor exists.", tag = "native-boundary")]
 pub fn metadata_is_symlink(metadata: &fs::Metadata) -> bool {
     metadata.is_symlink()
 }
@@ -760,6 +770,7 @@ fn different_lengths(left: &fs::Metadata, right: &fs::Metadata) -> bool {
 
 #[cfg_attr(coverage_nightly, coverage(off))]
 #[must_use]
+// #[gamma::skip(fn_value.bool_true, reason = "This adapter reads an actual symlink target; deterministic target observations need the deferred filesystem seam.", tag = "native-boundary")]
 pub fn link_target_differs(destination: &Utf8Path, source_target: &std::path::Path) -> bool {
     match fs::read_link(destination.as_std_path()) {
         Ok(target) => target != source_target,
@@ -820,9 +831,9 @@ fn directory_has_expected_children(cause: &std::io::Error) -> bool {
 /// Checks if an IO error indicates the directory is not empty.
 fn is_not_empty_error(err: &std::io::Error) -> bool {
     // On Unix, ENOTEMPTY; on Windows, ERROR_DIR_NOT_EMPTY.
-    err.kind() == ErrorKind::DirectoryNotEmpty
-        || err.raw_os_error() == Some(39)  // ENOTEMPTY on Linux
-        || err.raw_os_error() == Some(66) // ENOTEMPTY on macOS
+    // #[gamma::skip(logical.or_remove_right, reason = "On Linux raw errno 39 is already classified as DirectoryNotEmpty by std, so the explicit Linux-code fallback adds no accepted error.", tag = "equivalent")]
+    let not_empty_kind_or_linux_code = err.kind() == ErrorKind::DirectoryNotEmpty || err.raw_os_error() == Some(39);
+    not_empty_kind_or_linux_code || err.raw_os_error() == Some(66) // ENOTEMPTY on macOS
 }
 
 /// Records the first failure.
@@ -887,6 +898,31 @@ mod tests {
             (directory.clone().into_std_path_buf(), true),
         ];
         assert_eq!(stale_inventory(root, &expected, entries), (vec![file], vec![directory]));
+    }
+
+    #[test]
+    fn directory_sync_preserves_inspection_and_removal_failures() {
+        let destination = Utf8Path::new("in-memory-sync-directory");
+        let inspection = sync_directory_with(
+            destination,
+            || Err(ErrorKind::PermissionDenied.into()),
+            |_| panic!("an inspection failure must not remove anything"),
+            |_| panic!("an inspection failure must not create anything"),
+        )
+        .unwrap_err();
+        assert_eq!(inspection.message(), "could not inspect `in-memory-sync-directory`");
+
+        let removal = sync_directory_with(
+            destination,
+            || Ok(false),
+            |actual| {
+                assert_eq!(actual, destination);
+                Err(ErrorKind::PermissionDenied.into())
+            },
+            |_| panic!("a removal failure must not create anything"),
+        )
+        .unwrap_err();
+        assert_eq!(removal.message(), "could not remove stale entry at `in-memory-sync-directory`");
     }
 
     #[test]

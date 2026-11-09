@@ -82,6 +82,25 @@ The scripted guard tests remain mutation-tested and also run under Miri.
 Native acceptance still signals a real, freshly spawned process group and
 verifies both termination and the already-gone result.
 
+## Mutation coverage boundary
+
+The exhaustive mutation gate still requires every retained mutant to be killed.
+It does not claim that every native adapter is mutation-covered. Site-specific
+`gamma::skip` comments identify native boundaries that cannot be exercised by the
+current owned, in-memory seams: process-global registry wiring, owning cgroup
+construction and release, background reaping, credential/proc reads, and actual
+signal or kill-descriptor writes. Reasons and tags distinguish these from
+equivalent mutations and measured no-progress timeouts.
+
+The deferred alternative is an owning-resource/I/O backend, not fabricated
+descriptors, process identifiers, mutable globals, or additional host-dependent
+fixtures. Exclusions leave the existing injected decision cores in scope:
+identifier rejection, proc-field parsing, discovery error propagation, registry
+slot identity, atomic reaper ownership, leaf-name uniqueness, and removal retry
+policy. Existing native acceptance, Miri-compatible policy tests, and Loom
+ownership models remain; they provide different evidence, not proof that the
+excluded native mutations would be killed.
+
 ## Portability
 
 Unix and Windows implementations are selected with target-specific

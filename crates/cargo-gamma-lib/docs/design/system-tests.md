@@ -196,6 +196,23 @@ marker must fail against that callback without starting another copy of the
 test executable in a sibling systemd scope. Unmarked cases separately verify
 one attempt and unchanged success, exit-code and refusal results.
 
+### Mutation scope at native boundaries
+
+The exhaustive score remains 100% of the retained population, with no flaky
+verdict allowance. It is not a claim of mutation coverage for native acceptance
+or every storage adapter. Local, reasoned `gamma::skip` comments exclude native
+relaunch/PATH/environment wiring and filesystem/cache paths whose existing
+partial seams still require actual owning files, native metadata or global
+state. Completing that coverage requires the deferred owning-resource and
+filesystem backend; it must not be simulated by tests changing the shared host.
+
+Injected policy stays eligible, including the once-only relaunch guard, command
+construction, directory synchronization error handling, executable permissions,
+and lexical path normalization. Platform-only policies use compile-time `cfg`
+blocks so an inactive platform branch is not offered as mutation coverage.
+Native acceptance remains valuable but does not establish that excluded
+syscall/storage failures were mutation-tested.
+
 ## Native command and storage acceptance
 
 The non-default `system-tests` feature also selects narrow private native

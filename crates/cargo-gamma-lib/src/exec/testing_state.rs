@@ -210,11 +210,16 @@ fn inspect_artifact(path: &Utf8Path, follow: bool) -> std::io::Result<(ArtifactK
     #[cfg(unix)]
     let executable = {
         use std::os::unix::fs::PermissionsExt as _;
-        metadata.permissions().mode() & 0o111
+        executable_permission_bits(metadata.permissions().mode())
     };
     #[cfg(not(unix))]
     let executable = 0;
     Ok((kind, executable))
+}
+
+#[cfg(unix)]
+fn executable_permission_bits(mode: u32) -> u32 {
+    mode & 0o111
 }
 
 /// Classifies prepared artifacts without requiring native links or special-file fixtures.
@@ -476,6 +481,7 @@ pub(crate) fn invalidate_testing(base: &Utf8Path) -> Result<()> {
 
 pub(crate) fn finish_testing_record(base: &Utf8Path) -> Result<()> {
     if phase(base)? == Some(Phase::FinishedTesting) {
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "This transition publishes native campaign state; a deterministic storage refusal needs the deferred state-publication backend.", tag = "native-boundary")]
         set_phase(base, Phase::Completed)?;
     }
     Ok(())
@@ -557,6 +563,7 @@ impl TestingState {
         if !super::workspace::remember_campaign_base(&plan.root, &record.base) {
             return Err(error!("could not publish the campaign location; testing has not started"));
         }
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "This transition publishes native campaign state; a deterministic storage refusal needs the deferred state-publication backend.", tag = "native-boundary")]
         set_phase(&record.base, Phase::Testing)?;
         Ok(state)
     }
@@ -1153,6 +1160,23 @@ mod tests {
     use crate::discover::TargetFile;
     use crate::exec::{OrderingHints, Workspace};
     use crate::{HashMap, fixtures};
+
+    #[test]
+    #[cfg(unix)]
+    fn executable_artifact_identity_preserves_exactly_the_three_execute_bits() {
+        for (mode, expected) in [
+            (0, 0),
+            (0o400, 0),
+            (0o100, 0o100),
+            (0o010, 0o010),
+            (0o001, 0o001),
+            (0o755, 0o111),
+            (0o777, 0o111),
+            (0o7000, 0),
+        ] {
+            assert_eq!(executable_permission_bits(mode), expected, "mode {mode:o}");
+        }
+    }
 
     #[test]
     fn oct25_artifact_stat_selects_the_real_follow_or_link_operation() {

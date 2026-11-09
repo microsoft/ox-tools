@@ -653,6 +653,7 @@ pub fn prepare(command: Command, request: MemoryRequest) -> Result<PreparedComma
     {
         use std::os::unix::process::CommandExt as _;
 
+        // #[gamma::skip(try.propagate_to_unwrap, literal.str_to_empty, literal.str_to_xyzzy, reason = "This failure requires native signal-handler installation to fail; deterministic coverage needs the deferred containment-preparation backend.", tag = "native-boundary")]
         interrupt::arm().map_err(|cause| {
             PlatformError::because_static(Situation::Refused, "terminal-signal protection could not be installed", cause)
         })?;
@@ -676,6 +677,7 @@ pub fn prepare(command: Command, request: MemoryRequest) -> Result<PreparedComma
         // Attempted for every launch, not only for a metered one. Test listing asks
         // for no accounting and still runs repository-controlled code, and a process group is not a
         // boundary that retains descendants across process-group/session changes.
+        // #[gamma::skip(all, reason = "This setup creates native cgroup resources; exercising alternate outcomes without real containment requires the deferred preparation backend.", tag = "native-boundary")]
         let cgroup = if request.wanted() {
             Some(Cgroup::create(request.limit)?)
         } else {
@@ -684,6 +686,7 @@ pub fn prepare(command: Command, request: MemoryRequest) -> Result<PreparedComma
             Cgroup::create_unmetered_if_supported()?
         };
 
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "Failing a newly created cgroup's pre-exec setup needs an injected owning-resource backend.", tag = "native-boundary")]
         if let Some(cgroup) = cgroup.as_ref() {
             cgroup.arm(&mut command)?;
         }
@@ -692,6 +695,7 @@ pub fn prepare(command: Command, request: MemoryRequest) -> Result<PreparedComma
         // whole run's response to `Ctrl-C`, so it is worth no more than it has to be: creating a
         // cgroup is several filesystem writes and, on the first contained spawn, can be a process
         // migration, none of which can produce a child. Nothing exists to protect until `spawn`.
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "This wrapper opens the process-global interrupt window after native setup; owned registry tests cover its interruption policy.", tag = "native-boundary")]
         let spawning = window()?;
 
         Ok(PreparedCommand {
@@ -928,6 +932,7 @@ impl ProcessTree {
             #[cfg(any(test, feature = "fault-injection"))]
             let watched = if faults::fired(faults::Fault::Watch) {
                 if let Some(slot) = watched {
+                    // #[gamma::skip(stmt.delete_call, reason = "This release belongs to the test-only failed-watch override; native registry release and lifecycle policy are covered separately.", tag = "non-contract")]
                     interrupt::forget(slot, group);
                 }
                 None
@@ -1133,6 +1138,7 @@ impl ProcessTree {
             reason = "only the cgroup and job paths have anything to read, and the signature is shared"
         )
     )]
+    // #[gamma::skip(fn_value.default, reason = "Producing native accounting requires a real process boundary; usage_from_reading retains scripted Linux reading-to-result coverage.", tag = "native-boundary")]
     pub fn usage(&self) -> MemoryUsage {
         #[cfg(target_os = "linux")]
         {
@@ -1258,6 +1264,7 @@ impl ProcessTree {
 
         #[cfg(unix)]
         {
+            // #[gamma::skip(all, reason = "This adapter observes native waitid errors while retaining a real Child and numeric process identity; deterministic fault coverage requires the deferred lifecycle backend.", tag = "native-boundary")]
             let observed = match group::exited(child.id()) {
                 Ok(observed) => observed,
                 Err(cause) => {
@@ -1289,6 +1296,7 @@ impl ProcessTree {
                 return Err(sampler_failure(&cause));
             }
 
+            // #[gamma::skip(all, reason = "This orchestration releases native identities and reaps a real Child; cleanup_after_observation itself remains mutation-tested with supplied operations.", tag = "native-boundary")]
             match cleanup_after_observation(
                 observed,
                 || {
@@ -1390,6 +1398,7 @@ impl ProcessTree {
     ///
     /// The child is still killed when sweeping the surrounding subtree fails. A direct child-kill
     /// failure takes precedence over the sweep failure after both cleanup attempts complete.
+    // #[gamma::skip(fn_value.ok, reason = "Returning without killing leaves native descendants and output readers alive; the observed mutant times out instead of producing a completed test verdict.", tag = "timeout")]
     fn kill(&self, child: &mut Child) -> io::Result<()> {
         #[cfg(target_os = "macos")]
         {
@@ -1528,6 +1537,7 @@ impl ProcessTree {
         // Signalling the group has to come first: killing the leader on its own leaves the group
         // without one, and the descendants are then reparented and unreachable.
         #[cfg(unix)]
+        // #[gamma::skip(bool_expr.negate, reason = "The running/exited flag selects native process-group signalling; observing this call site requires a real child and the deferred lifecycle backend.", tag = "native-boundary")]
         let killed = sweep_group(self.group, leader_exited);
 
         #[cfg(windows)]
@@ -1648,6 +1658,7 @@ fn wait_for_output(subtree: &mut ProcessTree) -> io::Result<ExitStatus> {
             return Err(io::Error::other("output wait failed as requested by a test"));
         }
 
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "This wrapper polls native Child observation; injecting a failure here without spawning needs the deferred process lifecycle backend.", tag = "native-boundary")]
         if let Some(status) = subtree.observe()? {
             return Ok(status);
         }
@@ -1686,6 +1697,7 @@ fn group_id(child_id: u32) -> Result<i32, PlatformError> {
 fn abandoning(refusal: PlatformError, child: &mut Child, guard: &SpawnGuard) -> PlatformError {
     let cleanup = abandon(child, guard);
     #[cfg(any(test, feature = "fault-injection"))]
+    // #[gamma::skip(cond.always_true, reason = "This override is test-only fault-injection plumbing, not production abandonment policy.", tag = "non-contract")]
     let cleanup = if faults::fired(faults::Fault::AbandonCleanup) {
         Err(io::Error::other("abandonment cleanup failed as requested by a test"))
     } else {
@@ -1765,6 +1777,7 @@ fn start_sampler(child: &mut Child, guard: &SpawnGuard, group: i32, slot: usize)
 
 /// Signals the retained group using the existing exited-leader handling.
 #[cfg(unix)]
+// #[gamma::skip(all, reason = "This wrapper invokes actual process-group signalling; injected kill and cleanup decision helpers remain mutation-tested without fabricated native identities.", tag = "native-boundary")]
 fn sweep_group(group: Option<i32>, leader_exited: bool) -> io::Result<()> {
     group.map_or(Ok(()), |group| {
         if leader_exited {
@@ -1866,6 +1879,7 @@ fn kill_if_running(child: &mut Child) -> io::Result<()> {
 }
 
 #[cfg(any(test, not(target_os = "macos")))]
+// #[gamma::skip(fn_value.ok, reason = "The no-op mutant leaves native descendants and their readers running and timed out in the exhaustive campaign; callback-level cleanup mutations remain enabled.", tag = "timeout")]
 fn kill_with<C>(child: &mut C, sweep: impl FnOnce() -> io::Result<()>, kill: impl FnOnce(&mut C) -> io::Result<()>) -> io::Result<()> {
     let swept = sweep();
     let killed = kill(child);

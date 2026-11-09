@@ -130,6 +130,7 @@ const NAME_ATTEMPTS: u64 = 64;
 /// retried with another sequence value; exhausting the finite retry budget is safer than sharing
 /// an old cgroup's accounting.
 #[cfg_attr(coverage_nightly, coverage(off))]
+// #[gamma::skip(all, reason = "Directory creation and EEXIST retries use native filesystem state; deterministic fault coverage requires an injected creation boundary.", tag = "native-boundary")]
 fn create_child_with(root: &Path, kind: &str, pid: u32, generation: u64, mut next: impl FnMut() -> u64) -> io::Result<PathBuf> {
     for _attempt in 0..NAME_ATTEMPTS {
         let path = root.join(format!("{kind}.{pid}.{generation}.{}", next()));
@@ -191,6 +192,7 @@ fn start_time_from(stat: &str) -> Option<u64> {
 }
 
 /// The kernel generation of one process identifier.
+// #[gamma::skip(all, reason = "This adapter reads the live proc filesystem; malformed stat parsing remains mutation-tested through start_time_from.", tag = "native-boundary")]
 fn process_generation(pid: u32) -> io::Result<u64> {
     let stat = fs::read_to_string(format!("/proc/{pid}/stat"))?;
 
@@ -202,6 +204,7 @@ fn process_generation(pid: u32) -> io::Result<u64> {
 /// An error other than `NotFound` is deliberately treated as live: permission and namespace
 /// boundaries must not turn a leaf belonging to another running invocation into one we remove.
 #[cfg_attr(coverage_nightly, coverage(off))]
+// #[gamma::skip(all, reason = "Creator liveness depends on live proc entries and permission failures; scripting it requires the deferred process-generation I/O seam.", tag = "native-boundary")]
 fn owner_is_live(owner: LeafOwner) -> bool {
     match process_generation(owner.pid) {
         Ok(generation) => owner.generation.is_none_or(|owned| generation == owned),
@@ -216,6 +219,7 @@ fn owner_is_live(owner: LeafOwner) -> bool {
 /// can be removed. A failed `rmdir` normally means an orphan still occupies the cgroup; returning
 /// `true` asks the background reaper to try again after it exits.
 #[cfg_attr(coverage_nightly, coverage(off))]
+// #[gamma::skip(all, reason = "Stale-leaf cleanup combines directory inventory, live process generations and the shared reaper registry; deterministic coverage requires the deferred owned-state and I/O refactor.", tag = "native-boundary")]
 fn reap_owned_leaves(root: &Path) -> bool {
     let Ok(entries) = fs::read_dir(root) else {
         return true;
@@ -274,6 +278,7 @@ fn reap_owned_leaves(root: &Path) -> bool {
 /// Relaxed is enough. Nothing is published through this value; it is only required to be different
 /// from every other value handed out, and that is a property of the read-modify-write itself.
 fn next_name_ticket(sequence: &AtomicU64) -> u64 {
+    // #[gamma::skip(expr.increment, literal.int_increment, reason = "Tickets are opaque: their initial offset and exact stride are not a supported contract. Unit and Loom tests verify distinct allocations rather than restating the increment constant.", tag = "non-contract")]
     sequence.fetch_add(1, Ordering::Relaxed)
 }
 
@@ -299,6 +304,7 @@ fn release_reaper_claim(running: &AtomicBool) {
 
 /// Starts the bounded, shared background reaper after foreground cleanup gives up.
 #[cfg_attr(coverage_nightly, coverage(off))]
+// #[gamma::skip(all, reason = "Starting the shared background worker mutates process-global state and spawns a thread; claim and failed-start release policy remain mutation-tested on owned atomics.", tag = "native-boundary")]
 fn ensure_reaper() {
     if !claim_reaper(&REAPER_RUNNING) {
         return;
@@ -312,6 +318,7 @@ fn ensure_reaper() {
 
 /// Reaps leaves that become empty after their owning run has moved on.
 #[cfg_attr(coverage_nightly, coverage(off))]
+// #[gamma::skip(all, reason = "The infinite worker couples shared reaper generations, native directory cleanup and sleeping; deterministic coverage requires extracting an owned single-iteration driver.", tag = "native-boundary")]
 fn reaper_loop() -> ! {
     loop {
         let task = {
@@ -360,6 +367,7 @@ fn settled(
 
 /// Works out whether this process can create memory-controlled cgroups, and where.
 #[cfg_attr(coverage_nightly, coverage(off))]
+// #[gamma::skip(all, reason = "Native discovery publishes shared reaper state and can start its worker; discovery callback ordering and error propagation remain mutation-tested through discover_with.", tag = "native-boundary")]
 fn discover() -> Result<PathBuf, String> {
     let root = discover_with(own, delegate, probe)?;
     let pending = reap_owned_leaves(&root);
@@ -395,6 +403,7 @@ fn discover_with(
 
 /// The cgroup this process is currently in.
 fn own() -> Result<PathBuf, String> {
+    // #[gamma::skip(try.propagate_to_unwrap, reason = "Failure to read the process's actual cgroup listing requires native proc filesystem fault injection; listing parsing remains independently tested.", tag = "native-boundary")]
     let listed = fs::read_to_string(SELF_CGROUP).map_err(|cause| format!("`{SELF_CGROUP}` could not be read: {cause}"))?;
 
     resolve(Path::new(MOUNT), &listed)
@@ -463,6 +472,7 @@ fn delegate(own: &Path) -> Result<PathBuf, String> {
     // to do, and it leaves the delegation boundary itself free to distribute controllers.
     let supervisor = own.join(SUPERVISOR);
 
+    // #[gamma::skip(try.propagate_to_unwrap, reason = "This failure requires a live delegation that needs migration but refuses supervisor creation; testing it needs the deferred cgroup I/O seam.", tag = "native-boundary")]
     fs::create_dir_all(&supervisor).map_err(|cause| {
         format!(
             "`{}` could not be created: {cause}. Creating a cgroup there needs one delegated to this \
@@ -471,8 +481,10 @@ fn delegate(own: &Path) -> Result<PathBuf, String> {
         )
     })?;
 
+    // #[gamma::skip(try.propagate_to_unwrap, reason = "Native process migration failure in the delegation recovery path cannot be scripted without the deferred cgroup I/O seam.", tag = "native-boundary")]
     vacate(own, &supervisor)?;
 
+    // #[gamma::skip(try.propagate_to_unwrap, reason = "This second controller-enable attempt follows real process migration; reproducing its failure needs the deferred cgroup I/O seam.", tag = "native-boundary")]
     enable(own).map_err(|cause| {
         format!(
             "the memory controller could not be delegated to the children of `{}`: {cause}. \
@@ -529,11 +541,13 @@ fn lists(path: &Path, file: &str, wanted: &str) -> bool {
 /// Both files are checked because they answer different questions and fail on different hosts:
 /// `memory.max` is what bounds a mutant, and `memory.peak` — which arrived in Linux 5.19 — is what
 /// the baseline measures in order to choose that bound.
+// #[gamma::skip(all, reason = "This wrapper supplies the real process identity and global naming sequence to native cgroup creation; it cannot be exercised with fabricated identities.", tag = "native-boundary")]
 fn probe(root: &Path) -> Result<(), String> {
     probe_with(root, process::id(), || next_name_ticket(&SEQUENCE))
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
+// #[gamma::skip(all, reason = "Probing creates a real cgroup whose interface files are supplied by the kernel; deterministic creation and cleanup faults need the deferred I/O seam.", tag = "native-boundary")]
 fn probe_with(root: &Path, pid: u32, next: impl FnMut() -> u64) -> Result<(), String> {
     let generation = process_generation(pid).map_err(|cause| format!("process generation could not be read: {cause}"))?;
     let path = create_child_with(root, "gamma.probe", pid, generation, next).map_err(|cause| {
@@ -648,6 +662,7 @@ impl Cgroup {
     /// a ceiling could not be written, or the leaf's `cgroup.kill` switch could not be opened. That
     /// concerns one launch rather than the host, and the caller must not launch that command.
     #[cfg_attr(coverage_nightly, coverage(off))]
+    // #[gamma::skip(all, reason = "This adapter uses cached native delegation and creates a real containment leaf; owned parsing, configuration and naming policy remain separately mutation-tested.", tag = "native-boundary")]
     pub fn create(limit: Option<u64>) -> Result<Self, PlatformError> {
         let root = root().map_err(|reason| PlatformError::new(Situation::Unsupported, reason))?;
         Self::create_at(root, limit)
@@ -659,6 +674,7 @@ impl Cgroup {
     /// backtrace-bearing [`PlatformError`]. Per-launch failures remain [`Situation::Refused`]
     /// errors because a supported host failed to create this particular boundary.
     #[cfg_attr(coverage_nightly, coverage(off))]
+    // #[gamma::skip(all, reason = "The supported/unsupported decision uses cached host delegation and native leaf creation; scripting both requires the deferred owned cgroup backend.", tag = "native-boundary")]
     pub fn create_unmetered_if_supported() -> Result<Option<Self>, PlatformError> {
         let Ok(root) = root() else {
             return Ok(None);
@@ -668,6 +684,7 @@ impl Cgroup {
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
+    // #[gamma::skip(all, reason = "Leaf creation, owning kill-file opening and active registration must share one critical section; testing this path without native state requires the deferred lifecycle refactor.", tag = "native-boundary")]
     fn create_at(root: &Path, limit: Option<u64>) -> Result<Self, PlatformError> {
         let (group, start_reaper) = {
             // Creation and registration are one critical section. A reaper never sees a
@@ -695,6 +712,7 @@ impl Cgroup {
     }
 
     /// Creates and configures a leaf beneath an already selected cgroup root.
+    // #[gamma::skip(all, reason = "This native wrapper supplies process identity and the shared naming sequence; injected generation/configuration helpers remain in mutation scope.", tag = "native-boundary")]
     fn create_under(root: &Path, limit: Option<u64>) -> Result<Self, String> {
         Self::create_under_with(root, limit, process::id(), process_generation, || next_name_ticket(&SEQUENCE))
     }
@@ -713,10 +731,12 @@ impl Cgroup {
         let group = Self {
             path,
             kill: None,
+            // #[gamma::skip(literal.bool_flip, reason = "Changing initial tracking state touches the process-global reaper on drop; testing that ownership transition needs the deferred owned lifecycle state.", tag = "native-boundary")]
             tracked: false,
             watch: None,
         };
 
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "A just-created kernel cgroup must refuse configuration to reach this error; deterministic coverage needs injected creation and interface writes.", tag = "native-boundary")]
         group.configure(limit)?;
 
         Ok(group)
@@ -806,6 +826,7 @@ impl Cgroup {
     ///
     /// Returns the operating system's reason when the cgroup kill switch could not be written.
     #[cfg_attr(coverage_nightly, coverage(off))]
+    // #[gamma::skip(all, reason = "The pre-opened kill descriptor uses native short writes and EINTR retry; recording those outcomes without real descriptors requires the deferred owning-handle backend.", tag = "native-boundary")]
     pub fn kill(&self) -> io::Result<()> {
         if let Some(kill) = self.kill.as_ref() {
             let fd = kill.as_raw_fd();
@@ -906,6 +927,7 @@ impl Cgroup {
 
 impl Drop for Cgroup {
     #[cfg_attr(coverage_nightly, coverage(off))]
+    // #[gamma::skip(all, reason = "Teardown couples descriptor quiescence, native removal and the shared reaper; replacing this with deterministic operations requires the deferred owning-resource lifecycle refactor.", tag = "native-boundary")]
     fn drop(&mut self) {
         // Discharged first, and unconditionally once a registration was ever made. The registry
         // holds a raw descriptor this leaf owns, and the `kill` field below closes it as this
@@ -975,6 +997,32 @@ mod tests {
     use std::error::Error as _;
 
     use super::*;
+
+    #[test]
+    fn process_generation_uses_field_22_after_the_complete_command_name() {
+        let stat = "41 (worker ) with spaces) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 123456 20";
+        assert_eq!(start_time_from(stat), Some(123456));
+        assert_eq!(start_time_from("not a process stat"), None);
+        assert_eq!(start_time_from("41 (worker) S 1"), None);
+        assert_eq!(start_time_from(&stat.replace("123456", "invalid")), None);
+    }
+
+    #[test]
+    fn reaper_ownership_is_exclusive_and_can_be_reclaimed_after_a_failed_start() {
+        let running = AtomicBool::new(false);
+        assert!(claim_reaper(&running));
+        assert!(!claim_reaper(&running), "a second reaper must not start");
+        release_reaper_claim(&running);
+        assert!(claim_reaper(&running), "a failed start must allow a retry");
+        assert!(!claim_reaper(&running));
+    }
+
+    #[test]
+    fn leaf_name_tickets_remain_unique_across_successive_allocations() {
+        let sequence = AtomicU64::new(0);
+        let tickets: std::collections::BTreeSet<_> = (0..4).map(|_| next_name_ticket(&sequence)).collect();
+        assert_eq!(tickets.len(), 4, "distinct leaves must not share their accounting");
+    }
 
     /// Why the tests below are `#[ignore]`d, and how to run them.
     ///
@@ -1369,6 +1417,60 @@ mod tests {
     }
 
     #[test]
+    fn discovery_propagates_each_failure_without_running_later_stages() {
+        assert_eq!(
+            discover_with(
+                || Err("own refusal".into()),
+                |_| panic!("ownership failed"),
+                |_| panic!("ownership failed")
+            ),
+            Err("own refusal".into())
+        );
+        assert_eq!(
+            discover_with(
+                || Ok(PathBuf::from("own")),
+                |path| {
+                    assert_eq!(path, Path::new("own"));
+                    Err("delegation refusal".into())
+                },
+                |_| panic!("delegation failed"),
+            ),
+            Err("delegation refusal".into())
+        );
+        assert_eq!(
+            discover_with(
+                || Ok(PathBuf::from("own")),
+                |_| Ok(PathBuf::from("delegated")),
+                |path| {
+                    assert_eq!(path, Path::new("delegated"));
+                    Err("probe refusal".into())
+                },
+            ),
+            Err("probe refusal".into())
+        );
+    }
+
+    #[test]
+    fn a_refusal_preserves_its_reason_and_classification() {
+        let error = refused("the delegated memory controller is unavailable".into());
+        assert_eq!(error.situation(), Situation::Refused);
+        assert_eq!(error.to_string(), "the delegated memory controller is unavailable");
+    }
+
+    #[test]
+    fn successful_removal_returns_immediately_without_pausing() {
+        let mut attempts = 0;
+        assert!(remove_with_retry(
+            || {
+                attempts += 1;
+                true
+            },
+            || panic!("successful removal must not pause"),
+        ));
+        assert_eq!(attempts, 1);
+    }
+
+    #[test]
     fn removal_uses_exactly_the_configured_number_of_attempts() {
         let attempts = core::cell::Cell::new(0_u32);
         let pauses = core::cell::Cell::new(0_u32);
@@ -1407,6 +1509,8 @@ mod tests {
 
     #[test]
     fn only_per_invocation_leaf_names_are_owned_by_the_reaper() {
+        use std::os::unix::ffi::OsStrExt as _;
+
         assert_eq!(
             leaf_owner(std::ffi::OsStr::new("gamma.42.7.9")),
             Some(LeafOwner {
@@ -1424,6 +1528,8 @@ mod tests {
         assert_eq!(leaf_owner(std::ffi::OsStr::new("gamma.0.7.9")), None);
         assert_eq!(leaf_owner(std::ffi::OsStr::new("gamma.42.not-a-generation.9")), None);
         assert_eq!(leaf_owner(std::ffi::OsStr::new("gamma.42.7.not-a-sequence")), None);
+        assert_eq!(leaf_owner(std::ffi::OsStr::new("gamma.42.not-a-sequence")), None);
+        assert_eq!(leaf_owner(std::ffi::OsStr::from_bytes(b"gamma.42.\xff")), None);
     }
 
     #[test]

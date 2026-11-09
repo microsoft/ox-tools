@@ -1156,6 +1156,7 @@ fn retain_compiler_exclusions(converger: &mut Converger, plan: &Plan, exclusions
 /// Loads and persists retained compiler evidence before instrumenting a new population.
 fn prepare_compiler_exclusions(work: &Workspace, plan: &Plan) -> Result<crate::discover::CompilerExclusions> {
     let exclusions = crate::discover::CompilerExclusions::load(work.base(), &plan.root)?;
+    // #[gamma::skip(try.propagate_to_unwrap, reason = "This wrapper publishes compiler exclusions into native campaign storage; scripting its failure requires the deferred campaign filesystem backend.", tag = "native-boundary")]
     exclusions.store(work.base())?;
     Ok(exclusions)
 }

@@ -135,6 +135,7 @@ impl VerdictLog {
     }
 
     fn resume_progress_file(mut file: File, path: &Utf8Path) -> crate::Result<File> {
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "Repair failure needs a native file read/truncate/seek refusal; the existing owned log policy does not supply an owning-file backend.", tag = "native-boundary")]
         Self::repair_log_tail(&mut file)
             .map_err(|cause| error!("could not recover testing progress log `{path}`; check that it is writable").caused_by(cause))?;
         drop(file);

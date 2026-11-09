@@ -24,6 +24,11 @@ a non-default selector that resolves to their mutator admits them without
 changing their stable identity. The standalone `check_stated` API has no build
 configuration and therefore audits the whole file.
 
+When propagating a function's declared return type, its trailing expression is
+the last statement enabled by the supplied configuration, not necessarily the
+last statement in the source. This preprocessing must not introduce mutations
+in a disabled trailing platform branch.
+
 ## Boundaries
 
 - Input is Rust source plus a mutator selection; output is deterministic

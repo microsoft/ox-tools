@@ -61,6 +61,7 @@ pub(crate) enum Refusal {
 
 /// Whether this process is the result of a relaunch.
 #[cfg_attr(coverage_nightly, coverage(off))]
+// #[gamma::skip(all, reason = "This adapter reads process-wide environment state; the recursion guard is mutation-tested through relaunch_unless without changing shared environment.", tag = "native-boundary")]
 pub(crate) fn relaunched() -> bool {
     env::var_os(MARKER).is_some()
 }
@@ -103,6 +104,7 @@ fn scope_command(exe: OsString, args: Vec<OsString>) -> Command {
 /// An `Err` means the relaunch was attempted and failed, which is worth reporting rather than
 /// swallowing: the user asked for a bound, something was supposed to provide it, and it did not.
 #[cfg_attr(coverage_nightly, coverage(off))]
+// #[gamma::skip(all, reason = "This native wrapper can re-execute the harness; the shared relaunch_unless guard and scope_command arguments remain mutation-tested without spawning.", tag = "native-boundary")]
 pub(crate) fn relaunch() -> Result<Option<i32>, Refusal> {
     relaunch_unless(relaunched(), relaunch_in_scope)
 }
@@ -121,6 +123,7 @@ fn relaunch_unless(marked: bool, attempt: impl FnOnce() -> Result<Option<i32>, R
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
+// #[gamma::skip(all, reason = "Real executable discovery, argv and systemd-run status require environment/process injection; executing this adapter under a harness can recursively relaunch tests.", tag = "native-boundary")]
 fn relaunch_in_scope() -> Result<Option<i32>, Refusal> {
     let Ok(exe) = env::current_exe() else {
         return Err(Refusal::Unavailable);
@@ -149,6 +152,7 @@ fn relaunch_in_scope() -> Result<Option<i32>, Refusal> {
 /// Hand-rolled rather than taken from a crate, because the question is small and asking it wrongly
 /// is cheap: a false negative means no relaunch and the old behaviour, and a false positive means
 /// a spawn that fails and is handled.
+// #[gamma::skip(all, reason = "This adapter combines the process PATH with real filesystem metadata; deterministic coverage requires the deferred environment/filesystem seam.", tag = "native-boundary")]
 fn which(program: &str) -> Option<std::path::PathBuf> {
     let paths = env::var_os("PATH")?;
 
@@ -174,13 +178,20 @@ mod tests {
         let args: Vec<_> = command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect();
 
         assert_eq!(command.get_program(), "systemd-run");
-        assert!(args.contains(&"--user".to_owned()), "{args:?}");
-        assert!(args.contains(&"--scope".to_owned()), "{args:?}");
-        assert!(args.contains(&"--property=Delegate=yes".to_owned()), "{args:?}");
-
         // The executable and its arguments must follow the separator, or a leading `-` in the
         // forwarded command line would be parsed as an option to `systemd-run`.
         let separator = args.iter().position(|arg| arg == "--").expect("a separator");
+        for required in [
+            "--user",
+            "--scope",
+            "--property=Delegate=yes",
+            "--property=MemoryAccounting=yes",
+            "--quiet",
+            "--collect",
+            "--same-dir",
+        ] {
+            assert!(args[..separator].iter().any(|arg| arg == required), "missing {required}: {args:?}");
+        }
         assert_eq!(args[separator + 1], "/opt/cargo-gamma");
         assert_eq!(args[separator + 2..], ["gamma", "run"]);
     }

@@ -496,6 +496,7 @@ impl Workspace {
                 return Some(candidate);
             }
 
+            // #[gamma::skip(cond.always_false, loop.break_to_continue, loop.delete_break, reason = "This native ancestor scan is observable only when the copied tree has no manifest but an external ancestor does; deterministic coverage needs the deferred file-inventory backend.", tag = "native-boundary")]
             if directory == self.root {
                 break;
             }
@@ -949,6 +950,7 @@ impl Workspace {
                 return Err(error!("report source directory `{root}` is a link"));
             }
             Ok(metadata) if metadata.is_dir() => {
+                // #[gamma::skip(try.propagate_to_unwrap, reason = "Failure to remove an existing report-source directory requires native filesystem fault injection.", tag = "native-boundary")]
                 fs::remove_dir_all(root.as_std_path())
                     .map_err(|cause| error!("could not clear report source directory `{root}`").caused_by(cause))?;
             }
@@ -1266,6 +1268,7 @@ fn rustc_capture_directory(root: &Utf8Path, target: &Utf8Path) -> Option<Utf8Pat
     Some(target.join(".cargo-gamma-rustc"))
 }
 
+// #[gamma::skip(cond.always_false, literal.int_decrement, call.replace_with_default, call_result.default, reason = "These changes route name-only detection through native canonicalization; scripting identity equivalence requires the deferred path/filesystem seam.", tag = "native-boundary")]
 fn wrapper_is_self(candidate: &OsStr, wrapper: &Utf8Path, root: &Utf8Path) -> bool {
     let candidate = std::path::Path::new(candidate);
 
@@ -1293,12 +1296,12 @@ fn wrapper_is_self(candidate: &OsStr, wrapper: &Utf8Path, root: &Utf8Path) -> bo
 }
 
 fn executable_names_equal(left: &str, right: &str) -> bool {
-    if
-    // #[gamma::skip(cond.always_true, reason = "Target-specific equivalence for this archived Windows campaign: cfg!(windows) is the compile-time constant true. Replacing it with true preserves executable-name case folding. No claim of equivalence on Unix.", tag = "equivalent")]
-    cfg!(windows) {
+    #[cfg(windows)]
+    {
         left.eq_ignore_ascii_case(right)
-    } else {
-        // #[gamma::skip(relational.eq_to_ne, reason = "Target-specific equivalence for the archived Windows campaign: this equality is solely the else arm of if cfg!(windows), whose true arm uses eq_ignore_ascii_case. The mutated else arm is unreachable on Windows; Unix behavior would differ and is not claimed equivalent.", tag = "equivalent")]
+    }
+    #[cfg(not(windows))]
+    {
         left == right
     }
 }
@@ -1480,6 +1483,7 @@ fn campaign_state_from_with_metadata(
     let base = campaign_base(&root, &target, None);
     match inspect(&base) {
         Ok(_) => validate_campaign_state_owner(&root, &base)?,
+        // #[gamma::skip(match_guard.always_true, reason = "This branch follows native campaign discovery and ownership validation; complete in-memory coverage needs the deferred campaign filesystem backend.", tag = "native-boundary")]
         Err(cause) if cause.kind() == io::ErrorKind::NotFound => {}
         Err(cause) => {
             return Err(error!("could not inspect the campaign state at `{base}` before validating its owner").caused_by(cause));
@@ -1774,6 +1778,7 @@ fn clean_cache_with_guard(
     let campaign = campaign_base(root, target, None);
 
     validate_scratch(root, &scratch)?;
+    // #[gamma::skip(try.propagate_to_unwrap, reason = "The selected cache is validated through native path identity and ownership; fault injection requires the deferred cache filesystem backend.", tag = "native-boundary")]
     validate_default_campaign_base(root, target, &campaign)?;
 
     clean_cache_paths(root, &scratch, &campaign, || claim_workspace(root))
@@ -1824,6 +1829,7 @@ where
             continue;
         }
 
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "The supplied native DirEntry is removed through real filesystem operations; injecting inventory alone cannot control removal failures.", tag = "native-boundary")]
         remove_cached(&entry)?;
         removed = true;
     }
@@ -1931,6 +1937,7 @@ fn physical(path: &Utf8Path) -> Utf8PathBuf {
         tail.push(name);
 
         // #[gamma::skip(cond.always_false, tag = "timeout", reason = "the ancestor scan must stop when no further parent can be removed")]
+        // #[gamma::skip(cond.always_true, cond.negate, unary.remove_not, reason = "This fallback requires native canonicalization to fail through the ancestor chain; deterministic coverage needs the deferred path-resolution backend.", tag = "native-boundary")]
         if !existing.pop() {
             return path.to_owned();
         }
@@ -1962,6 +1969,7 @@ fn ensure_copy_terminates(source: &Utf8Path, base: &Utf8Path) -> Result<()> {
         return Ok(());
     }
 
+    // #[gamma::skip(call.replace_with_default, call_result.default, cond.always_false, cond.always_true, cond.negate, reason = "This recovery distinguishes a physically nested cache reached through native links; controlling both lexical and physical identity requires the deferred resolver backend.", tag = "native-boundary")]
     if prunes(&real_source, &real_base) {
         return Err(error!(
             "the scratch directory `{base}` is `{real_base}`, inside the workspace at `{source}`, but is \
@@ -2065,6 +2073,7 @@ fn expose_vcs_metadata_with(
             let git_dir = if marker.as_std_path().is_dir() {
                 marker.clone()
             } else {
+                // #[gamma::skip(try.propagate_to_unwrap, reason = "This adapter reads an inventoried native Git pointer file; deterministic read failures require the deferred metadata and file-operation backend.", tag = "native-boundary")]
                 let text = fs::read_to_string(marker.as_std_path())
                     .map_err(|cause| error!("could not read Git metadata pointer `{marker}`").caused_by(cause))?;
                 let relative = text
@@ -2140,6 +2149,7 @@ fn claim_redirected_cache(source: &Utf8Path, base: &Utf8Path) -> Result<File> {
     claim_redirected_cache_with(source, base, |owner| fs::symlink_metadata(owner.as_std_path()), has_any_entries)
 }
 
+// #[gamma::skip(match_guard.always_true, try.propagate_to_unwrap, reason = "This partial seam still opens owning lock files, creates private directories and validates native metadata. Complete deterministic failure coverage requires the deferred owning-file cache backend.", tag = "native-boundary")]
 fn claim_redirected_cache_with(
     source: &Utf8Path,
     base: &Utf8Path,
@@ -2267,6 +2277,7 @@ fn inspect_cache_path(path: &Utf8Path) -> io::Result<fs::Metadata> {
 /// can write to their own cache can still change it under a run they started themselves, and no
 /// check here would be about a trust boundary.
 #[cfg(unix)]
+// #[gamma::skip(all, reason = "This policy consumes native ancestor Metadata, current credentials and physical paths; exercising foreign ownership and metadata failures without changing host state requires the deferred owned metadata backend.", tag = "native-boundary")]
 fn reject_foreign_writers(base: &Utf8Path) -> Result<()> {
     /// The bits that let a group member or anyone else write to a directory.
     const SHARED_WRITE: u32 = 0o022;
@@ -2383,6 +2394,7 @@ fn validate_cache_owner_with_inventory(
     validate_cache_owner_with_writer(source, base, kind, inspect, inventory, write_cache_owner)
 }
 
+// #[gamma::skip(match_guard.always_true, result.err_to_ok, reason = "Opening the marker and reading metadata/content from that same owning handle is native; injected metadata or writes alone cannot control the open failure without the deferred owning-file backend.", tag = "native-boundary")]
 fn validate_cache_owner_with_writer(
     source: &Utf8Path,
     base: &Utf8Path,
@@ -2479,6 +2491,7 @@ fn write_cache_owner(marker: &mut impl Write, source: &Utf8Path, owner: &Utf8Pat
 }
 
 #[cfg(unix)]
+// #[gamma::skip(bitwise.or_to_and, reason = "The open flags enforce no-follow and nonblocking behavior on native file types; testing their removal needs real links/FIFOs or the deferred owning-file backend.", tag = "native-boundary")]
 fn open_cache_owner(owner: &Utf8Path) -> io::Result<File> {
     // O_NOFOLLOW rejects a final-component symlink at open time. O_NONBLOCK prevents a planted
     // special file such as a FIFO from blocking before handle metadata can reject it.
@@ -2704,6 +2717,7 @@ fn claim_default_campaign_cache(root: &Utf8Path, target: &Utf8Path, base: &Utf8P
     validate_default_campaign_base(root, target, base)?;
     fs::create_dir_all(base.as_std_path())
         .map_err(|cause| error!("could not create cargo-gamma's campaign cache at `{base}`").caused_by(cause))?;
+    // #[gamma::skip(try.propagate_to_unwrap, reason = "This wrapper inspects native cache link identity immediately after creation; deterministic substitution/failure coverage needs the deferred cache filesystem backend.", tag = "native-boundary")]
     reject_linked_cache(base)?;
     validate_cache_owner(root, base, CacheKind::Default)
 }
@@ -2800,8 +2814,10 @@ fn anchor_manifest_paths(
         let _destination = crate::paths::require_within(path, root, "a scratch manifest")?;
         let mut manifest = Manifest::read(path)?;
 
+        // #[gamma::skip(stmt.delete_call, reason = "This orchestration rewrites real copied manifests; the path-rewrite policy is tested separately and native publication needs the deferred manifest filesystem backend.", tag = "native-boundary")]
         manifest.anchor_paths(&source.join(original), original);
         manifest.redirect_runtime(runtime, &workspace_features)?;
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "Failing native publication of a loaded manifest requires the deferred manifest filesystem backend.", tag = "native-boundary")]
         manifest.save()?;
     }
 

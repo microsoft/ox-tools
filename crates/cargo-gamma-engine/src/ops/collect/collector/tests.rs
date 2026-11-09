@@ -3998,6 +3998,25 @@ fn a_statement_that_is_configured_out_is_not_mutated() {
 }
 
 #[test]
+fn typed_tail_expressions_respect_their_configuration() {
+    let source = "fn f() -> bool {
+        #[cfg(unix)] { true }
+        #[cfg(not(unix))] { false }
+    }";
+    let file = SourceFile::parse("test.rs", source.to_owned()).unwrap();
+    let selection = Selection::parse("bool_expr.negate").unwrap();
+
+    for (cfg, active) in [(CfgSet::parse("unix"), "{ true }"), (CfgSet::parse("windows"), "{ false }")] {
+        let found = collect_in(&file, &selection, &cfg);
+        assert_eq!(
+            found.iter().map(|candidate| file.slice(&candidate.span).trim()).collect::<Vec<_>>(),
+            [active],
+            "{found:?}"
+        );
+    }
+}
+
+#[test]
 fn a_match_arm_that_is_configured_out_takes_its_body_with_it() {
     let source = "fn f(x: bool) -> i32 { match x { #[cfg(not(unix))] true => 1 + 2, _ => 0 } }";
     let found = mutators(source, "arith.add_to_sub", &CfgSet::parse("unix"));

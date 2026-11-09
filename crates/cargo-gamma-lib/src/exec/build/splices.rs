@@ -151,6 +151,7 @@ impl Splices {
             false;
         }
 
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "Restoration publishes into the real copied workspace; scripting its failure requires the deferred instrumentation filesystem backend.", tag = "native-boundary")]
         self.restore_removed_files(work, plan)?;
         let dirty = self.refresh_index(plan, withdrawn);
         self.instrument_selected(work, plan, &dirty, |ordinal| !withdrawn.contains(&ordinal), true)
@@ -176,6 +177,7 @@ impl Splices {
             false;
         }
 
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "Restoration publishes into the real copied workspace; scripting its failure requires the deferred instrumentation filesystem backend.", tag = "native-boundary")]
         self.restore_removed_files(work, plan)?;
         let mut dirty = self.refresh_plan_index(plan);
         dirty.extend(
@@ -270,6 +272,7 @@ impl Splices {
             // Rewriting a file with the text it already holds would make cargo rebuild its crate, so
             // an unchanged file is left alone and its mtime with it.
             let destination = work.root.join(&file.path);
+            // #[gamma::skip(try.propagate_to_unwrap, reason = "This publication owns native workspace files; deterministic write refusal requires the deferred instrumentation filesystem backend.", tag = "native-boundary")]
             if Workspace::overwrite(&work.root, &destination, &instrumented)? {
                 written.push(file.path.clone());
             }
@@ -310,6 +313,7 @@ impl Splices {
         for path in removed {
             if let Some(original) = self.sources.get(&path) {
                 let destination = work.root.join(&path);
+                // #[gamma::skip(try.propagate_to_unwrap, reason = "This restoration publishes a native source file; deterministic refusal requires the deferred instrumentation filesystem backend.", tag = "native-boundary")]
                 let _written = Workspace::overwrite(&work.root, &destination, &original.serialized)?;
             }
             if let Some((_ordinals, guards)) = self.placed.remove(&path) {

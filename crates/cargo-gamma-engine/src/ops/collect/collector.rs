@@ -3412,7 +3412,7 @@ impl<'a> Collector<'a> {
 
     /// Visits a function body with its trailing expression checked against the declared return type.
     fn in_typed_block<T>(&mut self, block: &Block, expected: &Type, body: impl FnOnce(&mut Self) -> T) -> T {
-        let Some(Stmt::Expr(tail, None)) = block.stmts.last() else {
+        let Some(Stmt::Expr(tail, None)) = block.stmts.iter().rev().find(|statement| !self.skipped(stmt_attrs(statement))) else {
             return body(self);
         };
 

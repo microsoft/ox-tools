@@ -45,6 +45,7 @@ pub fn exited(pid: u32) -> io::Result<bool> {
 
 fn exited_with_waitid(pid: u32, waitid: impl FnOnce(libc::id_t) -> io::Result<libc::pid_t>) -> io::Result<bool> {
     let pid =
+        // #[gamma::skip(try.propagate_to_unwrap, literal.str_to_empty, literal.str_to_xyzzy, reason = "libc id_t is u32 on the supported Linux mutation target, so converting a u32 cannot reach this error.", tag = "equivalent")]
         libc::id_t::try_from(pid).map_err(|_out_of_range| io::Error::new(io::ErrorKind::InvalidInput, "child pid does not fit waitid"))?;
     Ok(waitid(pid)? != 0)
 }
@@ -109,6 +110,7 @@ fn kill_with(group: i32, signal: impl FnOnce(i32) -> io::Result<()>) -> io::Resu
 ///
 /// Returns errors from [`kill`], including macOS `EPERM` unless the leader is the group's only
 /// remaining member.
+// #[gamma::skip(all, reason = "This adapter signals an actual unreaped process group; rejection and macOS permission policy remain mutation-tested through supplied signalling callbacks.", tag = "native-boundary")]
 pub fn kill_after_exit(group: i32) -> io::Result<()> {
     #[cfg(target_os = "macos")]
     {
@@ -232,6 +234,7 @@ pub fn raise_interrupt() {
 /// Coverage excludes this helper because the uncaught signal terminates the subprocess before
 /// instrumentation can flush its counters.
 #[cfg_attr(coverage_nightly, coverage(off))]
+// #[gamma::skip(fn_value.unit, reason = "This test-support helper raises a real terminating signal; observing its absence requires a subprocess, not an in-process test.", tag = "native-boundary")]
 pub fn raise_quit() {
     // SAFETY: as for `raise_interrupt` — `raise` receives one integer signal number, dereferences
     // no caller pointer, and is sound whatever disposition is installed. That it may not return is

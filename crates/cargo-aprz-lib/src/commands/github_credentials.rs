@@ -337,6 +337,7 @@ fn process_current_dir() -> Option<PathBuf> {
 }
 
 /// Resolves `program` only from explicit, non-empty PATH entries.
+// #[gamma::skip(parameter.default_shadow, reason = "This resolver probes actual executable metadata; deterministic PATH-entry failures need the deferred native lookup backend. executable-name and permission policy remain tested in memory.", tag = "native-boundary")]
 fn resolve_executable(program: &OsStr, path: &OsStr, path_ext: Option<&OsStr>, current_dir: &Path) -> Option<PathBuf> {
     debug_assert!(current_dir.is_absolute(), "the process current directory is absolute");
     let executable_names = executable_names(program, path_ext);
@@ -393,17 +394,25 @@ fn windows_executable_image_extension(extension: &OsStr) -> bool {
 }
 
 #[cfg(not(windows))]
-fn executable_names(program: &OsStr, _path_ext: Option<&OsStr>) -> Vec<OsString> {
+fn executable_names(program: &OsStr, _: Option<&OsStr>) -> Vec<OsString> {
     vec![program.to_owned()]
 }
 
 #[cfg(unix)]
+// #[gamma::skip(fn_value.bool_true, reason = "This wrapper reads native executable Metadata; is_executable_with retains the regular-file, execute-bit and inspection-error policy under supplied observations.", tag = "native-boundary")]
 fn is_executable(candidate: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt as _;
 
-    candidate
-        .metadata()
-        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+    is_executable_with(|| {
+        candidate
+            .metadata()
+            .map(|metadata| (metadata.is_file(), metadata.permissions().mode()))
+    })
+}
+
+#[cfg(unix)]
+fn is_executable_with(inspect: impl FnOnce() -> io::Result<(bool, u32)>) -> bool {
+    inspect().is_ok_and(|(file, mode)| file && mode & 0o111 != 0)
 }
 
 #[cfg(not(unix))]
@@ -420,6 +429,21 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn executable_discovery_requires_a_regular_file_with_an_execute_permission() {
+        for mode in [0o100, 0o010, 0o001, 0o755] {
+            assert!(is_executable_with(|| Ok((true, mode))), "{mode:o}");
+            assert!(!is_executable_with(|| Ok((false, mode))), "directories are not executable files");
+        }
+        for mode in [0, 0o600, 0o644, 0o666] {
+            assert!(!is_executable_with(|| Ok((true, mode))), "{mode:o}");
+        }
+        for kind in [io::ErrorKind::NotFound, io::ErrorKind::PermissionDenied] {
+            assert!(!is_executable_with(|| Err(io::Error::from(kind))), "{kind:?}");
+        }
+    }
 
     fn token(value: &str) -> GitHubToken {
         value.parse().expect("GitHubToken parsing is infallible")

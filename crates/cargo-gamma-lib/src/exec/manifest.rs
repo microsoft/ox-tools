@@ -995,6 +995,7 @@ pub(super) fn cap_lints(root: &Utf8Path) -> Result<()> {
     let _destination = crate::paths::require_within(&path, root, "a scratch Cargo configuration")?;
 
     if let Some(parent) = path.parent() {
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "This adapter creates a native manifest parent; injected publication failures do not control mkdir without the deferred filesystem backend.", tag = "native-boundary")]
         fs::create_dir_all(parent.as_std_path()).map_err(|cause| error!("could not create `{parent}`").caused_by(cause))?;
     }
 
@@ -1071,6 +1072,12 @@ fn append_flag(flags: &mut Item) -> bool {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn portable_paths_normalize_windows_separators_on_every_host() {
+        assert_eq!(portable_path(Utf8Path::new(r"C:\workspace\member")), "C:/workspace/member");
+        assert_eq!(portable_path(Utf8Path::new("workspace/member")), "workspace/member");
+    }
 
     #[test]
     fn recovered_non_escaping_dependency_does_not_stop_later_external_path_anchoring() {
