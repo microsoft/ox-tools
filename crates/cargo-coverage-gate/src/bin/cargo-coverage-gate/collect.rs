@@ -69,7 +69,15 @@ pub(crate) fn run(args: &CoverageGateArgs, collection: &CollectionArgs) -> Resul
         return Ok(ExitCode::SUCCESS);
     }
 
-    validate_instrumentation_tools(&workspace, &tools, effective_target.rustc_version.as_deref())?;
+    let rustc_version = validate_instrumentation_tools(&workspace, &tools, effective_target.rustc_version.as_deref())?;
+    let collection_target = collection_target(
+        &workspace,
+        &tools,
+        &effective_target.triple,
+        &rustc_version,
+        Command::output,
+        |stderr| eprint!("{stderr}"),
+    )?;
     let coverage_scratch = prepare_coverage_directories(
         &collection.coverage_dir,
         &workspace,
@@ -83,7 +91,7 @@ pub(crate) fn run(args: &CoverageGateArgs, collection: &CollectionArgs) -> Resul
         args: &collection,
         scratch_dir: coverage_scratch.path(),
         coverage_target_root: &coverage_target_root,
-        target: &effective_target.triple,
+        target: collection_target,
         tools: &tools,
         quiet: args.quiet,
     };
@@ -236,7 +244,7 @@ struct CollectionExecution<'a> {
     args: &'a CollectionArgs,
     scratch_dir: &'a Path,
     coverage_target_root: &'a Path,
-    target: &'a str,
+    target: Option<&'a str>,
     tools: &'a ToolPrograms,
     quiet: bool,
 }
@@ -320,6 +328,91 @@ impl EffectiveTarget {
             rustc_version: Some(rustc_version),
         })
     }
+}
+
+fn collection_target<'a>(
+    workspace: &WorkspaceInfo,
+    tools: &ToolPrograms,
+    target: &'a str,
+    rustc_version: &str,
+    read: impl FnOnce(&mut Command) -> io::Result<Output>,
+    write_stderr: impl FnOnce(&str),
+) -> Result<Option<&'a str>, AppError> {
+    let host = rustc_host(rustc_version).ok_or_else(|| AppError::new("`rustc -vV` did not report a host target"))?;
+    if target != host {
+        return Ok(Some(target));
+    }
+
+    let mut command = cargo_command(workspace, tools);
+    command.args([
+        "--color=never",
+        "-Zunstable-options",
+        "config",
+        "get",
+        "build.target",
+        "--format=json",
+    ]);
+    let display = command_display(&command);
+    let output = read(&mut command).into_app_err(format!("failed to execute `{display}` for Cargo build-target discovery"))?;
+    let stderr = String::from_utf8(output.stderr).into_app_err("Cargo build-target discovery stderr was not UTF-8")?;
+    // An unset leaf exits 101, sometimes preceded by nonfatal config-filename warnings.
+    // Recognize only that outcome without hiding other query failures.
+    if output.status.code() == Some(101)
+        && output.stdout.is_empty()
+        && let Some(warnings) = unset_target_warnings(&stderr)
+    {
+        write_stderr(warnings);
+        return Ok(None);
+    }
+    if !output.status.success() {
+        return Err(AppError::new(format!(
+            "Cargo build-target discovery failed: `{display}` exited with {}:\n{stderr}",
+            output.status
+        )));
+    }
+    write_stderr(&stderr);
+    let config = String::from_utf8(output.stdout).into_app_err("Cargo build-target discovery stdout was not UTF-8")?;
+    let config: serde_json::Value = serde_json::from_str(&config).into_app_err("failed to parse Cargo configuration JSON")?;
+    let configured_target = config.get("build").and_then(|build| build.get("target"));
+    let needs_override = match configured_target {
+        None => false,
+        Some(serde_json::Value::Array(targets)) => !targets.is_empty(),
+        Some(_) => true,
+    };
+    // A configured target still needs an explicit override to preserve the selected platform.
+    // Otherwise, omitting --target lets Cargo instrument native proc-macros through RUSTFLAGS.
+    Ok(needs_override.then_some(target))
+}
+
+fn unset_target_warnings(stderr: &str) -> Option<&str> {
+    let stderr = stderr.trim_end();
+    let mut lines = stderr.lines();
+    let error = lines.next_back()?;
+    if error != "error: config value `build.target` is not set" {
+        return None;
+    }
+    let is_config = |path: &str| path == "config" || path.ends_with("/config") || path.ends_with("\\config");
+    while let Some(line) = lines.next() {
+        if let Some(path) = line
+            .strip_prefix("warning: `")
+            .and_then(|line| line.strip_suffix("` is deprecated in favor of `config.toml`"))
+        {
+            if !is_config(path)
+                || lines.next() != Some("  |")
+                || lines.next() != Some("  = help: if you need to support cargo 1.38 or earlier, you can symlink `config` to `config.toml`")
+            {
+                return None;
+            }
+        } else {
+            let message = line.strip_prefix("warning: both `")?.strip_suffix('`')?;
+            let (files, used) = message.split_once("` exist. Using `")?;
+            let (legacy, toml) = files.split_once("` and `")?;
+            if !is_config(legacy) || used != legacy || toml.strip_suffix(".toml") != Some(legacy) {
+                return None;
+            }
+        }
+    }
+    stderr.strip_suffix(error)
 }
 
 impl WorkspaceInfo {
@@ -461,7 +554,7 @@ fn validate_instrumentation_tools(
     workspace: &WorkspaceInfo,
     tools: &ToolPrograms,
     resolved_rustc_version: Option<&str>,
-) -> Result<(), AppError> {
+) -> Result<String, AppError> {
     validate_instrumentation_tools_with(workspace, tools, resolved_rustc_version, read_stdout)
 }
 
@@ -470,7 +563,7 @@ fn validate_instrumentation_tools_with(
     tools: &ToolPrograms,
     resolved_rustc_version: Option<&str>,
     mut read: impl FnMut(&mut Command, &str) -> Result<String, AppError>,
-) -> Result<(), AppError> {
+) -> Result<String, AppError> {
     let mut cargo_version = cargo_command(workspace, tools);
     cargo_version.args(["--version", "--verbose"]);
     let cargo_version = read(&mut cargo_version, "cargo toolchain validation")?;
@@ -505,7 +598,7 @@ fn validate_instrumentation_tools_with(
             "`cargo coverage-gate run` requires cargo-llvm-cov >= {minimum}, but the effective version is {version}"
         )));
     }
-    Ok(())
+    Ok(rustc_version)
 }
 
 fn cargo_release(output: &str) -> Option<&str> {
@@ -590,7 +683,7 @@ fn plain_configuration_command(
     // #[gamma::skip(call_result.default, reason = "append_package_selection returns unit; all arguments are still appended and () is replaced with ()")]
     append_package_selection(&mut command, selection);
     // #[gamma::skip(call_result.default, reason = "append_nextest_options returns unit; all arguments are still appended and () is replaced with ()")]
-    append_nextest_options(&mut command, args, configuration, target);
+    append_nextest_options(&mut command, args, configuration, Some(target));
     command.arg("--no-tests=pass");
     command
 }
@@ -748,8 +841,11 @@ fn append_package_selection(command: &mut Command, selection: &Selection) {
     }
 }
 
-fn append_nextest_options(command: &mut Command, args: &CollectionArgs, configuration: FeatureConfiguration, target: &str) {
-    command.arg(configuration.cargo_flag()).arg("--locked").arg("--target").arg(target);
+fn append_nextest_options(command: &mut Command, args: &CollectionArgs, configuration: FeatureConfiguration, target: Option<&str>) {
+    command.arg(configuration.cargo_flag()).arg("--locked");
+    if let Some(target) = target {
+        command.arg("--target").arg(target);
+    }
     if let Some(jobs) = args.jobs {
         command.arg("--jobs").arg(jobs.get().to_string());
         command.arg("--build-jobs").arg(jobs.get().to_string());
@@ -864,7 +960,9 @@ fn report_command_for_host(
     command.args(["llvm-cov", "report", "--lcov", "--output-path"]).arg(lcov_path);
     // #[gamma::skip(call_result.default, reason = "append_package_selection returns unit; all arguments are still appended and () is replaced with ()")]
     append_package_selection(&mut command, execution.selection);
-    command.arg("--target").arg(execution.target);
+    if let Some(target) = execution.target {
+        command.arg("--target").arg(target);
+    }
     command
 }
 
@@ -1370,7 +1468,7 @@ mod tests {
             args: &args,
             scratch_dir: root,
             coverage_target_root: root,
-            target: "x86_64-pc-windows-msvc",
+            target: Some("x86_64-pc-windows-msvc"),
             tools: &tools,
             quiet: false,
         };
@@ -1466,10 +1564,14 @@ mod tests {
     }
 
     fn process_output(success: bool, stdout: &[u8], stderr: &[u8]) -> Output {
+        process_output_with_code(u8::from(!success), stdout, stderr)
+    }
+
+    fn process_output_with_code(code: u8, stdout: &[u8], stderr: &[u8]) -> Output {
         #[cfg(unix)]
-        let status = ExitStatus::from_raw(if success { 0 } else { 1 << 8 });
+        let status = ExitStatus::from_raw(i32::from(code) << 8);
         #[cfg(windows)]
-        let status = ExitStatus::from_raw(u32::from(!success));
+        let status = ExitStatus::from_raw(u32::from(code));
 
         Output {
             status,
@@ -1505,7 +1607,7 @@ mod tests {
             args: &args,
             scratch_dir: root,
             coverage_target_root: root,
-            target: "x86_64-pc-windows-msvc",
+            target: Some("x86_64-pc-windows-msvc"),
             tools: &tools,
             quiet: false,
         };
@@ -1661,7 +1763,7 @@ mod tests {
             args: &args,
             scratch_dir: &scratch,
             coverage_target_root: &coverage_target_root,
-            target: "x86_64-pc-windows-msvc",
+            target: Some("x86_64-pc-windows-msvc"),
             tools: &tools,
             quiet: false,
         };
@@ -1741,7 +1843,7 @@ mod tests {
             args: &args,
             scratch_dir: &scratch,
             coverage_target_root: &coverage_target_root,
-            target: "x86_64-pc-windows-msvc",
+            target: Some("x86_64-pc-windows-msvc"),
             tools: &tools,
             quiet: false,
         };
@@ -1838,7 +1940,7 @@ mod tests {
             args: &args,
             scratch_dir: &scratch,
             coverage_target_root: &coverage_target_root,
-            target: "x86_64-pc-windows-msvc",
+            target: Some("x86_64-pc-windows-msvc"),
             tools: &tools,
             quiet: false,
         };
@@ -2148,7 +2250,7 @@ mod tests {
                 args: &args,
                 scratch_dir: Path::new("scratch"),
                 coverage_target_root: Path::new("coverage-target"),
-                target: "test-target",
+                target: Some("test-target"),
                 tools: &tools,
                 quiet: false,
             };
@@ -2204,7 +2306,7 @@ mod tests {
                 args: &args,
                 scratch_dir: Path::new("scratch"),
                 coverage_target_root: Path::new("coverage-target"),
-                target: "test-target",
+                target: Some("test-target"),
                 tools: &tools,
                 quiet: false,
             };
@@ -2241,6 +2343,354 @@ mod tests {
     }
 
     #[test]
+    fn native_collection_target_is_omitted_unless_cargo_config_needs_an_override() {
+        let workspace = workspace(Path::new("repo"));
+        let tools = ToolPrograms {
+            cargo: "cargo-custom".into(),
+            rustc: "rustc-custom".into(),
+        };
+        let version = "release: 1.101.0-nightly\nhost: x86_64-pc-windows-msvc\n";
+        for explicit in [None, Some("x86_64-pc-windows-msvc")] {
+            let effective = EffectiveTarget::resolve_with_reader(&workspace, explicit, &tools, |_, _, _| Ok(version.to_owned()))
+                .expect("scripted host discovery");
+            for (config, expected) in [
+                (None, None),
+                (Some("{}"), None),
+                (Some(r#"{"build":{"target":[]}}"#), None),
+                (
+                    Some(r#"{"build":{"target":"x86_64-pc-windows-msvc"}}"#),
+                    Some(effective.triple.as_str()),
+                ),
+                (
+                    Some(r#"{"build":{"target":"aarch64-pc-windows-msvc"}}"#),
+                    Some(effective.triple.as_str()),
+                ),
+                (
+                    Some(r#"{"build":{"target":["aarch64-pc-windows-msvc"]}}"#),
+                    Some(effective.triple.as_str()),
+                ),
+            ] {
+                let target = collection_target(
+                    &workspace,
+                    &tools,
+                    &effective.triple,
+                    version,
+                    |command| {
+                        assert_eq!(command.get_program(), OsStr::new("cargo-custom"));
+                        assert_eq!(command.get_current_dir(), Some(Path::new("repo")));
+                        assert_eq!(
+                            command.get_args().collect::<Vec<_>>(),
+                            [
+                                "--color=never",
+                                "-Zunstable-options",
+                                "config",
+                                "get",
+                                "build.target",
+                                "--format=json"
+                            ]
+                            .map(OsStr::new)
+                        );
+                        Ok(match config {
+                            Some(config) => process_output(true, config.as_bytes(), b""),
+                            None => process_output_with_code(101, b"", b"error: config value `build.target` is not set\r\n"),
+                        })
+                    },
+                    |stderr| assert_eq!(stderr, ""),
+                )
+                .expect("valid Cargo configuration");
+                assert_eq!(target, expected, "explicit={explicit:?}, config={config:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn collection_target_queries_the_build_target_leaf_key() {
+        let workspace = workspace(Path::new("repo"));
+        let tools = ToolPrograms {
+            cargo: "cargo-custom".into(),
+            rustc: "unused-rustc".into(),
+        };
+        let target = collection_target(
+            &workspace,
+            &tools,
+            "native",
+            "host: native\n",
+            |command| {
+                assert_eq!(
+                    command.get_args().collect::<Vec<_>>(),
+                    [
+                        "--color=never",
+                        "-Zunstable-options",
+                        "config",
+                        "get",
+                        "build.target",
+                        "--format=json"
+                    ]
+                    .map(OsStr::new)
+                );
+                Ok(process_output(true, br#"{"build":{"target":"cross-target"}}"#, b""))
+            },
+            |stderr| assert_eq!(stderr, ""),
+        )
+        .expect("scripted build.target leaf query succeeds");
+        assert_eq!(target, Some("native"));
+    }
+
+    #[test]
+    fn native_collection_preserves_filename_warnings_for_an_unset_target() {
+        let workspace = workspace(Path::new("repo"));
+        let tools = ToolPrograms {
+            cargo: "cargo-custom".into(),
+            rustc: "unused-rustc".into(),
+        };
+        let deprecated = "warning: `repo/.cargo/config` is deprecated in favor of `config.toml`\n\
+                          \x20 |\n\
+                          \x20 = help: if you need to support cargo 1.38 or earlier, you can symlink `config` to `config.toml`\n";
+        let duplicate = "warning: both `repo/.cargo/config` and `repo/.cargo/config.toml` exist. Using `repo/.cargo/config`\n";
+        for warnings in [
+            deprecated.to_owned(),
+            deprecated.replace("repo/.cargo/", ""),
+            deprecated.replace('/', "\\").replace('\n', "\r\n"),
+            duplicate.to_owned(),
+            duplicate.replace("repo/.cargo/", ""),
+            duplicate.replace('/', "\\").replace('\n', "\r\n"),
+            format!("{deprecated}{duplicate}"),
+        ] {
+            for explicit in [None, Some("native")] {
+                let effective =
+                    EffectiveTarget::resolve_with_reader(&workspace, explicit, &tools, |_, _, _| Ok("host: native\n".to_owned()))
+                        .expect("scripted native target");
+                let stderr = format!("{warnings}error: config value `build.target` is not set\n");
+                let mut forwarded = String::new();
+                let target = collection_target(
+                    &workspace,
+                    &tools,
+                    &effective.triple,
+                    "host: native\n",
+                    |_| Ok(process_output_with_code(101, b"", stderr.as_bytes())),
+                    |text| forwarded.push_str(text),
+                )
+                .expect("known Cargo filename warnings do not invalidate an unset target");
+                assert_eq!(target, None);
+                assert_eq!(forwarded, warnings);
+            }
+        }
+    }
+
+    #[test]
+    fn collection_target_does_not_hide_query_failures_as_an_unset_target() {
+        let workspace = workspace(Path::new("repo"));
+        let tools = ToolPrograms {
+            cargo: "cargo-custom".into(),
+            rustc: "unused-rustc".into(),
+        };
+        for (code, stdout, stderr) in [
+            (1, "", "error: config value `build.target` is not set"),
+            (101, "", "error: failed to load Cargo configuration"),
+            (
+                101,
+                "",
+                "warning: invalid configuration\nerror: config value `build.target` is not set",
+            ),
+            (101, "unexpected output", "error: config value `build.target` is not set"),
+            (
+                1,
+                "",
+                "warning: both `repo/.cargo/config` and `repo/.cargo/config.toml` exist. Using `repo/.cargo/config`\n\
+                 error: config value `build.target` is not set",
+            ),
+            (
+                101,
+                "{}",
+                "warning: both `repo/.cargo/config` and `repo/.cargo/config.toml` exist. Using `repo/.cargo/config`\n\
+                 error: config value `build.target` is not set",
+            ),
+        ] {
+            let output = process_output_with_code(code, stdout.as_bytes(), stderr.as_bytes());
+            let status = output.status;
+            let error = collection_target(
+                &workspace,
+                &tools,
+                "native",
+                "host: native\n",
+                |_| Ok(output),
+                |_| panic!("failed queries must not forward warnings as successful output"),
+            )
+            .expect_err("only Cargo's exact missing-key outcome is absence")
+            .to_string();
+            assert_eq!(
+                error,
+                format!(
+                    "Cargo build-target discovery failed: \
+                     `cargo-custom --color=never -Zunstable-options config get build.target --format=json` \
+                     exited with {status}:\n{stderr}"
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn unset_target_warnings_rejects_unrecognized_or_incomplete_diagnostics() {
+        for warnings in [
+            "warning: invalid configuration\n",
+            "error: failed to load Cargo configuration\n",
+            "note: `repo/.cargo/config` is deprecated in favor of `config.toml`\n\
+             \x20 |\n\
+             \x20 = help: if you need to support cargo 1.38 or earlier, you can symlink `config` to `config.toml`\n",
+            "warning: `repo/.cargo/config` is deprecated in favor of `config.toml`\n",
+            "warning: `repo/.cargo/config` is deprecated in favor of `config.toml`\n  |\n",
+            "warning: `repo/.cargo/config` is deprecated in favor of `config.toml`\n  |\n  = help: different advice\n",
+            "warning: `repo/.cargo/other` is deprecated in favor of `config.toml`\n\
+             \x20 |\n\
+             \x20 = help: if you need to support cargo 1.38 or earlier, you can symlink `config` to `config.toml`\n",
+            "warning: both `repo/.cargo/other` and `repo/.cargo/other.toml` exist. Using `repo/.cargo/other`\n",
+            "warning: both `repo/.cargo/config` and `repo/.cargo/config.toml` exist. Using `repo/.cargo/config.toml`\n",
+            "warning: both `repo/.cargo/config` and `elsewhere/config.toml` exist. Using `repo/.cargo/config`\n",
+            "warning: both `repo/.cargo/config` exist. Using `repo/.cargo/config`\n",
+            "warning: both `repo/.cargo/config` and `repo/.cargo/config.toml`\n",
+            "warning: both `repo/.cargo/config` and `repo/.cargo/config.toml` exist\n",
+            "warning: both `repo/.cargo/config` and `repo/.cargo/config.toml` exist. Using `repo/.cargo/config\n",
+        ] {
+            let stderr = format!("{warnings}error: config value `build.target` is not set\n");
+            assert_eq!(unset_target_warnings(&stderr), None, "{stderr}");
+        }
+        assert_eq!(unset_target_warnings(""), None);
+        assert_eq!(unset_target_warnings("error: failed to load Cargo configuration\n"), None);
+    }
+
+    #[test]
+    fn collection_target_forwards_successful_query_warnings_without_changing_the_target() {
+        let workspace = workspace(Path::new("repo"));
+        let tools = ToolPrograms {
+            cargo: "cargo-custom".into(),
+            rustc: "unused-rustc".into(),
+        };
+        for stderr in ["", "warning: unused Cargo configuration key\n"] {
+            let mut warnings = String::new();
+            let target = collection_target(
+                &workspace,
+                &tools,
+                "native",
+                "host: native\n",
+                |_| Ok(process_output(true, br#"{"build":{"target":[]}}"#, stderr.as_bytes())),
+                |text| warnings.push_str(text),
+            )
+            .expect("warnings do not invalidate a successful query");
+            assert_eq!(target, None);
+            assert_eq!(warnings, stderr);
+        }
+    }
+
+    #[test]
+    fn collection_target_preserves_invalid_output_encoding_errors() {
+        let workspace = workspace(Path::new("repo"));
+        let tools = ToolPrograms {
+            cargo: "cargo-custom".into(),
+            rustc: "unused-rustc".into(),
+        };
+        for (stdout, stderr, expected) in [
+            (&b"\xff"[..], &b""[..], "Cargo build-target discovery stdout was not UTF-8"),
+            (&b"{}"[..], &b"\xff"[..], "Cargo build-target discovery stderr was not UTF-8"),
+        ] {
+            let error = collection_target(
+                &workspace,
+                &tools,
+                "native",
+                "host: native\n",
+                |_| Ok(process_output(true, stdout, stderr)),
+                |stderr| assert_eq!(stderr, ""),
+            )
+            .expect_err("invalid UTF-8 is not missing configuration");
+            assert!(error.find_source::<std::string::FromUtf8Error>().is_some());
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn cross_collection_target_stays_explicit_without_reading_cargo_config() {
+        let workspace = workspace(Path::new("repo"));
+        let tools = ToolPrograms {
+            cargo: "unused-cargo".into(),
+            rustc: "unused-rustc".into(),
+        };
+        let target = collection_target(
+            &workspace,
+            &tools,
+            "aarch64-pc-windows-msvc",
+            "host: x86_64-pc-windows-msvc\n",
+            |_| panic!("cross-target selection must not query Cargo configuration"),
+            |_| panic!("cross-target selection must not forward query output"),
+        )
+        .expect("explicit cross target");
+        assert_eq!(target, Some("aarch64-pc-windows-msvc"));
+    }
+
+    #[test]
+    fn collection_target_reports_host_config_and_json_errors() {
+        let workspace = workspace(Path::new("repo"));
+        let tools = ToolPrograms {
+            cargo: "cargo-custom".into(),
+            rustc: "unused-rustc".into(),
+        };
+        let missing_host = collection_target(
+            &workspace,
+            &tools,
+            "native",
+            "release: 1.101.0-nightly\n",
+            |_| panic!("missing host must fail before Cargo configuration"),
+            |_| panic!("missing host must not forward query output"),
+        )
+        .expect_err("missing host");
+        assert_eq!(missing_host.to_string(), "`rustc -vV` did not report a host target");
+        let config_error = collection_target(
+            &workspace,
+            &tools,
+            "native",
+            "host: native\n",
+            |_| Err(io::Error::other("configuration unavailable")),
+            |_| panic!("failed queries must not forward query output"),
+        )
+        .expect_err("failed configuration query");
+        assert_eq!(
+            config_error
+                .find_source::<io::Error>()
+                .expect("query errors preserve their cause")
+                .kind(),
+            io::ErrorKind::Other
+        );
+        let rendered = config_error.to_string();
+        let (diagnostic, _) = rendered.rsplit_once(" (at ").expect("I/O errors include their enrichment location");
+        assert_eq!(
+            diagnostic,
+            "configuration unavailable\n\
+             > failed to execute `cargo-custom --color=never -Zunstable-options config get build.target --format=json` \
+             for Cargo build-target discovery"
+        );
+        let invalid_json = collection_target(
+            &workspace,
+            &tools,
+            "native",
+            "host: native\n",
+            |_| Ok(process_output(true, b"{", b"")),
+            |stderr| assert_eq!(stderr, ""),
+        )
+        .expect_err("invalid configuration JSON");
+        let cause = invalid_json
+            .find_source::<serde_json::Error>()
+            .expect("JSON errors preserve their typed cause");
+        assert_eq!(cause.classify(), serde_json::error::Category::Eof);
+        assert_eq!((cause.line(), cause.column()), (1, 1));
+        let rendered = invalid_json.to_string();
+        let (diagnostic, _) = rendered
+            .rsplit_once(" (at ")
+            .expect("JSON parse errors include their enrichment location");
+        assert_eq!(
+            diagnostic,
+            "EOF while parsing an object at line 1 column 1\n> failed to parse Cargo configuration JSON"
+        );
+    }
+
+    #[test]
     fn instrumentation_validation_uses_exact_commands_contexts_and_errors() {
         let workspace = workspace(Path::new("repo"));
         let tools = ToolPrograms {
@@ -2254,7 +2704,7 @@ mod tests {
             "cargo-llvm-cov 0.9.0\n".to_owned(),
         ]
         .into_iter();
-        validate_instrumentation_tools_with(&workspace, &tools, None, |command, description| {
+        let rustc_version = validate_instrumentation_tools_with(&workspace, &tools, None, |command, description| {
             calls.push((
                 command.get_program().to_owned(),
                 command.get_args().map(OsStr::to_owned).collect::<Vec<_>>(),
@@ -2263,6 +2713,7 @@ mod tests {
             Ok(outputs.next().expect("one output per command"))
         })
         .expect("valid tools");
+        assert_eq!(rustc_version, "release: 1.99.0-nightly\n");
         assert_eq!(
             calls,
             [
@@ -2424,7 +2875,7 @@ mod tests {
             args: &args,
             scratch_dir: Path::new("scratch"),
             coverage_target_root: &coverage_target_root,
-            target: "test-target",
+            target: Some("test-target"),
             tools: &tools,
             quiet: false,
         };
@@ -2493,6 +2944,62 @@ mod tests {
                         assert_eq!(native.get_envs().collect::<Vec<_>>(), expected.get_envs().collect::<Vec<_>>());
                     }
                 }
+            }
+        }
+    }
+
+    #[test]
+    #[cfg_attr(
+        all(miri, windows),
+        ignore = "constructing a Command environment calls an unsupported Windows API under miri"
+    )]
+    fn native_coverage_commands_omit_target_for_collection_and_reporting() {
+        let workspace = workspace(Path::new("repo"));
+        let selection = Selection {
+            explicit: false,
+            members: workspace.members.clone(),
+        };
+        let args = collection_args();
+        let tools = ToolPrograms {
+            cargo: "cargo".into(),
+            rustc: "rustc".into(),
+        };
+        let execution = CollectionExecution {
+            workspace: &workspace,
+            selection: &selection,
+            args: &args,
+            scratch_dir: Path::new("scratch"),
+            coverage_target_root: Path::new("coverage-target"),
+            target: None,
+            tools: &tools,
+            quiet: false,
+        };
+        for windows_host in [false, true] {
+            for configuration in normalized_configurations(&[]) {
+                let nextest = nextest_command_for_host(&execution, configuration, windows_host);
+                let mut expected = vec!["llvm-cov", "nextest", "--no-report"];
+                if windows_host {
+                    expected.push("--no-rustc-wrapper");
+                }
+                expected.extend([
+                    "--workspace",
+                    configuration.cargo_flag(),
+                    "--locked",
+                    "--jobs",
+                    "3",
+                    "--build-jobs",
+                    "3",
+                    "--no-tests=pass",
+                ]);
+                assert_eq!(
+                    nextest.get_args().collect::<Vec<_>>(),
+                    expected.iter().map(OsStr::new).collect::<Vec<_>>()
+                );
+                let report = report_command_for_host(&execution, configuration, Path::new("lcov.info"), windows_host);
+                assert_eq!(
+                    report.get_args().collect::<Vec<_>>(),
+                    ["llvm-cov", "report", "--lcov", "--output-path", "lcov.info", "--workspace"].map(OsStr::new)
+                );
             }
         }
     }
@@ -2971,7 +3478,7 @@ mod tests {
             args: &args,
             scratch_dir: Path::new("scratch"),
             coverage_target_root: &coverage_target_root,
-            target: "test-target",
+            target: Some("test-target"),
             tools: &tools,
             quiet: false,
         };
@@ -3090,7 +3597,7 @@ mod tests {
             args: &args,
             scratch_dir: tmp.path(),
             coverage_target_root: &coverage_target_root,
-            target: "test-target",
+            target: Some("test-target"),
             tools: &tools,
             quiet: true,
         };
@@ -3237,7 +3744,7 @@ mod tests {
             args: &args,
             scratch_dir: tmp.path(),
             coverage_target_root: &coverage_target_root,
-            target: "test-target",
+            target: Some("test-target"),
             tools: &tools,
             quiet: true,
         };
