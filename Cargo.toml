@@ -34,13 +34,13 @@ bytes = { version = "1.12.1", default-features = false }
 camino = { version = "1.2.6", default-features = false }
 # local dependencies
 cargo-aprz-lib = { path = "crates/cargo-aprz-lib", default-features = false, version = "1.2.2" }
-cargo-gamma-attrs = { path = "crates/cargo-gamma-attrs", default-features = false, version = "0.4.0" }
-cargo-gamma-attrs-impl = { path = "crates/cargo-gamma-attrs-impl", default-features = false, version = "0.4.0" }
-cargo-gamma-engine = { path = "crates/cargo-gamma-engine", default-features = false, version = "0.4.0" }
-cargo-gamma-lib = { path = "crates/cargo-gamma-lib", default-features = false, version = "0.5.0" }
-cargo-gamma-process = { path = "crates/cargo-gamma-process", default-features = false, version = "0.4.0" }
-cargo-gamma-rt = { path = "crates/cargo-gamma-rt", default-features = false, version = "0.4.0" }
-cargo-gamma-unsafe = { path = "crates/cargo-gamma-unsafe", default-features = false, version = "0.4.0" }
+cargo-gamma-attrs = { path = "crates/cargo-gamma-attrs", default-features = false, version = "0.6.0" }
+cargo-gamma-attrs-impl = { path = "crates/cargo-gamma-attrs-impl", default-features = false, version = "0.6.0" }
+cargo-gamma-engine = { path = "crates/cargo-gamma-engine", default-features = false, version = "0.6.0" }
+cargo-gamma-lib = { path = "crates/cargo-gamma-lib", default-features = false, version = "0.6.0" }
+cargo-gamma-process = { path = "crates/cargo-gamma-process", default-features = false, version = "0.6.0" }
+cargo-gamma-rt = { path = "crates/cargo-gamma-rt", default-features = false, version = "0.6.0" }
+cargo-gamma-unsafe = { path = "crates/cargo-gamma-unsafe", default-features = false, version = "0.6.0" }
 # external dependencies
 cargo-platform = { version = "0.3.3", default-features = false }
 cargo_metadata = { version = "0.23.1", default-features = false }
@@ -50,8 +50,6 @@ clap = { version = "4.6.7", default-features = false }
 clap_complete = { version = "4.6.11", default-features = false }
 command-group = { version = "5.0.1", default-features = false }
 compact_str = { version = "0.10.0", default-features = false }
-# blake3 accepts yanked 0.4.3; the registry mirror still selects it.
-constant_time_eq = { version = "=0.4.2", default-features = false }
 csv = { version = "1.4.0", default-features = false }
 duct = { version = "1.1.2", default-features = false }
 env_logger = { version = "0.11.11", default-features = false }

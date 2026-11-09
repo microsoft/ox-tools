@@ -1618,7 +1618,6 @@ pub(crate) fn same_existing_path(left: &Utf8Path, right: &Utf8Path) -> bool {
         left.eq_ignore_ascii_case(right)
     }
 
-    // #[gamma::skip(bool_expr.negate, reason = "Target-specific equivalence for the archived Windows campaign: the exact mutated canonicalization match is immediately guarded by #[cfg(not(windows))], so it is removed before Windows compilation. Negating its result cannot affect this target's binary. No cross-platform equivalence is claimed.", tag = "equivalent")]
     #[cfg(not(windows))]
     match (
         fs::canonicalize(left.as_std_path()).ok(),

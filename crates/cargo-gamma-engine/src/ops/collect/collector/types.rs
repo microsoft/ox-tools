@@ -1018,7 +1018,9 @@ impl Types<'_> {
             {
                 true
             }
-            [root, name] if root == "rustc_hash" && collection_kind(name) == Some(written_kind) => true,
+            [root, name] if root == "rustc_hash" && self.standard_external_root(root) && collection_kind(name) == Some(written_kind) => {
+                true
+            }
             _ => false,
         }
     }
@@ -1602,7 +1604,9 @@ impl Types<'_> {
             // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
             None;
         }
-        match resolved_type_path(ty, self.imports)?.last().map(String::as_str) {
+        match
+        // #[gamma::skip(try.propagate_to_unwrap, tag = "equivalent", reason = "supports_collection_api above already resolved this same immutable type and import map successfully, so the repeated resolution cannot return None.")]
+        resolved_type_path(ty, self.imports)?.last().map(String::as_str) {
             Some("HashSet") => Some(1),
             Some("HashMap") => Some(2),
             _ => None,
@@ -2130,6 +2134,113 @@ mod tests {
     }
 
     #[test]
+    fn nov7_abstract_projections_follow_the_root_through_parentheses() {
+        let abstracts = vec!["T".to_owned()];
+        for (text, expected) in [
+            ("(T)", true),
+            ("(T::Item)", true),
+            ("Self::Item", true),
+            ("T::Item", true),
+            ("T::Nested::Item", true),
+            ("Concrete::T", false),
+            ("Concrete::Self", false),
+            ("(Concrete::Item)", false),
+            ("Concrete", false),
+        ] {
+            assert_eq!(is_abstract_type(&syn::parse_str(text).unwrap(), &abstracts), expected, "{text}");
+        }
+    }
+
+    #[test]
+    fn nov7_local_identity_resolves_aliases_self_and_associated_types() {
+        let defaults = defaults("struct Local;");
+        let imports = HashMap::default();
+        let aliases = HashMap::from_iter([(
+            "Alias".into(),
+            Some(Alias {
+                parameters: Vec::new(),
+                target: parse_quote!(Local),
+            }),
+        )]);
+        let associated = HashMap::from_iter([("Item".into(), parse_quote!(Local))]);
+        let self_type = parse_quote!(Local);
+        let types = Types {
+            aliases: Some(&aliases),
+            self_type: Some(&self_type),
+            self_associated: Some(&associated),
+            ..facts(&defaults, &imports)
+        };
+        for text in ["Local", "Alias", "Self", "Self::Item"] {
+            assert!(types.is_local_type(&syn::parse_str(text).unwrap()), "{text}");
+        }
+        assert!(!types.is_local_type(&parse_quote!(external::Local)));
+    }
+
+    #[test]
+    fn nov7_nominal_generic_default_does_not_require_its_payload_to_default() {
+        let defaults = defaults(
+            "struct Missing; struct Container<T>(core::marker::PhantomData<T>);
+             impl<T> Default for Container<T> {
+                 fn default() -> Self { Self(core::marker::PhantomData) }
+             }",
+        );
+        let imports = HashMap::default();
+        let types = facts(&defaults, &imports);
+        assert!(!types.lacks_default(&parse_quote!(Container<Missing>)));
+        assert!(types.lacks_default(&parse_quote!(Box<Missing>)));
+    }
+
+    #[test]
+    fn nov7_negative_alias_and_labeled_source_evidence_stays_exact() {
+        let defaults = defaults("struct Missing; type Alias = Missing;");
+        let imports = HashMap::default();
+        let aliases = HashMap::from_iter([(
+            "Alias".into(),
+            Some(Alias {
+                parameters: Vec::new(),
+                target: parse_quote!(Missing),
+            }),
+        )]);
+        let types = Types {
+            aliases: Some(&aliases),
+            ..facts(&defaults, &imports)
+        };
+        assert!(types.package_lacks_default(&parse_quote!(Alias)));
+
+        let cfg = crate::cfg::CfgSet::unconditional();
+        let mut labeled = Defaults::of_source_in(&syn::parse_file("struct Widget;").unwrap(), &cfg, "negative.rs");
+        labeled.absorb(Defaults::of_source_in(
+            &syn::parse_file("#[derive(Default)] struct Widget;").unwrap(),
+            &cfg,
+            "positive.rs",
+        ));
+        labeled.bind_sources(&[
+            ("negative.rs".into(), "negative.rs".into(), Vec::new()),
+            ("positive.rs".into(), "positive.rs".into(), Vec::new()),
+        ]);
+        for (source, expected) in [("negative.rs", true), ("positive.rs", false)] {
+            let imports = HashMap::from_iter([(SOURCE_FILE.into(), Some(vec![source.into()]))]);
+            assert_eq!(
+                facts(&labeled, &imports).package_lacks_default(&parse_quote!(Widget)),
+                expected,
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn nov7_nonstandard_roots_are_not_rejected_as_shadowed_standard_crates() {
+        let defaults = Defaults::default();
+        let imports = HashMap::from_iter([(
+            format!("{EXTERN_ROOT_PREFIX}external"),
+            Some(vec![ABSOLUTE_ROOT.into(), "dependency".into()]),
+        )]);
+        let types = facts(&defaults, &imports);
+        assert!(types.standard_constructor_root(&parse_quote!(external::Vec<u8>)));
+        assert!(!types.supports_collection_api(&parse_quote!(external::Vec<u8>)));
+    }
+
+    #[test]
     fn control_flow_only_defaults_the_omitted_continuation_after_a_known_break_payload() {
         let defaults = Defaults::default();
         let imports = HashMap::default();
@@ -2541,6 +2652,26 @@ mod tests {
             Some(parse_quote!(foreign::Thing))
         );
         assert_eq!(types.instantiate_alias(&parse_quote!(Tuple)), Some(parse_quote!((u8, bool))));
+    }
+
+    #[test]
+    fn collection_api_rejects_renamed_foreign_rustc_hash_roots() {
+        let defaults = Defaults::default();
+        for (original, genuine) in [("foreign", false), ("rustc_hash", true)] {
+            let imports = HashMap::from_iter([(
+                format!("{EXTERN_ROOT_PREFIX}rustc_hash"),
+                Some(vec![ABSOLUTE_ROOT.into(), original.into()]),
+            )]);
+            let types = facts(&defaults, &imports);
+            for text in [
+                "::rustc_hash::Vec<u8>",
+                "::rustc_hash::FxHashSet<u8>",
+                "::rustc_hash::FxHashMap<u8, u8>",
+            ] {
+                let ty = syn::parse_str(text).unwrap();
+                assert_eq!(types.supports_collection_api(&ty), genuine, "{original}: {text}");
+            }
+        }
     }
 
     #[test]

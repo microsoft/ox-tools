@@ -1278,7 +1278,6 @@ impl Converger {
     /// those additional packages still have to be restored to pristine source: filtering their
     /// diagnostics after compilation is too late, because they may already have broken or masked
     /// the build.
-    // #[gamma::skip(fn_value.empty_collection, tag = "timeout", reason = "dropping withdrawn mutants repeatedly rebuilds contexts that cannot be isolated in the campaign")]
     fn scoped_withdrawn(&self, plan: &Plan, packages: Option<&[String]>) -> HashSet<u32> {
         let mut withdrawn = self.withdrawn.clone();
         let Some(packages) = packages else {

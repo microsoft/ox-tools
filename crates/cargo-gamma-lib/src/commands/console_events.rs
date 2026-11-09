@@ -316,6 +316,8 @@ pub(super) fn mutant_detail(mutant: &crate::model::Mutant) -> String {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use std::time::Instant;
+
     use camino::Utf8PathBuf;
 
     use super::super::verdict_log::TESTING_PROGRESS_LOG;
@@ -387,10 +389,12 @@ mod tests {
     #[test]
     fn dashboard_starts_while_the_sweep_is_still_being_planned() {
         let mut host = Sink::default().terminal(160);
+        let mut dashboard = Dashboard::new(true, Some(160), Styler::new(false));
+        dashboard.set_redraw_time_for_test(Instant::now());
         let mut events = ConsoleEvents {
             host: &mut host,
             progress: Progress::new(true, Styler::new(false), Some(160)),
-            dashboard: Dashboard::new(true, Some(160), Styler::new(false)),
+            dashboard,
             styler: Styler::new(false),
             show_build: false,
             verdict_log: VerdictLog::default(),
@@ -413,6 +417,7 @@ mod tests {
             planning_draw,
             "planning events must update dashboard state without writing a competing progress line"
         );
+        assert_eq!(events.dashboard.testing_status_for_test(), "Planning reachability index ready");
     }
 
     #[test]

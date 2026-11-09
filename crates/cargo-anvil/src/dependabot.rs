@@ -456,6 +456,29 @@ mod tests {
     }
 
     #[test]
+    fn nov7_bom_and_unicode_preserve_edit_offsets_and_idempotence() {
+        let source = format!("\u{feff}# café\n{JOB}");
+        let output = update(&source, PATHS).unwrap().unwrap();
+        assert_eq!(
+            output,
+            source.replace(
+                "  - package-ecosystem:",
+                "  - exclude-paths:\n      - \".github/actions/anvil-setup/action.yml\"\n      - \".github/workflows/anvil-pr-impl.yml\"\n    package-ecosystem:"
+            )
+        );
+        assert_eq!(update(&output, PATHS).unwrap(), None);
+    }
+
+    #[test]
+    fn nov7_non_bom_prefixes_are_not_silently_discarded() {
+        let error = update(&format!("x{JOB}"), PATHS).unwrap_err();
+        assert_eq!(error_cause::<UnsupportedVersionError>(&error).actual, "<missing>");
+
+        let error = update(&format!("\0{JOB}"), PATHS).unwrap_err();
+        error_cause::<saphyr_parser::ScanError>(&error);
+    }
+
+    #[test]
     fn exclusions_are_exact_selected_catalog_paths_not_prefix_globs() {
         let catalog = Catalog::builder(CliMeta::new("test"))
             .with_artifact(Artifact::backend_file(Backend::GitHub, ".github/workflows/generated.yaml", ""))

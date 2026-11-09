@@ -52,6 +52,13 @@
 //!
 //! ## Install and adopt
 //!
+//! Supported adopter toolchains are **Rust and Cargo 1.95 or newer**, including
+//! the repository's declared MSRV. Building this release of cargo-anvil from
+//! source requires **Rust 1.97 or newer**. Generated recipes require
+//! **Just 1.46.0 or newer**, PowerShell Core (`pwsh`), Git, and rustup.
+//! They target one Cargo workspace or single-crate package at the repository root.
+//! Older adopter toolchains and multi-workspace orchestration are unsupported.
+//!
 //! Install the generator:
 //!
 //! ```console
@@ -214,10 +221,6 @@
 //!   [`cargo-gamma`](https://crates.io/crates/cargo-gamma) runs,
 //!   [`cargo-hack`](https://crates.io/crates/cargo-hack) feature-powerset
 //!   checks, and benchmark compilation.
-//!
-//! `docs/design/checks.md` records the exact commands, impact scope, feature
-//! configurations, operating-system matrix, tier placement, and rationale for
-//! each check.
 //!
 //! ## Configuring checks
 //!
@@ -430,8 +433,9 @@
 //! }
 //! ```
 //!
-//! The engine format remains `anvil`-named on disk so tools built on it can
-//! coexist safely and share the same update rules.
+//! The engine format remains `anvil`-named on disk. Only one tool manages a
+//! repository at a time; switching tools requires `--force` and preserves the
+//! normal content-conflict protections.
 //!
 //! ## In-process catalog updates
 //!

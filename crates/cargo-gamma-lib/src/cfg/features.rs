@@ -201,8 +201,9 @@ fn forwarding_is_active(package: &Package, entry: &str, mine: &HashSet<String>) 
 /// Finds packages whose dependency features remain uncertain.
 ///
 /// Conditional, unknown-kind, and unselected workspace edges seed uncertainty.
-/// It propagates through outgoing workspace dependencies.
-pub(crate) fn uncertain_packages(metadata: &Metadata, selected: &HashSet<String>) -> HashSet<String> {
+/// It propagates through outgoing workspace dependencies, but selected packages
+/// have complete feature sets under `--all-features`.
+pub(crate) fn uncertain_packages(metadata: &Metadata, selected: &HashSet<String>, all_features: bool) -> HashSet<String> {
     let members = metadata.workspace_packages();
     let mut uncertain: HashSet<&str> = members
         .iter()
@@ -225,7 +226,11 @@ pub(crate) fn uncertain_packages(metadata: &Metadata, selected: &HashSet<String>
             }
         }
     }
-    uncertain.into_iter().map(str::to_owned).collect()
+    uncertain
+        .into_iter()
+        .filter(|name| !all_features || !selected.contains(*name))
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Applies one feature-table entry, returning the (package, feature) pair if something new was
@@ -485,8 +490,13 @@ mod tests {
         metadata.packages.extend([gamma, delta]);
         let selected = ["alpha", "beta", "gamma", "delta"].map(str::to_owned).into_iter().collect();
         assert_eq!(
-            uncertain_packages(&metadata, &selected),
+            uncertain_packages(&metadata, &selected, false),
             ["beta", "gamma", "delta"].map(str::to_owned).into_iter().collect()
+        );
+        let selected = ["alpha", "beta", "gamma"].map(str::to_owned).into_iter().collect();
+        assert_eq!(
+            uncertain_packages(&metadata, &selected, true),
+            HashSet::from_iter(["delta".to_owned()])
         );
     }
 
@@ -595,7 +605,7 @@ mod tests {
         let selected = HashSet::from_iter(["alpha".to_owned(), "beta".to_owned()]);
         let enabled = enabled(&metadata, &FeatureArgs::default());
         let cfgs = crate::cfg::Cfgs::new(&crate::cfg::CfgSet::parse("unix\n"), &enabled)
-            .feature_uncertainty(&uncertain_packages(&metadata, &selected));
+            .feature_uncertainty(&uncertain_packages(&metadata, &selected, false));
         let beta = cfgs.for_package("beta");
         for expression in [
             "feature = \"extra\"",
@@ -607,6 +617,44 @@ mod tests {
         }
         assert!(!beta.holds_str("all(windows, feature = \"extra\")"));
         assert!(!beta.holds_str("not(any(unix, feature = \"extra\"))"));
+    }
+
+    #[test]
+    fn all_features_filters_native_tls_only_code_in_selected_packages() {
+        let mut metadata = optional_metadata();
+        metadata.packages[0].dependencies[0].target = Some("cfg(unknown_target)".parse().unwrap());
+        metadata.packages[1].features.insert("native-tls".into(), Vec::new());
+        metadata.packages[1].features.insert("rustls".into(), Vec::new());
+        let args = FeatureArgs {
+            all_features: true,
+            ..FeatureArgs::default()
+        };
+        let enabled = enabled(&metadata, &args);
+        let source = crate::parse::SourceFile::parse(
+            "beta.rs",
+            r#"
+                fn build(mut builder: Builder) {
+                    #[cfg(all(feature = "native-tls", not(any(feature = "rustls", test))))]
+                    { builder = builder.defaults_to_native_tls(); }
+                }
+            "#
+            .into(),
+        )
+        .unwrap();
+        let selection = crate::ops::Selection::parse("stmt.delete_assign").unwrap();
+        for select_beta in [false, true] {
+            let mut selected = HashSet::from_iter(["alpha".to_owned()]);
+            if select_beta {
+                selected.insert("beta".to_owned());
+            }
+            let cfgs = crate::cfg::Cfgs::new(&crate::cfg::CfgSet::parse("unix\n"), &enabled).feature_uncertainty(&uncertain_packages(
+                &metadata,
+                &selected,
+                args.all_features,
+            ));
+            let found = crate::ops::collect::collect_in(&source, &selection, cfgs.for_package("beta"));
+            assert_eq!(found.len(), usize::from(!select_beta), "select_beta={select_beta}: {found:?}");
+        }
     }
 
     #[test]
@@ -625,7 +673,7 @@ mod tests {
         metadata.packages.push(duplicate);
 
         let selected = HashSet::from_iter(["alpha".to_owned(), "beta".to_owned()]);
-        assert!(uncertain_packages(&metadata, &selected).is_empty());
+        assert!(uncertain_packages(&metadata, &selected, false).is_empty());
         let expected = HashSet::from_iter(["alpha".to_owned(), "beta".to_owned(), "leaf".to_owned()]);
         for cause in 0..3 {
             let mut metadata = metadata.clone();
@@ -637,7 +685,11 @@ mod tests {
                     selected.remove("alpha");
                 }
             }
-            assert_eq!(uncertain_packages(&metadata, &selected), expected, "uncertainty cause {cause}");
+            assert_eq!(
+                uncertain_packages(&metadata, &selected, false),
+                expected,
+                "uncertainty cause {cause}"
+            );
         }
     }
 

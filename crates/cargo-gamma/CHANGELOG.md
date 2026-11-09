@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-06
+
+- 🐛 Bug Fixes
+
+  - cargo-gamma: replace previous reports when a run selects no mutants ([#345](https://github.com/microsoft/ox-tools/pull/345))
+
 ## [0.5.0] - 2026-11-04
 
 - ✨ Features

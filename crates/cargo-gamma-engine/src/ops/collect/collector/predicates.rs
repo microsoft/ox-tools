@@ -9,7 +9,7 @@ use syn::{
     GenericArgument, Label, Lit, Macro, Pat, Path, PathArguments, ReturnType, Stmt, Type, UnOp,
 };
 
-use super::super::defaults::DefaultPaths;
+use super::super::defaults::{DefaultPaths, item_attrs};
 use super::values::{Kind, resolve_type, strip};
 
 /// Returns whether borrowing an expression relies on it being promoted to static storage.
@@ -765,9 +765,7 @@ pub(super) fn stmt_attrs(statement: &Stmt) -> &[Attribute] {
         Stmt::Macro(mac) => &mac.attrs,
         Stmt::Expr(expression, _semi) => expr_attrs(expression),
 
-        // An item's own visitor asks the question already, and asking it here as well would need
-        // the same match over every item kind to no additional effect.
-        Stmt::Item(_) => &[],
+        Stmt::Item(item) => item_attrs(item),
     }
 }
 

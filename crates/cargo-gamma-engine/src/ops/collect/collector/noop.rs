@@ -98,7 +98,9 @@ pub(super) fn is_standard_default_constructor(expression: &Expr, expected: &Type
     }
     let expected = types.resolve_alias(expected);
     let constructor = Type::Path(constructor_path);
-    if !types.standard_constructor_root(&constructor) || !types.standard_constructor_root(expected) {
+    if
+    // #[gamma::skip(cond.always_false, logical.or_remove_left, logical.or_remove_right, logical.or_to_and, tag = "equivalent", reason = "Every accepting branch below independently requires genuine empty-constructor, primitive, or Option APIs for both types; those checks also reject shadowed roots.")]
+    !types.standard_constructor_root(&constructor) || !types.standard_constructor_root(expected) {
         return
         // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
         false;
