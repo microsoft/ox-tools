@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-name: Validate exhaustive checks after native scope remediation
-run-name: Exhaustive verification ${{ github.sha }}
+name: Validate remaining Linux exhaustive checks
+run-name: Bounded Linux compilation ${{ github.sha }}
 
 on:
   workflow_dispatch:
@@ -107,7 +107,7 @@ jobs:
           done
           echo "::error::Diagnostics did not become ready; refusing an unobserved run."
           exit 1
-      - name: Run unchanged exhaustive group inside external user limits
+      - name: Run remaining feature and benchmark checks inside external user limits
         id: campaign
         shell: bash
         run: |
@@ -121,7 +121,7 @@ jobs:
             XDG_RUNTIME_DIR="/run/user/$DIAGNOSTIC_UID" \
             DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$DIAGNOSTIC_UID/bus" \
             CI=true GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted \
-            ANVIL_IMPACT=off CARGO_INCREMENTAL=0 \
+            ANVIL_IMPACT=off CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 \
             GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
             GAMMA_DIAGNOSTIC_BOUNDARY="$DIAGNOSTIC_BOUNDARY" \
             systemd-run --user --scope --quiet --collect --same-dir \
@@ -205,6 +205,8 @@ jobs:
           retention-days: 30
 
   windows:
+    # The unchanged Windows validation is already running in run 42680114199.
+    if: ${{ false }}
     runs-on: windows-latest
     timeout-minutes: 360
     steps:

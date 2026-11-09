@@ -56,9 +56,13 @@ def run(output):
         raise RuntimeError(f"Refusing a run without the expected external limits: {limits}")
     if limits["memory.events.local"] is None or limits["pids.events"] is None:
         raise RuntimeError(f"Refusing a run without resource-limit counters: {limits}")
-    (output / "verified-limits.json").write_text(json.dumps({"time": now(), "cgroup": str(group), "limits": limits}, indent=2))
+    (output / "verified-limits.json").write_text(json.dumps({
+        "time": now(), "cgroup": str(group), "limits": limits,
+        "cargoBuildJobs": os.environ["CARGO_BUILD_JOBS"],
+    }, indent=2))
     print(f"Verified independent limits: {json.dumps(limits)}", flush=True)
-    os.execvp("just", ["just", "anvil-scheduled-exhaustive"])
+    print(f"Cargo compilation parallelism: {os.environ['CARGO_BUILD_JOBS']}", flush=True)
+    os.execvp("just", ["just", "anvil-cargo-hack", "anvil-bench"])
 
 
 def sample(unit):
@@ -181,7 +185,7 @@ def observe(output, unit):
     inventories = set()
     history = collections.deque(maxlen=12)
     check = api("POST", "check-runs", {
-        "name": "Protected Linux mutation diagnostics",
+        "name": "Protected Linux remaining exhaustive checks",
         "head_sha": os.environ["GITHUB_SHA"], "status": "in_progress",
         "external_id": f"{os.environ['GITHUB_RUN_ID']}/{os.environ['GITHUB_RUN_ATTEMPT']}",
         "details_url": f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
@@ -224,7 +228,7 @@ def observe(output, unit):
                 }
                 payload = {"output": {
                     "title": f"Last protected heartbeat: {state['time']}",
-                    "summary": "\U0001f916 Full exhaustive verification with external 10 GiB memory, zero swap and 1024-task limits. "
+                    "summary": "\U0001f916 Feature-powerset and benchmark-compilation verification with external 10 GiB memory, zero swap and 1024-task limits. "
                                "A limit-triggered stop is not a successful exhaustive check. "
                                "Only GAMMA_ACTIVE is inspected from child environments; saved workspace environments are not published.",
                     "text": "```json\n" + json.dumps(text, indent=2).replace("```", "~~~") + "\n```",
