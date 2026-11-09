@@ -243,8 +243,8 @@ impl Registry {
         while self.handling.load(Ordering::SeqCst) != 0 {
             // #[gamma::skip(stmt.delete_call, reason = "Deleting the scripted progress notification prevents the outstanding sweep from completing; the observed mutant times out.", tag = "timeout")]
             waiting();
-            #[cfg(not(loom))]
             // #[gamma::skip(stmt.delete_call, reason = "Yielding changes scheduling and CPU use, not the quiescence condition or the release-before-reuse contract.", tag = "non-contract")]
+            #[cfg(not(loom))]
             std::thread::yield_now();
             #[cfg(loom)]
             loom::thread::yield_now();
@@ -1150,6 +1150,8 @@ mod tests {
         registry.release_cgroup(1, 23);
         assert_eq!(registry.holding_cgroup(0), Some(17));
         assert_eq!(registry.holding_cgroup(1), None);
+        assert_eq!(registry.claim_cgroup(31, &|_| panic!("no interruption")), Some(1));
+        assert_eq!(registry.holding_cgroup(1), Some(31));
     }
 
     #[test]

@@ -93,7 +93,11 @@ fn scope_command(exe: OsString, args: Vec<OsString>) -> Command {
         .arg("--")
         .arg(exe)
         .args(args)
-        .env(MARKER, "1");
+        .env(
+            MARKER,
+            // #[gamma::skip(literal.str_to_xyzzy, reason = "The recursion guard observes only marker presence; substituting another nonempty opaque value preserves relaunch prevention.", tag = "equivalent")]
+            "1",
+        );
 
     command
 }

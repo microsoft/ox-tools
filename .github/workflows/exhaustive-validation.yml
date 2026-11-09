@@ -1,6 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 name: Validate exhaustive checks after native scope remediation
+run-name: Exhaustive verification ${{ github.sha }}
 
 on:
   workflow_dispatch:
