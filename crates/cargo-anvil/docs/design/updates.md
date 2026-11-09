@@ -82,9 +82,11 @@ Markers must be complete comment lines in the host's syntax: `#`, `//`, or
 XML comments. Changing the syntax of an existing region is refused while old
 markers remain.
 
-XML regions require an existing valid document with a separate root closing
-tag line. New regions are inserted before that line. Missing, self-closing,
-malformed, or compact-root hosts are refused; Anvil does not scaffold XML.
+XML regions require an existing valid document. Introducing a new region also
+requires a separate root closing tag line, before which the region is inserted.
+Existing regions inside the root update in place even when its closing tag
+shares a line with other content. Missing, self-closing, or malformed hosts
+are refused; Anvil does not scaffold XML.
 Marker-looking strings, CDATA, and other non-comment content are not markers.
 XML region IDs cannot contain `--`, line breaks, or invalid XML characters.
 
