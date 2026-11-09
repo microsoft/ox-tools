@@ -55,7 +55,10 @@ fn ci_iterator_enumeration_checks_owner_identity_payload_and_call_shape() {
     with_collector("", |collector| {
         for root in ["std", "core"] {
             let ty: Type = parse_str(&format!("{root}::iter::Enumerate<std::str::Chars<'a>>")).unwrap();
-            assert_eq!(collector.inferred_iterator_item(&ty), Some(parse_quote!((usize, char))));
+            assert_eq!(
+                collector.inferred_iterator_item(&ty),
+                Some(parse_quote!((::core::primitive::usize, ::core::primitive::char)))
+            );
         }
         for ty in [
             "foreign::iter::Enumerate<std::str::Chars<'a>>",
@@ -69,7 +72,7 @@ fn ci_iterator_enumeration_checks_owner_identity_payload_and_call_shape() {
         collector.bind_type("chars".into(), parse_quote!(std::str::Chars<'a>));
         collector.bind_type("unknown".into(), parse_quote!(Unknown));
         for (expression, expected) in [
-            ("chars.enumerate()", Some(parse_quote!(std::iter::Enumerate<std::str::Chars<'a>>))),
+            ("chars.enumerate()", Some(parse_quote!(::std::iter::Enumerate<std::str::Chars<'a>>))),
             ("chars.unrecognized()", None),
             ("chars.enumerate(true)", None),
             ("unknown.enumerate()", None),
@@ -399,7 +402,7 @@ fn ci_mandatory_tail_prefixes_distinguish_literals_from_possible_divergence() {
     ] {
         let expression = parse_str(source).unwrap();
         let mut spans = Vec::new();
-        super::mandatory_tail_statements(&expression, &mut spans);
+        super::mandatory_tail_statements(&CfgSet::unconditional(), &expression, &mut spans);
         assert_eq!(
             spans.iter().map(|range| &source[range.clone()]).collect::<Vec<_>>(),
             expected,
@@ -477,7 +480,7 @@ fn inferred_open_options_and_slice_iterators_follow_reference_chains_and_reject_
             let expression = parse_str(&format!("options.{method}(true)")).unwrap();
             assert_eq!(
                 collector.inferred_expression_type(&expression),
-                Some(parse_quote!(&mut std::fs::OpenOptions))
+                Some(parse_quote!(&mut ::std::fs::OpenOptions))
             );
             for arguments in ["", "true, false"] {
                 let expression = parse_str(&format!("options.{method}({arguments})")).unwrap();
@@ -487,16 +490,19 @@ fn inferred_open_options_and_slice_iterators_follow_reference_chains_and_reject_
         for (expression, expected) in [
             (
                 "options.read(true).append(false).open(\"input\")",
-                Some(parse_quote!(std::result::Result<std::fs::File, std::io::Error>)),
+                Some(parse_quote!(::std::result::Result<::std::fs::File, ::std::io::Error>)),
             ),
             ("options.open()", None),
             ("options.unknown(true)", None),
             ("foreign.read(true)", None),
-            ("vector.iter()", Some(parse_quote!(std::slice::Iter<'_, char>))),
-            ("slice.iter()", Some(parse_quote!(std::slice::Iter<'_, bool>))),
-            ("array.iter()", Some(parse_quote!(std::slice::Iter<'_, u8>))),
+            ("vector.iter()", Some(parse_quote!(::std::slice::Iter<'_, ::core::primitive::char>))),
+            ("slice.iter()", Some(parse_quote!(::std::slice::Iter<'_, ::core::primitive::bool>))),
+            ("array.iter()", Some(parse_quote!(::std::slice::Iter<'_, ::core::primitive::u8>))),
             ("vector.iter(true)", None),
-            ("vector.iter().next()", Some(parse_quote!(std::option::Option<&char>))),
+            (
+                "vector.iter().next()",
+                Some(parse_quote!(::std::option::Option<&::core::primitive::char>)),
+            ),
             ("incomplete.next()", None),
         ] {
             assert_eq!(
@@ -795,9 +801,21 @@ fn followup_call_operator_proofs_distinguish_rhs_arguments_and_unrelated_operati
          impl core::ops::Sub<(u8, bool)> for Left { type Output = u32; }",
         |_, calls, imports| {
             for (rhs, operation, expected) in [
-                (parse_quote!(Wrapper<u8>), "+", parse_quote!(u16)),
-                (parse_quote!(crate::Wrapper<u8>), "+", parse_quote!(u16)),
-                (parse_quote!((u8, bool)), "-", parse_quote!(u32)),
+                (
+                    parse_quote!(Wrapper<::core::primitive::u8>),
+                    "+",
+                    parse_quote!(::core::primitive::u16),
+                ),
+                (
+                    parse_quote!(crate::Wrapper<::core::primitive::u8>),
+                    "+",
+                    parse_quote!(::core::primitive::u16),
+                ),
+                (
+                    parse_quote!((::core::primitive::u8, ::core::primitive::bool)),
+                    "-",
+                    parse_quote!(::core::primitive::u32),
+                ),
             ] {
                 let OperatorResult::Output(actual) = calls.operator_result(&parse_quote!(Left), &rhs, operation, &ROOT, imports) else {
                     panic!("the fixture declares this exact operator signature");
@@ -805,11 +823,23 @@ fn followup_call_operator_proofs_distinguish_rhs_arguments_and_unrelated_operati
                 assert_eq!(actual, &expected, "{rhs:?} {operation}");
             }
             assert!(matches!(
-                calls.operator_result(&parse_quote!(Left), &parse_quote!(Wrapper<bool>), "+", &ROOT, imports),
+                calls.operator_result(
+                    &parse_quote!(Left),
+                    &parse_quote!(Wrapper<::core::primitive::bool>),
+                    "+",
+                    &ROOT,
+                    imports
+                ),
                 OperatorResult::Missing
             ));
             assert!(matches!(
-                calls.operator_result(&parse_quote!(Left), &parse_quote!((bool, u8)), "-", &ROOT, imports),
+                calls.operator_result(
+                    &parse_quote!(Left),
+                    &parse_quote!((::core::primitive::bool, ::core::primitive::u8)),
+                    "-",
+                    &ROOT,
+                    imports
+                ),
                 OperatorResult::Missing
             ));
             assert!(!calls.unit_operator_absent(&parse_quote!(Left), "+", &ROOT, imports));
@@ -1006,7 +1036,7 @@ fn followup_call_scope_annotations_withhold_block_enum_shadows_without_hiding_ex
             assert!(calls.method_signature(&parse_quote!(Item), "read", &scope, block_imports).is_none());
             assert_eq!(
                 calls.field(&parse_quote!(crate::outer::Item), &parse_quote!(value), &scope, block_imports),
-                Some(parse_quote!(u8))
+                Some(parse_quote!(::core::primitive::u8))
             );
             assert_eq!(
                 calls
@@ -1102,7 +1132,7 @@ fn campaign_direct_call_inference_keeps_nominal_constructors_and_rejects_unquali
         |collector| {
             for (call, expected) in [
                 ("Packet(1)", Some(parse_quote!(Packet))),
-                ("payload::Packet(2)", Some(parse_quote!(payload::Packet))),
+                ("payload::Packet(2)", Some(parse_quote!(self::payload::Packet))),
                 ("factory()", None),
                 ("Utc::now()", Some(parse_quote!(chrono::DateTime))),
                 ("Utc::other()", None),
@@ -1546,13 +1576,16 @@ fn operator_output_canonicalization_handles_invisible_groups_and_rejects_oversiz
             output.ty = Type::Tuple(tuple);
             parse_quote!(_)
         } else {
-            let group = Type::Group(TypeGroup {
+            let group = TypeGroup {
                 attrs: Vec::new(),
                 group_token: Group::default(),
                 elem: Box::new(parse_quote!(u8)),
-            });
-            output.ty = group.clone();
-            group
+            };
+            output.ty = Type::Group(group.clone());
+            Type::Group(TypeGroup {
+                elem: Box::new(parse_quote!(::core::primitive::u8)),
+                ..group
+            })
         };
         let cfg = CfgSet::unconditional();
         let indexes = indexes_in(&file, &Selection::everything(), &cfg);
@@ -1629,7 +1662,7 @@ fn operator_literal_and_reference_classification_preserves_unknown_trait_worlds(
         assert!(!collector.unsupported_operator(&parse_quote!(true + false), "-"));
         assert_eq!(
             collector.binary_expression_type(&parse_quote!(number + number)),
-            Some(parse_quote!(&u32))
+            Some(parse_quote!(&::core::primitive::u32))
         );
     });
     with_collector(
@@ -1754,7 +1787,7 @@ fn method_inference_advances_each_reference_before_resolving_the_result() {
     with_collector("struct Owner; impl Owner { fn value(&self) -> Self { Owner } }", |collector| {
         collector.bind_type("owner".into(), parse_quote!(&Owner));
         assert_eq!(
-            collector.inferred_method_type_with(&parse_quote!(owner.value()), || {
+            collector.inferred_method_type_with(&parse_quote!(owner.value()), &collector.scope_path, || {
                 panic!("recorded local signatures already have canonical owner types");
             }),
             Some(parse_quote!(crate::Owner))
@@ -1764,11 +1797,11 @@ fn method_inference_advances_each_reference_before_resolving_the_result() {
         collector.bind_type("options".into(), parse_quote!(&mut &mut std::fs::OpenOptions));
         let mut visits = 0;
         assert_eq!(
-            collector.inferred_method_type_with(&parse_quote!(options.read(true)), || {
+            collector.inferred_method_type_with(&parse_quote!(options.read(true)), &collector.scope_path, || {
                 visits += 1;
                 assert!(visits <= 2, "the receiver has exactly two reference layers");
             }),
-            Some(parse_quote!(&mut std::fs::OpenOptions))
+            Some(parse_quote!(&mut ::std::fs::OpenOptions))
         );
         assert_eq!(visits, 2);
     });
@@ -1866,7 +1899,7 @@ fn iterator_absence_and_mandatory_tail_classification_do_not_confuse_present_val
     ] {
         let expression = parse_str(source).unwrap();
         let mut tails = Vec::new();
-        super::mandatory_tail_statements(&expression, &mut tails);
+        super::mandatory_tail_statements(&CfgSet::unconditional(), &expression, &mut tails);
         if source.contains("return") {
             assert!(!tails.is_empty(), "{source}");
         } else {
@@ -1931,23 +1964,23 @@ fn recorded_local_method_outputs_are_canonical_for_borrowed_receivers() {
 fn constructor_inference_preserves_wrapper_payloads_and_distinguishes_factory_methods() {
     with_collector("", |collector| {
         for (expression, expected) in [
-            ("Box::new(true)", "Box<bool>"),
-            ("Box::new(true, 'q')", "Box<bool>"),
-            ("std::boxed::Box::new('q')", "std::boxed::Box<char>"),
-            ("alloc::boxed::Box::new(true)", "alloc::boxed::Box<bool>"),
-            ("std::rc::Rc::new(true)", "std::rc::Rc<bool>"),
-            ("std::rc::Rc::new(true, 'q')", "std::rc::Rc<bool>"),
-            ("alloc::rc::Rc::new(true)", "alloc::rc::Rc<bool>"),
-            ("std::sync::Arc::new(true)", "std::sync::Arc<bool>"),
-            ("alloc::sync::Arc::new(true)", "alloc::sync::Arc<bool>"),
-            ("std::cell::Cell::new(true)", "std::cell::Cell<bool>"),
-            ("core::cell::RefCell::new(true)", "core::cell::RefCell<bool>"),
-            ("std::sync::Mutex::new(true)", "std::sync::Mutex<bool>"),
-            ("std::sync::RwLock::new(true)", "std::sync::RwLock<bool>"),
+            ("Box::new(true)", "::std::boxed::Box<::core::primitive::bool>"),
+            ("Box::new(true, 'q')", "::std::boxed::Box<::core::primitive::bool>"),
+            ("std::boxed::Box::new('q')", "::std::boxed::Box<::core::primitive::char>"),
+            ("alloc::boxed::Box::new(true)", "::std::boxed::Box<::core::primitive::bool>"),
+            ("std::rc::Rc::new(true)", "std::rc::Rc<::core::primitive::bool>"),
+            ("std::rc::Rc::new(true, 'q')", "std::rc::Rc<::core::primitive::bool>"),
+            ("alloc::rc::Rc::new(true)", "alloc::rc::Rc<::core::primitive::bool>"),
+            ("std::sync::Arc::new(true)", "std::sync::Arc<::core::primitive::bool>"),
+            ("alloc::sync::Arc::new(true)", "alloc::sync::Arc<::core::primitive::bool>"),
+            ("std::cell::Cell::new(true)", "std::cell::Cell<::core::primitive::bool>"),
+            ("core::cell::RefCell::new(true)", "core::cell::RefCell<::core::primitive::bool>"),
+            ("std::sync::Mutex::new(true)", "std::sync::Mutex<::core::primitive::bool>"),
+            ("std::sync::RwLock::new(true)", "std::sync::RwLock<::core::primitive::bool>"),
             ("String::new()", "String"),
             ("String::from(\"text\")", "String"),
-            ("std::string::String::from(\"text\")", "String"),
-            ("alloc::string::String::new()", "String"),
+            ("std::string::String::from(\"text\")", "std::string::String"),
+            ("alloc::string::String::new()", "alloc::string::String"),
             (
                 "std::fs::File::open(\"input\")",
                 "std::result::Result<std::fs::File, std::io::Error>",
@@ -2153,15 +2186,19 @@ fn invisible_expression_groups_preserve_inference_and_tail_analysis() {
         assert!(collector.is_known_float(&grouped(parse_quote!(1.5))));
         assert_eq!(
             collector.inferred_expression_type(&grouped(parse_quote!(true))),
-            Some(parse_quote!(bool))
+            Some(parse_quote!(::core::primitive::bool))
         );
         collector.bind_type("number".into(), parse_quote!(f64));
         let value = grouped(parse_quote!(number));
         assert_eq!(collector.ownership_type(&value), Some(&parse_quote!(f64)));
-        assert_eq!(collector.inferred_expression_type(&value), Some(parse_quote!(f64)));
+        assert_eq!(
+            collector.inferred_expression_type(&value),
+            Some(parse_quote!(::core::primitive::f64))
+        );
         assert!(collector.is_known_float(&value));
         let mut spans = Vec::new();
         super::mandatory_tail_statements(
+            &CfgSet::unconditional(),
             &grouped(parse_quote!({
                 return;
             })),
@@ -2169,7 +2206,7 @@ fn invisible_expression_groups_preserve_inference_and_tail_analysis() {
         );
         assert_eq!(spans.len(), 1);
         let value = grouped(parse_quote!(values.iter().sum()));
-        assert!(super::needs_expected_numeric_type(&value));
+        assert!(super::needs_expected_numeric_type(&CfgSet::unconditional(), &value));
         assert_eq!(
             collector.numeric_confidence(&parse_quote!((unknown))),
             super::Confidence::Optimistic
@@ -2680,15 +2717,15 @@ fn field_lookup_preserves_owner_identity_and_cfg_without_guessing_generic_argume
         ",
         |_, calls, imports| {
             for (ty, member, expected) in [
-                ("First", "value", Some(parse_quote!(u8))),
-                ("&First", "value", Some(parse_quote!(u8))),
-                ("b::Same", "value", Some(parse_quote!(bool))),
-                ("Pair", "0", Some(parse_quote!(u16))),
-                ("Pair", "1", Some(parse_quote!(String))),
+                ("First", "value", Some(parse_quote!(::core::primitive::u8))),
+                ("&First", "value", Some(parse_quote!(::core::primitive::u8))),
+                ("b::Same", "value", Some(parse_quote!(::core::primitive::bool))),
+                ("Pair", "0", Some(parse_quote!(::core::primitive::u16))),
+                ("Pair", "1", Some(parse_quote!(::std::string::String))),
                 ("Pair", "2", None),
                 ("Generic<u8>", "value", Some(parse_quote!(_))),
                 ("Hidden", "value", None),
-                ("Hidden", "kept", Some(parse_quote!(bool))),
+                ("Hidden", "kept", Some(parse_quote!(::core::primitive::bool))),
                 ("Duplicate", "value", None),
                 ("(u8, bool)", "0", None),
             ] {
@@ -3007,13 +3044,13 @@ fn inferred_match_types_require_branch_agreement_except_for_result_shape_evidenc
             collector.bind_type("optional".into(), parse_quote!(Option<u8>));
             collector.bind_type("result".into(), parse_quote!(Result<u16, bool>));
             for (expression, expected) in [
-                ("match value { A => true, B => false }", Some(parse_quote!(bool))),
+                ("match value { A => true, B => false }", Some(parse_quote!(::core::primitive::bool))),
                 ("match value { A => true, B => 'x' }", None),
                 ("match value { A => true, B => unknown }", None),
                 ("match value {}", None),
                 (
                     "match value { A => Ok(true), B => Err(false) }",
-                    Some(parse_quote!(std::result::Result<_, _>)),
+                    Some(parse_quote!(::std::result::Result<_, _>)),
                 ),
                 (
                     "match value { A => Ok(true), B => unknown }",
@@ -3023,18 +3060,18 @@ fn inferred_match_types_require_branch_agreement_except_for_result_shape_evidenc
                     "match value { A => Ok(true), B => false }",
                     Some(parse_quote!(std::result::Result<_, _>)),
                 ),
-                ("{ true }", Some(parse_quote!(bool))),
+                ("{ true }", Some(parse_quote!(::core::primitive::bool))),
                 ("{ true; }", None),
                 ("{ let value = true; }", None),
                 ("{ }", None),
-                ("(true, unknown)", Some(parse_quote!((bool, _,)))),
-                ("optional?", Some(parse_quote!(u8))),
-                ("result?", Some(parse_quote!(u16))),
+                ("(true, unknown)", Some(parse_quote!((::core::primitive::bool, _,)))),
+                ("optional?", Some(parse_quote!(::core::primitive::u8))),
+                ("result?", Some(parse_quote!(::core::primitive::u16))),
                 ("owner?", None),
                 ("owner.owned()", Some(parse_quote!(crate::Owner))),
-                ("owner.borrowed()", Some(parse_quote!(bool))),
+                ("owner.borrowed()", Some(parse_quote!(::core::primitive::bool))),
                 ("owner.deferred()", None),
-                ("sync_value()", Some(parse_quote!(u32))),
+                ("sync_value()", Some(parse_quote!(::core::primitive::u32))),
                 ("async_value()", None),
             ] {
                 assert_eq!(
@@ -3063,37 +3100,40 @@ fn standard_method_inference_requires_receiver_family_and_argument_shape() {
             collector.bind_type(name.into(), ty);
         }
         for (expression, expected) in [
-            ("text.to_owned()", Some(parse_quote!(std::string::String))),
-            ("text.to_string()", Some(parse_quote!(std::string::String))),
-            ("owned.to_owned()", Some(parse_quote!(std::string::String))),
-            ("owned.to_string()", Some(parse_quote!(std::string::String))),
+            ("text.to_owned()", Some(parse_quote!(::std::string::String))),
+            ("text.to_string()", Some(parse_quote!(::std::string::String))),
+            ("owned.to_owned()", Some(parse_quote!(::std::string::String))),
+            ("owned.to_string()", Some(parse_quote!(::std::string::String))),
             ("text.to_owned(1)", None),
             ("owned.to_string(1)", None),
             ("number.to_owned()", None),
             ("text.unknown()", None),
-            ("text.chars()", Some(parse_quote!(std::str::Chars<'_>))),
-            ("owned.chars()", Some(parse_quote!(std::str::Chars<'_>))),
+            ("text.chars()", Some(parse_quote!(::std::str::Chars<'_>))),
+            ("owned.chars()", Some(parse_quote!(::std::str::Chars<'_>))),
             ("text.chars(1)", None),
             ("number.chars()", None),
-            ("chars.next()", Some(parse_quote!(std::option::Option<char>))),
+            ("chars.next()", Some(parse_quote!(::std::option::Option<::core::primitive::char>))),
             ("chars.next(1)", None),
             ("number.next()", None),
-            ("result.map(transform)", Some(parse_quote!(std::result::Result<_, _>))),
-            ("result.map_err(transform)", Some(parse_quote!(std::result::Result<_, _>))),
-            ("result.and_then(transform)", Some(parse_quote!(std::result::Result<_, _>))),
-            ("result.or_else(transform)", Some(parse_quote!(std::result::Result<_, _>))),
+            ("result.map(transform)", Some(parse_quote!(::std::result::Result<_, _>))),
+            ("result.map_err(transform)", Some(parse_quote!(::std::result::Result<_, _>))),
+            ("result.and_then(transform)", Some(parse_quote!(::std::result::Result<_, _>))),
+            ("result.or_else(transform)", Some(parse_quote!(::std::result::Result<_, _>))),
             ("result.map()", None),
             ("result.map(a, b)", None),
             ("foreign.map(transform)", None),
             ("optional.map(transform)", None),
-            ("result.unwrap()", Some(parse_quote!(u8))),
-            ("result.expect(message)", Some(parse_quote!(u8))),
-            ("optional.unwrap_or(1)", Some(parse_quote!(u16))),
-            ("optional.unwrap_or_else(make)", Some(parse_quote!(u16))),
+            ("result.unwrap()", Some(parse_quote!(::core::primitive::u8))),
+            ("result.expect(message)", Some(parse_quote!(::core::primitive::u8))),
+            ("optional.unwrap_or(1)", Some(parse_quote!(::core::primitive::u16))),
+            ("optional.unwrap_or_else(make)", Some(parse_quote!(::core::primitive::u16))),
             ("foreign.unwrap()", None),
-            ("instant.elapsed()", Some(parse_quote!(std::time::Duration))),
-            ("instant.duration_since(other)", Some(parse_quote!(std::time::Duration))),
-            ("instant.saturating_duration_since(other)", Some(parse_quote!(std::time::Duration))),
+            ("instant.elapsed()", Some(parse_quote!(::std::time::Duration))),
+            ("instant.duration_since(other)", Some(parse_quote!(::std::time::Duration))),
+            (
+                "instant.saturating_duration_since(other)",
+                Some(parse_quote!(::std::time::Duration)),
+            ),
             ("instant.unknown()", None),
             ("number.elapsed()", None),
         ] {
@@ -3109,22 +3149,42 @@ fn standard_method_inference_requires_receiver_family_and_argument_shape() {
 #[test]
 fn standard_constructor_inference_does_not_borrow_local_string_identity() {
     for (source, expression, expected) in [
-        ("", "String::new()", Some(parse_quote!(String))),
-        ("", "String::from(value)", Some(parse_quote!(String))),
+        ("", "String::new()", Some(parse_quote!(::std::string::String))),
+        ("", "String::from(value)", Some(parse_quote!(::std::string::String))),
         ("", "String::other()", None),
         ("", "Other::new()", None),
         ("struct String;", "String::new()", None),
         ("use dependency::String;", "String::new()", None),
-        ("use std::string::String;", "String::new()", Some(parse_quote!(String))),
-        ("use std::string::String as Text;", "Text::new()", Some(parse_quote!(String))),
+        (
+            "use std::string::String;",
+            "String::new()",
+            Some(parse_quote!(::std::string::String)),
+        ),
+        (
+            "use std::string::String as Text;",
+            "Text::new()",
+            Some(parse_quote!(::std::string::String)),
+        ),
         ("use dependency::String as Text;", "Text::new()", None),
-        ("", "std::string::String::new()", Some(parse_quote!(String))),
-        ("", "alloc::string::String::from(value)", Some(parse_quote!(String))),
-        ("", "Box::new(true)", Some(parse_quote!(Box<bool>))),
+        ("", "std::string::String::new()", Some(parse_quote!(::std::string::String))),
+        ("", "alloc::string::String::from(value)", Some(parse_quote!(::std::string::String))),
+        ("", "Box::new(true)", Some(parse_quote!(::std::boxed::Box<::core::primitive::bool>))),
         ("", "Box::new()", None),
-        ("", "std::sync::Arc::new('x')", Some(parse_quote!(std::sync::Arc<char>))),
-        ("", "std::cell::RefCell::new(true)", Some(parse_quote!(std::cell::RefCell<bool>))),
-        ("", "std::sync::Mutex::new(true)", Some(parse_quote!(std::sync::Mutex<bool>))),
+        (
+            "",
+            "std::sync::Arc::new('x')",
+            Some(parse_quote!(std::sync::Arc<::core::primitive::char>)),
+        ),
+        (
+            "",
+            "std::cell::RefCell::new(true)",
+            Some(parse_quote!(std::cell::RefCell<::core::primitive::bool>)),
+        ),
+        (
+            "",
+            "std::sync::Mutex::new(true)",
+            Some(parse_quote!(std::sync::Mutex<::core::primitive::bool>)),
+        ),
         ("", "dependency::Box::new(true)", None),
     ] {
         with_collector(source, |collector| {
@@ -3176,8 +3236,8 @@ fn arithmetic_replacement_filter_preserves_the_operator_output_type() {
             ("naive - duration", "+", false, Some(parse_quote!(chrono::NaiveDateTime))),
             ("delta * scalar", "/", false, Some(parse_quote!(chrono::TimeDelta))),
             ("delta + delta", "*", true, Some(parse_quote!(chrono::TimeDelta))),
-            ("text + suffix", "-", true, Some(parse_quote!(String))),
-            ("scalar % scalar", "+", false, Some(parse_quote!(u32))),
+            ("text + suffix", "-", true, Some(parse_quote!(::std::string::String))),
+            ("scalar % scalar", "+", false, Some(parse_quote!(::core::primitive::u32))),
             ("scalar + foreign", "-", false, None),
             ("foreign + scalar", "-", false, None),
             ("unknown + scalar", "-", false, None),
@@ -3720,7 +3780,7 @@ fn unsigned_zero_propagation_requires_the_exact_adapter_name_and_argument_shape(
     ] {
         let expression = parse_str(source).unwrap();
         let mut spans = Vec::new();
-        super::unsigned_zero_spans(&expression, &mut spans);
+        super::unsigned_zero_spans(&CfgSet::unconditional(), &expression, &mut spans);
         assert_eq!(spans.len(), count, "{source}: {spans:?}");
         for range in spans {
             assert_eq!(&source[range], "0", "{source}");
@@ -3741,7 +3801,7 @@ fn expected_numeric_reductions_are_detected_in_each_value_branch_but_not_discard
         ("{ values.sum(); }", false),
     ] {
         assert_eq!(
-            super::needs_expected_numeric_type(&parse_str(source).unwrap()),
+            super::needs_expected_numeric_type(&CfgSet::unconditional(), &parse_str(source).unwrap()),
             expected,
             "{source}"
         );
@@ -3759,7 +3819,7 @@ fn mandatory_tail_statements_keep_complete_semicolon_statements_in_every_branch(
     ] {
         let expression = parse_str(source).unwrap();
         let mut spans = Vec::new();
-        super::mandatory_tail_statements(&expression, &mut spans);
+        super::mandatory_tail_statements(&CfgSet::unconditional(), &expression, &mut spans);
         let actual = spans.iter().map(|range| &source[range.clone()]).collect::<Vec<_>>();
         assert_eq!(actual, expected, "{source}");
     }
@@ -3786,7 +3846,14 @@ fn reusable_payloads_choose_the_first_compatible_name_and_reach_wrapped_value_br
         ] {
             let expression = parse_str(source).unwrap();
             let mut spans = Vec::new();
-            super::reusable_payload_spans(&expression, &expected, &collector.types(), &parameters, &mut spans);
+            super::reusable_payload_spans(
+                &CfgSet::unconditional(),
+                &expression,
+                &expected,
+                &collector.types(),
+                &parameters,
+                &mut spans,
+            );
             assert_eq!(spans.len(), count, "{source}: {spans:?}");
             for (range, name) in spans {
                 assert_eq!(&source[range], "None", "{source}");
@@ -3794,7 +3861,13 @@ fn reusable_payloads_choose_the_first_compatible_name_and_reach_wrapped_value_br
             }
         }
         let mut spans = Vec::new();
-        super::admissible_default_spans(&parse_quote!(None), &parse_quote!(Vec<u8>), &collector.types(), &mut spans);
+        super::admissible_default_spans(
+            &CfgSet::unconditional(),
+            &parse_quote!(None),
+            &parse_quote!(Vec<u8>),
+            &collector.types(),
+            &mut spans,
+        );
         assert_eq!(spans.len(), 0);
     });
 }
@@ -3821,7 +3894,7 @@ fn iterator_item_inference_checks_every_namespace_component_before_extracting_pa
     with_collector("", |collector| {
         assert_eq!(
             collector.inferred_iterator_item(&parse_quote!(core::str::Chars<'a>)),
-            Some(parse_quote!(char))
+            Some(parse_quote!(::core::primitive::char))
         );
         assert_eq!(
             collector.inferred_iterator_item(&parse_quote!(std::slice::Iter<'a, bool>)),
@@ -3850,9 +3923,9 @@ fn inferred_structs_references_and_parentheses_keep_exact_types_and_qualified_se
             ("<Owner as Trait>::Record { value: true }", None),
             ("<Owner>::Record", None),
             ("<Owner as items>::Unit", None),
-            ("(true)", Some(parse_quote!(bool))),
-            ("&true", Some(parse_quote!(&(bool)))),
-            ("&mut true", Some(parse_quote!(&mut (bool)))),
+            ("(true)", Some(parse_quote!(::core::primitive::bool))),
+            ("&true", Some(parse_quote!(&(::core::primitive::bool)))),
+            ("&mut true", Some(parse_quote!(&mut (::core::primitive::bool)))),
         ] {
             assert_eq!(
                 collector.inferred_expression_type(&parse_str(expression).unwrap()),
@@ -3923,6 +3996,32 @@ fn source_call_queries_reject_empty_module_aliases_and_never_unify_distinct_exte
 }
 
 #[test]
+fn incomplete_operator_operands_are_unknown_not_missing_from_a_closed_inventory() {
+    with_calls(
+        "struct Owner; impl ::core::ops::Add<u8> for Owner { type Output = u8; fn add(self, _: u8) -> u8 { 1 } }",
+        |_, calls, imports| {
+            for rhs in [parse_quote!(_), parse_quote!(Option<_>), parse_quote!((u8, _))] {
+                assert!(
+                    matches!(
+                        calls.operator_result(&parse_quote!(Owner), &rhs, "+", &ROOT, imports),
+                        OperatorResult::Unknown
+                    ),
+                    "{rhs:?}"
+                );
+            }
+            assert!(matches!(
+                calls.operator_result(&parse_quote!(Owner), &parse_quote!(u8), "+", &ROOT, imports),
+                OperatorResult::Output(_)
+            ));
+            assert!(matches!(
+                calls.operator_result(&parse_quote!(Owner), &parse_quote!(bool), "+", &ROOT, imports),
+                OperatorResult::Missing
+            ));
+        },
+    );
+}
+
+#[test]
 fn closed_operator_inventory_cannot_prove_absence_for_a_nonpath_owner() {
     with_calls("struct Owner;", |_, calls, imports| {
         assert!(calls.unit_operator_absent(&parse_quote!(Owner), "+", &ROOT, imports));
@@ -3939,7 +4038,7 @@ fn source_fields_canonicalize_imported_primitive_aliases_before_reporting_their_
         |_, calls, imports| {
             assert_eq!(
                 calls.field(&parse_quote!(Record), &parse_quote!(value), &ROOT, imports),
-                Some(parse_quote!(core::primitive::u8))
+                Some(parse_quote!(::core::primitive::u8))
             );
         },
     );
@@ -4155,27 +4254,33 @@ fn character_receiver_resolves_reference_aliases_and_stops_generic_parameter_nam
 }
 
 #[test]
-fn character_literals_do_not_bypass_visible_aliases_of_their_inferred_type_name() {
+fn character_literals_bypass_type_aliases_but_declared_bindings_do_not() {
     with_collector("type char = u8;", |collector| {
         let literal = parse_quote!('x');
         let inferred = collector.inferred_expression_type(&literal).unwrap();
-        assert_eq!(inferred, parse_quote!(char));
-        assert!(collector.types().supports_char_api());
-        assert_eq!(collector.types().primitive_kind(&inferred), super::values::Kind::Unsigned);
-        assert!(!collector.character_receiver(&literal));
+        assert_eq!(inferred, parse_quote!(::core::primitive::char));
+        assert!(collector.character_receiver(&literal));
+        collector.bind_type("declared".into(), parse_quote!(char));
+        assert_eq!(
+            collector.inferred_expression_type(&parse_quote!(declared)),
+            Some(parse_quote!(::core::primitive::u8))
+        );
+        assert!(!collector.character_receiver(&parse_quote!(declared)));
     });
 }
 
 #[test]
-fn character_literal_alias_inference_stops_when_a_generic_parameter_reenters_its_alias_name() {
+fn character_literal_inference_ignores_same_named_generic_aliases() {
     with_collector("type char<char: 'static> = &'static char;", |collector| {
         let mut visits = Vec::new();
-        assert!(!collector.character_receiver_with(&parse_quote!('x'), |ty| {
+        assert!(collector.character_receiver_with(&parse_quote!('x'), |ty| {
             visits.push(ty);
-            assert!(visits.len() <= 2, "the same reference target cannot be followed a third time");
+            assert!(
+                visits.len() <= 1,
+                "intrinsic character evidence must not enter the generic alias target"
+            );
         }));
-        assert_eq!(visits.len(), 2);
-        assert_eq!(visits[0], visits[1], "both lookups must reach the same real published alias target");
+        assert_eq!(visits.len(), 1);
     });
 }
 
@@ -4848,7 +4953,7 @@ fn inferred_binary_results_and_temporal_type_aliases_retain_their_declared_ident
         for (expression, expected) in [
             ("instant + duration", parse_quote!(std::time::Instant)),
             ("instant - instant", parse_quote!(std::time::Duration)),
-            ("text + suffix", parse_quote!(String)),
+            ("text + suffix", parse_quote!(::std::string::String)),
         ] {
             assert_eq!(
                 collector.inferred_expression_type(&parse_str(expression).unwrap()),

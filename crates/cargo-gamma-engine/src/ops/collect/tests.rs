@@ -2241,6 +2241,29 @@ fn arrays_of_promotable_references_have_proven_defaults() {
 }
 
 #[test]
+fn arrays_of_string_references_require_trusted_primitive_identity() {
+    for root in ["core", "std"] {
+        let declaration = format!("mod {root} {{ pub mod primitive {{ pub struct str; }} }}");
+        for (path, trusted) in [
+            (format!("::{root}::primitive::str"), true),
+            (format!("{root}::primitive::str"), false),
+        ] {
+            for length in [0, 1] {
+                let source = format!("{declaration} fn f() -> [&'static {path}; {length}] {{ loop {{}} }}");
+                for selection in ["@default", "fn_value.default"] {
+                    let found = candidates(&source, selection);
+                    assert_eq!(found.len(), usize::from(trusted || length == 0), "{source}: {found:?}");
+                    assert!(
+                        found.iter().all(|candidate| candidate.confidence == Confidence::Proven),
+                        "{source}: {found:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn shadowed_option_replacements_remain_optimistic() {
     let source = "struct Option<T>(T); fn f() -> Option<u8> { Option(1) }";
     let found = candidates(source, "fn_value");
@@ -4052,6 +4075,1138 @@ fn last_to_first_requires_a_receiver_with_a_proven_first_method() {
 }
 
 #[test]
+fn match_sibling_protection_reads_block_local_types() {
+    for (locals, tail, expected) in [
+        ("let x = true;", "x", 0),
+        ("let x: bool = true;", "x", 0),
+        ("let x = true; let y = x;", "y", 0),
+        ("let (x, _) = (true, ());", "x", 0),
+        ("let x = \"text\";", "x", 0),
+        ("let x = ();", "x", 1),
+        ("#[cfg(any())] let x = true; let x = ();", "x", 1),
+    ] {
+        let source = format!(
+            "fn f(x: u8, flag: bool) {{ loop {{ let _ = match flag {{ true => {{ {locals} {tail} }}, false => {{ continue; }} }}; }} }}"
+        );
+        let found = candidates(&source, "loop.delete_continue");
+        assert_eq!(found.len(), expected, "{source}: {found:?}");
+    }
+}
+
+#[test]
+fn match_sibling_protection_reads_successful_let_else_bindings() {
+    for (ty, pattern, expected) in [("bool", "Some(x)", 0), ("()", "Some(x)", 1), ("(bool, ())", "Some((x, _))", 0)] {
+        let source = format!(
+            "fn f(value: Option<{ty}>, flag: bool) {{ loop {{ let _ = match flag {{ true => {{ let {pattern} = value else {{ continue; }}; x }}, false => {{ continue; }} }}; }} }}"
+        );
+        let found = candidates(&source, "loop.delete_continue");
+        assert_eq!(found.len(), expected, "{source}: {found:?}");
+    }
+}
+
+#[test]
+fn match_sibling_protection_preserves_inherited_source_imports() {
+    for (root, opening, closing) in [("crate", "", ""), ("self", "", ""), ("super", "mod nested {", "}")] {
+        for import in ["use v::VALUE;", "use v as w; use w::VALUE;"] {
+            let source = format!(
+                "mod values {{ pub const VALUE: bool = true; }} {opening} use {root}::values as v; fn f(flag: bool) {{ loop {{ let _ = match flag {{ true => {{ {import} VALUE }}, false => {{ continue; }} }}; }} }} {closing}"
+            );
+            let found = candidates(&source, "loop.delete_continue");
+            assert!(found.is_empty(), "{source}: {found:?}");
+        }
+    }
+}
+
+#[test]
+fn match_sibling_protection_resolves_extern_self_aliases_from_the_crate_root() {
+    for (root, inner, expected) in [("()", "bool", 1), ("bool", "()", 0)] {
+        let value = |ty| if ty == "bool" { "true" } else { "()" };
+        let source = format!(
+            "const VALUE: {root} = {}; mod inner {{ extern crate self as this; const VALUE: {inner} = {}; fn f(flag: bool) {{ loop {{ let _ = match flag {{ true => {{ use this::VALUE; VALUE }}, false => {{ continue; }} }}; }} }} }}",
+            value(root),
+            value(inner)
+        );
+        let found = candidates(&source, "loop.delete_continue");
+        assert_eq!(found.len(), expected, "{source}: {found:?}");
+    }
+}
+
+#[test]
+fn absolute_self_alias_value_imports_preserve_declaration_evidence() {
+    for (import, value) in [("use ::this::VALUE;", "VALUE"), ("use ::this::VALUE as IMPORTED;", "IMPORTED")] {
+        let source =
+            format!("extern crate self as this; const VALUE: &bool = &true; mod caller {{ fn f() -> bool {{ {import} !{value} }} }}");
+        let found = candidates(&source, "unary.remove_not");
+        assert_eq!(found.len(), 1, "{source}: {found:?}");
+        assert_eq!(found[0].replacement, format!("*({value})"), "{source}");
+        assert_eq!(found[0].confidence, Confidence::Proven, "{source}");
+        for (ty, initializer, expected) in [("bool", "true", 0), ("()", "()", 1)] {
+            let source = format!(
+                "extern crate self as this; const VALUE: {ty} = {initializer}; mod caller {{ fn f(flag: bool) {{ loop {{ let _ = match flag {{ true => {{ {import} {value} }}, false => {{ continue; }} }}; }} }} }}"
+            );
+            let found = candidates(&source, "loop.delete_continue");
+            assert_eq!(found.len(), expected, "{source}: {found:?}");
+        }
+    }
+    let source = "const VALUE: &bool = &true; mod std { pub mod u8 { pub const MAX: &bool = &true; } } fn f() -> u8 { use ::std::u8::MAX as VALUE; !VALUE }";
+    let found = candidates(source, "unary.remove_not");
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].replacement, "VALUE");
+    assert_eq!(found[0].confidence, Confidence::Optimistic);
+}
+
+#[test]
+fn mixed_primitive_roots_preserve_match_branch_agreement() {
+    for (ty, value) in [("bool", "true"), ("char", "'x'"), ("&'static str", "\"text\"")] {
+        for (binding, literal) in [
+            ("x", "{ extern crate std as core; VALUE }"),
+            ("{ extern crate std as core; x }", "VALUE"),
+        ] {
+            let literal = literal.replace("VALUE", value);
+            let source = format!(
+                "fn f(x: {ty}, a: bool, b: bool) {{ loop {{ let _ = match a {{ true => match b {{ true => {binding}, false => {literal} }}, false => {{ continue; }} }}; }} }}"
+            );
+            let found = candidates(&source, "loop.delete_continue");
+            assert!(found.is_empty(), "{source}: {found:?}");
+        }
+    }
+}
+
+#[test]
+fn composite_match_branches_preserve_frozen_element_evidence() {
+    for root in ["core", "std"] {
+        for (binding, literal) in [("(x,)", "(false,)"), ("(&x,)", "(&false,)")] {
+            let source = format!(
+                "fn f(x: bool, a: bool, b: bool) {{ extern crate self as {root}; loop {{ let _ = match a {{ true => match b {{ true => {binding}, false => {literal} }}, false => {{ continue; }} }}; }} }}"
+            );
+            let found = candidates(&source, "loop.delete_continue");
+            assert!(found.is_empty(), "{source}: {found:?}");
+        }
+    }
+}
+
+#[test]
+fn source_constructor_paths_freeze_before_composite_inference() {
+    for (declaration, suffix) in [
+        ("pub struct Value;", ""),
+        ("pub struct Value();", "()"),
+        ("pub struct Value {}", " {}"),
+    ] {
+        let source = format!(
+            "mod values {{ {declaration} }} fn f(a: bool, b: bool) {{ loop {{ let _ = match a {{ true => match b {{ true => (crate::values::Value{suffix},), false => {{ use crate::values as local; (local::Value{suffix},) }} }}, false => {{ continue; }} }}; }} }}"
+        );
+        let found = candidates(&source, "loop.delete_continue");
+        assert!(found.is_empty(), "{source}: {found:?}");
+    }
+}
+
+#[test]
+fn character_literals_ignore_aliases_in_match_branch_scopes() {
+    for alias in ["()", "u8"] {
+        let source = format!(
+            "fn f(a: bool, b: bool) {{ loop {{ let _ = match a {{ true => match b {{ true => {{ type char = {alias}; 'x' }}, false => 'y' }}, false => {{ continue; }} }}; }} }}"
+        );
+        let found = candidates(&source, "loop.delete_continue");
+        assert!(found.is_empty(), "{source}: {found:?}");
+    }
+}
+
+#[test]
+fn absolute_string_result_evidence_ignores_local_type_root_shadows() {
+    for (declaration, generics) in [("struct std;", ""), ("type std = ();", ""), ("", "<std>"), ("", "<std: Default>")] {
+        let source = format!(
+            "fn f{generics}(flag: bool) {{ loop {{ let _ = match flag {{ true => {{ {declaration} \"text\".to_owned() }}, false => {{ continue; }} }}; }} }}"
+        );
+        let found = candidates(&source, "loop.delete_continue");
+        assert!(found.is_empty(), "{source}: {found:?}");
+    }
+}
+
+#[test]
+fn absolute_value_imports_do_not_resolve_against_source_modules() {
+    let declarations = "const io: () = (); mod std { pub const io: bool = true; }";
+    let source = format!(
+        "{declarations} fn work() {{}} fn f(flag: bool) {{ match flag {{ true => {{ use ::std::io; io }}, false => {{ work(); }} }} }}"
+    );
+    let found = candidates(&source, "stmt.delete_call");
+    assert_eq!(found.len(), 1, "{source}: {found:?}");
+
+    for (import, expected) in [("::std::io", 1), ("crate::std::io", 0)] {
+        let source = format!(
+            "{declarations} fn f(flag: bool) {{ loop {{ let _ = match flag {{ true => {{ use {import}; io }}, false => {{ continue; }} }}; }} }}"
+        );
+        let found = candidates(&source, "loop.delete_continue");
+        assert_eq!(found.len(), expected, "{source}: {found:?}");
+    }
+}
+
+#[test]
+fn bare_primitive_evidence_ignores_out_of_scope_external_alias_names() {
+    let source = "fn outer() { extern crate self as bool; mod nested { pub fn f(x: &bool) -> bool { !x } } }";
+    let found = candidates(source, "unary.remove_not");
+    assert_eq!(found.len(), 1, "{source}: {found:?}");
+    assert_eq!(found[0].replacement, "*(x)");
+}
+
+#[test]
+fn operator_rhs_matching_compares_mixed_root_primitive_identities() {
+    for (rhs, expression) in [("u8", "b as u8"), ("(u8,)", "(b as u8,)"), ("Box<u8>", "Box::new(b as u8)")] {
+        for (output, expected) in [("A", 1), ("B", 0)] {
+            let source = format!(
+                "struct A; struct B; impl ::core::ops::Add<{rhs}> for A {{ type Output = A; fn add(self, _: {rhs}) -> A {{ unreachable!() }} }} impl ::core::ops::Sub<{rhs}> for A {{ type Output = {output}; fn sub(self, _: {rhs}) -> {output} {{ unreachable!() }} }} fn f(a: A, b: u8) -> A {{ extern crate std as core; a + ({expression}) }}"
+            );
+            let found = candidates(&source, "arith.add_to_sub");
+            assert_eq!(found.len(), expected, "{source}: {found:?}");
+        }
+    }
+}
+
+#[test]
+fn constructor_payloads_preserve_frozen_operands_across_caller_rebinding() {
+    for (rhs, expression) in [
+        ("Box<u8>", "Box::new(b)"),
+        ("Box<Box<u8>>", "Box::new(Box::new(b))"),
+        ("::std::rc::Rc<u8>", "::std::rc::Rc::new(b)"),
+    ] {
+        for (output, expected) in [("A", 1), ("B", 0)] {
+            let source = format!(
+                "struct A; struct B; impl ::core::ops::Add<{rhs}> for A {{ type Output = A; fn add(self, _: {rhs}) -> A {{ self }} }} impl ::core::ops::Sub<{rhs}> for A {{ type Output = {output}; fn sub(self, _: {rhs}) -> {output} {{ {output} }} }} fn f(a: A, b: u8) -> A {{ extern crate self as core; a + {expression} }}"
+            );
+            let found = candidates(&source, "arith.add_to_sub");
+            assert_eq!(found.len(), expected, "{source}: {found:?}");
+        }
+    }
+}
+
+#[test]
+fn operator_outputs_distinguish_source_local_extern_roots() {
+    for root in ["core", "this"] {
+        let standard = "std";
+        for (output, expected) in [
+            (format!("::{standard}::option::Option<u8>"), 0),
+            (format!("::{root}::option::Option<u8>"), 1),
+            (format!("{root}::option::Option<u8>"), 1),
+            ("crate::option::Option<u8>".to_owned(), 1),
+        ] {
+            let source = format!(
+                "extern crate self as {root}; mod option {{ pub struct Option<T>(pub ::{standard}::marker::PhantomData<T>); }} struct A; impl ::{standard}::ops::Add<u8> for A {{ type Output = ::{root}::option::Option<u8>; fn add(self, _: u8) -> Self::Output {{ unreachable!() }} }} impl ::{standard}::ops::Sub<u8> for A {{ type Output = {output}; fn sub(self, _: u8) -> Self::Output {{ unreachable!() }} }} fn f(a: A, b: u8) -> ::{root}::option::Option<u8> {{ a + b }}"
+            );
+            let found = candidates(&source, "arith.add_to_sub");
+            assert_eq!(found.len(), expected, "{source}: {found:?}");
+        }
+    }
+}
+
+#[test]
+fn indexed_absolute_local_aliases_ignore_lexical_alias_rebinding() {
+    for root in ["core", "this"] {
+        let source = format!(
+            "extern crate self as {root}; struct Owner; impl Owner {{ fn unwrap(self) -> &'static bool {{ &true }} }} mod fake {{ pub struct Owner; impl Owner {{ pub fn unwrap(self) -> u8 {{ 1 }} }} }} mod caller {{ use crate::fake as {root}; fn value() -> ::{root}::Owner {{ crate::Owner }} fn f() -> bool {{ !value().unwrap() }} }}"
+        );
+        let found = candidates(&source, "unary.remove_not");
+        assert_eq!(found.len(), 1, "{source}: {found:?}");
+        assert_eq!(found[0].replacement, "*(value().unwrap())", "{source}");
+    }
+}
+
+#[test]
+fn imported_constants_override_hidden_binding_import_context() {
+    for (name, import) in [
+        ("VALUE", "use crate::values::VALUE;"),
+        ("RENAMED", "use crate::values::VALUE as RENAMED;"),
+    ] {
+        for expression in [name.to_owned(), format!("({name})")] {
+            let source = format!(
+                "mod values {{ pub const VALUE: Option<&'static bool> = Some(&true); }} fn f() -> bool {{ extern crate self as std; let {name} = (); {{ {import} !{expression}.unwrap() }} }}"
+            );
+            let found = candidates(&source, "unary.remove_not");
+            assert_eq!(found.len(), 1, "{source}: {found:?}");
+            assert_eq!(found[0].replacement, format!("*({expression}.unwrap())"));
+        }
+    }
+}
+
+#[test]
+fn concrete_wrapper_alias_constructors_preserve_owner_arguments() {
+    for (aliases, rhs, expression) in [
+        ("type Flags = Box<bool>;", "Box<bool>", "Flags::new(true)"),
+        ("type Flags = Box<u16>;", "Box<u16>", "Flags::new(1)"),
+        (
+            "type Inner = Box<bool>; type Flags = Box<Inner>;",
+            "Box<Box<bool>>",
+            "Flags::new(Inner::new(true))",
+        ),
+        ("type Flags = ::std::rc::Rc<bool>;", "::std::rc::Rc<bool>", "Flags::new(true)"),
+        ("type Flags<T> = Box<T>;", "Box<bool>", "Flags::<bool>::new(true)"),
+        ("", "Box<bool>", "Box::<bool>::new(true)"),
+        ("", "Box<Box<bool>>", "Box::<Box::<bool>>::new(Box::<bool>::new(true))"),
+    ] {
+        for (output, expected) in [("A", 1), ("B", 0)] {
+            let source = format!(
+                "{aliases} struct A; struct B; impl ::core::ops::Add<{rhs}> for A {{ type Output = A; fn add(self, _: {rhs}) -> A {{ self }} }} impl ::core::ops::Sub<{rhs}> for A {{ type Output = {output}; fn sub(self, _: {rhs}) -> {output} {{ {output} }} }} fn f(a: A) -> A {{ a + {expression} }}"
+            );
+            let found = candidates(&source, "arith.add_to_sub");
+            assert_eq!(found.len(), expected, "{source}: {found:?}");
+        }
+    }
+}
+
+#[test]
+fn extern_self_field_types_retain_borrowed_method_outputs() {
+    for owner in ["this::Owner", "::this::Owner"] {
+        let source = format!(
+            "extern crate self as this; struct Owner; impl Owner {{ fn unwrap(self) -> &'static bool {{ &true }} }} struct Holder {{ owner: {owner} }} fn f(holder: Holder) -> bool {{ !holder.owner.unwrap() }}"
+        );
+        let found = candidates(&source, "unary.remove_not");
+        assert_eq!(found.len(), 1, "{source}: {found:?}");
+        assert_eq!(found[0].replacement, "*(holder.owner.unwrap())");
+    }
+}
+
+#[test]
+fn field_backed_method_chains_use_output_declaration_context() {
+    for method in ["unwrap", "build"] {
+        for receiver in ["h.maker", "(h.maker)"] {
+            let source = format!(
+                "struct Maker; impl Maker {{ fn {method}(self) -> Option<&'static bool> {{ Some(&true) }} }} mod caller {{ extern crate self as std; struct Holder {{ maker: crate::Maker }} fn f(h: Holder) -> bool {{ !{receiver}.{method}().unwrap() }} }}"
+            );
+            let found = candidates(&source, "unary.remove_not");
+            assert_eq!(found.len(), 1, "{source}: {found:?}");
+            assert_eq!(found[0].replacement, format!("*({receiver}.{method}().unwrap())"));
+        }
+    }
+}
+
+#[test]
+fn absolute_option_fields_do_not_borrow_lexical_lookalike_methods() {
+    let source = "struct Holder { value: Option<&'static bool> } mod fake { pub mod option { pub struct Option; impl Option { pub fn unwrap(self) -> u8 { 1 } } } } fn f(holder: Holder) -> bool { use crate::fake as std; !holder.value.unwrap() }";
+    let found = candidates(source, "unary.remove_not");
+    assert_eq!(found.len(), 1, "{source}: {found:?}");
+    assert_eq!(found[0].replacement, "*(holder.value.unwrap())");
+}
+
+#[test]
+fn genuine_extern_roots_cannot_supply_source_local_option_methods() {
+    let source = "extern crate std; struct Holder { value: Option<&'static bool> } mod option { pub struct Option; impl Option { pub fn unwrap(self) -> u8 { 1 } } } fn f(holder: Holder) -> bool { !holder.value.unwrap() }";
+    let found = candidates(source, "unary.remove_not");
+    assert_eq!(found.len(), 1, "{source}: {found:?}");
+    assert_eq!(found[0].replacement, "*(holder.value.unwrap())");
+}
+
+#[test]
+fn frozen_io_result_fields_do_not_borrow_lexical_lookalike_methods() {
+    let source = "struct Holder { value: ::std::io::Result<&'static bool> } mod fake { pub mod result { pub struct Result; impl Result { pub fn unwrap(self) -> u8 { 1 } } } } fn f(holder: Holder) -> bool { use crate::fake as std; !holder.value.unwrap() }";
+    let found = candidates(source, "unary.remove_not");
+    assert_eq!(found.len(), 1, "{source}: {found:?}");
+    assert_eq!(found[0].replacement, "*(holder.value.unwrap())");
+}
+
+#[test]
+fn frozen_fields_preserve_declaration_roots_under_block_local_extern_self_aliases() {
+    for (definition, field) in [
+        ("struct Holder { value: Option<&'static bool> }", "holder.value"),
+        ("struct Holder(Option<&'static bool>);", "holder.0"),
+        ("struct Holder { value: ::std::io::Result<&'static bool> }", "holder.value"),
+    ] {
+        let source = format!(
+            "{definition} mod option {{ pub struct Option; impl Option {{ pub fn unwrap(self) -> u8 {{ 1 }} }} }} fn f(holder: Holder) -> bool {{ extern crate self as std; !{field}.unwrap() }}"
+        );
+        let found = candidates(&source, "unary.remove_not");
+        assert_eq!(found.len(), 1, "{source}: {found:?}");
+        assert_eq!(found[0].replacement, format!("*({field}.unwrap())"));
+    }
+}
+
+#[test]
+fn absolute_crate_root_extern_self_aliases_retain_nominal_methods() {
+    for root in ["this", "std"] {
+        let source = format!(
+            "#![no_std] extern crate self as {root}; struct Owner; impl Owner {{ fn unwrap(self) -> &'static bool {{ &true }} }} mod nested {{ fn f(owner: ::{root}::Owner) -> bool {{ !owner.unwrap() }} }}"
+        );
+        let found = candidates(&source, "unary.remove_not");
+        assert_eq!(found.len(), 1, "{source}: {found:?}");
+        assert_eq!(found[0].replacement, "*(owner.unwrap())");
+    }
+}
+
+#[test]
+fn genuine_external_operator_outputs_do_not_become_local_crate_aliases() {
+    for (root, traits) in [("core", "std"), ("std", "core")] {
+        for output in ["real::time::Duration", "Imported", "Alias"] {
+            let source = format!(
+                "extern crate self as {root}; mod time {{ pub struct Duration; }} struct A; mod implementation {{ extern crate {root} as real; use real::time::Duration as Imported; type Alias = real::time::Duration; impl ::{traits}::ops::Add<u8> for crate::A {{ type Output = {output}; fn add(self, _: u8) -> Self::Output {{ unreachable!() }} }} impl ::{traits}::ops::Sub<u8> for crate::A {{ type Output = crate::time::Duration; fn sub(self, _: u8) -> Self::Output {{ unreachable!() }} }} }} fn f(a: A, b: u8) -> ::{traits}::time::Duration {{ a + b }}"
+            );
+            let found = candidates(&source, "arith.add_to_sub");
+            assert!(found.is_empty(), "{source}: {found:?}");
+        }
+    }
+}
+
+#[test]
+fn genuine_external_constant_imports_do_not_borrow_local_alias_types() {
+    for (root, primitives) in [("core", "std"), ("std", "core")] {
+        let source = format!(
+            "extern crate self as {root}; mod u32 {{ pub const MAX: &bool = &true; }} fn f() -> ::{primitives}::primitive::u32 {{ extern crate {root} as real; use real::u32::MAX as VALUE; !VALUE }}"
+        );
+        let found = candidates(&source, "unary.remove_not");
+        assert_eq!(found.len(), 1, "{source}: {found:?}");
+        assert_eq!(found[0].replacement, "VALUE", "{source}");
+        assert_eq!(found[0].confidence, Confidence::Optimistic, "{source}");
+    }
+}
+
+#[test]
+fn genuine_external_method_payloads_do_not_use_local_alias_methods() {
+    for root in ["core", "std"] {
+        for output in ["real::option::Option<&'static bool>", "Imported<&'static bool>", "Alias"] {
+            let source = format!(
+                "extern crate self as {root}; mod option {{ pub struct Option<T>(T); impl<T> Option<T> {{ pub fn unwrap(self) -> u8 {{ 1 }} }} }} mod maker {{ extern crate {root} as real; use real::option::Option as Imported; type Alias = real::option::Option<&'static bool>; pub struct Maker; impl Maker {{ pub fn value(&self) -> {output} {{ Some(&true) }} }} }} fn f(m: &maker::Maker) -> bool {{ !m.value().unwrap() }}"
+            );
+            let found = candidates(&source, "unary.remove_not");
+            assert_eq!(found.len(), 1, "{source}: {found:?}");
+            assert_eq!(found[0].replacement, "*(m.value().unwrap())", "{source}");
+        }
+    }
+}
+
+#[test]
+fn genuine_external_fields_do_not_use_local_alias_layouts() {
+    for root in ["core", "std"] {
+        let source = format!(
+            "extern crate self as {root}; mod ops {{ pub struct Range {{ pub start: &'static bool }} }} mod consumer {{ extern crate {root} as real; fn f(r: real::ops::Range<u32>) -> u32 {{ !r.start }} }}"
+        );
+        let found = candidates(&source, "unary.remove_not");
+        assert_eq!(found.len(), 1, "{source}: {found:?}");
+        assert_eq!(found[0].replacement, "r.start", "{source}");
+        assert_eq!(found[0].confidence, Confidence::Optimistic, "{source}");
+    }
+}
+
+#[test]
+fn frozen_external_operator_rhs_do_not_match_local_lookalikes() {
+    for (root, traits) in [("core", "std"), ("std", "core")] {
+        for (original, replacement) in [("real", "crate"), ("crate", "real")] {
+            let source = format!(
+                "extern crate self as {root}; mod time {{ pub struct Duration; }} struct A; mod implementation {{ extern crate {root} as real; impl ::{traits}::ops::Add<{original}::time::Duration> for crate::A {{ type Output = crate::A; fn add(self, _: {original}::time::Duration) -> Self::Output {{ self }} }} impl ::{traits}::ops::Sub<{replacement}::time::Duration> for crate::A {{ type Output = crate::A; fn sub(self, _: {replacement}::time::Duration) -> Self::Output {{ self }} }} fn f(a: crate::A, b: {original}::time::Duration) -> crate::A {{ a + b }} }}"
+            );
+            let found = candidates(&source, "arith.add_to_sub");
+            assert!(found.is_empty(), "{source}: {found:?}");
+        }
+    }
+}
+
+#[test]
+fn frozen_external_operator_owners_do_not_consult_local_implementations() {
+    for (root, traits) in [("core", "std"), ("std", "core")] {
+        let source = format!(
+            "extern crate self as {root}; mod time {{ pub struct Duration; }} mod implementation {{ extern crate {root} as real; impl ::{traits}::ops::Add<real::time::Duration> for crate::time::Duration {{ type Output = crate::time::Duration; fn add(self, _: real::time::Duration) -> Self::Output {{ self }} }} fn f(a: real::time::Duration, b: real::time::Duration) -> real::time::Duration {{ a + b }} }}"
+        );
+        let found = candidates(&source, "arith.add_to_sub");
+        assert_eq!(found.len(), 1, "{source}: {found:?}");
+        assert_eq!(found[0].replacement, "(a) - (b)");
+    }
+}
+
+#[test]
+fn indexed_frozen_external_constants_and_statics_keep_their_payload_identity() {
+    for root in ["core", "std"] {
+        for storage in ["const", "static"] {
+            for (reference, initializer, expression) in [("", "Some(&true)", "VALUE.unwrap()"), ("&", "&Some(&true)", "(*VALUE).unwrap()")]
+            {
+                for imported in [false, true] {
+                    let function = format!("fn f() -> bool {{ !{expression} }}");
+                    let local = if imported { "" } else { &function };
+                    let consumer = if imported {
+                        format!("mod consumer {{ use crate::values::VALUE; {function} }}")
+                    } else {
+                        String::new()
+                    };
+                    let source = format!(
+                        "extern crate self as {root}; mod option {{ pub struct Option<T>(T); impl<T> Option<T> {{ pub fn unwrap(self) -> u8 {{ 1 }} }} }} mod values {{ extern crate {root} as real; pub {storage} VALUE: {reference}real::option::Option<&'static bool> = {initializer}; {local} }} {consumer}"
+                    );
+                    let found = candidates(&source, "unary.remove_not");
+                    assert_eq!(found.len(), 1, "{source}: {found:?}");
+                    assert_eq!(found[0].replacement, format!("*({expression})"), "{source}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn inferred_literal_primitives_do_not_select_absolute_self_alias_roots() {
+    let source = "extern crate self as core; mod nested { extern crate core; fn f() -> bool { !&true } }";
+    let found = candidates(source, "unary.remove_not");
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].replacement, "*(&true)");
+}
+
+#[test]
+fn child_operator_outputs_resolve_relative_self_aliases_before_freezing() {
+    for (root, traits) in [("core", "std"), ("std", "core")] {
+        for declaration in [String::new(), format!("extern crate {root};"), format!("use ::{traits} as {root};")] {
+            let genuine = !declaration.is_empty();
+            let value = if genuine { "0" } else { "crate::primitive::u8" };
+            let source = format!(
+                "extern crate self as {root}; mod primitive {{ pub struct u8; }} struct A; mod child {{ {declaration} impl ::{traits}::ops::Add<::{traits}::primitive::u8> for crate::A {{ type Output = {root}::primitive::u8; fn add(self, _: ::{traits}::primitive::u8) -> Self::Output {{ {value} }} }} impl ::{traits}::ops::Sub<::{traits}::primitive::u8> for crate::A {{ type Output = ::{traits}::primitive::u8; fn sub(self, _: ::{traits}::primitive::u8) -> Self::Output {{ 0 }} }} fn f(a: crate::A, b: ::{traits}::primitive::u8) -> {root}::primitive::u8 {{ a + b }} }}"
+            );
+            let found = candidates(&source, "arith.add_to_sub");
+            assert_eq!(found.len(), usize::from(genuine), "{source}: {found:?}");
+        }
+    }
+}
+
+#[test]
+fn source_absolute_string_payloads_use_crate_root_not_lexical_extern_provenance() {
+    for root in ["core", "std"] {
+        for (path, expected) in [(format!("::{root}::primitive::str"), 0), (format!("{root}::primitive::str"), 2)] {
+            let source = format!(
+                "extern crate self as {root}; mod primitive {{ pub struct str; }} mod child {{ extern crate {root}; fn f() -> &'static {path} {{ unreachable!() }} }}"
+            );
+            let found = candidates(&source, "fn_value.empty_string,fn_value.xyzzy_string");
+            assert_eq!(found.len(), expected, "{source}: {found:?}");
+        }
+    }
+}
+
+#[test]
+fn source_absolute_prelude_types_do_not_use_nested_genuine_extern_bindings() {
+    for root in ["core", "std"] {
+        for (import, path, borrowed) in [
+            (String::new(), format!("::{root}::option::Option<bool>"), true),
+            (String::new(), format!("{root}::option::Option<bool>"), false),
+            (format!("use {root}::option::Option as Imported;"), "Imported<bool>".into(), false),
+        ] {
+            let source = format!(
+                "extern crate self as {root}; mod option {{ pub struct Option<T>(T); impl<T> Option<T> {{ pub fn unwrap(self) -> &'static bool {{ &true }} }} }} mod child {{ extern crate {root}; {import} fn f(o: {path}) -> bool {{ !o.unwrap() }} }}"
+            );
+            let found = candidates(&source, "unary.remove_not");
+            assert_eq!(found.len(), 1, "{source}: {found:?}");
+            let expected = if borrowed { "*(o.unwrap())" } else { "o.unwrap()" };
+            assert_eq!(found[0].replacement, expected, "{source}");
+        }
+    }
+}
+
+#[test]
+fn payload_constructors_do_not_rebind_frozen_external_roots() {
+    let source = "extern crate self as core;
+        mod option { pub struct Option<T>(T); }
+        struct A; struct B;
+        mod implementation {
+            extern crate core as real;
+            impl ::std::ops::Add<Box<real::option::Option<&'static bool>>> for crate::A {
+                type Output = crate::A;
+                fn add(self, _: Box<real::option::Option<&'static bool>>) -> Self::Output { self }
+            }
+            impl ::std::ops::Sub<Box<real::option::Option<&'static bool>>> for crate::A {
+                type Output = crate::B;
+                fn sub(self, _: Box<real::option::Option<&'static bool>>) -> Self::Output { crate::B }
+            }
+            pub fn value() -> real::option::Option<&'static bool> { Some(&true) }
+        }
+        fn f(a: A) -> A { a + Box::new(implementation::value()) }";
+    let found = candidates(source, "arith.add_to_sub");
+    assert!(found.is_empty(), "{found:?}");
+}
+
+#[test]
+fn generic_alias_arguments_resolve_source_roots_before_entering_frozen_targets() {
+    for (root, traits) in [("core", "std"), ("std", "core")] {
+        for parentheses in ["", "(", "(("] {
+            let closing = ")".repeat(parentheses.len());
+            let source = format!(
+                "extern crate self as {root};
+                mod option {{ pub struct Option; }}
+                type Alias<T> = (T,);
+                struct A; struct B;
+                impl ::{traits}::ops::Add<(crate::option::Option,)> for A {{
+                    type Output = A;
+                    fn add(self, _: (crate::option::Option,)) -> A {{ self }}
+                }}
+                impl ::{traits}::ops::Sub<(crate::option::Option,)> for A {{
+                    type Output = B;
+                    fn sub(self, _: (crate::option::Option,)) -> B {{ B }}
+                }}
+                fn f(a: A, b: {parentheses}Alias<::{root}::option::Option>{closing}) -> A {{ a + b }}"
+            );
+            let found = candidates(&source, "arith.add_to_sub");
+            assert!(found.is_empty(), "{source}: {found:?}");
+        }
+    }
+}
+
+#[test]
+fn payload_constructor_aliases_infer_omitted_but_preserve_declared_arguments() {
+    for (declaration, expression, rhs) in [
+        ("type Handle<T> = Box<T>;", "Handle::new(true)", "Box<bool>"),
+        ("type Handle<T> = Box<(T,)>;", "Handle::new((true,))", "Box<(bool,)>"),
+        (
+            "type Handle<T> = Box<Option<T>>; fn value() -> Option<bool> { Some(true) }",
+            "Handle::new(value())",
+            "Box<Option<bool>>",
+        ),
+        ("type Handle = Box<u16>;", "Handle::new(1)", "Box<u16>"),
+        ("type Handle<T> = Box<T>;", "Handle::<u16>::new(1)", "Box<u16>"),
+    ] {
+        let source = format!(
+            "{declaration} struct A; struct B; impl ::std::ops::Add<{rhs}> for A {{ type Output = A; fn add(self, _: {rhs}) -> A {{ self }} }} impl ::std::ops::Sub<{rhs}> for A {{ type Output = B; fn sub(self, _: {rhs}) -> B {{ B }} }} fn f(a: A) -> A {{ a + {expression} }}"
+        );
+        let found = candidates(&source, "arith.add_to_sub");
+        assert!(found.is_empty(), "{source}: {found:?}");
+    }
+}
+
+#[test]
+fn frozen_operator_operands_ignore_caller_root_rebinding() {
+    for declaration in ["extern crate core as std;", "extern crate self as std;", "use core as std;"] {
+        let source = format!("fn make() -> String {{ String::new() }} fn f() {{ {declaration} let _ = make() + \"\"; }}");
+        let found = candidates(&source, "arith.add_to_sub");
+        assert!(found.is_empty(), "{source}: {found:?}");
+    }
+}
+
+#[test]
+fn bare_primitive_names_are_not_absolute_extern_aliases_in_child_modules() {
+    let source = "extern crate self as bool; mod nested { fn f(value: &bool) -> bool { !value } }";
+    let found = candidates(source, "unary.remove_not");
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].replacement, "*(value)");
+}
+
+#[test]
+fn composite_operator_operands_preserve_crate_root_alias_identity() {
+    for rhs in [
+        "Box<::this::Payload>",
+        "(Box<::this::Payload>,)",
+        "&'static [::this::Payload]",
+        "*const ::this::Payload",
+        "Box<P>",
+        "(Box<P>,)",
+        "&'static [P]",
+        "*const P",
+        "Box<Relative>",
+    ] {
+        for alias in ["", "use crate::fake as this;", "extern crate std as this;"] {
+            for (output, expected) in [("A", 1), ("B", 0)] {
+                let source = format!(
+                    "extern crate self as this; use ::this::Payload as P; use crate::Payload as Relative; struct Payload; mod fake {{ pub struct Payload; }} struct A; struct B; impl ::std::ops::Add<{rhs}> for A {{ type Output = A; fn add(self, _: {rhs}) -> A {{ self }} }} impl ::std::ops::Sub<{rhs}> for A {{ type Output = {output}; fn sub(self, _: {rhs}) -> {output} {{ unreachable!() }} }} fn f(a: A, b: {rhs}) -> A {{ {alias} a + b }}"
+                );
+                let found = candidates(&source, "arith.add_to_sub");
+                assert_eq!(found.len(), expected, "{source}: {found:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn operator_outputs_expand_slice_and_pointer_element_aliases() {
+    for shape in ["&'static [ELEMENT]", "*const ELEMENT", "*mut ELEMENT"] {
+        let original = shape.replace("ELEMENT", "Byte");
+        let replacement = shape.replace("ELEMENT", "OtherByte");
+        for (other, expected) in [("u8", 1), ("bool", 0)] {
+            let source = format!(
+                "type Byte = u8; type OtherByte = {other}; struct A; impl ::core::ops::Add<u8> for A {{ type Output = {original}; fn add(self, _: u8) -> {original} {{ unreachable!() }} }} impl ::core::ops::Sub<u8> for A {{ type Output = {replacement}; fn sub(self, _: u8) -> {replacement} {{ unreachable!() }} }} fn f(a: A, b: u8) -> {original} {{ a + b }}"
+            );
+            let found = candidates(&source, "arith.add_to_sub");
+            assert_eq!(found.len(), expected, "{source}: {found:?}");
+        }
+    }
+}
+
+#[test]
+fn frozen_operator_outputs_ignore_caller_root_rebinding() {
+    for alias in ["", "extern crate self as core;"] {
+        for (original, replacement) in [("u8", "bool"), ("Option<u8>", "Option<bool>")] {
+            let source = format!(
+                "struct A; impl ::core::ops::Add<u8> for A {{ type Output = {original}; fn add(self, _: u8) -> {original} {{ unreachable!() }} }} impl ::core::ops::Sub<u8> for A {{ type Output = {replacement}; fn sub(self, _: u8) -> {replacement} {{ unreachable!() }} }} fn f(a: A, b: u8) -> {original} {{ {alias} a + b }}"
+            );
+            let found = candidates(&source, "arith.add_to_sub");
+            assert!(found.is_empty(), "{source}: {found:?}");
+        }
+    }
+}
+
+#[test]
+fn frozen_operator_outputs_compare_equivalent_result_spelling() {
+    for error in ["std::io::Error", "::std::io::Error"] {
+        let source = format!(
+            "struct A; impl ::core::ops::Add<u8> for A {{ type Output = ::std::io::Result<()>; fn add(self, _: u8) -> ::std::io::Result<()> {{ unreachable!() }} }} impl ::core::ops::Sub<u8> for A {{ type Output = Result<(), {error}>; fn sub(self, _: u8) -> Result<(), {error}> {{ unreachable!() }} }} fn f(a: A, b: u8) -> ::std::io::Result<()> {{ a + b }}"
+        );
+        let found = candidates(&source, "arith.add_to_sub");
+        assert_eq!(found.len(), 1, "{source}: {found:?}");
+    }
+}
+
+#[test]
+fn iterator_operator_rhs_types_ignore_shadowing_primitive_aliases() {
+    for (rhs, expression) in [
+        ("char", "text.chars().next().unwrap()"),
+        ("(usize, char)", "text.chars().enumerate().next().unwrap()"),
+    ] {
+        for (output, expected) in [("A", 1), ("B", 0)] {
+            let source = format!(
+                "struct A; struct B; impl ::core::ops::Add<{rhs}> for A {{ type Output = A; fn add(self, _: {rhs}) -> A {{ self }} }} impl ::core::ops::Sub<{rhs}> for A {{ type Output = {output}; fn sub(self, _: {rhs}) -> {output} {{ {output} }} }} fn f(a: A, text: &str) -> A {{ type char = u8; type usize = u8; a + {expression} }}"
+            );
+            let found = candidates(&source, "arith.add_to_sub");
+            assert_eq!(found.len(), expected, "{source}: {found:?}");
+        }
+    }
+}
+
+#[test]
+fn borrowed_boolean_inference_rejects_a_self_aliased_primitive_root() {
+    let source = r"
+        #![no_std]
+        extern crate self as std;
+        pub mod primitive { pub struct bool; }
+        impl<'a> ::core::ops::Not for &'a primitive::bool {
+            type Output = Self;
+            fn not(self) -> Self { self }
+        }
+        fn f(x: &::std::primitive::bool) -> &::std::primitive::bool { !x }
+    ";
+    let found = candidates(source, "unary.remove_not");
+    assert!(found.is_empty(), "{found:?}");
+}
+
+#[test]
+fn absolute_primitive_lookalikes_ignore_nested_extern_rebinding() {
+    for (root, external) in [("core", "std"), ("std", "core")] {
+        for (binding, expression) in [
+            (String::new(), format!("(x as &::{root}::primitive::bool)")),
+            (format!("let y: &::{root}::primitive::bool = x;"), "y".to_owned()),
+            (format!("use ::{root}::primitive::bool as Flag; let y: &Flag = x;"), "y".to_owned()),
+        ] {
+            let source = format!(
+                "extern crate self as {root}; mod primitive {{ pub struct bool; }} impl<'a> ::{external}::ops::Not for &'a primitive::bool {{ type Output = Self; fn not(self) -> Self {{ self }} }} fn f(x: &primitive::bool) -> &primitive::bool {{ extern crate {external} as {root}; {binding} !{expression} }}"
+            );
+            let found = candidates(&source, "unary.remove_not");
+            assert!(found.is_empty(), "{source}: {found:?}");
+        }
+    }
+}
+
+#[test]
+fn absolute_standard_primitives_ignore_nested_extern_self_aliases() {
+    for root in ["core", "std"] {
+        for (binding, expression) in [
+            (String::new(), format!("(x as &::{root}::primitive::bool)")),
+            (format!("let y: &::{root}::primitive::bool = x;"), "y".to_owned()),
+            (format!("use ::{root}::primitive::bool as Flag; let y: &Flag = x;"), "y".to_owned()),
+        ] {
+            let source = format!("fn f(x: &bool) -> bool {{ extern crate self as {root}; {binding} !{expression} }}");
+            let found = candidates(&source, "unary.remove_not");
+            assert_eq!(found.len(), 1, "{source}: {found:?}");
+            assert_eq!(found[0].replacement, format!("*({expression})"), "{source}");
+            assert_eq!(found[0].confidence, Confidence::Proven, "{source}");
+        }
+    }
+}
+
+#[test]
+fn borrowed_boolean_payloads_keep_their_validated_root_across_caller_rebinding() {
+    let source = "fn f(x: Option<&bool>) -> bool { extern crate std as core; !x.unwrap() }";
+    let found = candidates(source, "unary.remove_not");
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].replacement, "*(x.unwrap())");
+}
+
+#[test]
+fn borrowed_boolean_payloads_survive_caller_external_root_rebinding() {
+    for alias in [
+        "extern crate self as core;",
+        "extern crate self as std;",
+        "extern crate alloc as core;",
+    ] {
+        for expression in [
+            "x.unwrap()",
+            "x.expect(\"present\")",
+            "x.unwrap_or(&true)",
+            "x.unwrap_or_else(|| &true)",
+        ] {
+            let source = format!("fn f(x: Option<&bool>) -> bool {{ {alias} !{expression} }}");
+            let found = candidates(&source, "unary.remove_not");
+            assert_eq!(found.len(), 1, "{source}: {found:?}");
+            assert_eq!(found[0].replacement, format!("*({expression})"), "{source}");
+        }
+    }
+}
+
+#[test]
+fn indexed_boolean_outputs_ignore_caller_generic_names() {
+    for generics in ["bool", "bool: Default"] {
+        for (declaration, expression) in [
+            ("struct Maker; impl Maker { fn value(&self) -> &bool { &true } }", "m.value()"),
+            ("struct Maker; impl Maker { fn value(&self) -> &bool { &true } }", "(m.value())"),
+            ("struct Maker; fn value() -> &'static bool { &true }", "value()"),
+            ("struct Maker; fn value() -> &'static bool { &true }", "(value())"),
+        ] {
+            let source = format!("{declaration} fn f<{generics}>(m: Maker) -> ::core::primitive::bool {{ !{expression} }}");
+            let found = candidates(&source, "unary.remove_not");
+            assert_eq!(found.len(), 1, "{source}: {found:?}");
+            assert_eq!(found[0].replacement, format!("*({expression})"), "{source}");
+        }
+    }
+    let source = "struct Maker; impl Maker { fn value<T>(&self, x: T) -> T { x } } fn f<bool: ::core::ops::Not<Output = ::core::primitive::bool>>(m: Maker, x: bool) -> ::core::primitive::bool { !m.value::<bool>(x) }";
+    let found = candidates(source, "unary.remove_not");
+    assert!(found.is_empty(), "the declaration's own generic output remains unknown: {found:?}");
+}
+
+#[test]
+fn absolute_boolean_types_ignore_generic_root_shadows() {
+    for root in ["core", "std"] {
+        for generics in [root.to_owned(), format!("{root}: Default")] {
+            let source = format!("fn f<{generics}>(x: &::{root}::primitive::bool) -> bool {{ !x }}");
+            let found = candidates(&source, "unary.remove_not");
+            assert_eq!(found.len(), 1, "{source}: {found:?}");
+            assert_eq!(found[0].replacement, "*(x)", "{source}");
+        }
+    }
+}
+
+#[test]
+fn direct_unit_constructors_shadow_enclosing_borrowed_constants() {
+    for outer in [
+        "const X: &bool = &true;",
+        "mod values { pub const VALUE: &bool = &true; } use values::VALUE as X;",
+    ] {
+        let source = format!(
+            "{outer} fn f() {{ struct X; impl ::core::ops::Not for X {{ type Output = Self; fn not(self) -> Self {{ self }} }} let _: X = !X; }}"
+        );
+        let found = candidates(&source, "unary.remove_not");
+        assert_eq!(found.len(), 1, "{source}: {found:?}");
+        assert_eq!(found[0].replacement, "X", "{source}");
+    }
+    for declaration in ["#[cfg(any())] struct X;", "struct X { field: u8 }"] {
+        let source = format!("const X: &bool = &true; fn f() {{ {declaration} let _: bool = !X; }}");
+        let file = SourceFile::parse("test.rs", source.clone()).unwrap();
+        let selection = Selection::parse("unary.remove_not").unwrap();
+        let defaults = Defaults::of(&file.ast);
+        let found = collect_with(&file, &selection, &CfgSet::parse(""), &defaults);
+        assert_eq!(found.len(), 1, "{source}: {found:?}");
+        assert_eq!(found[0].replacement, "*(X)", "{source}");
+    }
+}
+
+#[test]
+fn conditional_constants_do_not_reuse_one_alternatives_borrowed_type() {
+    let source = r#"
+        const X: &bool = &true;
+        fn f() -> bool {
+            #[cfg(feature = "first")] const X: &bool = &true;
+            #[cfg(not(feature = "first"))] const X: bool = true;
+            !X
+        }
+    "#;
+    for (cfg, replacement, confidence) in [
+        (CfgSet::unconditional(), "X", Confidence::Optimistic),
+        (CfgSet::parse(""), "X", Confidence::Proven),
+        (CfgSet::parse("feature=\"first\""), "*(X)", Confidence::Proven),
+    ] {
+        let file = SourceFile::parse("test.rs", source.into()).unwrap();
+        let selection = Selection::parse("unary.remove_not").unwrap();
+        let defaults = Defaults::of(&file.ast);
+        let found = collect_with(&file, &selection, &cfg, &defaults);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].replacement, replacement, "{found:?}");
+        assert_eq!(found[0].confidence, confidence, "{found:?}");
+    }
+}
+
+#[test]
+fn type_only_named_imports_do_not_hide_value_globs() {
+    for import in ["crate::types::VALUE", "crate as VALUE"] {
+        for (glob, output, replacement, confidence) in [
+            ("", "bool", "*(VALUE)", Confidence::Proven),
+            ("use crate::values::*;", "u8", "VALUE", Confidence::Optimistic),
+        ] {
+            let source = format!(
+                "const VALUE: &bool = &true; mod types {{ pub type VALUE = (); }} mod values {{ pub const VALUE: u8 = 1; }} fn f() -> {output} {{ use {import}; {glob} !VALUE }}"
+            );
+            let found = candidates(&source, "unary.remove_not");
+            assert_eq!(found.len(), 1, "{source}: {found:?}");
+            assert_eq!(found[0].replacement, replacement, "{source}");
+            assert_eq!(found[0].confidence, confidence, "{source}");
+        }
+    }
+}
+
+#[test]
+fn unknown_operator_rhs_identities_do_not_prove_operator_absence() {
+    for rhs in ["u8", "Option<u8>"] {
+        for (root_operator, root_method, nested_operator, nested_method, opening, closing) in [
+            ("Add", "add", "Sub", "sub", "", ""),
+            ("Sub", "sub", "Add", "add", "mod caller {", "}"),
+        ] {
+            let source = format!(
+                "mod helpers {{}} use helpers::*; struct A; impl ::core::ops::{root_operator}<{rhs}> for A {{ type Output = A; fn {root_method}(self, _: {rhs}) -> A {{ self }} }} mod implementation {{ impl ::core::ops::{nested_operator}<{rhs}> for crate::A {{ type Output = crate::A; fn {nested_method}(self, _: {rhs}) -> crate::A {{ self }} }} }} {opening} fn f(a: crate::A, b: {rhs}) -> crate::A {{ a + b }} {closing}"
+            );
+            let found = candidates(&source, "arith.add_to_sub");
+            assert_eq!(found.len(), 1, "{source}: {found:?}");
+        }
+    }
+}
+
+#[test]
+fn frozen_boolean_evidence_survives_inferred_locals_and_chained_extraction() {
+    for (ty, locals, expression) in [
+        ("&bool", "let y = x;", "y"),
+        ("Option<Option<&bool>>", "", "x.unwrap().unwrap()"),
+        ("Option<Option<&bool>>", "let y = x.unwrap();", "y.unwrap()"),
+    ] {
+        for alias in ["extern crate self as core;", "extern crate self as std;"] {
+            let source = format!("fn f(x: {ty}) -> bool {{ {alias} {locals} !{expression} }}");
+            let found = candidates(&source, "unary.remove_not");
+            assert_eq!(found.len(), 1, "{source}: {found:?}");
+            assert_eq!(found[0].replacement, format!("*({expression})"), "{source}");
+        }
+    }
+}
+
+#[test]
+fn frozen_payload_context_uses_indexed_method_declarations() {
+    for (source, replacement) in [
+        (
+            "struct Maker; impl Maker { fn unwrap(self) -> Option<&'static bool> { Some(&true) } } mod caller { extern crate self as std; fn f(x: crate::Maker) -> bool { !x.unwrap().unwrap() } }",
+            "*(x.unwrap().unwrap())",
+        ),
+        (
+            "#![no_std] extern crate self as std; pub mod option { pub struct Option<T>(pub ::core::marker::PhantomData<T>); impl<T> Option<T> { pub fn unwrap(self) -> u8 { 1 } } } mod origin { pub struct Maker; impl Maker { pub fn unwrap(self) -> ::std::option::Option<&'static bool> { crate::option::Option(::core::marker::PhantomData) } } } fn f(x: origin::Maker) -> u8 { !x.unwrap().unwrap() }",
+            "x.unwrap().unwrap()",
+        ),
+    ] {
+        let found = candidates(source, "unary.remove_not");
+        assert_eq!(found.len(), 1, "{source}: {found:?}");
+        assert_eq!(found[0].replacement, replacement, "{source}");
+    }
+}
+
+#[test]
+fn string_wrapper_replacements_require_a_trusted_payload_identity() {
+    for wrapper in ["Box", "::std::rc::Rc", "::std::sync::Arc"] {
+        for root in ["core", "std"] {
+            for (declaration, path, expected) in [
+                (String::new(), format!("::{root}::primitive::str"), 2),
+                (
+                    format!("mod {root} {{ pub mod primitive {{ pub struct str; }} }}"),
+                    format!("{root}::primitive::str"),
+                    0,
+                ),
+            ] {
+                let source = format!("{declaration} fn f() -> {wrapper}<{path}> {{ unreachable!() }}");
+                let found = candidates(&source, "fn_value.empty_string,fn_value.xyzzy_string");
+                assert_eq!(found.len(), expected, "{source}: {found:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn qualified_string_returns_ignore_unrelated_bare_name_shadows() {
+    for (declaration, generics) in [
+        ("use std::fmt::*;", ""),
+        ("struct str;", ""),
+        ("type str = u8;", ""),
+        ("", "<str>"),
+        ("", "<str: Default>"),
+    ] {
+        for root in ["core", "std"] {
+            let source = format!("{declaration} fn f{generics}() -> &'static ::{root}::primitive::str {{ \"text\" }}");
+            let found = candidates(&source, "fn_value.empty_string,fn_value.xyzzy_string");
+            assert_eq!(found.len(), 2, "{source}: {found:?}");
+        }
+    }
+}
+
+#[test]
+fn string_return_replacements_require_a_trusted_primitive_identity() {
+    for root in ["std", "core"] {
+        for (declaration, path, expected) in [
+            (String::new(), format!("{root}::primitive::str"), 2),
+            (String::new(), format!("::{root}::primitive::str"), 2),
+            (
+                format!("mod {root} {{ pub mod primitive {{ pub struct str; }} }}"),
+                format!("{root}::primitive::str"),
+                0,
+            ),
+            (format!("mod {root} {{}}"), format!("::{root}::primitive::str"), 2),
+            (
+                format!("mod local {{ pub mod primitive {{ pub struct str; }} }} use local as {root};"),
+                format!("{root}::primitive::str"),
+                0,
+            ),
+            (
+                format!("extern crate {} as {root};", if root == "std" { "core" } else { "std" }),
+                format!("::{root}::primitive::str"),
+                0,
+            ),
+        ] {
+            let source = format!("{declaration} fn f() -> &'static {path} {{ unreachable!() }}");
+            let found = candidates(&source, "fn_value.empty_string,fn_value.xyzzy_string");
+            assert_eq!(found.len(), expected, "{source}: {found:?}");
+        }
+    }
+}
+
+#[test]
+fn chained_standard_methods_preserve_external_result_identities() {
+    for declaration in [
+        "mod helpers {}",
+        "#![no_std] extern crate alloc; extern crate core as std; use alloc::string::String; mod helpers {}",
+    ] {
+        for shadow in ["mod std {}", "use crate::helpers as std;"] {
+            let source = format!(
+                "{declaration} fn f(flag: bool, x: String) {{ loop {{ let _ = match flag {{ true => {{ {shadow} x.to_owned().to_owned() }}, false => {{ continue; }} }}; }} }}"
+            );
+            let found = candidates(&source, "loop.delete_continue");
+            assert!(found.is_empty(), "{source}: {found:?}");
+        }
+    }
+}
+
+#[test]
+fn operator_rhs_matching_requires_a_shared_resolved_identity() {
+    for rhs in ["bool", "String", "u8"] {
+        let source = format!(
+            "struct A; impl ::core::ops::Add<u8> for A {{ type Output = A; fn add(self, _: u8) -> A {{ self }} }} impl ::core::ops::Sub<{rhs}> for A {{ type Output = A; fn sub(self, _: {rhs}) -> A {{ self }} }} fn f(a: A, value: u8) -> A {{ a + value }}"
+        );
+        let found = candidates(&source, "arith.add_to_sub");
+        assert_eq!(found.len(), usize::from(rhs == "u8"), "{rhs}: {found:?}");
+    }
+}
+
+#[test]
+fn field_operator_operands_preserve_declaration_identities() {
+    for (declaration, record) in [
+        ("struct Record { value: u8 }", "Record"),
+        (
+            "mod model { type Byte = u8; pub struct Record { pub value: Byte } }",
+            "model::Record",
+        ),
+    ] {
+        let source = format!(
+            "{declaration} struct A; struct B; impl ::core::ops::Add<u8> for A {{ type Output = A; fn add(self, _: u8) -> A {{ self }} }} impl ::core::ops::Sub<u8> for A {{ type Output = B; fn sub(self, _: u8) -> B {{ B }} }} fn f(a: A, record: {record}) -> A {{ type u8 = bool; a + record.value }}"
+        );
+        let found = candidates(&source, "arith.add_to_sub");
+        assert!(found.is_empty(), "{source}: {found:?}");
+    }
+}
+
+#[test]
+fn primitive_inference_selects_an_unrebound_external_root() {
+    for (declaration, expected) in [
+        ("extern crate std as core;", 1),
+        ("extern crate core as core;", 1),
+        ("mod std {} mod core {}", 1),
+        ("extern crate std as core; extern crate core as std;", 0),
+    ] {
+        for (parameters, expression, replacement) in [
+            ("x: &bool", "!x", "*(x)"),
+            ("", "!&true", "*(&true)"),
+            ("x: Option<&bool>", "!x.unwrap()", "*(x.unwrap())"),
+        ] {
+            let source = format!("{declaration} fn f({parameters}) -> bool {{ {expression} }}");
+            let found = candidates(&source, "unary.remove_not");
+            assert_eq!(found.len(), expected, "{source}: {found:?}");
+            if expected != 0 {
+                assert_eq!(found[0].replacement, replacement, "{source}");
+            }
+        }
+    }
+}
+
+#[test]
+fn removing_not_withholds_unknown_glob_imported_operand_types() {
+    let found = candidates("mod helpers {} use helpers::*; fn f(x: &bool) -> bool { !x }", "unary.remove_not");
+    assert!(found.is_empty(), "{found:?}");
+    let found = candidates(
+        "mod helpers {} use helpers::*; fn f(x: &::core::primitive::bool) -> bool { !x }",
+        "unary.remove_not",
+    );
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].replacement, "*(x)");
+}
+
+#[test]
+fn removing_not_preserves_payload_identity_when_std_is_rebound() {
+    for declaration in ["extern crate core as std;", "extern crate std as std;"] {
+        let source = format!("{declaration} fn f(x: ::core::option::Option<&bool>) -> bool {{ !x.unwrap() }}");
+        let found = candidates(&source, "unary.remove_not");
+        assert_eq!(found.len(), 1, "{source}: {found:?}");
+        assert_eq!(found[0].replacement, "*(x.unwrap())", "{source}");
+        assert_eq!(found[0].replacement_index, 1, "{source}");
+    }
+}
+
+#[test]
+fn inline_constructor_operator_results_preserve_exact_rhs_identity() {
+    for (rhs, expression) in [
+        ("String", "String::new()"),
+        ("String", "std::string::String::from(\"x\")"),
+        ("String", "String::new().to_owned()"),
+        ("Box<String>", "Box::new(String::new())"),
+    ] {
+        let source = format!(
+            "struct A; struct B; impl ::core::ops::Add<{rhs}> for A {{ type Output = A; fn add(self, _: {rhs}) -> A {{ self }} }} impl ::core::ops::Sub<{rhs}> for A {{ type Output = B; fn sub(self, _: {rhs}) -> B {{ B }} }} fn f(a: A) -> A {{ a + {expression} }}"
+        );
+        let found = candidates(&source, "arith.add_to_sub");
+        assert!(found.is_empty(), "{expression}: {found:?}");
+    }
+}
+
+#[test]
+fn result_payload_reuse_compares_declaration_type_identities() {
+    for shadow in ["", "type u8 = ();"] {
+        let source = format!("fn f(error: &'static u8) -> Result<u8, &'static u8> {{ {shadow} let error = error; Ok(1) }}");
+        let found = candidates(&source, "result.ok_to_err");
+        assert_eq!(found.len(), 1, "{source}: {found:?}");
+        assert_eq!(found[0].replacement, "Err(error)");
+    }
+    let found = candidates(
+        "fn f(error: &'static u8) -> Result<u8, &'static u8> { let error = true; Ok(1) }",
+        "result.ok_to_err",
+    );
+    assert!(found.is_empty(), "{found:?}");
+    for (shadow, expected) in [
+        ("", 1),
+        ("let error = other;", 0),
+        ("type T = u8; let error: &'static T = &1;", 0),
+        ("struct T; let error: &'static T = &T;", 0),
+    ] {
+        let source =
+            format!("fn f<T: 'static, U: 'static>(error: &'static T, other: &'static U) -> Result<(), &'static T> {{ {shadow} Ok(()) }}");
+        let found = candidates(&source, "result.ok_to_err");
+        assert_eq!(found.len(), expected, "{source}: {found:?}");
+        if expected != 0 {
+            assert_eq!(found[0].replacement, "Err(error)");
+        }
+    }
+    let found = candidates(
+        "fn f(error: &'static u8) -> Result<u8, &'static u8> { let error = std::hint::black_box(true); Ok(1) }",
+        "result.ok_to_err",
+    );
+    assert!(found.is_empty(), "{found:?}");
+}
+
+#[test]
+fn result_payload_reuse_restores_parameter_scope_after_nested_functions() {
+    let found = candidates(
+        "type Byte = u8; fn f(error: &'static Byte) -> Result<u8, &'static Byte> { type Byte = bool; fn inner() {} Ok(1) }",
+        "result.ok_to_err",
+    );
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].replacement, "Err(error)");
+}
+
+#[test]
+fn freezing_nonstandard_prelude_names_preserves_import_identity() {
+    let source = "mod model { #[derive(Clone, Copy)] pub struct String; } use model::String as Text; fn f(flag: bool, value: Text) { type Text = (); loop { let _ = match flag { true => value, false => { continue; } }; } }";
+    let found = candidates(source, "loop.delete_continue");
+    assert!(found.is_empty(), "{source}: {found:?}");
+}
+
+#[test]
 fn removing_not_preserves_the_value_type_of_borrowed_bools() {
     let found = candidates(
         "fn f(flag: &bool, owned: bool) -> (bool, bool) { (!flag, !owned) }",
@@ -4064,6 +5219,24 @@ fn removing_not_preserves_the_value_type_of_borrowed_bools() {
         found.iter().map(|candidate| candidate.replacement_index).collect::<Vec<_>>(),
         [1, 0]
     );
+}
+
+#[test]
+fn removing_not_preserves_extracted_and_qualified_borrowed_bools() {
+    for (ty, operand, replacement) in [
+        ("Option<&bool>", "x.unwrap()", "*(x.unwrap())"),
+        ("Option<&mut bool>", "x.unwrap()", "*(x.unwrap())"),
+        ("Result<&bool, ()>", "x.expect(\"present\")", "*(x.expect(\"present\"))"),
+        ("&::core::primitive::bool", "x", "*(x)"),
+        ("&::std::primitive::bool", "x", "*(x)"),
+        ("Option<bool>", "x.unwrap()", "x.unwrap()"),
+    ] {
+        let source = format!("fn f(x: {ty}) -> bool {{ !{operand} }}");
+        let found = candidates(&source, "unary.remove_not");
+        assert_eq!(found.len(), 1, "{source}: {found:?}");
+        assert_eq!(found[0].replacement, replacement, "{source}");
+        assert_eq!(found[0].replacement_index, u32::from(replacement.starts_with('*')), "{source}");
+    }
 }
 
 #[test]
@@ -4137,6 +5310,20 @@ fn default_payloads_require_positive_evidence_through_aliases_closures_and_assig
     assert_eq!(names.iter().filter(|&&name| name == "result.ok_to_err").count(), 1, "{found:?}");
     assert_eq!(names.iter().filter(|&&name| name == "result.err_to_ok").count(), 1, "{found:?}");
     assert_eq!(names.iter().filter(|&&name| name == "assign_value.default").count(), 1, "{found:?}");
+}
+
+#[test]
+fn absolute_wrapper_replacements_retain_external_root_qualification() {
+    for path in ["::std::rc::Rc", "::std::sync::Arc", "::std::boxed::Box"] {
+        let source = format!("mod std {{}} fn f() -> {path}<::core::primitive::str> {{ loop {{}} }}");
+        let found = candidates(&source, "fn_value.empty_string,fn_value.xyzzy_string");
+        assert_eq!(
+            found.iter().map(|candidate| candidate.replacement.as_str()).collect::<Vec<_>>(),
+            [format!("{path}::from(\"\")"), format!("{path}::from(\"xyzzy\")")],
+            "{source}: {found:?}"
+        );
+        assert!(found.iter().all(|candidate| candidate.confidence == Confidence::Proven));
+    }
 }
 
 #[test]

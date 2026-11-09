@@ -378,7 +378,7 @@ pub(super) fn values_for(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Repl
             };
             // Unsized string wrappers need shape-specific constructors; `Default` cannot construct
             // their unsized payload directly.
-            if is_unsized_string_wrapper(resolved) {
+            if is_unsized_string_wrapper(resolved, types) {
                 return vec![
                     (
                         "fn_value.empty_string",
@@ -605,9 +605,11 @@ pub(super) fn reference_values(ty: &Type, _depth: usize, _types: &Types<'_>) -> 
     }
 }
 
-fn is_unsized_string_wrapper(ty: &Type) -> bool {
+fn is_unsized_string_wrapper(ty: &Type, types: &Types<'_>) -> bool {
     matches!(resolve_type(ty), Kind::Wrapper)
-        && type_argument(ty, 0).is_some_and(|inner| matches!(strip(inner), Type::Path(path) if path.path.is_ident("str")))
+        && types
+            .payload(ty, 0)
+            .is_some_and(|inner| types.supports_primitive_type(&inner, "str"))
 }
 
 /// The type a reference points at, seeing through parentheses and invisible grouping.
@@ -742,14 +744,17 @@ fn path_text(ty: &Type) -> Option<String> {
         None;
     };
 
-    Some(
-        path.path
-            .segments
-            .iter()
-            .map(|segment| segment.ident.to_string())
-            .collect::<Vec<_>>()
-            .join("::"),
-    )
+    let mut text = path
+        .path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>()
+        .join("::");
+    if path.path.leading_colon.is_some() {
+        text.insert_str(0, "::");
+    }
+    Some(text)
 }
 
 /// Sees through parentheses to the type underneath.
@@ -789,6 +794,22 @@ pub(super) enum Kind {
     Unknown,
 }
 
+pub(super) fn is_str(ty: &Type) -> bool {
+    let Type::Path(path) = strip(ty) else {
+        return
+        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
+        false;
+    };
+    let mut segments = path.path.segments.iter();
+    path.qself.is_none()
+        && (path.path.is_ident("str")
+            || matches!(
+                (segments.next(), segments.next(), segments.next(), segments.next()),
+                (Some(root), Some(module), Some(name), None)
+                    if (root.ident == "std" || root.ident == "core") && module.ident == "primitive" && name.ident == "str"
+            ))
+}
+
 pub(super) fn primitive_kind(name: &str) -> Option<Kind> {
     match name {
         "bool" => Some(Kind::Bool),
@@ -820,7 +841,7 @@ pub(super) fn resolve_type(ty: &Type) -> Kind {
             // Mutability is load-bearing, not decoration: `StaticStr`'s values are string literals,
             // which are `&'static str` and cannot be returned where `&mut str` was promised. A
             // mutable one therefore gets its own kind rather than being folded in here.
-            Type::Path(path) if path.path.is_ident("str") => {
+            elem if is_str(elem) => {
                 if reference.mutability.is_some() {
                     Kind::MutStr
                 } else {
@@ -1443,9 +1464,9 @@ mod tests {
             values_for(&syn::parse_quote!(Result<bool, foreign::bool>), 3, &types),
             [proven("fn_value.ok", "Ok(true)"), proven("fn_value.ok", "Ok(false)")]
         );
-        assert!(!is_unsized_string_wrapper(&syn::parse_quote!(Vec<str>)));
-        assert!(!is_unsized_string_wrapper(&syn::parse_quote!(Option<str>)));
-        assert!(is_unsized_string_wrapper(&syn::parse_quote!(Box<str>)));
+        assert!(!is_unsized_string_wrapper(&syn::parse_quote!(Vec<str>), &types));
+        assert!(!is_unsized_string_wrapper(&syn::parse_quote!(Option<str>), &types));
+        assert!(is_unsized_string_wrapper(&syn::parse_quote!(Box<str>), &types));
     }
 
     #[test]
@@ -2240,6 +2261,14 @@ mod tests {
             (parse_quote!(()), Kind::Unit),
             (parse_quote!(&str), Kind::StaticStr),
             (parse_quote!(&mut str), Kind::MutStr),
+            (parse_quote!(&'static ::core::primitive::str), Kind::StaticStr),
+            (parse_quote!(&mut ::core::primitive::str), Kind::MutStr),
+            (parse_quote!(&std::primitive::str), Kind::StaticStr),
+            (parse_quote!(&[u8]), Kind::Reference),
+            (parse_quote!(&(bool, u8)), Kind::Reference),
+            (parse_quote!(&crate::primitive::str), Kind::Reference),
+            (parse_quote!(&<T>::str), Kind::Reference),
+            (parse_quote!(&<T as core::primitive>::str), Kind::Reference),
             (parse_quote!(NonZeroU8), Kind::NonZero),
             (parse_quote!(NonZero<u8>), Kind::Unknown),
             (parse_quote!(Vec<bool>), Kind::Collection),

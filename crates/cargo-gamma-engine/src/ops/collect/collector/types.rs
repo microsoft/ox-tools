@@ -9,13 +9,49 @@ use syn::visit::{self, Visit};
 use syn::{GenericArgument, GenericParam, Generics, Path, PathArguments, ReturnType, Type, TypeParamBound, WherePredicate};
 
 use super::super::defaults::{DefaultPaths, standard_defaulted_parameters};
-use super::indexes::{ABSOLUTE_ROOT, EXTERN_ROOT_PREFIX};
+use super::indexes::{ABSOLUTE_ROOT, EXTERN_ROOT_PREFIX, EXTERNAL_ROOT, ROOT_EXTERN_PREFIX, import_target};
 use super::predicates::payload;
 use super::values::{Kind, primitive_kind, resolve_type, strip, type_argument_values, type_arguments, type_name};
 use crate::ops::collect::Defaults;
 use crate::{HashMap, HashSet};
 
 pub(super) const LOCAL_MODULE: &str = "<gamma-local-module>";
+
+pub(super) fn frozen_type_identity(ty: &Type) -> Type {
+    let imports = HashMap::default();
+    let defaults = Defaults::default();
+    let mut budget = TYPE_EXPANSION_LIMIT;
+    Types {
+        abstracts: &[],
+        defaulted: &[],
+        imports: &imports,
+        defaults: &defaults,
+        aliases: None,
+        self_type: None,
+        self_associated: None,
+    }
+    .source_type_at(
+        ty,
+        &mut 64,
+        TypeQualification::Identity,
+        // #[gamma::skip(literal.bool_flip, tag = "equivalent", reason = "The alias inventory is None above. instantiate_alias_with_budget returns None before consuming any budget, so toggling alias expansion cannot change any result.")]
+        true,
+        &mut budget,
+    )
+}
+
+pub(super) fn contains_unknown_type(ty: &Type) -> bool {
+    struct Unknown(bool);
+    impl<'ast> Visit<'ast> for Unknown {
+        fn visit_type_infer(&mut self, _: &'ast syn::TypeInfer) {
+            self.0 = true;
+        }
+    }
+    let mut unknown = Unknown(false);
+    unknown.visit_type(ty);
+    unknown.0
+}
+
 pub(super) const BLOCK_TYPES: &str = "<gamma-block-types>";
 pub(super) const SOURCE_FILE: &str = "<gamma-source-file>";
 /// Conservative default for input plus projected output syntax work before cloning.
@@ -26,6 +62,35 @@ pub(super) const TYPE_EXPANSION_LIMIT: usize = 4096;
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod coverage_tests;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TypeQualification {
+    Source,
+    Primitives,
+    Declaration,
+    CanonicalPrimitives,
+    Full,
+    Canonical,
+    Identity,
+}
+
+impl TypeQualification {
+    fn after_alias(self) -> Self {
+        match self {
+            Self::Full => Self::Canonical,
+            Self::Primitives | Self::Declaration => Self::CanonicalPrimitives,
+            other => other,
+        }
+    }
+
+    fn fully_qualified(self) -> bool {
+        matches!(self, Self::Full | Self::Canonical | Self::Identity)
+    }
+
+    fn absolute_identity(self, names: &[String]) -> bool {
+        self == Self::Identity && names.len() > 1 && names.first().is_some_and(|root| matches!(root.as_str(), "std" | "core" | "alloc"))
+    }
+}
 
 #[derive(Clone, PartialEq)]
 pub(super) struct Alias {
@@ -566,22 +631,106 @@ impl Types<'_> {
 
     // All normalization entry points use a separate conservative reconstruction-work allowance.
     // Its matching scale with visitor depth does not make the two budgets shared accounting.
+    #[cfg(test)]
     pub(super) fn source_type(&self, ty: &Type) -> Type {
         let mut budget = TYPE_EXPANSION_LIMIT;
-        self.source_type_at(ty, &mut 64, false, true, &mut budget)
+        self.source_type_at(ty, &mut 64, TypeQualification::Source, true, &mut budget)
     }
 
     pub(super) fn canonical_type(&self, ty: &Type) -> Type {
         let mut budget = TYPE_EXPANSION_LIMIT;
-        self.source_type_at(ty, &mut 64, true, true, &mut budget)
+        self.source_type_at(ty, &mut 64, TypeQualification::Primitives, true, &mut budget)
     }
 
     pub(super) fn declaration_type(&self, ty: &Type) -> Type {
         let mut budget = TYPE_EXPANSION_LIMIT;
-        self.source_type_at(ty, &mut 64, true, false, &mut budget)
+        self.source_type_at(ty, &mut 64, TypeQualification::Declaration, false, &mut budget)
     }
 
-    fn source_type_at(&self, ty: &Type, remaining: &mut usize, freeze_primitives: bool, expand_aliases: bool, budget: &mut usize) -> Type {
+    pub(super) fn frozen_type(&self, ty: &Type) -> Type {
+        let mut budget = TYPE_EXPANSION_LIMIT;
+        self.source_type_at(ty, &mut 64, TypeQualification::Full, true, &mut budget)
+    }
+
+    pub(super) fn frozen_canonical_type(&self, ty: &Type) -> Type {
+        let mut budget = TYPE_EXPANSION_LIMIT;
+        self.source_type_at(ty, &mut 64, TypeQualification::Canonical, true, &mut budget)
+    }
+
+    fn instantiate_source_alias(
+        &self,
+        ty: &Type,
+        remaining: &mut usize,
+        qualification: TypeQualification,
+        budget: &mut usize,
+    ) -> Option<Type> {
+        let Type::Path(path) = strip(ty) else {
+            return self.instantiate_alias_with_budget(ty, budget);
+        };
+        if path.path.leading_colon.is_some()
+            || path.path.segments.len() != 1
+            || !self
+                .aliases
+                .is_some_and(|aliases| aliases.get(&path.path.segments[0].ident.to_string()).is_some_and(Option::is_some))
+        {
+            return self.instantiate_alias_with_budget(ty, budget);
+        }
+        let mut prepared = strip(ty).clone();
+        if let Type::Path(path) = &mut prepared
+            && let PathArguments::AngleBracketed(arguments) = &mut path.path.segments[0].arguments
+        {
+            for argument in &mut arguments.args {
+                if let GenericArgument::Type(inner) = argument {
+                    *inner = self.source_type_at(inner, remaining, qualification, true, budget);
+                }
+            }
+        }
+        self.instantiate_alias_with_budget(&prepared, budget)
+    }
+
+    pub(super) fn standard_type(&self, module: &str, name: &str, roots: &[&str]) -> Option<Type> {
+        let root = roots
+            .iter()
+            .find(|root| self.standard_external_root(root) && (module != "primitive" || self.primitive_external_root(root)))?;
+        syn::parse_str(&format!("::{root}::{module}::{name}")).ok()
+    }
+
+    fn prelude_path(&self, ty: &Type, names: &[String]) -> Option<Vec<String>> {
+        let Some(name) = names.last() else {
+            return
+            // #[gamma::skip(option.none_to_some, reason = "This fallback is reached only for empty resolved names. Its sole consumer source_type_at then parses names.join(\"::\"), which is empty and cannot be a Path. Returning Some(Vec::default()) leaves those names empty too; the absolute flag is only applied after a successful parse, so both versions preserve the same cloned input type.", tag = "equivalent")]
+            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+            None;
+        };
+        let (module, roots) = match name.as_str() {
+            "String" => ("string", &["std", "alloc"]),
+            "Vec" => ("vec", &["std", "alloc"]),
+            "Box" => ("boxed", &["std", "alloc"]),
+            "Option" => ("option", &["std", "core"]),
+            "Result" => ("result", &["std", "core"]),
+            _ => {
+                return
+            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+            None;
+            }
+        };
+        if !self.supports_standard_type(ty, name, module, roots) {
+            return
+            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+            None;
+        }
+        let root = roots.iter().find(|root| self.standard_external_root(root))?;
+        Some(vec![(*root).into(), module.into(), name.clone()])
+    }
+
+    fn source_type_at(
+        &self,
+        ty: &Type,
+        remaining: &mut usize,
+        qualification: TypeQualification,
+        expand_aliases: bool,
+        budget: &mut usize,
+    ) -> Type {
         if *remaining == 0 {
             return syn::parse_quote!(_);
         }
@@ -589,13 +738,18 @@ impl Types<'_> {
         if !reserve_type(ty, budget) {
             return syn::parse_quote!(_);
         }
-        let alias = expand_aliases.then(|| self.instantiate_alias_with_budget(ty, budget)).flatten();
+        let alias = expand_aliases
+            .then(|| self.instantiate_source_alias(ty, remaining, qualification, budget))
+            .flatten();
+        let qualification = alias.as_ref().map_or(qualification, |_| qualification.after_alias());
+        let canonical = matches!(qualification, TypeQualification::Canonical | TypeQualification::CanonicalPrimitives);
         let ty = alias.as_ref().unwrap_or(ty);
         if self.is_io_result_path(ty)
             && let Some(inner) = payload(ty, 0)
         {
-            let inner = self.source_type_at(inner, remaining, freeze_primitives, expand_aliases, budget);
-            return syn::parse_quote!(std::result::Result<#inner, std::io::Error>);
+            let inner = self.source_type_at(inner, remaining, qualification, expand_aliases, budget);
+            let root = qualification.fully_qualified().then(|| quote::quote!(::));
+            return syn::parse_quote!(#root std::result::Result<#inner, #root std::io::Error>);
         }
         let mut resolved = ty.clone();
         match &mut resolved {
@@ -604,35 +758,43 @@ impl Types<'_> {
                     return syn::parse_quote!(_);
                 };
                 let name = first.ident.to_string();
-                if self.abstracts.contains(&name)
-                    || self.defaulted.contains(&name)
-                    || self
-                        .imports
-                        .get(BLOCK_TYPES)
-                        .and_then(Option::as_ref)
-                        .is_some_and(|names| names.contains(&name))
+                if path.path.leading_colon.is_none()
+                    && (self.abstracts.contains(&name)
+                        || self.defaulted.contains(&name)
+                        || self
+                            .imports
+                            .get(BLOCK_TYPES)
+                            .and_then(Option::as_ref)
+                            .is_some_and(|names| names.contains(&name)))
                 {
                     return syn::parse_quote!(_);
                 }
-                let Some(mut names) = resolved_type_path(ty, self.imports) else {
+                let Some((mut names, source_absolute, external)) = resolved_type_path_with_origin(ty, self.imports) else {
                     return syn::parse_quote!(_);
                 };
                 let bare_primitive = names.len() == 1
-                    && primitive_kind(&name).is_some()
+                    && (primitive_kind(&name).is_some() || matches!(name.as_str(), "str" | "char"))
                     && !self.defaults.defines(&name)
                     && !self.imports.contains_key(&name)
                     && !self.aliases.is_some_and(|aliases| aliases.contains_key(&name));
-                if freeze_primitives && bare_primitive && self.imports.contains_key("*") {
+                if qualification != TypeQualification::Source && bare_primitive && self.imports.contains_key("*") {
                     return syn::parse_quote!(_);
                 }
                 let qualified_primitive = matches!(names.as_slice(), [root, module, primitive]
                     if matches!(root.as_str(), "std" | "core")
                         && module == "primitive"
-                        && primitive_kind(primitive).is_some());
-                let primitive = freeze_primitives && (bare_primitive || qualified_primitive);
+                        && (primitive_kind(primitive).is_some() || matches!(primitive.as_str(), "str" | "char")));
+                let primitive = qualification != TypeQualification::Source && (bare_primitive || qualified_primitive);
                 if primitive {
-                    let name = names.pop().expect("a primitive path has a terminal type name");
-                    names = vec!["core".to_owned(), "primitive".to_owned(), name];
+                    let Some(path) = self.primitive_path(&names, external || canonical) else {
+                        return syn::parse_quote!(_);
+                    };
+                    names = path;
+                }
+                let prelude = qualification.fully_qualified().then(|| self.prelude_path(ty, &names)).flatten();
+                let absolute = primitive || prelude.is_some() || qualification.absolute_identity(&names);
+                if let Some(prelude) = prelude {
+                    names = prelude;
                 }
                 if names.len() == 1
                     && (self.defaults.defines(&name) || self.aliases.is_some_and(|aliases| aliases.get(&name).is_some_and(Option::is_none)))
@@ -640,38 +802,75 @@ impl Types<'_> {
                 {
                     names.splice(..0, core::iter::once("crate".to_owned()).chain(module.iter().cloned()));
                 }
+                let source_absolute = if external || canonical {
+                    source_absolute
+                } else {
+                    self.qualify_crate_root(&mut names, source_absolute, qualification)
+                };
                 if let Ok(mut qualified) = syn::parse_str::<Path>(&names.join("::")) {
-                    qualified.leading_colon = path.path.leading_colon.or_else(|| primitive.then(Default::default));
-                    if let (Some(last), Some(original)) = (qualified.segments.last_mut(), path.path.segments.last()) {
-                        last.arguments = original.arguments.clone();
-                        if let PathArguments::AngleBracketed(arguments) = &mut last.arguments {
-                            for argument in &mut arguments.args {
-                                if let GenericArgument::Type(inner) = argument {
-                                    *inner = self.source_type_at(inner, remaining, freeze_primitives, expand_aliases, budget);
-                                }
-                            }
-                        }
-                    }
+                    // Import markers also protect relative local paths from further expansion.
+                    qualified.leading_colon =
+                        (external || source_absolute && path.path.leading_colon.is_some() || absolute).then(Default::default);
+                    self.qualify_type_arguments(&mut qualified, &path.path, remaining, qualification, expand_aliases, budget);
                     path.path = qualified;
                 }
             }
             Type::Reference(reference) => {
-                *reference.elem = self.source_type_at(&reference.elem, remaining, freeze_primitives, expand_aliases, budget);
+                *reference.elem = self.source_type_at(&reference.elem, remaining, qualification, expand_aliases, budget);
             }
             Type::Tuple(tuple) => {
                 for element in &mut tuple.elems {
-                    *element = self.source_type_at(element, remaining, freeze_primitives, expand_aliases, budget);
+                    *element = self.source_type_at(element, remaining, qualification, expand_aliases, budget);
                 }
             }
-            Type::Array(array) => *array.elem = self.source_type_at(&array.elem, remaining, freeze_primitives, expand_aliases, budget),
-            Type::Ptr(pointer) => *pointer.elem = self.source_type_at(&pointer.elem, remaining, freeze_primitives, expand_aliases, budget),
-            Type::Slice(slice) => *slice.elem = self.source_type_at(&slice.elem, remaining, freeze_primitives, expand_aliases, budget),
-            Type::Paren(paren) => *paren.elem = self.source_type_at(&paren.elem, remaining, freeze_primitives, expand_aliases, budget),
-            Type::Group(group) => *group.elem = self.source_type_at(&group.elem, remaining, freeze_primitives, expand_aliases, budget),
+            Type::Array(array) => *array.elem = self.source_type_at(&array.elem, remaining, qualification, expand_aliases, budget),
+            Type::Ptr(pointer) => *pointer.elem = self.source_type_at(&pointer.elem, remaining, qualification, expand_aliases, budget),
+            Type::Slice(slice) => *slice.elem = self.source_type_at(&slice.elem, remaining, qualification, expand_aliases, budget),
+            Type::Paren(paren) => *paren.elem = self.source_type_at(&paren.elem, remaining, qualification, expand_aliases, budget),
+            Type::Group(group) => *group.elem = self.source_type_at(&group.elem, remaining, qualification, expand_aliases, budget),
             _ => {}
         }
         resolved
     }
+
+    fn qualify_type_arguments(
+        &self,
+        qualified: &mut Path,
+        original: &Path,
+        remaining: &mut usize,
+        qualification: TypeQualification,
+        expand_aliases: bool,
+        budget: &mut usize,
+    ) {
+        if let (Some(last), Some(original)) = (qualified.segments.last_mut(), original.segments.last()) {
+            last.arguments = original.arguments.clone();
+            if let PathArguments::AngleBracketed(arguments) = &mut last.arguments {
+                arguments.colon2_token = arguments.colon2_token.filter(|_| qualification != TypeQualification::Identity);
+                for argument in &mut arguments.args {
+                    if let GenericArgument::Type(inner) = argument {
+                        *inner = self.source_type_at(inner, remaining, qualification, expand_aliases, budget);
+                    }
+                }
+            }
+        }
+    }
+
+    fn qualify_crate_root(&self, names: &mut [String], absolute: bool, qualification: TypeQualification) -> bool {
+        if let Some(root) = names.first_mut()
+            && (matches!(
+                qualification,
+                TypeQualification::Full | TypeQualification::Identity | TypeQualification::Declaration
+            ) && matches!(self.imports.get(&format!("{ROOT_EXTERN_PREFIX}{root}")).and_then(Option::as_deref),
+                        Some([marker, target]) if marker == ABSOLUTE_ROOT && target == "crate"))
+        {
+            "crate".clone_into(root);
+            return
+            // #[gamma::skip(return_value.default, reason = "The inferred return type is bool and Default::default() is already false.", tag = "equivalent")]
+            false;
+        }
+        absolute
+    }
+
     pub(super) fn payload<'a>(&'a self, ty: &'a Type, index: usize) -> Option<Cow<'a, Type>> {
         if self.is_io_result(ty) && index == 1 {
             return Some(Cow::Owned(syn::parse_quote!(std::io::Error)));
@@ -686,6 +885,9 @@ impl Types<'_> {
     }
 
     pub(super) fn value_kind(&self, ty: &Type) -> Kind {
+        if matches!(resolve_type(ty), Kind::StaticStr | Kind::MutStr) && !self.supports_str_reference(ty) {
+            return Kind::Reference;
+        }
         if type_argument_values(ty).is_empty() {
             return resolve_type(ty);
         }
@@ -1031,6 +1233,28 @@ impl Types<'_> {
             .is_none_or(|path| matches!(path.as_deref(), Some([absolute, original]) if absolute == ABSOLUTE_ROOT && original == root))
     }
 
+    fn primitive_external_root(&self, root: &str) -> bool {
+        // std and core expose the same primitives, even when one is named through the other's alias.
+        self.imports.get(&format!("{ROOT_EXTERN_PREFIX}{root}")).is_none_or(
+            |path| matches!(path.as_deref(), Some([absolute, original]) if absolute == ABSOLUTE_ROOT && matches!(original.as_str(), "std" | "core")),
+        )
+    }
+
+    fn primitive_path(&self, names: &[String], external: bool) -> Option<Vec<String>> {
+        if !external && names.len() == 3 && !self.primitive_external_root(&names[0]) {
+            return
+            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+            None;
+        }
+        let name = names
+            .last()
+            .expect("primitive normalization is called only for nonempty primitive paths");
+        let root = ["core", "std"]
+            .into_iter()
+            .find(|root| self.standard_external_root(root) && self.primitive_external_root(root))?;
+        Some(vec![root.to_owned(), "primitive".to_owned(), name.clone()])
+    }
+
     pub(super) fn supports_collection_constructor(&self, ty: &Type) -> bool {
         if !self.supports_collection_api(ty) {
             return
@@ -1262,18 +1486,15 @@ impl Types<'_> {
             // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
             false;
         };
-        let Some(path) = resolved_type_path(&reference.elem, self.imports) else {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
-        };
-        !self.abstracts.iter().chain(self.defaulted).any(|name| name == "str")
-            && !self.defaults.defines("str")
-            && !self.imports.contains_key("*")
-            && self.standard_root_unshadowed(&path)
-            && (matches!(path.as_slice(), [name] if name == "str")
+        self.supports_primitive_type(&reference.elem, "str")
+    }
+
+    pub(super) fn supports_primitive_type(&self, ty: &Type, primitive: &str) -> bool {
+        self.unshadowed_type_path(ty).is_some_and(|path| {
+            matches!(path.as_slice(), [name] if name == primitive)
                 || matches!(path.as_slice(), [root, module, name]
-                    if matches!(root.as_str(), "std" | "core") && module == "primitive" && name == "str"))
+                    if matches!(root.as_str(), "std" | "core") && module == "primitive" && name == primitive)
+        })
     }
 
     /// Constructors whose empty value has the same allocation and state as their trait default.
@@ -1367,9 +1588,9 @@ impl Types<'_> {
             // #[gamma::skip(return_value.default, tag = "equivalent", reason = "The return type is Option<Vec<String>>; its default is already None.")]
             None;
         }
-        let (path, absolute) = resolved_type_path_with_root(ty, self.imports)?;
+        let (path, absolute, external) = resolved_type_path_with_origin(ty, self.imports)?;
         let first = path.first()?;
-        if !self.standard_path_unshadowed(&path, absolute)
+        if !external && !self.standard_path_unshadowed(&path, absolute)
             || !absolute && (self.abstracts.contains(first) || self.defaulted.contains(first))
             || path.len() == 1 && (self.defaults.defines(first) || self.imports.contains_key("*"))
         {
@@ -1421,7 +1642,7 @@ impl Types<'_> {
         if let Some(imported) = self.imports.get("Default") {
             return imported.as_ref().is_some_and(|path| {
                 let absolute = path.first().is_some_and(|root| root == ABSOLUTE_ROOT);
-                let path = if absolute { &path[1..] } else { path.as_slice() };
+                let path = import_target(path);
                 matches!(path, [root, module, name]
                     if matches!(root.as_str(), "std" | "core") && module == "default" && name == "Default")
                     && self.standard_path_unshadowed(path, absolute)
@@ -1441,7 +1662,13 @@ impl Types<'_> {
 
     fn standard_path_unshadowed(&self, path: &[String], absolute: bool) -> bool {
         if absolute {
-            path.first().is_some_and(|root| self.standard_external_root(root))
+            path.first().is_some_and(|root| {
+                self.standard_external_root(root)
+                    && self
+                        .imports
+                        .get(&format!("{ROOT_EXTERN_PREFIX}{root}"))
+                        .is_none_or(|path| matches!(path.as_deref(), Some([_, original]) if original == root))
+            })
         } else {
             self.standard_root_unshadowed(path)
         }
@@ -1459,11 +1686,7 @@ impl Types<'_> {
         self.standard_external_root(root)
             && self.imports.get(root).is_none_or(|imported| {
                 imported.as_ref().is_some_and(|imported| {
-                    let imported = if imported.first().is_some_and(|root| root == ABSOLUTE_ROOT) {
-                        &imported[1..]
-                    } else {
-                        imported.as_slice()
-                    };
+                    let imported = import_target(imported);
                     matches!(imported, [name] if name == root)
                 })
             })
@@ -1518,7 +1741,7 @@ impl Types<'_> {
             false;
         }
 
-        let Some(path) = resolved_type_path(ty, self.imports) else {
+        let Some((path, absolute, external)) = resolved_type_path_with_origin(ty, self.imports) else {
             return
             // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
             false;
@@ -1529,7 +1752,7 @@ impl Types<'_> {
                 path.as_slice(),
                 [root, module, name]
                     if roots.contains(&root.as_str())
-                        && self.standard_external_root(root)
+                        && (external || self.standard_path_unshadowed(&path, absolute))
                         && module == expected_module
                         && name == expected_name
             )
@@ -1587,7 +1810,7 @@ impl Types<'_> {
 
     fn has_source_independent_reference_default(&self, ty: &Type) -> bool {
         let concrete = self.resolve_alias(ty);
-        if matches!(resolve_type(concrete), Kind::StaticStr) {
+        if matches!(resolve_type(concrete), Kind::StaticStr) && self.supports_str_reference(concrete) {
             return true;
         }
 
@@ -1653,17 +1876,14 @@ impl Types<'_> {
         {
             let _replaced = segments.splice(..1, imported.iter().cloned());
         }
-        if segments.first().is_some_and(|segment| segment == ABSOLUTE_ROOT) {
-            let _absolute = segments.remove(0);
-        }
         let iterator_name = |name: &str| matches!(name, "Iterator" | "DoubleEndedIterator" | "ExactSizeIterator" | "FusedIterator");
 
-        matches!(segments.as_slice(), [name]
+        matches!(import_target(&segments), [name]
             if iterator_name(name)
                 && !imports.contains_key(name)
                 && !imports.contains_key("*"))
             || matches!(
-                segments.as_slice(),
+                import_target(&segments),
                 [root, module, name]
                     if matches!(root.as_str(), "std" | "core")
                         && module == "iter"
@@ -1933,6 +2153,10 @@ fn resolved_type_path(ty: &Type, imports: &HashMap<String, Option<Vec<String>>>)
 }
 
 fn resolved_type_path_with_root(ty: &Type, imports: &HashMap<String, Option<Vec<String>>>) -> Option<(Vec<String>, bool)> {
+    resolved_type_path_with_origin(ty, imports).map(|(path, absolute, _external)| (path, absolute))
+}
+
+fn resolved_type_path_with_origin(ty: &Type, imports: &HashMap<String, Option<Vec<String>>>) -> Option<(Vec<String>, bool, bool)> {
     let Type::Path(path) = strip(ty) else {
         return
         // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
@@ -1952,11 +2176,16 @@ fn resolved_type_path_with_root(ty: &Type, imports: &HashMap<String, Option<Vec<
         .collect::<Vec<_>>();
 
     let mut absolute = path.path.leading_colon.is_some();
+    let mut external = false;
     if !absolute {
         for _ in 0..imports.len().saturating_add(1) {
             let first = segments.first()?;
             if first == ABSOLUTE_ROOT {
                 let _absolute = segments.remove(0);
+                if segments.first().is_some_and(|first| first == EXTERNAL_ROOT) {
+                    let _external = segments.remove(0);
+                    external = true;
+                }
                 absolute = true;
                 break;
             }
@@ -1991,7 +2220,7 @@ fn resolved_type_path_with_root(ty: &Type, imports: &HashMap<String, Option<Vec<
         }
     }
 
-    Some((segments, absolute))
+    Some((segments, absolute, external))
 }
 
 /// Exact external error APIs whose `Default` obligations are unavailable.

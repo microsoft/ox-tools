@@ -1181,7 +1181,12 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
 
     clear_baseline_failures(&artifact_dir)?;
 
-    let dashboard = Dashboard::new(visible && args.dashboard, host.terminal_width(), styler);
+    let dashboard = Dashboard::new(
+        visible && args.dashboard,
+        host.terminal_width(),
+        styler,
+        tick::SimpleClock::new_system(),
+    );
     let mut events = ConsoleEvents {
         host,
         progress,
@@ -1636,7 +1641,12 @@ fn resumed_console_events<'host, H: Host>(
 ) -> ConsoleEvents<'host, H> {
     ConsoleEvents {
         progress: Progress::new(visible, styler, host.terminal_width()),
-        dashboard: Dashboard::new(visible && args.dashboard, host.terminal_width(), styler),
+        dashboard: Dashboard::new(
+            visible && args.dashboard,
+            host.terminal_width(),
+            styler,
+            tick::SimpleClock::new_system(),
+        ),
         host,
         styler,
         show_build: false,
@@ -4114,7 +4124,7 @@ mod tests {
         ConsoleEvents {
             host,
             progress: Progress::new(false, Styler::new(false), Some(80)),
-            dashboard: Dashboard::new(false, Some(80), Styler::new(false)),
+            dashboard: Dashboard::new(false, Some(80), Styler::new(false), tick::ClockControl::new().to_simple_clock()),
             styler: Styler::new(false),
             show_build: false,
             verdict_log: VerdictLog::default(),
@@ -5343,7 +5353,7 @@ mod tests {
         let mut events = ConsoleEvents {
             host: &mut host,
             progress: Progress::new(false, Styler::new(false), Some(80)),
-            dashboard: Dashboard::new(false, Some(80), Styler::new(false)),
+            dashboard: Dashboard::new(false, Some(80), Styler::new(false), tick::ClockControl::new().to_simple_clock()),
             styler: Styler::new(false),
             show_build: false,
             verdict_log: VerdictLog::default(),

@@ -1569,6 +1569,10 @@ const STDOUT_READER_THREAD: &str = "cargo-gamma-process-stdout";
 const STDERR_READER_THREAD: &str = "cargo-gamma-process-stderr";
 const STDOUT_STREAM: &str = "stdout";
 const STDERR_STREAM: &str = "stderr";
+/// Amortizes reads and capture locking while bounding each reader's stack buffer to 8 KiB.
+const OUTPUT_READ_CHUNK_SIZE: usize = 8192;
+/// Trades exit-observation latency for less busy polling by pausing between checks.
+const OUTPUT_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(1);
 
 fn output_reader<R>(pipe: Option<R>, name: &'static str) -> io::Result<Option<OutputReader>>
 where
@@ -1607,7 +1611,7 @@ where
     // The initialization value is not observed: `Read` initializes the reported prefix,
     // and the unreported suffix is never copied into the capture.
     // #[gamma::skip(literal.int_increment, reason = "the reader overwrites every byte in the reported prefix and the untouched suffix is never observed")]
-    let mut chunk = [0_u8; 8192];
+    let mut chunk = [0_u8; OUTPUT_READ_CHUNK_SIZE];
 
     loop {
         let read = match pipe.read(&mut chunk) {
@@ -1674,7 +1678,7 @@ fn wait_for_output(subtree: &mut ProcessTree) -> io::Result<ExitStatus> {
         }
 
         // #[gamma::skip(all, reason = "this positive delay only throttles polling; zero or deletion busy-spins, while one or two milliseconds has the same result")]
-        thread::sleep(Duration::from_millis(1));
+        thread::sleep(OUTPUT_WAIT_POLL_INTERVAL);
     }
 }
 

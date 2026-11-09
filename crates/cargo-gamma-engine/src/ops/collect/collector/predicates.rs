@@ -10,7 +10,11 @@ use syn::{
 };
 
 use super::super::defaults::{DefaultPaths, item_attrs};
+use super::calls::Calls;
+use super::indexes::{ScopePath, block_id};
 use super::values::{Kind, resolve_type, strip};
+use crate::HashSet;
+use crate::cfg::CfgSet;
 
 /// Returns whether borrowing an expression relies on it being promoted to static storage.
 ///
@@ -517,7 +521,7 @@ pub(super) fn is_numeric_return(output: &ReturnType) -> bool {
 /// returns before the `+ 1` ever runs, so the mutant behaves exactly like the original and survives
 /// every test. Only the cases the source states outright are reported. This never tries to prove a
 /// value *is* reachable, so anything it is unsure about answers `false` and is perturbed as before.
-pub(super) fn diverges(expression: &Expr) -> bool {
+pub(super) fn diverges(cfg: &CfgSet, expression: &Expr) -> bool {
     match expression {
         // Control leaves the function, or the enclosing loop, outright.
         Expr::Return(_) | Expr::Break(_) | Expr::Continue(_) => true,
@@ -527,31 +531,36 @@ pub(super) fn diverges(expression: &Expr) -> bool {
         Expr::Macro(node) => is_diverging_macro(&node.mac),
 
         // A `loop` with no `break` runs forever; one with a `break` may yield a value.
-        Expr::Loop(node) => !has_break(&node.body),
+        Expr::Loop(node) => !has_break(cfg, &node.body),
 
         // Wrappers that add no control flow carry the divergence of what they hold.
-        Expr::Paren(ExprParen { expr, .. }) | Expr::Group(ExprGroup { expr, .. }) => diverges(expr),
-        Expr::Block(ExprBlock { block, .. }) | Expr::Unsafe(ExprUnsafe { block, .. }) => block_diverges(block),
+        Expr::Paren(ExprParen { expr, .. }) | Expr::Group(ExprGroup { expr, .. }) => diverges(cfg, expr),
+        // A labeled block can consume a break and yield its value instead of diverging.
+        Expr::Block(ExprBlock { block, label: None, .. }) | Expr::Unsafe(ExprUnsafe { block, .. }) => block_diverges(cfg, block),
+        Expr::Block(ExprBlock { block, label: Some(_), .. }) => !has_break(cfg, block) && block_diverges(cfg, block),
 
         // An `if` diverges only when it cannot fall through: it needs an `else`, and both the `then`
         // block and the `else` branch must diverge in turn.
         Expr::If(node) => node
             .else_branch
             .as_ref()
-            .is_some_and(|(_else, otherwise)| block_diverges(&node.then_branch) && diverges(otherwise)),
+            .is_some_and(|(_else, otherwise)| block_diverges(cfg, &node.then_branch) && diverges(cfg, otherwise)),
 
-        // A `match` diverges when it has arms and every one of them does. A match on an empty type
+        // A `match` diverges when it has active arms and every one of them does. A match on an empty type
         // has no arm to reach here as a numeric tail, so the emptiness check only guards the logic.
-        Expr::Match(node) => !node.arms.is_empty() && node.arms.iter().all(|arm| diverges(&arm.body)),
+        Expr::Match(node) => {
+            let mut active = node.arms.iter().filter(|arm| !cfg.skip_gate(&arm.attrs)).peekable();
+            active.peek().is_some() && active.all(|arm| diverges(cfg, &arm.body))
+        }
 
         _ => false,
     }
 }
 
 /// Returns whether a block's value is unreachable because its final statement diverges.
-fn block_diverges(block: &Block) -> bool {
-    match block.stmts.last() {
-        Some(Stmt::Expr(expr, _semi)) => diverges(expr),
+fn block_diverges(cfg: &CfgSet, block: &Block) -> bool {
+    match active_statements(block, cfg).next_back() {
+        Some(Stmt::Expr(expr, _semi)) => diverges(cfg, expr),
         Some(Stmt::Macro(node)) => is_diverging_macro(&node.mac),
         _ => false,
     }
@@ -567,24 +576,49 @@ fn is_diverging_macro(mac: &Macro) -> bool {
     })
 }
 
-/// Returns whether a loop body contains any `break`, anywhere within it.
+/// Returns whether a block contains any active `break`, anywhere within it.
 ///
-/// Deliberately conservative: a `break` that belongs to a nested loop still counts, so a loop is
-/// only called breakless when it truly has none. Erring this way keeps the divergence test from
-/// ever rejecting a loop that might produce a value.
-fn has_break(block: &Block) -> bool {
-    let mut finder = BreakFinder { found: false };
+/// Deliberately conservative: a `break` that belongs to a nested loop still counts, so a loop or
+/// labeled block is only called breakless when it truly has none. Erring this way keeps the
+/// divergence test from ever rejecting a construct that might produce a value.
+fn has_break(cfg: &CfgSet, block: &Block) -> bool {
+    let mut finder = BreakFinder { cfg, found: false };
 
     finder.visit_block(block);
     finder.found
 }
 
 /// Records whether any `break` was seen while walking a loop body.
-struct BreakFinder {
+struct BreakFinder<'a> {
+    cfg: &'a CfgSet,
     found: bool,
 }
 
-impl<'ast> Visit<'ast> for BreakFinder {
+impl<'ast> Visit<'ast> for BreakFinder<'_> {
+    fn visit_expr(&mut self, i: &'ast Expr) {
+        if !self.cfg.skip_gate(expr_attrs(i)) {
+            syn::visit::visit_expr(self, i);
+        }
+    }
+
+    fn visit_arm(&mut self, i: &'ast syn::Arm) {
+        if !self.cfg.skip_gate(&i.attrs) {
+            syn::visit::visit_arm(self, i);
+        }
+    }
+
+    fn visit_local(&mut self, i: &'ast syn::Local) {
+        if !self.cfg.skip_gate(&i.attrs) {
+            syn::visit::visit_local(self, i);
+        }
+    }
+
+    fn visit_item(&mut self, i: &'ast syn::Item) {
+        if !self.cfg.skip_gate(item_attrs(i)) {
+            syn::visit::visit_item(self, i);
+        }
+    }
+
     fn visit_expr_break(&mut self, _node: &'ast ExprBreak) {
         self.found = true;
     }
@@ -769,6 +803,113 @@ pub(super) fn stmt_attrs(statement: &Stmt) -> &[Attribute] {
     }
 }
 
+/// Keeps the statements that participate in the current build, preserving tail barriers.
+pub(super) fn active_statements<'a>(block: &'a Block, cfg: &'a CfgSet) -> impl DoubleEndedIterator<Item = &'a Stmt> {
+    block.stmts.iter().filter(|statement| !cfg.skip_gate(stmt_attrs(statement)))
+}
+
+/// Detects tail uses that cannot safely inherit binding types from outside the block.
+pub(super) fn tail_uses_block_locals(
+    block: &Block,
+    cfg: &CfgSet,
+    tail: &Expr,
+    scope: &ScopePath,
+    calls: &Calls,
+    payload_constructor: &dyn Fn(&syn::ExprCall, &ScopePath) -> bool,
+) -> bool {
+    let patterns = active_statements(block, cfg).filter_map(|statement| match statement {
+        Stmt::Local(local) => Some(&local.pat),
+        _ => None,
+    });
+    uses_pattern_bindings(cfg, tail, patterns, scope, calls, payload_constructor)
+}
+
+/// Detects inference inputs bound by patterns whose scope has not been established.
+pub(super) fn uses_pattern_bindings<'a>(
+    cfg: &CfgSet,
+    expression: &Expr,
+    patterns: impl Iterator<Item = &'a Pat>,
+    scope: &ScopePath,
+    calls: &Calls,
+    payload_constructor: &dyn Fn(&syn::ExprCall, &ScopePath) -> bool,
+) -> bool {
+    struct PatternNames(HashSet<String>);
+    impl<'ast> Visit<'ast> for PatternNames {
+        fn visit_pat_ident(&mut self, i: &'ast syn::PatIdent) {
+            let _inserted = self.0.insert(i.ident.to_string());
+            syn::visit::visit_pat_ident(self, i);
+        }
+    }
+
+    struct LocalUses<'a> {
+        cfg: &'a CfgSet,
+        calls: &'a Calls,
+        payload_constructor: &'a dyn Fn(&syn::ExprCall, &ScopePath) -> bool,
+        binding_scope: &'a ScopePath,
+        scope: ScopePath,
+        names: HashSet<String>,
+        found: bool,
+    }
+    impl<'ast> Visit<'ast> for LocalUses<'_> {
+        fn visit_expr_path(&mut self, i: &'ast syn::ExprPath) {
+            self.found |= i.path.get_ident().is_some_and(|name| {
+                let name = name.to_string();
+                self.names.contains(&name) && self.calls.value_type(&name, &self.scope, Some(self.binding_scope)).is_none()
+            });
+        }
+
+        fn visit_expr_call(&mut self, i: &'ast syn::ExprCall) {
+            self.visit_expr(&i.func);
+            if (self.payload_constructor)(i, &self.scope)
+                && let Some(argument) =
+                    // #[gamma::skip(iter.first_to_last, reason = "The semantic payload predicate recognizes only Box/Rc/Arc/Cell/RefCell/Mutex/RwLock::new. Their standard-library definitions each take one payload argument; for every supported well-typed call first and last therefore select the same argument. Argument-independent and source-defined factories never enter this branch.", tag = "equivalent")]
+                    i.args.first()
+            {
+                self.visit_expr(argument);
+            }
+        }
+
+        fn visit_expr_method_call(&mut self, i: &'ast syn::ExprMethodCall) {
+            self.visit_expr(&i.receiver);
+        }
+
+        fn visit_expr_cast(&mut self, _: &'ast syn::ExprCast) {}
+
+        fn visit_expr_struct(&mut self, _: &'ast syn::ExprStruct) {}
+
+        fn visit_expr_block(&mut self, i: &'ast ExprBlock) {
+            if let Some(Stmt::Expr(tail, None)) = active_statements(&i.block, self.cfg).next_back() {
+                self.scope.push(block_id(&i.block));
+                self.visit_expr(tail);
+                let _scope = self.scope.pop();
+            }
+        }
+
+        fn visit_expr_match(&mut self, i: &'ast syn::ExprMatch) {
+            for arm in &i.arms {
+                if !self.cfg.skip_gate(&arm.attrs) {
+                    self.visit_expr(&arm.body);
+                }
+            }
+        }
+    }
+    let mut names = PatternNames(HashSet::default());
+    for pattern in patterns {
+        names.visit_pat(pattern);
+    }
+    let mut uses = LocalUses {
+        cfg,
+        calls,
+        payload_constructor,
+        binding_scope: scope,
+        scope: scope.clone(),
+        names: names.0,
+        found: false,
+    };
+    uses.visit_expr(expression);
+    uses.found
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
@@ -890,9 +1031,9 @@ mod tests {
             assert_eq!(is_unsigned_binding(&ty), unsigned, "{text}");
         }
         for text in ["panic!()", "todo!()", "unreachable!()", "unimplemented!()"] {
-            assert!(diverges(&parse_str::<Expr>(text).unwrap()));
+            assert!(diverges(&CfgSet::unconditional(), &parse_str::<Expr>(text).unwrap()));
         }
-        assert!(!diverges(&syn::parse_quote!(ordinary!())));
+        assert!(!diverges(&CfgSet::unconditional(), &syn::parse_quote!(ordinary!())));
     }
 
     fn default_paths(source: &str) -> DefaultPaths {
@@ -1008,8 +1149,8 @@ mod tests {
             let _value = 1;
         });
 
-        assert!(block_diverges(&macro_block));
-        assert!(!block_diverges(&local_tail));
+        assert!(block_diverges(&CfgSet::unconditional(), &macro_block));
+        assert!(!block_diverges(&CfgSet::unconditional(), &local_tail));
     }
 
     #[test]
@@ -1188,6 +1329,18 @@ mod tests {
     }
 
     #[test]
+    fn divergence_requires_a_nonempty_set_of_active_match_arms() {
+        let cfg = CfgSet::parse("");
+        for (expression, expected) in [
+            ("match value { _ => return 1, #[cfg(any())] _ => 2 }", true),
+            ("match value { #[cfg(any())] _ => return 1 }", false),
+            ("match value { _ => 2, #[cfg(any())] _ => return 1 }", false),
+        ] {
+            assert_eq!(diverges(&cfg, &parse_str(expression).unwrap()), expected, "{expression}");
+        }
+    }
+
+    #[test]
     fn divergence_and_pattern_helpers_cover_each_recursive_form() {
         for expression in [
             parse_quote!(return 1),
@@ -1203,7 +1356,7 @@ mod tests {
                 None => panic!(),
             }),
         ] {
-            assert!(diverges(&expression), "{expression:?}");
+            assert!(diverges(&CfgSet::unconditional(), &expression), "{expression:?}");
         }
         for expression in [
             parse_quote!(loop {
@@ -1224,7 +1377,7 @@ mod tests {
             parse_quote!(if ready { return 1 } else { 0 }),
             parse_quote!(if ready { 0 } else { return 1 }),
         ] {
-            assert!(!diverges(&expression), "{expression:?}");
+            assert!(!diverges(&CfgSet::unconditional(), &expression), "{expression:?}");
         }
 
         assert_eq!(declared_name(&parse_quote!(value)), Some("value".to_owned()));

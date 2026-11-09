@@ -316,8 +316,6 @@ pub(super) fn mutant_detail(mutant: &crate::model::Mutant) -> String {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use std::time::Instant;
-
     use camino::Utf8PathBuf;
 
     use super::super::verdict_log::TESTING_PROGRESS_LOG;
@@ -334,7 +332,7 @@ mod tests {
             let mut events = ConsoleEvents {
                 host: &mut host,
                 progress: Progress::new(true, Styler::new(false), Some(80)),
-                dashboard: Dashboard::new(true, Some(80), Styler::new(false)),
+                dashboard: Dashboard::new(true, Some(80), Styler::new(false), tick::ClockControl::new().to_simple_clock()),
                 styler: Styler::new(false),
                 show_build: false,
                 verdict_log: VerdictLog::default(),
@@ -389,8 +387,7 @@ mod tests {
     #[test]
     fn dashboard_starts_while_the_sweep_is_still_being_planned() {
         let mut host = Sink::default().terminal(160);
-        let mut dashboard = Dashboard::new(true, Some(160), Styler::new(false));
-        dashboard.set_redraw_time_for_test(Instant::now());
+        let dashboard = Dashboard::new(true, Some(160), Styler::new(false), tick::ClockControl::new().to_simple_clock());
         let mut events = ConsoleEvents {
             host: &mut host,
             progress: Progress::new(true, Styler::new(false), Some(160)),
@@ -426,7 +423,7 @@ mod tests {
         let mut events = ConsoleEvents {
             host: &mut host,
             progress: Progress::new(true, Styler::new(false), Some(80)),
-            dashboard: Dashboard::new(false, Some(80), Styler::new(false)),
+            dashboard: Dashboard::new(false, Some(80), Styler::new(false), tick::ClockControl::new().to_simple_clock()),
             styler: Styler::new(false),
             show_build: false,
             verdict_log: VerdictLog::default(),
@@ -455,7 +452,7 @@ mod tests {
         let mut events = ConsoleEvents {
             host: &mut host,
             progress: Progress::new(true, Styler::new(false), Some(200)),
-            dashboard: Dashboard::new(false, Some(200), Styler::new(false)),
+            dashboard: Dashboard::new(false, Some(200), Styler::new(false), tick::ClockControl::new().to_simple_clock()),
             styler: Styler::new(false),
             show_build: false,
             verdict_log: VerdictLog::default(),
@@ -482,7 +479,7 @@ mod tests {
         let mut events = ConsoleEvents {
             host: &mut host,
             progress: Progress::new(true, Styler::new(false), Some(200)),
-            dashboard: Dashboard::new(false, Some(200), Styler::new(false)),
+            dashboard: Dashboard::new(false, Some(200), Styler::new(false), tick::ClockControl::new().to_simple_clock()),
             styler: Styler::new(false),
             show_build: false,
             verdict_log: VerdictLog::default(),
@@ -512,7 +509,7 @@ mod tests {
         let mut events = ConsoleEvents {
             host: &mut host,
             progress: Progress::new(true, Styler::new(false), Some(200)),
-            dashboard: Dashboard::new(false, Some(200), Styler::new(false)),
+            dashboard: Dashboard::new(false, Some(200), Styler::new(false), tick::ClockControl::new().to_simple_clock()),
             styler: Styler::new(false),
             show_build: false,
             verdict_log: VerdictLog::default(),
@@ -549,7 +546,7 @@ mod tests {
         let mut events = ConsoleEvents {
             host: &mut host,
             progress: Progress::new(true, Styler::new(false), Some(200)),
-            dashboard: Dashboard::new(false, Some(200), Styler::new(false)),
+            dashboard: Dashboard::new(false, Some(200), Styler::new(false), tick::ClockControl::new().to_simple_clock()),
             styler: Styler::new(false),
             show_build: false,
             verdict_log: VerdictLog::default(),
@@ -592,7 +589,7 @@ mod tests {
         let mut events = ConsoleEvents {
             host: &mut host,
             progress: Progress::new(true, Styler::new(false), Some(80)),
-            dashboard: Dashboard::new(false, Some(80), Styler::new(false)),
+            dashboard: Dashboard::new(false, Some(80), Styler::new(false), tick::ClockControl::new().to_simple_clock()),
             styler: Styler::new(false),
             show_build: false,
             verdict_log: VerdictLog::default(),
@@ -621,7 +618,7 @@ mod tests {
         let mut events = ConsoleEvents {
             host: &mut host,
             progress: Progress::new(false, Styler::new(false), None),
-            dashboard: Dashboard::new(false, None, Styler::new(false)),
+            dashboard: Dashboard::new(false, None, Styler::new(false), tick::ClockControl::new().to_simple_clock()),
             styler: Styler::new(false),
             show_build: true,
             verdict_log: VerdictLog::default(),
@@ -648,7 +645,7 @@ mod tests {
                 let mut events = ConsoleEvents {
                     host: &mut host,
                     progress: Progress::new(false, Styler::new(false), None),
-                    dashboard: Dashboard::new(false, None, Styler::new(false)),
+                    dashboard: Dashboard::new(false, None, Styler::new(false), tick::ClockControl::new().to_simple_clock()),
                     styler: Styler::new(false),
                     show_build,
                     verdict_log: VerdictLog::default(),
@@ -670,7 +667,7 @@ mod tests {
         let mut events = ConsoleEvents {
             host: &mut host,
             progress: Progress::new(false, Styler::new(false), None),
-            dashboard: Dashboard::new(false, None, Styler::new(false)),
+            dashboard: Dashboard::new(false, None, Styler::new(false), tick::ClockControl::new().to_simple_clock()),
             styler: Styler::new(false),
             show_build: false,
             verdict_log: VerdictLog::default(),
@@ -689,7 +686,7 @@ mod tests {
                 let mut events = ConsoleEvents {
                     host: &mut host,
                     progress: Progress::new(true, Styler::new(false), Some(120)),
-                    dashboard: Dashboard::new(false, Some(120), Styler::new(false)),
+                    dashboard: Dashboard::new(false, Some(120), Styler::new(false), tick::ClockControl::new().to_simple_clock()),
                     styler: Styler::new(false),
                     show_build,
                     verdict_log: VerdictLog::default(),
@@ -707,7 +704,7 @@ mod tests {
         let mut events = ConsoleEvents {
             host: &mut host,
             progress: Progress::new(true, Styler::new(false), Some(120)),
-            dashboard: Dashboard::new(false, Some(120), Styler::new(false)),
+            dashboard: Dashboard::new(false, Some(120), Styler::new(false), tick::ClockControl::new().to_simple_clock()),
             styler: Styler::new(false),
             show_build: false,
             verdict_log: VerdictLog::default(),
@@ -742,7 +739,12 @@ mod tests {
             let mut events = ConsoleEvents {
                 host: &mut host,
                 progress: Progress::new(true, Styler::new(false), Some(160)),
-                dashboard: Dashboard::new(dashboard, Some(160), Styler::new(false)),
+                dashboard: Dashboard::new(
+                    dashboard,
+                    Some(160),
+                    Styler::new(false),
+                    tick::ClockControl::new().to_simple_clock(),
+                ),
                 styler: Styler::new(false),
                 show_build: false,
                 verdict_log: VerdictLog::default(),
@@ -784,7 +786,12 @@ mod tests {
             let mut events = ConsoleEvents {
                 host: &mut host,
                 progress: Progress::new(true, Styler::new(false), Some(160)),
-                dashboard: Dashboard::new(dashboard, Some(160), Styler::new(false)),
+                dashboard: Dashboard::new(
+                    dashboard,
+                    Some(160),
+                    Styler::new(false),
+                    tick::ClockControl::new().to_simple_clock(),
+                ),
                 styler: Styler::new(false),
                 show_build: false,
                 verdict_log: VerdictLog::default(),
@@ -844,7 +851,12 @@ mod tests {
             let mut events = ConsoleEvents {
                 host: &mut host,
                 progress: Progress::new(true, Styler::new(false), Some(160)),
-                dashboard: Dashboard::new(dashboard, Some(160), Styler::new(false)),
+                dashboard: Dashboard::new(
+                    dashboard,
+                    Some(160),
+                    Styler::new(false),
+                    tick::ClockControl::new().to_simple_clock(),
+                ),
                 styler: Styler::new(false),
                 show_build: false,
                 verdict_log: VerdictLog::default(),
@@ -889,7 +901,7 @@ mod tests {
         let mut events = ConsoleEvents {
             host: &mut host,
             progress: Progress::new(false, Styler::new(false), None),
-            dashboard: Dashboard::new(false, None, Styler::new(false)),
+            dashboard: Dashboard::new(false, None, Styler::new(false), tick::ClockControl::new().to_simple_clock()),
             styler: Styler::new(false),
             show_build: false,
             verdict_log: VerdictLog::default(),
@@ -908,7 +920,7 @@ mod tests {
         let mut events = ConsoleEvents {
             host: &mut host,
             progress: Progress::new(false, Styler::new(false), None),
-            dashboard: Dashboard::new(false, None, Styler::new(false)),
+            dashboard: Dashboard::new(false, None, Styler::new(false), tick::ClockControl::new().to_simple_clock()),
             styler: Styler::new(false),
             show_build: false,
             verdict_log: VerdictLog::default(),
@@ -943,7 +955,7 @@ mod tests {
         let mut events = ConsoleEvents {
             host: &mut host,
             progress: Progress::new(false, Styler::new(false), None),
-            dashboard: Dashboard::new(false, None, Styler::new(false)),
+            dashboard: Dashboard::new(false, None, Styler::new(false), tick::ClockControl::new().to_simple_clock()),
             styler: Styler::new(false),
             show_build: false,
             verdict_log: VerdictLog::default(),
@@ -997,7 +1009,7 @@ mod tests {
             let mut events = ConsoleEvents {
                 host: &mut host,
                 progress: Progress::new(true, styler, Some(160)),
-                dashboard: Dashboard::new(dashboard, Some(160), styler),
+                dashboard: Dashboard::new(dashboard, Some(160), styler, tick::ClockControl::new().to_simple_clock()),
                 styler,
                 show_build: false,
                 verdict_log: VerdictLog::default(),
@@ -1031,7 +1043,7 @@ mod tests {
         let mut events = ConsoleEvents {
             host: &mut host,
             progress: Progress::new(true, styler, Some(160)),
-            dashboard: Dashboard::new(true, Some(160), styler),
+            dashboard: Dashboard::new(true, Some(160), styler, tick::ClockControl::new().to_simple_clock()),
             styler,
             show_build: false,
             verdict_log: VerdictLog::default(),

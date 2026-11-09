@@ -19,8 +19,23 @@ use crate::ops::registry::Selection;
 use crate::{HashMap, HashSet};
 
 pub(super) const ABSOLUTE_ROOT: &str = "<absolute>";
+pub(super) const EXTERNAL_ROOT: &str = "<external>";
 pub(super) const EXTERN_ROOT_PREFIX: &str = "<gamma-extern-root>";
+pub(super) const ROOT_EXTERN_PREFIX: &str = "<gamma-extern-root><crate-root>";
 pub(super) type ScopePath = Vec<(usize, usize)>;
+
+pub(super) fn import_target(path: &[String]) -> &[String] {
+    let path = if path.first().is_some_and(|root| root == ABSOLUTE_ROOT) {
+        &path[1..]
+    } else {
+        path
+    };
+    if path.first().is_some_and(|root| root == EXTERNAL_ROOT) {
+        &path[1..]
+    } else {
+        path
+    }
+}
 
 pub(super) fn module_id(ident: &syn::Ident) -> (usize, usize) {
     let start = ident.span().start();
@@ -468,9 +483,21 @@ impl Walk<'_> {
     pub(super) fn on_item_extern_crate(&mut self, node: &syn::ItemExternCrate) {
         if self.type_evidence {
             let name = node.rename.as_ref().map_or(&node.ident, |(_, name)| name);
-            let path = [ABSOLUTE_ROOT.to_owned(), node.ident.to_string()];
-            self.imported(name.to_string(), &path);
+            let root = if node.ident == "self" {
+                "crate".to_owned()
+            } else {
+                node.ident.to_string()
+            };
+            let path = [ABSOLUTE_ROOT.to_owned(), root];
+            let mut imported = path.to_vec();
+            if node.ident != "self" {
+                imported.insert(1, EXTERNAL_ROOT.to_owned());
+            }
+            self.imported(name.to_string(), &imported);
             self.imported(format!("{EXTERN_ROOT_PREFIX}{name}"), &path);
+            if self.scope_path.is_empty() {
+                self.imported(format!("{ROOT_EXTERN_PREFIX}{name}"), &path);
+            }
         }
     }
 

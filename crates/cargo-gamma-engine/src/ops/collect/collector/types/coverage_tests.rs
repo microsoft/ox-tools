@@ -1041,9 +1041,105 @@ fn alias_and_qualification_budget_failures_remain_explicit_unknown_types_rather_
             assert_eq!(budget, available);
         }
         assert_eq!(
-            types.source_type_at(&parse_quote!(bool), &mut 64, false, true, &mut 0),
+            types.source_type_at(&parse_quote!(bool), &mut 64, TypeQualification::Source, true, &mut 0),
             parse_quote!(_)
         );
+    });
+}
+
+#[test]
+fn local_import_qualification_preserves_source_spelling_but_never_an_absolute_crate_prefix() {
+    with_types("struct Payload;", |types| {
+        let mut imports = types.imports.clone();
+        for (name, path) in [
+            (format!("{ROOT_EXTERN_PREFIX}this"), vec![ABSOLUTE_ROOT, "crate"]),
+            ("this".into(), vec![ABSOLUTE_ROOT, "crate"]),
+            ("Imported".into(), vec![ABSOLUTE_ROOT, "this", "Payload"]),
+            ("Local".into(), vec![ABSOLUTE_ROOT, "crate", "Payload"]),
+        ] {
+            imports.insert(name, Some(path.into_iter().map(str::to_owned).collect()));
+        }
+        let scoped = Types {
+            imports: &imports,
+            ..*types
+        };
+        for (ty, source) in [
+            (parse_quote!(::this::Payload), parse_quote!(::this::Payload)),
+            (parse_quote!(Imported), parse_quote!(this::Payload)),
+        ] {
+            assert_eq!(scoped.source_type(&ty), source);
+            assert_eq!(scoped.canonical_type(&ty), source);
+            assert_eq!(scoped.frozen_type(&ty), parse_quote!(crate::Payload));
+        }
+        let ty = parse_quote!(Local);
+        assert_eq!(scoped.source_type(&ty), parse_quote!(crate::Payload));
+        assert_eq!(scoped.canonical_type(&ty), parse_quote!(crate::Payload));
+        assert_eq!(scoped.frozen_type(&ty), parse_quote!(crate::Payload));
+    });
+}
+
+#[test]
+fn primitive_normalization_never_emits_an_absolute_self_alias() {
+    with_types("", |types| {
+        let mut imports = types.imports.clone();
+        for root in ["core", "std"] {
+            imports.insert(format!("{EXTERN_ROOT_PREFIX}{root}"), Some(vec![ABSOLUTE_ROOT.into(), root.into()]));
+        }
+        for (root, expected) in [("core", parse_quote!(::std::primitive::bool)), ("std", parse_quote!(_))] {
+            imports.insert(
+                format!("{ROOT_EXTERN_PREFIX}{root}"),
+                Some(vec![ABSOLUTE_ROOT.into(), "crate".into()]),
+            );
+            let scoped = Types {
+                imports: &imports,
+                ..*types
+            };
+            assert_eq!(scoped.canonical_type(&parse_quote!(bool)), expected);
+        }
+    });
+}
+
+#[test]
+fn genuine_extern_imports_keep_standard_api_and_primitive_identity_under_root_self_aliases() {
+    with_types("", |types| {
+        for (root, other) in [("core", "std"), ("std", "core")] {
+            let mut imports = types.imports.clone();
+            for prefix in [EXTERN_ROOT_PREFIX, ROOT_EXTERN_PREFIX] {
+                imports.insert(format!("{prefix}{root}"), Some(vec![ABSOLUTE_ROOT.into(), "crate".into()]));
+            }
+            imports.insert(root.into(), Some(vec![ABSOLUTE_ROOT.into(), "crate".into()]));
+            for (name, suffix) in [
+                ("real", vec![]),
+                ("Imported", vec!["option", "Option"]),
+                ("Primitive", vec!["primitive", "bool"]),
+            ] {
+                imports.insert(
+                    name.into(),
+                    Some(
+                        [ABSOLUTE_ROOT, EXTERNAL_ROOT, root]
+                            .into_iter()
+                            .chain(suffix)
+                            .map(str::to_owned)
+                            .collect(),
+                    ),
+                );
+            }
+            let scoped = Types {
+                imports: &imports,
+                ..*types
+            };
+            for ty in [parse_quote!(real::option::Option<bool>), parse_quote!(Imported<bool>)] {
+                assert!(scoped.supports_option_api(&ty), "{root}: {ty:?}");
+                assert!(scoped.unshadowed_type_path(&ty).is_some(), "{root}: {ty:?}");
+            }
+            let fake = parse_str(&format!("::{root}::option::Option<bool>")).unwrap();
+            assert!(!scoped.supports_option_api(&fake));
+            assert!(scoped.unshadowed_type_path(&fake).is_none());
+            assert_eq!(
+                scoped.canonical_type(&parse_quote!(Primitive)),
+                parse_str::<Type>(&format!("::{other}::primitive::bool")).unwrap()
+            );
+        }
     });
 }
 
@@ -1098,6 +1194,56 @@ fn primitive_qualification_keeps_local_declarations_alias_ambiguity_imports_and_
 }
 
 #[test]
+fn frozen_payloads_preserve_api_evidence_across_alias_and_std_rebinding() {
+    with_types("mod caller { mod std {} }", |types| {
+        let aliases = HashMap::from_iter([(
+            "Item".into(),
+            Some(Alias {
+                parameters: Vec::new(),
+                target: parse_quote!(String),
+            }),
+        )]);
+        let declaration = Types {
+            aliases: Some(&aliases),
+            ..*types
+        };
+        let frozen = declaration.frozen_type(&parse_quote!(Option<(Vec<Item>, Box<Item>)>));
+        let aliases = ["Item", "Vec", "Box", "Option"]
+            .into_iter()
+            .map(|name| {
+                (
+                    name.into(),
+                    Some(Alias {
+                        parameters: Vec::new(),
+                        target: parse_quote!(()),
+                    }),
+                )
+            })
+            .collect();
+        let mut imports = types.imports.clone();
+        imports.insert(LOCAL_MODULE.into(), Some(vec!["caller".into()]));
+        imports.insert("std".into(), Some(vec!["crate".into(), "caller".into(), "std".into()]));
+        let caller = Types {
+            aliases: Some(&aliases),
+            imports: &imports,
+            ..*types
+        };
+        let resolved = caller.source_type(&frozen);
+        assert!(caller.supports_option_api(&resolved), "{resolved:?}");
+        let tuple = caller.payload(&resolved, 0).unwrap();
+        let Type::Tuple(tuple) = tuple.as_ref() else {
+            panic!("the Option payload must remain a tuple after caller-side resolution");
+        };
+        assert!(caller.supports_collection_api(&tuple.elems[0]), "{tuple:?}");
+        assert!(caller.supports_wrapper_api(&tuple.elems[1]), "{tuple:?}");
+        for ty in &tuple.elems {
+            let item = caller.payload(ty, 0).unwrap();
+            assert!(caller.supports_string_api(&item), "{item:?}");
+        }
+    });
+}
+
+#[test]
 fn primitive_kind_proofs_require_the_expected_kind_and_exact_unshadowed_standard_namespace() {
     with_types("", |types| {
         for (source, kind, expected) in [
@@ -1130,8 +1276,36 @@ fn io_result_payloads_keep_the_fixed_error_slot_and_never_replace_the_success_pa
         assert_eq!(types.payload(&ty, 0).as_deref(), Some(&parse_quote!(bool)));
         assert_eq!(types.payload(&ty, 1).as_deref(), Some(&parse_quote!(std::io::Error)));
         assert_eq!(types.payload(&ty, 2), None);
+        let frozen: Type = parse_quote!(::std::result::Result<::core::primitive::bool, ::std::io::Error>);
+        assert_eq!(types.frozen_type(&ty), frozen);
+        assert_eq!(frozen_type_identity(&ty), frozen);
         for spelling in ["custom::io::Result<bool>", "std::other::Result<bool>", "std::io::Other<bool>"] {
             assert!(!types.is_io_result(&parse_str(spelling).unwrap()), "{spelling}");
+        }
+    });
+}
+
+#[test]
+fn comparison_identities_qualify_standard_paths_without_rebinding_nominals() {
+    with_types("", |types| {
+        for (source, identity) in [
+            ("std::Owner", "::std::Owner"),
+            ("std::time::Duration", "::std::time::Duration"),
+            ("core::time::Duration", "::core::time::Duration"),
+            ("alloc::rc::Rc<crate::Owner>", "::alloc::rc::Rc<crate::Owner>"),
+            (
+                "std::rc::Rc::<std::rc::Rc::<crate::Owner>>",
+                "::std::rc::Rc<::std::rc::Rc<crate::Owner>>",
+            ),
+            ("external::Record", "external::Record"),
+            ("crate::Record", "crate::Record"),
+            ("std", "std"),
+            ("core", "core"),
+            ("alloc", "alloc"),
+        ] {
+            let ty: Type = parse_str(source).unwrap();
+            assert_eq!(frozen_type_identity(&ty), parse_str::<Type>(identity).unwrap(), "{source}");
+            assert_eq!(types.frozen_type(&ty), ty, "{source}");
         }
     });
 }

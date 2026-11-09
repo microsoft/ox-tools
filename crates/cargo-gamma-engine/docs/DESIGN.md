@@ -358,10 +358,11 @@ configuration and therefore audits the whole file.
   iterator chains. Removing `!` from a borrowed boolean dereferences the
   operand so the replacement remains a boolean. Slice, array, and standard
   `Vec::iter` callback evidence carries borrowed tuple elements into `any`
-  and `all` closures. Each negation site emits one replacement: a proven
+  and `all` closures. Each negation site emits at most one replacement: a proven
   borrowed boolean uses the dereferenced form at replacement index 1; other
   operands use the plain form at index 0, optimistic when their type is
-  unresolved. Keeping these identities distinct prevents a historical failure
+  unavailable. Present-but-incomplete inferred evidence emits no replacement.
+  Keeping these identities distinct prevents a historical failure
   of the plain form from suppressing a corrected borrowed-boolean replacement.
   Unknown operands never add a speculative dereference alternative.
   Double negation is not a substitute
@@ -461,7 +462,182 @@ configuration and therefore audits the whole file.
   original value type.
   Tail selection gates every statement kind, including item declarations, so
   a disabled item following the active expression cannot hide its expected type
-  or numeric return perturbations.
+  or numeric return perturbations. The same selection applies recursively through
+  nested blocks and branches when inferring block types, propagating expected
+  types, preserving numeric reduction inference, and protecting value-required
+  loops and diverging tails. Active items and semicolon-terminated statements
+  remain tail barriers rather than exposing an earlier expression.
+  Only active match arms contribute to branch-type inference and provide non-unit
+  evidence for protecting other arm tails.
+  Labeled blocks are divergence-transparent only when they contain no active
+  breaks, conservatively including breaks in nested loops.
+  A break, including one before the final statement, can supply their reachable
+  value, which remains eligible for numeric perturbations.
+  Divergence requires a nonempty set of active match arms, all diverging.
+  Before a block's locals are visited, tail inference withholds enclosing-scope
+  binding evidence when the tail uses an active local declared in that block.
+  Inactive locals and unrelated names do not invalidate that evidence.
+  Call arguments do not invalidate an independently known callee return type.
+  Payload-inferred standard constructors instead retain their first argument's
+  binding dependencies. Explicit casts
+  retain their stated output type. Struct initializer fields likewise do not
+  invalidate the struct path's known type. Match-arm protection first establishes
+  each active arm's pattern bindings; recursive branch inference withholds outer-scope
+  evidence for names bound by a not-yet-entered arm pattern.
+  Dependency scanning follows only active value tails and active match-arm
+  bodies, not discarded block prefixes, scrutinees, or guards. Intervening
+  value items and imports shadow an enclosing local dependency; inactive items
+  and type-only imports do not. Lookup stops at the local's declaration scope,
+  so unrelated outer items cannot hide a genuine local dependency. Recursive type
+  inference enters the indexed block scope for calls, imports, aliases, and
+  related type lookups, so local items cannot inherit an outer namesake's
+  signature and known local non-unit return types still protect sibling arms.
+  Binding types retain their declaration-scope aliases and imports while
+  explicit casts use the scope of the expression being inferred. Indexed call
+  signatures carry their declaration scope, including qualified and imported
+  calls. Indexed outputs freeze after declaration-generic substitution, without
+  applying the caller's abstract or defaulted generic names.
+  Known type evidence freezes primitive and prelude identities in its
+  declaration environment before returning an inferred type, so later consumers
+  cannot reinterpret it through caller-local aliases or imports.
+  Inferred identifier bindings retain their initializer's import evidence.
+  An imported value item that shadows an enclosing binding supplies its own
+  declaration imports rather than the hidden binding's saved context.
+  Unit and tuple struct constructors shadow enclosing values whether declared
+  directly or imported; braced struct declarations remain type-only.
+  Chained payload extraction carries that context forward; indexed methods use
+  their output declaration context rather than inheriting the receiver's.
+  Method-origin lookup infers field-backed receivers before selecting the
+  output declaration context.
+  Constructor and method results use the same normalized identities before
+  operator comparison. Validated method and payload results are not normalized
+  again against caller imports; borrowed-boolean checks compare their frozen
+  intrinsic identities even when a caller rebinds an external root.
+  Payload constructors freeze their owner separately and preserve already-frozen
+  arguments, including nested wrappers. Concrete aliases and explicit wrapper
+  arguments remain intact; inferred payload arguments fill only an unparameterized
+  owner through its type syntax tree. Synthesized `io::Result` identities use
+  absolute `Result` and `Error` paths when freezing a declaration.
+  Generated constructor paths retain the source's leading `::`, so lexical
+  modules cannot redirect a validated absolute external constructor.
+  Synthesized standard method results use absolute,
+  trusted external identities before caller imports are applied. Standard
+  prelude and primitive identities choose an unrebound compatible external
+  root; primitive evidence becomes unknown if neither `core` nor `std` is trusted.
+  Qualified primitive evidence validates the original external crate before
+  rewriting its root: `self` and foreign crates cannot masquerade as standard
+  primitives. Absolute primitive paths, including absolute named imports, use
+  crate-root extern provenance rather than nested extern bindings; normalized
+  absolute roots must also name genuine standard primitives at the crate root.
+  The shared primitive module permits genuine `std`/`core` aliases
+  to preserve already-validated payload evidence across caller rebinding.
+  Branch agreement preserves the frozen evidence of each inferred element,
+  rather than revalidating composites in a caller scope or requiring identical
+  source spelling. Source-written constructor paths freeze in their expression
+  scope before contributing to composites. Comparison treats trusted
+  `core::primitive` and `std::primitive` identities as equivalent, including
+  nested operator RHS types, without changing the root used to express the
+  inferred result. Match sibling-tail
+  protection reads active block-local declarations in source order before
+  judging their tails, including successful `let ... else` destructuring,
+  restoring the outer binding evidence afterward.
+  Boolean, character, and string literals select trusted roots independently of source
+  type lookup and retain their intrinsic identities even when a local type
+  shadows their primitive names. Absolute type paths bypass lexical type-name
+  shadows while retaining external-crate identity validation. External value
+  imports remain outside the source-local inventory rather than resolving
+  against same-named source modules; their unavailable value types stay unknown.
+  Absolute nominal lookup bypasses lexical imports and recognizes source-local
+  external aliases only when declared at the crate root. Indexed fields retain
+  their declaration scope for subsequent method and payload lookup.
+  Canonicalized `crate`, `self`, and `super` roots remain local, including when
+  an indexed alias expansion carries an absolute-path marker.
+  Crate-root extern provenance is inherited separately from lexical extern
+  shadows. Indexed and inferred composite types canonicalize absolute crate-root
+  `extern crate self` aliases to `crate` paths before comparison, keeping local
+  lookalikes distinct from standard-library types. Absolute import provenance
+  survives expansion for type freezing and source-local value lookup; genuine
+  external value imports remain unavailable. Synthetic absolute `crate` roots
+  become ordinary local paths. Genuine `extern crate` imports retain a separate
+  external-namespace marker through named imports, even when their original crate
+  name is a crate-root `extern crate self` alias. Source self aliases normalize
+  before expansion; canonical declaration types are not reinterpreted as source
+  paths while freezing. Alias arguments resolve in the caller's source context
+  before substitution into canonical declaration targets. Frozen external
+  receivers never consult same-named local methods or field layouts, and standard
+  method inference uses their frozen identities rather than lexical root bindings.
+  Frozen operator owners and RHS types likewise stay outside source-local nominal
+  lookup. Indexed constants and statics retain their frozen declaration identities
+  through named imports, parentheses, and reference dereferences instead of
+  resolving their roots again as source syntax. Literal primitive output roots
+  must be genuine external crates in both lexical and crate-root provenance.
+  Relative source self-alias roots inherited by child modules normalize before
+  canonical freezing unless a lexical import overrides them. Source-absolute
+  primitive and prelude recognition also checks crate-root extern provenance;
+  nested genuine extern bindings cannot turn a source-local absolute path into
+  a standard-library type. Genuine external imports retain their own provenance.
+  Parentheses around a generic alias do not bypass source-argument normalization.
+  Payload constructors infer omitted generic-alias payloads from their frozen
+  arguments while retaining concrete aliases and explicitly supplied type
+  arguments. Standard operator classification uses caller-independent frozen
+  evidence, so caller root rebinding cannot erase validated operand identities.
+  Slice and pointer element
+  aliases resolve in their declaration environment before indexed types freeze.
+  A named type-only import, including a crate-root alias with an empty target,
+  does not hide a value glob: unresolved glob values prevent lookup from falling
+  through to an enclosing value declaration.
+  Protected inherited `crate`, `self`, and `super` imports still resolve against
+  the source inventory. `extern crate self` aliases always resolve from the
+  crate root, including declarations inside nested modules.
+  Iterator-generated character and enumeration-index types use trusted absolute
+  primitive identities rather than resolving caller-local aliases. Resource
+  proofs recognize frozen primitive character elements in field-backed vectors,
+  preserving stall protection for character scans through immutable owners.
+  Frozen absolute collection roots bypass unrelated caller generic names while
+  relative generic names still shadow enclosing aliases.
+  Operator proofs require complete frozen RHS identities on both the operand
+  and relevant implementations; unknown components cannot prove equality or
+  absence. Output comparisons use complete caller-independent frozen identities,
+  including equivalent standard result spellings, without applying caller imports.
+  Comparison-only qualification normalizes standard external path spelling
+  and ignores optional turbofish separators without rewriting the spelling
+  retained by ordinary inference.
+  String-reference consumers recognize qualified
+  primitive spellings as well as bare `str`; return-value replacements require
+  a resolved standard identity, not a local module named `std` or `core`.
+  This includes the payloads of string-wrapper constructors and the proof of
+  string-reference defaults inside arrays. Qualified string
+  paths remain valid under unrelated bare-name shadows and wildcard imports;
+  bare `str` still requires unambiguous lexical evidence.
+  Receiver lookup preserves that declaration environment through parentheses,
+  references, and active block tails. Standard `Option` and `Result` payload
+  extraction freezes known primitive and prelude type identities recursively,
+  so chained methods do not reinterpret a payload through a caller-local alias.
+  Custom types and aliases retain their source identity.
+  Removing boolean negation recognizes borrowed primitive booleans through
+  both source and qualified spellings, and dereferences the replacement once.
+  Removal is withheld when an inferred operand contains unknown type syntax,
+  including evidence erased by a wildcard import.
+  Reusable parameter payloads compare normalized types in the parameter and
+  current binding's declaration environments. Normalized types must agree;
+  unknown agreement additionally requires the original parameter declaration
+  scope, where the binding still has the parameter's exact source type,
+  so erased or identically spelled local shadows
+  cannot establish payload reuse.
+  Indexed fields freeze their types in their declaration scope before operand
+  comparison. Constants and statics freeze their indexed types in their declaration scope,
+  so caller-local generic parameters and bounds cannot change their identity.
+  They shadow outer bindings; unavailable inner value items do not fall back
+  to an outer namesake.
+  Import lookup observes lexical declaration scopes, resolves source-visible
+  constant/static types in the target's declaration environment, and withholds
+  unavailable imported value evidence. Type-only imports do not shadow values.
+  Assignment-default admission also uses that target declaration environment.
+  Indexed operator operands and outputs freeze primitive and prelude identities
+  recursively before comparison with inferred operands. Nominal fallback
+  comparison requires successful resolution on both sides, not two unresolved paths.
+  `self` imports, including renamed forms, bind only the type namespace and
+  never introduce value evidence, even when their target has a value namesake.
   Qualified constructors propagate borrowed-temporary evidence to their consumer.
   Array reversals in assignment destinations guard the whole assignment, retaining
   valid places and evaluating the right-hand side once. This includes arrays nested

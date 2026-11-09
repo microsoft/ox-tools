@@ -466,7 +466,11 @@ mod tests {
             assert_eq!(indexes.root_imports.get("*"), Some(&None));
             assert_eq!(
                 indexes.root_imports.get("imported"),
-                Some(&Some(vec![ABSOLUTE_ROOT.into(), "external".into()]))
+                Some(&Some(vec![
+                    ABSOLUTE_ROOT.into(),
+                    super::super::indexes::EXTERNAL_ROOT.into(),
+                    "external".into()
+                ]))
             );
             assert_eq!(indexes.fields.get("kept"), Some(&false));
             assert!(!indexes.fields.contains_key("absent"));

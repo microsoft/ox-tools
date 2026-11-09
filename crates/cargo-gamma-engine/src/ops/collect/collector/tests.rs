@@ -1,8 +1,10 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+use syn::parse::Parser;
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
+use syn::token::{Group, Paren};
 use syn::visit::Visit;
 use syn::{Expr, Item, Member, Stmt};
 
@@ -74,7 +76,7 @@ fn control_flow_default_markers_require_a_matching_expected_type_and_unary_const
         ] {
             let expression: Expr = syn::parse_str(text).unwrap();
             let mut spans = Vec::new();
-            super::admissible_default_spans(&expression, &expected, &types, &mut spans);
+            super::admissible_default_spans(&CfgSet::unconditional(), &expression, &expected, &types, &mut spans);
             let expected_spans = if admitted {
                 vec![expression.span().byte_range()]
             } else {
@@ -648,7 +650,7 @@ fn inferred_locals_keep_unsigned_evidence_separate_from_resource_trust() {
                 }
                 assert!(collector.inferred_unsigned.contains("value"));
                 assert!(!collector.binding_types["copy"].resource_trusted);
-                assert_eq!(collector.binding_types["copy"].ty, syn::parse_quote!(u32));
+                assert_eq!(collector.binding_types["copy"].ty, syn::parse_quote!(::core::primitive::u32));
             });
         },
     );
@@ -806,7 +808,7 @@ fn unsigned_zero_collection_records_only_zero_literals_and_real_sum_sources() {
     ] {
         let expression: Expr = syn::parse_str(text).unwrap();
         let mut spans = Vec::new();
-        super::unsigned_zero_spans(&expression, &mut spans);
+        super::unsigned_zero_spans(&CfgSet::unconditional(), &expression, &mut spans);
         let actual: Vec<_> = spans.iter().map(|span| &text[span.clone()]).collect();
         assert_eq!(actual, expected, "{text}");
     }
@@ -1237,6 +1239,172 @@ fn cfg_disabled_items_do_not_hide_numeric_return_tails() {
             assert_eq!(file.slice(&candidate.span), "{ probe() }");
         }
     }
+}
+
+#[test]
+fn nested_cfg_active_tails_preserve_result_replacements() {
+    for attributes in ["#[cfg(any())]", "#[cfg_attr(all(), cfg(any()))]"] {
+        for body in [
+            format!("{{ {{ Ok(1) }} {attributes} struct Hidden; }}"),
+            format!("if ready {{ {{ Ok(1) }} {attributes} struct Hidden; }} else {{ Err(error) }}"),
+            format!("match ready {{ _ => {{ {{ Ok(1) }} {attributes} struct Hidden; }} }}"),
+        ] {
+            for error in ["String", "&'static u8"] {
+                let source = format!("fn f(error: {error}) -> Result<u8, {error}> {{ {body} }}");
+                let file = SourceFile::parse("fixture.rs", source).unwrap();
+                let found = collect_in(&file, &Selection::parse("result.ok_to_err").unwrap(), &CfgSet::parse(""));
+                assert_eq!(found.len(), 1, "{error}: {body}: {found:?}");
+                assert_eq!(file.slice(&found[0].span), "Ok(1)");
+                if error == "&'static u8" {
+                    assert_eq!(found[0].replacement, "Err(error)");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn labeled_blocks_with_breaks_or_values_retain_numeric_perturbations() {
+    for statements in [
+        "break 'out 1;",
+        "if ready { break 'out 1; } return 2;",
+        "loop { break; } return 2;",
+        "let _ = loop { break 2; }; return 1;",
+        "fn unused() { loop { break; } } return 1;",
+        "match ready { true => break 'out 2, false => return 1 }",
+        "{ 1 }",
+    ] {
+        for tail in ["", "#[cfg(any())] struct Hidden;", "#[cfg_attr(all(), cfg(any()))] struct Hidden;"] {
+            let body = format!("'out: {{ {statements} {tail} }}");
+            let source = format!("fn f(ready: bool) -> u32 {{ {body} }}");
+            let file = SourceFile::parse("fixture.rs", source).unwrap();
+            let found = collect_in(
+                &file,
+                &Selection::parse("expr.increment,expr.decrement").unwrap(),
+                &CfgSet::parse(""),
+            );
+            assert_eq!(
+                found.iter().map(|candidate| candidate.mutator).collect::<Vec<_>>(),
+                ["expr.decrement", "expr.increment"],
+                "{body}: {found:?}"
+            );
+            for candidate in found {
+                assert_eq!(file.slice(&candidate.span), body);
+            }
+        }
+    }
+}
+
+#[test]
+fn breakless_labeled_blocks_with_diverging_tails_do_not_emit_numeric_perturbations() {
+    for tail in ["", "#[cfg(any())] struct Hidden;", "#[cfg_attr(all(), cfg(any()))] struct Hidden;"] {
+        let source = format!("fn f() -> u32 {{ 'out: {{ return 1; {tail} }} }}");
+        assert_eq!(
+            mutators(&source, "expr.increment,expr.decrement", &CfgSet::parse("")),
+            Vec::<&str>::new(),
+            "{tail}"
+        );
+    }
+}
+
+#[test]
+fn disabled_breaks_do_not_hide_labeled_block_divergence() {
+    for attributes in ["#[cfg(any())]", "#[cfg_attr(all(), cfg(any()))]"] {
+        for statements in [
+            format!("return 1; {attributes} break 'out 2;"),
+            format!("{attributes} let _ = loop {{ break 2; }}; return 1;"),
+            format!("{attributes} fn unused() {{ loop {{ break; }} }} return 1;"),
+            format!("match flag {{ true => return 1, {attributes} false => break 'out 2, false => return 1 }}"),
+        ] {
+            let source = format!("fn f(flag: bool) -> u32 {{ return 'out: {{ {statements} }}; }}");
+            assert_eq!(
+                mutators(&source, "expr.increment,expr.decrement", &CfgSet::parse("")),
+                Vec::<&str>::new(),
+                "{statements}"
+            );
+        }
+    }
+}
+
+#[test]
+fn nested_cfg_active_tails_preserve_unsigned_zero_context() {
+    let file = SourceFile::parse("fixture.rs", "fn f() -> u32 { { { 0 } #[cfg(any())] struct Hidden; } }".into()).unwrap();
+    let found = collect_in(
+        &file,
+        &Selection::parse("literal.int_increment,literal.int_decrement").unwrap(),
+        &CfgSet::parse(""),
+    );
+    assert_eq!(
+        found.iter().map(|candidate| candidate.replacement.as_str()).collect::<Vec<_>>(),
+        ["1"]
+    );
+}
+
+#[test]
+fn nested_cfg_active_tails_preserve_inferred_block_types() {
+    with_source_facts("", "all", |collector| {
+        for expression in [
+            "{ { true } #[cfg(any())] struct Hidden; }",
+            "{ { true } #[cfg_attr(all(), cfg(any()))] struct Hidden; }",
+        ] {
+            assert_eq!(
+                collector.inferred_expression_type(&syn::parse_str(expression).unwrap()),
+                Some(syn::parse_quote!(::core::primitive::bool)),
+                "{expression}"
+            );
+        }
+    });
+}
+
+#[test]
+fn nested_cfg_active_tails_preserve_reduction_inference_and_value_required_loops() {
+    let cfg = CfgSet::parse("");
+    for expression in [
+        "{ { values.iter().sum() } #[cfg(any())] struct Hidden; }",
+        "if ready { { values.iter().sum() } #[cfg(any())] struct Hidden; } else { 0 }",
+    ] {
+        assert!(
+            super::needs_expected_numeric_type(&cfg, &syn::parse_str(expression).unwrap()),
+            "{expression}"
+        );
+    }
+    for expression in [
+        "{ { loop { break 1; } } #[cfg(any())] struct Hidden; }",
+        "if ready { { loop { break 1; } } #[cfg(any())] struct Hidden; } else { 0 }",
+    ] {
+        let expression: Expr = syn::parse_str(expression).unwrap();
+        let mut spans = Vec::new();
+        super::value_position_loop_spans(&cfg, &expression, &mut spans);
+        assert_eq!(spans.len(), 1, "{expression:?}");
+    }
+}
+
+#[test]
+fn cfg_active_tail_selection_preserves_items_and_semicolon_barriers() {
+    for attributes in ["", "#[cfg(all())]", "#[cfg(version(\"1.80\"))]", "#[cfg_attr(any(), cfg(any()))]"] {
+        let source = format!("fn f() -> Result<u8, String> {{ {{ {{ Ok(1) }} {attributes} struct Active; }} }}");
+        assert!(mutators(&source, "result.ok_to_err", &CfgSet::parse("")).is_empty(), "{source}");
+        let source = format!("fn f() -> Result<u8, String> {{ {{ Ok(1); {attributes} struct Active; }} }}");
+        assert!(mutators(&source, "result.ok_to_err", &CfgSet::parse("")).is_empty(), "{source}");
+    }
+}
+
+#[test]
+fn nested_cfg_active_tails_preserve_diverging_statement_protection() {
+    let cfg = CfgSet::parse("");
+    let source = "{ #[cfg(any())] let hidden = unknown(); { return 1; } #[cfg(any())] struct Hidden; }";
+    let expression: Expr = syn::parse_str(source).unwrap();
+    let mut spans = Vec::new();
+    super::mandatory_tail_statements(&cfg, &expression, &mut spans);
+    assert_eq!(spans.iter().map(|span| &source[span.clone()]).collect::<Vec<_>>(), ["return 1;"]);
+
+    let source = "{ continue; #[cfg_attr(all(), cfg(any()))] struct Hidden; }";
+    let block = syn::parse_str(source).unwrap();
+    let span = super::trailing_continue(&cfg, &block).unwrap();
+    assert_eq!(&source[span], "continue;");
+
+    let source = "fn f() -> i32 { { { return 7; } #[cfg(any())] struct Hidden; } }";
+    assert_eq!(mutators(source, "expr.increment,expr.decrement", &cfg), Vec::<&str>::new());
 }
 
 #[test]
@@ -2006,7 +2174,7 @@ fn module_prelude_policy_is_inherited_and_restored_for_unit_result_proofs() {
 fn resource_binding_and_iterator_initialization_require_exact_trusted_evidence() {
     use super::resource::Binding;
 
-    let source = "type Text = &'static str; type Cycle = Cycle; type Generic<T> = T; fn f() {}";
+    let source = "type Text = &'static str; type Cycle = Cycle; type Generic<T> = T; type Shadow = Vec<char>; fn f() {}";
     let file = SourceFile::parse("fixture.rs", source.to_owned()).unwrap();
     let selection = Selection::everything();
     let cfg = CfgSet::unconditional();
@@ -2056,6 +2224,24 @@ fn resource_binding_and_iterator_initialization_require_exact_trusted_evidence()
     }
     collector.generics.push("T".to_owned());
     assert_eq!(collector.resource_binding(&syn::parse_quote!(T), &Vec::new()), None);
+    for defaulted in [false, true] {
+        let names = vec!["std".to_owned(), "Shadow".to_owned()];
+        if defaulted {
+            collector.generics.clear();
+            collector.defaulted = names;
+        } else {
+            collector.generics = names;
+        }
+        assert_eq!(collector.resource_binding(&syn::parse_quote!(Shadow), &Vec::new()), None);
+        assert_eq!(
+            collector.resource_binding(&syn::parse_quote!(std::vec::Vec<char>), &Vec::new()),
+            None
+        );
+        assert_eq!(
+            collector.resource_binding(&syn::parse_quote!(::std::vec::Vec<char>), &Vec::new()),
+            Some(Binding::VecChar)
+        );
+    }
 }
 
 #[test]
@@ -2192,6 +2378,24 @@ fn resource_filters_omit_removed_sole_exits_and_growth_loops() {
             &CfgSet::unconditional(),
         );
         assert!(found.is_empty(), "{source}: {found:?}");
+    }
+}
+
+#[test]
+fn resource_filters_preserve_field_backed_character_scan_progress() {
+    for element in ["char", "::core::primitive::char", "::std::primitive::char"] {
+        for generics in ["", "<std>", "<std: Default>"] {
+            let source = format!(
+                "struct Owner {{ characters: Vec<{element}> }} fn f{generics}(owner: &Owner, mut index: usize, end: usize) {{ while index < end && owner.characters[index] == 'x' {{ index += 1; }} }}"
+            );
+            let file = SourceFile::parse("fixture.rs", source.clone()).unwrap();
+            let found = collect_in(&file, &Selection::parse("stmt.delete_assign").unwrap(), &CfgSet::unconditional());
+            let progress = source.find("index += 1;").unwrap();
+            assert!(
+                !found.iter().any(|candidate| candidate.span.start == progress),
+                "{source}: {found:?}"
+            );
+        }
     }
 }
 
@@ -3845,8 +4049,8 @@ fn recursive_default_admissibility_and_payload_reuse_match_exact_typed_sites() {
         }
         let mut admissible = Vec::new();
         let mut reusable = Vec::new();
-        admissible_default_spans(expression, &expected, &types, &mut admissible);
-        reusable_payload_spans(expression, &expected, &types, &parameters, &mut reusable);
+        admissible_default_spans(&CfgSet::unconditional(), expression, &expected, &types, &mut admissible);
+        reusable_payload_spans(&CfgSet::unconditional(), expression, &expected, &types, &parameters, &mut reusable);
         assert_eq!(admissible.len(), admissible_count, "{expected:?}: {expression:?}");
         assert_eq!(reusable.len(), reusable_count, "{expected:?}: {expression:?}");
         assert!(reusable.iter().all(|(_, name)| name == "copy"));
@@ -3890,8 +4094,8 @@ fn recursive_value_position_walks_record_only_type_preserving_sites() {
         };
         let mut zeros = Vec::new();
         let mut loops = Vec::new();
-        unsigned_zero_spans(expression, &mut zeros);
-        value_position_loop_spans(expression, &mut loops);
+        unsigned_zero_spans(&CfgSet::unconditional(), expression, &mut zeros);
+        value_position_loop_spans(&CfgSet::unconditional(), expression, &mut loops);
         assert_eq!(zeros.len(), zero_count, "{expression:?}");
         assert!(zeros.iter().all(|span| file.slice(span) == "0"));
         assert_eq!(loops.len(), loop_count, "{expression:?}");
@@ -3903,7 +4107,7 @@ fn recursive_value_position_walks_record_only_type_preserving_sites() {
         expr: Box::new(syn::parse_quote!(0)),
     });
     let mut zeros = Vec::new();
-    unsigned_zero_spans(&group, &mut zeros);
+    unsigned_zero_spans(&CfgSet::unconditional(), &group, &mut zeros);
     assert_eq!(zeros.len(), 1);
 }
 
@@ -5911,11 +6115,927 @@ fn comparison_traversal_respects_unsigned_evidence_on_each_side() {
 }
 
 #[test]
-fn value_required_if_branches_keep_their_trailing_continue() {
-    let source = "fn f(flag: bool) { loop { let _ = if flag { 1 } else { continue; }; } }";
-    let found = mutators(source, "loop.delete_continue", &CfgSet::unconditional());
+fn inactive_match_arms_do_not_hide_diverging_numeric_returns() {
+    for attributes in ["#[cfg(any())]", "#[cfg_attr(all(), cfg(any()))]"] {
+        let source = format!("fn f(flag: bool) -> u32 {{ match flag {{ _ => return 1, {attributes} _ => 2 }} }}");
+        assert_eq!(
+            mutators(&source, "expr.increment,expr.decrement", &CfgSet::parse("")),
+            Vec::<&str>::new(),
+            "{attributes}"
+        );
+    }
+}
 
-    assert!(found.is_empty(), "{found:?}");
+#[test]
+fn block_local_shadowing_does_not_suppress_sibling_unit_call_deletion() {
+    for (local, tail) in [
+        ("let x = ();", "x"),
+        ("let x: () = ();", "x"),
+        ("let (x, _) = ((), ());", "x"),
+        ("let whole @ Some(x) = Some(()) else { return; };", "x"),
+        ("let x = ();", "x.clone()"),
+    ] {
+        let source = format!(
+            "fn work() {{}} fn f(x: u8, flag: bool) {{ match flag {{ true => {{ {local} {{ {tail} }} #[cfg(any())] struct Hidden; }}, false => {{ work(); }} }} }}"
+        );
+        let file = SourceFile::parse("fixture.rs", source).unwrap();
+        let found = collect_in(&file, &Selection::parse("stmt.delete_call").unwrap(), &CfgSet::parse(""));
+        assert_eq!(found.len(), 1, "{local}: {found:?}");
+        assert_eq!(file.slice(&found[0].span), "work();");
+        assert_eq!(found[0].replacement, "");
+    }
+}
+
+#[test]
+fn block_local_callees_do_not_inherit_outer_function_return_types() {
+    let source =
+        "fn make() -> u8 { 1 } fn work() {} fn f(flag: bool) { match flag { true => { let make = || (); make() }, false => { work(); } } }";
+    let file = SourceFile::parse("fixture.rs", source.to_owned()).unwrap();
+    let found = collect_in(&file, &Selection::parse("stmt.delete_call").unwrap(), &CfgSet::parse(""));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(file.slice(&found[0].span), "work();");
+    assert_eq!(found[0].replacement, "");
+}
+
+#[test]
+fn block_local_method_receivers_do_not_inherit_outer_return_types() {
+    let source = "struct Numeric; impl Numeric { fn value(&self) -> u8 { 1 } } struct Unit; impl Unit { fn value(&self) {} } fn work() {} fn f(x: Numeric, flag: bool) { match flag { true => { let x = Unit; x.value() }, false => { work(); } } }";
+    let file = SourceFile::parse("fixture.rs", source.to_owned()).unwrap();
+    let found = collect_in(&file, &Selection::parse("stmt.delete_call").unwrap(), &CfgSet::parse(""));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(file.slice(&found[0].span), "work();");
+    assert_eq!(found[0].replacement, "");
+}
+
+#[test]
+fn local_call_arguments_preserve_known_nonunit_return_evidence() {
+    for (initializer, value) in [("()", "make(x)"), ("()", "maker.make(x)"), ("1_u32", "x as u8")] {
+        let source = format!(
+            "fn make(_: ()) -> Result<u8, ()> {{ Ok(1) }} struct Maker; impl Maker {{ fn make(&self, _: ()) -> Result<u8, ()> {{ Ok(1) }} }} fn f(flag: bool, maker: Maker) {{ loop {{ let _ = match flag {{ true => {{ let x = {initializer}; {value} }}, false => {{ continue; }} }}; }} }}"
+        );
+        assert_eq!(
+            mutators(&source, "loop.delete_continue", &CfgSet::parse("")),
+            Vec::<&str>::new(),
+            "{value}"
+        );
+    }
+}
+
+#[test]
+fn scope_inference_ignores_discarded_block_prefixes() {
+    for prefix in ["x;", "let _ = x;"] {
+        let source = format!(
+            "fn make() -> Result<u8, ()> {{ Ok(1) }} fn f(flag: bool) {{ loop {{ let _ = match flag {{ true => {{ let x = (); {{ {prefix} make() }} }}, false => {{ continue; }} }}; }} }}"
+        );
+        assert_eq!(
+            mutators(&source, "loop.delete_continue", &CfgSet::parse("")),
+            Vec::<&str>::new(),
+            "{prefix}"
+        );
+    }
+}
+
+#[test]
+fn scope_inference_ignores_match_inputs() {
+    for value in [
+        "match x { () => true }",
+        "match () { () if { x; true } => true, _ => false }",
+        "match () { () => true, #[cfg(any())] _ => { x; false } }",
+    ] {
+        let source = format!(
+            "fn f(flag: bool) {{ loop {{ let _ = match flag {{ true => {{ let x = (); {value} }}, false => {{ continue; }} }}; }} }}"
+        );
+        assert_eq!(
+            mutators(&source, "loop.delete_continue", &CfgSet::parse("")),
+            Vec::<&str>::new(),
+            "{value}"
+        );
+    }
+}
+
+#[test]
+fn scope_inference_tracks_only_active_match_value_dependencies() {
+    let source = "fn work() {} fn f(x: u8, flag: bool) { match flag { true => { let x = (); match flag { true => x, false => x } }, false => { work(); } } }";
+    let file = SourceFile::parse("fixture.rs", source.to_owned()).unwrap();
+    let found = collect_in(&file, &Selection::parse("stmt.delete_call").unwrap(), &CfgSet::parse(""));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(file.slice(&found[0].span), "work();");
+    assert_eq!(found[0].replacement, "");
+
+    for attributes in ["#[cfg(any())]", "#[cfg_attr(all(), cfg(any()))]"] {
+        let source = format!(
+            "fn f(flag: bool) {{ loop {{ let _ = match flag {{ true => {{ let x = (); match flag {{ true => true, {attributes} false => x, false => false }} }}, false => {{ continue; }} }}; }} }}"
+        );
+        assert_eq!(
+            mutators(&source, "loop.delete_continue", &CfgSet::parse("")),
+            Vec::<&str>::new(),
+            "{attributes}"
+        );
+    }
+}
+
+#[test]
+fn scope_inference_resolves_block_function_shadows() {
+    for declaration in ["fn make() {}", "use crate::makers::unit as make;"] {
+        let source = format!(
+            "mod makers {{ pub fn unit() {{}} }} fn make() -> u8 {{ 1 }} fn work() {{}} fn f(flag: bool) {{ match flag {{ true => {{ {declaration} {{ make() }} #[cfg(any())] struct Hidden; }}, false => {{ work(); }} }} }}"
+        );
+        let file = SourceFile::parse("fixture.rs", source).unwrap();
+        let found = collect_in(&file, &Selection::parse("stmt.delete_call").unwrap(), &CfgSet::parse(""));
+        assert_eq!(found.len(), 1, "{declaration}: {found:?}");
+        assert_eq!(file.slice(&found[0].span), "work();");
+        assert_eq!(found[0].replacement, "");
+    }
+}
+
+#[test]
+fn scope_inference_preserves_local_nonunit_evidence() {
+    for outer in ["fn make() {}", "fn make() -> Result<u8, ()> { Ok(1) }"] {
+        for (declaration, value) in [
+            ("fn make() -> Result<u8, ()> { Ok(1) }", "make()"),
+            ("fn make() -> Result<u8, ()> { Ok(1) }", "make().map(|value| value)"),
+            ("type Output = u8;", "1_u32 as Output"),
+            ("type Output = u8;", "(1_u32 as Output) + 1"),
+            ("use std::fs::File as LocalFile;", "LocalFile::open(\"unused\")"),
+        ] {
+            let source = format!(
+                "{outer} fn f(flag: bool) {{ loop {{ let _ = match flag {{ true => {{ {declaration} {{ {value} }} #[cfg(any())] struct Hidden; }}, false => {{ continue; }} }}; }} }}"
+            );
+            assert_eq!(
+                mutators(&source, "loop.delete_continue", &CfgSet::parse("")),
+                Vec::<&str>::new(),
+                "{outer}: {declaration}: {value}"
+            );
+        }
+    }
+}
+
+#[test]
+fn scope_inference_preserves_binding_declaration_aliases() {
+    let source = "type Alias = (); fn work() {} fn f(x: Alias, flag: bool) { match flag { true => { type Alias = u8; { x } #[cfg(any())] struct Hidden; }, false => { work(); } } }";
+    let file = SourceFile::parse("fixture.rs", source.to_owned()).unwrap();
+    let found = collect_in(&file, &Selection::parse("stmt.delete_call").unwrap(), &CfgSet::parse(""));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(file.slice(&found[0].span), "work();");
+    assert_eq!(found[0].replacement, "");
+
+    let source = "type Alias = u8; fn f(x: Alias, flag: bool) { loop { let _ = match flag { true => { type Alias = (); { x } #[cfg(any())] struct Hidden; }, false => { continue; } }; } }";
+    assert_eq!(mutators(source, "loop.delete_continue", &CfgSet::parse("")), Vec::<&str>::new());
+}
+
+#[test]
+fn dependency_scanning_follows_nested_bindings_calls_receivers_and_active_arms() {
+    with_source_facts("", "loop.delete_continue", |collector| {
+        for (pattern, expression, expected) in [
+            ("whole @ Some(x)", "x", true),
+            ("x", "x()", true),
+            ("x", "(x).clone()", true),
+            ("x", "match flag { true => x, false => y }", true),
+            ("x", "match flag { #[cfg(any())] true => x, _ => y }", false),
+        ] {
+            let pattern = syn::Pat::parse_single.parse_str(pattern).unwrap();
+            let expression: Expr = syn::parse_str(expression).unwrap();
+            assert_eq!(
+                super::predicates::uses_pattern_bindings(
+                    collector.cfg,
+                    &expression,
+                    core::iter::once(&pattern),
+                    &collector.scope_path,
+                    &collector.calls,
+                    &|call, scope| collector.constructor_uses_payload(call, scope),
+                ),
+                expected,
+                "{pattern:?}: {expression:?}"
+            );
+        }
+    });
+}
+
+#[test]
+fn dependency_scanning_stops_value_lookup_at_the_binding_declaration_scope() {
+    with_source_facts(
+        "fn x() -> bool { true } fn f() -> bool { let x = false; x }",
+        "arith",
+        |collector| {
+            let Item::Fn(function) = &collector.file.ast.items[1] else {
+                unreachable!()
+            };
+            let Stmt::Local(local) = &function.block.stmts[0] else {
+                unreachable!()
+            };
+            let Stmt::Expr(tail, None) = function.block.stmts.last().unwrap() else {
+                unreachable!()
+            };
+            collector.scope_path.push(super::indexes::block_id(&function.block));
+            assert!(super::predicates::uses_pattern_bindings(
+                collector.cfg,
+                tail,
+                core::iter::once(&local.pat),
+                &collector.scope_path,
+                &collector.calls,
+                &|call, scope| collector.constructor_uses_payload(call, scope),
+            ));
+        },
+    );
+}
+
+#[test]
+fn nonunit_match_lookahead_enters_grouped_local_binding_scopes() {
+    with_source_facts("", "loop.delete_continue", |collector| {
+        let scope = collector.scope_path.clone();
+        let block: Expr = syn::parse_quote!({
+            let value = true;
+            value
+        });
+        let parenthesized = Expr::Paren(syn::ExprParen {
+            attrs: Vec::new(),
+            paren_token: Paren::default(),
+            expr: Box::new(block.clone()),
+        });
+        let grouped = Expr::Group(syn::ExprGroup {
+            attrs: Vec::new(),
+            group_token: Group::default(),
+            expr: Box::new(block),
+        });
+        for expression in [parenthesized, grouped] {
+            assert!(collector.known_nonunit_match_arm(&expression), "{expression:?}");
+            assert!(!collector.binding_types.contains_key("value"));
+            assert_eq!(collector.scope_path, scope);
+        }
+    });
+}
+
+#[test]
+fn file_open_inference_withholds_results_without_a_trusted_caller_root() {
+    for (declaration, known) in [
+        ("", true),
+        ("mod std {}", true),
+        ("extern crate core as std;", false),
+        ("extern crate core as std; extern crate std as core;", false),
+    ] {
+        let source = format!("fn f(options: ::std::fs::OpenOptions) {{ {declaration} let _ = options.open(\"unused\"); }}");
+        with_source_facts(&source, "loop.delete_continue", |collector| {
+            let Item::Fn(function) = &collector.file.ast.items[0] else {
+                unreachable!()
+            };
+            let Stmt::Local(local) = function.block.stmts.last().unwrap() else {
+                unreachable!()
+            };
+            collector.bind_type("options".into(), syn::parse_quote!(::std::fs::OpenOptions));
+            collector.scope_path.push(super::indexes::block_id(&function.block));
+            assert_eq!(
+                collector.inferred_expression_type(&local.init.as_ref().unwrap().expr).is_some(),
+                known,
+                "{source}"
+            );
+        });
+    }
+}
+
+#[test]
+fn declared_method_results_do_not_expand_caller_local_aliases() {
+    for alias in ["u8", "bool", "()"] {
+        let source = format!(
+            "mod model {{ pub struct Payload; pub struct Maker; impl Maker {{ pub fn make(&self) -> Payload {{ unreachable!() }} }} }} fn f(maker: model::Maker) {{ type Payload = {alias}; maker.make() }}"
+        );
+        with_source_facts(&source, "arith", |collector| {
+            let Item::Fn(function) = collector.file.ast.items.last().unwrap() else {
+                unreachable!()
+            };
+            let Stmt::Expr(Expr::MethodCall(call), None) = function.block.stmts.last().unwrap() else {
+                unreachable!()
+            };
+            collector.scope_path.push(super::indexes::block_id(&function.block));
+            collector.bind_type("maker".into(), syn::parse_quote!(model::Maker));
+            let expected = syn::parse_quote!(crate::model::Payload);
+            assert_eq!(
+                collector.inferred_method_type(call, &collector.scope_path),
+                Some(expected),
+                "{source}"
+            );
+        });
+    }
+}
+
+#[test]
+fn payload_constructor_dependencies_reject_dynamic_and_qualified_trait_callees() {
+    with_source_facts("", "loop.delete_continue", |collector| {
+        for expression in ["(factory())(true)", "<Maker as Factory>::new(true)", "<Box<bool>>::new(true)"] {
+            let Expr::Call(call) = syn::parse_str(expression).unwrap() else {
+                unreachable!()
+            };
+            assert!(!collector.constructor_uses_payload(&call, &collector.scope_path), "{expression}");
+        }
+        let Expr::Call(call) = syn::parse_str("std::sync::Arc::new(true)").unwrap() else {
+            unreachable!()
+        };
+        assert!(collector.constructor_uses_payload(&call, &collector.scope_path));
+    });
+}
+
+#[test]
+fn constructor_payload_dependencies_do_not_inherit_outer_local_types() {
+    for (declaration, value, tail, expected) in [
+        ("", "true", "Box::new(x)", None),
+        ("", "true", "std::sync::Arc::new(x)", None),
+        ("", "\"text\"", "String::from(x)", Some(syn::parse_quote!(::std::string::String))),
+        (
+            "fn make(_: bool) -> u8 { 0 }",
+            "true",
+            "make(x)",
+            Some(syn::parse_quote!(::core::primitive::u8)),
+        ),
+        (
+            "",
+            "0u64",
+            "std::time::Duration::new(x, 0)",
+            Some(syn::parse_quote!(std::time::Duration)),
+        ),
+        (
+            "struct Box; impl Box { fn new(_: bool) -> u8 { 0 } }",
+            "true",
+            "Box::new(x)",
+            Some(syn::parse_quote!(::core::primitive::u8)),
+        ),
+    ] {
+        let source = format!("{declaration} fn f(x: u8) {{ {{ let x = {value}; {{ {tail} }} #[cfg(any())] struct Hidden; }} }}");
+        with_source_facts(&source, "arith", |collector| {
+            let Item::Fn(function) = collector.file.ast.items.last().unwrap() else {
+                unreachable!()
+            };
+            let Stmt::Expr(expression, None) = function.block.stmts.last().unwrap() else {
+                unreachable!()
+            };
+            let expression = expression.clone();
+            collector.scope_path.push(super::indexes::block_id(&function.block));
+            collector.bind_type("x".into(), syn::parse_quote!(u8));
+            assert_eq!(collector.inferred_expression_type(&expression), expected, "{source}");
+        });
+    }
+}
+
+#[test]
+fn imported_static_assignments_use_the_declaration_environment() {
+    for (ty, initial, value, declaration, parameters, expected) in [
+        ("NoDefault", "NoDefault", "values::NoDefault", "type Value = ();", "", Vec::new()),
+        ("u8", "1", "2", "type Value = NoDefault;", "", vec!["assign_value.default"]),
+        ("NoDefault", "NoDefault", "values::NoDefault", "", "<Value: Default>", Vec::new()),
+        ("u8", "1", "2", "", "<u8>", vec!["assign_value.default"]),
+    ] {
+        let source = format!(
+            "struct NoDefault; mod values {{ pub struct NoDefault; pub type Value = {ty}; pub static mut ORIGINAL: Value = {initial}; }} use crate::values::ORIGINAL as SLOT; fn f{parameters}() {{ {declaration} unsafe {{ SLOT = {value}; }} }}"
+        );
+        assert_eq!(
+            mutators(&source, "assign_value.default", &CfgSet::parse("")),
+            expected,
+            "{ty}: {parameters}: {declaration}"
+        );
+    }
+}
+
+#[test]
+fn indexed_operator_rhs_types_match_frozen_inference() {
+    for (declaration, rhs) in [
+        ("", "u8"),
+        ("", "std::primitive::u8"),
+        ("", "(u8,)"),
+        ("", "Option<(u8,)>"),
+        ("", "Vec<Option<u8>>"),
+        ("struct Word; type u8 = Word;", "u8"),
+        ("struct Vec<T>(T);", "Vec<u8>"),
+    ] {
+        for (output, expected) in [("A", vec!["arith.add_to_sub"]), ("B", Vec::new())] {
+            let source = format!(
+                "{declaration} struct A; struct B; impl ::core::ops::Add<{rhs}> for A {{ type Output = A; fn add(self, _: {rhs}) -> A {{ self }} }} impl ::core::ops::Sub<{rhs}> for A {{ type Output = {output}; fn sub(self, _: {rhs}) -> {output} {{ {output} }} }} fn f(a: A, b: {rhs}) -> A {{ a + b }}"
+            );
+            assert_eq!(
+                mutators(&source, "arith", &CfgSet::parse("")),
+                expected,
+                "{declaration}: {rhs}: {output}"
+            );
+        }
+    }
+}
+
+#[test]
+fn intrinsic_literals_preserve_their_identity_under_type_shadows() {
+    for (declaration, first, second) in [
+        ("type str = ();", "\"a\"", "\"b\""),
+        ("struct str;", "\"a\"", "\"b\""),
+        ("type str = ();", "x.unwrap()", "\"b\""),
+        ("type str = ();", "y.unwrap()", "\"b\""),
+        ("type bool = ();", "true", "false"),
+    ] {
+        let source = format!(
+            "fn f(x: Option<&'static str>, y: Option<&'static std::primitive::str>, b: bool) {{ loop {{ let _ = match b {{ true => match b {{ true => {{ {declaration} {first} }}, false => {second} }}, false => {{ continue; }} }}; break; }} }}"
+        );
+        assert_eq!(
+            mutators(&source, "loop.delete_continue", &CfgSet::parse("")),
+            Vec::<&str>::new(),
+            "{declaration}"
+        );
+    }
+}
+
+#[test]
+fn callee_results_preserve_their_declaration_environment() {
+    for (declaration, call) in [
+        ("fn make() -> String { String::new() }", "make()"),
+        ("mod values { pub fn make() -> String { String::new() } }", "values::make()"),
+        (
+            "type String = (); mod values { pub fn make() -> String { String::new() } }",
+            "values::make()",
+        ),
+        (
+            "struct Maker; impl Maker { fn make() -> String { String::new() } }",
+            "Maker::make()",
+        ),
+        (
+            "struct Maker; impl Maker { fn make(&self) -> String { String::new() } }",
+            "Maker.make()",
+        ),
+        (
+            "mod values { pub fn make() -> String { String::new() } }",
+            "{ use crate::values::make; make() }",
+        ),
+    ] {
+        let source = format!(
+            "{declaration} fn f(flag: bool) {{ loop {{ let _ = match flag {{ true => {{ type String = (); {call} }}, false => {{ continue; }} }}; break; }} }}"
+        );
+        assert_eq!(
+            mutators(&source, "loop.delete_continue", &CfgSet::parse("")),
+            Vec::<&str>::new(),
+            "{call}"
+        );
+    }
+}
+
+#[test]
+fn mixed_payload_and_binding_branches_compare_type_identities() {
+    for (ty, binding, payload, otherwise) in [
+        ("u8", "u8", "x.unwrap()", "y"),
+        ("u8", "u8", "x.expect(\"present\")", "{ type u8 = (); y }"),
+        ("String", "String", "x.unwrap()", "y"),
+        ("String", "String", "x.unwrap()", "{ type String = (); y }"),
+        ("String", "std::string::String", "x.unwrap()", "y"),
+        ("std::string::String", "String", "x.unwrap()", "y"),
+        ("Vec<u8>", "std::vec::Vec<u8>", "x.unwrap()", "y"),
+        ("Box<u8>", "std::boxed::Box<u8>", "x.unwrap()", "y"),
+        ("bool", "bool", "x.unwrap()", "{ type bool = (); true }"),
+    ] {
+        let source = format!(
+            "fn f(x: Option<{ty}>, y: {binding}, a: bool, b: bool) {{ loop {{ let _ = match a {{ true => match b {{ true => {payload}, false => {otherwise} }}, false => {{ continue; }} }}; break; }} }}"
+        );
+        assert_eq!(
+            mutators(&source, "loop.delete_continue", &CfgSet::parse("")),
+            Vec::<&str>::new(),
+            "{ty}: {otherwise}"
+        );
+    }
+}
+
+#[test]
+fn chained_payload_methods_preserve_their_declaration_type_identity() {
+    for (ty, expression, shadow) in [
+        ("Option<String>", "x.unwrap().to_owned()", "String"),
+        ("Option<String>", "x.expect(\"present\").to_owned()", "String"),
+        ("Option<String>", "x.unwrap_or(std::string::String::new()).to_owned()", "String"),
+        ("Option<String>", "x.unwrap_or_else(std::string::String::new).to_owned()", "String"),
+        ("Option<Option<String>>", "x.unwrap().unwrap().to_owned()", "String"),
+        ("Option<Result<String, ()>>", "x.unwrap().unwrap().to_owned()", "String"),
+        ("Option<Option<String>>", "x.unwrap().unwrap().to_owned()", "Option"),
+        ("Option<Result<String, ()>>", "x.unwrap().unwrap().to_owned()", "Result"),
+        ("Option<Vec<u8>>", "x.unwrap()", "Vec"),
+        ("Option<Box<u8>>", "x.unwrap()", "Box"),
+        ("Option<u8>", "x.unwrap()", "u8"),
+    ] {
+        let source = format!(
+            "fn f(x: {ty}, flag: bool) {{ loop {{ let _ = match flag {{ true => {{ type {shadow} = (); {expression} }}, false => {{ continue; }} }}; break; }} }}"
+        );
+        assert_eq!(
+            mutators(&source, "loop.delete_continue", &CfgSet::parse("")),
+            Vec::<&str>::new(),
+            "{ty}: {expression}"
+        );
+    }
+
+    for declaration in ["type String = ();", "struct String; impl String { fn to_owned(&self) {} }"] {
+        let source = format!(
+            "{declaration} fn work() {{}} fn f(x: Option<String>, flag: bool) {{ match flag {{ true => {{ x.unwrap().to_owned() }}, false => {{ work(); }} }} }}"
+        );
+        let file = SourceFile::parse("fixture.rs", source).unwrap();
+        let found = collect_in(&file, &Selection::parse("stmt.delete_call").unwrap(), &CfgSet::parse(""));
+        assert_eq!(found.len(), 1, "{declaration}: {found:?}");
+        assert_eq!(file.slice(&found[0].span), "work();");
+        assert_eq!(found[0].replacement, "");
+    }
+}
+
+#[test]
+fn dependency_scanning_respects_intervening_value_shadows() {
+    for tail in [
+        "{ const x: bool = true; x }",
+        "{ static x: bool = true; x }",
+        "{ use crate::values::x; x }",
+        "{ use crate::values::VALUE as x; x }",
+        "match flag { x => { const x: bool = true; x } }",
+    ] {
+        let source = format!(
+            "mod values {{ pub const x: bool = true; pub const VALUE: bool = true; }} fn f(x: u8, flag: bool) {{ loop {{ let _ = match flag {{ true => {{ let x = (); {tail} }}, false => {{ continue; }} }}; break; }} }}"
+        );
+        assert_eq!(
+            mutators(&source, "loop.delete_continue", &CfgSet::parse("")),
+            Vec::<&str>::new(),
+            "{tail}"
+        );
+    }
+
+    for tail in [
+        "{ x }",
+        "{ #[cfg(any())] const x: bool = true; x }",
+        "{ #[cfg_attr(all(), cfg(any()))] static x: bool = true; x }",
+        "{ use crate::types::x; x }",
+    ] {
+        let source = format!(
+            "mod types {{ pub type x = bool; }} fn work() {{}} fn f(x: u8, flag: bool) {{ match flag {{ true => {{ let x = (); {tail} }}, false => {{ work(); }} }} }}"
+        );
+        let file = SourceFile::parse("fixture.rs", source).unwrap();
+        let found = collect_in(&file, &Selection::parse("stmt.delete_call").unwrap(), &CfgSet::parse(""));
+        assert_eq!(found.len(), 1, "{tail}: {found:?}");
+        assert_eq!(file.slice(&found[0].span), "work();");
+        assert_eq!(found[0].replacement, "");
+    }
+}
+
+#[test]
+fn struct_initializer_fields_preserve_known_method_return_types() {
+    for initializer in ["S { x }", "S { x: x }", "S { ..x }"] {
+        let local = if initializer == "S { ..x }" { "S { x: () }" } else { "()" };
+        let source = format!(
+            "struct S {{ x: () }} impl S {{ fn make(&self) -> Result<u8, ()> {{ Ok(1) }} }} fn f(flag: bool) {{ loop {{ let _ = match flag {{ true => {{ let x = {local}; {initializer}.make() }}, false => {{ continue; }} }}; }} }}"
+        );
+        assert_eq!(
+            mutators(&source, "loop.delete_continue", &CfgSet::parse("")),
+            Vec::<&str>::new(),
+            "{initializer}"
+        );
+    }
+}
+
+#[test]
+fn type_namespace_self_imports_preserve_outer_values() {
+    for import in [
+        "use crate as VALUE;",
+        "use crate::values::VALUE::{self};",
+        "use crate::values::VALUE::self;",
+        "use crate::values::VALUE::{self as VALUE};",
+        "use crate::values::VALUE::self as VALUE;",
+    ] {
+        let source = format!(
+            "const VALUE: () = (); mod values {{ pub mod VALUE {{}} pub const VALUE: bool = true; }} fn work() {{}} fn f(flag: bool) {{ match flag {{ true => {{ {import} VALUE }}, false => {{ work(); }} }} }}"
+        );
+        let file = SourceFile::parse("fixture.rs", source).unwrap();
+        let found = collect_in(&file, &Selection::parse("stmt.delete_call").unwrap(), &CfgSet::parse(""));
+        assert_eq!(found.len(), 1, "{import}: {found:?}");
+        assert_eq!(file.slice(&found[0].span), "work();");
+        assert_eq!(found[0].replacement, "");
+    }
+    for import in ["use crate::values::module::{self};", "use crate::values::module::self;"] {
+        let source = format!(
+            "mod values {{ pub mod module {{}} }} struct Owner; impl Owner {{ fn make(&self) -> Result<u8, ()> {{ Ok(1) }} fn f(&self, flag: bool) {{ loop {{ let _ = match flag {{ true => {{ {import} self.make() }}, false => {{ continue; }} }}; }} }} }}"
+        );
+        assert_eq!(
+            mutators(&source, "loop.delete_continue", &CfgSet::parse("")),
+            Vec::<&str>::new(),
+            "{import}"
+        );
+    }
+}
+
+#[test]
+fn scoped_imports_preserve_value_shadowing_and_type_evidence() {
+    for import in [
+        "use crate::unit::VALUE;",
+        "use crate::unit::{VALUE};",
+        "use crate::unit::{self, VALUE};",
+        "use crate::unit::UNIT as VALUE;",
+        "use crate::unit::*;",
+        "use external::VALUE;",
+    ] {
+        let source = format!(
+            "const VALUE: u8 = 1; mod unit {{ pub const VALUE: () = (); pub const UNIT: () = (); }} fn work() {{}} fn f(flag: bool) {{ match flag {{ true => {{ {import} {{ VALUE }} }}, false => {{ work(); }} }} }}"
+        );
+        let file = SourceFile::parse("fixture.rs", source).unwrap();
+        let found = collect_in(&file, &Selection::parse("stmt.delete_call").unwrap(), &CfgSet::parse(""));
+        assert_eq!(found.len(), 1, "{import}: {found:?}");
+        assert_eq!(file.slice(&found[0].span), "work();");
+        assert_eq!(found[0].replacement, "");
+    }
+
+    for source in [
+        "const VALUE: () = (); mod numeric { pub type Output = u8; pub const VALUE: Output = 1; } fn f(flag: bool) { loop { let _ = match flag { true => { use crate::numeric::VALUE; VALUE }, false => { continue; } }; } }",
+        "mod functions { pub fn VALUE() {} } use functions::VALUE; fn f(VALUE: bool, flag: bool) { loop { let _ = match flag { true => { VALUE }, false => { continue; } }; } }",
+        "const VALUE: bool = true; mod types { pub type VALUE = u8; } fn f(flag: bool) { loop { let _ = match flag { true => { use crate::types::VALUE; VALUE }, false => { continue; } }; } }",
+    ] {
+        assert_eq!(
+            mutators(source, "loop.delete_continue", &CfgSet::parse("")),
+            Vec::<&str>::new(),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn recursive_expression_origins_preserve_nonroot_scope_paths() {
+    with_source_facts(
+        "mod child { fn example(value: Result<&bool, ()>) -> Result<(), ()> { Ok(()) } }",
+        "all",
+        |collector| {
+            let declaration = collector.scope_aliases.keys().find(|scope| scope.len() == 1).unwrap().clone();
+            let syn::Item::Mod(module) = &collector.file.ast.items[0] else {
+                unreachable!()
+            };
+            let syn::Item::Fn(function) = &module.content.as_ref().unwrap().1[0] else {
+                unreachable!()
+            };
+            let body = super::indexes::block_id(&function.block);
+            collector.scope_path = declaration.clone();
+            collector.bind_type("value".into(), syn::parse_quote!(Result<&bool, ()>));
+            collector.scope_path.push(body);
+            for expression in [
+                syn::parse_quote!(({ value })),
+                syn::parse_quote!(&{ value }),
+                syn::parse_quote!({ value }?),
+                syn::parse_quote!(value.unwrap()),
+                syn::parse_quote!(value.expect("present")),
+                syn::parse_quote!(value.unwrap_or(&true)),
+                syn::parse_quote!(value.unwrap_or_else(|_| &true)),
+                Expr::Group(syn::ExprGroup {
+                    attrs: Vec::new(),
+                    group_token: syn::token::Group::default(),
+                    expr: Box::new(syn::parse_quote!({ value })),
+                }),
+            ] {
+                assert_eq!(
+                    collector.expression_type_scope(&expression, &collector.scope_path),
+                    declaration,
+                    "{expression:?}"
+                );
+            }
+            let expression: Expr = syn::parse_quote!(value.map(|payload| *payload));
+            assert_eq!(
+                collector.expression_type_scope(&expression, &collector.scope_path),
+                collector.scope_path
+            );
+            let expression: Expr = syn::parse_quote!({
+                {
+                    true
+                }
+                #[cfg(any())]
+                struct Hidden;
+            });
+            let Expr::Block(outer) = &expression else { unreachable!() };
+            let Stmt::Expr(Expr::Block(inner), None) = &outer.block.stmts[0] else {
+                unreachable!()
+            };
+            let mut expected = collector.scope_path.clone();
+            expected.extend([super::indexes::block_id(&outer.block), super::indexes::block_id(&inner.block)]);
+            assert_eq!(collector.expression_type_scope(&expression, &collector.scope_path), expected);
+        },
+    );
+}
+
+#[test]
+fn recursive_expression_imports_preserve_saved_initializer_context() {
+    with_source_facts(
+        "use std as original; mod child { use core as current; fn f() {} }",
+        "all",
+        |collector| {
+            let declaration = collector.scope_aliases.keys().find(|scope| scope.len() == 1).unwrap().clone();
+            let Item::Mod(module) = &collector.file.ast.items[1] else {
+                unreachable!()
+            };
+            let Item::Fn(function) = &module.content.as_ref().unwrap().1[1] else {
+                unreachable!()
+            };
+            let body = super::indexes::block_id(&function.block);
+            let imports = collector.current_imports().clone();
+            collector.scope_path = declaration;
+            collector.bind_type_with_imports("value".into(), syn::parse_quote!(Result<Option<&bool>, ()>), false, imports.clone());
+            collector.scope_path.push(body);
+            assert_ne!(collector.current_imports(), &imports);
+            for expression in [
+                syn::parse_quote!((value)),
+                Expr::Group(syn::ExprGroup {
+                    attrs: Vec::new(),
+                    group_token: Group::default(),
+                    expr: Box::new(syn::parse_quote!(value)),
+                }),
+                syn::parse_quote!(&value),
+                syn::parse_quote!(*(&value)),
+                syn::parse_quote!(value?),
+                syn::parse_quote!(value.unwrap()),
+                syn::parse_quote!(value.expect("present")),
+                syn::parse_quote!(value.unwrap_or(Some(&true))),
+                syn::parse_quote!(value.unwrap_or_else(|_| Some(&true))),
+                syn::parse_quote!(value.unwrap().unwrap()),
+            ] {
+                assert_eq!(
+                    collector.imports_of_expression(&expression),
+                    &imports,
+                    "saved initializer imports must survive {expression:?}"
+                );
+            }
+            for expression in [
+                syn::parse_quote!(value.map(|payload| payload)),
+                syn::parse_quote!(unknown.unwrap()),
+                syn::parse_quote!(unknown.build()),
+            ] {
+                assert_eq!(
+                    collector.imports_of_expression(&expression),
+                    collector.current_imports(),
+                    "unavailable method output context must retain the current imports: {expression:?}"
+                );
+            }
+        },
+    );
+}
+
+#[test]
+fn receiver_scope_retains_module_block_and_try_provenance() {
+    for source in [
+        "type String = (); mod child { fn f(x: String, flag: bool) { loop { let _ = match flag { true => { type String = (); x.to_owned() }, false => { continue; } }; } } }",
+        "type String = (); const VALUE: () = (); mod text { pub const VALUE: String = String::new(); } fn f(flag: bool) { loop { let _ = match flag { true => { ({ use crate::text::VALUE; VALUE }).to_owned() }, false => { continue; } }; } }",
+        "mod child { fn f(x: Result<&String, ()>, flag: bool) -> Result<(), ()> { loop { let _ = match flag { true => { type String = (); (x?).to_owned() }, false => { continue; } }; } } }",
+    ] {
+        assert_eq!(
+            mutators(source, "loop.delete_continue", &CfgSet::parse("")),
+            Vec::<&str>::new(),
+            "{source}"
+        );
+    }
+
+    with_source_facts("type String = (); mod child {}", "all", |collector| {
+        collector.scope_path = collector.scope_aliases.keys().find(|scope| !scope.is_empty()).unwrap().clone();
+        collector.bind_type("value".into(), syn::parse_quote!(String));
+        collector.scope_path.clear();
+        let mut call: syn::ExprMethodCall = syn::parse_quote!(value.to_owned());
+        *call.receiver = Expr::Group(syn::ExprGroup {
+            attrs: Vec::new(),
+            group_token: syn::token::Group::default(),
+            expr: Box::new(syn::parse_quote!(&value)),
+        });
+        assert_eq!(
+            collector.inferred_method_type(&call, &collector.scope_path),
+            Some(syn::parse_quote!(::std::string::String))
+        );
+    });
+}
+
+#[test]
+fn scoped_receivers_keep_their_declaration_type_identity() {
+    for receiver in ["x", "(x)", "{ &x }", "&x"] {
+        for prefix in ["", "fn x() {}"] {
+            let source = format!(
+                "{prefix} fn f(x: String, flag: bool) {{ loop {{ let _ = match flag {{ true => {{ type String = (); ({receiver}).to_owned() }}, false => {{ continue; }} }}; }} }}"
+            );
+            assert_eq!(
+                mutators(&source, "loop.delete_continue", &CfgSet::parse("")),
+                Vec::<&str>::new(),
+                "{prefix}: {receiver}"
+            );
+        }
+    }
+}
+
+#[test]
+fn scoped_value_items_preserve_their_types_and_shadow_outer_bindings() {
+    for source in [
+        "type Output = u8; fn work() {} fn f(flag: bool) { match flag { true => { type Output = (); const VALUE: Output = (); { VALUE } #[cfg(any())] struct Hidden; }, false => { work(); } } }",
+        "fn work() {} fn f(x: u8, flag: bool) { match flag { true => { const x: () = (); { x } #[cfg(any())] struct Hidden; }, false => { work(); } } }",
+        "fn work() {} fn f(x: u8, flag: bool) { match flag { true => { static x: () = (); { x } #[cfg(any())] struct Hidden; }, false => { work(); } } }",
+        "mod types { pub type Output = (); } fn work() {} fn f(x: u8, flag: bool) { match flag { true => { use crate::types::Output; const x: Output = (); { x } #[cfg(any())] struct Hidden; }, false => { work(); } } }",
+        "struct Unit; impl Unit { const VALUE: () = (); } fn work() {} fn f(VALUE: u8, flag: bool) { match flag { true => { <Unit>::VALUE }, false => { work(); } } }",
+    ] {
+        let file = SourceFile::parse("fixture.rs", source.to_owned()).unwrap();
+        let found = collect_in(&file, &Selection::parse("stmt.delete_call").unwrap(), &CfgSet::parse(""));
+        assert_eq!(found.len(), 1, "{source}: {found:?}");
+        assert_eq!(file.slice(&found[0].span), "work();");
+        assert_eq!(found[0].replacement, "");
+    }
+
+    for declaration in [
+        "type Output = Result<u8, ()>; const VALUE: Output = Ok(1);",
+        "static VALUE: bool = true;",
+        "#[cfg(any())] const VALUE: () = ();",
+        "#[cfg_attr(all(), cfg(any()))] static VALUE: () = ();",
+    ] {
+        let source = format!(
+            "fn f(VALUE: u8, flag: bool) {{ loop {{ let _ = match flag {{ true => {{ {declaration} {{ VALUE }} #[cfg(any())] struct Hidden; }}, false => {{ continue; }} }}; }} }}"
+        );
+        assert_eq!(
+            mutators(&source, "loop.delete_continue", &CfgSet::parse("")),
+            Vec::<&str>::new(),
+            "{declaration}"
+        );
+    }
+}
+
+#[test]
+fn match_arm_bindings_do_not_reuse_shadowed_outer_types() {
+    for (outer_type, value_type, body) in [
+        (
+            "u8",
+            "Option<()>",
+            "match value { Some(x) => { { x } #[cfg(any())] struct Hidden; }, None => { work(); } }",
+        ),
+        (
+            "u8",
+            "Option<()>",
+            "match flag { true => match value { Some(x) => { { x } #[cfg(any())] struct Hidden; }, None => () }, false => { work(); } }",
+        ),
+        (
+            "Result<u8, ()>",
+            "Option<()>",
+            "match flag { true => match value { Some(x) => { { x } #[cfg(any())] struct Hidden; }, None => () }, false => { work(); } }",
+        ),
+        (
+            "u8",
+            "Result<(), ()>",
+            "match flag { true => match value { Ok(x) => x, Err(x) => x }, false => { work(); } }",
+        ),
+    ] {
+        let source = format!("fn work() {{}} fn f(x: {outer_type}, value: {value_type}, flag: bool) {{ {body} }}");
+        let file = SourceFile::parse("fixture.rs", source).unwrap();
+        let found = collect_in(&file, &Selection::parse("stmt.delete_call").unwrap(), &CfgSet::parse(""));
+        assert_eq!(found.len(), 1, "{body}: {found:?}");
+        assert_eq!(file.slice(&found[0].span), "work();");
+        assert_eq!(found[0].replacement, "");
+    }
+
+    let source = "fn f(x: (), value: Option<u8>) { loop { let _ = match value { Some(x) => { { x } #[cfg(any())] struct Hidden; }, None => { continue; } }; } }";
+    assert_eq!(mutators(source, "loop.delete_continue", &CfgSet::parse("")), Vec::<&str>::new());
+}
+
+#[test]
+fn block_local_inference_keeps_unshadowed_and_cfg_disabled_binding_evidence() {
+    with_source_facts("fn f(x: u8, y: bool) {}", "all", |collector| {
+        let Item::Fn(function) = collector.file.ast.items[0].clone() else {
+            unreachable!()
+        };
+        collector.in_function(&function.sig, |collector| {
+            for (expression, expected) in [
+                ("{ let x = (); { x } #[cfg(any())] struct Hidden; }", None),
+                (
+                    "{ let x = (); { y } #[cfg(any())] struct Hidden; }",
+                    Some(syn::parse_quote!(::core::primitive::bool)),
+                ),
+                (
+                    "{ #[cfg(any())] let x = (); { x } #[cfg(any())] struct Hidden; }",
+                    Some(syn::parse_quote!(::core::primitive::u8)),
+                ),
+                ("{ let x = (); true }", Some(syn::parse_quote!(::core::primitive::bool))),
+            ] {
+                assert_eq!(
+                    collector.inferred_expression_type(&syn::parse_str(expression).unwrap()),
+                    expected,
+                    "{expression}"
+                );
+            }
+        });
+    });
+}
+
+#[test]
+fn cfg_disabled_match_arms_do_not_suppress_unit_call_deletion() {
+    for attributes in ["#[cfg(any())]", "#[cfg_attr(all(), cfg(any()))]"] {
+        for source in [
+            format!(
+                "fn work() {{}} fn f() {{ match true {{ {attributes} true => {{ {{ 1 }} #[cfg(any())] struct Hidden; }}, _ => {{ work(); }} }} }}"
+            ),
+            format!(
+                "fn result() -> Result<u8, ()> {{ Ok(1) }} fn work() {{}} fn f() {{ match true {{ true => match true {{ {attributes} true => {{ {{ result() }} #[cfg(any())] struct Hidden; }}, _ => () }}, _ => {{ work(); }} }} }}"
+            ),
+        ] {
+            let file = SourceFile::parse("fixture.rs", source).unwrap();
+            let found = collect_in(&file, &Selection::parse("stmt.delete_call").unwrap(), &CfgSet::parse(""));
+            assert_eq!(found.len(), 1, "{attributes}: {}: {found:?}", file.text);
+            assert_eq!(file.slice(&found[0].span), "work();");
+            assert_eq!(found[0].replacement, "");
+        }
+    }
+}
+
+#[test]
+fn value_required_if_branches_keep_their_trailing_continue() {
+    for source in [
+        "fn f(flag: bool) { loop { let _ = if flag { 1 } else { continue; }; } }",
+        "fn f(flag: bool) { loop { let _ = if flag { { 1 } #[cfg(any())] struct Hidden; } else { continue; #[cfg(any())] struct Hidden; }; } }",
+        "fn f(flag: bool) { loop { let _ = if flag { continue; #[cfg(any())] struct Hidden; } else { { 1 } #[cfg(any())] struct Hidden; }; } }",
+    ] {
+        let found = mutators(source, "loop.delete_continue", &CfgSet::parse(""));
+        assert!(found.is_empty(), "{source}: {found:?}");
+    }
 }
 
 #[test]

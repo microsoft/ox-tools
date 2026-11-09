@@ -219,6 +219,9 @@ misreport them as test-suite failures.
 Return-tail analysis and call-argument mutation use only statements and arguments active under
 these predicates; disabled branches cannot supply a return value or shift argument types.
 Disabled item declarations inside a block also cannot hide its active return tail.
+This applies throughout nested block and branch tails, including expected-type
+propagation and inferred block types; active items and semicolons still stop
+value-tail analysis.
 With `--all-features`, selected packages have complete feature sets even when dependency feature
 activation is otherwise uncertain. Unselected dependencies retain conservative feature handling.
 Unknown predicates remain eligible; runtime CPU dispatch does not exclude compiled code.

@@ -3,10 +3,10 @@
 
 //! Negative evidence for APIs that share iterator and option spellings.
 
-use syn::{Expr, Type};
+use syn::{Expr, PathArguments, Type};
 
 use crate::ops::collect::collector::Collector;
-use crate::ops::collect::collector::indexes::ABSOLUTE_ROOT;
+use crate::ops::collect::collector::indexes::{ScopePath, import_target};
 use crate::ops::collect::collector::values::strip;
 
 impl Collector<'_> {
@@ -98,7 +98,7 @@ impl Collector<'_> {
                 name.as_str(),
                 super::types::SOURCE_FILE | super::types::LOCAL_MODULE | super::types::BLOCK_TYPES
             ) && path.as_ref().is_some_and(|path| {
-                let mut path = path.iter().filter(|name| name.as_str() != ABSOLUTE_ROOT).map(String::as_str);
+                let mut path = import_target(path).iter().map(String::as_str);
                 matches!(
                     (path.next(), path.next(), path.next(), path.next()),
                     (Some("std"), Some("io"), Some("Read" | "BufRead"), None)
@@ -172,14 +172,7 @@ impl Collector<'_> {
         if path.segments.len() == 1
             && let Some(name) = path.get_ident()
             && let Some(Some(imported)) = self.current_imports().get(&name.to_string())
-            && let Ok(imported) = syn::parse_str::<syn::Path>(
-                &imported
-                    .iter()
-                    .filter(|name| name.as_str() != ABSOLUTE_ROOT)
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join("::"),
-            )
+            && let Ok(imported) = syn::parse_str::<syn::Path>(&import_target(imported).join("::"))
         {
             path = imported;
         }
@@ -209,14 +202,7 @@ impl Collector<'_> {
             return true;
         }
         if let Some(Some(none)) = self.current_imports().get("None")
-            && let Ok(mut none) = syn::parse_str::<syn::Path>(
-                &none
-                    .iter()
-                    .filter(|name| name.as_str() != ABSOLUTE_ROOT)
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join("::"),
-            )
+            && let Ok(mut none) = syn::parse_str::<syn::Path>(&import_target(none).join("::"))
             && none.segments.last().is_some_and(|segment| segment.ident == "None")
         {
             let _variant = none.segments.pop();
@@ -229,6 +215,10 @@ impl Collector<'_> {
     }
 
     pub(super) fn standard_constructor_type(&self, call: &syn::ExprCall) -> Option<Type> {
+        self.standard_constructor_type_in_scope(call, &self.scope_path)
+    }
+
+    pub(super) fn standard_constructor_type_in_scope(&self, call: &syn::ExprCall, scope: &ScopePath) -> Option<Type> {
         let Expr::Path(callee) = &*call.func else {
             return
         // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
@@ -244,7 +234,7 @@ impl Collector<'_> {
             qself: None,
             path: callee.path.clone(),
         });
-        if self.types().unshadowed_type_path(&constructor).is_some_and(|path| {
+        if self.types_in_scope(scope).unshadowed_type_path(&constructor).is_some_and(|path| {
             matches!(path.as_slice(),
                 [name] if matches!(name.as_str(), "Ok" | "Err") && self.implicit_prelude)
                 || matches!(
@@ -265,40 +255,29 @@ impl Collector<'_> {
             // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
             None;
         }
-        let mut path = callee.path.clone();
-        let method =
-        // #[gamma::skip(try.propagate_to_unwrap, reason = "segments.pop() follows the callee.path.segments.len() >= 2 guard, and no segment was removed before that pop. Its Option cannot be None.", tag = "equivalent")]
-        path.segments.pop()?.ident.to_string();
-        let _separator = path.segments.pop_punct();
-        let ty = Type::Path(syn::TypePath {
-            attrs: Vec::new(),
-            qself: None,
-            path,
-        });
-        let resolved = self.types().unshadowed_type_path(&ty)?;
-        match (resolved.as_slice(), method.as_str()) {
-            ([name], "new") if name == "Box" => {
-                let inner = self.inferred_expression_type(call.args.first()?)?;
-                Some(syn::parse_quote!(#ty<#inner>))
-            }
-            ([root, module, name], "new")
-                if matches!(
-                    (root.as_str(), module.as_str(), name.as_str()),
-                    ("std" | "alloc", "boxed", "Box")
-                        | ("std" | "alloc", "rc", "Rc")
-                        | ("std" | "alloc", "sync", "Arc")
-                        | ("std" | "core", "cell", "RefCell" | "Cell")
-                        | ("std", "sync", "Mutex" | "RwLock")
-                ) =>
+        let (ty, method, resolved) = self.constructor_target(call, scope)?;
+        if payload_constructor(&resolved, &method) {
+            let types = self.types_in_scope(scope);
+            let infer_alias_payload = matches!(&ty, Type::Path(path)
+                if path.path.get_ident()
+                    .and_then(|name| types.aliases?.get(&name.to_string())?.as_ref())
+                    .is_some_and(|alias| !alias.parameters.is_empty()));
+            let mut ty = types.frozen_type(&ty);
+            if let Type::Path(path) = &mut ty
+                && let Some(owner) = path.path.segments.last_mut()
+                && (owner.arguments.is_none() || infer_alias_payload)
             {
-                let inner = self.inferred_expression_type(call.args.first()?)?;
-                Some(syn::parse_quote!(#ty<#inner>))
+                let inner = self.inferred_expression_type_in_scope(call.args.first()?, scope)?;
+                owner.arguments = PathArguments::AngleBracketed(syn::parse_quote!(<#inner>));
             }
-            ([name], "new" | "from") if name == "String" => Some(syn::parse_quote!(String)),
+            return Some(ty);
+        }
+        match (resolved.as_slice(), method.as_str()) {
+            ([name], "new" | "from") if name == "String" => Some(ty),
             ([root, module, name], "new" | "from")
                 if matches!(root.as_str(), "std" | "alloc") && module == "string" && name == "String" =>
             {
-                Some(syn::parse_quote!(String))
+                Some(ty)
             }
             ([root, module, name], "open" | "create" | "create_new") if root == "std" && module == "fs" && name == "File" => {
                 Some(syn::parse_quote!(std::result::Result<#ty, std::io::Error>))
@@ -317,6 +296,52 @@ impl Collector<'_> {
             _ => None,
         }
     }
+
+    fn constructor_target(&self, call: &syn::ExprCall, scope: &ScopePath) -> Option<(Type, String, Vec<String>)> {
+        let Expr::Path(callee) = &*call.func else {
+            return
+            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+            None;
+        };
+        if
+        // #[gamma::skip(cond.always_false, reason = "Factory inference rejects qself before calling this helper. Its other consumer only recognizes verified concrete standard payload-constructor owners: a well-typed qualified trait path cannot name those structs, while qualified inherent paths leave no owner segments. Removing this duplicate guard changes neither supported factory inference nor payload dependencies.", tag = "equivalent")]
+        callee.qself.is_some() {
+            return
+            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+            None;
+        }
+        let mut path = callee.path.clone();
+        let method =
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "Both consumers pass source-parsed Expr::Path callees, whose paths are nonempty. This is the first removal from the cloned segment list, so pop always returns a segment even for a singleton path.", tag = "equivalent")]
+        path.segments.pop()?.ident.to_string();
+        let _separator = path.segments.pop_punct();
+        let ty = Type::Path(syn::TypePath {
+            attrs: Vec::new(),
+            qself: None,
+            path,
+        });
+        let resolved = self.types_in_scope(scope).unshadowed_type_path(&ty)?;
+        Some((ty, method, resolved))
+    }
+
+    pub(super) fn constructor_uses_payload(&self, call: &syn::ExprCall, scope: &ScopePath) -> bool {
+        self.constructor_target(call, scope)
+            .is_some_and(|(_, method, path)| payload_constructor(&path, &method))
+    }
+}
+
+fn payload_constructor(path: &[String], method: &str) -> bool {
+    method == "new"
+        && (matches!(path, [name] if name == "Box")
+            || matches!(path, [root, module, name]
+            if matches!(
+                (root.as_str(), module.as_str(), name.as_str()),
+                ("std" | "alloc", "boxed", "Box")
+                    | ("std" | "alloc", "rc", "Rc")
+                    | ("std" | "alloc", "sync", "Arc")
+                    | ("std" | "core", "cell", "RefCell" | "Cell")
+                    | ("std", "sync", "Mutex" | "RwLock")
+            )))
 }
 
 #[cfg(test)]

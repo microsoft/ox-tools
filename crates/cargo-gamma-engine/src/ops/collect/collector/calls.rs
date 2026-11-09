@@ -7,10 +7,15 @@ use syn::visit::{self, Visit};
 use syn::{Expr, FnArg, GenericArgument, Member, PathArguments, Signature, Type};
 
 use crate::cfg::CfgSet;
-use crate::ops::collect::collector::indexes::{ABSOLUTE_ROOT, ScopePath, block_id, module_id};
+use crate::ops::collect::collector::indexes::{
+    ABSOLUTE_ROOT, EXTERN_ROOT_PREFIX, EXTERNAL_ROOT, ROOT_EXTERN_PREFIX, ScopePath, block_id, module_id,
+};
 use crate::ops::collect::collector::predicates::{expr_attrs, stmt_attrs};
-use crate::ops::collect::defaults::{impl_item_attrs, item_attrs, trait_item_attrs};
+use crate::ops::collect::defaults::{Defaults, impl_item_attrs, item_attrs, trait_item_attrs};
 use crate::{HashMap, HashSet};
+
+type ScopedSignature = (Signature, ScopePath);
+type ScopedField = (Type, ScopePath);
 
 /// Separates incomplete evidence from proven absence and a uniquely known operator output.
 pub(super) enum OperatorResult<'a> {
@@ -25,11 +30,15 @@ pub(super) enum OperatorResult<'a> {
 /// is ambiguous or unavailable, preventing a lookup from falling through to an outer declaration.
 #[derive(Default)]
 pub(super) struct Calls {
-    free: HashMap<(ScopePath, String), Option<Signature>>,
-    qualified: HashMap<Vec<String>, Option<Signature>>,
+    free: HashMap<(ScopePath, String), Option<ScopedSignature>>,
+    value_types: HashMap<(ScopePath, String), Type>,
+    value_imports: HashMap<ScopePath, HashMap<String, Option<Vec<String>>>>,
+    type_only: HashSet<(ScopePath, String)>,
+    qualified: HashMap<Vec<String>, Option<ScopedSignature>>,
     modules: HashMap<ScopePath, Vec<String>>,
+    crate_aliases: HashSet<String>,
     blocks: HashSet<ScopePath>,
-    fields: HashMap<(Vec<String>, String), Option<Type>>,
+    fields: HashMap<(Vec<String>, String), Option<ScopedField>>,
     noncopy_members: HashMap<Vec<String>, Vec<Type>>,
     named_methods: HashSet<String>,
     enums: HashSet<Vec<String>>,
@@ -43,6 +52,94 @@ pub(super) struct Calls {
 }
 
 impl Calls {
+    /// Finds a value item before an enclosing binding; an unavailable type still shadows outer names.
+    pub(super) fn value_type(
+        &self,
+        name: &str,
+        scope: &ScopePath,
+        binding_scope: Option<&ScopePath>,
+    ) -> Option<(Option<&Type>, &ScopePath)> {
+        #[cfg(test)]
+        let mut remaining = scope.len() + 1;
+        self.value_type_with(name, scope, binding_scope, || {
+            #[cfg(test)]
+            {
+                assert!(
+                    remaining > 0,
+                    "value lookup cannot revisit the root after searching its enclosing scopes"
+                );
+                remaining -= 1;
+            }
+        })
+    }
+
+    fn value_type_with(
+        &self,
+        name: &str,
+        scope: &ScopePath,
+        binding_scope: Option<&ScopePath>,
+        mut on_scope: impl FnMut(),
+    ) -> Option<(Option<&Type>, &ScopePath)> {
+        let mut scope = scope.clone();
+        loop {
+            on_scope();
+            if binding_scope == Some(&scope) {
+                return
+                // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+                None;
+            }
+            if let Some((key, _)) = self.free.get_key_value(&(scope.clone(), name.to_owned())) {
+                return Some((self.value_types.get(key), &key.0));
+            }
+            if let Some(imported) = self.imported_value_type(name, &scope) {
+                return Some(imported);
+            }
+            if !self.blocks.contains(&scope) {
+                return
+                // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+                None;
+            }
+            let _scope = scope.pop();
+        }
+    }
+
+    fn imported_value_type(&self, name: &str, scope: &ScopePath) -> Option<(Option<&Type>, &ScopePath)> {
+        let (import_scope, imports) = self.value_imports.get_key_value(scope)?;
+        let import = imports.get(name).or_else(|| imports.get("*"))?;
+        let path =
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "Both production value_type callers obtain names from Path::get_ident on parsed Rust expressions. Such identifiers, including raw identifiers, always parse as a single-segment Path.", tag = "equivalent")]
+        syn::parse_str(name).ok()?;
+        let Some(target) = self.source_path(&path, scope, imports).filter(|_| {
+            imports.contains_key(name)
+                && import.as_deref().is_none_or(|path| match path {
+                    [absolute, root, ..] if absolute == ABSOLUTE_ROOT => {
+                        matches!(root.as_str(), "crate" | "self" | "super") || self.crate_aliases.contains(root)
+                    }
+                    _ => true,
+                })
+        }) else {
+            return Some((None, import_scope));
+        };
+        let Some((name, module)) = target.split_last() else {
+            return imports.contains_key("*").then_some((None, import_scope));
+        };
+        let mut modules = self.modules.iter().filter(|(_, path)| path.as_slice() == module);
+        let Some((origin, _)) = modules.next() else {
+            return Some((None, import_scope));
+        };
+        if modules.next().is_some() {
+            return Some((None, import_scope));
+        }
+        let key = (origin.clone(), name.clone());
+        if let Some((key, _)) = self.free.get_key_value(&key) {
+            return Some((self.value_types.get(key), &key.0));
+        }
+        if self.type_only.contains(&key) {
+            return imports.contains_key("*").then_some((None, import_scope));
+        }
+        Some((None, import_scope))
+    }
+
     pub(super) fn has_method_named(&self, name: &str) -> bool {
         self.named_methods.contains(name)
     }
@@ -83,6 +180,17 @@ impl Calls {
         scope: &ScopePath,
         imports: &HashMap<String, Option<Vec<String>>>,
     ) -> Option<&Signature> {
+        self.scoped_method_signature(ty, name, scope, imports)
+            .map(|(signature, _)| signature)
+    }
+
+    pub(super) fn scoped_method_signature(
+        &self,
+        ty: &Type,
+        name: &str,
+        scope: &ScopePath,
+        imports: &HashMap<String, Option<Vec<String>>>,
+    ) -> Option<(&Signature, &ScopePath)> {
         let ty = match super::values::strip(ty) {
             Type::Reference(reference) => &reference.elem,
             other => other,
@@ -92,9 +200,12 @@ impl Calls {
         // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
         None;
         };
+        if path.path.leading_colon.is_some() {
+            return None;
+        }
         let mut owner = self.nominal_path(&path.path, scope, imports)?;
         owner.push(name.to_owned());
-        self.qualified.get(&owner)?.as_ref()
+        self.qualified.get(&owner)?.as_ref().map(|(signature, scope)| (signature, scope))
     }
 
     /// Supplies trusted source fields to the collector's bounded move-sensitivity classifier.
@@ -133,6 +244,14 @@ impl Calls {
             indexes,
         };
         let _previous = walk.calls.modules.insert(Vec::new(), Vec::new());
+        walk.calls.crate_aliases = indexes
+            .root_imports
+            .iter()
+            .filter_map(|(name, path)| match path.as_deref() {
+                Some([_, target]) if target == "crate" => name.strip_prefix(ROOT_EXTERN_PREFIX).map(str::to_owned),
+                _ => None,
+            })
+            .collect();
         walk.calls.closed = super::noop::LocalCalls::nontransforming_attributes(&file.attrs);
         walk.visit_file(file);
         walk.calls.identities = crate::ops::collect::default_identity::Identities::of(file, cfg);
@@ -147,6 +266,16 @@ impl Calls {
         scope: &ScopePath,
         imports: &HashMap<String, Option<Vec<String>>>,
     ) -> Option<Type> {
+        self.scoped_field(ty, member, scope, imports).map(|(ty, _)| ty.clone())
+    }
+
+    pub(super) fn scoped_field(
+        &self,
+        ty: &Type,
+        member: &Member,
+        scope: &ScopePath,
+        imports: &HashMap<String, Option<Vec<String>>>,
+    ) -> Option<&ScopedField> {
         let ty = match ty {
             Type::Reference(reference) => &reference.elem,
             other => other,
@@ -161,7 +290,7 @@ impl Calls {
             Member::Named(name) => name.to_string(),
             Member::Unnamed(index) => index.index.to_string(),
         };
-        self.fields.get(&(owner, member))?.clone()
+        self.fields.get(&(owner, member))?.as_ref()
     }
 
     /// Attaches enclosing-module and block-shadow evidence to each lexical import environment.
@@ -202,21 +331,34 @@ impl Calls {
             return OperatorResult::Unknown;
         }
         let Type::Path(left) = left else { return OperatorResult::Unknown };
+        if left.path.leading_colon.is_some() {
+            return OperatorResult::Unknown;
+        }
         let Some(owner) = self.nominal_path(&left.path, scope, imports) else {
             return OperatorResult::Unknown;
         };
         if self.identities.resolve_path(&owner).is_none() {
             return OperatorResult::Unknown;
         }
+        let right_identity = super::types::frozen_type_identity(right);
+        if super::types::contains_unknown_type(&right_identity) {
+            return OperatorResult::Unknown;
+        }
         let mut found = None;
         for (implemented, operation, rhs, output) in &self.operators {
             if implemented == &owner && operation == operator {
-                let same_rhs = rhs == right
+                let rhs_identity = super::types::frozen_type_identity(rhs);
+                if super::types::contains_unknown_type(&rhs_identity) {
+                    return OperatorResult::Unknown;
+                }
+                let same_rhs = rhs_identity == right_identity
                     || match (rhs, right) {
                         (Type::Path(left), Type::Path(right)) => {
-                            left.path.segments.last().map(|segment| &segment.arguments)
-                                == right.path.segments.last().map(|segment| &segment.arguments)
-                                && self.nominal_path(&left.path, scope, imports) == self.nominal_path(&right.path, scope, imports)
+                            left.path.leading_colon.is_none()
+                                && right.path.leading_colon.is_none()
+                                && left.path.segments.last().map(|segment| &segment.arguments)
+                                    == right.path.segments.last().map(|segment| &segment.arguments)
+                                && self.same_type(&left.path, &right.path, scope, imports)
                         }
                         _ => false,
                     };
@@ -284,24 +426,48 @@ impl Calls {
 
     /// Resolves lexical imports and relative modules without crossing an unresolved block shadow.
     fn nominal_path(&self, path: &syn::Path, scope: &ScopePath, imports: &HashMap<String, Option<Vec<String>>>) -> Option<Vec<String>> {
+        let module = self.source_path(path, scope, imports)?;
+        Some(self.identities.resolve_path(&module).unwrap_or(module))
+    }
+
+    fn source_path(&self, path: &syn::Path, scope: &ScopePath, imports: &HashMap<String, Option<Vec<String>>>) -> Option<Vec<String>> {
         let mut names = path.segments.iter().map(|segment| segment.ident.to_string()).collect::<Vec<_>>();
-        if imports
-            .get(super::types::BLOCK_TYPES)
-            .and_then(Option::as_ref)
-            .is_some_and(|shadows| names.first().is_some_and(|name| shadows.contains(name)))
-        {
-            return
-            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-            None;
-        }
-        if let Some(imported) = imports.get(
-            // #[gamma::skip(try.propagate_to_unwrap, reason = "These first() calls occur before import expansion on a source-parsed Path, whose segment list is nonempty. The later first() calls after expansion are separately tested with empty self-import targets and are not included in this proof.", tag = "equivalent")]
-            names.first()?,
-        ) {
-            let _old = names.splice(..1, imported.as_ref()?.iter().cloned());
+        let root =
+            // #[gamma::skip(try.propagate_to_unwrap, tag = "equivalent", reason = "The input is a source-parsed or canonicalized Path, both of which have nonempty segments. This first access precedes import expansion, so names cannot be empty.")]
+            names.first()?;
+        if path.leading_colon.is_some() {
+            if !matches!(root.as_str(), "crate" | "self" | "super") {
+                if !self.crate_aliases.contains(root) {
+                    return
+                    // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+                    None;
+                }
+                "crate".clone_into(&mut names[0]);
+            }
+        } else {
+            if imports
+                .get(super::types::BLOCK_TYPES)
+                .and_then(Option::as_ref)
+                .is_some_and(|shadows| shadows.contains(root))
+            {
+                return
+                // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
+                None;
+            }
+            if let Some(imported) = imports.get(root) {
+                let _old = names.splice(..1, imported.as_ref()?.iter().cloned());
+            }
         }
         if names.first().is_some_and(|name| name == ABSOLUTE_ROOT) {
             let _absolute = names.remove(0);
+            if names.first().is_some_and(|name| name == EXTERNAL_ROOT) {
+                return None;
+            }
+            if let Some(root) = names.first_mut()
+                && self.crate_aliases.contains(root)
+            {
+                "crate".clone_into(root);
+            }
         }
         let mut scope = scope.clone();
         while !self.modules.contains_key(&scope) {
@@ -328,16 +494,14 @@ impl Calls {
                     let _root = names.remove(0);
                 }
             }
-            _ if path.leading_colon.is_some() => return
-            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-            None,
             _ => {}
         }
         module.extend(names);
-        Some(self.identities.resolve_path(&module).unwrap_or(module))
+        Some(module)
     }
 
     /// Resolves free or qualified calls, stopping at bindings and unavailable inner declarations.
+    #[cfg(test)]
     pub(super) fn signature(
         &self,
         callee: &Expr,
@@ -346,6 +510,18 @@ impl Calls {
         self_type: Option<&Type>,
         bound: impl Fn(&str) -> bool,
     ) -> Option<&Signature> {
+        self.scoped_signature(callee, scope, imports, self_type, bound)
+            .map(|(signature, _)| signature)
+    }
+
+    pub(super) fn scoped_signature(
+        &self,
+        callee: &Expr,
+        scope: &ScopePath,
+        imports: &HashMap<String, Option<Vec<String>>>,
+        self_type: Option<&Type>,
+        bound: impl Fn(&str) -> bool,
+    ) -> Option<(&Signature, &ScopePath)> {
         #[cfg(test)]
         let mut remaining = scope.len() + 1;
         self.signature_with(callee, scope, imports, self_type, bound, |_| {
@@ -358,6 +534,7 @@ impl Calls {
                 remaining -= 1;
             }
         })
+        .map(|(signature, scope)| (signature, scope))
     }
 
     /// Observes every free-call lexical-scope probe before lookup, so tests can detect repeated
@@ -370,7 +547,7 @@ impl Calls {
         self_type: Option<&Type>,
         bound: impl Fn(&str) -> bool,
         mut on_scope: impl FnMut(&ScopePath),
-    ) -> Option<&Signature> {
+    ) -> Option<&ScopedSignature> {
         let Expr::Path(callee) = callee else {
             return
         // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
@@ -548,8 +725,6 @@ impl Walk<'_> {
         if matches!(&right, Type::Path(path) if path.path.is_ident("Self")) {
             right = left.clone();
         }
-        // #[gamma::skip(stmt.delete_call, reason = "operator first canonicalizes the complete trait type, recursively canonicalizing every type argument. The chosen RHS is cloned from that normalized trait argument; the only subsequent replacement is bare Self with the already-canonicalized left type. A second canonical_type on this already-normalized RHS has no further expansion or qualification.", tag = "equivalent")]
-        self.canonical_type(&mut right);
         let Some(mut output) = node
             .items
             .iter()
@@ -566,7 +741,60 @@ impl Walk<'_> {
             output = left;
         }
         self.canonical_type(&mut output);
+        right = self.freeze_canonical_type(&right);
+        output = self.freeze_canonical_type(&output);
         self.calls.operators.push((owner, operation.to_owned(), right, output));
+    }
+
+    fn freeze_canonical_type(&self, ty: &Type) -> Type {
+        // Local names and aliases are already canonical; freeze intrinsic identities before leaving this scope.
+        let defaults = Defaults::default();
+        let types = super::types::Types {
+            abstracts: &[],
+            defaulted: &[],
+            imports: self.indexes.scope_imports.get(&self.scope).unwrap_or(&self.indexes.root_imports),
+            defaults: &defaults,
+            aliases: None,
+            self_type: None,
+            self_associated: None,
+        };
+        types.frozen_canonical_type(ty)
+    }
+
+    fn record_value(&mut self, ident: &syn::Ident, ty: &Type) {
+        let key = (self.scope.clone(), ident.to_string());
+        if self.calls.free.insert(key.clone(), None).is_none() {
+            let mut ty = ty.clone();
+            self.canonical_type(&mut ty);
+            let ty = self.freeze_canonical_type(&ty);
+            let _previous = self.calls.value_types.insert(key, ty);
+        } else {
+            let _previous = self.calls.value_types.remove(&key);
+        }
+    }
+
+    fn record_imports(&mut self, tree: &syn::UseTree) {
+        let name = match tree {
+            syn::UseTree::Path(path) => return self.record_imports(&path.tree),
+            syn::UseTree::Group(group) => {
+                for item in &group.items {
+                    self.record_imports(item);
+                }
+                return;
+            }
+            syn::UseTree::Name(name) => (name.ident != "self").then(|| name.ident.to_string()),
+            syn::UseTree::Rename(rename) => (rename.ident != "self").then(|| rename.rename.to_string()),
+            syn::UseTree::Glob(_) => Some("*".to_owned()),
+        };
+        if let Some(name) = name {
+            let imports = self.indexes.scope_imports.get(&self.scope).unwrap_or(&self.indexes.root_imports);
+            let _previous = self
+                .calls
+                .value_imports
+                .entry(self.scope.clone())
+                .or_default()
+                .insert(name.clone(), imports.get(&name).cloned().flatten());
+        }
     }
 
     /// Freezes a signature in its declaration environment, marking duplicate names unavailable.
@@ -608,12 +836,13 @@ impl Walk<'_> {
         let name = signature.ident.to_string();
         if !associated {
             let key = (self.scope.clone(), name.clone());
+            let _previous = self.calls.value_types.remove(&key);
             let _entry = self
                 .calls
                 .free
                 .entry(key)
                 .and_modify(|entry| *entry = None)
-                .or_insert_with(|| Some(signature.clone()));
+                .or_insert_with(|| Some((signature.clone(), self.scope.clone())));
         }
 
         if self.calls.blocks.contains(&self.scope) {
@@ -630,7 +859,7 @@ impl Walk<'_> {
             .qualified
             .entry(qualified)
             .and_modify(|entry| *entry = None)
-            .or_insert_with(|| Some(signature.clone()));
+            .or_insert_with(|| Some((signature.clone(), self.scope.clone())));
     }
 
     /// Normalizes bounded alias/import evidence, replacing unresolved expansions with unknown types.
@@ -644,6 +873,10 @@ impl Walk<'_> {
     }
 
     fn canonical_type_at(&self, ty: &mut Type, remaining: usize, budget: &mut usize) {
+        self.canonical_type_with_root(ty, remaining, budget, true);
+    }
+
+    fn canonical_type_with_root(&self, ty: &mut Type, remaining: usize, budget: &mut usize, source: bool) {
         if remaining == 0 {
             *ty = syn::parse_quote!(_);
             return;
@@ -675,6 +908,7 @@ impl Walk<'_> {
                 .get(&self.scope)
                 .and_then(|aliases| aliases.get(&first.ident.to_string()))
         {
+            self.canonical_type_arguments(&mut path.path, remaining - 1, budget, source);
             let arguments = super::values::type_argument_values(ty);
             if arguments.len() != alias.parameters.len() {
                 *ty = syn::parse_quote!(_);
@@ -682,19 +916,14 @@ impl Walk<'_> {
             }
             let substitutions = alias.parameters.iter().cloned().zip(arguments.into_iter().cloned()).collect();
             *ty = super::types::substitute_type_with_budget(&alias.target, &substitutions, budget);
-            self.canonical_type_at(ty, remaining - 1, budget);
+            self.canonical_type_with_root(ty, remaining - 1, budget, false);
             return;
         }
         match ty {
             Type::Path(path) if path.qself.is_none() => {
-                for segment in &mut path.path.segments {
-                    if let PathArguments::AngleBracketed(arguments) = &mut segment.arguments {
-                        for argument in &mut arguments.args {
-                            if let GenericArgument::Type(ty) = argument {
-                                self.canonical_type_at(ty, remaining, budget);
-                            }
-                        }
-                    }
+                self.canonical_type_arguments(&mut path.path, remaining, budget, source);
+                if source {
+                    self.canonical_local_root(&mut path.path);
                 }
                 let imports = self.indexes.scope_imports.get(&self.scope).unwrap_or(&self.indexes.root_imports);
                 if path.path.leading_colon.is_none()
@@ -702,23 +931,7 @@ impl Walk<'_> {
                     && let Some(Some(names)) = imports.get(&first.ident.to_string())
                     && !names.is_empty()
                 {
-                    let arguments = first.arguments.clone();
-                    let mut qualified = names
-                        .iter()
-                        .filter(|name| name.as_str() != ABSOLUTE_ROOT)
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .join("::");
-                    if names.first().is_some_and(|name| name == ABSOLUTE_ROOT) {
-                        qualified.insert_str(0, "::");
-                    }
-                    if let Ok(mut prefix) = syn::parse_str::<syn::Path>(&qualified) {
-                        if let Some(last) = prefix.segments.last_mut() {
-                            last.arguments = arguments;
-                        }
-                        prefix.segments.extend(path.path.segments.iter().skip(1).cloned());
-                        path.path = prefix;
-                    }
+                    self.qualify_imported_type_path(names, &mut path.path);
                 } else if path.path.leading_colon.is_none()
                     && let Some(first) = path.path.segments.first()
                     && self
@@ -732,17 +945,68 @@ impl Walk<'_> {
                     prefix.segments.extend(path.path.segments.iter().cloned());
                     path.path = prefix;
                 }
-            }
-            Type::Reference(reference) => self.canonical_type_at(&mut reference.elem, remaining, budget),
-            Type::Tuple(tuple) => {
-                for ty in &mut tuple.elems {
-                    self.canonical_type_at(ty, remaining, budget);
+                if path.path.segments.first().is_some_and(|first| first.ident == "crate") {
+                    path.path.leading_colon = None;
                 }
             }
-            Type::Array(array) => self.canonical_type_at(&mut array.elem, remaining, budget),
-            Type::Paren(paren) => self.canonical_type_at(&mut paren.elem, remaining, budget),
-            Type::Group(group) => self.canonical_type_at(&mut group.elem, remaining, budget),
+            Type::Reference(reference) => self.canonical_type_with_root(&mut reference.elem, remaining, budget, source),
+            Type::Tuple(tuple) => {
+                for ty in &mut tuple.elems {
+                    self.canonical_type_with_root(ty, remaining, budget, source);
+                }
+            }
+            Type::Array(array) => self.canonical_type_with_root(&mut array.elem, remaining, budget, source),
+            Type::Slice(slice) => self.canonical_type_with_root(&mut slice.elem, remaining, budget, source),
+            Type::Ptr(pointer) => self.canonical_type_with_root(&mut pointer.elem, remaining, budget, source),
+            Type::Paren(paren) => self.canonical_type_with_root(&mut paren.elem, remaining, budget, source),
+            Type::Group(group) => self.canonical_type_with_root(&mut group.elem, remaining, budget, source),
             _ => {}
+        }
+    }
+
+    fn qualify_imported_type_path(&self, names: &[String], original: &mut syn::Path) {
+        let mut qualified = super::indexes::import_target(names).join("::");
+        if names.first().is_some_and(|name| name == ABSOLUTE_ROOT) {
+            qualified.insert_str(0, "::");
+        }
+        if let Ok(mut prefix) = syn::parse_str::<syn::Path>(&qualified) {
+            if let (Some(last), Some(first)) = (prefix.segments.last_mut(), original.segments.first()) {
+                last.arguments = first.arguments.clone();
+            }
+            prefix.segments.extend(original.segments.iter().skip(1).cloned());
+            if !names.iter().any(|name| name == EXTERNAL_ROOT) {
+                self.canonical_local_root(&mut prefix);
+            }
+            *original = prefix;
+        }
+    }
+
+    fn canonical_type_arguments(&self, path: &mut syn::Path, remaining: usize, budget: &mut usize, source: bool) {
+        for segment in &mut path.segments {
+            if let PathArguments::AngleBracketed(arguments) = &mut segment.arguments {
+                for argument in &mut arguments.args {
+                    if let GenericArgument::Type(ty) = argument {
+                        self.canonical_type_with_root(ty, remaining, budget, source);
+                    }
+                }
+            }
+        }
+    }
+
+    fn canonical_local_root(&self, path: &mut syn::Path) {
+        let Some(first) = path.segments.first_mut() else { return };
+        let root = first.ident.to_string();
+        let imports = self.indexes.scope_imports.get(&self.scope).unwrap_or(&self.indexes.root_imports);
+        let local = if path.leading_colon.is_some() {
+            self.calls.crate_aliases.contains(&root)
+        } else {
+            !imports.contains_key(&root)
+                && matches!(imports.get(&format!("{EXTERN_ROOT_PREFIX}{root}")).and_then(Option::as_deref),
+                    Some([_, target]) if target == "crate")
+        };
+        if local {
+            first.ident = syn::Ident::new("crate", first.ident.span());
+            path.leading_colon = None;
         }
     }
 
@@ -771,7 +1035,7 @@ impl Walk<'_> {
             {
                 self.calls.noncopy_members.entry(owner.clone()).or_default().push(ty.clone());
             }
-            let ty = Some(ty);
+            let ty = Some((self.freeze_canonical_type(&ty), self.scope.clone()));
             let member = field.ident.as_ref().map_or_else(|| index.to_string(), ToString::to_string);
             let _entry = self
                 .calls
@@ -786,6 +1050,11 @@ impl Walk<'_> {
 #[expect(clippy::renamed_function_params, reason = "visitor parameters use descriptive names")]
 impl<'ast> Visit<'ast> for Walk<'_> {
     fn visit_item_struct(&mut self, node: &'ast syn::ItemStruct) {
+        if !matches!(node.fields, syn::Fields::Named(_)) {
+            let key = (self.scope.clone(), node.ident.to_string());
+            let _previous = self.calls.value_types.remove(&key);
+            let _previous = self.calls.free.insert(key, None);
+        }
         if self.calls.blocks.contains(&self.scope) {
             let _inserted = self
                 .calls
@@ -824,6 +1093,18 @@ impl<'ast> Visit<'ast> for Walk<'_> {
     }
     fn visit_item(&mut self, node: &'ast syn::Item) {
         if !self.cfg.skip_gate(item_attrs(node)) {
+            let type_only = match node {
+                syn::Item::Type(item) => Some(&item.ident),
+                syn::Item::Trait(item) => Some(&item.ident),
+                syn::Item::Enum(item) => Some(&item.ident),
+                syn::Item::Mod(item) => Some(&item.ident),
+                syn::Item::Union(item) => Some(&item.ident),
+                syn::Item::Struct(item) => Some(&item.ident),
+                _ => None,
+            };
+            if let Some(name) = type_only {
+                let _inserted = self.calls.type_only.insert((self.scope.clone(), name.to_string()));
+            }
             // #[gamma::skip(assign.or_to_and, stmt.delete_assign, tag = "equivalent", reason = "Only derive/cfg_attr can set open_methods here. Both are rejected by the immediately following nontransforming_attributes check, permanently clearing closed. method_absent is the only reader of open_methods and already rejects every !closed inventory. The separate trait-impl assignment is not covered.")]
             self.calls.open_methods |= item_attrs(node).iter().any(|attribute|
                     // #[gamma::skip(logical.or_remove_left, logical.or_remove_right, logical.or_to_and, tag = "equivalent", reason = "Either recognized attribute independently clears closed in the following nontransforming_attributes check. Narrowing only this open_methods predicate cannot change method_absent, which rejects !closed first.")]
@@ -913,15 +1194,20 @@ impl<'ast> Visit<'ast> for Walk<'_> {
         visit::visit_trait_item_fn(self, node);
     }
     fn visit_item_const(&mut self, node: &'ast syn::ItemConst) {
-        let _previous = self.calls.free.insert((self.scope.clone(), node.ident.to_string()), None);
+        self.record_value(&node.ident, &node.ty);
         visit::visit_item_const(self, node);
     }
+    fn visit_item_use(&mut self, node: &'ast syn::ItemUse) {
+        self.record_imports(&node.tree);
+    }
     fn visit_item_static(&mut self, node: &'ast syn::ItemStatic) {
-        let _previous = self.calls.free.insert((self.scope.clone(), node.ident.to_string()), None);
+        self.record_value(&node.ident, &node.ty);
         visit::visit_item_static(self, node);
     }
     fn visit_foreign_item_fn(&mut self, node: &'ast syn::ForeignItemFn) {
-        let _previous = self.calls.free.insert((self.scope.clone(), node.sig.ident.to_string()), None);
+        let key = (self.scope.clone(), node.sig.ident.to_string());
+        let _previous = self.calls.value_types.remove(&key);
+        let _previous = self.calls.free.insert(key, None);
         visit::visit_foreign_item_fn(self, node);
     }
 
@@ -938,6 +1224,80 @@ mod tests {
     use super::super::indexes::indexes_in;
     use super::*;
     use crate::ops::registry::Selection;
+
+    #[test]
+    fn value_lookup_stops_at_the_enclosing_module() {
+        let file = parse_file("const VALUE: () = (); mod child {}").unwrap();
+        let cfg = CfgSet::unconditional();
+        let indexes = indexes_in(&file, &Selection::everything(), &cfg);
+        let calls = Calls::of(&file, &cfg, &indexes);
+        let Item::Mod(child) = &file.items[1] else {
+            panic!("fixture declares child as its second item");
+        };
+        let mut visits = 0;
+        assert_eq!(
+            calls.value_type_with("ABSENT", &Vec::new(), None, || {
+                visits += 1;
+                assert_eq!(visits, 1, "a missing root value cannot revisit its module scope");
+            }),
+            None
+        );
+        assert_eq!(visits, 1);
+        assert_eq!(calls.value_type("VALUE", &vec![module_id(&child.ident)], None), None);
+    }
+
+    #[test]
+    fn ambiguous_and_reexported_value_imports_withhold_outer_evidence() {
+        for modules in [
+            "#[cfg(feature = \"first\")] mod values { pub const VALUE: bool = true; }
+             #[cfg(not(feature = \"first\"))] mod values { pub const VALUE: bool = false; }",
+            "mod actual { pub const VALUE: bool = true; }
+             mod values { pub use crate::actual::VALUE; }",
+        ] {
+            let file = parse_file(&format!(
+                "const VALUE: bool = true; {modules} fn f() {{ use crate::values::VALUE; }}"
+            ))
+            .unwrap();
+            let cfg = CfgSet::unconditional();
+            let indexes = indexes_in(&file, &Selection::everything(), &cfg);
+            let calls = Calls::of(&file, &cfg, &indexes);
+            let Item::Fn(function) = file.items.last().unwrap() else {
+                panic!("fixture ends with a function containing the import");
+            };
+            let scope = vec![block_id(&function.block)];
+            assert_eq!(calls.value_type("VALUE", &scope, None), Some((None, &scope)), "{modules}");
+        }
+    }
+
+    #[test]
+    fn type_only_declarations_and_imports_preserve_outer_values_but_constructors_shadow_them() {
+        for (declaration, type_only) in [
+            ("pub type VALUE = ();", true),
+            ("pub trait VALUE {}", true),
+            ("pub enum VALUE { One }", true),
+            ("pub mod VALUE {}", true),
+            ("pub union VALUE { pub field: u8 }", true),
+            ("pub struct VALUE { pub field: u8 }", true),
+            ("pub struct VALUE;", false),
+            ("pub struct VALUE(pub u8);", false),
+        ] {
+            for (module, body) in [
+                (format!("mod values {{ {declaration} }}"), "use crate::values::VALUE;".to_owned()),
+                (String::new(), declaration.to_owned()),
+            ] {
+                let file = parse_file(&format!("const VALUE: bool = true; {module} fn f() {{ {body} }}")).unwrap();
+                let cfg = CfgSet::unconditional();
+                let indexes = indexes_in(&file, &Selection::everything(), &cfg);
+                let calls = Calls::of(&file, &cfg, &indexes);
+                let Item::Fn(function) = file.items.last().unwrap() else {
+                    panic!("fixture ends with a function containing the declaration or import");
+                };
+                let expected = type_only.then(|| parse_quote!(::core::primitive::bool));
+                let found = calls.value_type("VALUE", &vec![block_id(&function.block)], None);
+                assert!(found.is_some_and(|(ty, _)| ty == expected.as_ref()), "{declaration}: {found:?}");
+            }
+        }
+    }
 
     #[test]
     fn self_associated_calls_require_a_path_owner() {
@@ -1022,7 +1382,12 @@ mod tests {
         let indexes = indexes_in(&file, &Selection::everything(), &cfg);
         let calls = Calls::of(&file, &cfg, &indexes);
         for name in ["from_const", "from_static", "from_foreign"] {
-            let signature = calls.free.values().flatten().find(|signature| signature.ident == name).unwrap();
+            let (signature, _) = calls
+                .free
+                .values()
+                .flatten()
+                .find(|(signature, _)| signature.ident == name)
+                .unwrap();
             assert_eq!(signature.output, parse_quote!(-> bool), "{name}");
         }
     }
@@ -1066,7 +1431,7 @@ mod tests {
     fn nominal_paths_resolve_import_heads_self_and_absolute_roots_without_guessing_missing_parents() {
         let cfg = CfgSet::unconditional();
         let file =
-            parse_file("fn method() -> bool { true } struct Root; impl Root { fn method() -> bool { true } } mod child { struct Local; }")
+            parse_file("extern crate self as this; fn method() -> bool { true } struct Root; impl Root { fn method() -> bool { true } } mod child { struct Local; }")
                 .unwrap();
         let indexes = indexes_in(&file, &Selection::everything(), &cfg);
         let calls = Calls::of(&file, &cfg, &indexes);
@@ -1081,11 +1446,17 @@ mod tests {
         ]);
         for (ty, expected) in [
             ("Renamed", Some(vec!["Root".to_owned()])),
+            ("::Renamed", None),
             ("Renamed::Member", Some(vec!["Root".to_owned(), "Member".to_owned()])),
             ("Outside", Some(vec!["dependency".to_owned(), "Record".to_owned()])),
+            ("::Outside", None),
             ("Blocked", None),
             ("self::Root", Some(vec!["Root".to_owned()])),
+            ("::self::Root", Some(vec!["Root".to_owned()])),
+            ("::crate::Root", Some(vec!["Root".to_owned()])),
+            ("::this::Root", Some(vec!["Root".to_owned()])),
             ("super::Root", None),
+            ("::super::Root", None),
             ("::dependency::Record", None),
         ] {
             let path: Path = parse_str(ty).unwrap();
@@ -1108,6 +1479,14 @@ mod tests {
         assert_eq!(
             calls.nominal_path(&parse_quote!(self::Local), &child_scope, &empty),
             Some(vec!["child".into(), "Local".into()])
+        );
+        assert_eq!(
+            calls.nominal_path(&parse_quote!(::self::Local), &child_scope, &empty),
+            Some(vec!["child".into(), "Local".into()])
+        );
+        assert_eq!(
+            calls.nominal_path(&parse_quote!(::super::Root), &child_scope, &empty),
+            Some(vec!["Root".into()])
         );
         let blocked_scope = (1, 1);
         let shadows = HashMap::from_iter([(super::super::types::BLOCK_TYPES.into(), Some(vec!["Root".into()]))]);
@@ -1135,6 +1514,9 @@ mod tests {
             ("&First", "&_", "&self::Terminal"),
             ("(First, First)", "(_, _)", "(self::Terminal, self::Terminal)"),
             ("[First; 1]", "[_; 1]", "[self::Terminal; 1]"),
+            ("[First]", "[_]", "[self::Terminal]"),
+            ("*const First", "*const _", "*const self::Terminal"),
+            ("*mut First", "*mut _", "*mut self::Terminal"),
             ("(First)", "(_)", "(self::Terminal)"),
         ] {
             for (remaining, expected) in [(1, low), (2, high)] {
@@ -1164,10 +1546,10 @@ mod tests {
     #[test]
     fn canonicalization_preserves_qualified_self_and_generic_arguments_when_splicing_imports() {
         let cfg = CfgSet::unconditional();
-        let file = parse_file("use external::Trait; use std::vec::Vec as Renamed;").unwrap();
+        let file = parse_file("extern crate self as this; struct Root; use external::Trait; use std::vec::Vec as Renamed;").unwrap();
         let indexes = indexes_in(&file, &Selection::everything(), &cfg);
         let walk = Walk {
-            calls: Calls::default(),
+            calls: Calls::of(&file, &cfg, &indexes),
             scope: Vec::new(),
             module: Vec::new(),
             owner: None,
@@ -1182,5 +1564,8 @@ mod tests {
         let mut ty = parse_quote!(Renamed<bool>::IntoIter);
         walk.canonical_type_at(&mut ty, 3, &mut 4096);
         assert_eq!(ty, parse_quote!(std::vec::Vec<bool>::IntoIter));
+        let mut ty = parse_quote!(::this::Root);
+        walk.canonical_type_at(&mut ty, 3, &mut 4096);
+        assert_eq!(ty, parse_quote!(crate::Root));
     }
 }
