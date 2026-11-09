@@ -115,7 +115,6 @@ pub fn sync_or_copy_using(
     if !root.as_std_path().is_dir() {
         copy(source, root, skip, options, &reflinks)?;
 
-        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
         mark_consistent(root);
         return Ok(SyncOutcome::FreshCopy);
     }
@@ -125,7 +124,6 @@ pub fn sync_or_copy_using(
         clear(root).map_err(|cause| error!("could not clear the inconsistent scratch tree at `{root}`").caused_by(cause))?;
         copy(source, root, skip, options, &reflinks)?;
 
-        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
         mark_consistent(root);
         return Ok(SyncOutcome::FreshCopy);
     }
@@ -136,7 +134,6 @@ pub fn sync_or_copy_using(
 
     match synchronize(source, root, skip, options, &reflinks) {
         Ok(()) => {
-            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
             mark_consistent(root);
             Ok(SyncOutcome::Synchronized)
         }
@@ -151,7 +148,6 @@ pub fn sync_or_copy_using(
             })?;
             copy(source, root, skip, options, &reflinks)?;
 
-            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
             mark_consistent(root);
             Ok(SyncOutcome::FreshCopy)
         }
@@ -245,7 +241,6 @@ pub fn collect_source_entries_with(
 
     let mut builder = WalkBuilder::new(source.as_std_path());
 
-    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
     configure_source_walk(options, |setting, enabled| {
         let _builder = match setting {
             WalkSetting::Hidden => builder.hidden(enabled),
@@ -272,7 +267,6 @@ pub fn collect_source_entries_with(
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(cause) => {
-                    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
                     record_walk_failure(failure, cause);
                     return WalkState::Quit;
                 }
@@ -310,7 +304,6 @@ pub fn collect_source_entries_with(
 
     // Include tracked files that the ignore walk may have skipped, same as copy_tracked does.
     if let Some(tracked) = tracked(source)? {
-        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
         restore_tracked_entries(&mut result, source, skip, tracked, source_entry_exists);
     }
 
@@ -587,7 +580,6 @@ pub fn copy_file_for_sync_with_stamp(
                 return copy_failure(source, destination, cause);
             }
             Err(_unsupported) => {
-                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
                 mark_reflinks_unsupported(reflinks);
                 let _removed = fs::remove_file(destination.as_std_path());
             }
@@ -644,7 +636,6 @@ pub fn remove_stale_with_directory<S: std::hash::BuildHasher>(
 
     // Remove stale directories deepest-first so that parents are empty when reached.
 
-    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
     sort_stale_directories(&mut stale_dirs);
     for dir in &stale_dirs {
         // Only remove if truly empty (children may have been expected).
@@ -693,13 +684,11 @@ fn stale_inventory<S: std::hash::BuildHasher>(
 
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub fn record_walk_failure(failure: &Mutex<Option<Error>>, cause: ignore::Error) {
-    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
     record(failure, error!("could not read the source tree").caused_by(cause));
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub fn record_invalid_path(failure: &Mutex<Option<Error>>, path: &std::path::Path) {
-    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
     record(
         failure,
         error!("`{}` is not valid UTF-8 and cannot be synchronized", path.display()),
@@ -709,7 +698,6 @@ pub fn record_invalid_path(failure: &Mutex<Option<Error>>, path: &std::path::Pat
 fn source_path<'a>(path: &'a std::path::Path, failure: &Mutex<Option<Error>>) -> Option<&'a Utf8Path> {
     let source = Utf8Path::from_path(path);
     if source.is_none() {
-        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
         record_invalid_path(failure, path);
     }
     source
@@ -738,7 +726,6 @@ fn source_entry_exists(path: &Utf8Path) -> bool {
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
-// #[gamma::skip(result.err_to_ok, reason = "Observing failed removal requires a native filesystem refusal; this adapter has no injected remove operation.", tag = "native-boundary")]
 fn remove_stale_entry(path: &Utf8Path) -> std::io::Result<()> {
     match fs::remove_file(path.as_std_path()) {
         Ok(()) => Ok(()),

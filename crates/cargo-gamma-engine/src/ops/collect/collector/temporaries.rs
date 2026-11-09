@@ -93,25 +93,21 @@ fn assignment_arrays(expression: &Expr, assignment: &Range<usize>, sites: &mut H
         Expr::Tuple(tuple) => &tuple.elems,
         Expr::Struct(structure) => {
             for field in &structure.fields {
-                // #[gamma::skip(call_result.default, tag = "equivalent", reason = "assignment_arrays returns unit; default_after executes it with identical sites mutations before returning the same unit value.")]
                 assignment_arrays(&field.expr, assignment, sites);
             }
             return;
         }
         Expr::Paren(paren) => {
-            return
-            // #[gamma::skip(call_result.default, tag = "equivalent", reason = "assignment_arrays returns unit; default_after executes it with identical sites mutations before returning the same unit value.")]
-            assignment_arrays(&paren.expr, assignment, sites);
+            // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
+            return assignment_arrays(&paren.expr, assignment, sites);
         }
         Expr::Group(group) => {
-            return
-            // #[gamma::skip(call_result.default, tag = "equivalent", reason = "assignment_arrays returns unit; default_after executes it with identical sites mutations before returning the same unit value.")]
-            assignment_arrays(&group.expr, assignment, sites);
+            // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
+            return assignment_arrays(&group.expr, assignment, sites);
         }
         _ => return,
     };
     for element in elements {
-        // #[gamma::skip(call_result.default, tag = "equivalent", reason = "assignment_arrays returns unit; default_after executes it with identical sites mutations before returning the same unit value.")]
         assignment_arrays(element, assignment, sites);
     }
 }

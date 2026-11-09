@@ -90,6 +90,28 @@ impl Original {
 
 impl Splices {
     #[cfg(test)]
+    pub(super) fn with_original_for_test(root: Utf8PathBuf, path: Utf8PathBuf, source: &str) -> Self {
+        let parsed = strip_bom(source).to_owned();
+        let digest = crate::discover::digest(parsed.as_bytes());
+        Self {
+            root,
+            sources: HashMap::from_iter([(
+                path,
+                Original {
+                    parsed,
+                    serialized: source.to_owned(),
+                    digest,
+                },
+            )]),
+            ..Self::default()
+        }
+    }
+
+    pub(super) fn guards(&self) -> &Guards {
+        &self.guards
+    }
+
+    #[cfg(test)]
     pub(super) fn seeded_guards_for_test(root: Utf8PathBuf, guards: Guards) -> Self {
         Self {
             root,

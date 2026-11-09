@@ -128,6 +128,29 @@ pub fn configured() -> bool {
     }
 }
 
+pub fn configured_block_first(left: &str, right: &str) -> bool {
+    #[cfg(all())]
+    {
+        let left = left.trim();
+        left.eq_ignore_ascii_case(right)
+    }
+    #[cfg(any())]
+    match (left, right) {
+        (a, b) => a == b,
+    }
+}
+
+pub fn configured_match_last(left: &str, right: &str) -> bool {
+    #[cfg(any())]
+    {
+        false
+    }
+    #[cfg_attr(all(), cfg(all()))]
+    match (left.trim(), right) {
+        (a, b) => a.eq_ignore_ascii_case(b),
+    }
+}
+
 pub fn configured_body() -> bool {
     #[cfg(any())]
     {

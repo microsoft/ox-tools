@@ -47,7 +47,7 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
     if ($ownsCollector) {
         $hostTarget = & rustc '+{{ rust_nightly }}' --print host-tuple
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-        & cargo '+{{ rust_nightly }}' run --locked --package cargo-coverage-gate --bin cargo-coverage-gate --target $hostTarget -- coverage-gate run @packageArgs @collectionArgs
+        & cargo '+{{ rust_nightly }}' run --release --locked --package cargo-coverage-gate --bin cargo-coverage-gate --target $hostTarget -- coverage-gate run @packageArgs @collectionArgs
     } else {
         & cargo '+{{ rust_nightly }}' coverage-gate run @packageArgs @collectionArgs
     }

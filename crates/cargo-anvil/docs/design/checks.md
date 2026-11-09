@@ -121,7 +121,9 @@ Released-surface source validation covers every workspace member, including
 packages outside the affected test set. Ambiguous or unsupported layouts fail;
 see [cargo-coverage-gate's accepted layouts](../../../cargo-coverage-gate/docs/design/README.md).
 Workspaces owning the `cargo-coverage-gate` package and binary use that checkout's
-collector; others use the installed tool.
+collector, bootstrapped in release mode to avoid retaining a separate debug build
+alongside the instrumented test builds. This does not change the coverage test
+profiles or thresholds. Other workspaces use the installed tool.
 
 ### `pr-msrv`
 

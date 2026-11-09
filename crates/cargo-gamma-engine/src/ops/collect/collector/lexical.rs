@@ -4,6 +4,7 @@
 //! Lexical numeric-use and ownership-guard evidence.
 
 use core::ops::Range;
+use std::rc::Rc;
 
 use syn::spanned::Spanned as _;
 use syn::visit::{self, Visit};
@@ -14,8 +15,20 @@ use crate::cfg::CfgSet;
 use crate::ops::collect::defaults::{impl_item_attrs, item_attrs, trait_item_attrs};
 use crate::{HashMap, HashSet};
 
+type Continuation<'ast> = Rc<[&'ast Expr]>;
+
+/// Conservative analysis-cost cap, not a Rust limit or measured capacity.
+/// Raising it admits longer ownership continuations at greater analysis cost;
+/// lowering it leaves more continuations unknown.
+const MAX_CONTINUATION_LEN: usize = 32;
+
+/// Conservative recursion budget for finding the first overlapping use.
+/// Raising it permits deeper prefix searches; lowering it retains more of the
+/// full continuation when a narrower prefix cannot be proved.
+const MAX_USE_PREFIX_DEPTH: usize = 64;
+
 #[derive(Default)]
-pub(super) struct Evidence {
+pub(super) struct Evidence<'ast> {
     pub(super) numeric: HashSet<Range<usize>>,
     pub(super) unsigned: HashSet<Range<usize>>,
     pub(super) reinitializations: HashMap<Range<usize>, Vec<Expr>>,
@@ -25,9 +38,12 @@ pub(super) struct Evidence {
     pub(super) invalid_ownership: HashMap<Range<usize>, Vec<Expr>>,
     pub(super) invalid_transitions: HashMap<Range<usize>, Vec<Expr>>,
     pub(super) reborrowable: HashSet<Range<usize>>,
+    pub(super) ownership_continuations: HashMap<Range<usize>, HashMap<Range<usize>, Continuation<'ast>>>,
+    pub(super) returned_types: HashMap<Range<usize>, syn::Type>,
+    pub(super) receiver_moves: HashMap<Range<usize>, String>,
 }
 
-pub(super) fn evidence(file: &syn::File, cfg: &CfgSet) -> Evidence {
+pub(super) fn evidence<'ast>(file: &'ast syn::File, cfg: &CfgSet) -> Evidence<'ast> {
     let mut walk = Walk {
         cfg,
         bindings: HashMap::default(),
@@ -45,11 +61,16 @@ pub(super) fn evidence(file: &syn::File, cfg: &CfgSet) -> Evidence {
         contexts: HashMap::default(),
         following: HashMap::default(),
         move_blocks: HashMap::default(),
-        loop_bodies: HashMap::default(),
         unreachable: Vec::new(),
         restorations: Vec::new(),
         writes: HashSet::default(),
         reborrowable: HashSet::default(),
+        continuation: None,
+        continuations: HashMap::default(),
+        alternatives: Vec::new(),
+        return_type: None,
+        returned_types: HashMap::default(),
+        receiver_moves: HashMap::default(),
     };
     walk.visit_file(file);
     let mut evidence = Evidence::default();
@@ -61,16 +82,16 @@ pub(super) fn evidence(file: &syn::File, cfg: &CfgSet) -> Evidence {
             let _inserted = evidence.unsigned.insert(site.clone());
         }
     }
-    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
     reinitializations(&walk, &mut evidence);
-    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
     exits(&walk, &mut evidence);
     evidence.structures = walk.structures;
     evidence.reborrowable = walk.reborrowable;
+    evidence.returned_types = walk.returned_types;
+    evidence.receiver_moves = walk.receiver_moves;
     evidence
 }
 
-fn reinitializations(walk: &Walk<'_>, evidence: &mut Evidence) {
+fn reinitializations<'ast>(walk: &Walk<'ast, '_>, evidence: &mut Evidence<'ast>) {
     for (span, moved) in &walk.reinitializations {
         if let Some(context) = walk.contexts.get(span) {
             let invalid = moved
@@ -80,6 +101,14 @@ fn reinitializations(walk: &Walk<'_>, evidence: &mut Evidence) {
                 .collect::<Vec<_>>();
             if !invalid.is_empty() {
                 let _prior = evidence.invalid_ownership.insert(span.clone(), invalid);
+                if let Some(continuation) = walk.continuations.get(span) {
+                    let checks = moved
+                        .iter()
+                        .filter(|(place, _)| !walk.following_invalid(span, context, place))
+                        .map(|(_, expression)| (expression.span().byte_range(), Rc::clone(continuation)))
+                        .collect();
+                    let _prior = evidence.ownership_continuations.insert(span.clone(), checks);
+                }
             }
             let _prior = evidence.ownership_regions.insert(span.clone(), context.region());
         }
@@ -94,9 +123,10 @@ fn reinitializations(walk: &Walk<'_>, evidence: &mut Evidence) {
 /// Ordinary invalidity covers later uses and unrestored loop back edges. Transition invalidity
 /// instead checks the path introduced by swapping break/continue; region-only evidence preserves
 /// viable alternatives by lifting their guard rather than rejecting them.
-fn exits(walk: &Walk<'_>, evidence: &mut Evidence) {
+fn exits<'ast>(walk: &Walk<'ast, '_>, evidence: &mut Evidence<'ast>) {
     for exit in &walk.exits {
         let mut invalid = Vec::new();
+        let mut continuation_checks = HashMap::default();
         let mut invalid_transitions = Vec::new();
         let names = exit
             .moved
@@ -108,7 +138,7 @@ fn exits(walk: &Walk<'_>, evidence: &mut Evidence) {
                 })
             })
             .map(|(place, expression)| {
-                if exit.plain && walk.move_blocks.get(&expression.span().byte_range()) == Some(&exit.context.block) {
+                if exit.plain && walk.move_dominates(expression, &exit.context) {
                     let carried = exit.loop_start.is_some_and(|start| place.binding < start);
                     let backedge = carried && !walk.restored_in_loop(&exit.context, place, None, None);
                     // Continue-to-break exposes uses after the loop. Break-to-continue instead
@@ -124,8 +154,11 @@ fn exits(walk: &Walk<'_>, evidence: &mut Evidence) {
                     if transition_invalid {
                         invalid_transitions.push(expression.clone());
                     }
-                    if walk.used_after(exit.span.end, place) || backedge {
+                    if (walk.used_after_compatible(&exit.span, place) || backedge)
+                        && let Some(prefix) = walk.exit_prefix(exit, place)
+                    {
                         invalid.push(expression.clone());
+                        let _prior = continuation_checks.insert(expression.span().byte_range(), prefix);
                     }
                 }
                 expression.clone()
@@ -135,6 +168,7 @@ fn exits(walk: &Walk<'_>, evidence: &mut Evidence) {
             let _prior = evidence.ownership_regions.insert(exit.span.clone(), exit.context.region());
             if !invalid.is_empty() {
                 let _prior = evidence.invalid_ownership.insert(exit.span.clone(), invalid);
+                let _prior = evidence.ownership_continuations.insert(exit.span.clone(), continuation_checks);
             }
             if !invalid_transitions.is_empty() {
                 let _prior = evidence.invalid_transitions.insert(exit.span.clone(), invalid_transitions);
@@ -144,13 +178,14 @@ fn exits(walk: &Walk<'_>, evidence: &mut Evidence) {
     }
 }
 
-struct Exit {
+struct Exit<'ast> {
     span: Range<usize>,
     moved: Vec<(Place, Expr)>,
     loop_start: Option<usize>,
     context: Context,
     plain: bool,
     continuing: bool,
+    continuation: Option<Continuation<'ast>>,
 }
 
 struct Context {
@@ -186,8 +221,8 @@ impl Place {
     }
 }
 
-struct Walk<'a> {
-    cfg: &'a CfgSet,
+struct Walk<'ast, 'cfg> {
+    cfg: &'cfg CfgSet,
     bindings: HashMap<String, usize>,
     binding_undo: Vec<(String, Option<usize>)>,
     sites: Vec<(Range<usize>, usize)>,
@@ -196,21 +231,142 @@ struct Walk<'a> {
     unsigned: HashSet<usize>,
     moved: HashMap<Place, Expr>,
     reinitializations: HashMap<Range<usize>, Vec<(Place, Expr)>>,
-    exits: Vec<Exit>,
+    exits: Vec<Exit<'ast>>,
     loops: Vec<Range<usize>>,
     structures: HashMap<String, Option<HashMap<String, syn::Type>>>,
     blocks: Vec<Range<usize>>,
     contexts: HashMap<Range<usize>, Context>,
     following: HashMap<Range<usize>, Following>,
     move_blocks: HashMap<Range<usize>, Range<usize>>,
-    loop_bodies: HashMap<Range<usize>, Range<usize>>,
     unreachable: Vec<Range<usize>>,
     restorations: Vec<(Range<usize>, Place)>,
     writes: HashSet<Range<usize>>,
     reborrowable: HashSet<Range<usize>>,
+    continuation: Option<Continuation<'ast>>,
+    continuations: HashMap<Range<usize>, Continuation<'ast>>,
+    alternatives: Vec<Vec<Range<usize>>>,
+    return_type: Option<syn::Type>,
+    returned_types: HashMap<Range<usize>, syn::Type>,
+    receiver_moves: HashMap<Range<usize>, String>,
 }
 
-impl Walk<'_> {
+impl<'ast> Walk<'ast, '_> {
+    fn continuation(&self, statements: &'ast [syn::Stmt], outer: &Continuation<'ast>) -> Option<Continuation<'ast>> {
+        let mut suffix = Vec::new();
+        for later in statements {
+            if self.cfg.skip_gate(stmt_attrs(later)) {
+                continue;
+            }
+            match later {
+                syn::Stmt::Expr(expression, _) => suffix.push(expression),
+                syn::Stmt::Local(local) if local.init.as_ref().is_some_and(|init| init.diverge.is_none()) => {
+                    // #[gamma::skip(try.propagate_to_unwrap, tag = "equivalent", reason = "The match guard immediately above requires local.init to be Some with no divergence; neither local nor its initializer is mutated between that guard and this access.")]
+                    suffix.push(local.init.as_ref()?.expr.as_ref());
+                }
+                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                _ => return None,
+            }
+            if suffix.len() + outer.len() > MAX_CONTINUATION_LEN {
+                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                return None;
+            }
+        }
+        if suffix.is_empty() {
+            Some(Rc::clone(outer))
+        } else {
+            suffix.extend(outer.iter().copied());
+            Some(suffix.into())
+        }
+    }
+
+    fn exit_prefix(&self, exit: &Exit<'ast>, place: &Place) -> Option<Continuation<'ast>> {
+        let continuation = exit.continuation.as_ref()?;
+        for (index, expression) in continuation.iter().enumerate() {
+            if let Some(inner) = self.use_prefix(expression, place, MAX_USE_PREFIX_DEPTH) {
+                // #[gamma::skip(arith.add_to_mul, reason = "This changes only reserved capacity; the same continuation slices are appended.", tag = "equivalent")]
+                let mut prefix = Vec::with_capacity(index + inner.len());
+                prefix.extend_from_slice(&continuation[..index]);
+                prefix.extend(inner);
+                return Some(prefix.into());
+            }
+        }
+        Some(Rc::clone(continuation))
+    }
+
+    fn use_prefix(&self, expression: &'ast Expr, place: &Place, remaining: usize) -> Option<Vec<&'ast Expr>> {
+        let next = remaining.checked_sub(1)?;
+        if self
+            .place_sites
+            .iter()
+            .any(|(site, used)| *site == expression.span().byte_range() && place.overlaps(used) && !self.writes.contains(site))
+        {
+            return Some(Vec::new());
+        }
+        match expression {
+            Expr::Paren(paren) => self.use_prefix(&paren.expr, place, next),
+            Expr::Group(group) => self.use_prefix(&group.expr, place, next),
+            Expr::Reference(reference) => self.use_prefix(&reference.expr, place, next),
+            Expr::Return(returned) => self.use_prefix(returned.expr.as_ref()?, place, next),
+            Expr::Call(call) => {
+                let mut prefix = vec![call.func.as_ref()];
+                for argument in &call.args {
+                    if let Some(inner) = self.use_prefix(argument, place, next) {
+                        prefix.extend(inner);
+                        return Some(prefix);
+                    }
+                    prefix.push(argument);
+                }
+                None
+            }
+            Expr::MethodCall(call) => {
+                if let Some(prefix) = self.use_prefix(&call.receiver, place, next) {
+                    return Some(prefix);
+                }
+                let mut prefix = vec![call.receiver.as_ref()];
+                for argument in &call.args {
+                    if let Some(inner) = self.use_prefix(argument, place, next) {
+                        prefix.extend(inner);
+                        return Some(prefix);
+                    }
+                    prefix.push(argument);
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn compatible(&self, left: &Range<usize>, right: &Range<usize>) -> bool {
+        let within = |inner: &Range<usize>, outer: &Range<usize>| outer.start <= inner.start && inner.end <= outer.end;
+        !self.alternatives.iter().any(|branches| {
+            let left = branches.iter().position(|branch| within(left, branch));
+            let right = branches.iter().position(|branch| within(right, branch));
+            left.zip(right).is_some_and(|(left, right)| left != right)
+        })
+    }
+
+    fn move_dominates(&self, expression: &Expr, context: &Context) -> bool {
+        self.move_blocks
+            .get(&expression.span().byte_range())
+            .is_some_and(|block| block.start <= context.block.start && context.block.end <= block.end)
+    }
+
+    fn used_after_compatible(&self, position: &Range<usize>, place: &Place) -> bool {
+        self.place_sites.iter().any(|(site, used)| {
+            !self.writes.contains(site)
+                && site.start > position.end
+                && place.overlaps(used)
+                && self.compatible(position, site)
+                && !self
+                    .unreachable
+                    .iter()
+                    .any(|region| region.start <= site.start && site.end <= region.end)
+                && !self.restorations.iter().any(|(span, restored)| {
+                    position.end < span.start && span.end < site.start && restored.contains(place) && self.compatible(position, span)
+                })
+        })
+    }
+
     fn used_after(&self, position: usize, place: &Place) -> bool {
         let restoration = self
             .restorations
@@ -243,29 +399,39 @@ impl Walk<'_> {
             .unreachable
             .iter()
             .any(|region| region.start <= span.start && span.end <= region.end)
-            || self.move_blocks.get(&expression.span().byte_range()) != Some(&context.block)
+            || !self.move_dominates(expression, context)
         {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+            return false;
         }
-        if let Some(following) = self.following.get(span) {
-            if self.place_sites.iter().any(|(site, used)| {
-                !self.writes.contains(site) && following.span.start <= site.start && site.end <= following.span.end && place.overlaps(used)
-            }) {
-                return true;
-            }
-            return following.breaks
-                && context
-                    .loop_region
-                    .as_ref()
-                    .is_some_and(|region| self.used_after(region.end, place));
+        if self.following_invalid(span, context, place) {
+            return true;
+        }
+        if self.continuations.get(span).is_some_and(|continuation| {
+            continuation
+                .iter()
+                .any(|expression| matches!(expression, Expr::Break(_) | Expr::Return(_)))
+        }) {
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+            return false;
         }
         context
             .loop_region
             .as_ref()
-            .is_some_and(|region| self.loop_bodies.get(region) == Some(&context.block) && place.binding < region.start)
+            .is_some_and(|region| self.continuations.contains_key(span) && place.binding < region.start)
             && !self.restored_in_loop(context, place, Some(span), None)
+    }
+
+    fn following_invalid(&self, span: &Range<usize>, context: &Context, place: &Place) -> bool {
+        self.following.get(span).is_some_and(|following| {
+            self.place_sites.iter().any(|(site, used)| {
+                !self.writes.contains(site) && following.span.start <= site.start && site.end <= following.span.end && place.overlaps(used)
+            }) || following.breaks
+                && context
+                    .loop_region
+                    .as_ref()
+                    .is_some_and(|region| self.used_after(region.end, place))
+        })
     }
 
     fn bind(&mut self, pattern: &Pat) {
@@ -375,14 +541,20 @@ impl Walk<'_> {
             context,
             plain,
             continuing,
+            continuation: self.continuation.clone(),
         });
     }
 
-    fn function(&mut self, signature: &syn::Signature, body: Option<&syn::Block>) {
+    fn function(&mut self, signature: &syn::Signature, body: Option<&'ast syn::Block>) {
         let outer = core::mem::take(&mut self.bindings);
         let outer_undo = core::mem::take(&mut self.binding_undo);
         let outer_moved = core::mem::take(&mut self.moved);
         let outer_loops = core::mem::take(&mut self.loops);
+        let outer_continuation = self.continuation.take();
+        let outer_return = self.return_type.take();
+        if let syn::ReturnType::Type(_, ty) = &signature.output {
+            self.return_type = Some((**ty).clone());
+        }
         for input in &signature.inputs {
             if let syn::FnArg::Typed(typed) = input
                 && !self.cfg.skip_gate(&typed.attrs)
@@ -397,11 +569,13 @@ impl Walk<'_> {
         self.binding_undo = outer_undo;
         self.moved = outer_moved;
         self.loops = outer_loops;
+        self.continuation = outer_continuation;
+        self.return_type = outer_return;
     }
 }
 
 #[expect(clippy::renamed_function_params, reason = "visitor parameters use descriptive names")]
-impl<'ast> Visit<'ast> for Walk<'_> {
+impl<'ast> Visit<'ast> for Walk<'ast, '_> {
     fn visit_item(&mut self, node: &'ast syn::Item) {
         if !self.cfg.skip_gate(item_attrs(node)) {
             visit::visit_item(self, node);
@@ -487,7 +661,15 @@ impl<'ast> Visit<'ast> for Walk<'_> {
                 );
             }
         }
-        visit::visit_block(self, node);
+        let outer_continuation = self.continuation.clone();
+        for (index, statement) in node.stmts.iter().enumerate() {
+            self.continuation = outer_continuation
+                .as_ref()
+                .and_then(|outer| self.continuation(&node.stmts[index + 1..], outer));
+            self.visit_stmt(statement);
+        }
+        // #[gamma::skip(stmt.delete_assign, tag = "equivalent", reason = "On the final statement iteration the later-statement suffix is empty, so continuation is already exactly outer_continuation. Nested block/function/closure/loop visitors restore the suffix they received; a skipped final statement leaves it untouched. An empty block never changes it.")]
+        self.continuation = outer_continuation;
         let _block = self.blocks.pop();
         self.restore_bindings(checkpoint);
     }
@@ -506,15 +688,27 @@ impl<'ast> Visit<'ast> for Walk<'_> {
     fn visit_expr_closure(&mut self, node: &'ast syn::ExprClosure) {
         let checkpoint = self.binding_undo.len();
         let outer_loops = core::mem::take(&mut self.loops);
+        let outer_moved = core::mem::take(&mut self.moved);
+        let outer_continuation = self.continuation.take();
+        let outer_return = self.return_type.take();
         for input in &node.inputs {
             self.bind(input);
         }
         self.visit_expr(&node.body);
         self.restore_bindings(checkpoint);
         self.loops = outer_loops;
+        self.moved = outer_moved;
+        self.continuation = outer_continuation;
+        self.return_type = outer_return;
     }
 
     fn visit_expr_if(&mut self, node: &'ast syn::ExprIf) {
+        if let Some((_, otherwise)) = &node.else_branch {
+            self.alternatives.push(
+                // #[gamma::skip(collection.reverse_vec, tag = "equivalent", reason = "The only consumer compatible finds each span's branch index and compares the two indices for inequality. Reversing this disjoint then/else pair preserves membership and whether the indices differ.")]
+                vec![node.then_branch.span().byte_range(), otherwise.span().byte_range()],
+            );
+        }
         let checkpoint = self.binding_undo.len();
         self.visit_expr(&node.cond);
         self.visit_block(&node.then_branch);
@@ -541,9 +735,10 @@ impl<'ast> Visit<'ast> for Walk<'_> {
             let _inserted = self.numeric.insert(ident.ident.span().byte_range().start);
         }
         self.loops.push(node.span().byte_range());
-        let _prior = self.loop_bodies.insert(node.span().byte_range(), node.body.span().byte_range());
+        let outer_continuation = self.continuation.replace(Rc::default());
         self.visit_block(&node.body);
         let _loop = self.loops.pop();
+        self.continuation = outer_continuation;
         self.restore_bindings(checkpoint);
     }
 
@@ -551,6 +746,7 @@ impl<'ast> Visit<'ast> for Walk<'_> {
         if self.cfg.skip_gate(&node.attrs) {
             return;
         }
+
         let checkpoint = self.binding_undo.len();
         self.bind(&node.pat);
         if let Pat::Guard(guarded) = &node.pat {
@@ -558,6 +754,26 @@ impl<'ast> Visit<'ast> for Walk<'_> {
         }
         self.visit_expr(&node.body);
         self.restore_bindings(checkpoint);
+    }
+
+    fn visit_expr_match(&mut self, node: &'ast syn::ExprMatch) {
+        self.alternatives
+            .push(node.arms.iter().map(|arm| arm.span().byte_range()).collect());
+        visit::visit_expr_match(self, node);
+    }
+
+    fn visit_expr_return(&mut self, node: &'ast syn::ExprReturn) {
+        if let Some(expression) = &node.expr
+            && let Some(place) = self.place(expression)
+            && let Some(ty) = &self.return_type
+        {
+            for (site, used) in &self.place_sites {
+                if used == &place {
+                    let _prior = self.returned_types.insert(site.clone(), ty.clone());
+                }
+            }
+        }
+        visit::visit_expr_return(self, node);
     }
 
     fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
@@ -628,10 +844,15 @@ impl<'ast> Visit<'ast> for Walk<'_> {
             let _inserted = self.reborrowable.insert(argument.span().byte_range());
             self.moved_argument(argument);
         }
-        if matches!(
-            node.method.to_string().as_str(),
+        let method = node.method.to_string();
+        if
+        // #[gamma::skip(logical.and_remove_right, tag = "equivalent", reason = "moved_argument records only syntactic places. Dropping this guard adds receiver_moves/reborrowable spans only for non-place expressions, which cannot occur in reinitialization/exit place evidence. Those exact-span entries are never queried by noncopy_place or ownership_known_place for an admitted edit.")]
+        matches!(
+            method.as_str(),
             "into_iter" | "into_bytes" | "into_boxed_str" | "into_string" | "into_os_string" | "into_vec"
-        ) {
+        ) && self.place(&node.receiver).is_some()
+        {
+            let _prior = self.receiver_moves.insert(node.receiver.span().byte_range(), method);
             let _inserted = self.reborrowable.insert(node.receiver.span().byte_range());
             self.moved_argument(&node.receiver);
         }
@@ -672,25 +893,30 @@ impl<'ast> Visit<'ast> for Walk<'_> {
                     let _prior = self.contexts.insert(node.span().byte_range(), context);
                 }
                 let _previous = self.reinitializations.insert(node.span().byte_range(), restored);
+                if let Some(continuation) = &self.continuation {
+                    let _prior = self.continuations.insert(node.span().byte_range(), Rc::clone(continuation));
+                }
             }
         }
     }
 
     fn visit_expr_loop(&mut self, node: &'ast syn::ExprLoop) {
         self.loops.push(node.span().byte_range());
-        let _prior = self.loop_bodies.insert(node.span().byte_range(), node.body.span().byte_range());
+        let outer_continuation = self.continuation.replace(Rc::default());
         visit::visit_expr_loop(self, node);
         let _loop = self.loops.pop();
+        self.continuation = outer_continuation;
     }
 
     fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
         self.loops.push(node.span().byte_range());
-        let _prior = self.loop_bodies.insert(node.span().byte_range(), node.body.span().byte_range());
+        let outer_continuation = self.continuation.replace(Rc::default());
         let checkpoint = self.binding_undo.len();
         self.visit_expr(&node.cond);
         self.visit_block(&node.body);
         self.restore_bindings(checkpoint);
         let _loop = self.loops.pop();
+        self.continuation = outer_continuation;
     }
 
     fn visit_expr_continue(&mut self, node: &'ast syn::ExprContinue) {
@@ -710,7 +936,26 @@ mod tests {
 
     use super::*;
 
-    fn empty_walk(cfg: &CfgSet) -> Walk<'_> {
+    fn copied(continuation: &[&Expr]) -> Vec<Expr> {
+        continuation.iter().map(|expression| (*expression).clone()).collect()
+    }
+
+    fn expression_nodes(expressions: &[&Expr]) -> usize {
+        struct Nodes(usize);
+        impl<'ast> Visit<'ast> for Nodes {
+            fn visit_expr(&mut self, i: &'ast Expr) {
+                self.0 += 1;
+                visit::visit_expr(self, i);
+            }
+        }
+        let mut nodes = Nodes(0);
+        for expression in expressions {
+            nodes.visit_expr(expression);
+        }
+        nodes.0
+    }
+
+    fn empty_walk<'ast>(cfg: &CfgSet) -> Walk<'ast, '_> {
         Walk {
             cfg,
             bindings: HashMap::default(),
@@ -728,12 +973,498 @@ mod tests {
             contexts: HashMap::default(),
             following: HashMap::default(),
             move_blocks: HashMap::default(),
-            loop_bodies: HashMap::default(),
             unreachable: Vec::new(),
             restorations: Vec::new(),
             writes: HashSet::default(),
             reborrowable: HashSet::default(),
+            continuation: None,
+            continuations: HashMap::default(),
+            alternatives: Vec::new(),
+            return_type: None,
+            returned_types: HashMap::default(),
+            receiver_moves: HashMap::default(),
         }
+    }
+
+    #[test]
+    fn residual_grouped_prefixes_keep_the_effects_before_a_nested_read() {
+        let cfg = CfgSet::parse("");
+        let mut walk = empty_walk(&cfg);
+        walk.bind(&parse_quote!(value));
+        let target = walk.place(&parse_quote!(value)).unwrap();
+        let expression = Expr::Group(ExprGroup {
+            attrs: Vec::new(),
+            group_token: syn::token::Group::default(),
+            expr: Box::new(syn::parse_str("callee(first(), value, after())").unwrap()),
+        });
+        walk.visit_expr(&expression);
+        assert_eq!(
+            walk.use_prefix(&expression, &target, 64)
+                .map(|prefix| prefix.into_iter().cloned().collect::<Vec<_>>()),
+            Some(vec![parse_quote!(callee), parse_quote!(first())])
+        );
+    }
+
+    #[test]
+    fn residual_nested_function_and_closure_returns_do_not_replace_the_outer_return_or_exit_suffix() {
+        let cfg = CfgSet::parse("");
+        for nested in ["function", "closure"] {
+            let mut walk = empty_walk(&cfg);
+            walk.bind(&parse_quote!(value));
+            let outer_use: Expr = syn::parse_str("value").unwrap();
+            walk.visit_expr(&outer_use);
+            walk.moved_argument(&outer_use);
+            walk.blocks.push(0..1000);
+            let outer_effect: Expr = parse_quote!(outer_effect());
+            walk.continuation = Some(vec![&outer_effect].into());
+            walk.return_type = Some(parse_quote!(bool));
+            let inner: syn::ItemFn = parse_quote! {
+                fn inner() -> char {
+                    let value = 'x';
+                    return value;
+                }
+            };
+            let closure = syn::parse_str("|| { let value = 'x'; return value; }").unwrap();
+            if nested == "function" {
+                walk.function(&inner.sig, Some(&inner.block));
+            } else {
+                walk.visit_expr_closure(&closure);
+            }
+            let returned = syn::parse_str::<Expr>("return value").unwrap();
+            walk.visit_expr(&returned);
+            assert_eq!(
+                walk.returned_types.get(&outer_use.span().byte_range()),
+                Some(&parse_quote!(bool)),
+                "{nested}"
+            );
+            walk.exit(900..901, true, false);
+            assert_eq!(
+                walk.exits.last().unwrap().continuation.as_deref().map(copied),
+                Some(vec![parse_quote!(outer_effect())]),
+                "{nested}"
+            );
+        }
+    }
+
+    #[test]
+    fn residual_each_loop_restores_the_enclosing_exit_continuation_after_its_own_suffix() {
+        let cfg = CfgSet::parse("");
+        for expression in [
+            "for item in items { break; inner_effect(); }",
+            "loop { break; inner_effect(); }",
+            "while ready { break; inner_effect(); }",
+        ] {
+            let mut walk = empty_walk(&cfg);
+            walk.blocks.push(0..1000);
+            let outer_effect: Expr = parse_quote!(outer_effect());
+            walk.continuation = Some(vec![&outer_effect].into());
+            let parsed = syn::parse_str::<Expr>(expression).unwrap();
+            walk.visit_expr(&parsed);
+            assert_eq!(
+                walk.exits[0].continuation.as_deref().map(copied),
+                Some(vec![parse_quote!(inner_effect())]),
+                "{expression}"
+            );
+            walk.exit(900..901, true, false);
+            assert_eq!(
+                walk.exits.last().unwrap().continuation.as_deref().map(copied),
+                Some(vec![parse_quote!(outer_effect())]),
+                "{expression}"
+            );
+        }
+    }
+
+    #[test]
+    fn residual_match_arms_are_alternatives_and_return_types_do_not_spread_to_other_places() {
+        let cfg = CfgSet::parse("");
+        let mut walk = empty_walk(&cfg);
+        let expression: Expr = syn::parse_str("match option { Some(value) => consume(value), None => observe(other) }").unwrap();
+        walk.visit_expr(&expression);
+        let Expr::Match(matched) = &expression else {
+            panic!("match fixture")
+        };
+        assert!(!walk.compatible(&matched.arms[0].span().byte_range(), &matched.arms[1].span().byte_range()));
+        let file = parse_file("fn f(left: String, right: bool) -> bool { consume(left); observe(right); return right; }").unwrap();
+        walk.visit_file(&file);
+        let mut classified = 0;
+        for (span, place) in &walk.place_sites {
+            if place.root == "left" {
+                assert_eq!(walk.returned_types.get(span), None);
+            } else if place.root == "right" && walk.returned_types.contains_key(span) {
+                assert_eq!(walk.returned_types.get(span), Some(&parse_quote!(bool)));
+                classified += 1;
+            }
+        }
+        assert_eq!(classified, 1);
+    }
+
+    #[test]
+    fn cohort_use_prefix_preserves_evaluation_order_and_stops_before_the_first_read() {
+        let cfg = CfgSet::parse("");
+        let mut walk = empty_walk(&cfg);
+        walk.bind(&parse_quote!(value));
+        let target = walk.place(&parse_quote!(value)).unwrap();
+        for (expression, expected) in [
+            (
+                "receiver.method(first(), consume(value), last())",
+                Some(vec!["receiver", "first()", "consume"]),
+            ),
+            (
+                "callee(first(), receiver.method(value), last())",
+                Some(vec!["callee", "first()", "receiver"]),
+            ),
+            ("(&value).method(later())", Some(vec![])),
+            ("return &((value))", Some(vec![])),
+            ("return", None),
+            ("callee(unrelated)", None),
+            ("receiver.method(unrelated)", None),
+        ] {
+            let expression: Expr = syn::parse_str(expression).unwrap();
+            let mut walk = empty_walk(&cfg);
+            walk.bind(&parse_quote!(value));
+            walk.visit_expr(&expression);
+            assert_eq!(
+                walk.use_prefix(&expression, &target, 64)
+                    .map(|prefix| prefix.into_iter().cloned().collect::<Vec<_>>()),
+                expected.map(|prefix| prefix.into_iter().map(|text| syn::parse_str::<Expr>(text).unwrap()).collect()),
+                "{expression:?}"
+            );
+        }
+        let expression: Expr = syn::parse_str("value").unwrap();
+        walk.visit_expr(&expression);
+        assert_eq!(walk.use_prefix(&expression, &target, 0), None);
+        assert_eq!(walk.use_prefix(&expression, &target, 1), Some(Vec::new()));
+        walk.writes.insert(expression.span().byte_range());
+        assert_eq!(walk.use_prefix(&expression, &target, 1), None);
+        walk.writes.clear();
+        assert_eq!(walk.use_prefix(&expression, &place(target.binding + 1, &[]), 1), None);
+    }
+
+    #[test]
+    fn cohort_exit_prefix_retains_only_effects_before_the_read_and_distinguishes_unknown_continuations() {
+        let cfg = CfgSet::parse("");
+        let mut walk = empty_walk(&cfg);
+        walk.bind(&parse_quote!(value));
+        let target = walk.place(&parse_quote!(value)).unwrap();
+        let continuation =
+            ["before()", "callee(first(), value, after())", "unreachable_after_read()"].map(|text| syn::parse_str::<Expr>(text).unwrap());
+        for expression in &continuation {
+            walk.visit_expr(expression);
+        }
+        let mut exit = Exit {
+            span: 0..1,
+            moved: Vec::new(),
+            loop_start: None,
+            context: Context {
+                block: 0..1,
+                loop_region: None,
+            },
+            plain: true,
+            continuing: false,
+            continuation: Some(continuation.iter().collect()),
+        };
+        assert_eq!(
+            walk.exit_prefix(&exit, &target).as_deref().map(copied),
+            Some(vec![parse_quote!(before()), parse_quote!(callee), parse_quote!(first())])
+        );
+        exit.continuation = Some(vec![&continuation[0]].into());
+        assert_eq!(
+            walk.exit_prefix(&exit, &target).as_deref().map(copied),
+            Some(vec![parse_quote!(before())])
+        );
+        assert!(Rc::ptr_eq(
+            exit.continuation.as_ref().unwrap(),
+            &walk.exit_prefix(&exit, &target).unwrap()
+        ));
+        exit.continuation = Some(Rc::default());
+        assert_eq!(walk.exit_prefix(&exit, &target).as_deref().map(copied), Some(Vec::new()));
+        exit.continuation = None;
+        assert_eq!(walk.exit_prefix(&exit, &target), None);
+    }
+
+    #[test]
+    fn cohort_block_continuations_include_only_active_initializers_and_restore_the_outer_suffix() {
+        let cfg = CfgSet::parse("");
+        for (text, expected) in [
+            (
+                "{ break; let restored = reset(); observe(value); }",
+                Some(vec!["reset()", "observe(value)", "outer()"]),
+            ),
+            (
+                "{ break; #[cfg(any())] hidden(); observe(value); }",
+                Some(vec!["observe(value)", "outer()"]),
+            ),
+            ("{ break; let uninitialized; observe(value); }", None),
+            ("{ break; let Some(restored) = reset() else { return }; observe(value); }", None),
+            ("{ break; struct Local; observe(value); }", None),
+        ] {
+            let mut walk = empty_walk(&cfg);
+            let outer: Expr = parse_quote!(outer());
+            walk.continuation = Some(vec![&outer].into());
+            let block: Block = syn::parse_str(text).unwrap();
+            walk.visit_block(&block);
+            assert_eq!(
+                walk.exits[0].continuation.as_deref().map(copied),
+                expected.map(|suffix| suffix.into_iter().map(|text| syn::parse_str::<Expr>(text).unwrap()).collect()),
+                "{text}"
+            );
+            assert_eq!(walk.continuation.as_deref().map(copied), Some(vec![parse_quote!(outer())]));
+        }
+        let mut walk = empty_walk(&cfg);
+        let block = syn::parse_str::<Block>("{ break; observe(value); }").unwrap();
+        walk.visit_block(&block);
+        assert!(walk.exits[0].continuation.is_none());
+    }
+
+    #[test]
+    fn cohort_use_prefix_depth_limit_counts_every_wrapper_and_the_final_read() {
+        let cfg = CfgSet::parse("");
+        let mut walk = empty_walk(&cfg);
+        walk.bind(&parse_quote!(value));
+        let target = walk.place(&parse_quote!(value)).unwrap();
+        let at_limit = concat!(
+            "((((((((", "((((((((", "((((((((", "((((((((", "((((((((", "((((((((", "((((((((", "(((((((", "value", ")))))))", "))))))))",
+            "))))))))", "))))))))", "))))))))", "))))))))", "))))))))", "))))))))"
+        );
+        let expression: Expr = syn::parse_str(at_limit).unwrap();
+        walk.visit_expr(&expression);
+        assert_eq!(walk.use_prefix(&expression, &target, 64), Some(Vec::new()));
+        let mut exit = Exit {
+            span: 0..1,
+            moved: Vec::new(),
+            loop_start: None,
+            context: Context {
+                block: 0..1,
+                loop_region: None,
+            },
+            plain: true,
+            continuing: false,
+            continuation: Some(vec![&expression].into()),
+        };
+        assert_eq!(walk.exit_prefix(&exit, &target).as_deref().map(copied), Some(Vec::new()));
+        let wrapped = Expr::Paren(syn::ExprParen {
+            attrs: Vec::new(),
+            paren_token: syn::token::Paren::default(),
+            expr: Box::new(expression.clone()),
+        });
+        assert_eq!(walk.use_prefix(&wrapped, &target, 64), None);
+        exit.continuation = Some(vec![&wrapped].into());
+        assert_eq!(walk.exit_prefix(&exit, &target).as_deref().map(copied), Some(vec![wrapped]));
+    }
+
+    #[test]
+    fn cohort_continuation_budget_admits_exactly_thirty_two_following_expressions() {
+        let cfg = CfgSet::parse("");
+        let block: Block = syn::parse_str(concat!(
+            "{ break;",
+            "a(); b(); c(); d(); e(); f(); g(); h();",
+            "a(); b(); c(); d(); e(); f(); g(); h();",
+            "a(); b(); c(); d(); e(); f(); g(); h();",
+            "a(); b(); c(); d(); e(); f(); g(); h();",
+            "}",
+        ))
+        .unwrap();
+        let outer: Expr = parse_quote!(outer());
+        for (outer, expected) in [(Vec::new(), true), (vec![&outer], false)] {
+            let mut walk = empty_walk(&cfg);
+            walk.continuation = Some(outer.into());
+            walk.visit_block(&block);
+            assert_eq!(walk.exits[0].continuation.is_some(), expected);
+            if expected {
+                let expected = block
+                    .stmts
+                    .iter()
+                    .skip(1)
+                    .map(|statement| {
+                        let syn::Stmt::Expr(expression, _) = statement else {
+                            panic!("fixture expression")
+                        };
+                        expression.clone()
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(walk.exits[0].continuation.as_deref().map(copied), Some(expected));
+            }
+        }
+    }
+
+    #[test]
+    fn source_backed_continuations_count_construction_capture_and_partial_prefix_storage() {
+        let cfg = CfgSet::parse("");
+        let block: Block = syn::parse_str("{ break; let restored = reset(); observe(value); }").unwrap();
+        let outer_expression: Expr = parse_quote!(outer());
+        let outer: Rc<[&Expr]> = vec![&outer_expression].into();
+        let mut walk = empty_walk(&cfg);
+        walk.bind(&parse_quote!(value));
+        let target = walk.place(&parse_quote!(value)).unwrap();
+        walk.continuation = Some(Rc::clone(&outer));
+        walk.visit_block(&block);
+        let captured = walk.exits[0].continuation.as_ref().unwrap();
+        let prefix = walk.exit_prefix(&walk.exits[0], &target).unwrap();
+        let suffixes = (0..block.stmts.len())
+            .map(|index| walk.continuation(&block.stmts[index + 1..], &outer).unwrap())
+            .collect::<Vec<_>>();
+        assert!(Rc::ptr_eq(suffixes.last().unwrap(), &outer));
+        assert!(Rc::ptr_eq(walk.continuation.as_ref().unwrap(), &outer));
+        assert_eq!(copied(&prefix), vec![parse_quote!(reset()), parse_quote!(observe)]);
+        assert!(core::ptr::eq(prefix[0], captured[0]));
+        let Expr::Call(reset) = captured[0] else {
+            panic!("reset call fixture")
+        };
+        let Expr::Call(observe) = captured[1] else {
+            panic!("observe call fixture")
+        };
+        assert!(core::ptr::eq(prefix[1], observe.func.as_ref()));
+        assert!(core::ptr::eq(
+            core::ptr::from_ref(captured[2]),
+            core::ptr::from_ref(&outer_expression)
+        ));
+
+        // The copied implementation cloned the outer suffix, every constructed suffix, the
+        // captured exit, and the partial prefix (including reset's discarded callee prefix).
+        let copied_nodes = expression_nodes(&outer)
+            + suffixes.iter().map(|suffix| expression_nodes(suffix)).sum::<usize>()
+            + expression_nodes(captured)
+            + expression_nodes(&prefix)
+            + expression_nodes(&[&reset.func]);
+        let constructed_sequence_handles = outer.len()
+            + suffixes
+                .iter()
+                .filter(|suffix| !Rc::ptr_eq(suffix, &outer))
+                .map(|suffix| suffix.len())
+                .sum::<usize>()
+            + prefix.len();
+        let retained_handles = outer.len() + captured.len() + prefix.len();
+        assert_eq!((copied_nodes, constructed_sequence_handles, retained_handles), (27, 8, 6));
+    }
+
+    #[test]
+    fn source_backed_reinitialization_shares_one_captured_sequence_across_moved_places() {
+        let cfg = CfgSet::parse("");
+        let file =
+            parse_file("fn f(mut pair: Pair) { loop { consume(pair.left); consume(pair.right); pair = make(); after(); } }").unwrap();
+        let mut walk = empty_walk(&cfg);
+        walk.visit_file(&file);
+        let mut actual = Evidence::default();
+        reinitializations(&walk, &mut actual);
+        let (site, captured) = walk.continuations.iter().next().unwrap();
+        let checks = &actual.ownership_continuations[site];
+        assert_eq!(actual.invalid_ownership[site].len(), 2);
+        assert_eq!(checks.len(), 2);
+        assert!(checks.values().all(|sequence| Rc::ptr_eq(sequence, captured)));
+        assert_eq!(copied(captured), vec![parse_quote!(after())]);
+        let copied_nodes = expression_nodes(captured) * (1 + checks.len());
+        assert_eq!((copied_nodes, captured.len(), checks.len()), (6, 1, 2));
+    }
+
+    #[test]
+    fn cohort_branch_and_closure_visitors_preserve_binding_identity_and_loop_continuations() {
+        let cfg = CfgSet::parse("");
+        let file = parse_file(
+            "fn f(value: bool) {
+                loop {
+                    if let Some(value) = option { consume(value); } else { consume(value); }
+                    let closure = || { while let Some(value) = next() { consume(value); } };
+                    consume(value);
+                    break;
+                }
+            }",
+        )
+        .unwrap();
+        let mut walk = empty_walk(&cfg);
+        walk.visit_file(&file);
+        assert_eq!(walk.alternatives.len(), 1);
+        let branches = &walk.alternatives[0];
+        assert_eq!(branches.len(), 2);
+        let mut outer_reads = walk.place_sites.iter().filter(|(_, place)| place.root == "value");
+        let (_, conditional) = outer_reads.next().unwrap();
+        let (_, otherwise) = outer_reads.next().unwrap();
+        let (_, closure) = outer_reads.next().unwrap();
+        let (_, after) = outer_reads.next().unwrap();
+        assert_ne!(conditional.binding, otherwise.binding);
+        assert_eq!(otherwise.binding, after.binding);
+        assert_ne!(closure.binding, after.binding);
+        assert!(!walk.compatible(&branches[0], &branches[1]));
+        assert_eq!(walk.loops, Vec::<Range<usize>>::new());
+        assert!(walk.continuation.is_none());
+        assert!(walk.bindings.is_empty());
+    }
+
+    #[test]
+    fn cohort_branch_compatibility_checks_both_span_endpoints_and_branch_identity() {
+        let cfg = CfgSet::parse("");
+        let mut walk = empty_walk(&cfg);
+        walk.alternatives.push(vec![10..20, 30..40]);
+        for (left, right, expected) in [
+            (10..20, 30..40, false),
+            (11..19, 31..39, false),
+            (11..19, 11..19, true),
+            (11..19, 12..18, true),
+            (9..19, 31..39, true),
+            (11..21, 31..39, true),
+            (11..19, 29..39, true),
+            (11..19, 31..41, true),
+            (0..5, 50..60, true),
+        ] {
+            assert_eq!(walk.compatible(&left, &right), expected, "{left:?}: {right:?}");
+            assert_eq!(walk.compatible(&right, &left), expected, "{right:?}: {left:?}");
+        }
+    }
+
+    #[test]
+    fn cohort_move_dominance_requires_a_complete_enclosing_block() {
+        let cfg = CfgSet::parse("");
+        let mut walk = empty_walk(&cfg);
+        let expression: Expr = syn::parse_str("consume(value)").unwrap();
+        let context = Context {
+            block: 10..20,
+            loop_region: None,
+        };
+        for (block, expected) in [(10..20, true), (9..21, true), (11..20, false), (10..19, false)] {
+            walk.move_blocks.insert(expression.span().byte_range(), block.clone());
+            assert_eq!(walk.move_dominates(&expression, &context), expected, "{block:?}");
+        }
+        walk.move_blocks.clear();
+        assert!(!walk.move_dominates(&expression, &context));
+    }
+
+    #[test]
+    fn cohort_later_reads_ignore_only_reachable_compatible_complete_restorations() {
+        let cfg = CfgSet::parse("");
+        let mut walk = empty_walk(&cfg);
+        let target = place(1, &["left"]);
+        let position = 10..20;
+        walk.place_sites = vec![(40..50, target.clone())];
+        assert!(walk.used_after_compatible(&position, &target));
+        assert!(!walk.used_after_compatible(&(10..40), &target));
+        assert!(!walk.used_after_compatible(&position, &place(2, &["left"])));
+        assert!(!walk.used_after_compatible(&position, &place(1, &["right"])));
+        walk.writes.insert(40..50);
+        assert!(!walk.used_after_compatible(&position, &target));
+        walk.writes.clear();
+        for (unreachable, expected) in [(40..50, false), (39..51, false), (41..50, true), (40..49, true)] {
+            walk.unreachable = vec![unreachable.clone()];
+            assert_eq!(walk.used_after_compatible(&position, &target), expected, "{unreachable:?}");
+        }
+        walk.unreachable.clear();
+        for (restored, binding, fields, expected) in [
+            (21..39, 1, vec![], false),
+            (21..39, 1, vec!["left"], false),
+            (21..39, 1, vec!["left", "nested"], true),
+            (21..39, 2, vec!["left"], true),
+            (20..39, 1, vec!["left"], true),
+            (21..40, 1, vec!["left"], true),
+            (0..9, 1, vec!["left"], true),
+            (51..60, 1, vec!["left"], true),
+        ] {
+            walk.restorations = vec![(restored.clone(), place(binding, &fields))];
+            assert_eq!(walk.used_after_compatible(&position, &target), expected, "{restored:?}: {fields:?}");
+        }
+        walk.restorations = vec![(25..30, target.clone())];
+        walk.alternatives = vec![vec![10..20, 25..30]];
+        assert!(walk.used_after_compatible(&position, &target));
+        walk.restorations.clear();
+        walk.alternatives = vec![vec![10..20, 40..50]];
+        assert!(!walk.used_after_compatible(&position, &target));
     }
 
     #[test]
@@ -769,12 +1500,10 @@ mod tests {
         walk.bind(&parse_quote!(outer));
         let undo = walk.binding_undo.clone();
         let bindings = walk.bindings.clone();
-        walk.function(
-            &parse_quote!(fn nested(parameter: u8)),
-            Some(&parse_quote!({
-                let local = parameter;
-            })),
-        );
+        let body = parse_quote!({
+            let local = parameter;
+        });
+        walk.function(&parse_quote!(fn nested(parameter: u8)), Some(&body));
         assert_eq!(walk.binding_undo, undo);
         assert_eq!(walk.bindings, bindings);
     }
@@ -893,15 +1622,15 @@ mod tests {
         let field = place(1, &["left"]);
         let span = 30..40;
         walk.move_blocks.insert(expression.span().byte_range(), context.block.clone());
-        walk.loop_bodies.insert(10..90, context.block.clone());
+        walk.continuations.insert(span.clone(), Rc::default());
         assert!(walk.invalid_reinitialization(&span, &context, &field, &expression));
         assert!(!walk.invalid_reinitialization(&span, &context, &place(10, &["left"]), &expression));
         walk.restorations.push((40..50, field.clone()));
         assert!(!walk.invalid_reinitialization(&span, &context, &field, &expression));
         walk.restorations.clear();
-        walk.loop_bodies.clear();
+        walk.continuations.clear();
         assert!(!walk.invalid_reinitialization(&span, &context, &field, &expression));
-        walk.loop_bodies.insert(10..90, context.block.clone());
+        walk.continuations.insert(span.clone(), Rc::default());
         for (unreachable, invalid) in [(0..40, false), (35..50, true), (20..35, true)] {
             walk.unreachable = vec![unreachable.clone()];
             assert_eq!(
@@ -959,6 +1688,7 @@ mod tests {
             },
             plain: true,
             continuing: false,
+            continuation: Some(Rc::default()),
         });
         let mut actual = Evidence::default();
         exits(&walk, &mut actual);
@@ -1008,6 +1738,7 @@ mod tests {
                 context,
                 plain: true,
                 continuing,
+                continuation: Some(Rc::default()),
             });
             let mut actual = Evidence::default();
             exits(&walk, &mut actual);

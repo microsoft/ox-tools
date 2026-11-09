@@ -240,7 +240,6 @@ where
             // there is no mutant to record it against, and a baseline binary that went unmeasured
             // leaves every mutant that binary covers without a budget to be judged against.
             verdict => {
-                // #[gamma::skip(call_result.default, reason = "append_baseline_failure returns unit after retaining the same diagnostics and accounting updates")]
                 append_baseline_failure(
                     &mut baseline_failure,
                     &mut remaining_failed_test_artifacts,
@@ -255,7 +254,6 @@ where
             }
         }
     }
-    // #[gamma::skip(call_result.default, reason = "set_omitted_failed_test_count returns unit after retaining every artifact update")]
     set_omitted_failed_test_count(&mut baseline_failure, omitted_failed_tests);
 
     let baseline = Baseline {
@@ -270,7 +268,6 @@ where
         if let Some(failed) = failed {
             *failed = Some(baseline);
         }
-        // #[gamma::skip(call_result.default, reason = "disambiguate_artifact_directories returns unit after retaining the same directory changes")]
         disambiguate_artifact_directories(&mut baseline_failure);
         let count = baseline_failure.artifacts().len();
         let noun = if count == 1 { "failure" } else { "failures" };
@@ -709,7 +706,6 @@ fn directory_with_suffix(directory: &str, suffix: &str) -> String {
 
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn disambiguate_artifact_directories(failure: &mut Error) {
-    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
     disambiguate_artifact_directories_with(failure, || 2_u64..);
 }
 

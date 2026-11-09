@@ -1186,6 +1186,48 @@ fn focused_branch_replay_establishes_only_stable_path_assumptions() {
 }
 
 #[test]
+fn replay_must_finish_after_the_last_assumption_even_when_fuel_and_the_outer_guard_remain() {
+    let bindings = HashMap::from_iter([
+        ("ready".into(), Binding::Bool),
+        ("selected".into(), Binding::Bool),
+        ("tokens".into(), Binding::VecChar),
+    ]);
+    for (appends, certified) in [(1, true), (6, false)] {
+        let pushes = "tokens.push('a');".repeat(appends);
+        let original: Expr = parse_str(&format!("while ready {{ if selected {{ {pushes} ready = false; }} }}")).unwrap();
+        let mutated: Expr = parse_str(&format!("while ready {{ if selected {{ {pushes} }} }}")).unwrap();
+        assert_eq!(
+            proves(&original, &mutated, &bindings, &HashMap::default(), &HashMap::default(), true),
+            certified
+        );
+        if appends == 6 {
+            let (Expr::While(original), Expr::While(mutated)) = (&original, &mutated) else {
+                unreachable!()
+            };
+            let mut evaluator = machine();
+            evaluator.values = bindings
+                .iter()
+                .map(|(name, kind)| (name.clone(), Value::Symbol(name.clone(), *kind)))
+                .collect();
+            evaluator.paths = paths::conditions(&original.body, &mutated.body);
+            assert_eq!(evaluator.block(&mutated.body), Some(()));
+            let assumptions = core::mem::take(&mut evaluator.assumptions);
+            assert_eq!(assumptions.len(), 1);
+            evaluator.facts.clear();
+            assert_eq!(evaluator.block(&mutated.body), None);
+            assert_eq!(evaluator.assumptions, assumptions);
+            assert!(evaluator.budget > 0);
+            assert!(!evaluator.breaks);
+            assert_eq!(
+                evaluator.eval(&mutated.cond, Some(Binding::Bool)),
+                Some(Value::Symbol("ready".into(), Binding::Bool))
+            );
+            assert_eq!(evaluator.writes, HashSet::from_iter(["tokens".into()]));
+        }
+    }
+}
+
+#[test]
 fn interpretation_budgets_bound_projection_collection_and_syntax_searches() {
     let projection: Expr = parse_quote!(state.count);
     let tuple = Expr::Tuple(ExprTuple {
@@ -1390,6 +1432,8 @@ fn machine() -> Machine<'static> {
         stable_calls: None,
         paths: HashMap::default(),
         assumptions: Vec::new(),
+        retry: None,
+        breaks: false,
     }
 }
 
