@@ -589,7 +589,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-gamma"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "cargo-gamma-attrs",
  "cargo-gamma-lib",
@@ -600,7 +600,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-gamma-attrs"
-version = "0.4.0"
+version = "0.6.0"
 dependencies = [
  "cargo-gamma-attrs-impl",
  "cargo_metadata",
@@ -610,7 +610,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-gamma-attrs-impl"
-version = "0.4.0"
+version = "0.6.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -619,7 +619,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-gamma-engine"
-version = "0.4.0"
+version = "0.6.0"
 dependencies = [
  "blake3",
  "bolero",
@@ -640,7 +640,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-gamma-lib"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "blake3",
  "bolero",
@@ -680,7 +680,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-gamma-process"
-version = "0.4.0"
+version = "0.6.0"
 dependencies = [
  "camino",
  "cargo-gamma-unsafe",
@@ -690,7 +690,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-gamma-rt"
-version = "0.4.0"
+version = "0.6.0"
 dependencies = [
  "loom",
  "tempfile",
@@ -698,7 +698,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-gamma-unsafe"
-version = "0.4.0"
+version = "0.6.0"
 dependencies = [
  "cargo-gamma-rt",
  "libc",

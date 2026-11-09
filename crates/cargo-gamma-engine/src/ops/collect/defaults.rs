@@ -1333,6 +1333,60 @@ mod tests {
     use super::*;
 
     #[test]
+    fn nov7_absorbed_imports_aliases_and_alias_implementations_remain_unknown() {
+        for (sources, name) in [
+            (["struct Imported;", "use external::Imported;"], "Imported"),
+            (["struct Alias;", "type Alias = u8;"], "Alias"),
+            (
+                ["#[derive(Default)] struct Alias;", "type Alias = Missing; struct Missing;"],
+                "Missing",
+            ),
+            (["type Alias = u8;", "struct Missing; use crate::Missing as Alias;"], "Alias"),
+        ] {
+            let defaults = index(&sources);
+            assert!(!defaults.lacks_error_default(name), "{sources:?}");
+        }
+    }
+
+    #[test]
+    fn nov7_disabled_nominal_items_and_preceding_attributes_do_not_change_default_evidence() {
+        let defaults = Defaults::of_in(
+            &parse_file(
+                "#[cfg(any())] struct DisabledStruct;
+                 #[cfg(any())] enum DisabledEnum { Value }
+                 #[repr(transparent)] #[derive(Default)] struct Enabled(u8);
+                 #[derive(Default)] #[repr(transparent)] struct Reversed(u8);",
+            )
+            .unwrap(),
+            &CfgSet::parse(""),
+        );
+        assert!(!defaults.defines("DisabledStruct"));
+        assert!(!defaults.defines("DisabledEnum"));
+        assert!(defaults.has_default(&parse_quote!(Enabled)));
+        assert!(defaults.has_default(&parse_quote!(Reversed)));
+    }
+
+    #[test]
+    fn nov7_out_of_line_generic_types_do_not_gain_universal_default_from_one_instantiation() {
+        let cfg = CfgSet::unconditional();
+        let mut defaults = Defaults::of_source_in(
+            &parse_file("mod child; impl Default for child::Holder<u8> { fn default() -> Self { child::Holder(0) } }").unwrap(),
+            &cfg,
+            "root.rs",
+        );
+        defaults.absorb(Defaults::of_source_in(
+            &parse_file("pub struct Holder<T>(pub T);").unwrap(),
+            &cfg,
+            "child.rs",
+        ));
+        defaults.bind_sources(&[
+            ("root.rs".into(), "root.rs".into(), Vec::new()),
+            ("child.rs".into(), "root.rs".into(), vec!["child".into()]),
+        ]);
+        assert_eq!(defaults.source_default("root.rs", &[], &["child".into(), "Holder".into()]), None);
+    }
+
+    #[test]
     fn absolute_trait_imports_ignore_lexical_aliases_of_external_root_names() {
         for source in [
             "use core::default as std; use ::std::default::Default as D;",

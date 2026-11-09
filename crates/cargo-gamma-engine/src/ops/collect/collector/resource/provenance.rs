@@ -201,9 +201,10 @@ impl Collector<'_> {
                         path,
                     });
                     let types = self.types();
-                    if types.standard_constructor_root(&ty)
-                        && types.supports_collection_api(&ty)
-                        && types.standard_type_name(&ty).as_deref() == Some("Vec")
+                    if (
+                        // #[gamma::skip(logical.and_remove_left, tag = "equivalent", reason = "supports_collection_api independently rejects nongenuine or shadowed collection roots; retaining that conjunct gives the same Vec admission.")]
+                        types.standard_constructor_root(&ty) && types.supports_collection_api(&ty)
+                    ) && types.standard_type_name(&ty).as_deref() == Some("Vec")
                     {
                         let _prior = bindings.insert(name, Binding::Vec);
                         continue;
@@ -236,9 +237,10 @@ impl Collector<'_> {
                 let name = segment.ident.to_string();
                 self.generics.contains(&name) || self.defaulted.contains(&name)
             }));
-            if !abstract_root
-                && types.standard_constructor_root(&ty)
-                && types.supports_nonzero_api(&ty)
+            if (
+                // #[gamma::skip(logical.and_remove_right, tag = "equivalent", reason = "The following supports_nonzero_api check independently requires a genuine unshadowed standard root; this mutation still retains the abstract-root rejection.")]
+                !abstract_root && types.standard_constructor_root(&ty)
+            ) && types.supports_nonzero_api(&ty)
                 && types.standard_type_name(&ty).as_deref() == Some("NonZeroU32")
             {
                 let _prior = bindings.insert(name, Binding::Primitive(Primitive::Unsigned(32)));

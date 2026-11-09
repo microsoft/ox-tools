@@ -56,7 +56,10 @@ pub(super) fn complaints(stderr: &str) -> String {
     for line in segments {
         let trimmed = line.trim_start();
 
-        if is_progress(line) {
+        if
+        // #[gamma::skip(cond.always_false, tag = "equivalent", reason = "line is already unstyled; every is_progress match starts with Building or Compiling followed by a space, which the following PROGRESS filter also discards.")]
+        is_progress(line) {
+            // #[gamma::skip(loop.delete_continue, tag = "equivalent", reason = "Every line reaching this continue is also discarded by the following Building/Compiling PROGRESS filter.")]
             continue;
         }
 

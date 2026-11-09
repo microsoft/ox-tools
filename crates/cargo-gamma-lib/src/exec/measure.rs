@@ -23,11 +23,10 @@ use super::session::{PackageSweepCost, Phases, Session, SweepCost};
 use super::stall::Stall;
 use super::sweep::{Sweep, test_all};
 use super::test_binary::{
-    Reachability, TestBinary, TestScope, admits_target, build_packages, calibrate, oracle_packages, reaches, reaching_packages, restrict,
-    unmatched_test,
+    Reachability, TestBinary, TestScope, build_packages, calibrate, oracle_packages, reaches, reaching_packages, restrict, unmatched_test,
 };
 use super::workspace::{Workspace, campaign_base};
-use crate::discover::{CompileFailTarget, LibraryTestTarget, Plan, Survey, compile_fail_advice};
+use crate::discover::{LibraryTestTarget, Plan, Survey};
 use crate::error::error;
 use crate::model::{Mutant, Outcome};
 use crate::ops::registry::Selection;
@@ -685,14 +684,6 @@ fn measure_with_locks(
     // full instrumented build.
     validate_test_oracle(&survey.tests, &survey.library_tests, &survey.selected, config)?;
 
-    // Said before the tree is copied, let alone built. A compile-fail target is expensive per
-    // mutant rather than once, so by the time its cost is visible in the progress display the run
-    // has already committed hours to it — and what it looks like from outside is a run that hung.
-    // Checked against the oracle and its filters so that unrelated workspace packages and targets
-    // the caller has already excluded are not presented as costs of this run.
-    // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
-    announce_compile_fail_costs(survey, config, events);
-
     let mut plan = survey.skeleton();
     let mut converger = configured_converger(config);
 
@@ -895,12 +886,6 @@ fn measure_with_locks(
         dropped,
         learning: None,
     })
-}
-
-// #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
-fn announce_compile_fail_costs(survey: &Survey, config: &Config, events: &mut dyn Events) {
-    let targets = survey.compile_fail.as_slice();
-    warn_about_compile_fail_targets(targets, &survey.selected, config, events);
 }
 
 fn validate_synchronized_sources(work: &Workspace, digests: &HashMap<Utf8PathBuf, String>) -> Result<()> {
@@ -1203,30 +1188,6 @@ fn finish_schema_build(events: &mut impl Events, unviable: usize, viable: usize,
         let _ = write!(detail, ", leaving {}", crate::report::quantity(viable, "viable mutant"));
     }
     events.complete(&detail);
-}
-
-/// Says so when a test target is going to run the compiler once per mutant.
-///
-/// Named and never removed. `trybuild` asserts exact compiler output, so on a proc-macro crate such
-/// a target is often the *primary* oracle — a mutant that corrupts a diagnostic message is caught
-/// there and nowhere else. Excluding it automatically would gut the oracle for the code the
-/// technique suits best, and the mutants would come back as survivors rather than as anything
-/// visibly wrong. Whether the catch rate justifies the price is the caller's to weigh, so the run
-/// states the price and the flag and leaves the decision where it belongs.
-fn warn_about_compile_fail_targets(targets: &[CompileFailTarget], selected: &[String], config: &Config, events: &mut dyn Events) {
-    let oracle = oracle_packages(selected, config);
-    let admitted: Vec<_> = targets
-        .iter()
-        .filter(|target| {
-            (config.test_workspace || oracle.contains(&target.package))
-                && admits_target(&target.target, &config.include_tests, &config.exclude_tests)
-        })
-        .cloned()
-        .collect();
-
-    if let Some(warning) = compile_fail_advice(&admitted) {
-        events.warn(&warning);
-    }
 }
 
 /// How many packages a warning names before it starts counting them instead.
@@ -3825,136 +3786,6 @@ mod tests {
         assert!(settled.measuring());
         assert!(!settled.enforcing());
         assert_eq!(note, None);
-    }
-
-    fn target_in(package: &str, name: &str) -> CompileFailTarget {
-        CompileFailTarget {
-            package: package.to_owned(),
-            target: name.to_owned(),
-            harness: "trybuild".to_owned(),
-        }
-    }
-
-    fn target(name: &str) -> CompileFailTarget {
-        target_in("routerama", name)
-    }
-
-    fn config_with(exclude: &[&str]) -> Config {
-        Config {
-            exclude_tests: exclude.iter().map(|pattern| (*pattern).to_owned()).collect(),
-            ..Config::default()
-        }
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn a_compile_fail_target_is_named_before_anything_is_built() {
-        let mut events = Recorder::default();
-
-        warn_about_compile_fail_targets(
-            &[target("router_compile_fail")],
-            &["routerama".to_owned()],
-            &config_with(&[]),
-            &mut events,
-        );
-
-        let [warning] = events.warnings.as_slice() else {
-            panic!("one admitted target is one warning, got {:?}", events.warnings);
-        };
-
-        assert_eq!(
-            warning,
-            "1 test binary may have test cases that invoke the Rust compiler, which may lead to very long mutation test runs:\n  \
-             `router_compile_fail` in routerama (trybuild)\n\
-             Consider omitting the specific test cases using `--skip` harness filters."
-        );
-    }
-
-    /// A caller who has already acted on the advice must not be given it again, or the warning
-    /// becomes noise that is scrolled past on the run where it matters.
-    #[test]
-    fn a_target_already_excluded_is_not_warned_about() {
-        let mut events = Recorder::default();
-
-        warn_about_compile_fail_targets(
-            &[target("router_compile_fail")],
-            &["routerama".to_owned()],
-            &config_with(&["router_compile_fail"]),
-            &mut events,
-        );
-
-        assert!(events.warnings.is_empty(), "{:?}", events.warnings);
-    }
-
-    /// A glob is how these are excluded in practice, and it has to count as having acted.
-    #[test]
-    fn a_target_excluded_by_a_glob_is_not_warned_about() {
-        let mut events = Recorder::default();
-
-        warn_about_compile_fail_targets(
-            &[target("router_compile_fail")],
-            &["routerama".to_owned()],
-            &config_with(&["*_compile_fail"]),
-            &mut events,
-        );
-
-        assert!(events.warnings.is_empty(), "{:?}", events.warnings);
-    }
-
-    /// Targets in unrelated workspace packages are not part of the default oracle and must not
-    /// prompt the caller to exclude tests that this run will never execute.
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn a_compile_fail_target_outside_the_oracle_is_not_warned_about() {
-        let mut events = Recorder::default();
-
-        warn_about_compile_fail_targets(
-            &[target("router_compile_fail"), target_in("internity", "compile_fail")],
-            &["routerama".to_owned()],
-            &config_with(&[]),
-            &mut events,
-        );
-
-        let [warning] = events.warnings.as_slice() else {
-            panic!("only the selected package should produce a warning, got {:?}", events.warnings);
-        };
-
-        assert!(warning.contains("router_compile_fail"), "{warning}");
-        assert!(!warning.contains("internity"), "{warning}");
-        assert!(!warning.contains("`compile_fail` in internity"), "{warning}");
-    }
-
-    #[test]
-    fn whole_workspace_oracles_warn_about_compile_fail_targets_outside_the_selected_packages() {
-        let mut events = Recorder::default();
-        warn_about_compile_fail_targets(
-            &[target_in("external", "external_compile_fail")],
-            &["routerama".to_owned()],
-            &Config {
-                test_workspace: true,
-                ..Config::default()
-            },
-            &mut events,
-        );
-        let [warning] = events.warnings.as_slice() else {
-            panic!("a workspace-wide oracle must include the external compile-fail target");
-        };
-        assert!(warning.contains("`external_compile_fail` in external"), "{warning}");
-        assert!(
-            warning.contains("Consider omitting the specific test cases using `--skip` harness filters."),
-            "{warning}"
-        );
-        assert!(!warning.contains("--exclude-test"), "{warning}");
-    }
-
-    /// The ordinary case is a workspace with no such target at all, which must say nothing.
-    #[test]
-    fn a_workspace_without_one_is_silent() {
-        let mut events = Recorder::default();
-
-        warn_about_compile_fail_targets(&[], &["routerama".to_owned()], &config_with(&[]), &mut events);
-
-        assert!(events.warnings.is_empty(), "{:?}", events.warnings);
     }
 
     /// A workspace where `app` links `core`, and both are their own reach.

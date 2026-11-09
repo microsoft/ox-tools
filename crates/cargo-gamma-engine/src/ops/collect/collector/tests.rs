@@ -23,6 +23,34 @@ fn with_source_facts(source: &str, selector: &str, check: impl FnOnce(&mut Colle
 }
 
 #[test]
+fn nov7_default_selection_keeps_nonrestricted_optimistic_return_values() {
+    let file = SourceFile::parse("fixture.rs", "fn value() -> external::bool { todo!() }".into()).unwrap();
+    let found = collect_in(&file, &Selection::default_preset(), &CfgSet::unconditional());
+    let returns = found
+        .iter()
+        .filter(|candidate| candidate.mutator.starts_with("fn_value."))
+        .collect::<Vec<_>>();
+    assert_eq!(returns.len(), 2, "{found:?}");
+    assert!(returns.iter().all(|candidate| candidate.confidence == Confidence::Optimistic));
+    assert_eq!(
+        returns.iter().map(|candidate| candidate.replacement.as_str()).collect::<Vec<_>>(),
+        ["false", "true"]
+    );
+}
+
+#[test]
+fn nov7_impl_type_parameters_do_not_borrow_primitive_return_values() {
+    let source = "struct Holder<T>(T); impl<bool> Holder<bool> { fn value(value: bool) -> bool { value } }";
+    assert_eq!(mutators(source, "fn_value", &CfgSet::unconditional()), Vec::<&str>::new());
+}
+
+#[test]
+fn nov7_disabled_array_elements_do_not_supply_literal_mutations() {
+    let source = "fn value() { let _ = [#[cfg(any())] true, false]; }";
+    assert_eq!(mutators(source, "literal.bool_flip", &CfgSet::parse("")), ["literal.bool_flip"]);
+}
+
+#[test]
 fn control_flow_default_markers_require_a_matching_expected_type_and_unary_constructor() {
     with_source_facts("", "control_flow", |collector| {
         let types = collector.types();
@@ -1176,6 +1204,132 @@ fn configured_out_statements_and_unrelated_macros_do_not_stop_or_join_active_col
         for candidate in &found {
             assert_eq!(file.slice(&candidate.span), original);
         }
+    }
+}
+
+#[test]
+fn cfg_disabled_items_do_not_hide_boolean_return_tails() {
+    for attributes in ["#[cfg(any())]", "#[cfg_attr(all(), cfg(any()))]"] {
+        let source = format!("fn f() -> bool {{ {{ probe() }} {attributes} struct Hidden; }}");
+        let file = SourceFile::parse("fixture.rs", source).unwrap();
+        let found = collect_in(&file, &Selection::parse("bool_expr.negate").unwrap(), &CfgSet::parse(""));
+        assert_eq!(found.len(), 1, "{attributes}: {found:?}");
+        assert_eq!(file.slice(&found[0].span), "{ probe() }");
+    }
+}
+
+#[test]
+fn cfg_disabled_items_do_not_hide_numeric_return_tails() {
+    for attributes in ["#[cfg(any())]", "#[cfg_attr(all(), cfg(any()))]"] {
+        let source = format!("fn f() -> u32 {{ {{ probe() }} {attributes} struct Hidden; }}");
+        let file = SourceFile::parse("fixture.rs", source).unwrap();
+        let found = collect_in(
+            &file,
+            &Selection::parse("expr.increment,expr.decrement").unwrap(),
+            &CfgSet::parse(""),
+        );
+        assert_eq!(
+            found.iter().map(|candidate| candidate.mutator).collect::<Vec<_>>(),
+            ["expr.decrement", "expr.increment"],
+            "{attributes}: {found:?}"
+        );
+        for candidate in found {
+            assert_eq!(file.slice(&candidate.span), "{ probe() }");
+        }
+    }
+}
+
+#[test]
+fn configured_tail_expressions_follow_the_selected_architecture() {
+    for source in [
+        r#"
+            fn f() -> bool {
+                #[cfg(target_arch = "x86_64")] { x86() }
+                #[cfg(target_arch = "aarch64")] { arm() }
+            }
+        "#,
+        r#"
+            fn f() -> bool {
+                #[cfg_attr(all(), cfg(target_arch = "x86_64"))] { x86() }
+                #[cfg_attr(all(), cfg(target_arch = "aarch64"))] { arm() }
+            }
+        "#,
+    ] {
+        let file = SourceFile::parse("fixture.rs", source.into()).unwrap();
+        let selection = Selection::parse("bool_expr.negate").unwrap();
+        for (architecture, active, inactive) in [("x86_64", "x86()", "arm()"), ("aarch64", "arm()", "x86()")] {
+            let cfg = CfgSet::parse(&format!("target_arch=\"{architecture}\"\n")).with_test();
+            let found = collect_in(&file, &selection, &cfg);
+            assert_eq!(found.len(), 1, "{architecture}: {found:?}");
+            let original = file.slice(&found[0].span);
+            assert!(original.contains(active), "{architecture}: {original}");
+            assert!(!original.contains(inactive), "{architecture}: {original}");
+        }
+    }
+}
+
+#[test]
+fn numeric_return_perturbations_follow_the_active_tail() {
+    let file = SourceFile::parse(
+        "fixture.rs",
+        r#"
+            fn f() -> u32 {
+                #[cfg(target_arch = "x86_64")] { x86() }
+                #[cfg(target_arch = "aarch64")] { arm() }
+            }
+        "#
+        .into(),
+    )
+    .unwrap();
+    let selection = Selection::parse("expr.increment,expr.decrement").unwrap();
+    for (architecture, active, inactive) in [("x86_64", "x86()", "arm()"), ("aarch64", "arm()", "x86()")] {
+        let cfg = CfgSet::parse(&format!("target_arch=\"{architecture}\"\n")).with_test();
+        let found = collect_in(&file, &selection, &cfg);
+        assert_eq!(found.len(), 2, "{architecture}: {found:?}");
+        for candidate in found {
+            let original = file.slice(&candidate.span);
+            assert!(original.contains(active), "{architecture}: {original}");
+            assert!(!original.contains(inactive), "{architecture}: {original}");
+        }
+    }
+}
+
+#[test]
+fn configured_call_arguments_keep_only_active_mutants_and_parameter_types() {
+    let file = SourceFile::parse(
+        "fixture.rs",
+        r#"
+            fn consume(
+                #[cfg(target_arch = "aarch64")] ignored_bool: bool,
+                #[cfg(target_arch = "aarch64")] ignored_number: u32,
+                flag: bool,
+                number: u32,
+            ) {}
+            fn f(ignored_bool: bool, ignored_number: u32, flag: bool, number: u32) {
+                consume(
+                    #[cfg(target_arch = "aarch64")] ignored_bool,
+                    #[cfg(target_arch = "aarch64")] ignored_number,
+                    flag,
+                    number,
+                );
+            }
+        "#
+        .into(),
+    )
+    .unwrap();
+    let selection = Selection::parse("bool_expr.negate,expr.increment,expr.decrement").unwrap();
+    for (architecture, expected) in [
+        ("x86_64", vec!["flag", "number", "number"]),
+        (
+            "aarch64",
+            vec!["flag", "ignored_bool", "ignored_number", "ignored_number", "number", "number"],
+        ),
+    ] {
+        let cfg = CfgSet::parse(&format!("target_arch=\"{architecture}\"\n")).with_test();
+        let found = collect_in(&file, &selection, &cfg);
+        let mut originals: Vec<_> = found.iter().map(|candidate| file.slice(&candidate.span).trim()).collect();
+        originals.sort_unstable();
+        assert_eq!(originals, expected, "{architecture}: {found:?}");
     }
 }
 

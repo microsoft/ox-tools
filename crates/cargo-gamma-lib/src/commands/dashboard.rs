@@ -151,6 +151,8 @@ pub(super) struct Dashboard {
     styler: Styler,
     drawn_frame: Option<DrawnFrame>,
     last_draw: Option<Instant>,
+    #[cfg(test)]
+    redraw_time: Option<Instant>,
     testing_started: Option<Instant>,
     phase: Phase,
     status: String,
@@ -181,6 +183,8 @@ impl Dashboard {
             styler,
             drawn_frame: None,
             last_draw: None,
+            #[cfg(test)]
+            redraw_time: None,
             testing_started: None,
             phase: Phase::default(),
             status: String::new(),
@@ -209,6 +213,11 @@ impl Dashboard {
     #[cfg(test)]
     pub(super) fn testing_status_for_test(&self) -> &str {
         &self.status
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_redraw_time_for_test(&mut self, now: Instant) {
+        self.redraw_time = Some(now);
     }
 
     pub(super) const fn enabled(&self) -> bool {
@@ -409,7 +418,11 @@ impl Dashboard {
     }
 
     pub(super) fn tick<H: Host>(&mut self, host: &mut H) {
-        self.tick_at(host, Instant::now());
+        #[cfg(test)]
+        let now = self.redraw_time.unwrap_or_else(Instant::now);
+        #[cfg(not(test))]
+        let now = Instant::now();
+        self.tick_at(host, now);
     }
 
     fn tick_at<H: Host>(&mut self, host: &mut H, now: Instant) {
