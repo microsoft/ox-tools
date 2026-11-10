@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-11-10
+
+- ✨ Features
+
+  - cargo-anvil: isolate authenticated dependency preparation
+
+- 🐛 Bug Fixes
+
+  - cargo-gamma: honor active cfgs and reduce console noise ([#352](https://github.com/microsoft/ox-tools/pull/352))
+
+- 📚 Documentation
+
+  - cargo-anvil: focus documentation on current contracts ([#355](https://github.com/microsoft/ox-tools/pull/355))
+
 ## [0.25.0] - 2026-11-04
 
 - ⚡ Performance

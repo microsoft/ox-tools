@@ -1,7 +1,7 @@
 version = 2
 tool = "anvil"
-tool_version = "0.25.0"
-catalog_checksum = "sha256:6c42549eea050a198d2e0c61246d2e5af7d7e4360eb786e29bd5efb82813341a"
+tool_version = "0.26.0"
+catalog_checksum = "sha256:16a79f4001ac424eb8b852bb8f0ae940e987aa4f37e9dfad1312c3161c214eb5"
 
 [[file]]
 path = ".anvil/container/Dockerfile.dockerignore"
@@ -189,7 +189,7 @@ checksum = "sha256:eada927fe6c6f07d555598e6244f096a8d0044acec2f8c770a7fcd22302d6
 
 [[file]]
 path = "justfiles/anvil/container.just"
-checksum = "sha256:1b3ba7fa33aabdc5cced71cb0512daaa2eeedc3d7f6a03f0467f57889ea98196"
+checksum = "sha256:877402444f7e814fe0ee3fcbbb19b6b24001ca9a0dfef3d366ce9b1c22543a83"
 
 [[file]]
 path = "justfiles/anvil/dev/build.just"
