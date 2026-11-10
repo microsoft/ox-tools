@@ -3381,7 +3381,11 @@ mod tests {
             |_| panic!("ordinary failure must not write an empty report"),
         )
         .expect_err("ordinary failure must not request the Windows fallback");
-        assert!(error.to_string().contains("cargo llvm-cov report failed"), "{error}");
+        #[cfg(windows)]
+        let expected = "cargo llvm-cov report failed: `cargo report` exited with exit code: 1";
+        #[cfg(unix)]
+        let expected = "cargo llvm-cov report failed: `cargo report` exited with exit status: 1";
+        assert_eq!(error.to_string(), expected);
     }
 
     #[test]

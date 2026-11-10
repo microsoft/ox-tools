@@ -1295,15 +1295,14 @@ fn wrapper_is_self(candidate: &OsStr, wrapper: &Utf8Path, root: &Utf8Path) -> bo
         .is_some_and(|(candidate, wrapper)| candidate == wrapper)
 }
 
+#[cfg(windows)]
 fn executable_names_equal(left: &str, right: &str) -> bool {
-    #[cfg(windows)]
-    {
-        left.eq_ignore_ascii_case(right)
-    }
-    #[cfg(not(windows))]
-    {
-        left == right
-    }
+    left.eq_ignore_ascii_case(right)
+}
+
+#[cfg(not(windows))]
+fn executable_names_equal(left: &str, right: &str) -> bool {
+    left == right
 }
 
 /// What running a command produced, reduced to the three things [`interpret`] judges it on.
@@ -2611,8 +2610,7 @@ pub(crate) fn claim_workspace(root: &Utf8Path) -> Result<File> {
 fn claim_workspace_at(root: &Utf8Path, base: &Utf8Path) -> Result<File> {
     validate_default_cache_base(root, base)?;
 
-    fs::create_dir_all(base.as_std_path())
-        .map_err(|cause| error!("could not create cargo-gamma's workspace cache at `{base}`").caused_by(cause))?;
+    create_private_dir_all(base).map_err(|cause| error!("could not create cargo-gamma's workspace cache at `{base}`").caused_by(cause))?;
 
     let lock = claim(base)?;
 
@@ -2714,8 +2712,7 @@ fn validate_production_campaign_base(root: &Utf8Path, target: &Utf8Path, base: &
 
 fn claim_default_campaign_cache(root: &Utf8Path, target: &Utf8Path, base: &Utf8Path) -> Result<()> {
     validate_default_campaign_base(root, target, base)?;
-    fs::create_dir_all(base.as_std_path())
-        .map_err(|cause| error!("could not create cargo-gamma's campaign cache at `{base}`").caused_by(cause))?;
+    create_private_dir_all(base).map_err(|cause| error!("could not create cargo-gamma's campaign cache at `{base}`").caused_by(cause))?;
     // #[gamma::skip(try.propagate_to_unwrap, reason = "This wrapper inspects native cache link identity immediately after creation; deterministic substitution/failure coverage needs the deferred cache filesystem backend.", tag = "native-boundary")]
     reject_linked_cache(base)?;
     validate_cache_owner(root, base, CacheKind::Default)
@@ -6149,6 +6146,19 @@ mod tests {
         let mode = fs::metadata(base.as_std_path()).expect("the cache metadata").permissions().mode();
 
         assert_eq!(mode & 0o077, 0, "the cache mode {mode:o} grants group or other access");
+
+        crate::testing::with_cache_home_at(base.with_file_name("home"), || {
+            let target = source.join("target");
+            let _claims = claim_cache(&source, &target, None).expect("preclaimed default caches are private under any umask");
+            for base in [gamma_base(&source, None), campaign_base(&source, &target, None)] {
+                let mode = fs::metadata(&base).expect("the preclaimed cache metadata").permissions().mode();
+                assert_eq!(mode & 0o077, 0, "the preclaimed cache mode {mode:o} grants group or other access");
+            }
+        });
+
+        fs::set_permissions(&base, fs::Permissions::from_mode(0o750)).expect("the existing cache permissions");
+        create_private_dir_all(&base).expect("an existing directory is retained");
+        assert_eq!(fs::metadata(&base).unwrap().permissions().mode() & 0o777, 0o750);
     }
 
     /// A cache reached through a link is a cache whose identity can be changed after it has been

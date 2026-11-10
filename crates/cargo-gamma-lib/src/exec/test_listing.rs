@@ -1115,7 +1115,10 @@ mod tests {
             |_| panic!("an exited listing leader must not poll"),
         );
 
-        assert!(names.is_err(), "an incomplete listing was accepted: {names:?}");
+        assert_eq!(
+            names.unwrap_err().message(),
+            "test enumeration failed: stdout: output collection did not complete: timed out waiting on channel\n\nTest Stderr\n(no output)"
+        );
         assert!(clocks.is_empty());
         assert!(process.observations.is_empty());
         assert_eq!(process.terminated, 0);

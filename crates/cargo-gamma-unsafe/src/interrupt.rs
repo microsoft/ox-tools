@@ -1154,6 +1154,7 @@ mod tests {
         assert_eq!(registry.holding_cgroup(1), Some(31));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn an_old_owner_cannot_clear_a_reused_slots_cgroup() {
         let registry = Registry::new();

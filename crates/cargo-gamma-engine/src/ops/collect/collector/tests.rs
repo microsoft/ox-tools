@@ -4379,20 +4379,27 @@ fn a_statement_that_is_configured_out_is_not_mutated() {
 
 #[test]
 fn typed_tail_expressions_respect_their_configuration() {
-    let source = "fn f() -> bool {
-        #[cfg(unix)] { true }
-        #[cfg(not(unix))] { false }
-    }";
-    let file = SourceFile::parse("test.rs", source.to_owned()).unwrap();
     let selection = Selection::parse("bool_expr.negate").unwrap();
-
-    for (cfg, active) in [(CfgSet::parse("unix"), "{ true }"), (CfgSet::parse("windows"), "{ false }")] {
-        let found = collect_in(&file, &selection, &cfg);
-        assert_eq!(
-            found.iter().map(|candidate| file.slice(&candidate.span).trim()).collect::<Vec<_>>(),
-            [active],
-            "{found:?}"
-        );
+    for source in [
+        "fn f() -> bool {
+            #[cfg(unix)] { true }
+            #[cfg(not(unix))] { false }
+        }",
+        "fn f() -> bool {
+            #[cfg(unix)] { true }
+            #[cfg(not(unix))] { false }
+            #[cfg(any())] fn g() {}
+        }",
+    ] {
+        let file = SourceFile::parse("test.rs", source.to_owned()).unwrap();
+        for (cfg, active) in [(CfgSet::parse("unix"), "{ true }"), (CfgSet::parse("windows"), "{ false }")] {
+            let found = collect_in(&file, &selection, &cfg);
+            assert_eq!(
+                found.iter().map(|candidate| file.slice(&candidate.span).trim()).collect::<Vec<_>>(),
+                [active],
+                "{found:?}"
+            );
+        }
     }
 }
 

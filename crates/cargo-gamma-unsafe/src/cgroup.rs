@@ -1001,7 +1001,7 @@ mod tests {
     #[test]
     fn process_generation_uses_field_22_after_the_complete_command_name() {
         let stat = "41 (worker ) with spaces) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 123456 20";
-        assert_eq!(start_time_from(stat), Some(123456));
+        assert_eq!(start_time_from(stat), Some(123_456));
         assert_eq!(start_time_from("not a process stat"), None);
         assert_eq!(start_time_from("41 (worker) S 1"), None);
         assert_eq!(start_time_from(&stat.replace("123456", "invalid")), None);
