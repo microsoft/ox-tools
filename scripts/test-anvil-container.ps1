@@ -565,9 +565,10 @@ if (-not $buildSecretsSupported) {
     Write-Step 'everything above is engine-agnostic and has already run'
 } else {
 # A user writes this file by hand; the public catalog does not emit one.
+$env:ANVIL_E2E_BUILD_SECRET = 'build-secret-value'
 Write-Fixture $hooks @'
 function Anvil-BuildSecrets {
-    @{ Secrets = @{ e2e_token = 'build-secret-value' } }
+    @{ Secrets = @{ e2e_token = $env:ANVIL_E2E_BUILD_SECRET } }
 }
 
 function Anvil-RunEnv {
@@ -667,7 +668,7 @@ Write-Section '9. Hook output does not change the tag'
 
 Write-Fixture $hooks @'
 function Anvil-BuildSecrets {
-    @{ Secrets = @{ e2e_token = 'build-secret-value' } }
+    @{ Secrets = @{ e2e_token = $env:ANVIL_E2E_BUILD_SECRET } }
 }
 
 function Anvil-RunEnv {
@@ -754,6 +755,7 @@ function Invoke-PreparedCase([string]$Case, [string[]]$Command, [bool]$Succeeds 
     $environment = @{
         FIXTURE_IMAGE = $preparedImage
         FIXTURE_TOKEN = $fixtureToken
+        FIXTURE_SECOND_TOKEN = $secondToken
         FIXTURE_ACQUISITIONS = $acquisitions
         ANVIL_CONTAINER_NO_REBUILD = '1'
     }
@@ -929,7 +931,7 @@ function Anvil-PrepareEnv {
     Add-Content -LiteralPath $env:FIXTURE_ACQUISITIONS -Value 'acquired'
     @{ Env = @{
         CARGO_REGISTRIES_FIXTURE_TOKEN = $env:FIXTURE_TOKEN
-        FIXTURE_SECOND_CREDENTIAL = 'synthetic.fixture.second+[token]'
+        FIXTURE_SECOND_CREDENTIAL = $env:FIXTURE_SECOND_TOKEN
     } }
 }
 '@
@@ -947,7 +949,9 @@ Remove-Item -LiteralPath "$env:CARGO_HOME/registry/cache", "$env:CARGO_HOME/regi
 & cargo test --locked
 exit $LASTEXITCODE
 '@
-    Invoke-PreparedCase 'an incomplete cache fails offline without credential reacquisition' @('pwsh', '-File', '/workspace/incomplete-cache.ps1') $false | Out-Null
+    $incomplete = Invoke-PreparedCase 'an incomplete cache fails offline without credential reacquisition' @('pwsh', '-File', '/workspace/incomplete-cache.ps1') $false
+    Assert-That 'the incomplete-cache failure is from Cargo offline enforcement' `
+        ("$($incomplete.StdOut)$($incomplete.StdErr)".Contains('--offline'))
     Write-Fixture (Join-Path $repo 'validation-failure.ps1') 'exit 23'
     $failed = Invoke-PreparedCase 'a validation failure cleans up' @('pwsh', '-File', '/workspace/validation-failure.ps1') $false
     Assert-Equal 'validation exit status is preserved' 23 $failed.ExitCode
