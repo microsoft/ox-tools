@@ -1,100 +1,56 @@
-# Updates, Ownership, and TOML Adoption
+# Updates, ownership, and adoption
 
 `cargo anvil` updates generated infrastructure while preserving repository
-configuration. Owned files and managed regions deliberately have different
-ownership contracts: owned files support customization and proposals; the contents
-of managed regions belong to the catalog and edits require reconciliation.
-
-See [README.md](./README.md) for the CLI, [local.md](./local.md) for recipes,
-[extensibility.md](./extensibility.md) for catalogs, and
-[containers.md](./containers.md) for ordered container regions.
+configuration. Owned files support customization and proposals. Managed
+region bodies belong to the catalog and edits require reconciliation.
 
 ## 1. The manifest
 
-`.anvil.lock` is committed TOML at the repository root. It records the checksum
-of the last rendered content for each owned file and each `(host, id)` region:
+Commit `.anvil.lock` with the generated files. It records the managing tool,
+tool version, catalog checksum, and last-rendered checksum of each owned file
+and `(host, region ID)`. Do not edit checksums to accept an update.
 
-```toml
-version = 2
-tool = "anvil"
-tool_version = "0.4.1"
-catalog_checksum = "sha256:..."
+The current schema is 2. A lock with a newer schema is refused: upgrade the
+generator rather than deleting its ownership history. Paths are relative to
+and contained within the repository. Structural JSON regions also retain
+selector and scanner provenance for safe retirement.
 
-[[file]]
-path = "justfiles/anvil/checks/fmt.just"
-checksum = "sha256:..."
-
-[[region]]
-host = "deny.toml"
-id = "anvil-deny-advisories"
-checksum = "sha256:..."
-```
-
-Paths are repository-relative, slash-separated, and must stay inside the repository.
-Entries are deterministic: files sorted by path, regions by `(host, id)`.
-Schema 2 regions introduced through the structural JSON-array API also record an optional
-`json_array_path = ["property", "nested-property"]`. This additive provenance
-distinguishes strict JSON-array retirement from ordinary slash-comment regions
-whose host may use a more permissive JSON-like dialect. Locks without the field
-remain valid and keep the ordinary line-oriented retirement behavior.
-Hosts containing ordinary regions alongside a structural JSON array are also
-listed in the top-level `json_scanner_hosts` array. Host-level provenance is
-independent of checksum ownership, so it also covers refused untracked regions.
-It survives retirement of the final array region for as long as any catalog
-region remains in that host, preventing later runs from reinterpreting
-repository block-comment examples as ownership sentinels.
-Schema 1 remains readable with both provenance collections empty. Schema 2 is
-written whenever the lock is refreshed so older binaries refuse instead of
-silently erasing provenance they do not understand.
-The lock is read at startup and refreshed after applying the plan; `--dry-run`
-does not write it. Missing tracking means an item has not previously been rendered.
-The schema version controls format compatibility; a newer schema is refused.
-
-Checksums normalize CRLF to LF. Other whitespace differences are content changes.
-Region checksums cover only the body, not the sentinels or user text outside them.
-The recorded checksum is not the user's current checksum: keeping that distinction
-is what permits clean template updates while detecting edits.
+Checksums normalize CRLF to LF but otherwise treat whitespace as content.
+Region checksums cover the body, not markers or surrounding repository text.
+The lock is refreshed after artifact application; dry runs never write it.
 
 ### The single-tool guard
 
-A repository is managed by exactly one anvil-family tool. If `tool` names a
-different subcommand, refuse before planning anything, including in dry-run mode.
-Missing `tool` (including a legacy `rendered_by` lock) permits adoption.
-`--force` only permits an explicit ownership switch; it does not override content
-conflicts, edited regions, or safety checks. The new catalog follows the ordinary
-update and retirement rules below and records its identity on save.
+If the recorded `tool` names a different subcommand, the generator refuses
+before planning, including in dry-run mode. An absent tool identity permits
+adoption. `--force` permits a deliberate tool switch, but does not override
+content conflicts, edited regions, or safety checks.
 
 ### Catalog checksum
 
-`tool_version` is informational. `catalog_checksum` hashes the compiled catalog,
-including artifact identities and bodies, to distinguish different builds with the
-same version. Neither is a content-overwrite gate. Decisions compare per-item
-checksums, not catalog versions. The current catalog checksum is also shown by
-`--version`.
+`--version` reports the binary version and catalog checksum. The checksum
+distinguishes builds with different generated content; it is not an overwrite
+gate. Per-item checksums determine whether repository content can be updated.
 
 ## 2. Owned files
 
-Ownership is by path, not by a sentinel or generated-file warning. Generated
-warnings explain where to regenerate files; supported extension wrappers may use
-weaker provenance wording instead. Their update algorithm is the same.
+| Existing file | Catalog state | Result |
+| --- | --- | --- |
+| Matches current template | Any | In sync; refresh tracking. |
+| Absent | Live artifact | Write the template. |
+| Present without tracking | Differs from template | Preserve and propose the template. |
+| Matches last render | Template changed | Update automatically. |
+| Edited | Template unchanged | Preserve silently. |
+| Edited | Template changed | Preserve and propose the template. |
 
-Let `D` be the disk checksum, `L` the last-rendered checksum, and `T` the current
-template checksum. The first matching row applies:
-
-| State | Action |
-| --- | --- |
-| `D == T` | `InSync`; refresh tracking to `T`. |
-| File absent | Write the template and record `T`. Deletion requests regeneration. |
-| `L` absent, file present | Preserve the file, propose the template, record `T`. |
-| `D == L` | Write the changed template and record `T`. |
-| `D != L`, `T == L` | `LeaveAlone`; preserve customization silently. |
-| `D != L`, `T != L` | Preserve the file, propose the template, record `T`. |
-
-Empty owned files follow this algorithm unchanged: they can disable an owned
-artifact. An unchanged template leaves the empty file alone; a changed template
-can produce a proposal. A pre-created empty file is preserved on first adoption.
+Empty owned files follow the same rules. They can disable an artifact without
+being regenerated on every run; a later catalog change may produce a proposal.
+Deleting a live owned file instead requests regeneration.
 
 ## 3. Managed regions
+
+Repository-only settings belong after the closing marker and before the next
+table. For example:
 
 ```toml
 # >>> anvil-managed: anvil-deny-advisories
@@ -102,308 +58,133 @@ can produce a proposal. A pre-created empty file is preserved on first adoption.
 yanked = "deny"
 unmaintained = "all"
 # <<< anvil-managed: anvil-deny-advisories
-# Repository-specific exceptions continue [advisories].
 ignore = ["RUSTSEC-9999-0001"]
 ```
 
-The region owns the header and its generated assignments. User-only settings
-belong outside the sentinels, directly after the closing marker and before the
-next table. They must not repeat the table header or a managed key.
-
-Markers are complete comment lines in the host's comment syntax. Hash and
-slash-slash hosts use `# >>> anvil-managed: <id>` and
-`// >>> anvil-managed: <id>` (with matching `<<<` closers). XML and MSBuild
-hosts use `<!-- >>> anvil-managed: <id> -->` and
-`<!-- <<< anvil-managed: <id> -->`. Marker-shaped text embedded in an XML
-element, attribute, or larger comment is ordinary user content. XML region IDs
-containing `--`, CR, LF, or characters outside the XML 1.0 character set are
-rejected during catalog construction. Marker-
-shaped lines inside DTD/entity values, CDATA, processing instructions, or other
-non-comment XML content are not ownership boundaries. Comment recognition and
-root discovery use XML tokenizer tokens rather than raw substring matching.
-When an XML region is absent, the XML
-tokenizer discovers the document's actual root element and the region is
-inserted before that root's complete-line closing tag. The comment syntax does
-not assume MSBuild, `Project`, or any other XML vocabulary. TOML-specific
-placement rules are applied only to hash comment regions, even when an XML
-region happens to reuse one of their IDs. If the host is missing or malformed,
-the root is self-closing, or its closing tag shares a line with other content,
-introduction refuses rather than scaffolding a document or appending invalid
-content after the root.
-
-Always introducing an absent XML region at the end of the document root is a
-deliberate simplicity trade-off. It covers the current adopter-owned project
-lists without adding XML-path selectors, sibling anchors, or host-specific
-placement rules to `RegionSpec`. The region model can add an explicit placement
-specification later when a catalog needs to target a more precise XML location;
-existing regions will continue to update in place.
-
-Changing the declared syntax of
-an existing `(host, id)` is refused whenever marker lines in the previous
-syntax remain, including an unpaired marker; the manifest does not record the
-old syntax, so treating those markers as absent could duplicate an unbounded
-generated body. This protection also applies when the manifest is missing the
-region: Anvil uses the current rendered-body checksum to identify existing
-marker evidence rather than treating the region as new. Recovery requires
-restoring the previous catalog syntax or deliberately removing the old markers
-and body before retrying.
+Do not repeat the managed table header or its keys. TOML cannot override a
+managed value or extend an array by repeating an assignment.
 
 ### Strict ownership
 
-| State | Action |
-| --- | --- |
-| Body matches the current template | `InSync`; refresh tracking. Required start placement may still cause a write. |
-| Region absent | Adopt compatible unmanaged settings and write the region. |
-| Body empty or whitespace-only | Repopulate from the current template, even if the template has not changed. |
-| Body matches the last render | Update normally when the template changes. |
-| Any other nonempty body, including an untracked block | Refuse immediately and preserve its body and recorded checksum. |
+- A body matching the current template is in sync.
+- A missing region is introduced, adopting compatible unmanaged settings.
+- An empty or whitespace-only body is regenerated.
+- A body matching the last render updates when the template changes.
+- Any other nonempty body is preserved and refused, whether or not the
+  template changed.
 
-An edited region is refused whether or not its template changed. There is no
-managed-region `.anvil-proposed` file, silent acceptance, ownership transfer, or
-empty-body opt-out. Refusals repeat until reconciled. Restore generated content,
-apply the current template explicitly, or empty the body to regenerate it.
-Move compatible user-only settings outside the block before regenerating.
+Managed regions have no `.anvil-proposed` sibling and no empty-body opt-out.
+Refusals persist until reconciled. Restore generated content, apply the
+current template explicitly, or empty the body to regenerate it. Move
+repository-only settings outside the region first.
 
-TOML cannot override a managed key or extend a managed array by repeating an
-assignment outside the region. Conflicting values must be reconciled; there is
-no array merge or separate override configuration. The catalog's lint severity
-is generally `warn`; the Clippy recipe promotes warnings to errors at invocation.
-Editing a managed lint value is an ownership violation, not a customization API.
+Markers must be complete comment lines in the host's syntax: `#`, `//`, or
+XML comments. Changing the syntax of an existing region is refused while old
+markers remain.
+
+XML regions require an existing valid document. Introducing a new region also
+requires a separate root closing tag line, before which the region is inserted.
+Existing regions inside the root update in place even when its closing tag
+shares a line with other content. Missing, self-closing, or malformed hosts
+are refused; Anvil does not scaffold XML.
+Marker-looking strings, CDATA, and other non-comment content are not markers.
+XML region IDs cannot contain `--`, line breaks, or invalid XML characters.
 
 ### Adopting a hand-written table
 
-Given this existing `deny.toml`:
+Matching unmanaged values are adopted by parsed value rather than formatting.
+Their old formatting and attached comments need not survive. Repository-only
+assignments retain their source text and remain under the same table.
+Conflicting values are refused rather than overwritten or merged.
 
-```toml
-[advisories]
-# Waiting for upstream.
-ignore = ["RUSTSEC-9999-0001"]
-```
+Each independently extensible namespace has its own region: the deny
+sections, spelling sections, and Rust/rustdoc/Clippy lint tables. Append
+repository lint keys after the matching closing marker without opening the
+table again.
 
-The output is the single-header region above, with the original `ignore`
-assignment and its comment immediately below the closing sentinel. The shipped
-advisory template does **not** own `ignore`.
-
-Adoption compares parsed TOML values, not key order, whitespace, or comments:
-
-| Existing setting | Template setting | Result |
-| --- | --- | --- |
-| `[lints] workspace = true # our policy` | `[lints] workspace = true` | Emit once from the template; the matching assignment's comment may be dropped. |
-| `[advisories] ignore = ["RUSTSEC-9999-0001"]` | Only `yanked` and `unmaintained` | Preserve `ignore` outside the region in `[advisories]`. |
-| `[advisories] yanked = "warn"` | `yanked = "deny"` | Refuse this region; keep `warn`. Other deny sections may update. |
-| `ignore = ["ours"]` | `ignore = ["users"]` (synthetic catalog) | Refuse; never merge arrays or choose a side. |
-| `value = "a#b"` | `value = "a#c"` (synthetic catalog) | Refuse; `#` inside a string is data. |
-
-User-only assignments move as source slices, preserving formatting and comments.
-Boundary blank lines and trailing boundary whitespace may be tidied. Matching
-assignments are emitted by the template once; their old formatting and comments
-need not survive.
-
-The TOML parser locates headers and values. Multiline strings, bracketed text
-inside strings, quoted keys, and array-element lines need no ad hoc rules.
-`["a.b"]` and `[a.b]` are different tables. Explicit child tables such as
-`[workspace.package]` remain intact when adopting `[workspace]`. User-authored
-arrays of tables (`[[bin]]`) are preserved and bound the preceding table.
-Different header/dotted-key layouts need not be reconciled automatically, even
-when a reader considers them equivalent.
+Equivalent-looking dotted-key and header layouts are not always automatically
+reconciled. Custom multi-table regions refuse adoption when repository-only
+settings cannot be preserved under their original table. Anvil is not a
+general TOML repair tool.
 
 ### Catalog composition and multi-table regions
 
-Independently configurable tables have separate catalog regions:
+Every written TOML host must parse. A refusal distinguishes invalid existing
+TOML, an invalid generated template, overlapping managed tables, and a
+managed table conflicting with repository text. Correct the indicated owner
+rather than deleting unrelated settings.
 
-* `deny.toml`: advisories, licenses, bans, sources.
-* `spellcheck.toml`: root settings, `[Hunspell]`, `[Hunspell.quirks]`.
-* root `Cargo.toml`: Rust, rustdoc, and Clippy lint subtables.
-
-The lint regions own `[workspace.lints.rust]`, `[workspace.lints.rustdoc]`, and
-`[workspace.lints.clippy]` in workspaces, or the corresponding `[lints.*]`
-tables in single-crate repositories. A repository extends a subtable with bare
-lint names after that region's closing sentinel. Keeping each namespace in its
-own region lets `cargo sort --grouped` treat the managed and repository-owned
-blocks as independent groups without moving a sentinel through another lint
-namespace.
-
-An unchanged or empty old combined `anvil-workspace-lints` or root `anvil-lints`
-block retires in the same run that introduces the three replacements. An edited
-old block remains tracked and causes a refusal rather than being overwritten or
-retired. During a successful migration, repository-owned dotted assignments
-below the old region are rewritten into bare assignments under the matching new
-subtable. Their values and comments are preserved; assignments outside the
-three lint namespaces are unaffected. An empty legacy block cannot identify its
-parent table when that parent is also declared outside the block, so this
-ambiguous layout is refused and left unchanged for manual reconciliation.
-
-For example, a repository's `[Hunspell] transform_regex = ["^[0-9]+$"]`
-stays under `[Hunspell]` below `anvil-spellcheck-hunspell`, not under quirks.
-The old combined `anvil-spellcheck` block retires in the same run that introduces
-the three replacement regions. An untouched old block is removed; the next run
-is a no-op. An edited old block is preserved and remains tracked, with a refusal.
-When the old body ends in `[Hunspell.quirks]`, the headed replacements are
-inserted before it using the shared `At` splice placement, based on the parsed
-table context rather than the region id. Removing that block leaves user settings after its
-closing sentinel immediately below the new quirks region: for example,
-`allow_dashes = true` remains `Hunspell.quirks.allow_dashes`, never a root key.
-Empty or whitespace-only old bodies establish no table context: the replacements
-append instead. A conflicting user root `dev_comments = true` stays at root
-while adoption of the generated root defaults refuses, including on repeat runs.
-
-Catalog composition tests parse the actual per-host bodies for every workspace
-shape. They catch duplicate table claims and dotted-key/header collisions.
-Managed templates must not introduce arrays of tables; this is a catalog
-invariant, not a runtime deduplication or identity system.
-
-Custom multi-table regions remain possible, but adoption conservatively refuses
-user-only residue from any table other than the body's last table: placing it
-after the closing marker would change its membership. The engine does not
-automatically split arbitrary templates or repair unrelated invalid TOML.
-
-Every actual TOML write has a generic parse-before-write backstop. Only regions
-that will really retire are masked for that check; an edited retired region
-remains visible. Existing managed content is masked when locating unmanaged
-adoption candidates. This may incidentally repair duplicate headers, but is not
-a general invalid-input repair contract.
-
-The backstop judges each write against the host's accumulated text: regions this
-pass has already written are seen with their new bodies, and regions it has not
-reached yet with the bodies still on disk. Four faults can make that parse fail,
-and the refusal names which one, because they have different answers:
-
-| Fault | What the refusal says |
-| --- | --- |
-| The host already fails to parse before this region is spliced | The existing TOML has to be repaired; no run can write the region until it is |
-| The generated region body is invalid TOML on its own | Repair the catalog template; repository edits cannot make the generated body valid |
-| Two managed regions declare one table | Nothing hand-written is involved; re-run to finish a move, and if the refusal repeats the catalog is exchanging tables, which is unsupported |
-| A managed region and hand-written text declare one table | Reconcile the hand-written table with the managed one |
-
-A fourth and a fifth refusal share the wording but not the cause, and neither
-is a parse fault. One is a region the catalog no longer declares whose body has
-been edited since anvil rendered it; anvil will not discard changes it did not
-write, so the region stays and retirement stays incomplete until its body
-matches the last generated one, or it is emptied, or it is deleted. The other
-is a *live* region whose body no longer matches either its last render or the
-current template. Both say so rather than sending the reader to reconcile a
-table, and the retirement one names the host by the spelling on disk, which a
-case-only rename makes differ from the one the lock recorded. Both reach
-non-TOML hosts, because nothing about them depends on the format.
-
-A sixth refusal covers marker lines that do not form a matching pair. Anvil
-does not repair that shape and does not remove the surviving marker: a region
-that has lost a sentinel still holds a generated body whose end nothing can
-prove, and unmanaging it makes the writer append the template beside it,
-leaving two copies of the same content with only the newer one tracked. The
-host is left exactly as found until a human restores the boundary. Redundant
-markers *around* a complete pair are still cleaned up automatically, because
-there the boundary is known.
-
-**Moving a table between two live regions takes two runs, in one ordering.** When
-the region gaining the table is planned before the region giving it up, the first
-run refuses the gaining side — the giving side still declares the table on disk —
-writes the giving side, and the second run completes the move. Planned the other
-way round, one run does it. Either way it settles, and the state on disk stays
-readable throughout.
-
-**A catalog that exchanges tables between two live regions is not supported.**
-If region A takes B's table while B takes A's, neither can be written first and
-re-running repeats both refusals forever. Retire the region giving a table up,
-ship that, then add the region taking it: a retiring region is masked for the
-backstop, so the migration composes in a single run. This is the same two-step
-shape the combined `anvil-spellcheck` block used to split into three regions.
+Moving a table between live regions can require a second run if the gaining
+region is processed first. Exchanging tables between two live regions is
+unsupported: repeated runs cannot resolve the conflict. Such a catalog needs
+a staged retirement and introduction rather than an automatic exchange.
 
 ### Marker recovery
 
-Before ownership checks, remove redundant or unmatched marker **lines only**:
+Redundant markers around a complete pair can be removed without deleting
+surrounding content. An opener without a later close, or a close before an
+opener with no complete pair, is refused and preserved: restore the boundary
+before retrying. Marker cleanup never accepts edits to the body.
 
-| On disk for one id | Interpretation |
-| --- | --- |
-| Opening marker with no later close | No region. Remove the opener; treat all remaining content as unmanaged. |
-| Close before open, no complete pair | Remove both unmatched markers; preserve all other text and onboard normally. |
-| Two openers followed by a close | Keep the first opener and close; remove the duplicate opener, preserving intervening content. |
-| Opener followed by two closers | Keep the first complete pair; remove the extra close. Content after the first close stays unmanaged. |
-
-The same rules apply to `#`, `//`, and complete-line XML comment sentinels.
-Removed marker noise does not participate in body checksums. Cleanup is
-persisted even for otherwise in-sync regions and even if remaining content
-conflicts. Cleanup never blesses a changed non-marker body. Nested cross-id
-recovery and general broken-input repair are outside this contract.
-Retired markers in hosts receiving new regions are repaired before adoption
-and validation, using the same accumulated text through retirement. If two
-complete pairs share a retired id, only the first body is owned; the second
-body becomes unmanaged text and must participate in conflict checks. Marker
-cleanup alone does not make the retired catalog entry live again.
+Nested cross-region damage and arbitrary malformed input are not repaired.
 
 ### Line endings
 
-Generated bodies, markers, and separators use the original host's first newline
-(CRLF or LF), captured before adoption. New, empty, or no-newline hosts default
-to LF. Mixed hosts choose the first newline without normalizing user content.
-Moved residue retains its own endings; a missing terminator uses the original
-host style. In-sync content is not rewritten solely for line-ending differences.
+Generated region text uses the host's first newline style. New or empty hosts
+default to LF. Repository text is not normalized, and in-sync content is not
+rewritten solely because it uses CRLF.
 
 ## 4. Per-host insertion anchors
 
-Regions normally append in catalog order; existing regions update in place.
-`Start` retains leading header comments and their whitespace, then places root
-keys before user settings and every TOML table. Managed sentinels end the header;
-the insertion must not enter an existing block. Root-setting adoption also
-preserves these leading comments instead of dropping a copyright header attached
-to a matching assignment. The same insertion anchor is used to recognize an
-already correctly placed region, making the next run a no-op. `.delta.toml`'s
-`anvil-delta` and `spellcheck.toml`'s `anvil-spellcheck-root` use this placement.
-A clean legacy delta block below `[git]` moves to the beginning even when its
-template is unchanged, so `trip_wire_patterns` is a root key rather than a
-`git` setting. Existing repository-owned delta trip wires retain the established
-preservation behavior and visible note.
+Existing regions update in place. New regions normally append, except where
+their configuration requires another position. Root TOML settings precede
+tables while preserving leading comments. Ordered container regions retain
+their declared order and repository-owned gaps.
 
-`At` inserts a missing region at a specific boundary. Ordered composed hosts
-(notably the container Dockerfile) retain their scaffold, region ordering,
-classification, and insertion anchors. Non-TOML host text is not TOML-adopted.
-
-All actual writes and removals compose against one accumulating host text,
-so later operations preserve earlier changes. Refusing one region does not
-prevent independent regions or owned files from updating.
+Refusing one region does not prevent independent safe updates. Structural
+array hosts have stricter composition checks; see [shared arrays](array-regions.md).
 
 ## 5. Retirement
 
-An item tracked by the lock but absent from the current catalog retires. Backend
-deselection and removed workspace members can also cause retirement.
+Tracked artifacts absent from the selected catalog retire. Deselecting a
+backend or removing a workspace member can also retire artifacts.
 
 | Disk state | Owned file | Managed region |
 | --- | --- | --- |
 | Absent | Drop tracking. | Drop tracking. |
-| Matches last render | Delete and drop tracking. | Remove markers and body; drop tracking. |
-| Empty/whitespace-only | Ordinary owned-file comparison. | Remove the empty block and drop tracking. |
-| Nonempty edits | Preserve; drop tracking (`OrphanedKept`). | Refuse; preserve content **and tracking**. |
+| Matches last render | Delete and drop tracking. | Remove markers/body and drop tracking. |
+| Empty/whitespace-only | Ordinary owned-file comparison. | Remove the block and drop tracking. |
+| Edited | Preserve and drop tracking. | Refuse; preserve content and tracking. |
 
-An edited retired region is not transferred to the user. Repeated runs still
-report it; restoring the old generated body, emptying it, or removing it resolves
-retirement. Other artifacts continue to update.
+An edited retired region remains managed until reconciled. Restore its
+generated body, empty it, or deliberately remove it before retrying.
 
 ## 6. Owned-file proposals
 
-Only owned files generate `<path>.anvil-proposed`, containing the full current
-template. The live file is untouched. Recording `L = T` after proposing means
-the same proposal is not reported repeatedly unless the template changes again.
-Users may diff and merge it, replace the original with it, or delete it to
-dismiss it. Proposal files are intentionally not ignored by Git.
-
-Managed regions have no proposal composition pass and no proposal race-recovery
-behavior. Their outcomes are writes, in-sync observations, or scoped refusals.
+`<path>.anvil-proposed` contains the current template, not a merge. The live
+file is untouched. Review and merge it, replace the original, or delete the
+proposal to dismiss it. The same template is not proposed again unless the
+catalog changes. Proposal files are not ignored by Git.
 
 ## 7. Dry-run and summary
 
-`--dry-run` does not modify files or the lock. Exit 0 means no changes (including
-manifest changes) and no refusals. Exit 1 means pending changes or at least one
-refusal. The same categorized plan is printed during an ordinary update.
-Content refusals are scoped diagnostics, not a global fatal error: ordinary
-updates still apply safe items and preserve tracking for refused regions.
+`--dry-run` performs the same planning without changing artifacts or the lock.
+Exit 0 means no pending changes or refusals. Exit 1 means drift, refusal, or
+error. Normal updates print the categorized plan and apply safe items while
+retaining refusals.
+
+Application is not a repository-wide transaction. Earlier artifact changes
+can remain after a later I/O failure; the lock is published only after artifact
+operations succeed.
 
 ## 8. Backend selection
 
-`--backend github` and `--backend ado` are repeatable. Without explicit selection,
-anvil detects the backend from the origin remote; `--no-backends` emits local
-artifacts only. Previously tracked files for deselected backends follow the
-owned-file retirement rules. Backend selection does not change region ownership.
+Repeat `--backend github` and `--backend ado` to select both. Without explicit
+selection, Anvil detects the backend from `origin`; `--no-backends` selects
+local artifacts only. Previously tracked files of deselected backends follow
+the retirement rules, not an unconditional preserve-or-delete policy.
+
 ## Shared array entries
 
-The opt-in string-entry API has a deliberately narrower contract than ordinary
-whole-table/object regions: see [Required strings in shared arrays](array-regions.md).
+Required string entries have a narrower ownership contract than whole tables
+or objects. See [shared arrays](array-regions.md).

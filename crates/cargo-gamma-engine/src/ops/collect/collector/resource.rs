@@ -204,21 +204,31 @@ impl LoopProof {
                     continue;
                 }
                 TokenKind::OpenParen | TokenKind::OpenBrace | TokenKind::OpenBracket => {
-                    groups.push((delimiter?, TokenStream::new()));
+                    groups.push((
+                        // #[gamma::skip(try.propagate_to_unwrap, tag = "equivalent", reason = "This arm handles only opening delimiters, and the preceding match assigns Some to every opening-delimiter token kind.")]
+                        delimiter?,
+                        TokenStream::new(),
+                    ));
                     continue;
                 }
                 TokenKind::CloseParen | TokenKind::CloseBrace | TokenKind::CloseBracket => {
                     if groups.len() == 1 {
                         return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
                     }
-                    let (opened, tokens) = groups.pop()?;
+                    let (opened, tokens) =
+                        // #[gamma::skip(try.propagate_to_unwrap, tag = "equivalent", reason = "The groups.len() == 1 guard above rejects the base frame, so this pop always has an opening group to remove.")]
+                        groups.pop()?;
                     if Some(opened) != delimiter {
                         return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
                     }
                     TokenTree::Group(Group::new(opened, tokens))
                 }
                 TokenKind::Ident => TokenTree::Ident(Ident::new(spelling, proc_macro2::Span::call_site())),
-                TokenKind::RawIdent => TokenTree::Ident(Ident::new_raw(spelling.strip_prefix("r#")?, proc_macro2::Span::call_site())),
+                TokenKind::RawIdent => TokenTree::Ident(Ident::new_raw(
+                    // #[gamma::skip(try.propagate_to_unwrap, tag = "equivalent", reason = "rustc_lexer emits RawIdent only for a token spelling beginning with r#, and spelling is the exact token slice.")]
+                    spelling.strip_prefix("r#")?,
+                    proc_macro2::Span::call_site(),
+                )),
                 TokenKind::Literal { kind, suffix_start } => {
                     let literal = if let Some(literal) = literals.get(spelling) {
                         literal.clone()
@@ -248,7 +258,9 @@ impl LoopProof {
                     // #[gamma::skip(iter.all_to_any, reason = "The enclosing one-byte spelling guard makes this iterator a singleton.", tag = "equivalent")]
                     spelling.chars().all(|character| "~!@#$%^&*-=+|;:,<>./?'".contains(character)) =>
                 {
-                    let character = spelling.chars().next()?;
+                    let character =
+                        // #[gamma::skip(try.propagate_to_unwrap, tag = "equivalent", reason = "The arm guard requires spelling.len() == 1, so this UTF-8 token slice contains a character.")]
+                        spelling.chars().next()?;
                     let joint = text
                         .get(at..)
                         .and_then(|rest| rest.chars().next())

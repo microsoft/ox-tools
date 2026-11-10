@@ -892,7 +892,9 @@ impl<'a> Collector<'a> {
                 return self.resource_binding_with(&alias.target, scope, on_scope);
             }
         }
-        if !types.standard_constructor_root(ty) {
+        if
+        // #[gamma::skip(cond.always_false, tag = "equivalent", reason = "Every accepting branch below independently proves the genuine primitive, collection, string, or Peekable API, including its unshadowed root.")]
+        !types.standard_constructor_root(ty) {
             return
             // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
             None;
@@ -1121,7 +1123,7 @@ impl<'a> Collector<'a> {
         // positions where being wrong by one is a real fault rather than a compile error — but
         // only when the value is a number, which the signature already says.
         if is_numeric_return(&sig.output)
-            && let Some(Stmt::Expr(trailing, None)) = body.stmts.last()
+            && let Some(Stmt::Expr(trailing, None)) = body.stmts.iter().rev().find(|statement| !self.skipped(stmt_attrs(statement)))
             && !matches!(trailing, Expr::Lit(ExprLit { lit: Lit::Int(_), .. }))
         {
             let floating = matches!(&sig.output, ReturnType::Type(_, ty) if resolve_type(ty) == Kind::Float);
@@ -3285,7 +3287,9 @@ impl<'a> Collector<'a> {
         }
 
         for argument in args {
-            self.perturb(argument);
+            if !self.skipped(expr_attrs(argument)) {
+                self.perturb(argument);
+            }
         }
     }
 
@@ -3594,16 +3598,15 @@ impl<'a> Collector<'a> {
 
     /// Visits a function body with its trailing expression checked against the declared return type.
     fn in_typed_block<T>(&mut self, block: &Block, expected: &Type, body: impl FnOnce(&mut Self) -> T) -> T {
-        let Some(Stmt::Expr(tail, None)) = block.stmts.last() else {
+        let mut statements = block.stmts.iter().filter(|statement| !self.skipped(stmt_attrs(statement)));
+        let last = statements.next_back();
+        let Some(Stmt::Expr(tail, None)) = last else {
             let outer = self.undeletable_statements.len();
             let types = self.types();
             let expected = types.resolve_alias(expected);
-            if block
-                .stmts
-                .split_last()
-                .is_some_and(|(_, prefix)| prefix.iter().all(nondiverging_statement))
+            if statements.all(nondiverging_statement)
                 && (matches!(expected, Type::Never(_)) || !matches!(resolve_type(expected), Kind::Unit | Kind::Unknown))
-                && let Some(statement @ Stmt::Expr(_, Some(_))) = block.stmts.last()
+                && let Some(statement @ Stmt::Expr(_, Some(_))) = last
             {
                 self.undeletable_statements.push(statement.span().byte_range());
             }
@@ -5630,7 +5633,8 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         let parameter_types = self
             .call_signature(&node.func)
             .map(|signature| calls::Calls::parameters(signature, self.cfg));
-        for (index, argument) in node.args.iter().enumerate() {
+        let cfg = self.cfg;
+        for (index, argument) in node.args.iter().filter(|argument| !cfg.skip_gate(expr_attrs(argument))).enumerate() {
             if let Some(expected) = parameter_types.as_ref().and_then(|parameters| parameters.get(index)) {
                 self.in_typed_expression(argument, expected, |collector| {
                     if unsigned_context(expected) {

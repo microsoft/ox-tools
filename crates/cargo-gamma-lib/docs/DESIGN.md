@@ -444,12 +444,14 @@ rather than rendered visibly and its color styling remains intact. Without
 that flag, Cargo progress and convergence diagnostics remain hidden behind the
 stable cargo-gamma phase line.
 
-Compile-fail advice is one warning, with each affected test target on its own
-continuation line naming its package and compiler-test harness. It says that
-the test binaries may have cases that invoke the Rust compiler and may lead
-to very long mutation test runs, rather than asserting measured behavior.
-It suggests omitting specific test cases using harness `--skip` filters, not
-excluding whole binaries; no case is excluded automatically.
+Compiler-driving test detection is retained in `Survey::compile_fail`, and
+`compile_fail_advice` remains available to library callers. The advice names
+each affected test target, package, and compiler-test harness on its own line.
+It describes possible compiler invocation and long mutation-test runs, rather
+than asserting measured behavior, and suggests omitting specific cases using
+harness `--skip` filters instead of excluding whole binaries. The CLI does not
+emit this advice as a console warning. Detection does not change test eligibility
+or automatically exclude any case or binary from the mutation oracle.
 Detection requires a `trybuild` or `compiletest_rs` dev-dependency and a matching
 Rust identifier in the target's root source. Comments and string literals,
 including documentation, do not count as harness usage. This remains a

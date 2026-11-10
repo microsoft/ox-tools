@@ -21,6 +21,8 @@ Qualified collection and standard-wrapper payloads also require genuine external
 standard API or default evidence. That provenance follows lexical scopes and
 import aliases without treating ordinary local module or type shadows as
 shadows of absolute standard paths.
+Collection API recognition also checks the external identity of `rustc_hash`;
+a foreign crate renamed to `rustc_hash` does not supply collection API evidence.
 Absolute enum and `Default` paths retain that distinction through import and
 type-alias resolution, including identity checks that omit equivalent
 whole-function alternatives. Generated absolute replacements choose a genuine
@@ -457,6 +459,9 @@ configuration and therefore audits the whole file.
   closures, and async bodies. Source attributes remain outside generated
   expression operators, and configuration-selected function tails retain their
   original value type.
+  Tail selection gates every statement kind, including item declarations, so
+  a disabled item following the active expression cannot hide its expected type
+  or numeric return perturbations.
   Qualified constructors propagate borrowed-temporary evidence to their consumer.
   Array reversals in assignment destinations guard the whole assignment, retaining
   valid places and evaluating the right-hand side once. This includes arrays nested
