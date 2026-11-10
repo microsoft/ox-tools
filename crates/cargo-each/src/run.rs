@@ -631,6 +631,7 @@ fn add_infrastructure_failure(result: &mut InvocationResult, failure: String) {
 }
 
 fn command_for(invocation: &Invocation) -> Result<(&str, Command), String> {
+    // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "This wrapper reads the process-wide native PATH; command_for_with_path covers supplied lookup policy without mutating shared environment.", tag = "native-boundary")]
     command_for_with_path(invocation, std::env::var_os("PATH"))
 }
 

@@ -45,6 +45,7 @@ pub fn exited(pid: u32) -> io::Result<bool> {
 
 fn exited_with_waitid(pid: u32, waitid: impl FnOnce(libc::id_t) -> io::Result<libc::pid_t>) -> io::Result<bool> {
     let pid =
+        // #[gamma::skip(try.propagate_to_unwrap, literal.str_to_empty, literal.str_to_xyzzy, reason = "libc id_t is u32 on the supported Linux mutation target, so converting a u32 cannot reach this error.", tag = "equivalent")]
         libc::id_t::try_from(pid).map_err(|_out_of_range| io::Error::new(io::ErrorKind::InvalidInput, "child pid does not fit waitid"))?;
     Ok(waitid(pid)? != 0)
 }
@@ -141,6 +142,19 @@ fn signal_process(pid: i32, number: libc::c_int) -> io::Result<()> {
 }
 
 fn signal(group: i32, number: libc::c_int) -> io::Result<()> {
+    signal_with(group, |group| {
+        // SAFETY: `killpg` receives two integers and dereferences no caller pointer. The
+        // group guard below avoids POSIX's undefined small-group values; signalling the
+        // caller's intended group remains a correctness obligation on the caller.
+        if unsafe { libc::killpg(group, number) } == 0 {
+            return Ok(());
+        }
+
+        map_killpg_error(io::Error::last_os_error())
+    })
+}
+
+fn signal_with(group: i32, signal: impl FnOnce(i32) -> io::Result<()>) -> io::Result<()> {
     if group <= 1 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -148,20 +162,7 @@ fn signal(group: i32, number: libc::c_int) -> io::Result<()> {
         ));
     }
 
-    // SAFETY: there is no memory-safety precondition to discharge, and that is why this is sound:
-    // `killpg` is handed two integers and dereferences no caller pointer, so no value of `group` or
-    // of the signal can make it read or write memory it should not. The description follows from
-    // that — it names a group by id and delivers a signal — and its failure modes stay in-band: a
-    // group that no longer exists yields `ESRCH` through the return value, never through anything
-    // unsound. Whose group `group` names, and why the ordering around a reap matters, is a
-    // correctness obligation on the caller — see `ProcessTree::observe` in
-    // `cargo-gamma-process` — not a
-    // soundness one, because a wrong id can only signal the wrong group, not corrupt this process.
-    if unsafe { libc::killpg(group, number) } == 0 {
-        return Ok(());
-    }
-
-    map_killpg_error(io::Error::last_os_error())
+    signal(group)
 }
 
 /// Kills a group after its leader has been observed exiting without being reaped.
@@ -175,6 +176,7 @@ fn signal(group: i32, number: libc::c_int) -> io::Result<()> {
 ///
 /// Returns errors from [`kill`], including macOS `EPERM` unless the leader is the group's only
 /// remaining member.
+// #[gamma::skip(all, reason = "This adapter signals an actual unreaped process group; rejection and macOS permission policy remain mutation-tested through supplied signalling callbacks.", tag = "native-boundary")]
 pub fn kill_after_exit(group: i32) -> io::Result<()> {
     #[cfg(target_os = "macos")]
     {
@@ -298,6 +300,7 @@ pub fn raise_interrupt() {
 /// Coverage excludes this helper because the uncaught signal terminates the subprocess before
 /// instrumentation can flush its counters.
 #[cfg_attr(coverage_nightly, coverage(off))]
+// #[gamma::skip(fn_value.unit, reason = "This test-support helper raises a real terminating signal; observing its absence requires a subprocess, not an in-process test.", tag = "native-boundary")]
 pub fn raise_quit() {
     // SAFETY: as for `raise_interrupt` — `raise` receives one integer signal number, dereferences
     // no caller pointer, and is sound whatever disposition is installed. That it may not return is
@@ -333,15 +336,6 @@ mod tests {
 
         child.kill().expect("cleanup");
         let _status = child.wait().expect("reap");
-    }
-
-    #[test]
-    fn killing_a_non_group_identifier_is_rejected_without_signalling() {
-        for group in [1, 0, -1, i32::MIN] {
-            let error = kill(group).expect_err("an identifier that is unsafe for killpg must be refused");
-
-            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-        }
     }
 
     /// A real group with a live member is killed outright, and a group that has already gone is
@@ -400,6 +394,28 @@ mod tests {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod scripted_tests {
     use super::*;
+
+    #[test]
+    fn killing_a_non_group_identifier_is_rejected_without_signalling() {
+        for group in [1, 0, -1, i32::MIN] {
+            let error = signal_with(group, |group| panic!("the rejected group {group} must not reach signalling"))
+                .expect_err("an identifier that is unsafe for killpg must be refused");
+
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+            assert_eq!(error.to_string(), "process-group identifiers must be greater than one");
+        }
+    }
+
+    #[test]
+    fn killing_a_valid_group_passes_its_identifier_to_signalling_and_preserves_errors() {
+        let error = signal_with(2, |group| {
+            assert_eq!(group, 2);
+            Err(io::Error::from_raw_os_error(libc::EPERM))
+        })
+        .expect_err("the scripted signal reports a permission failure");
+
+        assert_eq!(error.raw_os_error(), Some(libc::EPERM));
+    }
 
     #[test]
     fn a_pending_waitid_result_is_not_an_exit() {

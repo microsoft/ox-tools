@@ -219,7 +219,6 @@ mod tests {
         );
     }
 
-    #[cfg(windows)]
     #[test]
     fn a_windows_package_spec_is_a_file_url() {
         // Cargo package IDs are URLs even on Windows. Passing a native `D:\...` path makes Cargo
