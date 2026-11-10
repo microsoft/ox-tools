@@ -297,6 +297,7 @@ edition = "2021"
 [dependencies]
 
 [workspace]
+members = ["."]
 '@
 New-Item -ItemType Directory -Path (Join-Path $repo 'src') -Force | Out-Null
 Write-Fixture (Join-Path $repo 'src/lib.rs') @'
