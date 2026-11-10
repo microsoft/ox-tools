@@ -40,6 +40,7 @@ anvil-pr-test
 anvil-pr-title
 anvil-readme
 anvil-readme-check
+anvil-release-profile
 anvil-scheduled
 anvil-scheduled-advisories
 anvil-scheduled-exhaustive

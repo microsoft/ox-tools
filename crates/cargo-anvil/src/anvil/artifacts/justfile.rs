@@ -142,6 +142,7 @@ const GROUP_FILES: &[(&str, &str)] = split_recipe_files!(
         "pr-runtime-analysis",
         "pr-fuzzing",
         "pr-mutants",
+        "release-profile",
         "scheduled-test",
         "scheduled-advisories",
         "scheduled-runtime-analysis",
@@ -846,6 +847,7 @@ mod tests {
             "anvil-pr-runtime-analysis:",
             "anvil-pr-fuzzing:",
             "anvil-pr-mutants:",
+            "anvil-release-profile:",
             "anvil-scheduled-test:",
             "anvil-scheduled-advisories:",
             "anvil-scheduled-exhaustive:",
@@ -858,6 +860,14 @@ mod tests {
         assert!(groups.contains(
             "anvil-pr-slow: anvil-pr-slow-validate-prereqs anvil-pr-test anvil-pr-msrv anvil-pr-runtime-analysis anvil-pr-fuzzing anvil-pr-mutants"
         ));
+        let release = group_body("release-profile");
+        assert!(release.contains("clippy --workspace --all-targets --all-features --locked --profile release"));
+        assert!(release.contains(
+            "nextest run --config-file $configPath --profile anvil-release-profile --cargo-profile release --workspace --all-features --locked"
+        ));
+        assert!(release.contains("Copy-Item -LiteralPath $nextestReportPath -Destination $reportPath -Force"));
+        assert!(release.contains("test --doc --workspace --all-features --locked --profile release"));
+        assert!(!release.contains("anvil-impact"));
         // PR group recipes list their own validate-prereqs aggregate first so
         // all tool checks run up front (just dedups the per-check ones).
         for needle in [
@@ -911,6 +921,7 @@ mod tests {
     #[test]
     fn scheduled_groups_do_not_require_cargo_delta() {
         for group in [
+            "release-profile",
             "scheduled-test",
             "scheduled-advisories",
             "scheduled-runtime-analysis",

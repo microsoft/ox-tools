@@ -131,6 +131,12 @@ generated roots use `secrets: inherit`.
 Third-party actions are pinned by commit SHA in the source templates. The
 shared actions are implementation details, not a public per-group action API.
 
+The opt-in `.github/workflows/anvil-release-profile.yml` workflow runs
+full-workspace release-profile validation on Linux and Windows. It supports
+manual dispatch and `workflow_call`; repositories can call it from their own
+event-driven workflow without adding the group to Anvil's default PR or
+scheduled job graphs.
+
 ### Failure attribution and commit statuses
 
 Just's failed-recipe diagnostic appears as an annotation, and the group step
@@ -164,6 +170,13 @@ Both reusable workflows accept optional `CODECOV_TOKEN`, forwarded by the
 default roots. Configure it for repositories requiring authenticated uploads.
 The generated workflow does not enable Codecov OIDC authentication. Codecov
 upload errors are non-blocking; the local coverage gate determines the verdict.
+
+### Test results
+
+When a group writes JUnit files under `target/anvil/test-results/`, the shared
+group action uploads them after success or failure. Release-profile validation
+uses `test-results-release-profile-<os>-<arch>-<attempt>` and retains the
+artifact for 30 days, subject to repository retention policy.
 
 ### Gamma reports and code scanning
 

@@ -30,6 +30,9 @@ const PR_IMPL_WORKFLOW: &str = include_str!("../../../templates/github/pr-impl-w
 /// Embedded body of the scheduled reusable workflow.
 const SCHEDULED_IMPL_WORKFLOW: &str = include_str!("../../../templates/github/scheduled-impl-workflow.yml");
 
+/// Embedded body of the opt-in release-profile workflow.
+const RELEASE_PROFILE_WORKFLOW: &str = include_str!("../../../templates/github/release-profile-workflow.yml");
+
 /// Embedded body of the PR root workflow.
 const PR_ROOT_WORKFLOW: &str = include_str!("../../../templates/github/pr-root-workflow.yml");
 
@@ -100,6 +103,16 @@ pub fn scheduled_impl_workflow() -> Artifact {
     )
 }
 
+/// `.github/workflows/anvil-release-profile.yml` — opt-in release-profile validation.
+#[must_use]
+pub fn release_profile_workflow() -> Artifact {
+    Artifact::backend_file(
+        Backend::GitHub,
+        ".github/workflows/anvil-release-profile.yml",
+        RELEASE_PROFILE_WORKFLOW,
+    )
+}
+
 /// `.github/workflows/anvil-pr.yml` — the PR root workflow.
 #[must_use]
 pub fn pr_root_workflow() -> Artifact {
@@ -135,6 +148,7 @@ pub(crate) fn all() -> Vec<Artifact> {
         impact_action(),
         pr_impl_workflow(),
         scheduled_impl_workflow(),
+        release_profile_workflow(),
         pr_root_workflow(),
         scheduled_root_workflow(),
         code_review_skill(),
@@ -194,6 +208,7 @@ mod tests {
                 ".github/actions/anvil-impact/action.yml",
                 ".github/workflows/anvil-pr-impl.yml",
                 ".github/workflows/anvil-scheduled-impl.yml",
+                ".github/workflows/anvil-release-profile.yml",
                 ".github/workflows/anvil-pr.yml",
                 ".github/workflows/anvil-scheduled.yml",
                 ".github/skills/code-review/SKILL.md",
@@ -210,6 +225,10 @@ mod tests {
         assert!(REPORT_STATUS_ACTION.contains("name: anvil-report-status"));
         assert!(IMPACT_ACTION.contains("name: anvil-impact"));
         assert!(IMPACT_ACTION.contains("cargo-delta"));
+        assert!(RELEASE_PROFILE_WORKFLOW.contains("group: release-profile"));
+        assert!(RELEASE_PROFILE_WORKFLOW.contains("impact_mode: off"));
+        assert_eq!(RELEASE_PROFILE_WORKFLOW.matches("default: ubuntu-latest").count(), 2);
+        assert_eq!(RELEASE_PROFILE_WORKFLOW.matches("default: windows-latest").count(), 2);
     }
 
     #[test]
@@ -332,6 +351,9 @@ mod tests {
         assert!(RUN_GROUP_ACTION.contains("impact_mode:"));
         assert!(RUN_GROUP_ACTION.contains("ANVIL_IMPACT: ${{ inputs.impact_mode }}"));
         assert!(RUN_GROUP_ACTION.contains("GITHUB_TOKEN: ${{ github.token }}"));
+        assert!(RUN_GROUP_ACTION.contains("name: Upload Anvil test results"));
+        assert!(RUN_GROUP_ACTION.contains("target/anvil/test-results/*.xml"));
+        assert!(RUN_GROUP_ACTION.contains("test-results-${{ inputs.group }}-${{ runner.os }}-${{ runner.arch }}"));
         assert!(
             !RUN_GROUP_ACTION.contains("ANVIL_INCLUDE_"),
             "the shared executor must not thread ANVIL_INCLUDE_* env vars"

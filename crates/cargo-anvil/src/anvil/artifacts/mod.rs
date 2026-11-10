@@ -44,7 +44,7 @@ use crate::catalog::{Artifact, ComposedHost};
 pub(crate) fn impact_mode(group: &str) -> &'static str {
     match group {
         "pr-fast" | "pr-test" | "pr-msrv" | "pr-runtime-analysis" | "pr-fuzzing" | "pr-mutants" => "consume",
-        "scheduled-test" | "scheduled-advisories" | "scheduled-runtime-analysis" | "scheduled-exhaustive" => "off",
+        "release-profile" | "scheduled-test" | "scheduled-advisories" | "scheduled-runtime-analysis" | "scheduled-exhaustive" => "off",
         other => {
             panic!("impact_mode: unclassified group '{other}'; add it to the pr/scheduled arms in artifacts::impact_mode")
         }
@@ -211,6 +211,7 @@ mod tests {
         assert_eq!(impact_mode("pr-msrv"), "consume");
         assert_eq!(impact_mode("pr-fuzzing"), "consume");
         assert_eq!(impact_mode("pr-mutants"), "consume");
+        assert_eq!(impact_mode("release-profile"), "off");
         assert_eq!(impact_mode("scheduled-test"), "off");
         assert_eq!(impact_mode("scheduled-exhaustive"), "off");
     }
@@ -261,6 +262,7 @@ mod tests {
             github::impact_action(),
             github::pr_impl_workflow(),
             github::scheduled_impl_workflow(),
+            github::release_profile_workflow(),
             github::pr_root_workflow(),
             github::scheduled_root_workflow(),
             github::code_review_skill(),
