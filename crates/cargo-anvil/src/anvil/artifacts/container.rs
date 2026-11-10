@@ -216,22 +216,29 @@ pub fn dockerignore() -> Artifact {
 /// catalog adds one with [`crate::CatalogBuilder::with_artifact`]; a single
 /// repository can write the same path by hand. The recipe loads it either way.
 ///
-/// The script may define any of three functions, and is dot-sourced before the
+/// The script may define any of four functions, and is dot-sourced before the
 /// phase that needs it. Each is named for what it supplies rather than for when
-/// it runs, because all three exist to provide credentials or an image, not as
+/// it runs, because all four exist to provide credentials or an image, not as
 /// general-purpose extension points:
 ///
 /// - `Anvil-BuildSecrets` returns `@{ Secrets = @{ <id> = <value> } }`. Each entry
 ///   becomes a `BuildKit` `--secret id=<id>`, passed by environment variable
 ///   name so the value never reaches a process argument, and never a layer.
 /// - `Anvil-RunEnv` returns `@{ Env = @{ <NAME> = <value> } }`. Each entry is
-///   forwarded into the container by name, for the same reason.
+///   forwarded into the requested command's container by name. This explicit
+///   legacy mode exposes the values to workspace code.
+/// - `Anvil-PrepareEnv` returns only `@{ Env = @{ <NAME> = <value> } }`.
+///   Its values reach only a disposable fixed `cargo fetch --locked` phase.
+///   Captured output and invocation-scoped registry/git caches are inspected
+///   for every value before a fresh, credential-free offline validation run.
+///   It cannot coexist with `Anvil-RunEnv` or `--github-token`; empty values,
+///   driver-control replacements, leaks and incomplete inspection fail closed.
 /// - `Anvil-ResolveImage` takes the computed reference and returns one to use
 ///   instead, or nothing. A hook declaring both `Engine` and `EnginePrefix`
 ///   also receives the exact selected engine invocation. Declaring only one
 ///   supplies neither, and hooks declaring neither remain compatible.
 ///
-/// The two credential phases are fail-closed: an empty value, a return with no
+/// The credential phases are fail-closed: an empty value, a return with no
 /// entries, a throw, or a script that cannot even be loaded stops the run. A
 /// build that silently proceeded without its credential would install a reduced
 /// tool set and then be tagged with the same content hash a credentialed build

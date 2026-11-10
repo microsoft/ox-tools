@@ -205,6 +205,7 @@ permissions**. Only use hooks and recipes from trusted repositories.
 | --- | --- |
 | `Anvil-BuildSecrets` | `@{ Secrets = @{ id = value } }`, before building. |
 | `Anvil-RunEnv` | `@{ Env = @{ NAME = value } }`, before running. |
+| `Anvil-PrepareEnv` | Only `@{ Env = @{ NAME = value } }`, for fixed authenticated dependency preparation instead of runtime forwarding. |
 | `Anvil-ResolveImage $tag` | A locally available image reference, or nothing, on a local cache miss. |
 
 Omit a credential function when it is unnecessary. A defined function returning
@@ -231,6 +232,48 @@ Secret values and run-environment values are passed to the engine by name,
 not embedded in process arguments. Build secret mounts do not become image
 layers, but files written using them do: remove credential files in the same
 `RUN` instruction that creates them.
+
+### Authenticated preparation, credential-free validation
+
+Use `Anvil-PrepareEnv` instead of `Anvil-RunEnv` when credentials are needed
+only to download locked Cargo dependencies:
+
+```powershell
+function Anvil-PrepareEnv {
+    @{ Env = @{ CARGO_REGISTRIES_INTERNAL_TOKEN = $env:CARGO_REGISTRIES_INTERNAL_TOKEN } }
+}
+```
+
+Anvil runs exactly `cargo fetch --locked` in a disposable container with a
+read-only checkout/history and fresh invocation-scoped registry/git caches.
+The hook supplies environment only, not a command, file or mount. Every
+returned value is sensitive; blank values and driver-control overrides are
+rejected. Defining `Anvil-RunEnv` as well, or passing `--github-token`, fails
+before acquiring preparation credentials.
+
+Preparation output is captured rather than streamed. Any exact credential
+value in either output stream or any cache-file bytes rejects preparation;
+incomplete inspection also fails. Sensitive diagnostics are withheld. After
+the preparation container is removed, only inspected registry/git caches
+reach a **fresh** validation container. Its requested command runs with
+`CARGO_NET_OFFLINE=true`, without the hook values, preparation home,
+configuration, credential files or mounts. Containers and temporary cache
+volumes are removed on success and failure; cleanup errors fail the run.
+Every invocation prepares anew. Missing locked dependencies fail offline;
+there is no retry with credentials or fallback to runtime authentication.
+
+Preparation uses image-owned Cargo/rustc, disables compiler wrappers and
+workspace host/compiler-backend flags, and neutralizes Cargo-forced native
+loader settings. The image LLVM backend is selected with a preparation-only
+`RUSTC_BOOTSTRAP=1`; neither bootstrap nor these compiler/loader overrides
+reach validation or legacy runs. Source/authentication configuration remains
+available. Hooks, the image and authentication providers must be trusted;
+workspace compiler callbacks need not be trusted with the preparation values.
+
+This mode is not a network or general execution sandbox. It does not intercept
+independently supplied or renamed Cargo executables, restrict arbitrary
+network clients, or make an untrusted hook safe. Without `Anvil-PrepareEnv`,
+the existing runtime authentication behavior is unchanged.
 
 ### Resolving published images
 
@@ -262,7 +305,9 @@ Anvil does not publish or promote images.
 This is not a sandbox for untrusted code. Commands can modify the mounted
 repository and Git data. Everything executed inside the container, including
 dependency build scripts and procedural macros, can read forwarded
-credentials. Keep the forwarded set narrow and use short-lived,
+runtime credentials in the legacy `Anvil-RunEnv`/`--github-token` mode.
+Prepared mode keeps its credentials out of that validation container.
+Keep the forwarded set narrow and use short-lived,
 least-privilege tokens only with reviewed code.
 
 ## 8. Customization
