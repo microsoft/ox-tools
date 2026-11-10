@@ -107,36 +107,27 @@ function Invoke-Native {
         [switch]$AllowFailure
     )
 
-    $previous = @{}
-    foreach ($key in $Environment.Keys) {
-        $previous[$key] = [Environment]::GetEnvironmentVariable($key)
-        Set-Item -LiteralPath "Env:$key" -Value $Environment[$key]
-    }
-    $entered = $false
+    $start = [Diagnostics.ProcessStartInfo]::new($Command)
+    $start.UseShellExecute = $false
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    if ($WorkingDirectory) { $start.WorkingDirectory = $WorkingDirectory }
+    foreach ($argument in $Arguments) { $start.ArgumentList.Add($argument) }
+    foreach ($key in $Environment.Keys) { $start.Environment[$key] = $Environment[$key] }
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $start
     try {
-        if ($WorkingDirectory) { Push-Location $WorkingDirectory; $entered = $true }
-        $stdoutFile = [System.IO.Path]::GetTempFileName()
-        $stderrFile = [System.IO.Path]::GetTempFileName()
-        try {
-            $process = Start-Process -FilePath $Command -ArgumentList $Arguments -NoNewWindow -Wait -PassThru `
-                -RedirectStandardOutput $stdoutFile -RedirectStandardError $stderrFile
-            $result = [pscustomobject]@{
-                ExitCode = $process.ExitCode
-                StdOut   = (Get-Content -LiteralPath $stdoutFile -Raw -ErrorAction SilentlyContinue) ?? ''
-                StdErr   = (Get-Content -LiteralPath $stderrFile -Raw -ErrorAction SilentlyContinue) ?? ''
-            }
-        } finally {
-            Remove-Item -LiteralPath $stdoutFile, $stderrFile -Force -ErrorAction SilentlyContinue
+        if (-not $process.Start()) { throw "could not start $Command" }
+        $stdout = $process.StandardOutput.ReadToEndAsync()
+        $stderr = $process.StandardError.ReadToEndAsync()
+        $process.WaitForExit()
+        $result = [pscustomobject]@{
+            ExitCode = $process.ExitCode
+            StdOut = $stdout.GetAwaiter().GetResult()
+            StdErr = $stderr.GetAwaiter().GetResult()
         }
     } finally {
-        if ($entered) { Pop-Location }
-        foreach ($key in $Environment.Keys) {
-            if ($null -eq $previous[$key]) {
-                Remove-Item -LiteralPath "Env:$key" -ErrorAction SilentlyContinue
-            } else {
-                Set-Item -LiteralPath "Env:$key" -Value $previous[$key]
-            }
-        }
+        $process.Dispose()
     }
 
     if (-not $AllowFailure -and $result.ExitCode -ne 0) {
@@ -304,6 +295,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+
+[workspace]
 '@
 New-Item -ItemType Directory -Path (Join-Path $repo 'src') -Force | Out-Null
 Write-Fixture (Join-Path $repo 'src/lib.rs') @'
@@ -317,7 +310,7 @@ pub const fn add(left: u64, right: u64) -> u64 {
 '@
 Write-Fixture (Join-Path $repo 'rust-toolchain.toml') @'
 [toolchain]
-channel = "1.95"
+channel = "1.99.1"
 '@
 Write-Fixture (Join-Path $repo 'Justfile') @'
 set unstable
@@ -732,6 +725,358 @@ $nested = Invoke-Engine -Arguments @(
 Assert-Equal 'anvil-container passes through inside the image' 0 $nested.ExitCode
 Assert-That 'no engine was invoked from inside the container' `
     (-not ($nested.StdErr -match 'building |Cannot connect to the Docker daemon')) $nested.StdErr
+
+# ---------------------------------------------------- authenticated prepare --
+
+Write-Section '11. Authenticated preparation and fresh offline validation'
+
+$preparedImage = $reference
+$registryName = "$imagePrefix-fixture-registry"
+$registryDir = Join-Path $repo 'fixture-registry'
+$engineRepo = ConvertTo-EnginePath $repo
+$configPath = Join-Path $repo '.cargo/config.toml'
+$acquisitions = Join-Path $repo 'fixture-acquisitions'
+$fixtureToken = 'synthetic-fixture-registry-token'
+$secondToken = 'synthetic.fixture.second+[token]'
+
+function Assert-PreparedCleanup([string]$Case) {
+    $volumes = (Invoke-Engine -Arguments @('volume', 'ls', '--format', '{{.Name}}')).StdOut
+    $containers = (Invoke-Engine -Arguments @('ps', '-a', '--format', '{{.Names}}')).StdOut
+    Assert-That "$Case removes invocation cache volumes" `
+        (-not (($volumes -split "`r?`n") | Where-Object { $_ -like "$imagePrefix-prepare-*" }))
+    Assert-That "$Case removes invocation containers" `
+        (-not (($containers -split "`r?`n") | Where-Object { $_ -like "$imagePrefix-prepare-*" }))
+}
+
+function Invoke-PreparedCase([string]$Case, [string[]]$Command, [bool]$Succeeds = $true, [hashtable]$ExtraEnvironment = @{}) {
+    $before = if (Test-Path -LiteralPath $acquisitions) { @(Get-Content -LiteralPath $acquisitions).Count } else { 0 }
+    $environment = @{
+        FIXTURE_IMAGE = $preparedImage
+        FIXTURE_TOKEN = $fixtureToken
+        FIXTURE_ACQUISITIONS = $acquisitions
+        ANVIL_CONTAINER_NO_REBUILD = '1'
+    }
+    foreach ($key in $ExtraEnvironment.Keys) { $environment[$key] = $ExtraEnvironment[$key] }
+    $result = Invoke-Just -Repo $repo -Arguments (@('anvil-container') + $Command) -Environment $environment -AllowFailure
+    Assert-That $Case (($result.ExitCode -eq 0) -eq $Succeeds) "$($result.StdOut)`n$($result.StdErr)"
+    $after = if (Test-Path -LiteralPath $acquisitions) { @(Get-Content -LiteralPath $acquisitions).Count } else { 0 }
+    Assert-Equal "$Case acquires preparation environment exactly once" ($before + 1) $after
+    Assert-That "$Case never surfaces either preparation value" `
+        (-not ("$($result.StdOut)$($result.StdErr)".Contains($fixtureToken)) -and
+         -not ("$($result.StdOut)$($result.StdErr)".Contains($secondToken)))
+    Assert-PreparedCleanup $Case
+    $result
+}
+
+Write-Fixture (Join-Path $registryDir 'source/private-dependency-0.1.0/Cargo.toml') @'
+[package]
+name = "private-dependency"
+version = "0.1.0"
+edition = "2021"
+'@
+Write-Fixture (Join-Path $registryDir 'source/private-dependency-0.1.0/src/lib.rs') 'pub fn answer() -> u8 { 42 }'
+Write-Fixture (Join-Path $registryDir 'server.ps1') @'
+$ErrorActionPreference = 'Stop'
+$listener = [Net.HttpListener]::new()
+$listener.Prefixes.Add('http://+:8080/')
+$listener.Start()
+Write-Output 'REGISTRY_READY'
+while ($listener.IsListening) {
+    $context = $listener.GetContext()
+    try {
+        $path = $context.Request.Url.AbsolutePath.TrimStart('/')
+        if ($path -ne 'config.json' -and $context.Request.Headers['Authorization'] -cne $env:FIXTURE_AUTH_TOKEN) {
+            Write-Output 'AUTH_REJECTED'
+            $context.Response.StatusCode = 401
+        } elseif ($path.Contains('..')) {
+            $context.Response.StatusCode = 400
+        } else {
+            if ($path -ne 'config.json') { Write-Output 'AUTH_ACCEPTED' }
+            $file = Join-Path /srv $path
+            if (Test-Path -LiteralPath $file -PathType Leaf) {
+                $bytes = [IO.File]::ReadAllBytes($file)
+                $context.Response.ContentLength64 = $bytes.Length
+                $context.Response.OutputStream.Write($bytes)
+            } else {
+                $context.Response.StatusCode = 404
+            }
+        }
+    } finally { $context.Response.Close() }
+}
+'@
+Write-Fixture (Join-Path $registryDir 'archive.ps1') @'
+$ErrorActionPreference = 'Stop'
+New-Item -ItemType Directory -Force /srv/private-dependency/0.1.0 | Out-Null
+& tar -czf /srv/private-dependency/0.1.0/download --directory /srv/source private-dependency-0.1.0
+exit $LASTEXITCODE
+'@
+Invoke-Engine -Arguments @('run', '--rm', '-v', "${engineRepo}/fixture-registry:/srv", $preparedImage,
+    'pwsh', '-NoLogo', '-NoProfile', '-File', '/srv/archive.ps1') | Out-Null
+$checksum = (Get-FileHash -LiteralPath (Join-Path $registryDir 'private-dependency/0.1.0/download') -Algorithm SHA256).Hash.ToLowerInvariant()
+$index = @{ name = 'private-dependency'; vers = '0.1.0'; deps = @(); cksum = $checksum; features = @{}; yanked = $false }
+Write-Fixture (Join-Path $registryDir 'pr/iv/private-dependency') (ConvertTo-Json -InputObject $index -Compress)
+
+try {
+    Invoke-Engine -Arguments @('run', '-d', '--name', $registryName,
+        '-e', "FIXTURE_AUTH_TOKEN=$fixtureToken", '-v', "${engineRepo}/fixture-registry:/srv:ro",
+        $preparedImage, 'pwsh', '-NoLogo', '-NoProfile', '-File', '/srv/server.ps1') | Out-Null
+    $registryInfo = (Invoke-Engine -Arguments @('inspect', $registryName)).StdOut | ConvertFrom-Json
+    $addresses = @($registryInfo[0].NetworkSettings.Networks.PSObject.Properties | ForEach-Object { $_.Value.IPAddress } | Where-Object { $_ })
+    if ($addresses.Count -ne 1) { throw 'fixture registry needs exactly one default network address' }
+    $registryUrl = "http://$($addresses[0]):8080/"
+    Write-Fixture (Join-Path $registryDir 'config.json') (ConvertTo-Json -Compress @{
+        dl = "${registryUrl}{crate}/{version}/download"; 'auth-required' = $true
+    })
+    $ready = $false
+    for ($attempt = 0; $attempt -lt 20; $attempt++) {
+        $logs = (Invoke-Engine -Arguments @('logs', $registryName)).StdOut
+        if ($logs.Contains('REGISTRY_READY')) { $ready = $true; break }
+        Start-Sleep -Milliseconds 250
+    }
+    Assert-That 'the authentication-enforcing registry is ready' $ready
+    if (-not $ready) { throw 'fixture registry did not become ready' }
+
+    $baseConfig = @"
+[registries.fixture]
+index = "sparse+$registryUrl"
+[registry]
+global-credential-providers = ["cargo:token"]
+[env]
+FIXTURE_UNRELATED = { value = "preserved", force = true }
+"@
+    Write-Fixture $configPath ($baseConfig + "`n[build]`nrustflags = ['--cfg=fixture_flag']`n")
+    Write-Fixture (Join-Path $repo 'Cargo.toml') @'
+[package]
+name = "anvil-e2e"
+version = "0.1.0"
+edition = "2021"
+[dependencies]
+private-dependency = { version = "=0.1.0", registry = "fixture" }
+probe-macro = { path = "probe-macro" }
+[workspace]
+members = ["probe-macro"]
+'@
+    Write-Fixture (Join-Path $repo 'build.rs') @'
+fn main() {
+    assert!(std::env::var_os("CARGO_REGISTRIES_FIXTURE_TOKEN").is_none());
+    assert!(std::env::var_os("FIXTURE_SECOND_CREDENTIAL").is_none());
+    assert!(std::env::var_os("RUSTC_BOOTSTRAP").is_none());
+    assert_eq!(std::env::var("FIXTURE_UNRELATED").unwrap(), "preserved");
+    println!("cargo:rustc-check-cfg=cfg(fixture_flag)");
+    println!("cargo:warning=BUILD_SCRIPT_CREDENTIAL_FREE");
+}
+'@
+    Write-Fixture (Join-Path $repo 'probe-macro/Cargo.toml') @'
+[package]
+name = "probe-macro"
+version = "0.1.0"
+edition = "2021"
+[lib]
+proc-macro = true
+'@
+    Write-Fixture (Join-Path $repo 'probe-macro/src/lib.rs') @'
+extern crate proc_macro;
+#[proc_macro]
+pub fn credential_free(_: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    assert!(std::env::var_os("CARGO_REGISTRIES_FIXTURE_TOKEN").is_none());
+    assert!(std::env::var_os("FIXTURE_SECOND_CREDENTIAL").is_none());
+    eprintln!("PROC_MACRO_CREDENTIAL_FREE");
+    "true".parse().unwrap()
+}
+'@
+    Write-Fixture (Join-Path $repo 'src/lib.rs') @'
+#[test]
+fn prepared_dependency_is_usable_without_credentials() {
+    assert!(std::env::var_os("CARGO_REGISTRIES_FIXTURE_TOKEN").is_none());
+    assert!(std::env::var_os("FIXTURE_SECOND_CREDENTIAL").is_none());
+    assert!(std::env::var_os("RUSTC_BOOTSTRAP").is_none());
+    assert_eq!(std::env::var("CARGO_NET_OFFLINE").unwrap(), "true");
+    assert_eq!(std::env::var("FIXTURE_UNRELATED").unwrap(), "preserved");
+    assert!(cfg!(fixture_flag));
+    assert!(probe_macro::credential_free!());
+    assert_eq!(private_dependency::answer(), 42);
+}
+'@
+    Write-Fixture (Join-Path $repo 'assert-prepared.ps1') @'
+$ErrorActionPreference = 'Stop'
+foreach ($name in @('CARGO_REGISTRIES_FIXTURE_TOKEN', 'FIXTURE_SECOND_CREDENTIAL', 'RUSTC_BOOTSTRAP')) {
+    if ($null -ne [Environment]::GetEnvironmentVariable($name)) { throw "preparation environment survived: $name" }
+}
+if ($env:CARGO_NET_OFFLINE -ne 'true') { throw 'validation must be offline' }
+foreach ($file in @("$env:CARGO_HOME/credentials", "$env:CARGO_HOME/credentials.toml", "$env:HOME/.netrc")) {
+    if (Test-Path -LiteralPath $file) { throw 'credential file reached validation' }
+}
+Write-Output 'DIRECT_COMMAND_CREDENTIAL_FREE'
+'@
+    $lockSetup = @('run', '--rm', '-v', "${engineRepo}:/workspace", '-w', '/workspace',
+        '-e', "CARGO_REGISTRIES_FIXTURE_TOKEN=$fixtureToken", $preparedImage, 'cargo', 'generate-lockfile')
+    # Locate by content rather than depending on the engine argument layout.
+    $wrongCredential = @($lockSetup | ForEach-Object {
+        if ($_ -eq "CARGO_REGISTRIES_FIXTURE_TOKEN=$fixtureToken") { 'CARGO_REGISTRIES_FIXTURE_TOKEN=synthetic-wrong-token' } else { $_ }
+    })
+    $denied = Invoke-Engine -Arguments $wrongCredential -AllowFailure
+    Assert-That 'wrong credentials cannot fetch the private dependency' ($denied.ExitCode -ne 0)
+    Invoke-Engine -Arguments $lockSetup | Out-Null
+    Assert-That 'the authenticated fixture produces a locked dependency graph' (Test-Path -LiteralPath (Join-Path $repo 'Cargo.lock'))
+    $authLogs = (Invoke-Engine -Arguments @('logs', $registryName)).StdOut
+    Assert-That 'the registry observed both rejection and genuine authenticated access' `
+        ($authLogs.Contains('AUTH_REJECTED') -and $authLogs.Contains('AUTH_ACCEPTED'))
+
+    Write-Fixture $hooks @'
+function Anvil-ResolveImage { param([string]$Tag) $env:FIXTURE_IMAGE }
+function Anvil-PrepareEnv {
+    Add-Content -LiteralPath $env:FIXTURE_ACQUISITIONS -Value 'acquired'
+    @{ Env = @{
+        CARGO_REGISTRIES_FIXTURE_TOKEN = $env:FIXTURE_TOKEN
+        FIXTURE_SECOND_CREDENTIAL = 'synthetic.fixture.second+[token]'
+    } }
+}
+'@
+    $direct = Invoke-PreparedCase 'a direct command runs without preparation credentials' @('pwsh', '-NoLogo', '-NoProfile', '-File', '/workspace/assert-prepared.ps1')
+    Assert-That 'the direct credential-absence probe actually executed' ($direct.StdOut.Contains('DIRECT_COMMAND_CREDENTIAL_FREE'))
+    $compiled = Invoke-PreparedCase 'fresh offline build scripts, procedural macros and tests succeed' @('cargo', 'test', '--locked', '--', '--nocapture')
+    Assert-That 'the build-script and procedural-macro probes actually executed' `
+        ($compiled.StdErr.Contains('BUILD_SCRIPT_CREDENTIAL_FREE') -and $compiled.StdErr.Contains('PROC_MACRO_CREDENTIAL_FREE'))
+    Assert-That 'the actual dependency-using test ran' ($compiled.StdOut.Contains('1 passed'))
+    Invoke-PreparedCase 'a bad preparation credential fails without validation' @('pwsh', '-File', '/workspace/assert-prepared.ps1') $false `
+        @{ FIXTURE_TOKEN = 'synthetic-wrong-token' } | Out-Null
+    Write-Fixture (Join-Path $repo 'incomplete-cache.ps1') @'
+$ErrorActionPreference = 'Stop'
+Remove-Item -LiteralPath "$env:CARGO_HOME/registry/cache", "$env:CARGO_HOME/registry/src" -Recurse -Force
+& cargo test --locked
+exit $LASTEXITCODE
+'@
+    Invoke-PreparedCase 'an incomplete cache fails offline without credential reacquisition' @('pwsh', '-File', '/workspace/incomplete-cache.ps1') $false | Out-Null
+    Write-Fixture (Join-Path $repo 'validation-failure.ps1') 'exit 23'
+    $failed = Invoke-PreparedCase 'a validation failure cleans up' @('pwsh', '-File', '/workspace/validation-failure.ps1') $false
+    Assert-Equal 'validation exit status is preserved' 23 $failed.ExitCode
+
+    Write-Section '12. Preparation suppresses workspace compiler and native-loader callbacks'
+    Write-Fixture (Join-Path $repo 'compiler-probe.sh') @'
+#!/bin/sh
+if [ -n "${CARGO_REGISTRIES_FIXTURE_TOKEN:-}" ]; then
+    echo CALLBACK_WITH_CREDENTIAL >&2
+    exit 91
+fi
+echo compiler-credential-free >> /workspace/callback-observations
+case "$1" in
+    */rustc) exec "$@" ;;
+    *) exec "$(rustup which rustc)" "$@" ;;
+esac
+'@
+    Write-Fixture (Join-Path $repo 'native-probe.c') @'
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+__attribute__((constructor)) static void observe(void) {
+    if (getenv("CARGO_REGISTRIES_FIXTURE_TOKEN") != NULL) {
+        fputs("CALLBACK_WITH_CREDENTIAL\n", stderr);
+        _exit(91);
+    }
+    FILE *out = fopen("/workspace/callback-observations", "a");
+    if (out != NULL) { fputs("native-credential-free\n", out); fclose(out); }
+}
+'@
+    Write-Fixture (Join-Path $repo 'setup-probes.ps1') @'
+$ErrorActionPreference = 'Stop'
+& chmod +x /workspace/compiler-probe.sh
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+& cc -shared -fPIC /workspace/native-probe.c -o /workspace/native-probe.so
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+$env:RUSTC_BOOTSTRAP = '1'
+$hostTriple = ((& rustc -vV) | Where-Object { $_.StartsWith('host: ') }).Substring(6)
+$json = (& rustc -Zunstable-options --print target-spec-json --target $hostTriple) -join "`n"
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+$target = $json | ConvertFrom-Json -AsHashtable
+$target['default-codegen-backend'] = '/workspace/native-probe.so'
+[IO.File]::WriteAllText('/workspace/probe-target.json', (ConvertTo-Json -InputObject $target -Depth 20))
+Write-Output "IMAGE_HOST:$hostTriple"
+'@
+    $setup = Invoke-Engine -Arguments @('run', '--rm', '-v', "${engineRepo}:/workspace", '-w', '/workspace',
+        $preparedImage, 'pwsh', '-NoProfile', '-File', '/workspace/setup-probes.ps1')
+    $hostLine = @($setup.StdOut -split "`r?`n" | Where-Object { $_.StartsWith('IMAGE_HOST:') })
+    if ($hostLine.Count -ne 1) { throw 'could not resolve the actual image compiler host' }
+    $imageHost = $hostLine[0].Substring(11)
+    $callbackCases = [ordered]@{
+        'build.rustc' = "[build]`nrustc = '/workspace/compiler-probe.sh'`nrustflags = ['--cfg=fixture_flag']"
+        'build.rustc-wrapper' = "[build]`nrustc-wrapper = '/workspace/compiler-probe.sh'`nrustflags = ['--cfg=fixture_flag']"
+        'build.rustc-workspace-wrapper' = "[build]`nrustc-workspace-wrapper = '/workspace/compiler-probe.sh'`nrustflags = ['--cfg=fixture_flag']"
+        'build backend flags' = "[build]`nrustflags = ['-Zcodegen-backend=/workspace/native-probe.so']"
+        'target backend flags' = "[target.$imageHost]`nrustflags = ['-Zcodegen-backend=/workspace/native-probe.so']"
+        'host flags' = "[unstable]`nhost-config = true`ntarget-applies-to-host = true`n[host]`nrustflags = ['-Zcodegen-backend=/workspace/native-probe.so']"
+        'host triple flags' = "[unstable]`nhost-config = true`ntarget-applies-to-host = true`n[host.$imageHost]`nrustflags = ['-Zcodegen-backend=/workspace/native-probe.so']"
+        'scalar custom target backend' = "[unstable]`njson-target-spec = true`n[build]`ntarget = '/workspace/probe-target.json'"
+        'array custom target backend' = "[unstable]`njson-target-spec = true`n[build]`ntarget = ['/workspace/probe-target.json']"
+        'mixed custom target backend' = "[unstable]`njson-target-spec = true`n[build]`ntarget = ['$imageHost', '/workspace/probe-target.json']"
+        'forced native loader' = "[env.LD_PRELOAD]`nvalue = '/workspace/native-probe.so'`nforce = true"
+        'forced relative native loader' = "[env.LD_PRELOAD]`nvalue = 'native-probe.so'`nforce = true`nrelative = true"
+    }
+    foreach ($case in $callbackCases.Keys) {
+        Write-Fixture $configPath ($baseConfig + "`n" + $callbackCases[$case] + "`n")
+        $control = Invoke-Engine -Arguments @('run', '--rm', '-v', "${engineRepo}:/workspace", '-w', '/workspace',
+            '-e', "CARGO_REGISTRIES_FIXTURE_TOKEN=$fixtureToken", '-e', 'RUSTC_BOOTSTRAP=1',
+            $preparedImage, 'cargo', 'fetch', '--locked') -AllowFailure
+        Assert-That "$case has a live uncontrolled callback positive control" `
+            ($control.ExitCode -ne 0 -and "$($control.StdOut)$($control.StdErr)".Contains('CALLBACK_WITH_CREDENTIAL'))
+        Invoke-PreparedCase "$case cannot execute with preparation credentials" `
+            @('pwsh', '-File', '/workspace/assert-prepared.ps1') | Out-Null
+        if ($case.StartsWith('build.rustc')) {
+            $observations = Join-Path $repo 'callback-observations'
+            if (Test-Path -LiteralPath $observations) { Remove-Item -LiteralPath $observations -Force }
+            Invoke-PreparedCase "$case remains active in credential-free validation" @('cargo', 'test', '--locked') | Out-Null
+            Assert-That "$case actually ran without credentials" `
+                ((Test-Path -LiteralPath $observations) -and (Get-Content -LiteralPath $observations -Raw).Contains('compiler-credential-free'))
+        }
+    }
+    Write-Fixture $configPath ($baseConfig + "`n[env.LD_PRELOAD]`nvalue = '/workspace/native-probe.so'`nforce = true`n[env.RUSTC_BOOTSTRAP]`nvalue = '-1'`nforce = true`n[build]`nrustflags = ['--cfg=fixture_flag']`n")
+    # Forced bootstrap is deliberately retained in validation; use a direct
+    # command so the build-script bootstrap-absence assertion stays meaningful.
+    Invoke-PreparedCase 'forced bootstrap cannot undo preparation controls' @('true') | Out-Null
+    Write-Fixture $configPath ($baseConfig + "`n[env.LD_PRELOAD]`nvalue = '/workspace/native-probe.so'`nforce = true`n[build]`nrustflags = ['--cfg=fixture_flag']`n")
+    $observations = Join-Path $repo 'callback-observations'
+    if (Test-Path -LiteralPath $observations) { Remove-Item -LiteralPath $observations -Force }
+    Invoke-PreparedCase 'normal flags and forced native loading remain active in validation' @('cargo', 'test', '--locked') | Out-Null
+    Assert-That 'the native callback actually executed without credentials' `
+        ((Test-Path -LiteralPath $observations) -and (Get-Content -LiteralPath $observations -Raw).Contains('native-credential-free'))
+
+    Write-Section '13. Cache leak rejection and incomplete inspection'
+    Write-Fixture (Join-Path $repo 'fixture-provider.ps1') @'
+$ErrorActionPreference = 'Stop'
+[Console]::Out.WriteLine('{"v":[1]}')
+$request = [Console]::In.ReadLine() | ConvertFrom-Json
+$mode = [IO.File]::ReadAllText('/workspace/fixture-leak-mode').Trim()
+$value = if ($mode -eq 'second') { $env:FIXTURE_SECOND_CREDENTIAL } else { $env:CARGO_REGISTRIES_FIXTURE_TOKEN }
+switch ($mode) {
+    'registry' { [IO.File]::WriteAllText("$env:CARGO_HOME/registry/.fixture-leak", $value) }
+    'git' { [IO.File]::WriteAllText("$env:CARGO_HOME/git/.fixture-leak", $value) }
+    'second' { [IO.File]::WriteAllText("$env:CARGO_HOME/registry/.fixture-leak", $value) }
+    'binary' {
+        $bytes = [byte[]]::new(70000) + [Text.Encoding]::UTF8.GetBytes($value) + [byte[]]@(0, 255, 0)
+        [IO.File]::WriteAllBytes("$env:CARGO_HOME/registry/.fixture-leak", $bytes)
+    }
+    'inspection' {
+        New-Item -ItemType SymbolicLink -Path "$env:CARGO_HOME/registry/.fixture-link" -Target /workspace/src | Out-Null
+    }
+    'stderr' { [Console]::Error.WriteLine($value) }
+}
+[Console]::Out.WriteLine((ConvertTo-Json -Compress @{
+    Ok = @{ kind = 'get'; token = $env:CARGO_REGISTRIES_FIXTURE_TOKEN; 'cache' = 'session'; 'operation_independent' = $true }
+}))
+'@
+    $providerConfig = $baseConfig.Replace('["cargo:token"]', '["pwsh -NoLogo -NoProfile -File /workspace/fixture-provider.ps1"]')
+    Write-Fixture $configPath $providerConfig
+    Write-Fixture (Join-Path $repo 'fixture-leak-mode') 'clean'
+    Invoke-PreparedCase 'the trusted authentication provider works without injecting a leak' `
+        @('pwsh', '-File', '/workspace/assert-prepared.ps1') | Out-Null
+    foreach ($mode in @('registry', 'git', 'second', 'binary', 'inspection', 'stderr')) {
+        Write-Fixture (Join-Path $repo 'fixture-leak-mode') $mode
+        $rejected = Invoke-PreparedCase "$mode credential leak or incomplete inspection rejects preparation" `
+            @('pwsh', '-File', '/workspace/assert-prepared.ps1') $false
+        Assert-That "$mode never starts requested validation" (-not $rejected.StdOut.Contains('DIRECT_COMMAND_CREDENTIAL_FREE'))
+    }
+} finally {
+    Invoke-Engine -Arguments @('rm', '-f', $registryName) -AllowFailure | Out-Null
+}
 
 # --------------------------------------------------------------- teardown ----
 
