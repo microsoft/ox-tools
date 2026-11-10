@@ -140,11 +140,6 @@ The execution unit modules also retain narrow native-adapter acceptance
 checks. Their boundary is distinct from the storage-free command, census,
 hint-selection and verdict-state-machine regressions:
 
-- `exec::build::tests::a_build_stopped_by_its_budget_takes_its_descendants_with_it`
-  requires `system-tests` and exercises real process-tree termination. The
-  already-contained descendant reaches its ready marker before supervision
-  receives a zero budget, so startup speed is not a deadline assertion.
-  Readiness has a separate finite safety bound; failure remains explicit.
 - `exec::census::final_survivor_tests` checks real listing output, invalid
   UTF-8 rejection, unsuccessful termination and containment refusal. The
   real-process cases require `system-tests`; decoding/status policy has a
@@ -164,7 +159,11 @@ hint-selection and verdict-state-machine regressions:
 - `exec::testing_state` retains a separate directory-read rejection check;
   bounded JSON size/overflow policy consumes in-memory readers.
 
-These checks require writable owned project-local directories; process cases
+Build-budget supervision instead uses a scripted subtree, clock and wait
+callbacks. Those cases verify deadline and cleanup decisions in process rather
+than launching a native descendant to prove termination.
+
+These native checks require writable owned project-local directories; process cases
 also require the already-built helper/current test executable and native
 process containment support. They need no external service, registry fetch,
 credentials or shared mutable fixture. Temporary trees, cache generations

@@ -25,6 +25,8 @@ pub(super) struct HarnessFilters<'args> {
     /// The positional filters, which libtest matches with `or`.
     filters: Vec<&'args str>,
 
+    skips: Vec<&'args str>,
+
     /// Whether the user asked for whole-name matching rather than substring matching.
     exact: bool,
 }
@@ -53,11 +55,19 @@ impl<'args> HarnessFilters<'args> {
         while let Some(arg) = args.get(index) {
             let arg = arg.as_str();
 
+            if arg == "--" {
+                parsed.filters.extend(args[index + 1..].iter().map(String::as_str));
+                // #[gamma::skip(loop.break_to_continue, tag = "outofmemory", reason = "continuing here appends the same positional filters forever without advancing index")]
+                break;
+            }
             if arg.starts_with('-') {
                 parsed.flags.push(arg);
 
                 if arg == "--exact" {
                     parsed.exact = true;
+                }
+                if let Some(skip) = arg.strip_prefix("--skip=") {
+                    parsed.skips.push(skip);
                 }
 
                 // The value belongs to the option, not to the filters, so it is consumed here and
@@ -66,6 +76,9 @@ impl<'args> HarnessFilters<'args> {
                     && let Some(value) = args.get(index + 1)
                 {
                     parsed.flags.push(value.as_str());
+                    if arg == "--skip" {
+                        parsed.skips.push(value.as_str());
+                    }
                     index += 1;
                 }
             } else {
@@ -85,6 +98,13 @@ impl<'args> HarnessFilters<'args> {
     /// everything. Anything else is matched the way libtest would have matched it, so that the
     /// answer here and the answer the harness would have given cannot differ.
     pub(super) fn admits(&self, name: &str) -> bool {
+        if self
+            .skips
+            .iter()
+            .any(|skip| if self.exact { name == *skip } else { name.contains(skip) })
+        {
+            return false;
+        }
         if self.filters.is_empty() {
             return true;
         }
@@ -114,6 +134,9 @@ impl<'args> HarnessFilters<'args> {
     /// The user's complete argument selection without a harness thread-count override.
     pub(super) fn without_test_threads(&self) -> Vec<&'args str> {
         let mut args = without_test_threads(&self.flags);
+        if self.filters.iter().any(|filter| filter.starts_with('-')) {
+            args.push("--");
+        }
         args.extend_from_slice(&self.filters);
         args
     }
@@ -126,8 +149,6 @@ impl<'args> HarnessFilters<'args> {
     /// carried rather than an allowlist that would silently drop the next such option. The one
     /// exception is `--format`, which would fight with the one the listing asks for.
     pub(super) fn selecting(&self) -> Vec<&'args str> {
-        // Each stored argument is pushed at most once, and the tail appends every filter, so this
-        // sum is an upper bound available up front.
         let mut args: Vec<&str> = Vec::with_capacity(
             // #[gamma::skip(arith.add_to_mul, reason = "Only private initial allocation capacity changes; subsequent pushes/writes determine identical output contents.", tag = "equivalent")]
             self.flags.len() + self.filters.len(),
@@ -148,6 +169,9 @@ impl<'args> HarnessFilters<'args> {
             index += 1 + usize::from(value.is_some());
         }
 
+        if self.filters.iter().any(|filter| filter.starts_with('-')) {
+            args.push("--");
+        }
         args.extend_from_slice(&self.filters);
         args
     }
@@ -186,6 +210,33 @@ mod tests {
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|arg| (*arg).to_owned()).collect()
+    }
+
+    #[test]
+    fn filters_after_the_option_terminator_remain_literal_names() {
+        let raw = args(&["--nocapture", "--", "--exact"]);
+        let parsed = HarnessFilters::parse(&raw);
+        assert!(!parsed.exact);
+        assert!(parsed.admits("case--exact"));
+        assert_eq!(parsed.selecting(), ["--nocapture", "--", "--exact"]);
+        assert_eq!(parsed.without_test_threads(), ["--nocapture", "--", "--exact"]);
+    }
+
+    #[test]
+    fn mixed_literal_names_retain_the_option_terminator_in_both_launch_forms() {
+        let raw = args(&["--nocapture", "--", "ordinary", "--literal"]);
+        let parsed = HarnessFilters::parse(&raw);
+        assert_eq!(parsed.selecting(), ["--nocapture", "--", "ordinary", "--literal"]);
+        assert_eq!(parsed.without_test_threads(), ["--nocapture", "--", "ordinary", "--literal"]);
+    }
+
+    #[test]
+    fn values_of_other_harness_options_do_not_become_skip_filters() {
+        let raw = args(&["--test-threads", "4", "--color", "always"]);
+        let parsed = HarnessFilters::parse(&raw);
+        assert!(parsed.admits("test4"));
+        assert!(parsed.admits("always_ready"));
+        assert_eq!(parsed.selecting(), ["--test-threads", "4", "--color", "always"]);
     }
 
     #[test]
@@ -243,6 +294,27 @@ mod tests {
         let parsed = HarnessFilters::parse(&raw);
 
         assert!(parsed.admits("anything at all"));
+    }
+
+    #[test]
+    fn skip_filters_exclude_named_probes_with_the_same_matching_rules_as_libtest() {
+        for skip in [args(&["--skip", "suite::slow"]), args(&["--skip=suite::slow"])] {
+            let parsed = HarnessFilters::parse(&skip);
+            assert!(!parsed.admits("suite::slow"));
+            assert!(!parsed.admits("suite::slower"));
+            assert!(parsed.admits("other::slow"));
+            assert!(parsed.admits("suite::fast"));
+            let mut exact = skip;
+            exact.push("--exact".into());
+            let parsed = HarnessFilters::parse(&exact);
+            assert!(!parsed.admits("suite::slow"));
+            assert!(parsed.admits("suite::slower"));
+        }
+        let raw = args(&["suite", "--skip", "slow", "--include-ignored"]);
+        let parsed = HarnessFilters::parse(&raw);
+        assert!(!parsed.admits("suite::slow"));
+        assert!(parsed.admits("suite::fast"));
+        assert!(!parsed.admits("other::fast"));
     }
 
     #[test]

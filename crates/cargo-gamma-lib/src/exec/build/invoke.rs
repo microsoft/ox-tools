@@ -3,14 +3,16 @@
 
 //! Running cargo, and turning its two output streams into something a reader can follow.
 
+use core::fmt::Write as _;
 use core::time::Duration;
 use std::io::{self, Read};
-use std::process::{Command, Output, Stdio};
+use std::process::{Command, ExitStatus, Output, Stdio};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
 use cargo_gamma_process::{MemoryRequest, ProcessTree, prepare};
+use tick::{SimpleClock, Stopwatch};
 
 use super::super::cargo_options::BuildLimits;
 use super::super::events::Events;
@@ -163,40 +165,17 @@ pub(super) fn supervise_tree(
     // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
     close_narration_channel(sender);
 
-    let deadline = budget.map(|budget| Instant::now() + budget);
-
-    let outcome = loop {
-        let _narrated =
-        // #[gamma::skip(call_result.default, reason = "The return value is discarded; default_after still performs the original call and every side effect.", tag = "equivalent")]
-        narrate(&lines, events);
-
-        match subtree.observe() {
-            Ok(Some(status)) => {
-                break Ok(Some(status));
-            }
-
-            Ok(None) => {
-                // #[gamma::skip(relational.ge_to_gt, reason = "Instant equality cannot be held across clock reads; expiration occurs on this poll or the immediately following poll")]
-                if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-                    break collect(&mut subtree).map(|()| None).map_err(|cause| {
-                        error!("cargo in `{root}` could not be terminated after its build budget expired").caused_by(cause)
-                    });
-                }
-
-                // #[gamma::skip(stmt.delete_call, reason = "the sleep only yields CPU between identical observe calls and cannot change the build result or deadline")]
-                thread::sleep(BUILD_POLL_INTERVAL);
-            }
-
-            Err(cause) => {
-                // Nothing more can be asked of this child, and dropping it would leave the whole
-                // build tree running with no handle on it at all.
-                break match collect(&mut subtree) {
-                    Ok(()) => Err(wait_error(&root, cause)),
-                    Err(cleanup) => Err(cleanup_error(&root, cleanup)),
-                };
-            }
-        }
-    };
+    let outcome = wait_for_build(
+        &mut subtree,
+        &root,
+        budget,
+        &SimpleClock::new_system(),
+        || {
+            // #[gamma::skip(call_result.default, tag = "equivalent", reason = "default_after still narrates every line; this closure discards the returned boolean.")]
+            let _narrated = narrate(&lines, events);
+        },
+        || thread::sleep(BUILD_POLL_INTERVAL),
+    );
 
     // Bounded, and reached on every path out of the loop above: the build and everything it
     // started have been killed by now, so the pipes close and the readers finish at once — unless
@@ -233,6 +212,55 @@ pub(super) fn supervise_tree(
         stdout: stdout.text,
         stderr: stderr.text,
     }))
+}
+
+pub(super) trait BuildProcess {
+    fn observe(&mut self) -> io::Result<Option<ExitStatus>>;
+    fn terminate_tree(&mut self) -> io::Result<()>;
+}
+
+impl BuildProcess for ProcessTree {
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    // #[gamma::skip(fn_value.ok, tag = "native-boundary", reason = "This adapter forwards native process observation; replacing it with Ok(None) stalls real process supervision. Deterministic wait-policy tests supply scripted observations instead of spawning processes.")]
+    fn observe(&mut self) -> io::Result<Option<ExitStatus>> {
+        Self::observe(self)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn terminate_tree(&mut self) -> io::Result<()> {
+        collect(self)
+    }
+}
+
+pub(super) fn wait_for_build(
+    subtree: &mut impl BuildProcess,
+    root: &str,
+    budget: Option<Duration>,
+    clock: &SimpleClock,
+    mut narrate: impl FnMut(),
+    mut pause: impl FnMut(),
+) -> Result<Option<ExitStatus>> {
+    let started = Stopwatch::new(clock);
+    loop {
+        narrate();
+        match subtree.observe() {
+            Ok(Some(status)) => return Ok(Some(status)),
+            Ok(None) => {
+                if budget.is_some_and(|budget| started.elapsed() >= budget) {
+                    return subtree.terminate_tree().map(|()| None).map_err(|cause| {
+                        error!("cargo in `{root}` could not be terminated after its build budget expired").caused_by(cause)
+                    });
+                }
+                pause();
+            }
+            Err(cause) => {
+                return match subtree.terminate_tree() {
+                    Ok(()) => Err(wait_error(root, cause)),
+                    Err(cleanup) => Err(cleanup_error(root, cleanup)),
+                };
+            }
+        }
+    }
 }
 
 /// Ends a build that will not be waited out, and reaps it.
@@ -671,6 +699,9 @@ const DRAIN_GRACE: Duration = Duration::from_secs(5);
 pub(super) struct Compiled {
     pub(super) succeeded: bool,
 
+    /// Actual termination status and Cargo arguments, for failures without compiler errors.
+    pub(super) failure_context: String,
+
     /// Cargo's JSON stream, or `None` if the build was stopped for outstaying its budget.
     pub(super) stdout: Option<String>,
 
@@ -715,6 +746,7 @@ pub(super) fn run_cargo(
     let Some(output) = compile(work, &args, limits.budget(first_round), events)? else {
         return Ok(Compiled {
             succeeded: false,
+            failure_context: String::new(),
             stdout: None,
             stderr: String::new(),
         });
@@ -728,9 +760,16 @@ pub(super) fn run_cargo(
     };
 
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let mut failure_context = format!("Cargo finished with {}", output.status);
+    #[cfg(windows)]
+    if let Some(code) = output.status.code() {
+        let _ = write!(failure_context, " (0x{:08X})", code.cast_unsigned());
+    }
+    let _ = write!(failure_context, ".\n\nCargo Arguments\n{args:?}");
 
     Ok(Compiled {
         succeeded: output.status.success(),
+        failure_context,
         stdout: Some(stdout),
         stderr,
     })

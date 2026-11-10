@@ -34,7 +34,7 @@
 #                          template writes after `stage:`, one of:
 #                            impact
 #                            pr_fast   pr_test   pr_msrv
-#                            pr_runtime_analysis   pr_mutants
+#                            pr_runtime_analysis   pr_fuzzing   pr_mutants
 #                            scheduled_test   scheduled_advisories
 #                            scheduled_runtime_analysis   scheduled_exhaustive
 #                          Unrelated to `group` in steps/setup.yml, which

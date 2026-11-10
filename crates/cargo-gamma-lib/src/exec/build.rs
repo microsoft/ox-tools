@@ -10,7 +10,6 @@ use camino::{Utf8Path, Utf8PathBuf};
 use super::cargo_options::BuildLimits;
 use super::events::Events;
 use super::test_binary::{TestBinary, retain_linked_to_population, test_binaries_with_linkage};
-use super::verdict::tail;
 use super::workspace::Workspace;
 use crate::discover::Plan;
 use crate::error::{Error, error};
@@ -33,7 +32,9 @@ mod splices;
 mod tests;
 
 use blame::{CompilerReason, blame};
-use complaints::{DIAGNOSTIC_LIMIT, complaints, diagnostics, leading, manifests_of, prioritize};
+#[cfg(test)]
+use complaints::complaints;
+use complaints::{DIAGNOSTIC_LIMIT, diagnostics, failure_output, leading, manifests_of, prioritize};
 use invoke::run_cargo;
 use isolation::IsolationBudget;
 #[cfg(test)]
@@ -172,7 +173,7 @@ mod final_survivor_tests {
                         "src/lib.rs".into(),
                         Guard {
                             site: position(ordinal * 10)..position(ordinal * 10 + 1),
-                            mutated: None,
+                            mutated: Some(position(ordinal * 10)..position(ordinal * 10 + 1)),
                         },
                     ),
                 )
@@ -185,6 +186,303 @@ mod final_survivor_tests {
             ..Converger::default()
         };
         (plan, converger)
+    }
+
+    fn positional_convergence() -> (Workspace, Plan, Converger) {
+        let work = Workspace::adopt("never-written-positional-root".into(), "never-written-positional-target".into());
+        let (mut plan, mut converger) = seeded_convergence_plan(&work.root);
+        for mutant in &mut plan.mutants {
+            *mutant = Mutant {
+                ordinal: mutant.ordinal,
+                package: "selected".into(),
+                replacement: "".into(),
+                ..crate::testing::ci_fixture::mutant("src/lib.rs", mutant.ordinal as usize, "stmt.delete_assign", Outcome::Pending)
+            };
+        }
+        let position = |line| crate::schema::Position::new(line, 1).unwrap();
+        converger.splices = Splices::seeded_guards_for_test(
+            work.root.clone(),
+            [
+                (
+                    1,
+                    (
+                        "src/lib.rs".into(),
+                        Guard {
+                            site: position(10)..position(30),
+                            mutated: None,
+                        },
+                    ),
+                ),
+                (
+                    2,
+                    (
+                        "src/lib.rs".into(),
+                        Guard {
+                            site: position(14)..position(20),
+                            mutated: None,
+                        },
+                    ),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        converger.compiler_exclusions = Some(from_value(json!({"version": 1, "mutants": {}})).unwrap());
+        converger.exclusion_store = Some(|_, _| Ok(()));
+        (work, plan, converger)
+    }
+
+    #[test]
+    fn cor2_positional_enclosing_deletion_survives_an_invalid_child_and_preserves_original_context() {
+        let (work, mut plan, mut converger) = positional_convergence();
+        plan.mutants[1].mutator = "collection.reverse_array".into();
+        plan.mutants[1].replacement = "reversed".into();
+        let position = |line| crate::schema::Position::new(line, 1).unwrap();
+        converger.splices = Splices::seeded_guards_for_test(
+            work.root.clone(),
+            [
+                (
+                    1,
+                    (
+                        "src/lib.rs".into(),
+                        Guard {
+                            site: position(10)..position(30),
+                            mutated: None,
+                        },
+                    ),
+                ),
+                (
+                    2,
+                    (
+                        "src/lib.rs".into(),
+                        Guard {
+                            site: position(14)..position(20),
+                            mutated: Some(position(15)..position(16)),
+                        },
+                    ),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        converger.subset_oracle = Some(|active| Some(active.contains(&2)));
+        let mut diagnostic: Value = from_str(&memory_diagnostic(1)).unwrap();
+        diagnostic["message"]["code"]["code"] = "E0070".into();
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+        let roots = vec!["selected".to_owned()];
+        let result = with_compiler(
+            {
+                let calls = std::rc::Rc::clone(&calls);
+                move |_work, arguments, _budget, _events| {
+                    let call = calls.get();
+                    calls.set(call + 1);
+                    assert!(call < 2);
+                    assert_eq!(arguments, ["check", "--tests", "--message-format=json", "--package", "selected"]);
+                    Ok(Some(memory_compiler_output(call == 1, diagnostic.to_string())))
+                }
+            },
+            || {
+                converger.converge(
+                    &work,
+                    &plan,
+                    Some(&roots),
+                    &["check", "--tests"],
+                    BuildLimits::default(),
+                    &mut RecordedConvergence::default(),
+                )
+            },
+        )
+        .unwrap();
+        assert!(matches!(result, Convergence::Built(_)));
+        assert_eq!(calls.get(), 2);
+        assert_eq!(converger.withdrawn, HashSet::from_iter([2]));
+        assert_eq!(converger.census, HashMap::from_iter([(2, CompilerReason::isolated())]));
+        let inventory = converger.compiler_exclusions.as_ref().unwrap();
+        assert_eq!(inventory.reason(&plan.mutants[0]), None);
+        assert!(inventory.reason(&plan.mutants[1]).is_some());
+        assert!(converger.proof_roots.iter().all(|scope| scope.as_deref() == Some(roots.as_slice())));
+        assert!(converger.isolation_budget.proofs <= isolation::MAX_ISOLATION_PROOFS);
+    }
+
+    #[test]
+    fn cor2_broad_and_secondary_deletion_spans_require_independent_singleton_proofs() {
+        for secondary in [false, true] {
+            let (work, plan, mut converger) = positional_convergence();
+            converger.subset_oracle = Some(|active| Some(active.contains(&1) || active.contains(&2)));
+            let mut diagnostic: Value = from_str(&memory_diagnostic(1)).unwrap();
+            let span = &mut diagnostic["message"]["spans"][0];
+            span["line_start"] = 1.into();
+            span["line_end"] = 40.into();
+            span["is_primary"] = (!secondary).into();
+            let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+            let result = with_compiler(
+                {
+                    let calls = std::rc::Rc::clone(&calls);
+                    move |_work, _arguments, _budget, _events| {
+                        let call = calls.get();
+                        calls.set(call + 1);
+                        assert!(call < 2);
+                        Ok(Some(memory_compiler_output(call == 1, diagnostic.to_string())))
+                    }
+                },
+                || {
+                    converger.converge(
+                        &work,
+                        &plan,
+                        None,
+                        &["check", "--tests"],
+                        BuildLimits::default(),
+                        &mut RecordedConvergence::default(),
+                    )
+                },
+            )
+            .unwrap();
+            assert!(matches!(result, Convergence::Built(_)));
+            assert_eq!(converger.withdrawn, HashSet::from_iter([1, 2]));
+            assert!(converger.census.values().all(|reason| reason == &CompilerReason::isolated()));
+            assert!(
+                converger.isolation_budget.proofs >= 3,
+                "the populated failure cannot prove either individual deletion"
+            );
+            let inventory = converger.compiler_exclusions.as_ref().unwrap();
+            assert!(plan.mutants.iter().all(|mutant| inventory.reason(mutant).is_some()));
+        }
+    }
+
+    #[test]
+    fn cor2_positional_interactions_are_not_persisted_as_individual_compiler_failures() {
+        let (work, plan, mut converger) = positional_convergence();
+        converger.subset_oracle = Some(|active| Some(active.contains(&1) && active.contains(&2)));
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+        let result = with_compiler(
+            {
+                move |_work, _arguments, _budget, _events| {
+                    let call = calls.get();
+                    calls.set(call + 1);
+                    assert!(call < 2);
+                    Ok(Some(memory_compiler_output(call == 1, memory_diagnostic(1))))
+                }
+            },
+            || {
+                converger.converge(
+                    &work,
+                    &plan,
+                    None,
+                    &["check", "--tests"],
+                    BuildLimits::default(),
+                    &mut RecordedConvergence::default(),
+                )
+            },
+        )
+        .unwrap();
+        assert!(matches!(result, Convergence::Built(_)));
+        assert!(converger.census.is_empty());
+        assert_eq!(converger.interactions.len(), 1);
+        assert!(converger.interactions.values().all(|members| members == &[1, 2]));
+        let inventory = converger.compiler_exclusions.as_ref().unwrap();
+        assert!(plan.mutants.iter().all(|mutant| inventory.reason(mutant).is_none()));
+    }
+
+    #[test]
+    fn convergence_proves_the_positional_candidate_before_broader_diagnostic_tiers() {
+        let (work, plan, mut converger) = positional_convergence();
+        converger.subset_oracle = Some(|active| {
+            assert_eq!(active, &HashSet::from_iter([1]));
+            Some(true)
+        });
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+        let result = with_compiler(
+            {
+                let calls = std::rc::Rc::clone(&calls);
+                move |_work, _arguments, _budget, _events| {
+                    let call = calls.get();
+                    calls.set(call + 1);
+                    assert!(call < 2, "one failed build and one successful retry are scripted");
+                    Ok(Some(memory_compiler_output(call == 1, memory_diagnostic(1))))
+                }
+            },
+            || {
+                converger.converge(
+                    &work,
+                    &plan,
+                    None,
+                    &["check", "--tests"],
+                    BuildLimits::default(),
+                    &mut RecordedConvergence::default(),
+                )
+            },
+        )
+        .unwrap();
+        assert!(matches!(result, Convergence::Built(_)));
+        assert_eq!(calls.get(), 2);
+        assert_eq!(converger.withdrawn, HashSet::from_iter([1]));
+        assert_eq!(converger.isolation_budget.proofs, 1);
+    }
+
+    #[test]
+    fn convergence_returns_positional_proof_publication_errors_without_panicking_or_withdrawing() {
+        let (work, plan, mut converger) = positional_convergence();
+        converger.subset_oracle = Some(|active| {
+            assert_eq!(active, &HashSet::from_iter([1]));
+            Some(true)
+        });
+        converger.exclusion_store = Some(|_, _| Err(error!("scripted positional publication failure")));
+        let failure = with_compiler(
+            |_work, _arguments, _budget, _events| Ok(Some(memory_compiler_output(false, memory_diagnostic(1)))),
+            || {
+                converger.converge(
+                    &work,
+                    &plan,
+                    None,
+                    &["check", "--tests"],
+                    BuildLimits::default(),
+                    &mut RecordedConvergence::default(),
+                )
+            },
+        )
+        .unwrap_err();
+        assert_eq!(failure.message(), "scripted positional publication failure");
+        assert!(converger.withdrawn.is_empty());
+        assert!(converger.census.is_empty());
+    }
+
+    #[test]
+    fn unattributed_convergence_failures_append_the_exact_failed_cargo_invocation() {
+        let work = Workspace::adopt("never-written-convergence-root".into(), "never-written-convergence-target".into());
+        let (plan, mut converger) = seeded_convergence_plan(&work.root);
+        let mut output = memory_compiler_output(false, String::new());
+        output.stderr = b"scripted compiler refusal".to_vec();
+        let status = output.status;
+        let expected = Converger::unattributed_build_error(&work, "", "scripted compiler refusal");
+        let result = with_compiler(
+            move |_work, arguments, _budget, _events| {
+                assert_eq!(arguments, ["check", "--tests", "--message-format=json", "--workspace"]);
+                Ok(Some(output.clone()))
+            },
+            || {
+                converger.converge(
+                    &work,
+                    &plan,
+                    None,
+                    &["check", "--tests"],
+                    BuildLimits::default(),
+                    &mut RecordedConvergence::default(),
+                )
+            },
+        )
+        .unwrap();
+        let Convergence::Stuck(failure) = result else {
+            panic!("a failed invocation with no diagnostic context cannot be attributed");
+        };
+        #[cfg(windows)]
+        let status = format!("{status} (0x00000100)");
+        assert_eq!(
+            failure.message(),
+            format!(
+                "{}\n\nCargo finished with {status}.\n\nCargo Arguments\n[\"check\", \"--tests\", \"--message-format=json\", \"--workspace\"]",
+                expected.message()
+            )
+        );
     }
 
     #[test]
@@ -966,13 +1264,20 @@ impl Converger {
         if self.whole_workspace { None } else { select }
     }
 
+    fn build_roots(&self, select: Option<&[String]>) -> Option<Vec<String>> {
+        match &self.fixed_roots {
+            Some(roots) if roots.is_empty() => None,
+            Some(roots) => Some(roots.clone()),
+            None => self.scoped(select).map(<[String]>::to_vec),
+        }
+    }
+
     /// The mutants that must be absent while one attribution scope is being judged.
     ///
     /// Cargo's roots may be wider than the stage to keep feature unification stable. Mutants from
     /// those additional packages still have to be restored to pristine source: filtering their
     /// diagnostics after compilation is too late, because they may already have broken or masked
     /// the build.
-    // #[gamma::skip(fn_value.empty_collection, tag = "timeout", reason = "dropping withdrawn mutants repeatedly rebuilds contexts that cannot be isolated in the campaign")]
     fn scoped_withdrawn(&self, plan: &Plan, packages: Option<&[String]>) -> HashSet<u32> {
         let mut withdrawn = self.withdrawn.clone();
         let Some(packages) = packages else {
@@ -1087,15 +1392,26 @@ impl Converger {
 
             let mut blamed = blame(&stdout, &work.root, &guards);
             retain_blamed(&mut blamed, plan, scope.mutants);
+            let positional = blamed
+                .iter()
+                .filter_map(|(ordinal, reason)| reason.needs_confirmation().then_some(*ordinal))
+                .collect::<HashSet<_>>();
+            blamed.retain(|_ordinal, reason| !reason.needs_confirmation());
 
             if blamed.is_empty() {
                 let proof_started = Instant::now();
-                let isolated = self.isolate_scoped(work, plan, &stdout, verb, scope.roots, limits, events)?;
+                let isolated = if positional.is_empty() {
+                    self.isolate_scoped(work, plan, &stdout, verb, scope.roots, limits, events)?
+                } else {
+                    self.isolate_with_candidates(work, plan, &stdout, verb, scope.roots, limits, events, Some(&positional))?
+                };
                 elapsed = elapsed.saturating_add(proof_started.elapsed());
                 if isolated.is_empty() {
                     self.history.push(build_round(elapsed, plan, []));
 
-                    return Ok(Convergence::Stuck(Self::unattributed_build_error(work, &stdout, &outcome.stderr)));
+                    let mut failure = Self::unattributed_build_error(work, &stdout, &outcome.stderr);
+                    failure.append_message(&format!("\n\n{}", outcome.failure_context));
+                    return Ok(Convergence::Stuck(failure));
                 }
 
                 let mut interactions = Vec::new();
@@ -1234,18 +1550,14 @@ impl Converger {
     fn unattributed_build_error(work: &Workspace, stdout: &str, stderr: &str) -> Error {
         let diagnostics = diagnostics(stdout);
 
-        // A build that produced no diagnostics at all did not fail the way this message assumes.
-        // The compiler was never reached — a build script panicked, a native library is missing, a
-        // dependency would not resolve, a package spec was ambiguous — and every one of those is
-        // explained on stderr and nowhere else. Saying "does not compile" here would send the
-        // reader hunting for a broken mutant that was never generated.
         if diagnostics.is_empty() {
             return error!(
-                "the instrumented tree failed to build, and the compiler reported nothing, so no \
-                 mutant can be blamed for it. The cause is usually something cargo hit before it \
-                 reached the code — a build script, a missing native dependency, a bad invocation — \
-                 and it is almost always in what cargo said:\n\n{}\n\n{}",
-                tail(&complaints(stderr), 30),
+                "the instrumented tree failed to build, but Cargo emitted no structured compiler errors, \
+                 so no mutant can be blamed for it. The available output does not establish the cause.\n\
+                 Re-run the same gamma command with `--show-build --leak-dirs` to see the full Cargo \
+                 output and keep the scratch tree. If Cargo still reports no cause, check the exit \
+                 status for an OS exception or signal and check available memory.\n\n{}\n\n{}",
+                failure_output(stdout, stderr),
                 work.inspect_hint()
             );
         }
@@ -1381,16 +1693,16 @@ impl Converger {
 
         prioritize(&mut diagnostics, &manifests_of(plan, &work.root, mutating));
 
-        // Nothing on the JSON stream means the compiler was never reached, which is the same class
-        // of failure `unattributed_build_error` describes and wants the same explanation. Saying
-        // "does not compile" over an empty diagnostic list would be a lie about a build script or a
-        // missing native library.
         if diagnostics.is_empty() {
+            let command = if test_lib {
+                "cargo test --no-run --lib"
+            } else {
+                "cargo check --tests"
+            };
             return Err(error!(
-                "the tree could not be checked, and the compiler reported nothing, so the cause is \
-                 something cargo hit before it reached the code — a build script, a missing native \
-                 dependency, a bad invocation:\n\n{}",
-                tail(&complaints(&outcome.stderr), 30)
+                "'{command}' failed, mutation testing cannot proceed\n\n{}\n\n{}",
+                outcome.failure_context,
+                failure_output(&stdout, &outcome.stderr)
             ));
         }
 
@@ -1554,11 +1866,7 @@ impl Converger {
         limits: BuildLimits,
         events: &mut dyn Events,
     ) -> Result<Build> {
-        let roots = match &self.fixed_roots {
-            Some(roots) if roots.is_empty() => None,
-            Some(roots) => Some(roots.clone()),
-            None => self.scoped(select).map(<[String]>::to_vec),
-        };
+        let roots = self.build_roots(select);
         let mut stdout = String::new();
         for codegen in [false, true] {
             let verb = if !codegen || self.test_lib {

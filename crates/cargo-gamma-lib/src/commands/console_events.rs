@@ -153,9 +153,12 @@ impl<H: Host> crate::exec::Events for ConsoleEvents<'_, H> {
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn warn(&mut self, message: &str) {
-        let label = self.styler.warning();
-
-        for line in message.lines() {
+        for (index, line) in message.lines().enumerate() {
+            let label = if index == 0 {
+                self.styler.warning()
+            } else {
+                crate::report::continuation()
+            };
             if self.dashboard.is_active() {
                 self.dashboard.line(self.host, &label, line);
             } else {
@@ -313,6 +316,8 @@ pub(super) fn mutant_detail(mutant: &crate::model::Mutant) -> String {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use std::time::Instant;
+
     use camino::Utf8PathBuf;
 
     use super::super::verdict_log::TESTING_PROGRESS_LOG;
@@ -384,10 +389,12 @@ mod tests {
     #[test]
     fn dashboard_starts_while_the_sweep_is_still_being_planned() {
         let mut host = Sink::default().terminal(160);
+        let mut dashboard = Dashboard::new(true, Some(160), Styler::new(false));
+        dashboard.set_redraw_time_for_test(Instant::now());
         let mut events = ConsoleEvents {
             host: &mut host,
             progress: Progress::new(true, Styler::new(false), Some(160)),
-            dashboard: Dashboard::new(true, Some(160), Styler::new(false)),
+            dashboard,
             styler: Styler::new(false),
             show_build: false,
             verdict_log: VerdictLog::default(),
@@ -410,6 +417,7 @@ mod tests {
             planning_draw,
             "planning events must update dashboard state without writing a competing progress line"
         );
+        assert_eq!(events.dashboard.testing_status_for_test(), "Planning reachability index ready");
     }
 
     #[test]
@@ -893,12 +901,9 @@ mod tests {
         assert!(host.err().contains("--exclude-test router_compile_fail"), "{}", host.err());
     }
 
-    /// A multi-line warning is written line by line, because the status column is per line and a
-    /// message written as one string would put the second line under the label rather than beside
-    /// it.
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn a_multi_line_warning_is_labelled_on_every_line() {
+    fn a_multi_line_warning_has_one_label_and_aligned_continuations() {
         let mut host = Sink::default();
         let mut events = ConsoleEvents {
             host: &mut host,
@@ -913,7 +918,13 @@ mod tests {
 
         assert_eq!(
             host.err().lines().filter(|line| line.contains("warning")).count(),
-            2,
+            1,
+            "{}",
+            host.err()
+        );
+        assert_eq!(
+            host.err().lines().last(),
+            Some(format!("{} second", crate::report::continuation()).as_str()),
             "{}",
             host.err()
         );

@@ -98,7 +98,9 @@ pub(super) fn is_standard_default_constructor(expression: &Expr, expected: &Type
     }
     let expected = types.resolve_alias(expected);
     let constructor = Type::Path(constructor_path);
-    if !types.standard_constructor_root(&constructor) || !types.standard_constructor_root(expected) {
+    if
+    // #[gamma::skip(cond.always_false, logical.or_remove_left, logical.or_remove_right, logical.or_to_and, tag = "equivalent", reason = "Every accepting branch below independently requires genuine empty-constructor, primitive, or Option APIs for both types; those checks also reject shadowed roots.")]
+    !types.standard_constructor_root(&constructor) || !types.standard_constructor_root(expected) {
         return
         // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
         false;
@@ -696,6 +698,7 @@ mod tests {
     use syn::parse_quote;
 
     use super::*;
+    use crate::ops::collect::collector::indexes::{ABSOLUTE_ROOT, EXTERN_ROOT_PREFIX};
 
     #[test]
     fn verified_resource_modules_can_clear_root_or_module_opacity_but_never_block_opacity() {
@@ -984,7 +987,13 @@ mod tests {
 
     #[test]
     fn constructor_proofs_check_absolute_roots_on_both_sides_of_the_comparison() {
-        let imports = HashMap::from_iter([("std".into(), None)]);
+        let imports = HashMap::from_iter([
+            ("std".into(), None),
+            (
+                format!("{EXTERN_ROOT_PREFIX}std"),
+                Some(vec![ABSOLUTE_ROOT.into(), "foreign".into()]),
+            ),
+        ]);
         let declarations = crate::ops::collect::Defaults::default();
         let types = Types {
             abstracts: &[],

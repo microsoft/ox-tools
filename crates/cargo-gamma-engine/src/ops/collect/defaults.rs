@@ -19,12 +19,17 @@ use crate::{HashMap, HashSet};
 /// and imports can shadow it in different namespaces. The collector cannot run name resolution,
 /// so it records explicit standard aliases and explicit shadows before it decides whether a call,
 /// bound, derive, or impl refers to the standard trait.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(super) struct DefaultPaths {
     aliases: HashSet<String>,
+    absolute_aliases: HashSet<String>,
     module_aliases: HashMap<String, Vec<String>>,
+    external_roots: HashMap<String, Option<String>>,
     shadows: HashSet<String>,
     derive_shadows: HashSet<String>,
+    derive_glob: bool,
+    derive_roots_shadowed: bool,
+    local_traits: HashSet<String>,
 }
 
 impl DefaultPaths {
@@ -43,23 +48,61 @@ impl DefaultPaths {
     /// makes an unrelated outer `impl Default` look custom. Conditional items likewise introduce
     /// no binding when the selected build strips them.
     pub(super) fn of_in(file: &File, cfg: &CfgSet) -> Self {
-        let mut paths = Self::default();
+        Self::default().with_items(file.items.iter(), cfg)
+    }
 
-        for item in &file.items {
-            if !cfg.holds_for(item_attrs(item)) {
-                continue;
+    pub(super) fn with_items<'a>(&self, items: impl Iterator<Item = &'a Item>, cfg: &CfgSet) -> Self {
+        let mut paths = self.clone();
+        let items = items.filter(|item| cfg.holds_for(item_attrs(item))).collect::<Vec<_>>();
+        // Extern bindings are visible throughout their scope, including imports preceding them.
+        for item in &items {
+            if let Item::ExternCrate(node) = item {
+                let binding = node.rename.as_ref().map_or(&node.ident, |(_, name)| name).to_string();
+                let standard = cfg.guaranteed_for(&node.attrs) && matches!(node.ident.to_string().as_str(), "core" | "std");
+                let _old = paths.absolute_aliases.remove(&binding);
+                let _old = paths.aliases.remove(&binding);
+                let _old = paths.module_aliases.remove(&binding);
+                if standard {
+                    let _old = paths.module_aliases.insert(binding.clone(), vec![node.ident.to_string()]);
+                    let _inserted = paths.absolute_aliases.insert(binding.clone());
+                } else {
+                    let _inserted = paths.derive_shadows.insert(binding.clone());
+                }
+                if
+                // #[gamma::skip(cond.always_true, tag = "equivalent", reason = "shadows is queried only for the prelude Default spelling; extra shadow entries for other extern bindings cannot change any query.")]
+                binding == "Default" {
+                    let _inserted = paths.shadows.insert(binding.clone());
+                }
+                let _old = paths.external_roots.insert(binding, standard.then(|| node.ident.to_string()));
             }
-
+        }
+        for item in items {
             match item {
-                syn::Item::Use(node) => paths.descend_use(&mut Vec::new(), &node.tree),
-                syn::Item::Trait(node) if node.ident == "Default" => {
-                    let _added = paths.shadows.insert("Default".to_owned());
+                syn::Item::Use(node) => paths.descend_use(&mut Vec::new(), &node.tree, node.leading_colon.is_some()),
+                syn::Item::Trait(node) => {
+                    paths.note_type_shadow(&node.ident);
+                    if cfg.guaranteed_for(&node.attrs) {
+                        let _added = paths.local_traits.insert(node.ident.to_string());
+                    }
+                    if
+                    // #[gamma::skip(cond.always_false, literal.str_to_empty, literal.str_to_xyzzy, reason = "note_type_shadow above already records Default for this trait. Disabling or changing this duplicate condition cannot remove that shadow.", tag = "equivalent")]
+                    node.ident == "Default" {
+                        let _added = paths.shadows.insert(
+                            // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "note_type_shadow above already inserted Default. Changing this duplicate insertion only adds a non-Default shadow, and shadows is queried only for the prelude Default spelling.", tag = "equivalent")]
+                            "Default".to_owned(),
+                        );
+                    }
                 }
                 syn::Item::Struct(node) => paths.note_type_shadow(&node.ident),
                 syn::Item::Enum(node) => paths.note_type_shadow(&node.ident),
                 syn::Item::Union(node) => paths.note_type_shadow(&node.ident),
                 syn::Item::Type(node) => paths.note_type_shadow(&node.ident),
                 syn::Item::Mod(node) => paths.note_type_shadow(&node.ident),
+                syn::Item::Macro(node) => {
+                    if let Some(name) = &node.ident {
+                        let _inserted = paths.derive_shadows.insert(name.to_string());
+                    }
+                }
                 _ => {}
             }
         }
@@ -67,11 +110,29 @@ impl DefaultPaths {
         paths
     }
 
+    pub(super) fn is_local_trait(&self, path: &Path) -> bool {
+        path.leading_colon.is_none()
+            && path.segments.len() == 1
+            && (
+                // #[gamma::skip(logical.and_remove_right, reason = "A recorded local trait clears its same-name imports in note_type_shadow, and a local Default also shadows the prelude. A bare recorded local-trait name therefore cannot be the standard trait.", tag = "equivalent")]
+                (
+                    // #[gamma::skip(iter.first_to_last, reason = "The preceding segments.len()==1 check guarantees that first and last are the same segment.", tag = "equivalent")]
+                    path.segments
+                        .first()
+                        .is_some_and(|segment| self.local_traits.contains(&segment.ident.to_string()))
+                ) && !self.is_standard_trait(path)
+            )
+    }
+
     /// Returns whether an implementation path names the standard `Default` trait.
     pub(super) fn is_standard_trait(&self, path: &Path) -> bool {
         let segments: Vec<String> = path.segments.iter().map(|segment| segment.ident.to_string()).collect();
 
-        self.is_standard_trait_segments(&segments)
+        if path.leading_colon.is_some() {
+            self.external_path(&segments).is_some_and(|path| is_standard_trait_path(&path))
+        } else {
+            self.is_standard_trait_segments(&segments)
+        }
     }
 
     /// Returns whether the fallback spelling `Default::default()` resolves to this trait.
@@ -91,7 +152,8 @@ impl DefaultPaths {
 
     /// Returns whether a bare name resolves to the standard `Default` trait.
     fn is_standard_trait_name(&self, name: &str) -> bool {
-        self.aliases.contains(name) || (name == "Default" && !self.shadows.contains(name))
+        (self.aliases.contains(name) && self.unambiguous_root(name))
+            || (name == "Default" && !self.derive_glob && !self.shadows.contains(name))
     }
 
     /// Returns whether a complete associated-function path calls the standard default trait.
@@ -104,7 +166,11 @@ impl DefaultPaths {
             false;
         }
 
-        self.is_standard_callee_segments(&segments)
+        if path.leading_colon.is_some() {
+            self.external_path(&segments).is_some_and(|path| is_standard_trait_path(&path))
+        } else {
+            self.is_standard_callee_segments(&segments)
+        }
     }
 
     pub(super) fn is_standard_default_segments(&self, segments: &[String]) -> bool {
@@ -122,19 +188,84 @@ impl DefaultPaths {
         path.is_ident("Default") && !self.derive_shadows.contains("Default")
     }
 
+    pub(super) fn known_builtin_derive(&self, path: &Path) -> bool {
+        !self.derive_glob
+            && !self.derive_roots_shadowed
+            && !self.derive_shadows.contains("std")
+            && !self.derive_shadows.contains("core")
+            && path.get_ident().is_some_and(|name| {
+                !self.derive_shadows.contains(&name.to_string())
+                    && matches!(
+                        name.to_string().as_str(),
+                        "Clone" | "Copy" | "Debug" | "Default" | "Eq" | "Hash" | "Ord" | "PartialEq" | "PartialOrd"
+                    )
+            })
+    }
+
+    pub(super) fn known_value_macro(&self, path: &Path) -> bool {
+        let names = path.segments.iter().map(|segment| segment.ident.to_string()).collect::<Vec<_>>();
+        let Some(name) = names.last() else {
+            return
+            // #[gamma::skip(return_value.default, reason = "The return type is bool; its Default is the same false returned for an empty path.", tag = "equivalent")]
+            false;
+        };
+        value_macro_name(name)
+            && !self.derive_roots_shadowed
+            && match names.as_slice() {
+                [name] => !self.derive_glob && !self.derive_shadows.contains(name),
+                [root, _] => matches!(root.as_str(), "std" | "core" | "alloc") && !self.derive_shadows.contains(root),
+                _ => false,
+            }
+    }
+
     /// Records one imported binding and the complete path it came from.
-    fn imported(&mut self, binding: String, prefix: &[String], source: String) {
+    fn imported(&mut self, binding: String, prefix: &[String], source: String, absolute: bool) {
+        let _shadowed = self.local_traits.remove(&binding);
         let mut path = prefix.to_vec();
 
         if source != "self" {
             path.push(source);
         }
 
-        let path = self.expand_module_alias(&path);
+        let rooted = absolute || path.first().is_some_and(|root| self.absolute_aliases.contains(root));
+        let standard_source = if absolute {
+            self.external_path(&path).is_some()
+        } else {
+            path.first().is_some_and(|root| self.unambiguous_root(root))
+        };
+        let path = if absolute {
+            self.external_path(&path).unwrap_or(path)
+        } else {
+            self.expand_module_alias(&path)
+        };
+        let absolute = rooted;
+        let _old = self.absolute_aliases.remove(&binding);
+        let _old = self.aliases.remove(&binding);
+        let _old = self.module_aliases.remove(&binding);
+        let standard_derive =
+            // #[gamma::skip(logical.and_remove_left, tag = "equivalent", reason = "standard_derive is used only in the following !standard_source || ... condition. When standard_source is false that condition already inserts the shadow; when true this conjunct changes nothing.")]
+            standard_source
+            && matches!(path.as_slice(), [root, module, name]
+            if matches!(root.as_str(), "std" | "core")
+                && name == &binding
+                && matches!((module.as_str(), name.as_str()),
+                    ("clone", "Clone") | ("marker", "Copy") | ("fmt", "Debug") | ("default", "Default")
+                    | ("cmp", "Eq" | "Ord" | "PartialEq" | "PartialOrd") | ("hash", "Hash")));
+        if !standard_source || (!standard_derive && !is_standard_module_path(&path)) {
+            let _added = self.derive_shadows.insert(binding.clone());
+        }
 
-        if is_standard_trait_path(&path) {
+        if standard_source && is_standard_trait_path(&path) {
+            if absolute {
+                let _added = self.absolute_aliases.insert(binding.clone());
+            }
             let _added = self.aliases.insert(binding);
-        } else if is_standard_module_path(&path) {
+        } else if
+        // #[gamma::skip(logical.and_remove_right, tag = "equivalent", reason = "Queries accept only std/core::default::Default. A nonmodule prefix cannot expand to that path: the root and default module are precisely the accepted module paths, and the complete trait path was handled above. Recording other prefixes cannot change a trait/default query; derive shadows are recorded independently above.")]
+        standard_source && is_standard_module_path(&path) {
+            if absolute {
+                let _added = self.absolute_aliases.insert(binding.clone());
+            }
             let _replaced = self.module_aliases.insert(binding.clone(), path);
 
             if
@@ -143,32 +274,34 @@ impl DefaultPaths {
                 let _added = self.shadows.insert(binding);
             }
         } else if
-        // #[gamma::skip(cond.always_true, reason = "These guards control insertion of shadow-set entries for bindings other than Default. Every meaningful shadow query either checks the literal Default, or checks a name only after name==Default. Additional non-Default entries therefore cannot change any result.", tag = "equivalent")]
+        // #[gamma::skip(cond.always_true, reason = "For other bindings this branch only inserts a non-Default shadow. The shadows set is queried exclusively for the prelude Default spelling, so those extra entries are unobservable.", tag = "equivalent")]
         binding == "Default" {
-            let _added = self.shadows.insert(binding.clone());
-            let _added = self.derive_shadows.insert(binding);
+            let _added = self.shadows.insert(binding);
         }
     }
 
     /// Records every binding one `use` tree introduces.
-    fn descend_use(&mut self, prefix: &mut Vec<String>, tree: &UseTree) {
+    fn descend_use(&mut self, prefix: &mut Vec<String>, tree: &UseTree, absolute: bool) {
         match tree {
             UseTree::Path(path) => {
                 prefix.push(path.ident.to_string());
-                self.descend_use(prefix, &path.tree);
+                self.descend_use(prefix, &path.tree, absolute);
                 let _popped = prefix.pop();
             }
 
-            UseTree::Name(name) => self.imported(name.ident.to_string(), prefix, name.ident.to_string()),
-            UseTree::Rename(rename) => self.imported(rename.rename.to_string(), prefix, rename.ident.to_string()),
+            UseTree::Name(name) => self.imported(name.ident.to_string(), prefix, name.ident.to_string(), absolute),
+            UseTree::Rename(rename) => self.imported(rename.rename.to_string(), prefix, rename.ident.to_string(), absolute),
 
             UseTree::Group(group) => {
                 for item in &group.items {
-                    self.descend_use(prefix, item);
+                    self.descend_use(prefix, item, absolute);
                 }
             }
 
-            UseTree::Glob(_) => {}
+            UseTree::Glob(_) => {
+                self.derive_glob = true;
+                self.local_traits.clear();
+            }
         }
     }
 
@@ -180,7 +313,7 @@ impl DefaultPaths {
             return true;
         }
 
-        is_standard_trait_path(&self.expand_module_alias(segments))
+        segments.first().is_some_and(|root| self.unambiguous_root(root)) && is_standard_trait_path(&self.expand_module_alias(segments))
     }
 
     /// Resolves the qualifier of an associated call through the type namespace.
@@ -191,7 +324,19 @@ impl DefaultPaths {
             return true;
         }
 
-        is_standard_trait_path(&self.expand_module_alias(segments))
+        segments.first().is_some_and(|root| self.unambiguous_root(root)) && is_standard_trait_path(&self.expand_module_alias(segments))
+    }
+
+    fn unambiguous_root(&self, root: &str) -> bool {
+        if self.external_roots.get(root) == Some(&None) {
+            return
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "The inferred bool default is already false.")]
+            false;
+        }
+        self.absolute_aliases.contains(root)
+            || (!self.derive_roots_shadowed
+                && !self.derive_glob
+                && (!self.derive_shadows.contains(root) || self.aliases.contains(root) || self.module_aliases.contains_key(root)))
     }
 
     /// Resolves the first segment of a path through one or more imported standard modules.
@@ -212,6 +357,55 @@ impl DefaultPaths {
 
         expanded
     }
+
+    /// Absolute roots ignore local types and modules, but not explicit extern-crate aliases.
+    fn external_path(&self, segments: &[String]) -> Option<Vec<String>> {
+        let mut path = segments.to_vec();
+        if let Some(root) = path.first_mut()
+            && let Some(standard) = self.external_roots.get(root)
+        {
+            *root = standard.as_ref()?.clone();
+        }
+        Some(path)
+    }
+}
+
+pub(super) fn value_macro_name(name: &str) -> bool {
+    matches!(
+        name,
+        "vec"
+            | "format"
+            | "format_args"
+            | "panic"
+            | "assert"
+            | "assert_eq"
+            | "assert_ne"
+            | "debug_assert"
+            | "debug_assert_eq"
+            | "debug_assert_ne"
+            | "print"
+            | "println"
+            | "eprint"
+            | "eprintln"
+            | "write"
+            | "writeln"
+            | "todo"
+            | "unimplemented"
+            | "unreachable"
+            | "matches"
+            | "cfg"
+            | "line"
+            | "column"
+            | "file"
+            | "module_path"
+            | "include_str"
+            | "include_bytes"
+            | "env"
+            | "option_env"
+            | "concat"
+            | "concat_bytes"
+            | "stringify"
+    )
 }
 
 /// Returns whether a path spells the standard `Default` trait without imports.
@@ -230,8 +424,13 @@ fn is_standard_module_path(path: &[String]) -> bool {
 }
 
 impl DefaultPaths {
-    /// Records a source declaration that occupies the bare type/module name `Default`.
+    /// Records a source declaration that shadows an imported type or standard root.
     fn note_type_shadow(&mut self, ident: &syn::Ident) {
+        let name = ident.to_string();
+        let _old = self.absolute_aliases.remove(&name);
+        let _old = self.aliases.remove(&name);
+        let _old = self.module_aliases.remove(&name);
+        self.derive_roots_shadowed |= ident == "std" || ident == "core" || ident == "alloc";
         if ident == "Default" {
             let _added = self.shadows.insert("Default".to_owned());
         }
@@ -369,9 +568,8 @@ impl Completeness {
 ///
 /// The index is evidence of *presence* and never proof of absence for anything it cannot see whole.
 /// A type it has no definition for stays optimistic, because it may come from a dependency that
-/// does implement `Default`. A definition it can see but whose `Default` a macro generates is the
-/// one way it can be wrong, and it errs in the safe direction: a mutant is withheld that would have
-/// compiled, which costs a little signal rather than producing a wrong verdict.
+/// does implement `Default`. Unexpanded item macros and procedural attributes may supply
+/// implementations elsewhere in the crate, so they also prevent proof of absence.
 #[derive(Debug, Default)]
 pub struct Defaults {
     identities: Option<Identities>,
@@ -381,6 +579,7 @@ pub struct Defaults {
     aliases: HashSet<String>,
     module_path: Vec<String>,
     uncertain_types: HashSet<String>,
+    unexpanded_implementations: bool,
     alias_targets: HashMap<String, HashSet<String>>,
     /// The local bindings that decide whether `Default` means the standard trait.
     paths: DefaultPaths,
@@ -433,6 +632,7 @@ pub struct Defaults {
 
     /// Lexical module nesting while visiting implementations.
     module_depth: usize,
+    module_certain: bool,
 }
 
 /// Folds one alias into the map, demoting a key two files disagree about.
@@ -541,11 +741,14 @@ impl Defaults {
     /// Builds the index over one parsed file for the selected configuration.
     #[must_use]
     pub fn of_in(file: &File, cfg: &CfgSet) -> Self {
+        let identities = Identities::of(file, cfg);
         let mut index = Self {
-            identities: Some(Identities::of(file, cfg)),
+            unexpanded_implementations: identities.unexpanded_implementations,
+            identities: Some(identities),
             resource_namespaces: super::resource_namespaces::Namespaces::of(file, cfg),
             paths: DefaultPaths::of_in(file, cfg),
             cfg: cfg.clone(),
+            module_certain: true,
             completeness: Completeness::Complete,
             ..Self::default()
         };
@@ -694,6 +897,7 @@ impl Defaults {
         self.unproven_generic_types.extend(other.unproven_generic_types);
         self.aliases.extend(other.aliases);
         self.uncertain_types.extend(other.uncertain_types);
+        self.unexpanded_implementations |= other.unexpanded_implementations;
         for (name, targets) in other.alias_targets {
             self.alias_targets.entry(name).or_default().extend(targets);
         }
@@ -715,7 +919,7 @@ impl Defaults {
     /// is a name rather than a syntax node.
     #[must_use]
     pub fn lacks_error_default(&self, name: &str) -> bool {
-        if !self.completeness.supplies_negative_evidence() || self.indirect.contains("*") {
+        if !self.completeness.supplies_negative_evidence() || self.indirect.contains("*") || self.unexpanded_implementations {
             return
             // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
             false;
@@ -832,8 +1036,15 @@ impl Defaults {
     }
 
     fn note_derive(&mut self, name: &str, generics: &Generics, attributes: &[syn::Attribute]) {
+        let expanded = super::default_identity::nominal_expansion(attributes, &self.cfg);
+        let attributes = expanded.as_deref().unwrap_or(attributes);
         let defaulted = derives_default(attributes, &self.paths);
-        if attributes.iter().any(|attribute| attribute.path().is_ident("cfg_attr")) {
+        if !self.module_certain
+            || expanded.is_none()
+            || !self.cfg.guaranteed_for(attributes)
+            || !super::default_identity::nominal_attributes(attributes)
+            || !super::default_identity::known_derives(attributes, &self.paths)
+        {
             let _inserted = self.indirect.insert(name.to_owned());
             let _inserted = self.uncertain_types.insert(name.to_owned());
         }
@@ -914,11 +1125,14 @@ impl<'ast> Visit<'ast> for Defaults {
             return;
         }
 
+        let certain = self.module_certain;
+        self.module_certain &= self.cfg.guaranteed_for(&node.attrs);
         self.module_depth += 1;
         self.module_path.push(node.ident.to_string());
         visit::visit_item_mod(self, node);
         let _module = self.module_path.pop();
         self.module_depth -= 1;
+        self.module_certain = certain;
     }
 
     fn visit_item_type(&mut self, node: &'ast ItemType) {
@@ -1117,6 +1331,372 @@ mod tests {
     use syn::{parse_file, parse_quote};
 
     use super::*;
+
+    #[test]
+    fn nov7_absorbed_imports_aliases_and_alias_implementations_remain_unknown() {
+        for (sources, name) in [
+            (["struct Imported;", "use external::Imported;"], "Imported"),
+            (["struct Alias;", "type Alias = u8;"], "Alias"),
+            (
+                ["#[derive(Default)] struct Alias;", "type Alias = Missing; struct Missing;"],
+                "Missing",
+            ),
+            (["type Alias = u8;", "struct Missing; use crate::Missing as Alias;"], "Alias"),
+        ] {
+            let defaults = index(&sources);
+            assert!(!defaults.lacks_error_default(name), "{sources:?}");
+        }
+    }
+
+    #[test]
+    fn nov7_disabled_nominal_items_and_preceding_attributes_do_not_change_default_evidence() {
+        let defaults = Defaults::of_in(
+            &parse_file(
+                "#[cfg(any())] struct DisabledStruct;
+                 #[cfg(any())] enum DisabledEnum { Value }
+                 #[repr(transparent)] #[derive(Default)] struct Enabled(u8);
+                 #[derive(Default)] #[repr(transparent)] struct Reversed(u8);",
+            )
+            .unwrap(),
+            &CfgSet::parse(""),
+        );
+        assert!(!defaults.defines("DisabledStruct"));
+        assert!(!defaults.defines("DisabledEnum"));
+        assert!(defaults.has_default(&parse_quote!(Enabled)));
+        assert!(defaults.has_default(&parse_quote!(Reversed)));
+    }
+
+    #[test]
+    fn nov7_out_of_line_generic_types_do_not_gain_universal_default_from_one_instantiation() {
+        let cfg = CfgSet::unconditional();
+        let mut defaults = Defaults::of_source_in(
+            &parse_file("mod child; impl Default for child::Holder<u8> { fn default() -> Self { child::Holder(0) } }").unwrap(),
+            &cfg,
+            "root.rs",
+        );
+        defaults.absorb(Defaults::of_source_in(
+            &parse_file("pub struct Holder<T>(pub T);").unwrap(),
+            &cfg,
+            "child.rs",
+        ));
+        defaults.bind_sources(&[
+            ("root.rs".into(), "root.rs".into(), Vec::new()),
+            ("child.rs".into(), "root.rs".into(), vec!["child".into()]),
+        ]);
+        assert_eq!(defaults.source_default("root.rs", &[], &["child".into(), "Holder".into()]), None);
+    }
+
+    #[test]
+    fn absolute_trait_imports_ignore_lexical_aliases_of_external_root_names() {
+        for source in [
+            "use core::default as std; use ::std::default::Default as D;",
+            "use std::default as core; use ::core::default::Default as D;",
+        ] {
+            let paths = DefaultPaths::of(&parse_file(source).unwrap());
+            assert!(paths.is_standard_trait(&parse_quote!(D)), "{source}");
+            assert!(paths.is_standard_default_callee(&parse_quote!(D::default)), "{source}");
+        }
+    }
+
+    #[test]
+    fn extern_default_bindings_and_conditional_roots_do_not_borrow_prelude_evidence() {
+        for source in ["extern crate core as Default;", "extern crate custom as Default;"] {
+            let paths = DefaultPaths::of(&parse_file(source).unwrap());
+            assert!(!paths.is_standard_trait(&parse_quote!(Default)), "{source}");
+            assert!(!paths.is_standard_default_callee(&parse_quote!(Default::default)), "{source}");
+        }
+        let cfg = CfgSet::parse("").with_undecided(["maybe".into()]);
+        let paths = DefaultPaths::of_in(&parse_file("#[cfg(maybe)] extern crate core;").unwrap(), &cfg);
+        assert!(!paths.is_standard_trait(&parse_quote!(::core::default::Default)));
+        for source in [
+            "extern crate custom as core; use ::std as core;",
+            "extern crate custom as core; use ::std::default as core;",
+        ] {
+            let paths = DefaultPaths::of(&parse_file(source).unwrap());
+            assert!(!paths.is_standard_trait(&parse_quote!(core::default::Default)), "{source}");
+            assert!(!paths.is_standard_trait(&parse_quote!(core::Default)), "{source}");
+        }
+    }
+
+    #[test]
+    fn self_imports_preserve_module_aliases_without_turning_other_standard_items_into_traits() {
+        for source in ["use core::default::{self as d};", "use ::std::default::{self as d};"] {
+            let paths = DefaultPaths::of(&parse_file(source).unwrap());
+            assert!(paths.is_standard_trait(&parse_quote!(d::Default)), "{source}");
+            assert!(paths.is_standard_default_callee(&parse_quote!(d::Default::default)), "{source}");
+            assert!(!paths.is_standard_trait(&parse_quote!(d)), "{source}");
+        }
+        let paths = DefaultPaths::of(&parse_file("use core::cmp::Ordering as D;").unwrap());
+        assert!(!paths.is_standard_trait(&parse_quote!(D)));
+        assert!(!paths.is_standard_default_callee(&parse_quote!(D::default)));
+    }
+
+    #[test]
+    fn unexpanded_implementation_evidence_survives_initialization_and_both_merge_orders() {
+        let ordinary = "struct Missing;";
+        let expanded = "struct Other; fn body() { implement_default!(); }";
+        let expanded_index = Defaults::of(&parse_file(expanded).unwrap());
+        assert!(expanded_index.unexpanded_implementations);
+        assert!(!expanded_index.lacks_error_default("Other"));
+        for sources in [[ordinary, expanded], [expanded, ordinary]] {
+            let mut index = Defaults::of(&parse_file(sources[0]).unwrap());
+            index.absorb(Defaults::of(&parse_file(sources[1]).unwrap()));
+            assert!(index.unexpanded_implementations);
+            assert!(!index.lacks_error_default("Missing"));
+            assert!(!index.lacks_error_default("Other"));
+        }
+    }
+
+    #[test]
+    fn declaration_uncertainty_keeps_each_independent_reason_without_poisoning_plain_siblings() {
+        let cfg = CfgSet::parse("").with_undecided(["maybe".into()]);
+        let excessive_attributes = format!("{} struct Uncertain;", "#[doc = \"inert\"]".repeat(4097));
+        for declaration in [
+            "#[cfg(maybe)] struct Uncertain;",
+            "#[transform] struct Uncertain;",
+            "#[derive(Expand)] struct Uncertain;",
+            "mod conditional { #[cfg(maybe)] mod nested { struct Uncertain; } }",
+            excessive_attributes.as_str(),
+        ] {
+            let source = format!("{declaration} struct Plain;");
+            let index = Defaults::of_in(&parse_file(&source).unwrap(), &cfg);
+            assert!(index.generic_default_is_unproven("Uncertain"), "{declaration}");
+            assert!(index.indirect.contains("Uncertain"), "{declaration}");
+            assert!(!index.generic_default_is_unproven("Plain"), "{declaration}");
+            assert!(!index.indirect.contains("Plain"), "{declaration}");
+        }
+    }
+
+    #[test]
+    fn conditional_module_uncertainty_propagates_through_plain_children_then_restores() {
+        let cfg = CfgSet::parse("").with_undecided(["maybe".into()]);
+        let index = Defaults::of_in(
+            &parse_file(
+                "#[cfg(maybe)] mod outer {
+                    struct Direct;
+                    mod inner { struct Nested; }
+                 }
+                 mod sibling { struct Certain; }",
+            )
+            .unwrap(),
+            &cfg,
+        );
+        assert!(index.generic_default_is_unproven("Direct"));
+        assert!(index.generic_default_is_unproven("Nested"));
+        assert!(!index.generic_default_is_unproven("Certain"));
+    }
+
+    #[test]
+    fn alias_certainty_distinguishes_absolute_sources_globs_and_macro_namespace_shadows() {
+        for (source, spelling, standard) in [
+            ("use core::default::Default as D; use foreign::*;", "D", false),
+            ("use ::core::default::Default as D; use foreign::*;", "D", true),
+            ("use foreign::*;", "core::default::Default", false),
+            ("use core::default::Default as D; mod core {}", "D", false),
+            ("use core::default as d; mod core {}", "d::Default", false),
+            ("macro_rules! d { () => {} } use core::default as d;", "d::Default", true),
+        ] {
+            let paths = DefaultPaths::of(&parse_file(source).unwrap());
+            assert_eq!(paths.is_standard_trait(&syn::parse_str(spelling).unwrap()), standard, "{source}");
+        }
+        let paths = DefaultPaths::of_in(
+            &parse_file("#[cfg(maybe)] trait Conditional {}").unwrap(),
+            &CfgSet::parse("").with_undecided(["maybe".into()]),
+        );
+        assert!(!paths.is_local_trait(&parse_quote!(Conditional)));
+        for root in ["core", "std"] {
+            let paths = DefaultPaths::of(&parse_file(&format!("use {root}::default::Default;")).unwrap());
+            assert!(paths.known_builtin_derive(&parse_quote!(Default)));
+            let declaration: ItemStruct = parse_quote!(
+                #[derive(Default)]
+                struct Ready;
+            );
+            assert!(derives_default(&declaration.attrs, &paths));
+        }
+    }
+
+    #[test]
+    fn extern_crate_provenance_controls_direct_imported_and_bounded_default_paths() {
+        for root in ["core", "std"] {
+            for (declaration, standard) in [
+                (format!("extern crate custom as {root};"), false),
+                (format!("extern crate self as {root};"), false),
+                (format!("extern crate {root};"), true),
+            ] {
+                for absolute in ["", "::"] {
+                    let trait_name = format!("{absolute}{root}::default::Default");
+                    let imports = format!(
+                        "use {trait_name} as Imported;
+                         use {absolute}{root}::default as defaults;
+                         use {absolute}{root} as library;"
+                    );
+                    for source in [format!("{declaration} {imports}"), format!("{imports} {declaration}")] {
+                        let paths = DefaultPaths::of(&parse_file(&source).unwrap());
+                        for spelling in [trait_name.as_str(), "Imported", "defaults::Default", "library::default::Default"] {
+                            let path: Path = syn::parse_str(spelling).unwrap();
+                            assert_eq!(paths.is_standard_trait(&path), standard, "{source}: {spelling}");
+                            let callee: Path = syn::parse_str(&format!("{spelling}::default")).unwrap();
+                            assert_eq!(paths.is_standard_default_callee(&callee), standard, "{source}: {spelling}");
+                            if absolute.is_empty() || spelling != trait_name {
+                                let segments = callee.segments.iter().map(|segment| segment.ident.to_string()).collect::<Vec<_>>();
+                                assert_eq!(paths.is_standard_default_segments(&segments), standard, "{source}: {spelling}");
+                            }
+                            let function: syn::ItemFn = syn::parse_str(&format!("fn f<T: {spelling}>() {{}}")).unwrap();
+                            let expected = if standard { vec!["T"] } else { Vec::new() };
+                            assert_eq!(standard_defaulted_parameters(&function.sig.generics, &paths), expected, "{source}");
+                        }
+                        let other = if root == "core" { "std" } else { "core" };
+                        assert!(paths.is_standard_trait(&syn::parse_str(&format!("::{other}::default::Default")).unwrap()));
+                        assert!(paths.is_standard_trait(&syn::parse_str(&format!("{other}::default::Default")).unwrap()));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn foreign_root_imports_cannot_reintroduce_standard_trait_evidence() {
+        for root in ["core", "std"] {
+            let other = if root == "core" { "std" } else { "core" };
+            for absolute in ["", "::"] {
+                let source = format!(
+                    "use {absolute}{root} as {other};
+                     use {other}::default::Default;
+                     extern crate custom as {root};"
+                );
+                let paths = DefaultPaths::of(&parse_file(&source).unwrap());
+                assert!(!paths.is_standard_trait(&parse_quote!(Default)), "{source}");
+                assert!(!paths.is_standard_trait(&syn::parse_str(&format!("{other}::default::Default")).unwrap()));
+            }
+        }
+    }
+
+    #[test]
+    fn standard_extern_renames_keep_their_original_root_identity() {
+        for root in ["core", "std"] {
+            let source = format!(
+                "extern crate {root} as genuine;
+                 extern crate custom as {root};
+                 use genuine::default::Default as Relative;
+                 use ::genuine::default::Default as Absolute;"
+            );
+            let paths = DefaultPaths::of(&parse_file(&source).unwrap());
+            for spelling in ["genuine::default::Default", "::genuine::default::Default", "Relative", "Absolute"] {
+                assert!(paths.is_standard_trait(&syn::parse_str(spelling).unwrap()), "{source}: {spelling}");
+            }
+        }
+    }
+
+    #[test]
+    fn extern_root_shadows_are_cfg_gated_and_lexically_scoped() {
+        let cfg = CfgSet::parse("unix");
+        for (gate, standard) in [("any()", true), ("windows", true), ("unix", false), ("all()", false)] {
+            let source = format!("#[cfg({gate})] extern crate custom as core;");
+            let paths = DefaultPaths::of_in(&parse_file(&source).unwrap(), &cfg);
+            for spelling in ["core::default::Default", "::core::default::Default"] {
+                assert_eq!(paths.is_standard_trait(&syn::parse_str(spelling).unwrap()), standard, "{source}");
+            }
+        }
+
+        let parent = DefaultPaths::of(&parse_file("use ::core::default::Default as Inherited;").unwrap());
+        let nested = parse_file("extern crate custom as core;").unwrap();
+        let child = parent.with_items(nested.items.iter(), &cfg);
+        assert!(!child.is_standard_trait(&parse_quote!(::core::default::Default)));
+        assert!(child.is_standard_trait(&parse_quote!(Inherited)));
+        assert!(parent.is_standard_trait(&parse_quote!(::core::default::Default)));
+        let sibling = parent.with_items(core::iter::empty(), &cfg);
+        assert!(sibling.is_standard_trait(&parse_quote!(::core::default::Default)));
+        let restored = child.with_items(parse_file("extern crate core;").unwrap().items.iter(), &cfg);
+        assert!(restored.is_standard_trait(&parse_quote!(::core::default::Default)));
+        assert!(restored.is_standard_trait(&parse_quote!(core::default::Default)));
+    }
+
+    #[test]
+    fn local_type_and_module_shadows_do_not_replace_absolute_extern_roots() {
+        for declaration in ["mod core {}", "struct core;", "type core = u8;"] {
+            for outer in ["", "extern crate core;"] {
+                let parent = DefaultPaths::of(&parse_file(outer).unwrap());
+                let paths = parent.with_items(parse_file(declaration).unwrap().items.iter(), &CfgSet::parse(""));
+                assert!(
+                    !paths.is_standard_trait(&parse_quote!(core::default::Default)),
+                    "{outer}: {declaration}"
+                );
+                assert!(
+                    paths.is_standard_trait(&parse_quote!(::core::default::Default)),
+                    "{outer}: {declaration}"
+                );
+                assert!(paths.is_standard_default_callee(&parse_quote!(::core::default::Default::default)));
+            }
+        }
+    }
+
+    #[test]
+    fn absolute_module_alias_provenance_survives_later_root_and_glob_shadows() {
+        let paths = DefaultPaths::of(
+            &parse_file(
+                "use ::core as external;
+                 use external::default::Default as D;
+                 mod core {}
+                 use foreign::*;",
+            )
+            .unwrap(),
+        );
+        assert!(paths.is_standard_trait(&parse_quote!(D)));
+        assert!(paths.is_standard_default_callee(&parse_quote!(D::default)));
+        assert!(!paths.is_standard_trait(&parse_quote!(Default)));
+        assert!(!paths.is_standard_default_callee(&parse_quote!(core::default::Default::default)));
+    }
+
+    #[test]
+    fn a_local_trait_replaces_an_inherited_import_only_in_its_own_scope() {
+        let parent = DefaultPaths::of(&parse_file("use ::core::default::Default as D;").unwrap());
+        let child = parent.with_items(parse_file("trait D {}").unwrap().items.iter(), &CfgSet::parse(""));
+        assert!(child.is_local_trait(&parse_quote!(D)));
+        assert!(!child.is_standard_trait(&parse_quote!(D)));
+        for path in [parse_quote!(::D), parse_quote!(D::Nested), parse_quote!(Unknown)] {
+            assert!(!child.is_local_trait(&path));
+        }
+        assert!(parent.is_standard_trait(&parse_quote!(D)));
+        assert!(!parent.is_local_trait(&parse_quote!(D)));
+    }
+
+    #[test]
+    fn builtin_macros_require_unshadowed_standard_names_and_roots() {
+        for (source, bare, qualified, derives) in [
+            ("", true, true, true),
+            ("macro_rules! vec { () => {} }", false, true, true),
+            ("use foreign::*;", false, true, false),
+            ("mod alloc {}", false, false, false),
+            ("extern crate custom as core;", true, false, false),
+            ("extern crate custom as std;", true, true, false),
+            ("extern crate core;", true, true, true),
+        ] {
+            let paths = DefaultPaths::of(&parse_file(source).unwrap());
+            assert_eq!(paths.known_value_macro(&parse_quote!(vec)), bare, "{source}");
+            assert_eq!(paths.known_value_macro(&parse_quote!(::core::vec)), qualified, "{source}");
+            assert_eq!(paths.known_builtin_derive(&parse_quote!(Clone)), derives, "{source}");
+        }
+    }
+
+    #[test]
+    fn default_path_queries_reject_incomplete_calls_and_nonstandard_macro_qualifiers() {
+        let paths = DefaultPaths::of_in(&parse_file("trait Default {}").unwrap(), &CfgSet::parse(""));
+        let mut empty: Path = parse_quote!(Default);
+        empty.segments.clear();
+        assert!(paths.is_local_trait(&parse_quote!(Default)));
+        assert!(!paths.is_standard_trait(&parse_quote!(Default)));
+        assert!(!paths.is_standard_default_callee(&empty));
+        assert!(!paths.is_standard_default_callee(&parse_quote!(Default::other)));
+        assert!(!paths.known_value_macro(&parse_quote!(std::nested::vec)));
+        assert!(!paths.known_value_macro(&empty));
+    }
+
+    #[test]
+    fn a_bare_self_import_has_no_nominal_target() {
+        let defaults = Defaults::of(&parse_file("use self;").unwrap());
+        assert!(defaults.indirect.contains("self"));
+        assert_eq!(defaults.local_imports.get("self"), None);
+    }
 
     #[test]
     fn default_implementations_through_renamed_imports_prevent_false_negative_target_evidence() {
@@ -1699,7 +2279,7 @@ mod tests {
         assert!(!standard_derive.lacks_default(&ty));
         assert!(custom.lacks_default(&ty));
         assert!(custom_alias.lacks_default(&ty));
-        assert!(custom_derive.lacks_default(&ty));
+        assert!(!custom_derive.lacks_default(&ty));
         assert!(nested_custom.lacks_default(&ty));
     }
 
@@ -1747,7 +2327,7 @@ mod tests {
     #[test]
     fn grouped_and_glob_use_trees_are_both_handled() {
         let defaults = index(&["pub struct Error;
-             use std::{fmt, default::Default as StdDefault};
+             use ::std::{fmt, default::Default as StdDefault};
              impl StdDefault for Error { fn default() -> Self { Self } }
              use std::collections::*;"]);
         let ty: Type = parse_quote!(Error);

@@ -66,6 +66,7 @@ const GROUPS: &[&str] = &[
     "pr-test",
     "pr-msrv",
     "pr-runtime-analysis",
+    "pr-fuzzing",
     "pr-mutants",
     "scheduled-test",
     "scheduled-advisories",
@@ -238,6 +239,7 @@ pub(crate) const GROUP_STEPS: &[(&str, &str)] = &[
     ("pr-test", ".pipelines/anvil/steps/pr-test.yml"),
     ("pr-msrv", ".pipelines/anvil/steps/pr-msrv.yml"),
     ("pr-runtime-analysis", ".pipelines/anvil/steps/pr-runtime-analysis.yml"),
+    ("pr-fuzzing", ".pipelines/anvil/steps/pr-fuzzing.yml"),
     ("pr-mutants", ".pipelines/anvil/steps/pr-mutants.yml"),
     ("scheduled-test", ".pipelines/anvil/steps/scheduled-test.yml"),
     ("scheduled-advisories", ".pipelines/anvil/steps/scheduled-advisories.yml"),
@@ -504,19 +506,22 @@ mod tests {
             (PR_STAGES, "pr-stages.yml", &pr_stages),
             (SCHEDULED_STAGES, "scheduled-stages.yml", &scheduled_stages),
         ] {
+            let mut expected_jobs = 0;
             for stage in expected {
+                let jobs_in_stage = if stage == "pr_fuzzing" { 1 } else { 2 };
+                expected_jobs += jobs_in_stage;
                 // The 10-space indent is the `parameters:` form; it does not
                 // match the `  - stage:` declaration that opens the stage.
                 assert_eq!(
                     template.matches(&format!("\n          stage: {stage}\n")).count(),
-                    2,
-                    "{label} must pass `stage: {stage}` on both per-OS jobs"
+                    jobs_in_stage,
+                    "{label} must pass `stage: {stage}` on all {jobs_in_stage} jobs"
                 );
             }
             let jobs = template.matches("- template: steps/job.yml").count();
             assert_eq!(
                 jobs,
-                expected.len() * 2,
+                expected_jobs,
                 "{label} renders {jobs} jobs but {} stages are expected",
                 expected.len()
             );
@@ -594,12 +599,41 @@ mod tests {
         ignore = "native and cargo-careful retain generated-pipeline text contracts; focused artifact rendering tests preserve Miri coverage"
     )]
     #[test]
+    fn pr_fuzzing_stage_is_linux_only_and_parallel_with_runtime_analysis() {
+        let stage = PR_STAGES
+            .split_once("\n  - stage: pr_fuzzing\n")
+            .expect("the PR stages declare pr_fuzzing")
+            .1
+            .split_once("\n  - stage: pr_mutants\n")
+            .expect("the mutation stage follows fuzzing")
+            .0;
+
+        assert!(stage.contains("dependsOn: [impact]"));
+        assert_eq!(stage.matches("- template: steps/job.yml").count(), 1);
+        assert!(stage.contains("name: linux"));
+        assert!(stage.contains("pool: ${{ parameters.linuxPool }}"));
+        assert!(stage.contains("name: anvil-impact-linux"));
+        assert!(stage.contains("- template: steps/pr-fuzzing.yml"));
+        assert!(!stage.contains("windows"));
+        assert!(!stage.contains("pr_runtime_analysis"));
+    }
+
+    #[test]
+    fn pr_fuzzing_step_consumes_impact() {
+        let step = render_group_step("pr-fuzzing");
+        assert!(step.contains("group: pr-fuzzing"));
+        assert!(step.contains("just anvil-pr-fuzzing"));
+        assert!(step.contains(r#"ANVIL_IMPACT: "consume""#));
+    }
+
+    #[test]
     fn pr_stages_has_impact_and_group_stages() {
         for needle in [
             "stage: impact\n",
             "stage: pr_fast",
             "stage: pr_test",
             "stage: pr_runtime_analysis",
+            "stage: pr_fuzzing",
             "stage: pr_mutants",
         ] {
             assert!(PR_STAGES.contains(needle), "PR stages missing '{needle}'");
@@ -644,8 +678,8 @@ mod tests {
         // Every pr-* stage depends on the single impact stage.
         assert_eq!(
             PR_STAGES.matches("dependsOn: [impact]").count(),
-            5,
-            "each of the five pr-* stages must depend on the single impact stage"
+            6,
+            "each of the six pr-* stages must depend on the single impact stage"
         );
     }
 

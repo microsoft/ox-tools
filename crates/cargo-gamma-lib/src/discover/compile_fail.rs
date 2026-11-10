@@ -1,9 +1,12 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Recognizing test targets that run the compiler rather than the code.
+//! Recognizing test targets that may contain compiler-driving test cases.
 
 use cargo_metadata::{DependencyKind, Metadata};
+use proc_macro2::{TokenStream, TokenTree};
+
+use crate::parse::exceeds_nesting_limit;
 
 /// The dev-dependencies that give a compile-fail harness away.
 ///
@@ -11,12 +14,9 @@ use cargo_metadata::{DependencyKind, Metadata};
 /// list alone, since such a target is an ordinary integration test as far as cargo is concerned.
 const HARNESSES: [&str; 2] = ["trybuild", "compiletest_rs"];
 
-/// A test target that asserts about compiler output rather than exercising the code under test.
+/// A test target that may contain compiler-driving test cases.
 ///
-/// Under mutation testing these are ruinous: the harness invokes rustc once per case, every mutant
-/// pays that in full, and the oracle almost never gains anything, because what the target checks is
-/// that some code fails to compile — which a mutated function body several crates away does not
-/// change. A target of this shape has been measured putting a single mutant at one to two minutes.
+/// Detection is static: it does not establish which cases run or measure their cost.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompileFailTarget {
     /// The workspace package declaring it.
@@ -87,24 +87,23 @@ fn normalized(mut found: Vec<CompileFailTarget>) -> Vec<CompileFailTarget> {
     found
 }
 
-/// Whether a source file names the harness crate.
-///
-/// A substring search over the root source, because the shapes in use are `trybuild::TestCases`,
-/// `use trybuild;` and `compiletest_rs::run_tests`, and distinguishing those from the same word in a
-/// comment would need the file parsed for no gain: a file that mentions the harness at all is a file
-/// this warning is right about.
+/// Whether the root source names the harness as a Rust identifier, not in prose or a literal.
 fn mentions(source: &str, harness: &str) -> bool {
-    source.contains(harness)
+    !exceeds_nesting_limit(source) && source.parse::<TokenStream>().is_ok_and(|tokens| names_harness(tokens, harness))
 }
 
-/// Renders the warning a run shows when it finds one of these.
+fn names_harness(tokens: TokenStream, harness: &str) -> bool {
+    tokens.into_iter().any(|token| match token {
+        TokenTree::Ident(ident) => ident == harness,
+        TokenTree::Group(group) => names_harness(group.stream(), harness),
+        TokenTree::Punct(_) | TokenTree::Literal(_) => false,
+    })
+}
+
+/// Renders optional compiler-driving test advice for library callers.
 ///
-/// The flag is spelled out in full because the value of this is that it can be acted on without
-/// first learning that `--exclude-test` exists. Nothing is excluded automatically: `trybuild`
-/// asserts exact compiler output, so on a proc-macro crate it is often the *primary* oracle — a
-/// mutant that corrupts a diagnostic message is caught there and nowhere else. Excluding by default
-/// would gut the oracle for the code the technique suits best, and the mutants would come back as
-/// survivors rather than as anything visibly wrong.
+/// Detection is heuristic, so advice describes a possible cost and suggests opting individual
+/// cases out rather than excluding entire test binaries.
 #[must_use]
 pub fn advice(targets: &[CompileFailTarget]) -> Option<String> {
     if targets.is_empty() {
@@ -113,20 +112,15 @@ pub fn advice(targets: &[CompileFailTarget]) -> Option<String> {
 
     let named: Vec<String> = targets
         .iter()
-        .map(|target| format!("`{}` in {} ({})", target.target, target.package, target.harness))
+        .map(|target| format!("  `{}` in {} ({})", target.target, target.package, target.harness))
         .collect();
 
-    let flags: Vec<String> = targets.iter().map(|target| format!("--exclude-test {}", target.target)).collect();
-
     Some(format!(
-        "{} {} the compiler once per case, so every mutant pays for a full rustc run and almost none are convicted by it: {}.\n\
-         If {} is not part of what should be judging these mutants, exclude it with `{}`.\n\
-         Left in, it is likely to make this run take hours.",
-        crate::report::quantity(targets.len(), "test target"),
-        if targets.len() == 1 { "invokes" } else { "invoke" },
-        named.join(", "),
-        if targets.len() == 1 { "it" } else { "any of them" },
-        flags.join(" "),
+        "{} test {} may have test cases that invoke the Rust compiler, which may lead to very long mutation test runs:\n{}\n\
+         Consider omitting the specific test cases using `--skip` harness filters.",
+        targets.len(),
+        if targets.len() == 1 { "binary" } else { "binaries" },
+        named.join("\n"),
     ))
 }
 
@@ -138,11 +132,46 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg_attr(miri, ignore = "native source discovery requires filesystem access")]
+    fn nov7_native_source_reader_discovers_a_real_compiler_driving_target() {
+        let root = camino::Utf8Path::new(env!("CARGO_MANIFEST_DIR"));
+        let source = root.join("tests").join("fixtures").join("compiler_driving.rs");
+        let metadata: Metadata = from_value(json!({
+            "packages":[{
+                "name":"subject","version":"0.0.0","id":"subject","source":null,
+                "dependencies":[{
+                    "name":"trybuild","source":null,"req":"*","kind":"dev","rename":null,
+                    "optional":false,"uses_default_features":true,"features":[],"target":null,"registry":null
+                }],
+                "targets":[{
+                    "name":"compiler","kind":["test"],"crate_types":["bin"],"src_path":source,
+                    "edition":"2024","test":true,"doc":false,"doctest":false,"required-features":[]
+                }],
+                "features":{},"manifest_path":root.join("Cargo.toml"),"metadata":null,
+                "authors":[],"categories":[],"keywords":[],"edition":"2024","publish":null,
+                "license":null,"license_file":null,"readme":null,"repository":null,"homepage":null,
+                "documentation":null,"description":null,"links":null,"default_run":null,"rust_version":null
+            }],
+            "workspace_members":["subject"],"workspace_default_members":["subject"],
+            "workspace_root":root,"target_directory":root.join("target"),"resolve":null,"metadata":null,"version":1
+        }))
+        .unwrap();
+        assert_eq!(
+            compile_fail_targets(&metadata),
+            [CompileFailTarget {
+                package: "subject".into(),
+                target: "compiler".into(),
+                harness: "trybuild".into(),
+            }]
+        );
+    }
+
+    #[test]
     #[cfg_attr(
         miri,
         ignore = "native source reader requires filesystem access; injected-reader cases remain enabled"
     )]
-    fn recovered_native_compile_fail_discovery_reads_a_checked_in_source_without_generating_a_target() {
+    fn native_discovery_does_not_mistake_harness_names_in_its_own_strings_for_usage() {
         let root = camino::Utf8Path::new(env!("CARGO_MANIFEST_DIR"));
         let source = root.join("src").join("discover").join("compile_fail.rs");
         let metadata: Metadata = from_value(json!({
@@ -165,14 +194,7 @@ mod tests {
             "workspace_root":root,"target_directory":root.join("unused"),"resolve":null,"metadata":null,"version":1
         }))
         .unwrap();
-        assert_eq!(
-            compile_fail_targets(&metadata),
-            vec![CompileFailTarget {
-                package: "subject".to_owned(),
-                target: "checked-in".to_owned(),
-                harness: "trybuild".to_owned()
-            }]
-        );
+        assert_eq!(compile_fail_targets(&metadata).len(), 0);
     }
 
     #[test]
@@ -264,6 +286,65 @@ mod tests {
     fn a_source_naming_the_harness_is_recognized() {
         assert!(mentions("fn main() { trybuild::TestCases::new(); }", "trybuild"));
         assert!(mentions("use compiletest_rs as compiletest;", "compiletest_rs"));
+        assert!(mentions("use trybuild::TestCases;", "trybuild"));
+        assert!(mentions("mod nested { fn check() { trybuild::TestCases::new(); } }", "trybuild"));
+    }
+
+    #[test]
+    fn overly_nested_source_is_not_parsed_for_optional_harness_advice() {
+        let source = format!("{}trybuild{}", "(".repeat(65), ")".repeat(65));
+        assert!(exceeds_nesting_limit(&source));
+        assert!(!mentions(&source, "trybuild"));
+        assert!(mentions(&format!("{}trybuild{}", "(".repeat(64), ")".repeat(64)), "trybuild"));
+    }
+
+    #[test]
+    fn comments_literals_and_longer_identifiers_do_not_count_as_harness_usage() {
+        for source in [
+            "//! The macro's only other use is the trybuild compile-test.\n#[test] fn runtime() {}",
+            "// trybuild::TestCases::new()\n#[test] fn runtime() {}",
+            "/* compiletest_rs /* nested trybuild comment */ */ fn runtime() {}",
+            r#"#[doc = "trybuild"] fn runtime() { let _ = "trybuild::TestCases"; }"#,
+            r##"fn runtime() { let _ = r#"trybuild"#; }"##,
+            "fn trybuild_helpers() {}",
+        ] {
+            assert!(!mentions(source, "trybuild"), "{source}");
+            assert!(!mentions(source, "compiletest_rs"), "{source}");
+        }
+        assert!(!mentions("fn broken() {", "trybuild"));
+    }
+
+    #[test]
+    fn six_test_targets_with_one_comment_only_mention_report_five_compiler_harnesses() {
+        let sources = [
+            ("performables", "compile_fail", "fn check() { trybuild::TestCases::new(); }"),
+            ("internity", "compile_fail", "fn check() { trybuild::TestCases::new(); }"),
+            ("templated_uri", "compile_tests", "use trybuild::TestCases;"),
+            ("ohno", "display_diagnostics", "fn check() { trybuild::TestCases::new(); }"),
+            ("fundle", "mod", "use trybuild::TestCases;"),
+            (
+                "fundle",
+                "newtype_basic",
+                "//! The macro's only other use is the trybuild compile-test in `tests/proc`.\n\
+                 #[test] fn newtype_from_deref_and_deref_mut() {}",
+            ),
+        ];
+        let targets: Vec<_> = sources
+            .into_iter()
+            .filter(|(_, _, source)| mentions(source, "trybuild"))
+            .map(|(package, name, _)| CompileFailTarget {
+                package: package.into(),
+                target: name.into(),
+                harness: "trybuild".into(),
+            })
+            .collect();
+        let warning = advice(&targets).unwrap();
+        assert!(
+            warning.starts_with("5 test binaries may have test cases that invoke the Rust compiler"),
+            "{warning}"
+        );
+        assert_eq!(warning.lines().filter(|line| line.starts_with("  ")).count(), 5);
+        assert!(!warning.contains("newtype_basic"), "{warning}");
     }
 
     /// An ordinary integration test in the same package must not be named, or the reader is sent to
@@ -279,28 +360,48 @@ mod tests {
         assert_eq!(advice(&[]), None);
     }
 
-    /// The whole point is that the flag can be copied out of the message, so it has to be there in
-    /// full — including the target name, which is what the pattern matches on.
     #[test]
-    fn the_advice_names_the_target_and_the_flag_that_removes_it() {
+    fn the_advice_names_the_binary_and_suggests_ignoring_specific_cases() {
         let text = advice(&[target("router_compile_fail")]).expect("one target is enough to advise about");
 
-        assert!(text.contains("`router_compile_fail` in routerama (trybuild)"), "{text}");
-        assert!(text.contains("--exclude-test router_compile_fail"), "{text}");
-        assert!(text.contains("1 test target invokes"), "{text}");
+        assert_eq!(
+            text,
+            concat!(
+                "1 test binary may have test cases that invoke the Rust compiler, which may lead to very long mutation test runs:\n",
+                "  `router_compile_fail` in routerama (trybuild)\n",
+                "Consider omitting the specific test cases using `--skip` harness filters."
+            )
+        );
     }
 
-    /// Several targets are one warning with one flag string, since a reader who has to run the
-    /// command twice will run it once and wonder why the run is still slow.
     #[test]
     fn several_targets_are_advised_about_together() {
         let text = advice(&[target("router_compile_fail"), target("feature_gates")]).expect("two targets are advised about");
 
-        assert!(text.contains("2 test targets invoke"), "{text}");
         assert!(
-            text.contains("--exclude-test router_compile_fail --exclude-test feature_gates"),
+            text.starts_with("2 test binaries may have test cases that invoke the Rust compiler"),
             "{text}"
         );
+        assert!(text.contains("`feature_gates` in routerama (trybuild)"), "{text}");
+        assert!(text.contains("`router_compile_fail` in routerama (trybuild)"), "{text}");
+    }
+
+    #[test]
+    fn each_binary_has_its_own_line_even_when_target_names_are_shared() {
+        let mut other_package = target("compile_fail");
+        other_package.package = "other".into();
+        let text = advice(&[target("compile_fail"), other_package, target("ui")]).unwrap();
+        assert_eq!(
+            text.lines().filter(|line| line.starts_with("  ")).collect::<Vec<_>>(),
+            [
+                "  `compile_fail` in routerama (trybuild)",
+                "  `compile_fail` in other (trybuild)",
+                "  `ui` in routerama (trybuild)",
+            ]
+        );
+        assert_eq!(text.matches("Consider omitting").count(), 1, "{text}");
+        assert!(!text.contains("--exclude-test"), "{text}");
+        assert!(!text.contains("primary oracle"), "{text}");
     }
 
     #[test]
@@ -315,6 +416,9 @@ mod tests {
     fn the_advice_says_it_is_the_callers_decision() {
         let text = advice(&[target("router_compile_fail")]).expect("one target is enough to advise about");
 
-        assert!(text.contains("If it is not part of what should be judging"), "{text}");
+        assert!(
+            text.contains("Consider omitting the specific test cases using `--skip` harness filters"),
+            "{text}"
+        );
     }
 }

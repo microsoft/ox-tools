@@ -1621,7 +1621,6 @@ pub(crate) fn same_existing_path(left: &Utf8Path, right: &Utf8Path) -> bool {
         left.eq_ignore_ascii_case(right)
     }
 
-    // #[gamma::skip(bool_expr.negate, reason = "Target-specific equivalence for the archived Windows campaign: the exact mutated canonicalization match is immediately guarded by #[cfg(not(windows))], so it is removed before Windows compilation. Negating its result cannot affect this target's binary. No cross-platform equivalence is claimed.", tag = "equivalent")]
     #[cfg(not(windows))]
     match (
         fs::canonicalize(left.as_std_path()).ok(),
@@ -3456,6 +3455,42 @@ mod testing_resume_tests {
 #[cfg(not(miri))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    #[test]
+    fn failed_test_enumeration_retains_retry_artifacts_but_success_does_not_settle_the_workspace() {
+        use cargo_gamma_process::MemoryRequest;
+
+        use super::*;
+
+        for fail in [false, true] {
+            for resources in [false, true] {
+                let mut work = Workspace::adopt("never-created-listing-root".into(), "never-created-listing-target".into());
+                work.settled.store(false, Ordering::Relaxed);
+                let binary = crate::testing::test_binary("never-launched-listing-binary");
+                let result = crate::exec::test_listing::with_listing_runner(
+                    move |_, _, _| (!fail).then(Vec::new),
+                    || {
+                        if resources {
+                            crate::exec::test_listing::list_resource_markers(&work, &binary, MemoryRequest::default())
+                        } else {
+                            crate::exec::test_listing::list_selected_allow_empty(&work, &binary, MemoryRequest::default())
+                        }
+                    },
+                );
+                assert_eq!(result.is_err(), fail);
+                assert_eq!(work.settled.load(Ordering::Relaxed), fail);
+                if let Err(failure) = result {
+                    let message = failure.to_string();
+                    assert!(message.contains("have been retained for diagnosis"), "{message}");
+                    assert!(message.contains("never-created-listing-root"), "{message}");
+                    assert!(message.contains("never-created-listing-target"), "{message}");
+                    assert!(message.contains("Retry command:"), "{message}");
+                }
+                work.teardown().unwrap();
+                assert_eq!(work.settled.load(Ordering::Relaxed), fail);
+            }
+        }
+    }
+
     use std::collections::BTreeMap;
     #[cfg(unix)]
     use std::os::unix::ffi::OsStringExt as _;

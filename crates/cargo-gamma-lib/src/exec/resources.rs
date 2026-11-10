@@ -152,6 +152,7 @@ impl Resources {
         Self::discover_with(
             binaries,
             limits,
+            work.test_arguments(),
             |binary| test_listing::list_resource_markers(work, binary, request),
             |binary| test_listing::list_selected_allow_empty(work, binary, request),
         )
@@ -160,8 +161,9 @@ impl Resources {
     fn discover_with(
         binaries: &[TestBinary],
         limits: &[ResourceLimit],
-        mut markers: impl FnMut(&TestBinary) -> Option<Vec<Box<str>>>,
-        mut selected_tests: impl FnMut(&TestBinary) -> Option<Vec<Box<str>>>,
+        base_arguments: &[String],
+        mut markers: impl FnMut(&TestBinary) -> Result<Vec<Box<str>>>,
+        mut selected_tests: impl FnMut(&TestBinary) -> Result<Vec<Box<str>>>,
     ) -> Result<Self> {
         let mut seen = BTreeSet::new();
         let mut assignments = HashMap::default();
@@ -173,13 +175,12 @@ impl Resources {
             if binary.libtest == Some(false) {
                 continue;
             }
-            let Some(names) = markers(binary) else {
-                return Err(error!(
-                    "could not list tests in `{}` while discovering its `#[gamma::resource(...)]` declarations.\n\
-                     Run that test binary with `--list --format terse` to diagnose why its harness cannot be enumerated.",
+            let names = markers(binary).map_err(|cause| {
+                error!(
+                    "could not list tests in `{}` while discovering its `#[gamma::resource(...)]` declarations.\n\n{cause}",
                     binary.path
-                ));
-            };
+                )
+            })?;
             let mut by_test: HashMap<Box<str>, Vec<Arc<str>>> = HashMap::default();
             let mut binary_resources = Vec::new();
             let mut test_markers = Vec::new();
@@ -198,26 +199,28 @@ impl Resources {
                     }
                 }
             }
-
-            if !test_markers.is_empty() {
-                let selected: BTreeSet<Box<str>> = selected_tests(binary)
-                    .ok_or_else(|| {
+            let filters = super::harness_filters::HarnessFilters::parse(base_arguments);
+            let selected: BTreeSet<Box<str>> = if test_markers.is_empty() {
+                BTreeSet::new()
+            } else {
+                selected_tests(binary)
+                    .map_err(|cause| {
                         error!(
-                            "could not list the selected tests in `{}` while applying its `#[gamma::resource(...)]` declarations.\n\
-                             Run that test binary with cargo-gamma's test arguments plus `--list --format terse` to diagnose the selection.",
+                            "could not list the selected tests in `{}` while applying its `#[gamma::resource(...)]` declarations.\n\n{cause}",
                             binary.path
                         )
                     })?
                     .into_iter()
-                    .collect();
-                for (test, resource) in test_markers {
-                    if selected.contains(test.as_str()) {
-                        let _new = seen.insert(resource.clone());
-                        by_test.entry(test.into()).or_default().push(resource.into());
-                    }
+                    .filter(|test| filters.admits(test))
+                    .collect()
+            };
+
+            for (test, resource) in test_markers {
+                if selected.contains(test.as_str()) {
+                    let _new = seen.insert(resource.clone());
+                    by_test.entry(test.into()).or_default().push(resource.into());
                 }
             }
-
             if by_test.is_empty() && binary_resources.is_empty() {
                 continue;
             }
@@ -480,14 +483,15 @@ mod tests {
         let resources = Resources::discover_with(
             core::slice::from_ref(&binary),
             &[],
+            &[],
             |_| {
-                Some(vec![
+                Ok(vec![
                     "__cargo_gamma_resource_6462_binary".into(),
                     "__cargo_gamma_resource_6462_test_6f6e65".into(),
                     "__cargo_gamma_resource_696f_test_6f6e65".into(),
                 ])
             },
-            |_| Some(vec!["one".into()]),
+            |_| Ok(vec!["one".into()]),
         )
         .unwrap();
         let expected = vec![Arc::<str>::from("db"), Arc::<str>::from("io")];
@@ -497,8 +501,9 @@ mod tests {
         let only_test_resources = Resources::discover_with(
             core::slice::from_ref(&binary),
             &[],
-            |_| Some(vec!["__cargo_gamma_resource_696f_test_6f6e65".into()]),
-            |_| Some(vec!["one".into()]),
+            &[],
+            |_| Ok(vec!["__cargo_gamma_resource_696f_test_6f6e65".into()]),
+            |_| Ok(vec!["one".into()]),
         )
         .unwrap();
         assert_eq!(only_test_resources.required(&binary, Only::All), [Arc::<str>::from("io")]);
@@ -528,9 +533,10 @@ mod tests {
         let resources = Resources::discover_with(
             &[custom, empty.clone(), binary_only.clone(), mixed.clone()],
             &[ResourceLimit::new("alpha", 3).expect("valid alpha capacity")],
+            &[],
             |binary| {
                 marker_calls.push(binary.path.clone());
-                Some(match binary.path.as_str() {
+                Ok(match binary.path.as_str() {
                     "empty" => vec!["ordinary".into()],
                     "binary-only" => vec![marker_binary("zeta"), marker_binary("alpha"), marker_binary("zeta")],
                     "mixed" => vec![
@@ -546,7 +552,7 @@ mod tests {
             },
             |binary| {
                 selected_calls.push(binary.path.clone());
-                Some(vec!["suite::selected".into()])
+                Ok(vec!["suite::selected".into()])
             },
         )
         .expect("well-formed marker discovery");
@@ -599,30 +605,33 @@ mod tests {
         let failed = Resources::discover_with(
             core::slice::from_ref(&binary),
             &[],
-            |_binary| None,
+            &[],
+            |_binary| Err(error!("owned marker failure")),
             |_binary| panic!("marker listing already failed"),
         )
         .expect_err("failed marker enumeration");
         assert_eq!(
             failed.to_string(),
-            "could not list tests in `broken-harness` while discovering its `#[gamma::resource(...)]` declarations.\nRun that test binary with `--list --format terse` to diagnose why its harness cannot be enumerated."
+            "could not list tests in `broken-harness` while discovering its `#[gamma::resource(...)]` declarations.\n\nowned marker failure"
         );
         let failed = Resources::discover_with(
             core::slice::from_ref(&binary),
             &[],
-            |_binary| Some(vec!["__cargo_gamma_resource_61_test_62".into()]),
-            |_binary| None,
+            &[],
+            |_binary| Ok(vec!["__cargo_gamma_resource_61_test_62".into()]),
+            |_binary| Err(error!("owned selection failure")),
         )
         .expect_err("failed selected enumeration");
         assert_eq!(
             failed.to_string(),
-            "could not list the selected tests in `broken-harness` while applying its `#[gamma::resource(...)]` declarations.\nRun that test binary with cargo-gamma's test arguments plus `--list --format terse` to diagnose the selection."
+            "could not list the selected tests in `broken-harness` while applying its `#[gamma::resource(...)]` declarations.\n\nowned selection failure"
         );
         let empty = Resources::discover_with(
             &[binary],
             &[],
-            |_binary| Some(vec!["__cargo_gamma_resource_61_test_62".into()]),
-            |_binary| Some(Vec::new()),
+            &[],
+            |_binary| Ok(vec!["__cargo_gamma_resource_61_test_62".into()]),
+            |_binary| Ok(Vec::new()),
         )
         .expect("empty selected population is authoritative");
         assert!(empty.binaries.is_empty());

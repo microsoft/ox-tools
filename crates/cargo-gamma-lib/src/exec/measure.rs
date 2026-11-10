@@ -23,11 +23,10 @@ use super::session::{PackageSweepCost, Phases, Session, SweepCost};
 use super::stall::Stall;
 use super::sweep::{Sweep, test_all};
 use super::test_binary::{
-    Reachability, TestBinary, TestScope, admits_target, build_packages, calibrate, oracle_packages, reaches, reaching_packages, restrict,
-    unmatched_test,
+    Reachability, TestBinary, TestScope, build_packages, calibrate, oracle_packages, reaches, reaching_packages, restrict, unmatched_test,
 };
 use super::workspace::{Workspace, campaign_base};
-use crate::discover::{CompileFailTarget, LibraryTestTarget, Plan, Survey, compile_fail_advice};
+use crate::discover::{LibraryTestTarget, Plan, Survey};
 use crate::error::error;
 use crate::model::{Mutant, Outcome};
 use crate::ops::registry::Selection;
@@ -663,14 +662,7 @@ fn measure_with_locks(
     }
     let started = Instant::now();
 
-    let support = runner_memory_support(
-        // #[gamma::skip(bool_expr.negate, tag = "native", reason = "this call combines the live host memory probe with runner selection; runner_memory_support exhaustively tests the platform/runner policy without native preparation")]
-        config.nextest,
-        // #[gamma::skip(bool_expr.negate, tag = "native", reason = "the compiled host platform is not an input a unit test can change; runner_memory_support tests both platform values explicitly")]
-        cfg!(target_os = "macos"),
-        memory::support().map_err(|reason| reason.to_string()),
-    );
-    let (memory, unbounded) = settle_memory_control(config, support)?;
+    let (memory, unbounded) = settle_memory_control(config, memory::support().map_err(|reason| reason.to_string()))?;
 
     // Resource discovery also uses the baseline limit, even with --no-baseline, so those
     // launches still need the soft-bound warning. Enforcement reaches here only with a
@@ -679,10 +671,10 @@ fn measure_with_locks(
     #[cfg(target_os = "macos")]
     if memory.enforcing() || memory.baseline_limit.is_some() {
         events.warn(&format!(
-            "memory enforcement on macOS samples the process group's physical footprint every {} ms: \
-             the bound is soft, allocation can overshoot between samples, descendants that leave \
-             the process group are neither counted nor stopped, and members owned by another user \
-             cannot be read and are not counted",
+            "memory enforcement on macOS samples the process tree's physical footprint every {} ms: \
+             the bound is soft, allocation can overshoot between samples, a descendant that leaves \
+             the process group and outlives its parent is neither counted nor stopped, and members \
+             owned by another user cannot be read and are not counted",
             cargo_gamma_process::SAMPLE_INTERVAL.as_millis(),
         ));
     }
@@ -691,14 +683,6 @@ fn measure_with_locks(
     // here changes which tests get to convict a mutant, so it should cost a second rather than a
     // full instrumented build.
     validate_test_oracle(&survey.tests, &survey.library_tests, &survey.selected, config)?;
-
-    // Said before the tree is copied, let alone built. A compile-fail target is expensive per
-    // mutant rather than once, so by the time its cost is visible in the progress display the run
-    // has already committed hours to it — and what it looks like from outside is a run that hung.
-    // Checked against the oracle and its filters so that unrelated workspace packages and targets
-    // the caller has already excluded are not presented as costs of this run.
-    // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
-    announce_compile_fail_costs(survey, config, events);
 
     let mut plan = survey.skeleton();
     let mut converger = configured_converger(config);
@@ -762,16 +746,16 @@ fn measure_with_locks(
         });
     }
 
-    // Check the complete schema to convergence, then generate its test binaries. The successful
-    // build's artifact stream is retained for the baseline, so convergence does not end with a
-    // redundant cache-hit Cargo invocation.
-    // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
-    begin_schema_build(events, converger.historical_exclusions);
-
     // Build only packages whose tests can actually be selected: the rest would be compiled,
     // baselined and never consulted. All target packages have already been instrumented, so this
     // one convergence sees every mutation that can affect those test targets.
     let select = build_packages(&plan, &scope);
+    // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
+    begin_schema_build(events, converger.historical_exclusions.saturating_add(converger.census.len()));
+
+    // Check the complete schema to convergence, then generate its test binaries. The successful
+    // build's artifact stream is retained for the baseline, so convergence does not end with a
+    // redundant cache-hit Cargo invocation.
     let mut build = converger.finish(&work, &mut plan, select.as_deref(), config.build, events)?;
     // From this point onward compiler convergence has produced durable score-neutral learning.
     // If a later preparation step fails, move the plan into `failed` on that error path so the
@@ -902,12 +886,6 @@ fn measure_with_locks(
         dropped,
         learning: None,
     })
-}
-
-// #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
-fn announce_compile_fail_costs(survey: &Survey, config: &Config, events: &mut dyn Events) {
-    let targets = survey.compile_fail.as_slice();
-    warn_about_compile_fail_targets(targets, &survey.selected, config, events);
 }
 
 fn validate_synchronized_sources(work: &Workspace, digests: &HashMap<Utf8PathBuf, String>) -> Result<()> {
@@ -1213,30 +1191,6 @@ fn finish_schema_build(events: &mut impl Events, unviable: usize, viable: usize,
     events.complete(&detail);
 }
 
-/// Says so when a test target is going to run the compiler once per mutant.
-///
-/// Named and never removed. `trybuild` asserts exact compiler output, so on a proc-macro crate such
-/// a target is often the *primary* oracle — a mutant that corrupts a diagnostic message is caught
-/// there and nowhere else. Excluding it automatically would gut the oracle for the code the
-/// technique suits best, and the mutants would come back as survivors rather than as anything
-/// visibly wrong. Whether the catch rate justifies the price is the caller's to weigh, so the run
-/// states the price and the flag and leaves the decision where it belongs.
-fn warn_about_compile_fail_targets(targets: &[CompileFailTarget], selected: &[String], config: &Config, events: &mut dyn Events) {
-    let oracle = oracle_packages(selected, config);
-    let admitted: Vec<_> = targets
-        .iter()
-        .filter(|target| {
-            (config.test_workspace || oracle.contains(&target.package))
-                && admits_target(&target.target, &config.include_tests, &config.exclude_tests)
-        })
-        .cloned()
-        .collect();
-
-    if let Some(warning) = compile_fail_advice(&admitted) {
-        events.warn(&warning);
-    }
-}
-
 /// How many packages a warning names before it starts counting them instead.
 const NAMED_HELPERS: usize = 5;
 
@@ -1475,17 +1429,6 @@ fn baseline_memory_request(memory: &MemoryPolicy) -> MemoryRequest {
     }
 }
 
-fn runner_memory_support(nextest: bool, macos: bool, support: Result<(), String>) -> Result<(), String> {
-    if macos && nextest {
-        Err(
-            "nextest puts each test in its own process group, outside macOS sampled memory control; drop `--nextest` to use memory control"
-                .to_owned(),
-        )
-    } else {
-        support
-    }
-}
-
 /// Describes what the baseline measured, for the line that replaces its announcement.
 ///
 /// The test count is omitted rather than guessed when no harness announced one, which is what a
@@ -1593,7 +1536,7 @@ mod tests {
         assert_eq!(failure.message(), "owned runtime link refusal");
         assert_eq!(
             from_slice::<Value>(&std::fs::read(base.join("compiler-exclusions.json")).unwrap()).unwrap(),
-            json!({"version": 1, "mutants": {}})
+            json!({"version": 1, "evidence_revision": 2, "mutants": {}})
         );
     }
 
@@ -3764,107 +3707,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn macos_nextest_disables_inherited_memory_control_with_a_reason() {
-        let config = Config {
-            nextest: true,
-            ..Config::default()
-        };
-        let support = runner_memory_support(config.nextest, true, Ok(()));
-        let (settled, note) = settle_memory_control(&config, support).unwrap();
-        assert_eq!(settled, config.memory.disabled());
-        assert!(!settled.enforcing());
-        assert_eq!(settled.baseline_limit, None);
-        assert_eq!(
-            note.as_deref(),
-            Some(
-                "nextest puts each test in its own process group, outside macOS sampled memory control; drop `--nextest` to use memory control"
-            )
-        );
-    }
-
-    #[test]
-    fn macos_nextest_refuses_stated_memory_control_and_limits() {
-        for memory in [
-            MemoryPolicy {
-                control: MemoryControl::Measure,
-                demand: Demand::Stated,
-                ..MemoryPolicy::default()
-            },
-            MemoryPolicy {
-                demand: Demand::Stated,
-                ..MemoryPolicy::default()
-            },
-            MemoryPolicy {
-                demand: Demand::Stated,
-                limit: Some(100),
-                ..MemoryPolicy::default()
-            },
-            MemoryPolicy {
-                control: MemoryControl::Measure,
-                demand: Demand::Stated,
-                baseline_limit: Some(100),
-                ..MemoryPolicy::default()
-            },
-        ] {
-            let config = Config {
-                nextest: true,
-                memory,
-                ..Config::default()
-            };
-            let support = runner_memory_support(config.nextest, true, Ok(()));
-            let error = settle_memory_control(&config, support).unwrap_err();
-            assert_eq!(
-                error.to_string(),
-                "memory control was asked for, but it is not available here: nextest puts each test in its own process group, outside macOS sampled memory control; drop `--nextest` to use memory control.\nRun with `--memory off` to continue without it."
-            );
-        }
-    }
-
-    #[test]
-    fn runner_memory_support_preserves_supported_combinations_and_host_failures() {
-        for (macos, nextest) in [(true, false), (false, true), (false, false)] {
-            let config = Config {
-                nextest,
-                ..Config::default()
-            };
-            let support = runner_memory_support(config.nextest, macos, Ok(()));
-            let (settled, note) = settle_memory_control(&config, support).unwrap();
-            assert_eq!(settled, config.memory);
-            assert_eq!(note, None);
-            assert_eq!(
-                runner_memory_support(nextest, macos, Err("host unavailable".to_owned())),
-                Err("host unavailable".to_owned())
-            );
-        }
-    }
-
-    #[test]
-    fn macos_nextest_allows_explicitly_disabled_memory_control() {
-        let config = Config {
-            nextest: true,
-            memory: MemoryPolicy {
-                control: MemoryControl::Off,
-                demand: Demand::Stated,
-                limit: Some(100),
-                baseline_limit: Some(200),
-                ..MemoryPolicy::default()
-            },
-            ..Config::default()
-        };
-        let support = runner_memory_support(config.nextest, true, Ok(()));
-        let (settled, note) = settle_memory_control(&config, support).unwrap();
-        assert_eq!(
-            settled,
-            MemoryPolicy {
-                limit: None,
-                baseline_limit: None,
-                ..config.memory
-            }
-        );
-        assert_eq!(note, None);
-    }
-
     /// A stated policy this host *can* deliver still errors when there is no baseline to derive a
     /// ceiling from, because a ceiling invented with no measurement behind it would be presented
     /// with exactly the confidence of a measured one.
@@ -3945,127 +3787,6 @@ mod tests {
         assert!(settled.measuring());
         assert!(!settled.enforcing());
         assert_eq!(note, None);
-    }
-
-    fn target_in(package: &str, name: &str) -> CompileFailTarget {
-        CompileFailTarget {
-            package: package.to_owned(),
-            target: name.to_owned(),
-            harness: "trybuild".to_owned(),
-        }
-    }
-
-    fn target(name: &str) -> CompileFailTarget {
-        target_in("routerama", name)
-    }
-
-    fn config_with(exclude: &[&str]) -> Config {
-        Config {
-            exclude_tests: exclude.iter().map(|pattern| (*pattern).to_owned()).collect(),
-            ..Config::default()
-        }
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn a_compile_fail_target_is_named_before_anything_is_built() {
-        let mut events = Recorder::default();
-
-        warn_about_compile_fail_targets(
-            &[target("router_compile_fail")],
-            &["routerama".to_owned()],
-            &config_with(&[]),
-            &mut events,
-        );
-
-        let [warning] = events.warnings.as_slice() else {
-            panic!("one admitted target is one warning, got {:?}", events.warnings);
-        };
-
-        assert!(warning.contains("router_compile_fail"), "{warning}");
-        assert!(warning.contains("--exclude-test router_compile_fail"), "{warning}");
-    }
-
-    /// A caller who has already acted on the advice must not be given it again, or the warning
-    /// becomes noise that is scrolled past on the run where it matters.
-    #[test]
-    fn a_target_already_excluded_is_not_warned_about() {
-        let mut events = Recorder::default();
-
-        warn_about_compile_fail_targets(
-            &[target("router_compile_fail")],
-            &["routerama".to_owned()],
-            &config_with(&["router_compile_fail"]),
-            &mut events,
-        );
-
-        assert!(events.warnings.is_empty(), "{:?}", events.warnings);
-    }
-
-    /// A glob is how these are excluded in practice, and it has to count as having acted.
-    #[test]
-    fn a_target_excluded_by_a_glob_is_not_warned_about() {
-        let mut events = Recorder::default();
-
-        warn_about_compile_fail_targets(
-            &[target("router_compile_fail")],
-            &["routerama".to_owned()],
-            &config_with(&["*_compile_fail"]),
-            &mut events,
-        );
-
-        assert!(events.warnings.is_empty(), "{:?}", events.warnings);
-    }
-
-    /// Targets in unrelated workspace packages are not part of the default oracle and must not
-    /// prompt the caller to exclude tests that this run will never execute.
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn a_compile_fail_target_outside_the_oracle_is_not_warned_about() {
-        let mut events = Recorder::default();
-
-        warn_about_compile_fail_targets(
-            &[target("router_compile_fail"), target_in("internity", "compile_fail")],
-            &["routerama".to_owned()],
-            &config_with(&[]),
-            &mut events,
-        );
-
-        let [warning] = events.warnings.as_slice() else {
-            panic!("only the selected package should produce a warning, got {:?}", events.warnings);
-        };
-
-        assert!(warning.contains("router_compile_fail"), "{warning}");
-        assert!(!warning.contains("internity"), "{warning}");
-        assert!(!warning.contains("--exclude-test compile_fail"), "{warning}");
-    }
-
-    #[test]
-    fn whole_workspace_oracles_warn_about_compile_fail_targets_outside_the_selected_packages() {
-        let mut events = Recorder::default();
-        warn_about_compile_fail_targets(
-            &[target_in("external", "external_compile_fail")],
-            &["routerama".to_owned()],
-            &Config {
-                test_workspace: true,
-                ..Config::default()
-            },
-            &mut events,
-        );
-        let [warning] = events.warnings.as_slice() else {
-            panic!("a workspace-wide oracle must include the external compile-fail target");
-        };
-        assert!(warning.contains("--exclude-test external_compile_fail"), "{warning}");
-    }
-
-    /// The ordinary case is a workspace with no such target at all, which must say nothing.
-    #[test]
-    fn a_workspace_without_one_is_silent() {
-        let mut events = Recorder::default();
-
-        warn_about_compile_fail_targets(&[], &["routerama".to_owned()], &config_with(&[]), &mut events);
-
-        assert!(events.warnings.is_empty(), "{:?}", events.warnings);
     }
 
     /// A workspace where `app` links `core`, and both are their own reach.

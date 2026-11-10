@@ -147,6 +147,7 @@ enum ArtifactKind {
     File,
     Directory,
     FileSymlink,
+    DirectorySymlink,
     Symlink,
     Other,
 }
@@ -177,12 +178,7 @@ impl ArtifactMetadata {
                     kind = ArtifactKind::FileSymlink;
                     executable = bits;
                 }
-                Ok((ArtifactKind::Directory, _)) => {
-                    return Err(error!(
-                        "prepared directory symlink `{path}` cannot be frozen for resumable testing; \
-                         replace it with a real directory and start a new campaign"
-                    ));
-                }
+                Ok((ArtifactKind::Directory, _)) => kind = ArtifactKind::DirectorySymlink,
                 Ok(_) => {}
                 Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => {}
                 Err(cause) => {
@@ -674,7 +670,11 @@ impl TestingState {
             {
                 continue;
             }
-            validate_artifact(artifact, ArtifactMetadata::read, artifact_digest)?;
+            validate_artifact(
+                artifact,
+                |path| prepared_artifact_metadata(path, &output, &self.artifact_roots),
+                artifact_digest,
+            )?;
         }
         Ok(())
     }
@@ -981,8 +981,104 @@ fn capture_artifacts_with<I: IntoIterator<Item = std::io::Result<fs::DirEntry>>>
     paths.sort();
     paths
         .into_iter()
-        .map(|path| capture_artifact_with(path, &output, &roots, ArtifactMetadata::read, artifact_digest))
+        .map(|path| {
+            capture_artifact_with(
+                path,
+                &output,
+                &roots,
+                |path| prepared_artifact_metadata(path, &output, &roots),
+                artifact_digest,
+            )
+        })
         .collect()
+}
+
+fn prepared_artifact_metadata(path: &Utf8Path, output: &Utf8Path, roots: &[Utf8PathBuf]) -> Result<ArtifactMetadata> {
+    prepared_artifact_metadata_with(path, output, roots, ArtifactMetadata::read, resolve_prepared_directory)
+}
+
+fn prepared_artifact_metadata_with(
+    path: &Utf8Path,
+    output: &Utf8Path,
+    roots: &[Utf8PathBuf],
+    inspect: impl FnOnce(&Utf8Path) -> Result<ArtifactMetadata>,
+    resolve: impl FnMut(&Utf8Path, bool) -> Result<Option<Utf8PathBuf>>,
+) -> Result<ArtifactMetadata> {
+    let metadata = inspect(path)?;
+    validate_directory_link_with(path, &metadata, output, roots, resolve)?;
+    Ok(metadata)
+}
+
+fn validate_directory_link_with(
+    path: &Utf8Path,
+    metadata: &ArtifactMetadata,
+    output: &Utf8Path,
+    roots: &[Utf8PathBuf],
+    mut resolve: impl FnMut(&Utf8Path, bool) -> Result<Option<Utf8PathBuf>>,
+) -> Result<()> {
+    if metadata.kind != ArtifactKind::DirectorySymlink {
+        return Ok(());
+    }
+    if let Some(target) = resolve(path, false)? {
+        for root in roots {
+            let Some(canonical_root) = resolve(root, true)? else {
+                continue;
+            };
+            if let Ok(relative) = target.strip_prefix(&canonical_root)
+                && !generated_output(&root.join(relative), output, roots)
+            {
+                return Ok(());
+            }
+        }
+    }
+    Err(error!(
+        "prepared directory symlink `{path}` points outside the captured input trees or into excluded generated output; \
+         move its target into a captured source or build-script output tree and start a new campaign"
+    ))
+}
+
+/// Resolves link targets without walking them; linked roots do not cover their unvisited contents.
+#[cfg_attr(coverage_nightly, coverage(off))]
+// #[gamma::skip(fn_value.ok, parameter.default_shadow, bool_expr.negate, tag = "native-boundary", reason = "this adapter only supplies native symlink_metadata and canonicalization to the tested policy; exercising this forwarding boundary requires native filesystem metadata rather than scripted file types")]
+fn resolve_prepared_directory(path: &Utf8Path, require_real_directory: bool) -> Result<Option<Utf8PathBuf>> {
+    resolve_prepared_directory_with(
+        path,
+        require_real_directory,
+        |path| fs::symlink_metadata(path).map(|metadata| metadata.file_type()),
+        canonical_artifact_path,
+    )
+}
+
+fn resolve_prepared_directory_with<T: PreparedFileType>(
+    path: &Utf8Path,
+    require_real_directory: bool,
+    inspect: impl FnOnce(&Utf8Path) -> std::io::Result<T>,
+    canonical: impl FnOnce(&Utf8Path) -> Result<Utf8PathBuf>,
+) -> Result<Option<Utf8PathBuf>> {
+    if require_real_directory {
+        let file_type = inspect(path).map_err(|cause| {
+            error!("could not inspect prepared input tree `{path}`; restore it or start a new campaign").caused_by(cause)
+        })?;
+        if !file_type.is_dir() || file_type.is_symlink() {
+            return Ok(None);
+        }
+    }
+    canonical(path).map(Some)
+}
+
+fn canonical_artifact_path(path: &Utf8Path) -> Result<Utf8PathBuf> {
+    canonical_artifact_path_with(path, |path| fs::canonicalize(path))
+}
+
+fn canonical_artifact_path_with(
+    path: &Utf8Path,
+    canonicalize: impl FnOnce(&Utf8Path) -> std::io::Result<std::path::PathBuf>,
+) -> Result<Utf8PathBuf> {
+    let canonical = canonicalize(path).map_err(|cause| {
+        error!("could not resolve prepared directory symlink or input tree `{path}`; restore it or start a new campaign").caused_by(cause)
+    })?;
+    Utf8PathBuf::from_path_buf(canonical)
+        .map_err(|_path| error!("prepared directory symlink or input tree `{path}` resolves to a non-UTF-8 path"))
 }
 
 /// Inspects metadata before hashing so link identity and generated-output classification stay aligned.
@@ -1070,6 +1166,26 @@ fn prepared_tree_walk(root: &Utf8Path) -> WalkDir {
 }
 
 fn artifact_digest(path: &Utf8Path, metadata: Option<&ArtifactMetadata>) -> Result<String> {
+    artifact_digest_with(path, metadata, canonical_artifact_path, fingerprint)
+}
+
+fn artifact_digest_with(
+    path: &Utf8Path,
+    metadata: Option<&ArtifactMetadata>,
+    canonical: impl FnOnce(&Utf8Path) -> Result<Utf8PathBuf>,
+    fingerprint: impl FnOnce(&Utf8Path) -> Result<String>,
+) -> Result<String> {
+    if let Some(link) = metadata
+        .filter(|metadata| metadata.kind == ArtifactKind::DirectorySymlink)
+        .and_then(|metadata| metadata.link.as_ref())
+    {
+        let target = canonical(path)?;
+        let mut digest = blake3::Hasher::new();
+        digest.update(link.as_str().as_bytes());
+        digest.update(&[0]);
+        digest.update(target.as_str().as_bytes());
+        return Ok(digest.finalize().to_hex().to_string());
+    }
     if let Some(link) = metadata
         .filter(|metadata| metadata.kind == ArtifactKind::Symlink)
         .and_then(|metadata| metadata.link.as_ref())
@@ -3319,6 +3435,7 @@ mod tests {
         );
         for (target, expected, bits) in [
             (Ok((ArtifactKind::File, 0o100)), ArtifactKind::FileSymlink, 0o100),
+            (Ok((ArtifactKind::Directory, 0o111)), ArtifactKind::DirectorySymlink, 0),
             (Ok((ArtifactKind::Other, 0o111)), ArtifactKind::Symlink, 0),
             (Err(std::io::Error::from(std::io::ErrorKind::NotFound)), ArtifactKind::Symlink, 0),
         ] {
@@ -3426,17 +3543,432 @@ mod tests {
     }
 
     #[test]
-    fn directory_symlinks_are_rejected_before_reading_or_walking_the_target() {
-        let failure = ArtifactMetadata::read_with(
+    fn directory_symlinks_capture_the_link_without_walking_the_target() {
+        let metadata = ArtifactMetadata::read_with(
             Utf8Path::new("prepared"),
             |follow| Ok((if follow { ArtifactKind::Directory } else { ArtifactKind::Symlink }, 0)),
-            || panic!("directory symlinks must be rejected before reading their target spelling"),
+            || Ok("new".into()),
+        )
+        .unwrap();
+        assert_eq!(
+            metadata,
+            ArtifactMetadata {
+                kind: ArtifactKind::DirectorySymlink,
+                executable: 0,
+                link: Some("new".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn directory_links_require_an_independently_captured_target_tree() {
+        let root = Utf8PathBuf::from("workspace");
+        let output = root.join("target");
+        let path = root.join("fixtures/alias");
+        let metadata = ArtifactMetadata {
+            kind: ArtifactKind::DirectorySymlink,
+            executable: 0,
+            link: Some("new".into()),
+        };
+        for (target, real_root, allowed) in [
+            ("canonical/workspace/fixtures/new", true, true),
+            ("canonical/workspace", true, true),
+            ("canonical/workspace-other/fixtures/new", true, false),
+            ("canonical/external", true, false),
+            ("canonical/workspace/target/generated", true, false),
+            ("canonical/workspace/fixtures/new", false, false),
+        ] {
+            let result = validate_directory_link_with(&path, &metadata, &output, core::slice::from_ref(&root), |seen, require_real| {
+                if seen == path {
+                    assert!(!require_real);
+                    Ok(Some(target.into()))
+                } else {
+                    assert_eq!(seen, root);
+                    assert!(require_real);
+                    Ok(real_root.then(|| "canonical/workspace".into()))
+                }
+            });
+            assert_eq!(result.is_ok(), allowed, "{target}; real root={real_root}");
+            if !allowed {
+                assert!(result.unwrap_err().message().contains("points outside the captured input trees"));
+            }
+        }
+        let build = output.join("build/subject/out");
+        validate_directory_link_with(&path, &metadata, &output, &[root.clone(), build.clone()], |seen, _| {
+            Ok(Some(if seen == path {
+                "canonical/workspace/target/build/subject/out/nested".into()
+            } else if seen == root {
+                "canonical/workspace".into()
+            } else {
+                assert_eq!(seen, build);
+                "canonical/workspace/target/build/subject/out".into()
+            }))
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn directory_link_validation_preserves_resolution_errors_and_ignores_other_kinds() {
+        let path = Utf8Path::new("prepared");
+        let mut metadata = ArtifactMetadata {
+            kind: ArtifactKind::File,
+            executable: 0,
+            link: None,
+        };
+        validate_directory_link_with(path, &metadata, path, &[], |_, _| {
+            panic!("regular files need no directory resolution")
+        })
+        .unwrap();
+        metadata.kind = ArtifactKind::DirectorySymlink;
+        let failure =
+            validate_directory_link_with(path, &metadata, path, &[], |_, _| Err(error!("injected resolution failure"))).unwrap_err();
+        assert_eq!(failure.message(), "injected resolution failure");
+    }
+
+    #[test]
+    fn prepared_metadata_is_published_only_after_directory_link_validation_succeeds() {
+        let path = Utf8Path::new("prepared/alias");
+        let output = Utf8Path::new("prepared/target");
+        let roots = [Utf8PathBuf::from("prepared")];
+        let metadata = || ArtifactMetadata {
+            kind: ArtifactKind::DirectorySymlink,
+            executable: 0,
+            link: Some("new".into()),
+        };
+        let actual = prepared_artifact_metadata_with(
+            path,
+            output,
+            &roots,
+            |seen| {
+                assert_eq!(seen, path);
+                Ok(metadata())
+            },
+            |seen, require_real| {
+                assert_eq!(require_real, seen != path);
+                assert!(
+                    seen == path || seen == roots[0],
+                    "only the link and its captured root may be resolved"
+                );
+                Ok(Some(
+                    if seen == path {
+                        "canonical/prepared/new"
+                    } else {
+                        "canonical/prepared"
+                    }
+                    .into(),
+                ))
+            },
+        )
+        .unwrap();
+        assert_eq!(actual, metadata());
+        let failure = prepared_artifact_metadata_with(
+            path,
+            output,
+            &roots,
+            |_| Ok(metadata()),
+            |seen, require_real| {
+                assert_eq!(require_real, seen != path);
+                assert!(
+                    seen == path || seen == roots[0],
+                    "only the link and its captured root may be resolved"
+                );
+                Ok(Some(if seen == path { "canonical/external" } else { "canonical/prepared" }.into()))
+            },
         )
         .unwrap_err();
         assert_eq!(
             failure.message(),
-            "prepared directory symlink `prepared` cannot be frozen for resumable testing; replace it with a real directory and start a new campaign"
+            "prepared directory symlink `prepared/alias` points outside the captured input trees or into excluded generated output; move its target into a captured source or build-script output tree and start a new campaign"
         );
+        let failure = prepared_artifact_metadata_with(
+            path,
+            output,
+            &roots,
+            |_| Err(error!("scripted artifact metadata failure")),
+            |_, _| panic!("metadata failure must stop before directory-link validation"),
+        )
+        .unwrap_err();
+        assert_eq!(failure.message(), "scripted artifact metadata failure");
+    }
+
+    #[test]
+    fn directory_link_validation_skips_linked_roots_and_preserves_real_root_resolution_failures() {
+        let path = Utf8Path::new("prepared/alias");
+        let metadata = ArtifactMetadata {
+            kind: ArtifactKind::DirectorySymlink,
+            executable: 0,
+            link: Some("new".into()),
+        };
+        let roots = ["linked".into(), "prepared".into()];
+        let mut calls = Vec::new();
+        validate_directory_link_with(path, &metadata, Utf8Path::new("prepared/target"), &roots, |seen, require_real| {
+            calls.push((seen.to_owned(), require_real));
+            match seen.as_str() {
+                "prepared/alias" => Ok(Some("canonical/prepared/new".into())),
+                "linked" => Ok(None),
+                "prepared" => Ok(Some("canonical/prepared".into())),
+                _ => panic!("unexpected directory resolution: {seen}"),
+            }
+        })
+        .unwrap();
+        assert_eq!(
+            calls,
+            [(path.to_owned(), false), (roots[0].clone(), true), (roots[1].clone(), true)]
+        );
+        let failure = validate_directory_link_with(path, &metadata, Utf8Path::new("prepared/target"), &roots, |seen, require_real| {
+            if require_real {
+                assert_eq!(seen, roots[0]);
+                Err(error!("scripted root resolution failure"))
+            } else {
+                assert_eq!(seen, path);
+                Ok(Some("canonical/prepared/new".into()))
+            }
+        })
+        .unwrap_err();
+        assert_eq!(failure.message(), "scripted root resolution failure");
+    }
+
+    #[test]
+    fn prepared_directory_resolution_requires_a_real_unlinked_directory_only_for_roots() {
+        struct Kind {
+            directory: bool,
+            symlink: bool,
+        }
+        impl PreparedFileType for Kind {
+            fn is_symlink(&self) -> bool {
+                self.symlink
+            }
+            fn is_file(&self) -> bool {
+                panic!("directory resolution does not inspect regular-file status")
+            }
+            fn is_dir(&self) -> bool {
+                self.directory
+            }
+        }
+        let path = Utf8Path::new("prepared");
+        let canonical = Utf8PathBuf::from("canonical/prepared");
+        for (directory, symlink, allowed) in [
+            (true, false, true),
+            (false, false, false),
+            (false, true, false),
+            (true, true, false),
+        ] {
+            let actual = resolve_prepared_directory_with(
+                path,
+                true,
+                |seen| {
+                    assert_eq!(seen, path);
+                    Ok(Kind { directory, symlink })
+                },
+                |seen| {
+                    assert!(allowed, "rejected roots must not be canonicalized");
+                    assert_eq!(seen, path);
+                    Ok(canonical.clone())
+                },
+            )
+            .unwrap();
+            assert_eq!(actual, allowed.then(|| canonical.clone()));
+        }
+        assert_eq!(
+            resolve_prepared_directory_with::<Kind>(
+                path,
+                false,
+                |_| panic!("a link target is canonicalized without inspecting whether the link itself is a real directory"),
+                |seen| {
+                    assert_eq!(seen, path);
+                    Ok(canonical.clone())
+                },
+            )
+            .unwrap(),
+            Some(canonical)
+        );
+    }
+
+    #[test]
+    fn prepared_directory_resolution_preserves_inspection_and_canonicalization_errors() {
+        let path = Utf8Path::new("prepared");
+        let failure = resolve_prepared_directory_with::<fs::FileType>(
+            path,
+            true,
+            |seen| {
+                assert_eq!(seen, path);
+                Err(std::io::Error::other("scripted inspection failure"))
+            },
+            |_| panic!("failed inspection must stop before canonicalization"),
+        )
+        .unwrap_err();
+        assert_eq!(
+            failure.to_string(),
+            "could not inspect prepared input tree `prepared`; restore it or start a new campaign: scripted inspection failure"
+        );
+        let failure = resolve_prepared_directory_with::<fs::FileType>(
+            path,
+            false,
+            |_| panic!("link targets do not require root metadata"),
+            |seen| {
+                assert_eq!(seen, path);
+                Err(error!("scripted canonicalization failure"))
+            },
+        )
+        .unwrap_err();
+        assert_eq!(failure.message(), "scripted canonicalization failure");
+    }
+
+    #[test]
+    fn canonical_artifact_paths_preserve_the_resolved_path_and_actionable_io_error() {
+        let path = Utf8Path::new("prepared/alias");
+        let actual = canonical_artifact_path_with(path, |seen| {
+            assert_eq!(seen, path);
+            Ok(std::path::PathBuf::from("canonical/prepared/new"))
+        })
+        .unwrap();
+        assert_eq!(actual, Utf8Path::new("canonical/prepared/new"));
+        let failure = canonical_artifact_path_with(path, |seen| {
+            assert_eq!(seen, path);
+            Err(std::io::Error::other("scripted canonicalization failure"))
+        })
+        .unwrap_err();
+        assert_eq!(
+            failure.to_string(),
+            "could not resolve prepared directory symlink or input tree `prepared/alias`; restore it or start a new campaign: scripted canonicalization failure"
+        );
+    }
+
+    #[test]
+    fn canonical_artifact_paths_reject_non_utf8_native_results_without_panicking() {
+        #[cfg(windows)]
+        let native = {
+            use std::os::windows::ffi::OsStringExt as _;
+            std::ffi::OsString::from_wide(&[0xD800])
+        };
+        #[cfg(unix)]
+        let native = {
+            use std::os::unix::ffi::OsStringExt as _;
+            std::ffi::OsString::from_vec(vec![0xff])
+        };
+        let path = Utf8Path::new("prepared/alias");
+        let failure = canonical_artifact_path_with(path, |seen| {
+            assert_eq!(seen, path);
+            Ok(std::path::PathBuf::from(native))
+        })
+        .unwrap_err();
+        assert_eq!(
+            failure.message(),
+            "prepared directory symlink or input tree `prepared/alias` resolves to a non-UTF-8 path"
+        );
+    }
+
+    #[test]
+    fn directory_link_digests_freeze_both_spelling_and_resolved_identity_without_opening_the_directory() {
+        let path = Utf8Path::new("prepared/alias");
+        let digest = |link: &str, target: &str| {
+            artifact_digest_with(
+                path,
+                Some(&ArtifactMetadata {
+                    kind: ArtifactKind::DirectorySymlink,
+                    executable: 0,
+                    link: Some(link.into()),
+                }),
+                |seen| {
+                    assert_eq!(seen, path);
+                    Ok(target.into())
+                },
+                |_| panic!("directory contents are captured under their real input root, not read as a file"),
+            )
+            .unwrap()
+        };
+        let original = digest("new", "prepared/new");
+        assert_eq!(original, blake3::hash(b"new\0prepared/new").to_hex().to_string());
+        assert_ne!(original, digest("./new", "prepared/new"));
+        assert_ne!(original, digest("new", "prepared/other"));
+    }
+
+    #[test]
+    fn directory_link_digest_propagates_canonicalization_failure_without_reading_contents() {
+        let failure = artifact_digest_with(
+            Utf8Path::new("prepared/alias"),
+            Some(&ArtifactMetadata {
+                kind: ArtifactKind::DirectorySymlink,
+                executable: 0,
+                link: Some("new".into()),
+            }),
+            |path| {
+                assert_eq!(path, Utf8Path::new("prepared/alias"));
+                Err(error!("scripted directory resolution failure"))
+            },
+            |_| panic!("a failed directory resolution must not fingerprint contents"),
+        )
+        .unwrap_err();
+        assert_eq!(failure.message(), "scripted directory resolution failure");
+    }
+
+    #[test]
+    fn directory_link_snapshots_validate_the_alias_and_its_independently_captured_files() {
+        let output = Utf8Path::new("prepared/target");
+        let link_path = Utf8Path::new("prepared/alias");
+        let file_path = Utf8Path::new("prepared/new/input");
+        let metadata = |path: &Utf8Path| ArtifactMetadata {
+            kind: if path == link_path {
+                ArtifactKind::DirectorySymlink
+            } else {
+                ArtifactKind::File
+            },
+            executable: 0,
+            link: (path == link_path).then(|| "new".into()),
+        };
+        let digest = |path: &Utf8Path, metadata: Option<&ArtifactMetadata>, target: &str, contents: &str| {
+            artifact_digest_with(
+                path,
+                metadata,
+                |_| Ok(target.into()),
+                |seen| {
+                    assert_eq!(seen, file_path);
+                    Ok(blake3::hash(contents.as_bytes()).to_hex().to_string())
+                },
+            )
+        };
+        let mut artifacts = Vec::new();
+        for path in [link_path, file_path] {
+            artifacts.push(
+                capture_artifact_with(
+                    path.to_owned(),
+                    output,
+                    &["prepared".into()],
+                    |path| Ok(metadata(path)),
+                    |path, metadata| digest(path, metadata, "prepared/new", "original"),
+                )
+                .unwrap(),
+            );
+        }
+        for (target, contents, changed_spelling, expected) in [
+            ("prepared/new", "original", false, None),
+            ("prepared/other", "original", false, Some(link_path)),
+            ("prepared/new", "original", true, Some(link_path)),
+            ("prepared/new", "changed", false, Some(file_path)),
+        ] {
+            let result = artifacts.iter().try_for_each(|artifact| {
+                validate_artifact(
+                    artifact,
+                    |path| {
+                        let mut metadata = metadata(path);
+                        if path == link_path && changed_spelling {
+                            metadata.link = Some("./new".into());
+                        }
+                        Ok(metadata)
+                    },
+                    |path, metadata| digest(path, metadata, target, contents),
+                )
+            });
+            match expected {
+                None => result.unwrap(),
+                Some(path) => assert_eq!(
+                    result.unwrap_err().message(),
+                    format!(
+                        "cannot resume testing: prepared artifact `{path}` changed; restore the campaign artifacts or start a new campaign"
+                    )
+                ),
+            }
+        }
     }
 
     #[test]
@@ -3464,10 +3996,8 @@ mod tests {
     #[test]
     fn legacy_directory_symlinks_are_not_accepted_as_frozen_artifacts() {
         let link = Utf8PathBuf::from("prepared/src/cycle");
-        let expected = format!(
-            "prepared directory symlink `{link}` cannot be frozen for resumable testing; \
-             replace it with a real directory and start a new campaign"
-        );
+        let expected =
+            format!("cannot resume testing: prepared artifact `{link}` changed; restore the campaign artifacts or start a new campaign");
         for metadata in [
             None,
             Some(ArtifactMetadata {
@@ -3489,7 +4019,7 @@ mod tests {
                     ArtifactMetadata::read_with(
                         path,
                         |follow| Ok((if follow { ArtifactKind::Directory } else { ArtifactKind::Symlink }, 0)),
-                        || panic!("ancestor links must be rejected before reading or traversing the target"),
+                        || Ok("..".into()),
                     )
                 },
                 |_, _| panic!("legacy metadata must not bypass inspection and read directory contents"),

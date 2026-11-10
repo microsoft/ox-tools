@@ -70,17 +70,83 @@ pub fn is_no_child_to_wait_for(cause: &io::Error) -> bool {
 /// broadcast operation. Other errors are the operating system's reason the group could not be
 /// signalled.
 pub fn kill(group: i32) -> io::Result<()> {
-    kill_with(group, |group| {
-        // SAFETY: there is no memory-safety precondition to discharge, and that is why this is sound:
-        // `killpg` is handed two integers and dereferences no caller pointer, so no value of `group` or
-        // of the signal can make it read or write memory it should not. The description follows from
-        // that — it names a group by id and delivers a signal — and its failure modes stay in-band: a
-        // group that no longer exists yields `ESRCH` through the return value, never through anything
-        // unsound. Whose group `group` names, and why the ordering around a reap matters, is a
-        // correctness obligation on the caller — see `ProcessTree::observe` in
-        // `cargo-gamma-process` — not a
-        // soundness one, because a wrong id can only signal the wrong group, not corrupt this process.
-        if unsafe { libc::killpg(group, libc::SIGKILL) } == 0 {
+    signal(group, libc::SIGKILL)
+}
+
+/// Stops every process in a group without ending it.
+///
+/// A stopped process can neither start a child nor reap one that has exited, so the ids of its
+/// children stay reserved while the caller signals them. `SIGKILL` still ends a stopped process.
+/// A group that has already exited is treated as successfully gone.
+///
+/// # Errors
+///
+/// As for [`kill`].
+#[cfg(target_os = "macos")]
+pub fn stop(group: i32) -> io::Result<()> {
+    signal(group, libc::SIGSTOP)
+}
+
+/// Resumes every process in a group that [`stop`] stopped.
+///
+/// # Errors
+///
+/// As for [`kill`].
+#[cfg(target_os = "macos")]
+pub fn resume(group: i32) -> io::Result<()> {
+    signal(group, libc::SIGCONT)
+}
+
+/// Stops one process without ending it.
+///
+/// While stopped, the process cannot reap its children, so their ids stay reserved. A process
+/// that has already exited is treated as successfully gone.
+///
+/// # Errors
+///
+/// Rejects identifiers less than or equal to one without making a system call. Other errors are
+/// the operating system's reason the process could not be signalled.
+#[cfg(target_os = "macos")]
+pub fn stop_process(pid: i32) -> io::Result<()> {
+    signal_process(pid, libc::SIGSTOP)
+}
+
+/// Kills one process.
+///
+/// # Errors
+///
+/// As for [`stop_process`].
+#[cfg(target_os = "macos")]
+pub fn kill_process(pid: i32) -> io::Result<()> {
+    signal_process(pid, libc::SIGKILL)
+}
+
+#[cfg(target_os = "macos")]
+fn signal_process(pid: i32, number: libc::c_int) -> io::Result<()> {
+    if pid <= 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "process identifiers must be greater than one",
+        ));
+    }
+
+    // SAFETY: `kill` is handed two integers and dereferences no caller pointer, so no value of
+    // `pid` or of the signal can make it read or write memory it should not. Rejecting values up
+    // to one above keeps the call away from the broadcast and group forms. Whose process `pid`
+    // names is a correctness obligation on the caller, not a soundness one.
+    if unsafe { libc::kill(pid, number) } == 0 {
+        return Ok(());
+    }
+
+    map_killpg_error(io::Error::last_os_error())
+}
+
+fn signal(group: i32, number: libc::c_int) -> io::Result<()> {
+    signal_with(group, |group| {
+        // SAFETY: `killpg` receives two integers and dereferences no caller pointer. The
+        // group guard below avoids POSIX's undefined small-group values; signalling the
+        // caller's intended group remains a correctness obligation on the caller.
+        if unsafe { libc::killpg(group, number) } == 0 {
             return Ok(());
         }
 
@@ -88,7 +154,7 @@ pub fn kill(group: i32) -> io::Result<()> {
     })
 }
 
-fn kill_with(group: i32, signal: impl FnOnce(i32) -> io::Result<()>) -> io::Result<()> {
+fn signal_with(group: i32, signal: impl FnOnce(i32) -> io::Result<()>) -> io::Result<()> {
     if group <= 1 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -195,8 +261,8 @@ pub fn exists(pid: i32) -> bool {
 
 /// The process group a process belongs to, or `None` if it could not be read.
 ///
-/// Test support for the process-tree tests in `cargo-gamma-process`, which assert that a contained
-/// child leads a group of its own rather than sharing this run's.
+/// The process-tree tests in `cargo-gamma-process` use it to assert that a contained child leads a
+/// group of its own; on macOS, cleanup uses it to find descendants that lead groups of their own.
 #[must_use]
 pub fn group_of(pid: i32) -> Option<i32> {
     // SAFETY: there is no memory-safety precondition to discharge — `getpgid` receives one integer
@@ -332,7 +398,7 @@ mod scripted_tests {
     #[test]
     fn killing_a_non_group_identifier_is_rejected_without_signalling() {
         for group in [1, 0, -1, i32::MIN] {
-            let error = kill_with(group, |group| panic!("the rejected group {group} must not reach signalling"))
+            let error = signal_with(group, |group| panic!("the rejected group {group} must not reach signalling"))
                 .expect_err("an identifier that is unsafe for killpg must be refused");
 
             assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
@@ -342,7 +408,7 @@ mod scripted_tests {
 
     #[test]
     fn killing_a_valid_group_passes_its_identifier_to_signalling_and_preserves_errors() {
-        let error = kill_with(2, |group| {
+        let error = signal_with(2, |group| {
             assert_eq!(group, 2);
             Err(io::Error::from_raw_os_error(libc::EPERM))
         })

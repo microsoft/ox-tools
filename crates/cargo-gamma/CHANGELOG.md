@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-06
+
+- 🐛 Bug Fixes
+
+  - cargo-gamma: replace previous reports when a run selects no mutants ([#345](https://github.com/microsoft/ox-tools/pull/345))
+
+## [0.5.0] - 2026-11-04
+
+- ✨ Features
+
+  - cargo-gamma: promote hints after runs
+  - cargo-gamma: release v0.5.0
+
+- 📚 Documentation
+
+  - cargo-gamma: regenerate command reference
+
+- 🧩 Miscellaneous
+
+  - Adopt cargo-gamma in Anvil and remediate campaign survivors ([#327](https://github.com/microsoft/ox-tools/pull/327))
+
 ## [0.4.0] - 2026-10-28
 
 - ✨ Features

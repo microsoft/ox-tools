@@ -216,6 +216,13 @@ The selected Cargo build settings also determine the active `cfg` predicates. Tr
 the build never compiles as ordinary live code would create mutants no test could execute and
 misreport them as test-suite failures.
 
+Return-tail analysis and call-argument mutation use only statements and arguments active under
+these predicates; disabled branches cannot supply a return value or shift argument types.
+Disabled item declarations inside a block also cannot hide its active return tail.
+With `--all-features`, selected packages have complete feature sets even when dependency feature
+activation is otherwise uncertain. Unselected dependencies retain conservative feature handling.
+Unknown predicates remain eligible; runtime CPU dispatch does not exclude compiled code.
+
 The source engine parses Rust for structure and spans but rewrites the original bytes rather than
 pretty-printing an AST. Textual rewriting preserves comments, formatting, macros, and literal
 spelling. Byte-accurate spans are therefore part of the correctness model, not merely an
@@ -490,7 +497,21 @@ authoritative; deleting the whole file instead permits historical evidence to be
 imported again. Dry runs apply this policy without writing the inventory; raw
 candidate listings do not apply it.
 
-All remaining selected target packages are instrumented before compilation begins. cargo-gamma asks Cargo to
+Known attribution and mutation-generation repairs require fresh compiler proof
+before their affected historical exclusions apply. Imported `try.propagate_to_unwrap`
+entries with no original diagnostic also require revalidation because added
+`ControlFlow` support may make them viable. A fresh individual failure clears
+that entry's pending marker without replacing its original recorded reason.
+
+Generated whole-function replacements require positive source-visible evidence
+for each `Default` construction, including recursively generated payloads.
+Unknown implementations are omitted rather than classified as unviable.
+Independent alternatives such as `None` and empty standard collections remain
+eligible. This intentionally omits otherwise viable defaults hidden behind
+unresolved dependency paths or opaque macros. No Default-only compiler pass
+runs between pristine validation and full-schema validation.
+
+All remaining selected target packages are then instrumented. cargo-gamma asks Cargo to
 check their test targets together, letting Cargo schedule independent packages concurrently and one
 compiler round withdraw failures from unrelated packages without repeatedly paying for code
 generation and linking. After check convergence, one build produces the test binaries consumed by
@@ -632,7 +653,9 @@ only after resolving the locator back to that record.
 Normal runs publish `gamma-report.json`, `gamma-report.html`, `gamma-report.sarif`,
 `gamma-perf-advice.md`, and `gamma-diagnostics.json` under the original workspace's
 `target/cargo-gamma/`. `last-gamma-run.json`, `gamma-progress.log`, and
-`gamma-selection.jsonl` remain reusable cache state rather than published artifacts. The selection
+`gamma-selection.jsonl` remain reusable cache state rather than published artifacts. A run that
+selects no mutants still publishes the three reports and the diagnostics bundle, describing an empty
+population, so a previous run's documents cannot stand in for its result. The selection
 journal is append-only, flushed during the campaign, and remains non-verdict scheduling telemetry.
 It retains at most 64 MiB per campaign, ending with an explicit truncation record when further
 attempts are omitted; reaching that diagnostic ceiling never stops mutant execution.
@@ -1040,10 +1063,12 @@ Platform containment uses the strongest suitable primitive:
   accounting and enforcement;
 - Windows job objects provide descendant lifetime and memory control;
 - on macOS, which has no process-tree memory boundary, memory is accounted and enforced by sampling
-  the process group's physical footprint.
+  the physical footprint of the process group and of its descendants by parentage.
 
 A process group is escapable: one unprivileged `setsid` or `setpgid` call removes a descendant from
-it, and every later signal to the group misses that descendant. Containment is therefore not
+it, and every later signal to the group misses that descendant. cargo-nextest does this for every
+test. On macOS, cleanup therefore also stops and ends every descendant found through its
+parent; a descendant that has outlived its parent is no longer found. Containment is therefore not
 conditional on whether memory is being measured. Every launch enters a cgroup leaf on Linux and a
 job object on Windows, including launches that request no accounting at all, such as test listing;
 the memory request decides only whether that boundary's readings are reported.
@@ -1104,8 +1129,8 @@ explicitly, while a user-requested guarantee fails rather than pretending to be 
 Enforcement is either kernel-enforced (a Linux cgroup or a Windows job) or sampled (macOS). A time
 budget cannot stand in for either. A mutant that breaks a loop's termination while the loop
 allocates can grow by gigabytes per second and exhaust a workstation long before any reasonable
-timeout. Sampled enforcement on macOS checks the process group's footprint every 10 ms and stops
-the group past its ceiling. It reports the same `outofmem` outcome, and the run says once that its
+timeout. Sampled enforcement on macOS checks the footprint of the process group and its
+descendants every 10 ms and stops them past their ceiling. It reports the same `outofmem` outcome, and the run says once that its
 bound is soft. The incident that motivated it and the measured overshoot are recorded in the
 [macOS memory design](../../cargo-gamma-process/docs/MACOS_MEMORY.md).
 
@@ -1140,9 +1165,12 @@ Comments and insignificant inter-token whitespace do not move an identity; liter
 Occurrence positions are reserved before confidence-based default selection, so a site present in
 both default and explicit populations keeps the same identity when an earlier optimistic site is
 withheld from the default population.
-Identity scheme 7 assigns those reservations in source order and distinguishes complete
-implementation self-type scopes. Stated-value replacement expressions are token-normalized:
+Identity scheme 8 assigns those reservations in source order and distinguishes complete
+implementation self-type scopes. Stated-value replacement expressions and composed return
+replacements (`tuple`, `Some`, `Ok`, and one-element constructions) are token-normalized:
 formatting and comments do not change their identities, but literal contents and operators do.
+Including composed replacement text prevents a pruned alternative from transferring its
+cached verdict to a different value at the same replacement index.
 Reports stamped with an earlier scheme are incompatible and cannot contribute persisted verdicts
 to the current population.
 The digest is rendered as twelve hex characters. The identity joins reports, shards, suppressions,
@@ -1234,6 +1262,12 @@ Ordinary promotion updates knowledge produced by the selected run and preserves 
 context is provenance, not an admission gate: it records the repository HEAD SHA and UTC generation
 date. Killer hints require fresh execution; imported compiler exclusions follow
 the explicit inventory policy instead.
+
+`cargo gamma run --update-hints` performs that ordinary incremental promotion after the campaign
+reaches a reportable outcome. A successful campaign returns a promotion failure, while normal
+nonzero mutation and gate outcomes retain their campaign status if promotion fails. Operational
+errors do not promote. The option conflicts with `--dry-run`, and a delegated Linux resume owns
+both the campaign and promotion so the parent does not promote a second time.
 
 Automatic hint consumption remains best-effort: malformed or unsupported knowledge is ignored
 because an optimization cannot be allowed to stop a run. Explicit incremental promotion has the
@@ -1370,11 +1404,13 @@ generation that the campaign measured.
 Prepared snapshots capture regular-file type and Unix executable bits as
 well as content digests. Symlink artifacts record their target spelling;
 links to regular files also validate target bytes and executable bits.
-Directory symlinks are rejected during prepared snapshot capture and resume
-validation. Their target contents
-cannot be frozen by recording only the link spelling. The error directs the
-user to replace the link with a real directory and start a new campaign.
-Tree capture never follows ancestor links or walks linked external directories.
+Directory symlinks retain both their target spelling and resolved target identity.
+Their target must lie in an independently captured real input directory, outside
+excluded generated output. The ordinary input scan freezes the target files.
+Aliases and ancestor cycles are supported without following directory links.
+Links to uncaptured external directories or unscanned linked roots are rejected
+with guidance to move the target into a captured input tree. Resume checks this
+coverage again, along with link identity and recorded target-file contents.
 
 Captured dynamic libraries remain integrity-checked even beneath generated
 target directories. Snapshots freeze each artifact's generated-output
@@ -1474,7 +1510,8 @@ its genuine survivor IDs with the population discovered from the current source.
 directory is `target/cargo-gamma` by default or the value of `--artifact-dir` when configured.
 Timeout and memory-limit outcomes are not selected even though the interchange schema exports them
 as `Survived`. This supports focused confirmation after tests are added without carrying any prior
-verdict forward.
+verdict forward. A report written by a run that selected no mutants holds no survivors, so it
+selects none.
 
 Command help follows the workspace Cargo-tool convention: green bold headings and usage,
 cyan bold literals, cyan placeholders, and package author/version metadata.
@@ -1535,16 +1572,19 @@ executed campaign, an actionable `Note   :` and indented entries for idle direct
 conditional suppression note, the conditional hints-promotion reminder, then one `Wrote  :` line
 per published artifact. The stats line reports elapsed wall time, distinct participating test
 binaries, mutant-test subprocess launches, and exact-hint plus inferred-test probes that killed
-their mutant. It is absent for dry runs and runs that never reached test execution. All labels
-start in column one, use the same width and styled emphasis, and artifact paths use the host's
+their mutant. It is absent for dry runs and runs that never reached test execution. The summary
+omits the cached-verdict count; that count remains available in diagnostics. All labels start
+in column one, use the same width and styled emphasis, and artifact paths use the host's
 native separators. Hints promotion is recommended only when the successfully persisted campaign
 state is resolvable through the same locator used by the command and would add, correct, or remove
 exact killer or compiler-ordering knowledge in the checked-in hints artifact. Generalized
 seed/transfer counter churn alone does not trigger the reminder. Suppression is recommended only
 when that same resolvable state contains the timeout or out-of-memory outcomes the command will
 consume.
-Incomplete, truncated, or unsaved output is labelled `warning`. Routine internal adjustments are
-silent.
+Incomplete test-process output does not produce a console warning; exit status still decides the
+verdict, and failed-baseline diagnostics retain the truncation flag. Other incomplete, truncated,
+or unsaved output is labelled `warning`. Routine internal adjustments are silent.
+Compiler-driving test detection does not produce console warnings or exclude tests from the oracle.
 
 Everything a rendered artifact shows that the repository controls — paths, source fragments, test
 names, mutator notes, and a build tool's own diagnostics — is control-character encoded before it
@@ -1630,6 +1670,12 @@ baseline, mutant, and confirmation launches so calibration and verdict
 execution observe the same contention policy. Gamma discovers declarations
 through ignored test-harness markers and refuses to run when a selected libtest harness
 cannot be enumerated, because source text cannot reliably reveal imported or renamed attributes.
+Enumeration failures distinguish process launch and containment errors, exit statuses
+(including hexadecimal Windows codes), the 30-second timeout, and incomplete or invalid output.
+They show bounded `Test Stderr` and `Test Stdout` sections using the same formatting as Cargo
+failures, followed by a shell-quoted retry command with its working directory. Configured
+environment values are not printed. The workspace and executable are kept automatically;
+retry in the same configured test environment before another campaign replaces them.
 A custom harness that has no libtest registry cannot contain those markers and contributes no
 declarations. A launch that may consume a declared resource runs its libtest harness with one test
 thread, keeping the admitted process from consuming the same resource concurrently from several
@@ -1692,7 +1738,8 @@ The mutant-schema design makes large campaigns practical, but it is not free.
 - **Resource containment depends on the host.** Linux and Windows provide strong process-tree
   facilities; other environments may provide less, and requested guarantees are refused when they
   cannot be honored. Where no sealed boundary exists, containment silently falls back to best
-  effort, and a descendant that deliberately leaves its process group can still outlive the run.
+  effort, and a descendant that deliberately leaves its process group can still outlive the run
+(on macOS, only once it has also outlived its parent).
   Linux additionally treats the memory interface as part of the same capability, so a kernel too
   old to expose it falls back to best effort even though its cgroup could have held the subtree.
 - **The workspace environment must be sound on platforms without an immutable startup image.**

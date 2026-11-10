@@ -13,15 +13,16 @@ timeout. On a developer machine, that is long enough to exhaust physical and
 compressed memory and take every other application down with it.
 
 cargo-gamma closes that gap with **sampled enforcement**. On macOS, it samples
-the physical footprint of every process in the launch's process group at a
-short fixed interval. It kills the group when the sum passes the ceiling the
-run already computes. Everything above the mechanism is reused unchanged: the
+the physical footprint of every process in the launch's process group, and of
+every process descended from one by parentage, at a short fixed interval. It
+kills them when the sum passes the ceiling the run already computes. Everything above the mechanism is reused unchanged: the
 baseline-derived ceiling, the `MemoryPolicy` arithmetic, the `outofmem`
 outcome, its note, and its suppression eligibility.
 
 The bound is soft. A runaway can overshoot the ceiling by roughly its growth
 rate times the sampling interval. A descendant that leaves the process group
-is not counted. Both limits are stated to the user rather than hidden.
+and outlives its parent is not counted. Both limits are stated to the user
+rather than hidden.
 
 ## Motivating example
 
@@ -238,8 +239,9 @@ measured the overshoot against a runaway growing faster than the incident's:
 
 The overshoot is about the growth rate times the interval. At 10 ms it is well
 inside the default 128 MiB headroom. That compares with more than 90 GB in the
-incident. One sample costs one listing call plus one usage call per group
-member, which is negligible next to running a test binary.
+incident. One sample costs one group listing call plus one child listing call
+and one usage call per process in the tree, which is negligible next to running
+a test binary.
 
 ### Stated limits
 
@@ -264,9 +266,10 @@ member, which is negligible next to running a test binary.
   a stable snapshot, for example stopping the group while it is read. That
   would pause every macOS launch at every sample, so it is not done.
 - **Group escape.** A descendant that calls `setsid` or `setpgid` leaves the
-  group and is neither counted nor killed. This is the same best-effort
-  containment macOS already has for termination. It does not newly weaken
-  anything.
+  group but keeps its parent, so it is still found by parentage; see
+  [nextest](#with-nextest). Once its parent exits, it is reparented to
+  `launchd` and is neither counted nor killed. This is the same best-effort
+  containment macOS has for termination.
 - **Unreadable members.** An unprivileged reader gets `EPERM` for a process
   owned by another user. For example, a test may launch a setuid tool such as
   `top`, `sudo` or `crontab`. Such a member is skipped like a vanished one, so
@@ -302,21 +305,49 @@ form, instead of reporting unsupported. Consequences:
   failing the run.
 - `--memory off` remains the user's explicit choice of no control.
 
-**Not with nextest.** With `--nextest`, cargo-gamma launches `cargo-nextest`,
-which puts every test process in a process group of its own (on cargo-nextest
-0.9.138, a test's pid equals its pgid, distinct from the runner's group). A
-group sampler would then measure the runner, not the tests, and would neither
-count nor stop a runaway test. So macOS with nextest is treated as a host
-without memory control, through the existing degrade-or-refuse path:
+### With nextest
 
-- Inherited control degrades to `off`, and the run states that the reason is
-  nextest's per-test process groups. The sampled-enforcement note is not shown.
-- Stated control or a stated ceiling is refused, with advice to drop
-  `--nextest` or pass `--memory off`.
+With `--nextest`, cargo-gamma launches `cargo-nextest`, which puts every test
+process in a process group of its own (on cargo-nextest 0.9.143, a test's pid
+equals its pgid, distinct from the runner's group). The test stays a child of
+the runner. Group membership alone would measure the runner, not the tests.
+Killing the group alone would kill the runner and leave the running test
+reparented to `launchd`; that was observed with a sleeping test.
 
-Linux and Windows are unaffected, because the cgroup or job contains nextest's
-test processes too. Covering nextest on macOS would require walking the process
-tree by parentage instead of by group. That is left to a later change.
+So both the sampler and the sweep walk the tree by parentage. Starting from
+the group's members, each process's children are listed with
+`proc_listpids(PROC_PPID_ONLY)`, transitively. The sampler sums every process
+found. The sweep runs in this order:
+
+1. Stop the launch's group with `SIGSTOP`, then stop each descendant outside
+   it before listing that descendant's children. A stopped process can neither
+   start a child nor reap one, so the whole tree is frozen and every listed
+   process keeps its pid and group id until the sweep has signalled it.
+2. Kill the descendants, children before parents, so a killed child stays a
+   zombie of a stopped parent instead of being reparented to `launchd` and
+   reaped. A descendant that leads its group, such as each test, is killed
+   with its group; any other is killed alone, so a process that joins an
+   unrelated group, such as this run's own, does not steer the sweep there.
+3. Kill the launch's group last. `SIGKILL` ends stopped processes.
+
+A descendant that cannot be killed, including one owned by another user
+(`EPERM`), fails the sweep, so cleanup is reported as unproven rather than
+complete. A failed child listing also fails the sweep, but skips only the
+subtree it would have revealed: every descendant already found, and so already
+stopped, is still killed rather than left suspended. If the launch's group cannot be killed, it is resumed, so a failed
+sweep does not leave it stopped. Stopping a group whose leader has already
+exited can fail because macOS refuses to signal a group of zombies; that group
+starts no children, so the walk does not need it stopped. A descendant that is
+already a zombie has no readable group, and is killed alone, which macOS
+accepts.
+
+A breach ends the runner along with the test, so the runner exits by signal
+instead of reporting a failed test. A nextest signal exit is otherwise not a
+verdict about the mutant, but after a breach the run reports it as `outofmem`,
+the same outcome a direct test binary gets.
+
+Linux and Windows are unchanged, because the cgroup or job contains nextest's
+test processes too. There the kernel ends the test, and nextest reports it.
 
 The existing contract says that support is claimed only where it exists. It is
 kept by naming the kind of support: kernel-enforced, or sampled.
@@ -325,15 +356,15 @@ kept by naming the kind of support: kernel-enforced, or sampled.
 
 | Crate | Change | Reason |
 |---|---|---|
-| `cargo-gamma-unsafe` | Safe wrappers for `proc_listpids` and `proc_pid_rusage` | FFI belongs here; every other crate forbids unsafe code |
+| `cargo-gamma-unsafe` | Safe wrappers for `proc_listpids` and `proc_pid_rusage`, and for stopping and resuming a group | FFI belongs here; every other crate forbids unsafe code |
 | `cargo-gamma-process` | The macOS sampler behind the existing accounting and ceiling interfaces | This crate already owns memory accounting for Linux and Windows |
 | `cargo-gamma-lib` | Rewording of the memory module's rationale; the run-start note naming sampled enforcement | Policy is unchanged; only the description of the platform changes |
 
 This design changes one existing rationale. The memory module says that polling
 is not used because it describes one process and races short-lived
 descendants. That remains true where a kernel boundary exists. On macOS, no such
-boundary exists. Polling the whole process group is the strongest available
-guard, and the race affects only processes that are not runaways.
+boundary exists. Polling the process group and its descendants is the strongest
+available guard, and the race affects only processes that are not runaways.
 
 ### Testing
 
@@ -345,6 +376,14 @@ processes:
   maximum across samples; members that disappear between listing and reading
   are skipped, not treated as errors; and a measuring but not enforcing policy
   never kills.
+- The walk by parentage and the sweep's order are driven by a scripted process
+  table that records listings and signals in one chronological log. Tests
+  cover the following: descendants in groups of their own are found once
+  each; every descendant is stopped before its children are listed; kills run
+  children first and end with the group; a descendant in a group it does not
+  lead is killed alone; a descendant that cannot be killed, including `EPERM`,
+  fails the sweep; a failed child listing still kills every descendant
+  already stopped; and a failed group kill resumes the group.
 - A single macOS-only integration test, ignored by default and failing when
   requested by name on a host that cannot run it, launches a real runaway
   allocator under a small explicit ceiling. It asserts that the outcome is

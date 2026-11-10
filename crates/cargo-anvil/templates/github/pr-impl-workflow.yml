@@ -285,9 +285,9 @@ jobs:
     permissions:
       contents: read
       statuses: write
-    # Stricter-runtime correctness: miri + careful.
-    # 4-leg matrix -- both checks compile per host target and can
-    # surface OS/arch-specific UB. Both are impact-scoped so the
+    # Stricter-runtime correctness: miri + careful + loom.
+    # 4-leg matrix -- these checks compile per host target and can
+    # surface OS/arch-specific bugs. All are impact-scoped so the
     # wall-clock is proportional to the PR's blast radius.
     needs: [impact-linux, impact-windows]
     strategy:
@@ -312,6 +312,32 @@ jobs:
       - uses: ./.github/actions/anvil-run-group
         with:
           group: pr-runtime-analysis
+          publish_commit_statuses: ${{ inputs.publish_commit_statuses }}
+          impact_mode: consume
+
+  pr-fuzzing:
+    name: "Check Group: Fuzzing (${{ matrix.os }})"
+    permissions:
+      contents: read
+      statuses: write
+    needs: [impact-linux]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [linux, linux-arm]
+    runs-on: ${{ matrix.os == 'linux' && inputs.linux_runner || inputs.linux_arm_runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          lfs: true
+      - name: Download impact artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: anvil-impact-Linux
+          path: target/anvil/impact
+      - uses: ./.github/actions/anvil-run-group
+        with:
+          group: pr-fuzzing
           publish_commit_statuses: ${{ inputs.publish_commit_statuses }}
           impact_mode: consume
 
@@ -374,6 +400,7 @@ jobs:
       - pr-test
       - pr-msrv
       - pr-runtime-analysis
+      - pr-fuzzing
       - pr-mutants
     runs-on: ${{ inputs.linux_runner }}
     steps:
@@ -386,6 +413,7 @@ jobs:
           PR_TEST: ${{ needs.pr-test.result }}
           PR_MSRV: ${{ needs.pr-msrv.result }}
           PR_RUNTIME_ANALYSIS: ${{ needs.pr-runtime-analysis.result }}
+          PR_FUZZING: ${{ needs.pr-fuzzing.result }}
           PR_MUTANTS: ${{ needs.pr-mutants.result }}
         run: |
           status=0
@@ -396,6 +424,7 @@ jobs:
             "pr-test=$PR_TEST" \
             "pr-msrv=$PR_MSRV" \
             "pr-runtime-analysis=$PR_RUNTIME_ANALYSIS" \
+            "pr-fuzzing=$PR_FUZZING" \
             "pr-mutants=$PR_MUTANTS"
           do
             name="${result%%=*}"

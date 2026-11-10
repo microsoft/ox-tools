@@ -52,6 +52,13 @@ repository must assemble differently.
 
 ### Install and adopt
 
+Supported adopter toolchains are **Rust and Cargo 1.95 or newer**, including
+the repository’s declared MSRV. Building this release of cargo-anvil from
+source requires **Rust 1.97 or newer**. Generated recipes require
+**Just 1.46.0 or newer**, PowerShell Core (`pwsh`), Git, and rustup.
+They target one Cargo workspace or single-crate package at the repository root.
+Older adopter toolchains and multi-workspace orchestration are unsupported.
+
 Install the generator:
 
 ```console
@@ -140,8 +147,8 @@ the generated cloud workflow:
   example compilation, and execution of selected examples;
 * **MSRV tests** execute affected tests with the repository’s declared
   minimum supported Rust version;
-* **runtime analysis** runs Miri, cargo-careful, Loom, and a short Bolero
-  fuzzing pass;
+* **runtime analysis** runs Miri, cargo-careful, and Loom;
+* **fuzzing** runs a short Bolero fuzzing pass on Linux;
 * **mutation testing** tests mutants in the pull-request diff.
 
 The scheduled tier runs full-workspace backstops and expensive checks that
@@ -214,10 +221,6 @@ above compose these recipes into the default policy:
   [`cargo-gamma`][__link23] runs,
   [`cargo-hack`][__link24] feature-powerset
   checks, and benchmark compilation.
-
-`docs/design/checks.md` records the exact commands, impact scope, feature
-configurations, operating-system matrix, tier placement, and rationale for
-each check.
 
 ### Configuring checks
 
@@ -430,8 +433,30 @@ fn main() -> ExitCode {
 }
 ```
 
-The engine format remains `anvil`-named on disk so tools built on it can
-coexist safely and share the same update rules.
+The engine format remains `anvil`-named on disk. Only one tool manages a
+repository at a time; switching tools requires `--force` and preserves the
+normal content-conflict protections.
+
+### In-process catalog updates
+
+[`update`][__link29] runs the same update engine as the CLI with explicit
+[`UpdateOptions`][__link30] and caller-supplied [`UpdateIo`][__link31]. It parses the workspace
+and lock, plans changes, and applies them through that boundary, without
+reading process arguments, initializing tracing, consulting Git, or
+accessing the host environment or current directory.
+
+Implement `UpdateIo` over an in-memory repository to test a downstream
+catalog’s actual generation and upgrade behavior, not a mocked result.
+[`UpdateResult`][__link32] reports drift, refusals, diagnostics, and the plan summary;
+inspect generated files and `.anvil.lock` in the supplied repository.
+Use `dry_run` to perform the same planning without writes or deletions.
+An empty backend set explicitly selects local-only generation.
+
+These APIs are supported without any dependency feature, including with
+`default-features = false`; do not enable `test-util` or use `test_support`.
+The `memory_catalog` example includes a complete downstream catalog and
+an in-memory `UpdateIo` implementation. Historical fixtures can be loaded
+using `include_str!` rather than read or copied at test runtime.
 
 More detailed design and operational guidance is available in the
 `docs/design/` folder.
@@ -442,7 +467,7 @@ More detailed design and operational guidance is available in the
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbz74I7zQ3IEwboKlLkONK75obJQlyCpAcJ_Mb3kdso-xrqy1hZIGDa2NhcmdvLWFudmlsZjAuMjMuM2tjYXJnb19hbnZpbA
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbBB0rQ4OCwxEbsR1IHqTyVmAbLictnbHgN60bG7Uxykcwxd5hZIGDa2NhcmdvLWFudmlsZjAuMjUuMWtjYXJnb19hbnZpbA
  [__link0]: https://github.com/casey/just
  [__link1]: https://rust-lang.github.io/rustfmt/
  [__link10]: https://www.conventionalcommits.org/
@@ -462,10 +487,14 @@ This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Br
  [__link23]: https://crates.io/crates/cargo-gamma
  [__link24]: https://crates.io/crates/cargo-hack
  [__link25]: https://crates.io/crates/cargo-coverage-gate
- [__link26]: https://docs.rs/cargo-anvil/0.23.3/cargo_anvil/?search=Catalog::anvil
- [__link27]: https://docs.rs/cargo-anvil/0.23.3/cargo_anvil/?search=Artifact
- [__link28]: https://docs.rs/cargo-anvil/0.23.3/cargo_anvil/fn.run_app.html
+ [__link26]: https://docs.rs/cargo-anvil/0.25.1/cargo_anvil/?search=Catalog::anvil
+ [__link27]: https://docs.rs/cargo-anvil/0.25.1/cargo_anvil/?search=Artifact
+ [__link28]: https://docs.rs/cargo-anvil/0.25.1/cargo_anvil/fn.run_app.html
+ [__link29]: https://docs.rs/cargo-anvil/0.25.1/cargo_anvil/?search=update
  [__link3]: https://crates.io/crates/cargo-each
+ [__link30]: https://docs.rs/cargo-anvil/0.25.1/cargo_anvil/?search=UpdateOptions
+ [__link31]: https://docs.rs/cargo-anvil/0.25.1/cargo_anvil/?search=UpdateIo
+ [__link32]: https://docs.rs/cargo-anvil/0.25.1/cargo_anvil/?search=UpdateResult
  [__link4]: https://crates.io/crates/cargo-sort
  [__link5]: https://crates.io/crates/cargo-heather
  [__link6]: https://crates.io/crates/cargo-ensure-no-cyclic-deps

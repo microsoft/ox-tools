@@ -3,23 +3,25 @@
 
 use core::fmt::Write as _;
 use core::ops::Range;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
+use std::error::Error as _;
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt as _;
 #[cfg(windows)]
 use std::os::windows::process::ExitStatusExt as _;
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::rc::Rc;
 use std::sync::{Mutex, OnceLock, mpsc};
-use std::{fs, io, thread};
+use std::{fs, io};
 
 use serde_json::Value;
 
 use super::blame::AttributionEvidence;
 use super::complaints::Diagnostic;
 use super::invoke::{
-    OutputLimits, Stream, compile, drained, finish_readers, is_progress, read_pipe, read_pipe_with_limits, rendered_diagnostic,
-    spawn_failure, supervise, supervise_with_limits,
+    BuildProcess, OutputLimits, Stream, compile, drained, finish_readers, is_progress, read_pipe, read_pipe_with_limits,
+    rendered_diagnostic, spawn_failure, supervise, supervise_with_limits, wait_for_build,
 };
 use super::messages::{build_evidence, dep_files};
 use super::*;
@@ -289,13 +291,25 @@ fn preflight_timeouts_and_missing_compiler_diagnostics_keep_their_distinct_cause
                     "{failure}"
                 );
             } else {
+                let command = if test_lib {
+                    "cargo test --no-run --lib"
+                } else {
+                    "cargo check --tests"
+                };
                 assert!(
-                    failure
-                        .message()
-                        .starts_with("the tree could not be checked, and the compiler reported nothing"),
+                    failure.message().starts_with(&format!(
+                        "'{command}' failed, mutation testing cannot proceed\n\nCargo finished with "
+                    )),
                     "{failure}"
                 );
-                assert!(failure.message().ends_with("driver stopped before diagnostics"), "{failure}");
+                assert!(
+                    failure.message().ends_with("\n\nCargo Stderr\ndriver stopped before diagnostics"),
+                    "{failure}"
+                );
+                let status = scripted_output(false, "", "").status;
+                assert!(failure.message().contains(&format!("Cargo finished with {status}")), "{failure}");
+                assert!(failure.message().contains(".\n\nCargo Arguments\n["), "{failure}");
+                assert!(!failure.message().contains("--show-build --leak-dirs"), "{failure}");
                 assert!(
                     !failure.message().contains("this tree does not compile before any mutation"),
                     "{failure}"
@@ -303,6 +317,56 @@ fn preflight_timeouts_and_missing_compiler_diagnostics_keep_their_distinct_cause
             }
         }
     }
+}
+
+#[test]
+fn preflight_silent_abnormal_exit_reports_status_arguments_and_unstructured_output() {
+    let mut work = policy_workspace();
+    work.cargo.features = vec!["--features".into(), "subject/special".into()];
+    work.cargo.profile = Some("mutation".into());
+    work.cargo.extra = vec!["--offline".into()];
+    let plan = empty_plan(&work);
+    #[cfg(windows)]
+    let status = std::process::ExitStatus::from_raw(0xc000_0005);
+    #[cfg(unix)]
+    let status = std::process::ExitStatus::from_raw(9);
+    let failure = native_test_util::with_compiler(
+        move |_workspace, _arguments, _budget, _events| {
+            Ok(Some(std::process::Output {
+                status,
+                stdout: b"wrapper: compiler terminated unexpectedly\n".to_vec(),
+                stderr: "\x1b[2K\x1b[32m    Checking\x1b[0m h3-quinn v0.0.10\r\n\x1b[2K\r\n"
+                    .repeat(40)
+                    .into_bytes(),
+            }))
+        },
+        || Converger::check(&work, &plan, None, &[], false, scripted_limits(), &mut Recorder::default()),
+    )
+    .unwrap_err();
+    let message = failure.message();
+    assert!(message.contains(&format!("Cargo finished with {status}")), "{message}");
+    #[cfg(windows)]
+    assert!(message.contains("(0xC0000005)"), "{message}");
+    assert!(
+        message.contains(
+            "Cargo Arguments\n[\"check\", \"--tests\", \"--keep-going\", \"--message-format=json\", \"--workspace\", \"--features\", \"subject/special\", \"--profile\", \"mutation\", \"--offline\"]"
+        ),
+        "{message}"
+    );
+    assert!(
+        message.starts_with("'cargo check --tests' failed, mutation testing cannot proceed\n\nCargo finished with "),
+        "{message}"
+    );
+    assert!(message.contains("wrapper: compiler terminated unexpectedly"), "{message}");
+    assert!(message.contains("cargo said nothing on stderr either."), "{message}");
+    assert!(message.contains("\n\nCargo Stderr\n"), "{message}");
+    assert!(
+        message.contains("\n\nCargo Stdout\nwrapper: compiler terminated unexpectedly"),
+        "{message}"
+    );
+    assert!(!message.contains("Checking"), "{message}");
+    assert!(!message.contains("\n\n\n"), "{message}");
+    assert!(!message.contains("before it reached the code"), "{message}");
 }
 
 #[test]
@@ -1637,7 +1701,7 @@ fn a_build_that_never_reached_the_compiler_says_so_rather_than_blaming_the_tree(
         .expect("the build ran, however badly");
     let reason = stuck_reason(convergence);
 
-    assert!(reason.contains("the compiler reported nothing"), "{reason}");
+    assert!(reason.contains("Cargo emitted no structured compiler errors"), "{reason}");
     assert!(
         !reason.contains("does not compile"),
         "the message for a tree rustc rejected must not be reused here: {reason}"
@@ -2920,69 +2984,149 @@ fn a_build_inside_its_budget_is_collected() {
     assert!(outcome.status.success(), "{outcome:?}");
 }
 
-/// A build stopped for outstaying its budget takes everything it started with it.
-///
-/// Cargo is the root of a tree, not a process: `rustc`, build scripts, and whatever those start.
-/// A kill aimed at cargo alone leaves that tree compiling against the same scratch directory the
-/// run is about to reuse, on the cores the next attempt needs — and holding the write ends of the
-/// pipes it inherited, which is what turns a build the budget cut off into a collection that never
-/// ends.
-///
-/// The descendant here is the shape that survives: spawned by the build, holding its pipes, and
-/// due to write a file well after the budget runs out. Reaching that write is what a surviving
-/// subtree looks like from outside.
-#[cfg(feature = "system-tests")]
+#[derive(Debug)]
+struct ScriptedBuildProcess {
+    observations: VecDeque<io::Result<Option<ExitStatus>>>,
+    cleanup: Option<io::Result<()>>,
+    calls: Vec<&'static str>,
+}
+
+impl BuildProcess for ScriptedBuildProcess {
+    fn observe(&mut self) -> io::Result<Option<ExitStatus>> {
+        self.calls.push("observe");
+        self.observations
+            .pop_front()
+            .expect("every observation must have a scripted result")
+    }
+
+    fn terminate_tree(&mut self) -> io::Result<()> {
+        self.calls.push("terminate-tree");
+        self.cleanup.take().expect("tree termination must be scripted exactly once")
+    }
+}
+
 #[test]
 fn a_build_stopped_by_its_budget_takes_its_descendants_with_it() {
-    crate::testing::within(crate::testing::WATCHDOG, "a build with a descendant", || {
-        let started = crate::testing::workdir("build-descendant-");
-        let root = Utf8PathBuf::from_path_buf(started.path().to_path_buf()).expect("a UTF-8 scratch path");
-        let (running, survived) = (root.join("running"), root.join("survived"));
-
-        let mut command = Command::new(crate::testing::helper_binary_path().as_std_path());
-
-        let _configured = command
-            .arg(crate::testing::directive(format_args!(
-                "spawn:touch:{running}|sleep:3000|touch:{survived}"
-            )))
-            .arg(crate::testing::directive("sleep:30000"))
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        let work = Workspace::adopt(root.clone(), root.join("target"));
-
-        let prepared = cargo_gamma_process::prepare(command, cargo_gamma_process::MemoryRequest::default())
-            .expect("the native acceptance process is contained");
-        let spawned = prepared.spawn().expect("the native acceptance process starts");
-        let mut subtree = cargo_gamma_process::ProcessTree::adopt(spawned).expect("the native acceptance tree is adopted");
-        let readiness_deadline = Instant::now() + Duration::from_secs(30);
-        while !running.as_std_path().exists() {
-            if Instant::now() >= readiness_deadline {
-                subtree.terminate().expect("the unreadied acceptance tree can be terminated");
-                panic!("the descendant did not reach its startup marker before the readiness safety bound");
-            }
-            thread::sleep(Duration::from_millis(10));
-        }
-
-        let outcome = super::invoke::supervise_tree(
-            subtree,
-            &work,
-            Some(Duration::ZERO),
-            &mut crate::testing::Recorder::default(),
-            super::invoke::OUTPUT_LIMITS,
+    for (budget, advance, observations) in [(0, 0, 1), (750, 750, 2), (750, 749, 3), (750, 751, 2)] {
+        let control = tick::ClockControl::new();
+        let clock = control.to_simple_clock();
+        let mut subtree = ScriptedBuildProcess {
+            observations: std::iter::repeat_with(|| Ok(None)).take(observations).collect(),
+            cleanup: Some(Ok(())),
+            calls: Vec::new(),
+        };
+        let narrated = Cell::new(0);
+        let pauses = Cell::new(0);
+        let outcome = wait_for_build(
+            &mut subtree,
+            "scripted-workspace",
+            Some(Duration::from_millis(budget)),
+            &clock,
+            || narrated.set(narrated.get() + 1),
+            || {
+                pauses.set(pauses.get() + 1);
+                control.advance(Duration::from_millis(advance));
+            },
         )
-        .expect("the build was supervised");
+        .unwrap();
+        assert!(outcome.is_none());
+        let mut expected = vec!["observe"; observations];
+        expected.push("terminate-tree");
+        assert_eq!(subtree.calls, expected);
+        assert!(subtree.observations.is_empty());
+        assert!(subtree.cleanup.is_none());
+        assert_eq!(narrated.get(), observations);
+        assert_eq!(pauses.get(), observations - 1);
+    }
+}
 
-        assert!(outcome.is_none(), "a build past its budget reports no output");
+#[test]
+fn scripted_build_completion_preserves_status_without_terminating_again() {
+    for success in [false, true] {
+        for (budget, waits) in [(None, 2), (Some(Duration::ZERO), 0), (Some(Duration::from_secs(1)), 1)] {
+            let control = tick::ClockControl::new();
+            let clock = control.to_simple_clock();
+            let status = scripted_output(success, "", "").status;
+            let mut observations = std::iter::repeat_with(|| Ok(None)).take(waits).collect::<VecDeque<_>>();
+            observations.push_back(Ok(Some(status)));
+            let mut subtree = ScriptedBuildProcess {
+                observations,
+                cleanup: None,
+                calls: Vec::new(),
+            };
+            let narrated = Cell::new(0);
+            let pauses = Cell::new(0);
+            let outcome = wait_for_build(
+                &mut subtree,
+                "scripted-workspace",
+                budget,
+                &clock,
+                || narrated.set(narrated.get() + 1),
+                || {
+                    pauses.set(pauses.get() + 1);
+                    control.advance(Duration::from_millis(7));
+                },
+            )
+            .unwrap();
+            assert_eq!(outcome, Some(status));
+            assert_eq!(subtree.calls, vec!["observe"; waits + 1]);
+            assert!(subtree.observations.is_empty());
+            assert_eq!(narrated.get(), waits + 1);
+            assert_eq!(pauses.get(), waits);
+        }
+    }
+}
 
-        // Past the descendant's sleep, so anything still alive has had its chance to write.
-        thread::sleep(Duration::from_millis(3500));
-
-        assert!(
-            !survived.as_std_path().exists(),
-            "the build's descendant outlived the kill that was aimed at the build"
-        );
-    });
+#[test]
+fn scripted_build_failures_collect_the_tree_and_preserve_the_relevant_error() {
+    for (timeout, cleanup, expected, kind) in [
+        (
+            true,
+            Err(io::Error::new(io::ErrorKind::PermissionDenied, "scripted cleanup")),
+            "cargo in `scripted-workspace` could not be terminated after its build budget expired: scripted cleanup",
+            io::ErrorKind::PermissionDenied,
+        ),
+        (
+            false,
+            Err(io::Error::new(io::ErrorKind::PermissionDenied, "scripted cleanup")),
+            "cargo in `scripted-workspace` could not be terminated after it stopped being observable: scripted cleanup",
+            io::ErrorKind::PermissionDenied,
+        ),
+        (
+            false,
+            Ok(()),
+            "could not wait for cargo in `scripted-workspace`: scripted observation",
+            io::ErrorKind::BrokenPipe,
+        ),
+    ] {
+        let control = tick::ClockControl::new();
+        let clock = control.to_simple_clock();
+        let mut subtree = ScriptedBuildProcess {
+            observations: VecDeque::from([if timeout {
+                Ok(None)
+            } else {
+                Err(io::Error::new(io::ErrorKind::BrokenPipe, "scripted observation"))
+            }]),
+            cleanup: Some(cleanup),
+            calls: Vec::new(),
+        };
+        let narrated = Cell::new(0);
+        let error = wait_for_build(
+            &mut subtree,
+            "scripted-workspace",
+            Some(Duration::ZERO),
+            &clock,
+            || narrated.set(narrated.get() + 1),
+            || panic!("a failed or expired observation must not pause"),
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), expected);
+        assert_eq!(error.source().unwrap().downcast_ref::<io::Error>().unwrap().kind(), kind);
+        assert_eq!(subtree.calls, ["observe", "terminate-tree"]);
+        assert!(subtree.observations.is_empty());
+        assert!(subtree.cleanup.is_none());
+        assert_eq!(narrated.get(), 1);
+    }
 }
 
 /// A build that finished is collected without waiting for whatever it left running.
@@ -3280,7 +3424,7 @@ fn a_follow_on_without_a_mutant_span_does_not_replace_the_root_reason() {
         Some(&CompilerReason {
             code: "E0308".to_owned(),
             category: "mismatched types".to_owned(),
-            evidence: AttributionEvidence::OtherDiagnostic,
+            evidence: AttributionEvidence::PositionalCandidate,
         })
     );
 }
@@ -4045,7 +4189,7 @@ fn a_build_that_reported_nothing_is_not_described_as_a_compile_failure() {
                     process didn't exit successfully: exit status: 101\n";
     let message = Converger::unattributed_build_error(&work, "", stderr).to_string();
 
-    assert!(message.contains("the compiler reported nothing"), "{message}");
+    assert!(message.contains("Cargo emitted no structured compiler errors"), "{message}");
     assert!(!message.contains("does not compile"), "{message}");
 
     // The whole point: the cause is on stderr and nowhere else, so it has to be shown.

@@ -363,27 +363,19 @@ cargo gamma run --in-diff change.patch
 
 ##### Compile-fail targets
 
-A `trybuild` or `compiletest_rs` target is an expensive special case, and a run says so before it
-builds anything:
+Before building, Gamma warns about test binaries whose root source names a `trybuild` or
+`compiletest_rs` dev-dependency:
 
 ```text
-warning 1 test target invokes the compiler once per case, so every mutant pays for a full rustc run
-        and almost none are convicted by it: `router_compile_fail` in routerama (trybuild).
-        If it is not part of what should be judging these mutants, exclude it with
-        `--exclude-test router_compile_fail`.
-        Left in, it is likely to make this run take hours.
+warning 1 test binary may have test cases that invoke the Rust compiler, which may lead to very long mutation test runs:
+          `router_compile_fail` in routerama (trybuild)
+        Consider omitting the specific test cases using `--skip` harness filters.
 ```
 
-The cost is real: such a target has been measured putting a single mutant at one to two minutes,
-which turns a run of a few thousand mutants into a multi-day one. What it asserts is that some code
-*fails* to compile, and a mutated function body in another crate almost never changes that — so
-nearly every mutant pays the full price and is convicted by something else anyway.
-
-Nothing is excluded for you. On a proc-macro crate `trybuild` is often the *primary* oracle: a
-mutant that corrupts a diagnostic message is caught there and nowhere else, so excluding it by
-default would gut the oracle for exactly the code the technique suits best, and the mutants would
-come back as survivors rather than as anything visibly wrong. Whether the catch rate justifies the
-price is yours to weigh, so the run states the price and the flag and leaves the decision alone.
+This is a static heuristic, not evidence that a particular case runs the compiler or makes the
+campaign slow. Comments and string literals do not trigger it. Review the cases in each named
+binary and use [`--skip` harness filters][__link10] for
+those that should not judge mutants. Nothing is excluded automatically.
 
 #### Controlling a run
 
@@ -474,7 +466,7 @@ and unchanged compilation inputs. Independently, `compiler-exclusions.json` in t
 cache excludes exact mutant IDs across context changes and even with `--incremental no`.
 To reconsider a repaired mutant, remove its inventory entry and use `--incremental no`;
 deleting the whole inventory can import old compiler failures again. See
-[Compiler exclusions][__link10] and
+[Compiler exclusions][__link11] and
 [What a run remembers](#what-a-run-remembers). `cargo gamma hints` promotes
 the parts that cannot move a score directly from that record,
 after using Cargo metadata to validate the current workspace identity but without source
@@ -506,7 +498,7 @@ they control the harness: `--skip`, `--test-threads`, `--nocapture`. The last tw
 destination and are concatenated in the order written, so pick whichever reads better — `--` is
 shorter and needs no escaping, while `--cargo-test-arg` can be interleaved with other flags,
 survives being appended to by a wrapper script, and is the form the
-[`cargo-test-args`][__link11] configuration key takes, which a file cannot write as a trailing
+[`cargo-test-args`][__link12] configuration key takes, which a file cannot write as a trailing
 `--`.
 
 A mutant is usually caught by one test, so a binary is stopped at the first test that announces a
@@ -588,7 +580,7 @@ mutant, and that shows up as a red baseline before a single mutant runs.
 Be aware of what stepping aside costs. A test that returns early on `CARGO_GAMMA` is not deciding
 anything, so every mutant only that test could have caught is reported as a survivor rather than as
 uncovered — the score falls, and the reason is invisible. Prefer moving cargo-driving tests into a
-test target of their own and naming it to [`--exclude-test`][__link12]: the run
+test target of their own and naming it to [`--exclude-test`][__link13]: the run
 then knows those tests were withheld and says so in the oracle note, instead of silently crediting
 their absence to your code.
 
@@ -656,7 +648,7 @@ test reaches this code” is a different problem from “the tests that ran it d
 report never merges them. But *how much* of the code is defended is one number, and code no test
 reaches is undefended.
 
-The [mutation-testing-elements][__link13]
+The [mutation-testing-elements][__link14]
 schema treats its `Timeout` status as detected. Gamma exports timeout and out-of-memory
 verdicts as schema `Survived` with a reason that preserves the actual outcome, so the standard
 report UI computes this same fail-closed score.
@@ -829,13 +821,11 @@ genuinely allowed to allocate this much can be taken out of the run for good wit
 `timeout`.
 
 On Linux and Windows the kernel enforces the ceiling for the whole process tree. macOS has no
-equivalent, so there cargo-gamma samples the test process group’s memory every 10 ms and stops it
-once it passes the ceiling. That bound is soft. A mutant growing very fast can overshoot by roughly
-its growth rate times 10 ms. A process that leaves the test’s process group is not counted. The run
-says so once at the start. With `--nextest` on macOS, each test runs in a process group of its own,
-outside what this sampling can see, so memory control is unavailable. When it was only the default,
-it is switched off with a note. When you asked for it, the run stops and tells you to drop `--nextest`
-or pass `--memory off`.
+equivalent, so there cargo-gamma samples the memory of the test’s process group and its descendants
+every 10 ms and stops them once they pass the ceiling. That bound is soft. A mutant growing very fast
+can overshoot by roughly its growth rate times 10 ms. A process that leaves the process group and
+outlives its parent is not counted. The run says so once at the start. This also covers `--nextest`,
+which runs each test in a process group of its own.
 
 ##### Baseline and intermittent test failures
 
@@ -1124,7 +1114,7 @@ exclude-trait-impls = ["Debug", "Display"]
 count = 30
 ```
 
-**[docs/CONFIG.md][__link14] documents every key.** [docs/gamma.toml][__link15] is a
+**[docs/CONFIG.md][__link15] documents every key.** [docs/gamma.toml][__link16] is a
 file listing all of them with their defaults, commented out — copy it and delete what you do not
 need:
 
@@ -1169,12 +1159,12 @@ min-score = 80.0
 
 Doctests are not built or run, so a mutant whose only coverage is a doctest is reported as a survivor.
 
-Types are read syntactically rather than resolved, so a type alias is not seen through and falls
-back to `Default::default()`. Where the tool can tell that no such guess could hold — a bare type
-parameter, an associated type projected out of one, a `Box<dyn Trait>`, or an `impl Trait` that is
-not an iterator — it withholds the mutant instead of generating one that cannot compile. The same
-absence of type resolution is why `expr` occasionally perturbs an expression that turns out not to
-be numeric.
+Types are analyzed from source rather than fully resolved by the compiler. A generated
+`Default::default()` requires positive evidence that the type supports it; unresolved aliases
+and dependency types receive no guessed default. Independent alternatives such as `None` and
+empty collections remain available. Use [`#[gamma::value(...)]`][__link17]
+to supply a known replacement when source analysis cannot establish one. The absence of full
+type resolution also means `expr` occasionally perturbs an expression that turns out not to be numeric.
 
 An `impl Trait` return that is not an iterator is still passed over. `impl Future` is the case that
 comes up most, and cargo-mutants does not cover it either.
@@ -1191,7 +1181,7 @@ Every run writes all three reports without being asked. Normally they are
 original workspace. [`--artifact-dir`](#controlling-a-run) moves the complete set to another
 directory and creates it when necessary. `--cache-dir` only relocates internal reusable state.
 
-The JSON is the [`mutation-testing-elements`][__link16]
+The JSON is the [`mutation-testing-elements`][__link18]
 interchange format, which is what the Azure DevOps and GitHub mutation report extensions consume, so
 no translation step is needed.
 
@@ -1411,7 +1401,7 @@ context and inputs. The separate compiler-exclusion inventory remains authoritat
 modes, until its exact mutant entry is removed. Every other killed, survived, timed-out,
 out-of-memory, flaky, ignored, or uncovered mutant is evaluated again. A previous killer is
 tried first, but its result is checked and the ordinary suite follows when it no longer kills
-the mutant. See [Compiler exclusions][__link17] before retrying a
+the mutant. See [Compiler exclusions][__link19] before retrying a
 repaired identity.
 
 #### Resuming interrupted testing
@@ -1734,14 +1724,16 @@ This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Br
 
  [__link0]: docs/CMDLINE.md
  [__link1]: docs/CONFIG.md
- [__link10]: docs/CMDLINE.md#compiler-exclusions
- [__link11]: docs/CONFIG.md
- [__link12]: docs/CMDLINE.md#full-option-reference
- [__link13]: https://github.com/stryker-mutator/mutation-testing-elements
- [__link14]: docs/CONFIG.md
- [__link15]: docs/gamma.toml
- [__link16]: https://github.com/stryker-mutator/mutation-testing-elements
- [__link17]: docs/CMDLINE.md#compiler-exclusions
+ [__link10]: docs/CONFIG.md#excluding-individual-test-cases
+ [__link11]: docs/CMDLINE.md#compiler-exclusions
+ [__link12]: docs/CONFIG.md
+ [__link13]: docs/CMDLINE.md#full-option-reference
+ [__link14]: https://github.com/stryker-mutator/mutation-testing-elements
+ [__link15]: docs/CONFIG.md
+ [__link16]: docs/gamma.toml
+ [__link17]: docs/MUTATORS.md#stating-the-value-yourself
+ [__link18]: https://github.com/stryker-mutator/mutation-testing-elements
+ [__link19]: docs/CMDLINE.md#compiler-exclusions
  [__link2]: docs/MIGRATION.md
  [__link3]: docs/MUTATORS.md
  [__link4]: docs/DESIGN.md

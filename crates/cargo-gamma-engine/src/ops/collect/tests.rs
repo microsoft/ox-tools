@@ -38,7 +38,7 @@ fn nested_local_generic_collections_preserve_proven_defaults() {
 }
 
 #[test]
-fn incomplete_indexes_preserve_optimistic_local_generic_collections() {
+fn incomplete_indexes_do_not_supply_local_generic_collection_defaults() {
     let source = "#[derive(Default)] struct Vec<T>(T);
         fn f() -> Vec<u8> { Vec(7) }";
     let file = SourceFile::parse("test.rs", source.to_owned()).unwrap();
@@ -50,13 +50,11 @@ fn incomplete_indexes_preserve_optimistic_local_generic_collections() {
         &defaults,
     );
 
-    assert_eq!(found.len(), 1, "{found:?}");
-    assert_eq!(found[0].replacement, "Default::default()");
-    assert_eq!(found[0].confidence, Confidence::Optimistic);
+    assert!(found.is_empty(), "{found:?}");
 }
 
 #[test]
-fn incomplete_indexes_keep_local_generic_maps_optimistic() {
+fn incomplete_indexes_do_not_supply_local_generic_map_defaults() {
     let source = "#[derive(Default)] struct HashMap<K, V>((K, V));
         fn f() -> HashMap<u8, u8> { HashMap((7, 8)) }";
     let file = SourceFile::parse("test.rs", source.to_owned()).unwrap();
@@ -68,9 +66,7 @@ fn incomplete_indexes_keep_local_generic_maps_optimistic() {
         &defaults,
     );
 
-    assert_eq!(found.len(), 1, "{found:?}");
-    assert_eq!(found[0].replacement, "Default::default()");
-    assert_eq!(found[0].confidence, Confidence::Optimistic);
+    assert!(found.is_empty(), "{found:?}");
 }
 
 #[test]
@@ -1264,15 +1260,25 @@ fn explicit_selection_restores_unknown_zero_decrements_as_optimistic() {
 }
 
 #[test]
-fn unresolved_default_return_values_stay_default_on_but_are_classified_as_optimistic() {
+fn unresolved_default_returns_are_withheld_under_default_and_explicit_selection() {
     let file = SourceFile::parse("test.rs", "fn f() -> dependency::Value { original() }".to_owned()).unwrap();
     let default_candidates = collect(&file, &Selection::default_preset());
     let explicit_candidates = collect(&file, &Selection::parse("fn_value.default").unwrap());
 
-    assert_eq!(default_candidates.len(), 1, "{default_candidates:?}");
-    assert_eq!(default_candidates[0].confidence, Confidence::Optimistic);
-    assert_eq!(explicit_candidates.len(), 1, "{explicit_candidates:?}");
-    assert_eq!(explicit_candidates[0].confidence, Confidence::Optimistic);
+    assert!(default_candidates.is_empty(), "{default_candidates:?}");
+    assert!(explicit_candidates.is_empty(), "{explicit_candidates:?}");
+}
+
+#[test]
+fn explicitly_stated_defaults_do_not_require_generated_default_evidence() {
+    let found = candidates(
+        "#[gamma::value(Default::default())] fn f() -> dependency::Value { original() }",
+        "fn_value",
+    );
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].mutator, "fn_value.stated");
+    assert_eq!(found[0].replacement, "Default::default()");
+    assert_eq!(found[0].confidence, Confidence::Explicit);
 }
 
 #[test]
@@ -1280,9 +1286,7 @@ fn foreign_type_does_not_borrow_same_named_local_default_evidence() {
     let file = SourceFile::parse("test.rs", "struct Value;\nfn f() -> dependency::Value { original() }".to_owned()).unwrap();
     let found = collect(&file, &Selection::parse("fn_value.default").unwrap());
 
-    assert_eq!(found.len(), 1, "{found:?}");
-    assert_eq!(found[0].replacement, "Default::default()");
-    assert_eq!(found[0].confidence, Confidence::Optimistic);
+    assert!(found.is_empty(), "{found:?}");
 }
 
 #[test]
@@ -1771,9 +1775,7 @@ fn explicit_imports_do_not_borrow_unrelated_package_default_evidence() {
         fn f() -> Config { original() }";
     let found = candidates(source, "fn_value.default");
 
-    assert_eq!(found.len(), 1, "{found:?}");
-    assert_eq!(found[0].replacement, "Default::default()");
-    assert_eq!(found[0].confidence, Confidence::Optimistic);
+    assert!(found.is_empty(), "{found:?}");
 }
 
 #[test]
@@ -1784,9 +1786,7 @@ fn renamed_generic_imports_do_not_borrow_unrelated_package_evidence() {
         fn f() -> Value<bool> { original() }";
     let found = candidates(source, "fn_value.default");
 
-    assert_eq!(found.len(), 1, "{found:?}");
-    assert_eq!(found[0].replacement, "Default::default()");
-    assert_eq!(found[0].confidence, Confidence::Optimistic);
+    assert!(found.is_empty(), "{found:?}");
 }
 
 #[test]
@@ -1824,13 +1824,11 @@ fn shadowed_or_unsupported_range_types_remain_optimistic() {
 }
 
 #[test]
-fn named_array_lengths_remain_optimistically_defaultable() {
+fn named_array_lengths_do_not_prove_a_defaultable_length() {
     let source = "const LEN: usize = 2; fn f() -> [u8; LEN] { [1; LEN] }";
     let found = candidates(source, "fn_value.default");
 
-    assert_eq!(found.len(), 1, "{found:?}");
-    assert_eq!(found[0].replacement, "Default::default()");
-    assert_eq!(found[0].confidence, Confidence::Optimistic);
+    assert!(found.is_empty(), "{found:?}");
 }
 
 #[test]
@@ -1847,15 +1845,13 @@ fn renamed_self_imports_preserve_the_module_path() {
 }
 
 #[test]
-fn imported_collection_spellings_use_optimistic_default() {
+fn imported_collection_spellings_preserve_elements_without_guessing_a_default() {
     let found = candidates("use dependency::Thing as HashSet; fn f() -> HashSet<u8> { original() }", "fn_value");
-    let empty = found
-        .iter()
-        .find(|candidate| candidate.mutator == "fn_value.empty_collection")
-        .expect("the imported type keeps a potentially usable default constructor");
-
-    assert_eq!(empty.replacement, "Default::default()");
-    assert_eq!(empty.confidence, Confidence::Optimistic);
+    assert!(!found.is_empty(), "{found:?}");
+    assert!(
+        found.iter().all(|candidate| candidate.mutator != "fn_value.empty_collection"),
+        "{found:?}"
+    );
     assert!(
         found
             .iter()
@@ -1929,13 +1925,11 @@ fn same_named_dependency_collections_remain_optimistic() {
 }
 
 #[test]
-fn dependency_collection_aliases_keep_an_optimistic_default() {
+fn dependency_collection_aliases_do_not_supply_default_evidence() {
     let source = "type Alias<T> = dependency::HashSet<T>; fn f() -> Alias<u8> { original() }";
     let found = candidates(source, "fn_value");
 
-    assert_eq!(found.len(), 1, "{found:?}");
-    assert_eq!(found[0].replacement, "Default::default()");
-    assert_eq!(found[0].confidence, Confidence::Optimistic);
+    assert!(found.is_empty(), "{found:?}");
 }
 
 #[test]
@@ -2189,7 +2183,7 @@ fn unresolved_fields_iterator_extrema_and_fallible_numeric_calls_remain_optimist
 }
 
 #[test]
-fn custom_collection_parameters_use_optimistic_default_construction() {
+fn custom_collection_parameters_require_positive_default_evidence() {
     for ty in [
         "std::collections::HashSet<u8, CustomBuildHasher>",
         "std::collections::HashMap<u8, u8, CustomBuildHasher>",
@@ -2197,9 +2191,7 @@ fn custom_collection_parameters_use_optimistic_default_construction() {
         let source = format!("fn f() -> {ty} {{ original() }}");
         let found = candidates(&source, "fn_value.empty_collection");
 
-        assert_eq!(found.len(), 1, "{source}: {found:?}");
-        assert_eq!(found[0].replacement, "Default::default()");
-        assert_eq!(found[0].confidence, Confidence::Optimistic);
+        assert!(found.is_empty(), "{source}: {found:?}");
     }
 }
 
@@ -2222,16 +2214,13 @@ fn floating_point_ranges_do_not_prove_iterator_adapters() {
 }
 
 #[test]
-fn unknown_array_elements_keep_an_explicit_optimistic_default() {
+fn unknown_array_elements_do_not_supply_default_evidence_under_any_selection() {
     let source = "fn f() -> [dependency::Value; 1] { original() }";
 
     let defaults = candidates(source, "@default");
-    assert_eq!(defaults.len(), 1, "{defaults:?}");
-    assert_eq!(defaults[0].mutator, "fn_value.default");
-    assert_eq!(defaults[0].confidence, Confidence::Optimistic);
+    assert!(defaults.is_empty(), "{defaults:?}");
     let explicit = candidates(source, "fn_value.default");
-    assert_eq!(explicit.len(), 1, "{explicit:?}");
-    assert_eq!(explicit[0].confidence, Confidence::Optimistic);
+    assert!(explicit.is_empty(), "{explicit:?}");
 }
 
 #[test]
@@ -2272,8 +2261,7 @@ fn incomplete_default_indexes_do_not_prove_local_default_implementations() {
     let file = SourceFile::parse("test.rs", "struct Config; fn f() -> Config { original() }".to_owned()).unwrap();
     let found = collect(&file, &Selection::parse("fn_value.default").unwrap());
 
-    assert_eq!(found.len(), 1, "{found:?}");
-    assert_eq!(found[0].confidence, Confidence::Optimistic);
+    assert!(found.is_empty(), "{found:?}");
 }
 
 #[test]
@@ -4563,9 +4551,7 @@ fn qualified_aliases_do_not_borrow_root_type_default_evidence() {
     ";
     let found = candidates(source, "fn_value.default");
 
-    assert_eq!(found.len(), 1, "{found:?}");
-    assert_eq!(found[0].replacement, "Default::default()");
-    assert_eq!(found[0].confidence, Confidence::Optimistic);
+    assert!(found.is_empty(), "{found:?}");
 }
 
 #[test]
@@ -4584,9 +4570,7 @@ fn cross_file_qualified_aliases_do_not_borrow_root_type_default_evidence() {
             &defaults,
         );
 
-        assert_eq!(found.len(), 1, "{source}: {found:?}");
-        assert_eq!(found[0].replacement, "Default::default()");
-        assert_eq!(found[0].confidence, Confidence::Optimistic);
+        assert!(found.is_empty(), "{source}: {found:?}");
     }
 }
 
@@ -4818,10 +4802,6 @@ fn a_bare_box_with_no_default_evidence_is_not_invented() {
 
 #[test]
 fn a_return_type_nested_deeper_than_the_recursion_bound_falls_back_to_default() {
-    // The recursion is bounded so that a deeply nested return type costs a constant number of
-    // mutants rather than one for every level of nesting; past that bound, the family still
-    // has to offer something, and `Default::default()` is the one expression that type-checks
-    // regardless of how deep the type turned out to be.
     let source = "fn f() -> Option<Option<Option<Option<bool>>>> { None }";
     let found = candidates(source, "fn_value");
 
@@ -4829,15 +4809,13 @@ fn a_return_type_nested_deeper_than_the_recursion_bound_falls_back_to_default() 
 }
 
 #[test]
-fn deeply_nested_shadowed_strings_remain_optimistic() {
+fn deeply_nested_shadowed_strings_do_not_gain_a_default_at_the_depth_limit() {
     let source = "struct String; fn f() -> Option<Option<Option<String>>> { original() }";
     let found = candidates(source, "fn_value");
-    let fallback = found
-        .iter()
-        .find(|candidate| candidate.replacement.contains("Default::default()"))
-        .expect("the depth limit emits a fallback");
-
-    assert_eq!(fallback.confidence, Confidence::Optimistic);
+    assert_eq!(
+        found.iter().map(|candidate| candidate.replacement.as_str()).collect::<Vec<_>>(),
+        ["None", "Some(None)", "Some(Some(None))"]
+    );
 }
 
 #[test]
@@ -5460,13 +5438,14 @@ fn stating_a_value_leaves_every_other_family_alone() {
 #[test]
 fn default_on_registry_families_are_discoverable() {
     let file = SourceFile::parse("fixture.rs", EVERY_FAMILY_FIXTURE.to_owned()).unwrap();
+    let defaults = Defaults::of(&file.ast);
 
     for mutator in REGISTRY.iter().filter(|mutator| mutator.default_on) {
         let mut selection = Selection::parse(mutator.name).unwrap();
         if mutator.name == "fn_value.err_with" {
             selection.set_errors(vec!["MyError::Boom".to_owned()]);
         }
-        let found = collect(&file, &selection);
+        let found = collect_with(&file, &selection, &CfgSet::unconditional(), &defaults);
 
         assert!(
             found.iter().any(|candidate| candidate.mutator == mutator.name),
@@ -5552,9 +5531,9 @@ fn a_stated_mutant_has_an_identity_of_its_own() {
 
 /// A file with no attribute remains pinned to the site-counted identity baseline.
 ///
-/// The baseline includes the corrected rule that replacements at one site share an occurrence.
-/// Once established, these ids must remain stable across runs because stored verdicts and
-/// suppressions name mutants by id.
+/// The baseline includes shared site occurrences and normalized composed replacements.
+/// These ids must remain stable across runs because stored verdicts and suppressions name
+/// mutants by id.
 #[test]
 fn a_file_that_states_nothing_uses_the_site_counted_identity_baseline() {
     let source = "fn a() -> bool { g() }\nfn b() -> Result<i32, MyError> { Ok(1) }\nfn c(x: i32) -> i32 { x + 1 }\n";
@@ -5568,8 +5547,8 @@ fn a_file_that_states_nothing_uses_the_site_counted_identity_baseline() {
             "2b643388f655",
             "6ecb982becec",
             "14fa38baad8e",
-            "3c5e85253765",
-            "0a42ad003f48",
+            "f1e1b2ff0afd",
+            "d40ff146595d",
             "2c30ededa685",
             "6b3d0f1f4c8a",
             "7db3aae5c3f8",
@@ -5663,6 +5642,18 @@ fn returns_option() -> Option<i32> { compute() }
 fn returns_option_ref() -> Option<&'static dyn core::fmt::Debug> { compute() }
 fn returns_result() -> Result<i32, MyError> { compute() }
 fn returns_result_ref() -> Result<&'static dyn core::fmt::Debug, MyError> { compute() }
+fn returns_control_flow() -> core::ops::ControlFlow<u8, bool> { compute() }
+fn returns_ordering() -> core::cmp::Ordering { compute() }
+fn enum_ops(order: core::cmp::Ordering, flow: core::ops::ControlFlow<u8>, flag: bool) {
+    order.is_lt(); order.is_le(); order.is_gt();
+    order.is_ge(); order.is_eq(); order.is_ne();
+    flow.is_break(); flow.is_continue();
+    consume(core::cmp::Ordering::Less);
+    consume(core::cmp::Ordering::Equal);
+    consume(core::cmp::Ordering::Greater);
+    let value: core::ops::ControlFlow<u8, bool> =
+        if flag { core::ops::ControlFlow::Break(7) } else { core::ops::ControlFlow::Continue(true) };
+}
 fn returns_vec() -> Vec<i32> { compute() }
 fn returns_tuple() -> (i32, bool) { compute() }
 fn returns_custom() -> Custom { compute() }
@@ -5861,6 +5852,7 @@ fn regex_op() { let _ = Regex::new("^a+b*[cd]?$"); }
 #[test]
 fn every_registry_entry_produces_at_least_one_candidate_against_the_composite_fixture() {
     let file = SourceFile::parse("fixture.rs", EVERY_FAMILY_FIXTURE.to_owned()).unwrap();
+    let defaults = Defaults::of(&file.ast);
 
     for mutator in REGISTRY {
         let mut selection = Selection::parse(mutator.name).unwrap();
@@ -5871,7 +5863,7 @@ fn every_registry_entry_produces_at_least_one_candidate_against_the_composite_fi
             selection.set_errors(vec!["MyError::Boom".to_owned()]);
         }
 
-        let found = collect(&file, &selection);
+        let found = collect_with(&file, &selection, &CfgSet::unconditional(), &defaults);
         let family = mutator.name.split('.').next().unwrap_or(mutator.name);
 
         assert!(

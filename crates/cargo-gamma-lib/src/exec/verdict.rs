@@ -415,16 +415,23 @@ fn spawn_patiently(command: Command, request: MemoryRequest) -> Result<SpawnedCo
 fn spawn_patiently_with_backoff(
     command: Command,
     request: MemoryRequest,
-    mut backoff: impl FnMut(PreparedCommand, Duration) -> Result<PreparedCommand, PlatformError>,
+    backoff: impl FnMut(PreparedCommand, Duration) -> Result<PreparedCommand, PlatformError>,
 ) -> Result<SpawnedCommand, StartError> {
-    let mut waited = SPAWN_BACKOFF;
-
     // Prepared once, outside the loop, and carried through every wait: a retry re-spawns the launch
     // it already has rather than building a second one, which is the only shape `prepare` supports.
-    let mut prepared = prepare(command, request).map_err(StartError::Containment)?;
+    let prepared = prepare(command, request).map_err(StartError::Containment)?;
+    spawn_prepared_with_backoff(prepared, spawn_once, backoff)
+}
+
+fn spawn_prepared_with_backoff<P, S>(
+    mut prepared: P,
+    mut spawn: impl FnMut(P) -> Result<S, FailedSpawn<P>>,
+    mut backoff: impl FnMut(P, Duration) -> Result<P, PlatformError>,
+) -> Result<S, StartError> {
+    let mut waited = SPAWN_BACKOFF;
 
     for _attempt in 1..SPAWN_ATTEMPTS {
-        match spawn_once(prepared) {
+        match spawn(prepared) {
             Ok(spawned) => return Ok(spawned),
             Err(FailedSpawn { cause, prepared: returned }) if transient(&cause) => {
                 prepared = backoff(*returned, waited).map_err(StartError::Containment)?;
@@ -435,7 +442,7 @@ fn spawn_patiently_with_backoff(
         waited = waited.saturating_mul(2);
     }
 
-    spawn_once(prepared).map_err(|failure| StartError::Spawn(failure.cause))
+    spawn(prepared).map_err(|failure| StartError::Spawn(failure.cause))
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -473,13 +480,13 @@ fn start_or_verdict_with(
     })
 }
 
-struct FailedSpawn {
+struct FailedSpawn<P> {
     cause: io::Error,
-    prepared: Box<PreparedCommand>,
+    prepared: Box<P>,
 }
 
 /// The spawn itself, named so the fault seam can stand in for the kernel's refusal.
-fn spawn_once(prepared: PreparedCommand) -> Result<SpawnedCommand, FailedSpawn> {
+fn spawn_once(prepared: PreparedCommand) -> Result<SpawnedCommand, FailedSpawn<PreparedCommand>> {
     #[cfg(test)]
     if faults::fired(Fault::Spawn) {
         return Err(FailedSpawn {
@@ -625,30 +632,6 @@ fn unconfirmed(verdict: &Verdict) -> Verdict {
     Verdict::Unconfirmed(None, reason)
 }
 
-/// Says on the diagnostic stream that a verdict was reached on less output than the binary produced.
-///
-/// Worth saying because the shortfall is invisible in the verdict itself: a truncated stream that
-/// lost the failure announcement is indistinguishable from a suite that failed without naming a
-/// test, and both come out as a kill with no killer. A reader chasing an unnamed kill would
-/// otherwise spend the search on the suite rather than on the pipe.
-fn announce_partial(binary: &TestBinary) {
-    let message = format!(
-        "the output of `{}` could not be read to the end, so the failing test may be named in text \
-         this run never saw. The exit status still decided the verdict.",
-        binary.path
-    );
-    // #[gamma::skip(call_result.default, reason = "announce returns unit and this mutator retains the diagnostic publication before replacing unit with unit")]
-    announce(&message);
-}
-
-/// Writes one diagnostic line, for the running command to say through its own `Host`.
-///
-/// Raised as a note rather than written here: this is reached on a worker thread while the progress
-/// display owns the terminal, so writing now would cut across a line somebody else is drawing.
-fn announce(message: &str) {
-    crate::notes::note(message.to_owned());
-}
-
 /// How much more room a suspected timeout or stall is given before it is believed.
 ///
 /// Large enough that scheduling noise cannot survive it, and paid only by mutants that already
@@ -665,10 +648,22 @@ pub(crate) const CONFIRM_FACTOR: u32 = 3;
 /// imposing one here would make it resolve the whole workspace relative to a single package.
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn launcher(work: &Workspace, binary: &TestBinary, only: Only<'_>, fail_fast: bool) -> Result<Command, Verdict> {
+    let names = only.names();
+    let user = HarnessFilters::parse(work.test_arguments());
+    let allowed: Vec<&str> = names.iter().copied().filter(|name| user.admits(name)).collect();
+    if !names.is_empty() && allowed.is_empty() {
+        return Err(Verdict::Unjudged(format!(
+            "the test selection this run made for `{}` names nothing the harness filters allow, \
+             so it was refused rather than run as a wider selection",
+            binary.path
+        )));
+    }
     let Some(harness) = work.runner() else {
         let mut command = Command::new(binary.path.as_std_path());
-        let names = only.names();
         let resource_bearing = !work.required_resources(binary, only).is_empty();
+        if resource_bearing {
+            let _ = command.args(["--test-threads", "1"]);
+        }
 
         if names.is_empty() {
             // The whole binary runs, so the user's arguments are the whole selection and go through
@@ -684,17 +679,6 @@ fn launcher(work: &Workspace, binary: &TestBinary, only: Only<'_>, fail_fast: bo
             // it — and a mutant could be convicted by a test the user deliberately excluded. The
             // intersection libtest cannot express is computed here instead: the user's filters
             // decide which of the chosen names may run, and only the survivors are passed.
-            let user = HarnessFilters::parse(work.test_arguments());
-            let allowed: Vec<&str> = names.iter().copied().filter(|name| user.admits(name)).collect();
-
-            if allowed.is_empty() {
-                return Err(Verdict::Unjudged(format!(
-                    "the test selection this run made for `{}` names nothing the harness filters allow, \
-                     so it was refused rather than run as a wider selection",
-                    binary.path
-                )));
-            }
-
             // The user's positional filters are not repeated here: `admits` has already applied
             // them, and leaving them out is what lets `--exact` pin this run's own names without
             // also silently converting the user's substring filter into a whole-name match.
@@ -704,9 +688,6 @@ fn launcher(work: &Workspace, binary: &TestBinary, only: Only<'_>, fail_fast: bo
                 let _ = command.args(user.flags());
             }
             let _ = command.args(allowed).arg("--exact");
-        }
-        if resource_bearing {
-            let _ = command.args(["--test-threads", "1"]);
         }
         let _ = command.current_dir(working_directory(work, binary).as_std_path());
         work.inherit_test_cache_home(&mut command);
@@ -1183,14 +1164,9 @@ fn supervise(
                     return (Verdict::Passed, usage, None);
                 }
 
-                // Said before the text is read rather than after, because what follows draws a
-                // conclusion from an absence — no announced failure means the harness named no
-                // test — and that reading is only sound if the text is all of it. The run is not
-                // abandoned over it: the exit status still says the suite failed, which is the
-                // verdict, and only the name is at risk.
-                if !collected.whole {
-                    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
-                    announce_partial(binary);
+                #[cfg(unix)]
+                if let Some(verdict) = stopped_by_ceiling(under_nextest, code, usage.peak, ceiling) {
+                    return (verdict, usage, evidence);
                 }
 
                 // Asked before the ceiling is turned into a verdict, because the harness's own
@@ -1502,6 +1478,18 @@ fn prefer_named(verdict: Verdict, peak: Option<u64>, ceiling: Option<u64>) -> Ve
         // Not a verdict about the mutant at all, and a ceiling does not make it one.
         other => other,
     }
+}
+
+/// The verdict for a runner that its memory ceiling stopped before it could report a test.
+///
+/// On macOS the sampler ends cargo-nextest together with the test that passed the ceiling, so the
+/// runner exits by signal instead of reporting a failed test. Without a ceiling breach, a signal
+/// from nextest is still not a verdict about the mutant. Only Unix ends a process by signal.
+#[cfg(unix)]
+fn stopped_by_ceiling(under_nextest: bool, code: Option<i32>, peak: Option<u64>, ceiling: Option<u64>) -> Option<Verdict> {
+    ceiling
+        .filter(|_limit| under_nextest && code.is_none())
+        .map(|limit| Verdict::MemoryLimit { peak, limit })
 }
 
 /// The verdict a run cut short by a failure the harness announced reaches.
@@ -2339,6 +2327,7 @@ pub(super) const DIAGNOSTIC_TAIL_LINES: usize = 20;
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod final_survivor_tests {
+    use std::cell::RefCell;
     use std::ffi::OsStr;
 
     use super::ReachObservation::{NotReached, Reached, Unknown};
@@ -2814,6 +2803,38 @@ mod final_survivor_tests {
     }
 
     #[test]
+    fn nov7_backoff_failure_is_returned_without_panicking_or_retrying() {
+        let mut spawns = 0;
+        let mut waits = 0;
+        let result = spawn_prepared_with_backoff(
+            (),
+            |()| {
+                spawns += 1;
+                assert_eq!(spawns, 1, "a refused backoff must prevent another spawn attempt");
+                Err::<(), _>(FailedSpawn {
+                    cause: io::Error::from(io::ErrorKind::WouldBlock),
+                    prepared: Box::new(()),
+                })
+            },
+            |(), delay| {
+                waits += 1;
+                assert_eq!(delay, SPAWN_BACKOFF);
+                Err(PlatformError::new_static(
+                    cargo_gamma_process::Situation::Refused,
+                    "backoff refused",
+                ))
+            },
+        );
+        assert_eq!(spawns, 1);
+        assert_eq!(waits, 1);
+        let Err(StartError::Containment(error)) = result else {
+            panic!("expected the injected backoff refusal");
+        };
+        assert_eq!(error.situation(), cargo_gamma_process::Situation::Refused);
+        assert_eq!(error.to_string(), "backoff refused");
+    }
+
+    #[test]
     fn native_spawn_retries_double_each_backoff_and_never_retry_a_permanent_refusal() {
         let (_directory, work) = crate::testing::helper_workspace("spawn-backoff-contract-", &["exit:0"]);
         let binary = crate::testing::helper();
@@ -2959,7 +2980,9 @@ mod final_survivor_tests {
         expiration: (bool, bool),
         stopped: Option<bool>,
         collected: std::cell::Cell<bool>,
+        output: RefCell<Option<Collected>>,
         stop_error: Option<String>,
+        usage: MemoryUsage,
     }
 
     impl ScriptedSupervision {
@@ -2969,7 +2992,9 @@ mod final_survivor_tests {
                 expiration,
                 stopped: None,
                 collected: std::cell::Cell::new(false),
+                output: RefCell::new(Some(empty_collected())),
                 stop_error: None,
+                usage: MemoryUsage::default(),
             }
         }
     }
@@ -2987,11 +3012,11 @@ mod final_survivor_tests {
         }
         fn collect(&self) -> Collected {
             assert!(!self.collected.replace(true), "only one output collection is scripted");
-            empty_collected()
+            self.output.borrow_mut().take().expect("only one output collection is scripted")
         }
         fn usage(&self) -> MemoryUsage {
             assert!(self.collected.get(), "completed output is collected before usage");
-            MemoryUsage::default()
+            self.usage
         }
         fn cut_short(&mut self, settled: bool) -> Result<(MemoryUsage, Option<u64>), (Verdict, MemoryUsage)> {
             assert!(self.stopped.replace(settled).is_none(), "only one termination is scripted");
@@ -3068,6 +3093,27 @@ mod final_survivor_tests {
                 assert_eq!(supervision.stopped, None);
             }
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_nextest_runner_signalled_after_its_ceiling_was_passed_is_out_of_memory() {
+        use std::os::unix::process::ExitStatusExt as _;
+
+        let binary = crate::testing::test_binary("ceiling-evidence");
+        let progress = Mutex::new(Progress::new(Watch::Off));
+        let mut supervision = ScriptedSupervision::new(Ok(Some(ExitStatus::from_raw(libc::SIGKILL))), (false, false));
+        supervision.usage = MemoryUsage {
+            peak: Some(7),
+            exhausted: true,
+        };
+        let request = MemoryRequest {
+            limit: Some(5),
+            ..MemoryRequest::default()
+        };
+        let (verdict, usage, _evidence) = supervise(&mut supervision, &binary, Some(37), true, request, &progress, false);
+        assert_eq!(verdict, Verdict::MemoryLimit { peak: Some(7), limit: 5 });
+        assert_eq!(usage, supervision.usage);
     }
 
     #[test]
@@ -3296,7 +3342,24 @@ mod final_survivor_tests {
             work.set_resources(Resources::fake_binary(&binary));
             let command = launcher(&work, &binary, Only::One("chosen"), true).unwrap();
             let arguments: Vec<_> = command.get_args().map(|argument| argument.to_string_lossy().into_owned()).collect();
-            assert_eq!(arguments, ["chosen", "--exact", "--test-threads", "1"]);
+            assert_eq!(arguments, ["--test-threads", "1", "chosen", "--exact"]);
+        }
+    }
+
+    #[test]
+    fn whole_binary_resource_thread_override_precedes_literal_filters() {
+        for arguments in [
+            vec!["--", "--literal"],
+            vec!["--test-threads=8", "--", "--literal"],
+            vec!["--test-threads", "8", "--", "--literal"],
+        ] {
+            let mut work = policy_workspace();
+            let binary = crate::testing::test_binary("literal-resource");
+            work.set_test_args(arguments.into_iter().map(str::to_owned).collect());
+            work.set_resources(Resources::fake_binary(&binary));
+            let command = launcher(&work, &binary, Only::All, true).unwrap();
+            let arguments: Vec<_> = command.get_args().map(|argument| argument.to_string_lossy().into_owned()).collect();
+            assert_eq!(arguments, ["--test-threads", "1", "--", "--literal"]);
         }
     }
 
@@ -3341,30 +3404,77 @@ mod final_survivor_tests {
         assert!(matches!(unfinished_nextest_failure(true, &progress), Some(Verdict::Unmetered(_))));
     }
 
+    #[cfg(unix)]
     #[test]
-    fn failing_native_children_warn_only_when_their_output_was_actually_truncated() {
-        for oversized in [false, true] {
-            let amount = if oversized { OUTPUT_CAP + 1 } else { 16 };
-            let flood = format!("flood:{amount}");
-            let (_directory, work) = crate::testing::helper_workspace("partial-output-diagnostic-", &[&flood, "exit:1"]);
-            let binary = crate::testing::helper();
+    fn a_nextest_runner_ended_by_signal_after_a_breach_is_out_of_memory() {
+        assert_eq!(
+            stopped_by_ceiling(true, None, Some(7), Some(5)),
+            Some(Verdict::MemoryLimit { peak: Some(7), limit: 5 })
+        );
+        assert_eq!(
+            stopped_by_ceiling(true, None, Some(7), None),
+            None,
+            "a signal without a breach is not a verdict"
+        );
+        assert_eq!(
+            stopped_by_ceiling(true, Some(100), Some(7), Some(5)),
+            None,
+            "an exit code is settled by nextest's meaning"
+        );
+        assert_eq!(
+            stopped_by_ceiling(false, None, Some(7), Some(5)),
+            None,
+            "a direct binary keeps the existing path"
+        );
+    }
+
+    #[test]
+    fn failing_children_preserve_verdicts_without_output_warnings() {
+        for (whole, tail_truncated, retain_failure) in [
+            (true, false, false),
+            (false, false, false),
+            (true, true, false),
+            (true, false, true),
+            (false, false, true),
+            (true, true, true),
+        ] {
+            let binary = crate::testing::test_binary("partial-output-diagnostic");
+            let progress = Mutex::new(Progress::new(Watch::Off));
+            let mut supervision = ScriptedSupervision::new(Ok(Some(exit_status(1))), (false, false));
+            *supervision.output.borrow_mut() = Some(Collected {
+                stdout_tail: b"retained stdout\n".to_vec(),
+                stderr_tail: b"retained stderr\n".to_vec(),
+                whole,
+                tail_truncated,
+                ..empty_collected()
+            });
             let notes = crate::notes::Run::new();
             let _scope = crate::notes::enter(Some(&notes));
-            let (verdict, _usage, _failure) = run_with(
-                &work,
+            let (verdict, usage, failure) = supervise(
+                &mut supervision,
                 &binary,
-                baseline_attempt(),
-                &Arc::new(Mutex::new(Progress::new(Watch::Off))),
+                None,
                 false,
+                MemoryRequest::default(),
+                &progress,
+                retain_failure,
             );
             assert_eq!(verdict, Verdict::Failed(None));
-            let messages = crate::notes::drain();
-            let expected = format!(
-                "the output of `{}` could not be read to the end, so the failing test may be named in text \
-                 this run never saw. The exit status still decided the verdict.",
-                binary.path
+            assert_eq!(usage, MemoryUsage::default());
+            assert_eq!(
+                failure.as_ref().map(|evidence| evidence.output_truncated),
+                retain_failure.then_some(!whole || tail_truncated)
             );
-            assert_eq!(messages, if oversized { vec![expected] } else { Vec::new() });
+            if retain_failure {
+                let evidence = failure.expect("failure retention was requested for a scripted nonzero exit");
+                assert_eq!(evidence.stdout_tail, "retained stdout");
+                assert_eq!(evidence.stderr_tail, "retained stderr");
+                assert_eq!(evidence.termination, Some(Termination::ExitCode(1)));
+                assert_eq!(evidence.failed_tests, Vec::<String>::new());
+            }
+            assert!(supervision.collected.get());
+            assert_eq!(supervision.stopped, None);
+            assert_eq!(crate::notes::drain(), Vec::<String>::new());
         }
     }
 
@@ -4309,6 +4419,20 @@ mod tests {
     }
 
     #[test]
+    fn nov7_short_output_lines_mark_the_first_discarded_byte_as_incomplete() {
+        for ending in [b"".as_slice(), b"x".as_slice(), b"x\n".as_slice()] {
+            let mut output = b"x\n".repeat(OUTPUT_CAP / 2);
+            output.extend_from_slice(ending);
+            let progress = Mutex::new(Progress::new(Watch::Off));
+            let (kept, tail, truncated, whole) = drain(io::Cursor::new(output), &progress, &Pulse::default(), false, false);
+            assert_eq!(kept.len(), OUTPUT_CAP);
+            assert_eq!(whole, ending.is_empty());
+            assert_eq!(tail.len(), 0);
+            assert!(!truncated);
+        }
+    }
+
+    #[test]
     fn output_discarded_past_the_cap_marks_the_stream_incomplete() {
         let mut output = vec![b'x'; OUTPUT_CAP];
         output.extend_from_slice(b"\ntest meaningful::killer ... FAILED\n");
@@ -4670,26 +4794,6 @@ mod tests {
             "the text after the interruption was lost: {:?}",
             String::from_utf8_lossy(&kept)
         );
-    }
-
-    /// A verdict reached on a truncated stream says so, since the shortfall is invisible in the
-    /// verdict itself.
-    ///
-    /// A kill with no killer is exactly what a lost announcement looks like, so without this a
-    /// reader would go looking through the suite for a failure that was never in the text they can
-    /// see.
-    #[test]
-    fn a_verdict_reached_on_a_truncated_stream_says_the_text_was_partial() {
-        crate::notes::alone(|| {
-            let binary = crate::testing::helper();
-
-            announce_partial(&binary);
-
-            let raised = crate::notes::drain();
-
-            assert_eq!(raised.len(), 1, "{raised:?}");
-            assert!(raised[0].contains(binary.path.as_str()), "the binary is not named: {raised:?}");
-        });
     }
 
     /// A workspace whose test binary is the portable helper, running the given script.

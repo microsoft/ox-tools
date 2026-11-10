@@ -21,6 +21,8 @@ use cargo_gamma_unsafe::interrupt;
 use cargo_gamma_unsafe::job::{self, Job};
 use cargo_gamma_unsafe::{PlatformError, Situation};
 
+#[cfg(target_os = "macos")]
+use crate::descendants;
 #[cfg(any(test, feature = "fault-injection"))]
 use crate::faults;
 #[cfg(target_os = "macos")]
@@ -1582,39 +1584,58 @@ fn output_reader<R>(pipe: Option<R>, name: &'static str) -> io::Result<Option<Ou
 where
     R: io::Read + Send + 'static,
 {
-    pipe.map(|mut pipe| {
+    output_reader_with_spawn(pipe, |pipe, captured, capture_enabled| {
+        thread::Builder::new()
+            .name(name.to_owned())
+            .spawn(move || read_output(pipe, &captured, &capture_enabled))
+    })
+}
+
+fn output_reader_with_spawn<R>(
+    pipe: Option<R>,
+    spawn: impl FnOnce(R, Arc<Mutex<Vec<u8>>>, Arc<AtomicBool>) -> io::Result<JoinHandle<io::Result<()>>>,
+) -> io::Result<Option<OutputReader>>
+where
+    R: io::Read + Send + 'static,
+{
+    pipe.map(|pipe| {
         let bytes = Arc::new(Mutex::new(Vec::new()));
         let retaining = Arc::new(AtomicBool::new(true));
         let captured = Arc::clone(&bytes);
         let capture_enabled = Arc::clone(&retaining);
-        let thread = thread::Builder::new().name(name.to_owned()).spawn(move || {
-            // The initialization value is not observed: `Read` initializes the reported prefix,
-            // and the unreported suffix is never copied into the capture.
-            // #[gamma::skip(literal.int_increment, reason = "the reader overwrites every byte in the reported prefix and the untouched suffix is never observed")]
-            let mut chunk = [0_u8; 8192];
-
-            loop {
-                let read = match pipe.read(&mut chunk) {
-                    Ok(read) => read,
-                    // #[gamma::skip(all, reason = "retrying every read error spins forever instead of terminating the output reader")]
-                    Err(cause) if cause.kind() == io::ErrorKind::Interrupted => continue,
-                    Err(cause) => return Err(cause),
-                };
-                // #[gamma::skip(all, reason = "failing to recognize EOF leaves the output reader blocked or spinning after the child exits")]
-                if read == 0 {
-                    return Ok(());
-                }
-
-                let mut captured = captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                if capture_enabled.load(Ordering::Acquire) {
-                    captured.extend_from_slice(&chunk[..read]);
-                }
-            }
-        })?;
+        let thread = spawn(pipe, captured, capture_enabled)?;
 
         Ok(OutputReader { thread, bytes, retaining })
     })
     .transpose()
+}
+
+fn read_output<R>(mut pipe: R, captured: &Mutex<Vec<u8>>, capture_enabled: &AtomicBool) -> io::Result<()>
+where
+    R: io::Read,
+{
+    // The initialization value is not observed: `Read` initializes the reported prefix,
+    // and the unreported suffix is never copied into the capture.
+    // #[gamma::skip(literal.int_increment, reason = "the reader overwrites every byte in the reported prefix and the untouched suffix is never observed")]
+    let mut chunk = [0_u8; 8192];
+
+    loop {
+        let read = match pipe.read(&mut chunk) {
+            Ok(read) => read,
+            // #[gamma::skip(all, reason = "retrying every read error spins forever instead of terminating the output reader")]
+            Err(cause) if cause.kind() == io::ErrorKind::Interrupted => continue,
+            Err(cause) => return Err(cause),
+        };
+        // #[gamma::skip(all, reason = "failing to recognize EOF leaves the output reader blocked or spinning after the child exits")]
+        if read == 0 {
+            return Ok(());
+        }
+
+        let mut captured = captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if capture_enabled.load(Ordering::Acquire) {
+            captured.extend_from_slice(&chunk[..read]);
+        }
+    }
 }
 
 fn discard_output_reader(reader: Option<&OutputReader>) {
@@ -1776,14 +1797,29 @@ fn start_sampler(child: &mut Child, guard: &SpawnGuard, group: i32, slot: usize)
 }
 
 /// Signals the retained group using the existing exited-leader handling.
+///
+/// On macOS, this first stops and ends every descendant found through its parent, which killing
+/// the group alone would leave running.
 #[cfg(unix)]
 // #[gamma::skip(all, reason = "This wrapper invokes actual process-group signalling; injected kill and cleanup decision helpers remain mutation-tested without fabricated native identities.", tag = "native-boundary")]
 fn sweep_group(group: Option<i32>, leader_exited: bool) -> io::Result<()> {
     group.map_or(Ok(()), |group| {
-        if leader_exited {
-            group::kill_after_exit(group)
-        } else {
-            group::kill(group)
+        let kill = || {
+            if leader_exited {
+                group::kill_after_exit(group)
+            } else {
+                group::kill(group)
+            }
+        };
+
+        #[cfg(target_os = "macos")]
+        {
+            descendants::sweep(group, kill)
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            kill()
         }
     })
 }
@@ -2056,6 +2092,21 @@ mod tests {
                 _ => Ok(0),
             }
         }
+    }
+
+    #[test]
+    fn nov7_output_reader_returns_thread_creation_errors() {
+        let mut spawns = 0;
+        let result = output_reader_with_spawn(Some(io::Cursor::new(Vec::<u8>::new())), |_, _, _| {
+            spawns += 1;
+            Err(io::Error::new(io::ErrorKind::PermissionDenied, "scripted thread-spawn refusal"))
+        });
+        assert_eq!(spawns, 1);
+        let Err(error) = result else {
+            panic!("expected the injected thread-spawn refusal");
+        };
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(error.to_string(), "scripted thread-spawn refusal");
     }
 
     #[test]

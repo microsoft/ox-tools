@@ -201,9 +201,10 @@ impl Collector<'_> {
                         path,
                     });
                     let types = self.types();
-                    if types.standard_constructor_root(&ty)
-                        && types.supports_collection_api(&ty)
-                        && types.standard_type_name(&ty).as_deref() == Some("Vec")
+                    if (
+                        // #[gamma::skip(logical.and_remove_left, tag = "equivalent", reason = "supports_collection_api independently rejects nongenuine or shadowed collection roots; retaining that conjunct gives the same Vec admission.")]
+                        types.standard_constructor_root(&ty) && types.supports_collection_api(&ty)
+                    ) && types.standard_type_name(&ty).as_deref() == Some("Vec")
                     {
                         let _prior = bindings.insert(name, Binding::Vec);
                         continue;
@@ -236,9 +237,10 @@ impl Collector<'_> {
                 let name = segment.ident.to_string();
                 self.generics.contains(&name) || self.defaulted.contains(&name)
             }));
-            if !abstract_root
-                && types.standard_constructor_root(&ty)
-                && types.supports_nonzero_api(&ty)
+            if (
+                // #[gamma::skip(logical.and_remove_right, tag = "equivalent", reason = "The following supports_nonzero_api check independently requires a genuine unshadowed standard root; this mutation still retains the abstract-root rejection.")]
+                !abstract_root && types.standard_constructor_root(&ty)
+            ) && types.supports_nonzero_api(&ty)
                 && types.standard_type_name(&ty).as_deref() == Some("NonZeroU32")
             {
                 let _prior = bindings.insert(name, Binding::Primitive(Primitive::Unsigned(32)));
@@ -255,7 +257,7 @@ mod tests {
     use super::*;
     use crate::cfg::CfgSet;
     use crate::ops::collect::Defaults;
-    use crate::ops::collect::collector::indexes::block_id;
+    use crate::ops::collect::collector::indexes::{ABSOLUTE_ROOT, EXTERN_ROOT_PREFIX, block_id};
     use crate::ops::registry::Selection;
     use crate::parse::SourceFile;
 
@@ -412,7 +414,7 @@ mod tests {
     }
 
     #[test]
-    fn absolute_nonzero_type_still_requires_unshadowed_standard_root_evidence() {
+    fn absolute_nonzero_type_bypasses_local_shadows_but_rejects_foreign_roots() {
         with_loop(
             "fn run(n: ::std::num::NonZeroU32){let n=n.get();while ready{}}",
             |collector, expression| {
@@ -423,6 +425,16 @@ mod tests {
                     HashMap::from_iter([("n".into(), Binding::Primitive(Primitive::Unsigned(32)))])
                 );
                 collector.root_imports.insert("std".into(), None);
+                let mut bindings = HashMap::default();
+                collector.resource_source_bindings(expression, &mut bindings);
+                assert_eq!(
+                    bindings,
+                    HashMap::from_iter([("n".into(), Binding::Primitive(Primitive::Unsigned(32)))])
+                );
+                collector.root_imports.insert(
+                    format!("{EXTERN_ROOT_PREFIX}std"),
+                    Some(vec![ABSOLUTE_ROOT.into(), "foreign".into()]),
+                );
                 let mut bindings = HashMap::default();
                 collector.resource_source_bindings(expression, &mut bindings);
                 assert_eq!(bindings, HashMap::default());
@@ -498,7 +510,7 @@ mod tests {
     }
 
     #[test]
-    fn absolute_vector_constructor_does_not_bypass_shadowed_standard_root_evidence() {
+    fn absolute_vector_constructor_bypasses_local_shadows_but_rejects_foreign_roots() {
         with_loop(
             "fn run(){let rows=::std::vec::Vec::new();let later=7;while ready{}}",
             |collector, expression| {
@@ -507,6 +519,16 @@ mod tests {
                     .entry(collector.scope_path.clone())
                     .or_default()
                     .insert("std".into(), None);
+                let mut bindings = HashMap::default();
+                collector.resource_source_bindings(expression, &mut bindings);
+                assert_eq!(
+                    bindings,
+                    HashMap::from_iter([("rows".into(), Binding::Vec), ("later".into(), Binding::Integer)])
+                );
+                collector.scope_imports.entry(collector.scope_path.clone()).or_default().insert(
+                    format!("{EXTERN_ROOT_PREFIX}std"),
+                    Some(vec![ABSOLUTE_ROOT.into(), "foreign".into()]),
+                );
                 let mut bindings = HashMap::default();
                 collector.resource_source_bindings(expression, &mut bindings);
                 assert_eq!(bindings, HashMap::from_iter([("later".into(), Binding::Integer)]));
