@@ -84,10 +84,10 @@ function Write-Detail([string]$Message) {
 
 function Assert-That([string]$Name, [bool]$Condition, [string]$Detail = '') {
     if ($Condition) {
-        $script:Passed = [int]$script:Passed + 1
+        $script:Passed++
         Write-Host "  [PASS] $Name" -ForegroundColor Green
     } else {
-        $script:Failed = [int]$script:Failed + 1
+        $script:Failed++
         Write-Host "  [FAIL] $Name" -ForegroundColor Red
         if ($Detail) { Write-Detail $Detail }
     }
@@ -954,16 +954,27 @@ function Anvil-PrepareEnv {
         @{ FIXTURE_TOKEN = 'synthetic-wrong-token' } | Out-Null
     Write-Fixture (Join-Path $repo 'incomplete-cache.ps1') @'
 $ErrorActionPreference = 'Stop'
-Remove-Item -LiteralPath "$env:CARGO_HOME/registry/cache", "$env:CARGO_HOME/registry/src" -Recurse -Force
+if ($env:CARGO_NET_OFFLINE -ne 'true') { throw 'validation must be offline' }
+foreach ($name in @('CARGO_REGISTRIES_FIXTURE_TOKEN', 'FIXTURE_SECOND_CREDENTIAL')) {
+    if ($null -ne [Environment]::GetEnvironmentVariable($name)) { throw 'preparation environment survived' }
+}
+if (-not (Test-Path -LiteralPath "$env:CARGO_HOME/registry/cache")) { throw 'prepared archive cache is missing' }
+foreach ($directory in @("$env:CARGO_HOME/registry/cache", "$env:CARGO_HOME/registry/src")) {
+    if (Test-Path -LiteralPath $directory) { Remove-Item -LiteralPath $directory -Recurse -Force }
+}
 & cargo test --locked
-exit $LASTEXITCODE
+$status = $LASTEXITCODE
+if ($status -eq 0) { throw 'incomplete dependency caches unexpectedly succeeded' }
+Write-Output 'OFFLINE_DEPENDENCY_CACHE_REJECTED'
+exit $status
 '@
     $incomplete = Invoke-PreparedCase 'an incomplete cache fails offline without credential reacquisition' @('pwsh', '-File', '/workspace/incomplete-cache.ps1') $false
-    Assert-That 'the incomplete-cache failure is from Cargo offline enforcement' `
-        ("$($incomplete.StdOut)$($incomplete.StdErr)".Contains('--offline'))
+    Assert-That 'Cargo rejects the missing dependency cache with offline enabled and no credentials' `
+        ($incomplete.StdOut.Contains('OFFLINE_DEPENDENCY_CACHE_REJECTED') -and $incomplete.StdErr.Contains('failed to download')) `
+        "$($incomplete.StdOut)`n$($incomplete.StdErr)"
     Write-Fixture (Join-Path $repo 'validation-failure.ps1') 'exit 23'
-    $failed = Invoke-PreparedCase 'a validation failure cleans up' @('pwsh', '-File', '/workspace/validation-failure.ps1') $false
-    Assert-Equal 'validation exit status is preserved' 23 $failed.ExitCode
+    $validationFailure = Invoke-PreparedCase 'a validation failure cleans up' @('pwsh', '-File', '/workspace/validation-failure.ps1') $false
+    Assert-Equal 'validation exit status is preserved' 23 $validationFailure.ExitCode
 
     Write-Section '12. Preparation suppresses workspace compiler and native-loader callbacks'
     Write-Fixture (Join-Path $repo 'compiler-probe.sh') @'
