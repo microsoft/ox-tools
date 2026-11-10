@@ -364,6 +364,7 @@ pub(super) fn dispatch<H: Host>(host: &mut H, cli: Cli, styler: Styler) -> crate
                 return Ok(code);
             }
             #[cfg(target_os = "linux")]
+            // #[gamma::skip(try.propagate_to_unwrap, reason = "This call reaches native saved-state and process-replacement adapters; scripted hosts refuse replacement, while resume_relaunch_with tests checkpoint and delegation error propagation without relaunching the harness.", tag = "native-boundary")]
             if args.resume_testing
                 && let Some(code) = super::run::resume_relaunch(host, &args)?
             {
