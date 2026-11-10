@@ -57,12 +57,13 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$ErrorView = 'NormalView'
 Set-StrictMode -Version Latest
 
 # ---------------------------------------------------------------- reporting --
 
-$script:Passed = 0
-$script:Failed = 0
+[int]$script:Passed = 0
+[int]$script:Failed = 0
 $script:Started = Get-Date
 
 function Write-Section([string]$Title) {
@@ -83,10 +84,10 @@ function Write-Detail([string]$Message) {
 
 function Assert-That([string]$Name, [bool]$Condition, [string]$Detail = '') {
     if ($Condition) {
-        $script:Passed++
+        $script:Passed = [int]$script:Passed + 1
         Write-Host "  [PASS] $Name" -ForegroundColor Green
     } else {
-        $script:Failed++
+        $script:Failed = [int]$script:Failed + 1
         Write-Host "  [FAIL] $Name" -ForegroundColor Red
         if ($Detail) { Write-Detail $Detail }
     }
@@ -750,7 +751,15 @@ function Assert-PreparedCleanup([string]$Case) {
         (-not (($containers -split "`r?`n") | Where-Object { $_ -like "$imagePrefix-prepare-*" }))
 }
 
+function Clear-CompilerQueryCache {
+    # Cargo persists failed -vV queries too. A positive control's deliberate
+    # failure must not masquerade as a callback in the later credential-free run.
+    $cache = Join-Path $repo 'target/.rustc_info.json'
+    if (Test-Path -LiteralPath $cache) { Remove-Item -LiteralPath $cache -Force }
+}
+
 function Invoke-PreparedCase([string]$Case, [string[]]$Command, [bool]$Succeeds = $true, [hashtable]$ExtraEnvironment = @{}) {
+    Clear-CompilerQueryCache
     $before = if (Test-Path -LiteralPath $acquisitions) { @(Get-Content -LiteralPath $acquisitions).Count } else { 0 }
     $environment = @{
         FIXTURE_IMAGE = $preparedImage
@@ -1018,6 +1027,7 @@ Write-Output "IMAGE_HOST:$hostTriple"
     }
     foreach ($case in $callbackCases.Keys) {
         Write-Fixture $configPath ($baseConfig + "`n" + $callbackCases[$case] + "`n")
+        Clear-CompilerQueryCache
         $control = Invoke-Engine -Arguments @('run', '--rm', '-v', "${engineRepo}:/workspace", '-w', '/workspace',
             '-e', "CARGO_REGISTRIES_FIXTURE_TOKEN=$fixtureToken", '-e', 'RUSTC_BOOTSTRAP=1',
             $preparedImage, 'cargo', 'fetch', '--locked') -AllowFailure
