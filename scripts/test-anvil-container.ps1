@@ -1056,6 +1056,7 @@ Write-Output "IMAGE_HOST:$hostTriple"
 
     Write-Section '13. Cache leak rejection and incomplete inspection'
     Write-Fixture (Join-Path $repo 'fixture-provider.ps1') @'
+#!/usr/bin/env pwsh
 $ErrorActionPreference = 'Stop'
 [Console]::Out.WriteLine('{"v":[1]}')
 $request = [Console]::In.ReadLine() | ConvertFrom-Json
@@ -1078,7 +1079,9 @@ switch ($mode) {
     Ok = @{ kind = 'get'; token = $env:CARGO_REGISTRIES_FIXTURE_TOKEN; 'cache' = 'session'; 'operation_independent' = $true }
 }))
 '@
-    $providerConfig = $baseConfig.Replace('["cargo:token"]', '["pwsh -NoLogo -NoProfile -File /workspace/fixture-provider.ps1"]')
+    Invoke-Engine -Arguments @('run', '--rm', '-v', "${engineRepo}:/workspace",
+        $preparedImage, 'chmod', '+x', '/workspace/fixture-provider.ps1') | Out-Null
+    $providerConfig = $baseConfig.Replace('["cargo:token"]', '["/workspace/fixture-provider.ps1"]')
     Write-Fixture $configPath $providerConfig
     Write-Fixture (Join-Path $repo 'fixture-leak-mode') 'clean'
     Invoke-PreparedCase 'the trusted authentication provider works without injecting a leak' `
