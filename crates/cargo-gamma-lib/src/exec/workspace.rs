@@ -6150,15 +6150,28 @@ mod tests {
         crate::testing::with_cache_home_at(base.with_file_name("home"), || {
             let target = source.join("target");
             let _claims = claim_cache(&source, &target, None).expect("preclaimed default caches are private under any umask");
-            for base in [gamma_base(&source, None), campaign_base(&source, &target, None)] {
-                let mode = fs::metadata(&base).expect("the preclaimed cache metadata").permissions().mode();
-                assert_eq!(mode & 0o077, 0, "the preclaimed cache mode {mode:o} grants group or other access");
-            }
+            let mode = fs::metadata(gamma_base(&source, None))
+                .expect("the preclaimed cache metadata")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o077, 0, "the preclaimed cache mode {mode:o} grants group or other access");
         });
 
-        fs::set_permissions(&base, fs::Permissions::from_mode(0o750)).expect("the existing cache permissions");
-        create_private_dir_all(&base).expect("an existing directory is retained");
-        assert_eq!(fs::metadata(&base).unwrap().permissions().mode() & 0o777, 0o750);
+        crate::testing::with_cache_home_at(base.with_file_name("campaign-home"), || {
+            let target = source.join("target");
+            let campaign = campaign_base(&source, &target, None);
+            assert!(!campaign.exists(), "campaign creation must not inherit a workspace preclaim");
+            claim_default_campaign_cache(&source, &target, &campaign).expect("a new campaign cache is private under any umask");
+            let mode = fs::metadata(&campaign).expect("the campaign cache metadata").permissions().mode();
+            assert_eq!(mode & 0o077, 0, "the campaign cache mode {mode:o} grants group or other access");
+        });
+
+        #[cfg(feature = "system-tests")]
+        {
+            fs::set_permissions(&base, fs::Permissions::from_mode(0o750)).expect("the existing cache permissions");
+            create_private_dir_all(&base).expect("an existing directory is retained");
+            assert_eq!(fs::metadata(&base).unwrap().permissions().mode() & 0o777, 0o750);
+        }
     }
 
     /// A cache reached through a link is a cache whose identity can be changed after it has been
