@@ -901,7 +901,7 @@ mod tests {
     }
 
     #[test]
-    fn directory_sync_preserves_inspection_and_removal_failures() {
+    fn directory_sync_preserves_inspection_failures() {
         let destination = Utf8Path::new("in-memory-sync-directory");
         let inspection = sync_directory_with(
             destination,
@@ -911,7 +911,11 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(inspection.message(), "could not inspect `in-memory-sync-directory`");
+    }
 
+    #[test]
+    fn directory_sync_preserves_removal_failures() {
+        let destination = Utf8Path::new("in-memory-sync-directory");
         let removal = sync_directory_with(
             destination,
             || Ok(false),

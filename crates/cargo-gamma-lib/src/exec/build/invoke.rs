@@ -143,7 +143,7 @@ pub(super) fn supervise_with_limits(
 
 /// Supervises an already-adopted build tree with bounded output.
 #[cfg_attr(coverage_nightly, coverage(off))]
-pub(super) fn supervise_tree(
+fn supervise_tree(
     mut subtree: ProcessTree,
     work: &Workspace,
     budget: Option<Duration>,
@@ -442,7 +442,7 @@ pub(super) struct OutputLimits {
 }
 
 /// The normal build-output budget, per stream.
-pub(super) const OUTPUT_LIMITS: OutputLimits = OutputLimits {
+const OUTPUT_LIMITS: OutputLimits = OutputLimits {
     retained: 256 * 1024 * 1024,
     line: 1024 * 1024,
     backlog: 64,
