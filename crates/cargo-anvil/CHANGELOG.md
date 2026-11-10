@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.25.1] - 2026-11-06
+
+- 🐛 Bug Fixes
+
+  - cargo-anvil: adopt cargo-coverage-gate 0.7.5 ([#350](https://github.com/microsoft/ox-tools/pull/350))
+
 ## [0.25.0] - 2026-11-04
 
 - ⚡ Performance
