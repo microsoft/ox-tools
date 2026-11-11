@@ -511,23 +511,21 @@ fn spawn_once(prepared: PreparedCommand) -> Result<SpawnedCommand, FailedSpawn<P
 /// `EAGAIN` for the process table, `EMFILE` and `ENFILE` for this process's and the system's
 /// descriptor tables, `ENOMEM` for the address space a fork needs. Everything else — a binary that
 /// is not there, one that is not executable — is a standing fact that no amount of waiting changes.
+#[cfg(unix)]
 fn transient(cause: &io::Error) -> bool {
     if cause.kind() == io::ErrorKind::WouldBlock || cause.kind() == io::ErrorKind::Interrupted {
         return true;
     }
 
-    #[cfg(unix)]
-    {
-        matches!(
-            cause.raw_os_error(),
-            Some(libc::EAGAIN | libc::EMFILE | libc::ENFILE | libc::ENOMEM)
-        )
-    }
+    matches!(
+        cause.raw_os_error(),
+        Some(libc::EAGAIN | libc::EMFILE | libc::ENFILE | libc::ENOMEM)
+    )
+}
 
-    #[cfg(not(unix))]
-    {
-        false
-    }
+#[cfg(not(unix))]
+fn transient(cause: &io::Error) -> bool {
+    matches!(cause.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted)
 }
 
 /// Which second look a verdict calls for, or `None` for one that is already evidence.
