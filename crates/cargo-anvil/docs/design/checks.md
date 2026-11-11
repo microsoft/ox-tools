@@ -153,6 +153,35 @@ Loom support without a matching test target fails. No Loom targets means a
 successful skip. Anvil supplies no global exploration bound; each model must
 bound its own search.
 
+#### Miri workload scope
+
+For Anvil itself, repeated substring scans of embedded pipeline and recipe text are
+native/`cargo careful` contracts, not execution of the generated scripts. Expensive
+instances have individual Miri ignores; artifact construction, rendering, and focused
+recipe checks remain interpreted. Parser byte boundaries, Unicode handling, region
+splicing, and in-memory update planning retain Miri coverage in every profile.
+These exclusions do not disable native tests, mutation testing, or any unsafe/concurrency
+tests in the workspace.
+
+The planner's exhaustive resolver-failure, multi-deletion adoption, neighbor-order,
+ownership-migration and cross-host policy scenarios run natively and under
+`cargo careful`, rather than repeating complete parse/plan/settle cycles in every
+Miri profile. Focused cache/error, lexical, adoption, TOML/JSON splicing and
+in-memory planning tests remain interpreted. The TOML planner lifecycle remains
+complete; the JSON lifecycle uses CRLF under Miri and all three newline forms
+natively. Dedicated lexical and byte-boundary tests still interpret LF, CRLF,
+bare CR and Unicode inputs.
+
+Dependabot's large merge-policy and formatting matrices also remain native/
+`cargo careful` contracts. Small block and flow patching round trips, including
+BOM/Unicode/CRLF preservation, malformed input, alias cycles and completed-lookup
+cache cleanup stay in Miri. Catalog-builder tests use a small nonempty catalog
+instead of repeatedly cloning and hashing every embedded workflow; native tests
+still verify the full built-in catalog. No Miri profile or workspace unsafe/
+concurrency test is removed. The scheduled job target is under two hours on each
+supported platform, measured across the complete job rather than interpreter-
+reported per-test time.
+
 ### `pr-fuzzing`
 
 Bolero runs discovered libfuzzer targets on Linux with the catalog nightly and

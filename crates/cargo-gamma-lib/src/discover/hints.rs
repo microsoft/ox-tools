@@ -1027,7 +1027,9 @@ fn existing_text(path: &Utf8Path) -> Result<Option<String>> {
                 },
                 |text| Ok(Some(text)),
             ),
+        // #[gamma::skip(match_guard.always_true, reason = "This adapter reads an actual existing hints file; permission/read failures need the deferred native-read backend.", tag = "native-boundary")]
         Err(cause) if cause.kind() == ErrorKind::NotFound => Ok(None),
+        // #[gamma::skip(result.err_to_ok, reason = "A non-NotFound native read refusal requires the deferred file-read backend; parsed hints policy remains mutation-tested.", tag = "native-boundary")]
         Err(cause) => Err(error!("`{path}` is already there and could not be read, so it must not be replaced").caused_by(cause)),
     }
 }

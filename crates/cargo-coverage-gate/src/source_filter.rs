@@ -5806,6 +5806,31 @@ mod tests {
     }
 
     #[test]
+    fn skipping_a_compiler_section_preserves_later_workspace_sections() {
+        let compiler = Path::new("a-compiler.rs");
+        let workspace = Path::new("z-workspace.rs");
+        let input = format!("{}{}", lcov_section(compiler, &[(1, 1)]), lcov_section(workspace, &[(1, 3)]));
+        let test_only = BTreeSet::new();
+        let mut classified = Vec::new();
+        let output = filter_report_with(parse_lcov(&input), None, |path| {
+            classified.push(path.to_owned());
+            if path == compiler {
+                Ok(SourceDisposition::CompilerLibrary)
+            } else {
+                assert_eq!(path, workspace);
+                Ok(SourceDisposition::Include {
+                    source_file: workspace.to_owned(),
+                    line_count: 1,
+                    test_only_lines: &test_only,
+                })
+            }
+        })
+        .unwrap();
+        assert_eq!(classified, [compiler, workspace]);
+        assert_eq!(output, "TN:\nSF:z-workspace.rs\nDA:1,3\nLF:1\nLH:1\nend_of_record\n");
+    }
+
+    #[test]
     fn report_filtering_propagates_controlled_resolution_failure_before_classification() {
         let missing = PathBuf::from("synthetic-missing.rs");
         let index = SourceIndex {

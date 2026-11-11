@@ -879,6 +879,7 @@ fn run_report(execution: &CollectionExecution<'_>, configuration: FeatureConfigu
         execution.quiet,
         &display,
         lcov_path,
+        // #[gamma::skip(bool_expr.negate, reason = "This native subprocess wrapper selects the host's fallback capability; supplied-output tests cover both policy choices without executing cargo.", tag = "native-boundary")]
         cfg!(windows),
         forward_output,
         |output, quiet| forward_stdout_to(output, quiet, &mut io::stdout()),
@@ -896,6 +897,7 @@ fn run_report(execution: &CollectionExecution<'_>, configuration: FeatureConfigu
             #[cfg(not(windows))]
             {
                 let _ = (execution, configuration, lcov_path, arguments);
+                // #[gamma::skip(result.err_to_ok, literal.str_to_empty, literal.str_to_xyzzy, reason = "With allow_windows_fallback false on non-Windows, handle_report_output_with cannot return WindowsFallback, so this defensive arm is unreachable.", tag = "equivalent")]
                 Err(AppError::new("Windows response-file fallback was requested on a non-Windows host"))
             }
         }
@@ -1241,6 +1243,7 @@ fn execute_windows_export(
     let mut command = Command::new(llvm_cov);
     // #[gamma::skip(call_result.default, reason = "configure_windows_export_command returns unit; command configuration still executes and () is replaced with ()")]
     configure_windows_export_command(&mut command, workspace_root, response);
+    // #[gamma::skip(stmt.delete_call, reason = "This redirects a native subprocess into an owning file; command-policy tests do not observe spawned-process output routing.", tag = "native-boundary")]
     command.stdout(Stdio::from(output_file));
     let display = command_display(&command);
     let output = command.output().into_app_err(format!("failed to execute `{display}`"))?;
@@ -1355,6 +1358,7 @@ impl TemporaryDirectory {
 
     fn cleanup_with(mut self, remove: impl FnOnce(&Path) -> io::Result<()>) -> Result<(), AppError> {
         // Windows explicit cleanup owns the full attempt budget; other platforms retain the Drop fallback.
+        // #[gamma::skip(stmt.delete_assign, reason = "The alternate assignment changes native Drop cleanup after an explicit removal failure; observing it needs the deferred owned-directory cleanup backend.", tag = "native-boundary")]
         self.armed = !cfg!(windows);
         let result = remove(&self.path);
         let context = cleanup_error_context(&self.path, result.as_ref().err());
@@ -1362,19 +1366,19 @@ impl TemporaryDirectory {
     }
 }
 
+#[cfg(windows)]
 fn cleanup_error_context(path: &Path, error: Option<&io::Error>) -> String {
-    #[cfg(windows)]
     let guidance = if error.is_some_and(|error| error.raw_os_error() == Some(32)) {
         "; release any process handles to this directory and retry cleanup"
     } else {
         ""
     };
-    #[cfg(not(windows))]
-    let guidance = {
-        let _ = error;
-        ""
-    };
     format!("failed to remove isolated coverage target `{}`{guidance}", path.display())
+}
+
+#[cfg(not(windows))]
+fn cleanup_error_context(path: &Path, _: Option<&io::Error>) -> String {
+    format!("failed to remove isolated coverage target `{}`", path.display())
 }
 
 impl Drop for TemporaryDirectory {
@@ -3361,6 +3365,27 @@ mod tests {
         )
         .expect_err("failure forwarding error must propagate");
         assert_eq!(ordinary_forward_error.to_string(), "failure forwarding failed");
+    }
+
+    #[test]
+    fn enabling_windows_fallback_does_not_reclassify_an_ordinary_report_failure() {
+        let output = process_output(false, b"", b"ordinary report failure");
+        let error = handle_report_output_with(
+            &output,
+            false,
+            "cargo report",
+            Path::new("lcov.info"),
+            true,
+            |_, _| Ok(()),
+            |_, _| panic!("ordinary failure must not use no-data forwarding"),
+            |_| panic!("ordinary failure must not write an empty report"),
+        )
+        .expect_err("ordinary failure must not request the Windows fallback");
+        #[cfg(windows)]
+        let expected = "cargo llvm-cov report failed: `cargo report` exited with exit code: 1";
+        #[cfg(unix)]
+        let expected = "cargo llvm-cov report failed: `cargo report` exited with exit status: 1";
+        assert_eq!(error.to_string(), expected);
     }
 
     #[test]

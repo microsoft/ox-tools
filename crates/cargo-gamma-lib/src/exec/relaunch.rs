@@ -61,6 +61,7 @@ pub(crate) enum Refusal {
 
 /// Whether this process is the result of a relaunch.
 #[cfg_attr(coverage_nightly, coverage(off))]
+// #[gamma::skip(all, reason = "This adapter reads process-wide environment state; the recursion guard is mutation-tested through relaunch_unless without changing shared environment.", tag = "native-boundary")]
 pub(crate) fn relaunched() -> bool {
     env::var_os(MARKER).is_some()
 }
@@ -92,7 +93,11 @@ fn scope_command(exe: OsString, args: Vec<OsString>) -> Command {
         .arg("--")
         .arg(exe)
         .args(args)
-        .env(MARKER, "1");
+        .env(
+            MARKER,
+            // #[gamma::skip(literal.str_to_xyzzy, reason = "The recursion guard observes only marker presence; substituting another nonempty opaque value preserves relaunch prevention.", tag = "equivalent")]
+            "1",
+        );
 
     command
 }
@@ -103,8 +108,9 @@ fn scope_command(exe: OsString, args: Vec<OsString>) -> Command {
 /// An `Err` means the relaunch was attempted and failed, which is worth reporting rather than
 /// swallowing: the user asked for a bound, something was supposed to provide it, and it did not.
 #[cfg_attr(coverage_nightly, coverage(off))]
+// #[gamma::skip(all, reason = "This native wrapper can re-execute the harness; the shared relaunch_unless guard and scope_command arguments remain mutation-tested without spawning.", tag = "native-boundary")]
 pub(crate) fn relaunch() -> Result<Option<i32>, Refusal> {
-    relaunch_unless(relaunched())
+    relaunch_unless(relaunched(), relaunch_in_scope)
 }
 
 /// Relaunches unless this process is already the relaunched one.
@@ -112,12 +118,17 @@ pub(crate) fn relaunch() -> Result<Option<i32>, Refusal> {
 /// The guard is a parameter rather than a call so that the recursion case can be tested without
 /// setting an environment variable, which in a threaded test binary is a change every other test
 /// sees.
-#[cfg_attr(coverage_nightly, coverage(off))]
-fn relaunch_unless(marked: bool) -> Result<Option<i32>, Refusal> {
+fn relaunch_unless(marked: bool, attempt: impl FnOnce() -> Result<Option<i32>, Refusal>) -> Result<Option<i32>, Refusal> {
     if marked {
         return Err(Refusal::AlreadyInScope);
     }
 
+    attempt()
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+// #[gamma::skip(all, reason = "Real executable discovery, argv and systemd-run status require environment/process injection; executing this adapter under a harness can recursively relaunch tests.", tag = "native-boundary")]
+fn relaunch_in_scope() -> Result<Option<i32>, Refusal> {
     let Ok(exe) = env::current_exe() else {
         return Err(Refusal::Unavailable);
     };
@@ -145,6 +156,7 @@ fn relaunch_unless(marked: bool) -> Result<Option<i32>, Refusal> {
 /// Hand-rolled rather than taken from a crate, because the question is small and asking it wrongly
 /// is cheap: a false negative means no relaunch and the old behaviour, and a false positive means
 /// a spawn that fails and is handled.
+// #[gamma::skip(all, reason = "This adapter combines the process PATH with real filesystem metadata; deterministic coverage requires the deferred environment/filesystem seam.", tag = "native-boundary")]
 fn which(program: &str) -> Option<std::path::PathBuf> {
     let paths = env::var_os("PATH")?;
 
@@ -170,13 +182,20 @@ mod tests {
         let args: Vec<_> = command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect();
 
         assert_eq!(command.get_program(), "systemd-run");
-        assert!(args.contains(&"--user".to_owned()), "{args:?}");
-        assert!(args.contains(&"--scope".to_owned()), "{args:?}");
-        assert!(args.contains(&"--property=Delegate=yes".to_owned()), "{args:?}");
-
         // The executable and its arguments must follow the separator, or a leading `-` in the
         // forwarded command line would be parsed as an option to `systemd-run`.
         let separator = args.iter().position(|arg| arg == "--").expect("a separator");
+        for required in [
+            "--user",
+            "--scope",
+            "--property=Delegate=yes",
+            "--property=MemoryAccounting=yes",
+            "--quiet",
+            "--collect",
+            "--same-dir",
+        ] {
+            assert!(args[..separator].iter().any(|arg| arg == required), "missing {required}: {args:?}");
+        }
         assert_eq!(args[separator + 1], "/opt/cargo-gamma");
         assert_eq!(args[separator + 2..], ["gamma", "run"]);
     }
@@ -197,7 +216,28 @@ mod tests {
     /// each generation would print the same note and start the same run.
     #[test]
     fn a_process_already_inside_a_scope_refuses_to_relaunch_again() {
-        assert_eq!(relaunch_unless(true), Err(Refusal::AlreadyInScope));
+        let attempted = core::cell::Cell::new(false);
+        let result = relaunch_unless(true, || {
+            attempted.set(true);
+            Err(Refusal::Unavailable)
+        });
+
+        assert_eq!(result, Err(Refusal::AlreadyInScope));
+        assert!(!attempted.get(), "an already-marked process must not attempt a relaunch");
+    }
+
+    #[test]
+    fn an_unmarked_process_attempts_relaunch_once_and_preserves_its_result() {
+        let attempts = core::cell::Cell::new(0);
+        let result = relaunch_unless(false, || {
+            attempts.set(attempts.get() + 1);
+            Ok(Some(23))
+        });
+
+        assert_eq!(result, Ok(Some(23)));
+        assert_eq!(attempts.get(), 1);
+        assert_eq!(relaunch_unless(false, || Ok(None)), Ok(None));
+        assert_eq!(relaunch_unless(false, || Err(Refusal::Unavailable)), Err(Refusal::Unavailable));
     }
 
     /// A program that is not on `PATH` must not be reported as found, or the relaunch spawns

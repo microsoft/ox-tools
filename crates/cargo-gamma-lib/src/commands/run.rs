@@ -572,6 +572,7 @@ fn finish_run<H: Host>(host: &mut H, args: &RunArgs, styler: Styler, executed: E
 }
 
 #[cfg(target_os = "linux")]
+// #[gamma::skip(all, reason = "This adapter reads live delegation and saved filesystem state before native process replacement; resume_relaunch_with retains scripted policy and refusal coverage.", tag = "native-boundary")]
 pub(super) fn resume_relaunch<H: Host>(host: &H, args: &RunArgs) -> crate::Result<Option<i32>> {
     resume_relaunch_with(
         args,

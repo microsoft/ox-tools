@@ -509,6 +509,19 @@ mod survivor_tests {
     use super::*;
 
     #[test]
+    fn an_inventoried_absolute_rust_path_needs_no_filesystem_probe() {
+        let root = Utf8Path::new(if cfg!(windows) { r"C:\workspace" } else { "/workspace" });
+        let relative = Utf8Path::new("src/selected.rs");
+        let absolute = root.join(relative);
+        assert_eq!(
+            locate_with(&absolute, &absolute, root, &HashSet::from_iter([relative]), &[], |_| {
+                panic!("an inventoried Rust source must not need a filesystem probe")
+            }),
+            Some(relative.to_owned())
+        );
+    }
+
+    #[test]
     fn recovered_diff_location_continues_from_an_untracked_absolute_path_to_the_raw_path() {
         let root = Utf8Path::new(if cfg!(windows) { r"C:\workspace" } else { "/workspace" });
         let absolute = root.join("untracked.rs");

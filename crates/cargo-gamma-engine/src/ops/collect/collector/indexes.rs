@@ -898,7 +898,6 @@ impl<'ast> Visit<'ast> for Walk<'_> {
     /// `visit_item_static`, keeps one skipped item from reaching any of them.
     fn visit_item(&mut self, node: &'ast Item) {
         if !self.cfg.skip_gate(item_attrs(node)) {
-            self.on_local_attributes(item_attrs(node));
             if let Item::Mod(module) = node {
                 self.on_item_mod(module);
             }

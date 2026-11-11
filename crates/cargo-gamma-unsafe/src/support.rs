@@ -22,6 +22,7 @@ use crate::Situation;
 /// a Unix that is neither Linux nor macOS. This classification describes a host-wide capability limitation
 /// rather than the failure of one launch.
 #[cfg(target_os = "linux")]
+// #[gamma::skip(fn_value.ok, reason = "This adapter classifies the cached native cgroup delegation; controlling supported and unsupported hosts needs the deferred discovery backend.", tag = "native-boundary")]
 pub fn support() -> Result<(), PlatformError> {
     crate::cgroup::root()
         .map(|_root| ())

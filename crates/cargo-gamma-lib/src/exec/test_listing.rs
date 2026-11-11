@@ -385,8 +385,6 @@ fn finish_listing_with(
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    #[cfg(unix)]
-    use std::fs;
     use std::io::Read;
     #[cfg(unix)]
     use std::os::unix::process::ExitStatusExt as _;
@@ -394,8 +392,6 @@ mod tests {
     use std::os::windows::process::ExitStatusExt as _;
 
     use camino::Utf8Path;
-    #[cfg(unix)]
-    use camino::Utf8PathBuf;
     use cargo_gamma_process::faults::{self as process_faults, Fault as ProcessFault};
 
     use super::*;
@@ -1094,46 +1090,39 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
-    #[cfg_attr(miri, ignore = "requires native subprocess execution and containment")]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn an_escaped_descendant_holding_listing_stdout_does_not_outlive_the_listing_budget() {
-        if !std::process::Command::new("setsid")
-            .arg("true")
-            .status()
-            .is_ok_and(|status| status.success())
-        {
-            eprintln!("skipping escaped-descendant fixture because `setsid` is unavailable");
-            return;
-        }
-
-        let directory = crate::testing::workdir("listing-escaped-listing-");
-        let marker = Utf8PathBuf::from_path_buf(directory.path().join("escaped.pid")).expect("UTF-8 path");
-        let mut command = std::process::Command::new("/bin/sh");
-        let script = format!("setsid sh -c 'echo $$ > \"{marker}\"; sleep 5' & while [ ! -s \"{marker}\" ]; do sleep 0.01; done");
-
-        let _ = command.args(["-c", &script]);
-
+        let mut process = MemoryListingProcess {
+            observations: std::collections::VecDeque::from([Ok(Some(recovered_listing_status()))]),
+            terminated: 0,
+        };
         let started = Instant::now();
-        let names = listed(command, Duration::from_millis(100));
+        let mut clocks = std::collections::VecDeque::from([started, started + LIST_BUDGET, started + LIST_BUDGET]);
+        let (sender, receiver) = listing_output_channel();
+        let (errors, stderr) = listing_output_channel();
+        errors.try_send((Vec::new(), None)).unwrap();
 
-        for _attempt in 0..20 {
-            if marker.as_std_path().exists() {
-                break;
-            }
-
-            thread::sleep(Duration::from_millis(10));
-        }
-
-        let pid = fs::read_to_string(marker.as_std_path()).expect("the escaped descendant started");
-        let _stopped = std::process::Command::new("kill").args(["-TERM", pid.trim()]).status();
-
-        assert!(names.is_none(), "an incomplete listing was accepted: {names:?}");
-        assert!(
-            started.elapsed() < Duration::from_secs(1),
-            "the listing waited for an escaped pipe holder: {:?}",
-            started.elapsed()
+        // A live sender with no output models a reader whose escaped pipe holder has not exited.
+        let names = finish_listing(
+            &mut process,
+            &receiver,
+            &stderr,
+            LIST_BUDGET,
+            || {
+                clocks
+                    .pop_front()
+                    .expect("listing may only query the start and each stream's remaining output budget")
+            },
+            |_| panic!("an exited listing leader must not poll"),
         );
+
+        assert_eq!(
+            names.unwrap_err().message(),
+            "test enumeration failed: stdout: output collection did not complete: timed out waiting on channel\n\nTest Stderr\n(no output)"
+        );
+        assert!(clocks.is_empty());
+        assert!(process.observations.is_empty());
+        assert_eq!(process.terminated, 0);
+        sender.try_send((b"late: test\n".to_vec(), None)).unwrap();
     }
 
     #[test]

@@ -124,6 +124,7 @@ fn run_if_requested_with<I: IntoIterator<Item = OsString>>(
 pub(crate) fn reset_capture_directory(directory: &camino::Utf8Path) -> bool {
     match fs::remove_dir_all(directory.as_std_path()) {
         Ok(()) => {}
+        // #[gamma::skip(match_guard.always_true, reason = "This branch handles native capture-directory removal failures; deterministic permission refusals need the deferred directory-operation backend.", tag = "native-boundary")]
         Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => {}
         Err(_cause) => return false,
     }

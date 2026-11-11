@@ -55,6 +55,7 @@ pub fn write(path: &Utf8Path, contents: &str) -> Result<()> {
     // the staging file is a sibling of the file the rename will actually touch. A dangling link
     // still has a destination: creating through it must preserve the link rather than replace it.
     let destination = crate::paths::physical(path)?;
+    // #[gamma::skip(try.propagate_to_unwrap, reason = "This native wrapper creates publication parents before using the injected publication policy; a deterministic mkdir refusal needs the deferred complete filesystem adapter.", tag = "native-boundary")]
     create_parents(&destination)?;
 
     replace(path, &destination, write_bytes(contents))
@@ -74,6 +75,7 @@ pub fn write(path: &Utf8Path, contents: &str) -> Result<()> {
 /// of either fails. A temporary left behind by a failed write is removed.
 pub(crate) fn write_streamed(path: &Utf8Path, fill: impl FnOnce(&mut dyn io::Write) -> io::Result<()>) -> Result<()> {
     let destination = crate::paths::physical(path)?;
+    // #[gamma::skip(try.propagate_to_unwrap, reason = "Native parent creation is outside the supplied writer callback and requires the deferred filesystem adapter to fail deterministically.", tag = "native-boundary")]
     create_parents(&destination)?;
 
     replace(path, &destination, fill)
@@ -99,6 +101,7 @@ pub(crate) fn write_if_unchanged(workspace: &Utf8Path, path: &Utf8Path, expected
 /// Atomically replaces `path` only when it still holds `expected`, under a lock held by the caller.
 pub(crate) fn write_if_unchanged_locked(path: &Utf8Path, expected: Option<&str>, contents: &str) -> Result<Publication> {
     let destination = crate::paths::physical(path)?;
+    // #[gamma::skip(try.propagate_to_unwrap, reason = "Parent creation is a native wrapper operation; PublicationFilesystem policy tests do not inject this adapter.", tag = "native-boundary")]
     create_parents(&destination)?;
     let scratch = scratch_path(&destination);
 
@@ -203,6 +206,7 @@ pub(crate) fn remove_if_unchanged_locked(destination: &Utf8Path, path: &Utf8Path
         return Ok(Publication::Conflict);
     }
 
+    // #[gamma::skip(try.propagate_to_unwrap, reason = "This removal uses the native filesystem after checking contents; deterministic failure needs the deferred removal adapter.", tag = "native-boundary")]
     fs::remove_file(destination.as_std_path()).map_err(|cause| error!("could not remove `{path}`").caused_by(cause))?;
 
     match published(destination) {
@@ -371,6 +375,7 @@ fn stage(scratch: &Utf8Path, fill: impl FnOnce(&mut dyn io::Write) -> io::Result
         .and_then(|path| fs::metadata(path.as_std_path()).ok())
         .map(|metadata| metadata.permissions())
     {
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "Failing permissions on a newly created owning file requires native fault injection; publication policy retains scripted stage failures.", tag = "native-boundary")]
         staging.set_permissions(permissions)?;
     }
 
