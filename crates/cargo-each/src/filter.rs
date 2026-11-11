@@ -799,6 +799,10 @@ mod tests {
                 "invalid filter expression `profile..test=true`: JSON field path must have non-empty dotted segments",
             ),
             (
+                "profile..test",
+                "invalid filter expression `profile..test`: JSON field path must have non-empty dotted segments",
+            ),
+            (
                 "reason=\"unfinished",
                 "invalid filter expression `reason=\"unfinished`: unclosed double quote",
             ),
