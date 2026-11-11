@@ -91,6 +91,31 @@ atoms:
 * `metadata:<dotted.key>=<value>` — that key equals `<value>` (numeric
   compare when both sides parse as a number, else string compare).
 
+#### JSON-record filters
+
+`--json-filter <EXPR>` applies the same `not`, `and`, `or`, parentheses,
+precedence, and repeatable-AND composition as the Cargo filters, but its
+atoms address dotted paths in each JSON object:
+
+* `<dotted.path>` — the field exists and is not `null`.
+* `<dotted.path>=<value>` — the field equals the typed scalar value.
+
+Unquoted `true`, `false`, `null`, and JSON numbers are compared with those
+JSON types. Other unquoted values are strings. Double-quote a string when it
+contains whitespace, Boolean operators, or parentheses; `\"` and `\\` are
+the supported escapes. For example:
+
+```text
+--json-filter 'reason=compiler-artifact and profile.test=true and executable'
+--json-filter 'target.name="integration test" or not fresh'
+```
+
+Repeated `--json-filter` options are AND-combined. Filtering preserves input
+order and duplicates and runs before placeholder and working-directory
+validation, so a mixed stream can select one record shape without unrelated
+records failing those later checks. A post-filter empty set is a successful
+no-op. `--json-filter` requires `--json-lines` or `--json-lines-file`.
+
 ### Execution modes
 
 * *per-package* (default): run the command once per selected member, in
