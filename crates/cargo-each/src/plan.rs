@@ -245,7 +245,7 @@ impl<'a> JsonWorkDir<'a> {
 }
 
 fn validate_json_path(path: &str) -> Result<(), EachError> {
-    if path.is_empty() || path.split('.').any(str::is_empty) {
+    if path.split('.').any(str::is_empty) {
         return Err(crate::error::PlaceholderMisuseError::new(
             path.to_owned(),
             "JSON working-directory field must be a dotted path with non-empty segments".to_owned(),
