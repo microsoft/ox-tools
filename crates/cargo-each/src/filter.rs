@@ -791,8 +791,16 @@ mod tests {
             ("", "invalid filter expression ``: empty expression"),
             ("=value", "invalid filter expression `=value`: empty JSON field path"),
             (
+                ".reason",
+                "invalid filter expression `.reason`: JSON field path must have non-empty dotted segments",
+            ),
+            (
                 ".reason=value",
                 "invalid filter expression `.reason=value`: JSON field path must have non-empty dotted segments",
+            ),
+            (
+                "profile..test",
+                "invalid filter expression `profile..test`: JSON field path must have non-empty dotted segments",
             ),
             (
                 "profile..test=true",
@@ -840,9 +848,16 @@ mod tests {
 
     #[test]
     fn json_field_lookup_observes_each_dotted_segment() {
-        let fields = json!({"profile": {"test": true}}).as_object().expect("object").clone();
-        assert_eq!(lookup_fields(&fields, "profile.test"), Some(&Value::Bool(true)));
-        assert_eq!(lookup_fields(&fields, "profile.missing"), None);
+        let fields = json!({"profile": {"details": {"test": true}}}).as_object().expect("object").clone();
+        assert_eq!(lookup_fields(&fields, "profile.details.test"), Some(&Value::Bool(true)));
+        assert_eq!(lookup_fields(&fields, "profile.details.missing"), None);
+    }
+
+    #[test]
+    fn metadata_lookup_observes_each_dotted_segment() {
+        let metadata = json!({"checks": {"skip": ["unit"]}});
+        assert_eq!(lookup(&metadata, "checks.skip"), Some(&json!(["unit"])));
+        assert_eq!(lookup(&metadata, "checks.missing"), None);
     }
 
     #[test]

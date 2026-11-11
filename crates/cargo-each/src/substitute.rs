@@ -108,7 +108,7 @@ fn visit_json_tokens<'a>(arg: &'a str, mut visit: impl FnMut(usize, usize, &'a s
         };
         let end = key_start + relative_end + 1;
         let key = &arg[key_start..end - 1];
-        if key.is_empty() || key.contains('{') || key.split('.').any(str::is_empty) {
+        if key.contains('{') || key.split('.').any(str::is_empty) {
             return Err(PlaceholderMisuseError::new(
                 arg[start..end].to_owned(),
                 "expected a dotted field path with non-empty segments".to_owned(),
