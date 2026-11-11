@@ -1218,9 +1218,36 @@ mod tests {
         ] {
             let CargoCli::Each(args) = CargoCli::try_parse_from(["cargo", "each", option, value, "--", "echo"])
                 .expect("JSON control parses for actionable validation");
+            assert!(super::json_mode_requested(&args), "{option} must select JSON-record mode");
             let error = validate_json_mode(&args).expect_err("JSON controls require a record source");
-            assert!(error.to_string().contains(option), "{error}");
+            let rendered = error.to_string();
+            let normalized = rendered
+                .rsplit_once(" (at ")
+                .map(|(message, _location)| message)
+                .expect("AppError context always includes its captured source location");
+            assert_eq!(
+                normalized,
+                format!("`{option}` requires `--json-lines` or `--json-lines-file`\n> invalid execution configuration")
+            );
         }
+    }
+
+    #[test]
+    fn invalid_json_filter_preserves_expression_and_context() {
+        let CargoCli::Each(args) =
+            CargoCli::try_parse_from(["cargo", "each", "--json-lines", "{}", "--json-filter", "=value", "--", "echo"])
+                .expect("invalid JSON filter parses for actionable validation");
+        let error = super::run_json_with(&args, |_, _, _, _| panic!("an invalid filter must not execute a command"))
+            .expect_err("invalid JSON filter");
+        let rendered = error.to_string();
+        let normalized = rendered
+            .rsplit_once(" (at ")
+            .map(|(message, _location)| message)
+            .expect("AppError context always includes its captured source location");
+        assert_eq!(
+            normalized,
+            "invalid filter expression `=value`: empty JSON field path\n> invalid JSON filter expression"
+        );
     }
 
     #[test]
@@ -1370,15 +1397,12 @@ mod tests {
 
     #[test]
     fn generic_json_filters_cargo_messages_and_derives_package_roots() {
-        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests")
-            .join("fixtures")
-            .join("cargo-messages.jsonl");
+        let fixture = include_str!("../tests/fixtures/cargo-messages.jsonl");
         let CargoCli::Each(mut args) = CargoCli::try_parse_from([
             std::ffi::OsString::from("cargo"),
             std::ffi::OsString::from("each"),
-            std::ffi::OsString::from("--json-lines-file"),
-            fixture.into_os_string(),
+            std::ffi::OsString::from("--json-lines"),
+            std::ffi::OsString::from(fixture),
             std::ffi::OsString::from("--json-filter"),
             std::ffi::OsString::from("reason=compiler-artifact and profile.test=true and executable"),
             std::ffi::OsString::from("--json-work-dir-parent"),

@@ -755,9 +755,11 @@ mod tests {
         let fields = json!({
             "reason": "compiler-artifact",
             "profile": {"test": true},
+            "disabled": false,
             "executable": "/ws/target/test",
             "count": 2,
-            "missing_executable": null
+            "missing_executable": null,
+            "label": "two words"
         })
         .as_object()
         .expect("object")
@@ -766,8 +768,11 @@ mod tests {
             ("reason=compiler-artifact", true),
             ("profile.test=true", true),
             ("profile.test=false", false),
+            ("disabled=false", true),
             ("count=2", true),
             ("count=\"2\"", false),
+            ("missing_executable=null", true),
+            ("label=\"two words\"", true),
             ("executable", true),
             ("missing_executable", false),
             ("missing", false),
@@ -783,15 +788,61 @@ mod tests {
     #[test]
     fn json_filters_reject_invalid_paths_and_quotes() {
         for (expression, expected) in [
-            ("", "empty expression"),
-            (".reason=value", "JSON field path"),
-            ("profile..test=true", "JSON field path"),
-            ("reason=\"unfinished", "unclosed double quote"),
-            ("reason=bad\"quote", "unclosed double quote"),
+            ("", "invalid filter expression ``: empty expression"),
+            ("=value", "invalid filter expression `=value`: empty JSON field path"),
+            (
+                ".reason=value",
+                "invalid filter expression `.reason=value`: JSON field path must have non-empty dotted segments",
+            ),
+            (
+                "profile..test=true",
+                "invalid filter expression `profile..test=true`: JSON field path must have non-empty dotted segments",
+            ),
+            (
+                "reason=\"unfinished",
+                "invalid filter expression `reason=\"unfinished`: unclosed double quote",
+            ),
+            (
+                "reason=bad\"quote",
+                "invalid filter expression `reason=bad\"quote`: unclosed double quote",
+            ),
+            (
+                "label=two words",
+                "invalid filter expression `label=two words`: unexpected predicate; expected `and`, `or`, or end of expression",
+            ),
+            (
+                "label=bad\"quote\"",
+                "invalid filter expression `label=bad\"quote\"`: double quotes must surround the complete JSON filter value",
+            ),
         ] {
             let error = JsonPredicate::parse(expression).expect_err("invalid JSON filter");
-            assert!(error.to_string().contains(expected), "{expression}: {error}");
+            assert_eq!(error.to_string(), expected, "{expression}");
         }
+    }
+
+    #[test]
+    fn json_filter_value_parsing_preserves_quote_boundaries() {
+        assert_eq!(
+            parse_json_filter_value("label=\"two words\"", "\"two words\"").expect("quoted JSON string"),
+            Value::String("two words".to_owned())
+        );
+        let error = parse_json_filter_value("label=bad\"quote", "bad\"quote").expect_err("partial quoting must fail");
+        assert_eq!(
+            error.to_string(),
+            "invalid filter expression `label=bad\"quote`: double quotes must surround the complete JSON filter value"
+        );
+        let error = parse_json_filter_value("label=value\"", "value\"").expect_err("a trailing quote is not a quoted value");
+        assert_eq!(
+            error.to_string(),
+            "invalid filter expression `label=value\"`: double quotes must surround the complete JSON filter value"
+        );
+    }
+
+    #[test]
+    fn json_field_lookup_observes_each_dotted_segment() {
+        let fields = json!({"profile": {"test": true}}).as_object().expect("object").clone();
+        assert_eq!(lookup_fields(&fields, "profile.test"), Some(&Value::Bool(true)));
+        assert_eq!(lookup_fields(&fields, "profile.missing"), None);
     }
 
     #[test]

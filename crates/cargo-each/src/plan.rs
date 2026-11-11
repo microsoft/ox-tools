@@ -478,26 +478,59 @@ mod tests {
     #[test]
     fn json_working_directory_errors_are_preflighted() {
         let record = JsonRecord {
-            fields: json!({"missing": null, "number": 7, "root": "Cargo.toml"})
-                .as_object()
-                .expect("object")
-                .clone(),
+            fields: json!({
+                "missing": null,
+                "number": 7,
+                "empty": "",
+                "nul": "a\u{0}b",
+                "root": "Cargo.toml"
+            })
+            .as_object()
+            .expect("object")
+            .clone(),
             source: std::sync::Arc::from("records.jsonl"),
             line: 2,
         };
         for (work_dir, expected) in [
-            (JsonWorkDir::Field("absent"), "field is missing"),
-            (JsonWorkDir::Field("number"), "field is not a string"),
-            (JsonWorkDir::ParentOf("root"), "path has no parent directory"),
+            (
+                JsonWorkDir::Field("absent"),
+                "cannot derive JSON working directory from `absent` for records.jsonl line 2: field is missing",
+            ),
+            (
+                JsonWorkDir::Field("number"),
+                "cannot derive JSON working directory from `number` for records.jsonl line 2: field is not a string",
+            ),
+            (
+                JsonWorkDir::Field("empty"),
+                "cannot derive JSON working directory from `empty` for records.jsonl line 2: field is empty",
+            ),
+            (
+                JsonWorkDir::Field("nul"),
+                "cannot derive JSON working directory from `nul` for records.jsonl line 2: field contains a NUL byte, which cannot be used as a process working directory",
+            ),
+            (
+                JsonWorkDir::ParentOf("root"),
+                "cannot derive JSON working directory from `root` for records.jsonl line 2: path has no parent directory",
+            ),
         ] {
             let error = Plan::build_json(std::slice::from_ref(&record), &cmd(&["runner"]), Some(work_dir))
                 .expect_err("invalid JSON working directory");
-            let rendered = error.to_string();
-            assert!(rendered.contains("records.jsonl") && rendered.contains("line 2") && rendered.contains(expected));
+            assert_eq!(error.to_string(), expected);
         }
-        let error = Plan::build_json(&[], &cmd(&["runner"]), Some(JsonWorkDir::Field("bad..path")))
-            .expect_err("invalid path must fail even for empty input");
-        assert!(error.to_string().contains("non-empty segments"), "{error}");
+        for (path, expected) in [
+            (
+                "",
+                "placeholder `` cannot be used here: JSON working-directory field must be a dotted path with non-empty segments",
+            ),
+            (
+                "bad..path",
+                "placeholder `bad..path` cannot be used here: JSON working-directory field must be a dotted path with non-empty segments",
+            ),
+        ] {
+            let error = Plan::build_json(&[], &cmd(&["runner"]), Some(JsonWorkDir::Field(path)))
+                .expect_err("invalid path must fail even for empty input");
+            assert_eq!(error.to_string(), expected);
+        }
     }
 
     #[test]

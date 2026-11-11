@@ -281,7 +281,7 @@
 //! cargo each --json-lines-file target/test-artifacts.jsonl \
 //!     --json-filter 'reason=compiler-artifact and profile.test=true and executable' \
 //!     --json-work-dir-parent manifest_path -- \
-//!     miri {json:executable}
+//!     {json:executable}
 //! ```
 
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]

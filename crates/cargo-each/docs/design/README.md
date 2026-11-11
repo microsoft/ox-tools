@@ -600,7 +600,7 @@ cargo test --workspace --no-run --message-format=json > target/test-artifacts.js
 cargo each --json-lines-file target/test-artifacts.jsonl \
     --json-filter 'reason=compiler-artifact and profile.test=true and executable' \
     --json-work-dir-parent manifest_path -- \
-    miri {json:executable}
+    {json:executable}
 ```
 
 The producer command and redirection stay outside cargo-each. Nested Cargo

@@ -691,20 +691,41 @@ mod tests {
             .expect("object")
             .clone();
         for (command, expected) in [
-            ("{json:missing}", "field is missing"),
-            ("{json:number}", "field is not a string"),
-            ("{json:nul}", "field contains a NUL byte"),
-            ("{name}", "not valid in JSON-record mode"),
-            ("{json:", "missing its closing"),
-            ("{json:}", "dotted field path"),
-            ("{json:{nested}}", "dotted field path"),
-            ("{json:target..name}", "dotted field path"),
+            (
+                "{json:missing}",
+                "cannot expand `{json:missing}` for records.jsonl line 2: field is missing",
+            ),
+            (
+                "{json:number}",
+                "cannot expand `{json:number}` for records.jsonl line 2: field is not a string",
+            ),
+            (
+                "{json:nul}",
+                "cannot expand `{json:nul}` for records.jsonl line 2: field contains a NUL byte, which cannot be passed in a process argument",
+            ),
+            ("{name}", "placeholder `{name}` cannot be used here: not valid in JSON-record mode"),
+            (
+                "{json:",
+                "placeholder `{json:` cannot be used here: JSON placeholder is missing its closing `}`",
+            ),
+            (
+                "{json:}",
+                "placeholder `{json:}` cannot be used here: expected a dotted field path with non-empty segments",
+            ),
+            (
+                "{json:{nested}}",
+                "placeholder `{json:{nested}` cannot be used here: expected a dotted field path with non-empty segments",
+            ),
+            (
+                "{json:target..name}",
+                "placeholder `{json:target..name}` cannot be used here: expected a dotted field path with non-empty segments",
+            ),
         ] {
             let command = args(&[command]);
             let error = validate_json_placeholders(&command)
                 .and_then(|()| substitute_json_prevalidated(&command, &fields, "records.jsonl", 2))
                 .expect_err("invalid JSON placeholder must fail");
-            assert!(error.to_string().contains(expected), "{command:?}: {error}");
+            assert_eq!(error.to_string(), expected, "{command:?}");
         }
     }
 
