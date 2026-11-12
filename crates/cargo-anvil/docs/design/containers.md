@@ -119,9 +119,12 @@ registry tags and restricted push access.
 
 ## 5. Runtime, mounts, and environment
 
-Each invocation creates one container and removes it on exit. The caller must
-run from inside the repository; its working directory is mapped beneath
-`/workspace`.
+Without `Anvil-PrepareEnv`, each invocation creates one container and removes
+it on exit, using the persistent download caches listed below. Prepared mode
+instead uses two sequential disposable containers and invocation-scoped caches
+removed on exit; see **Authenticated preparation, credential-free validation**.
+The caller must run from inside the repository; its working directory is
+mapped beneath `/workspace`.
 
 | Host resource | Container path |
 | --- | --- |
@@ -139,9 +142,10 @@ Tools and toolchains come from the image, not host Cargo or rustup directories.
 `target/` remains on the repository bind mount; switching between native and
 container builds can trigger recompilation.
 
-Image and volume names use the sanitized repository directory name. Checkouts
-with the same sanitized name share download caches, so `anvil-container-down`
-can affect another checkout.
+Image names and non-prepared volume names use the sanitized repository
+directory name. Without `Anvil-PrepareEnv`, checkouts with the same sanitized
+name share download caches, so `anvil-container-down` can affect another
+checkout. Prepared-mode caches are unique to each invocation.
 
 Linux engines run as the invoking non-root user's UID/GID; engines reached
 through WSL use the WSL user's IDs. Docker Desktop handles Windows/macOS

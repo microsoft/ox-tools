@@ -1078,7 +1078,7 @@ switch ($mode) {
     'git' { [IO.File]::WriteAllText("$env:CARGO_HOME/git/.fixture-leak", $value) }
     'second' { [IO.File]::WriteAllText("$env:CARGO_HOME/registry/.fixture-leak", $value) }
     'binary' {
-        $bytes = [byte[]]::new(70000) + [Text.Encoding]::UTF8.GetBytes($value) + [byte[]]@(0, 255, 0)
+        $bytes = [byte[]]::new(65530) + [Text.Encoding]::UTF8.GetBytes($value) + [byte[]]@(0, 255, 0)
         [IO.File]::WriteAllBytes("$env:CARGO_HOME/registry/.fixture-leak", $bytes)
     }
     'inspection' {

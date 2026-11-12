@@ -465,10 +465,13 @@ mod tests {
     )]
     #[test]
     fn recipe_has_no_generation_time_placeholders() {
-        // Every value is a literal or resolved at run time; nothing is
-        // substituted at emit time, so the recipe cannot drift from a
-        // configuration file.
-        assert!(!RECIPE.contains("__"), "the recipe must not carry rendering placeholders");
+        // The credential-name marker is replaced by the launcher at runtime,
+        // not by the generator.
+        let without_runtime_marker = RECIPE.replace("__CREDENTIAL_NAMES__", "");
+        assert!(
+            !without_runtime_marker.contains("__"),
+            "the recipe must not carry generation-time placeholders"
+        );
         assert!(!RECIPE.contains("anvil.toml"));
     }
 
@@ -790,7 +793,9 @@ mod tests {
         // NAME=VALUE on a command line is recorded by endpoint telemetry and
         // retained far longer than a short-lived token is meant to live.
         assert!(RECIPE.contains("$runArgs += @('-e', $name)"));
-        assert!(!RECIPE.contains("-e', \"$name="));
+        assert!(RECIPE.contains("foreach ($name in $prepareVars.Keys) { $prepareArgs += @('-e', $name) }"));
+        let without_empty_loader_controls = RECIPE.replace("$prepareArgs += @('-e', \"$name=\", '-e', \"CARGO_ENV_$name=\")", "");
+        assert!(!without_empty_loader_controls.contains("-e', \"$name="));
     }
 
     #[test]
@@ -815,8 +820,8 @@ mod tests {
         // An engine seeds a named volume from the image only on first
         // creation, so mounting a directory that holds installed binaries
         // pins the first image's tools over every later tag.
-        assert!(RECIPE.contains("-cargo-registry:/usr/local/cargo/registry"));
-        assert!(RECIPE.contains("-cargo-git:/usr/local/cargo/git"));
+        assert!(RECIPE.contains("\"${registryVolume}:/usr/local/cargo/registry\""));
+        assert!(RECIPE.contains("\"${gitVolume}:/usr/local/cargo/git\""));
         assert!(!RECIPE.contains("-cargo:/usr/local/cargo'"));
         assert!(!RECIPE.contains(":/usr/local/rustup"));
     }

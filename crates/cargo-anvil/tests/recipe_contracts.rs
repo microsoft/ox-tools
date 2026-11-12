@@ -1963,7 +1963,7 @@ function Fake-Engine {
     )
 }
 
-const PREPARATION_ENGINE: &str = r#"
+const PREPARATION_ENGINE: &str = r"
 $ErrorActionPreference = 'Stop'
 $record = @{
     Args = @($args)
@@ -1983,7 +1983,7 @@ if ($args[0] -eq 'run') {
 }
 if ($args[0] -eq 'volume' -and $args[1] -eq 'rm' -and $env:FAKE_CLEANUP_FAILURE -eq '1') { exit 1 }
 exit 0
-"#;
+";
 
 fn run_preparation_contract(hook: &str, command: &str, environment: &[(&str, &str)]) -> (TempDir, Output, Vec<serde_json::Value>) {
     let tmp = TempDir::new().unwrap();
@@ -2040,12 +2040,77 @@ function id { $global:LASTEXITCODE = 0; '1000' }
     (tmp, output, records)
 }
 
-const PREPARATION_HOOK: &str = r#"
+const PREPARATION_HOOK: &str = r"
 function Anvil-PrepareEnv {
     Add-Content -LiteralPath $env:HOOK_ACQUISITIONS -Value 'acquired'
     @{ Env = @{ PREPARATION_TOKEN = 'synthetic.a+[credential]'; SECOND_PREPARATION_TOKEN = 'second.synthetic.credential' } }
 }
-"#;
+";
+
+#[test]
+fn preparation_cache_scan_bounds_memory_and_checks_chunk_boundaries() {
+    if !tools_available() {
+        return;
+    }
+    let _powershell = powershell_process_lock();
+    let scanner = CONTAINER
+        .split_once("$prepareScript = @'\n")
+        .unwrap()
+        .1
+        .split_once("\n    try {\n        $cargo")
+        .unwrap()
+        .0;
+    let tmp = TempDir::new().unwrap();
+    let large = fs::File::create(tmp.path().join("large-cache")).unwrap();
+    large.set_len(256 * 1024 * 1024).unwrap();
+    drop(large);
+    let cases = r"
+function Assert-LeakRejected([string]$Path, [string[]]$Needles) {
+    $rejected = $false
+    try { Assert-CredentialFreeCacheFile $Path $Needles } catch {
+        if ($_.Exception.Message -ne 'preparation credential found in cache') { throw }
+        $rejected = $true
+    }
+    if (-not $rejected) { throw 'cache credential was accepted' }
+}
+$limit = [GC]::GetGCMemoryInfo().TotalAvailableMemoryBytes
+if ($limit -gt 128MB) { throw 'the bounded-memory probe requires its configured heap limit' }
+Assert-CredentialFreeCacheFile ./large-cache @('absent.synthetic.credential')
+$token = 'synthetic.[' + [char]0x20ac + ']+credential'
+$bytes = [Text.Encoding]::UTF8.GetBytes($token)
+$needle = [Text.Encoding]::Latin1.GetString($bytes)
+foreach ($offset in @(0, 65524, 65525, 65526, 65534, 65535, 65536)) {
+    $content = [byte[]]::new($offset) + $bytes + [byte[]]@(255, 0)
+    [IO.File]::WriteAllBytes('cache', $content)
+    Assert-LeakRejected ./cache @('decoy', $needle)
+}
+$long = [Text.Encoding]::UTF8.GetBytes(('x' * 140000) + 'long-credential-end')
+[IO.File]::WriteAllBytes('cache', ([byte[]]@(0, 255) + $long))
+Assert-LeakRejected ./cache @([Text.Encoding]::Latin1.GetString($long))
+[IO.File]::WriteAllBytes('cache', [byte[]]@(0, 255, 128))
+Assert-CredentialFreeCacheFile ./cache @($needle, 'x')
+[IO.File]::WriteAllBytes('cache', [byte[]]::new(0))
+Assert-CredentialFreeCacheFile ./cache @($needle)
+$readFailed = $false
+try { Assert-CredentialFreeCacheFile ./missing-cache @($needle) } catch { $readFailed = $true }
+if (-not $readFailed) { throw 'a missing cache file passed inspection' }
+Remove-Item -LiteralPath cache
+Write-Output 'bounded scan, exact binary boundaries, long credential, empty file and read failure verified'
+";
+    write(&tmp.path().join("scan.ps1"), &format!("{scanner}\n{cases}"));
+    let output = Command::new("pwsh")
+        .args(["-NoLogo", "-NoProfile", "-File", "scan.ps1"])
+        .current_dir(tmp.path())
+        .env("DOTNET_GCHeapHardLimit", "8000000")
+        .output()
+        .expect("pwsh was checked by tools_available");
+    assert!(
+        output.status.success(),
+        "cache scanner regression failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("bounded scan, exact binary boundaries"));
+}
 
 fn engine_arguments(record: &serde_json::Value) -> Vec<&str> {
     record["Args"]
@@ -2190,7 +2255,7 @@ fn preparation_rejects_runtime_authentication_and_driver_overrides_before_acquis
     ] {
         let (_, output, records) = run_preparation_contract(&format!("function Anvil-PrepareEnv {{ {returned} }}"), "cargo test", &[]);
         assert_failed(&output, "invalid preparation hook");
-        assert!(records.is_empty());
+        assert_eq!(records, [] as [serde_json::Value; 0]);
     }
 }
 
