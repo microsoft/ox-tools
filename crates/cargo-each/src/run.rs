@@ -21,10 +21,10 @@ use ohno::{AppError, IntoAppError};
 use tempfile::NamedTempFile;
 
 use crate::cli::EachArgs;
-use crate::error::{EachError, InvalidTargetKindError, JobsConflictWithOnceError, JsonInputConflictError};
-use crate::filter::{PackagePredicate, TargetPredicate};
+use crate::error::{EachError, InvalidTargetKindError, JobsConflictWithOnceError, JsonInputConflictError, JsonInputRequiredError};
+use crate::filter::{JsonPredicate, PackagePredicate, TargetPredicate};
 use crate::json_lines;
-use crate::plan::{BuildOptions, Invocation, Mode, PackagesExpansion, Plan};
+use crate::plan::{BuildOptions, Invocation, JsonWorkDir, Mode, PackagesExpansion, Plan};
 use crate::select::Selection;
 use crate::substitute::uses_workspace_rust_version;
 use crate::workspace::{Member, Workspace};
@@ -46,7 +46,7 @@ const WORKSPACE_RUST_VERSION_CONTEXT: &str = "failed to resolve workspace Rust v
 const PLAN_BUILD_CONTEXT: &str = "failed to build command plan";
 
 pub(crate) fn run(args: &EachArgs) -> Result<ExitCode, AppError> {
-    if !args.json_lines.is_empty() || !args.json_lines_files.is_empty() {
+    if json_mode_requested(args) {
         return run_json(args);
     }
     run_workspace_with(args, build_selection, Workspace::load, execute)
@@ -143,8 +143,15 @@ fn run_json_with(
     execute_plan: impl FnOnce(&Plan, bool, NonZeroUsize, Option<Duration>) -> Result<ExitCode, AppError>,
 ) -> Result<ExitCode, AppError> {
     validate_json_mode(args)?;
-    let records = json_lines::load(&args.json_lines, &args.json_lines_files).into_app_err("failed to read JSON Lines input")?;
-    let plan = Plan::build_json(&records, &args.command).into_app_err(PLAN_BUILD_CONTEXT)?;
+    let filters = parse_json_predicates(&args.json_filters)?;
+    let mut records = json_lines::load(&args.json_lines, &args.json_lines_files).into_app_err("failed to read JSON Lines input")?;
+    records.retain(|record| filters.iter().all(|filter| filter.matches(&record.fields)));
+    let work_dir = args
+        .json_work_dir
+        .as_deref()
+        .map(JsonWorkDir::Field)
+        .or_else(|| args.json_work_dir_parent.as_deref().map(JsonWorkDir::ParentOf));
+    let plan = Plan::build_json(&records, &args.command, work_dir).into_app_err(PLAN_BUILD_CONTEXT)?;
     drop(records);
     if plan.invocations.is_empty() {
         eprintln!("cargo each: JSON input resolved to no work; nothing to do");
@@ -159,7 +166,25 @@ fn run_json_with(
     execute_plan(&plan, args.keep_going, args.jobs, args.timeout)
 }
 
+fn json_mode_requested(args: &EachArgs) -> bool {
+    !args.json_lines.is_empty()
+        || !args.json_lines_files.is_empty()
+        || !args.json_filters.is_empty()
+        || args.json_work_dir.is_some()
+        || args.json_work_dir_parent.is_some()
+}
+
 fn validate_json_mode(args: &EachArgs) -> Result<(), AppError> {
+    if args.json_lines.is_empty() && args.json_lines_files.is_empty() {
+        let option = if !args.json_filters.is_empty() {
+            "--json-filter"
+        } else if args.json_work_dir.is_some() {
+            "--json-work-dir"
+        } else {
+            "--json-work-dir-parent"
+        };
+        return Err(JsonInputRequiredError::new(option.to_owned())).into_app_err(EXECUTION_CONFIGURATION_CONTEXT);
+    }
     let conflicts = [
         (!args.packages.is_empty(), "--package"),
         (!args.package_files.is_empty(), "--package-file"),
@@ -204,6 +229,13 @@ fn parse_target_predicates(specs: &[String]) -> Result<Vec<TargetPredicate>, App
     specs
         .iter()
         .map(|spec| TargetPredicate::parse(spec).into_app_err("invalid target filter expression"))
+        .collect()
+}
+
+fn parse_json_predicates(specs: &[String]) -> Result<Vec<JsonPredicate>, AppError> {
+    specs
+        .iter()
+        .map(|spec| JsonPredicate::parse(spec).into_app_err("invalid JSON filter expression"))
         .collect()
 }
 
@@ -1179,6 +1211,47 @@ mod tests {
     }
 
     #[test]
+    fn json_controls_require_json_input() {
+        for (option, value) in [
+            ("--json-filter", "reason=compiler-artifact"),
+            ("--json-work-dir", "package_dir"),
+            ("--json-work-dir-parent", "manifest_path"),
+        ] {
+            let CargoCli::Each(args) = CargoCli::try_parse_from(["cargo", "each", option, value, "--", "echo"])
+                .expect("JSON control parses for actionable validation");
+            assert!(super::json_mode_requested(&args), "{option} must select JSON-record mode");
+            let error = validate_json_mode(&args).expect_err("JSON controls require a record source");
+            let rendered = error.to_string();
+            let normalized = rendered
+                .rsplit_once(" (at ")
+                .map(|(message, _location)| message)
+                .expect("AppError context always includes its captured source location");
+            assert_eq!(
+                normalized,
+                format!("`{option}` requires `--json-lines` or `--json-lines-file`\n> invalid execution configuration")
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_json_filter_preserves_expression_and_context() {
+        let CargoCli::Each(args) =
+            CargoCli::try_parse_from(["cargo", "each", "--json-lines", "{}", "--json-filter", "=value", "--", "echo"])
+                .expect("invalid JSON filter parses for actionable validation");
+        let error = super::run_json_with(&args, |_, _, _, _| panic!("an invalid filter must not execute a command"))
+            .expect_err("invalid JSON filter");
+        let rendered = error.to_string();
+        let normalized = rendered
+            .rsplit_once(" (at ")
+            .map(|(message, _location)| message)
+            .expect("AppError context always includes its captured source location");
+        assert_eq!(
+            normalized,
+            "invalid filter expression `=value`: empty JSON field path\n> invalid JSON filter expression"
+        );
+    }
+
+    #[test]
     fn target_requirement_preflight_prevents_execution() {
         let CargoCli::Each(args) = CargoCli::try_parse_from([
             "cargo",
@@ -1321,6 +1394,53 @@ mod tests {
             .expect("the executor result is returned");
             assert_eq!(result, ExitCode::FAILURE);
         }
+    }
+
+    #[test]
+    fn generic_json_filters_cargo_messages_and_derives_package_roots() {
+        let fixture = include_str!("../tests/fixtures/cargo-messages.jsonl");
+        let CargoCli::Each(mut args) = CargoCli::try_parse_from([
+            std::ffi::OsString::from("cargo"),
+            std::ffi::OsString::from("each"),
+            std::ffi::OsString::from("--json-lines"),
+            std::ffi::OsString::from(fixture),
+            std::ffi::OsString::from("--json-filter"),
+            std::ffi::OsString::from("reason=compiler-artifact and profile.test=true and executable"),
+            std::ffi::OsString::from("--json-work-dir-parent"),
+            std::ffi::OsString::from("manifest_path"),
+            std::ffi::OsString::from("--"),
+            std::ffi::OsString::from("runner"),
+            std::ffi::OsString::from("{json:executable}"),
+            std::ffi::OsString::from("{json:manifest_path}"),
+            std::ffi::OsString::from("{json:package_id}"),
+            std::ffi::OsString::from("{json:target.name}"),
+        ])
+        .expect("generic JSON Cargo-message arguments");
+        args.keep_going = true;
+        args.jobs = NonZeroUsize::new(2).expect("two workers");
+        args.timeout = Some(Duration::from_secs(3));
+        let result = super::run_json_with(&args, |plan, keep_going, jobs, timeout| {
+            assert_eq!(plan.invocations.len(), 3);
+            assert_eq!(plan.invocations[0].argv, plan.invocations[2].argv);
+            assert_eq!(plan.invocations[0].work_dir, plan.invocations[2].work_dir);
+            assert_eq!(plan.invocations[0].work_dir, Some(PathBuf::from("C:/workspace/alpha")));
+            assert_eq!(
+                plan.invocations[0].argv,
+                [
+                    "runner",
+                    "C:/workspace/target/debug/deps/alpha_tests.exe",
+                    "C:/workspace/alpha/Cargo.toml",
+                    "path+file:///workspace/alpha#0.1.0",
+                    "alpha_tests",
+                ]
+            );
+            assert!(keep_going);
+            assert_eq!(jobs, args.jobs);
+            assert_eq!(timeout, args.timeout);
+            Ok(ExitCode::FAILURE)
+        })
+        .expect("filtered JSON input reaches the executor");
+        assert_eq!(result, ExitCode::FAILURE);
     }
 
     #[test]
