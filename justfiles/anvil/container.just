@@ -1140,6 +1140,24 @@ anvil-container *command:
                 (ConvertTo-Json -InputObject @($prepareVars.Keys) -Compress)))
             $prepareScript = @'
     $ErrorActionPreference = 'Stop'
+    function Assert-CredentialFreeCacheFile([string]$Path, [string[]]$Needles) {
+        $buffer = [byte[]]::new(65536)
+        $overlapLength = ($Needles | Measure-Object -Property Length -Maximum).Maximum - 1
+        $tail = ''
+        $stream = [IO.File]::OpenRead($Path)
+        try {
+            while (($read = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                # Latin1 preserves each byte, including split UTF-8 sequences.
+                $content = $tail + [Text.Encoding]::Latin1.GetString($buffer, 0, $read)
+                foreach ($needle in $Needles) {
+                    if ($content.Contains($needle, [StringComparison]::Ordinal)) { throw 'preparation credential found in cache' }
+                }
+                $tail = $content.Substring([Math]::Max(0, $content.Length - $overlapLength))
+            }
+        } finally {
+            $stream.Dispose()
+        }
+    }
     try {
         $cargo = & rustup which cargo
         if ($LASTEXITCODE -ne 0) { throw 'image Cargo resolution failed' }
@@ -1171,11 +1189,7 @@ anvil-container *command:
                     }
                 }
                 if (-not $entry.PSIsContainer) {
-                    $bytes = [IO.File]::ReadAllBytes($entry.FullName)
-                    $content = [Text.Encoding]::Latin1.GetString($bytes)
-                    foreach ($needle in $needles) {
-                        if ($content.Contains($needle, [StringComparison]::Ordinal)) { throw 'preparation credential found in cache' }
-                    }
+                    Assert-CredentialFreeCacheFile $entry.FullName $needles
                 }
             }
         }
