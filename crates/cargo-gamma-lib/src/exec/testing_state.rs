@@ -1066,6 +1066,7 @@ fn resolve_prepared_directory_with<T: PreparedFileType>(
     canonical(path).map(Some)
 }
 
+// #[gamma::skip(fn_value.ok_default, reason = "This adapter supplies native canonicalization to canonical_artifact_path_with; its result and error policy have scripted tests, while exercising this exact forwarding boundary requires native filesystem input.", tag = "native-boundary")]
 fn canonical_artifact_path(path: &Utf8Path) -> Result<Utf8PathBuf> {
     canonical_artifact_path_with(path, |path| fs::canonicalize(path))
 }

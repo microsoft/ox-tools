@@ -1611,16 +1611,16 @@ fn cache_owner_root_with_metadata(base: &Utf8Path, mut inspect: impl FnMut(&Utf8
     Some(root)
 }
 
+#[cfg(windows)]
 pub(crate) fn same_existing_path(left: &Utf8Path, right: &Utf8Path) -> bool {
-    #[cfg(windows)]
-    {
-        let left = left.as_str().strip_prefix(r"\\?\").unwrap_or(left.as_str());
-        let right = right.as_str().strip_prefix(r"\\?\").unwrap_or(right.as_str());
+    let left = left.as_str().strip_prefix(r"\\?\").unwrap_or(left.as_str());
+    let right = right.as_str().strip_prefix(r"\\?\").unwrap_or(right.as_str());
 
-        left.eq_ignore_ascii_case(right)
-    }
+    left.eq_ignore_ascii_case(right)
+}
 
-    #[cfg(not(windows))]
+#[cfg(not(windows))]
+pub(crate) fn same_existing_path(left: &Utf8Path, right: &Utf8Path) -> bool {
     match (
         fs::canonicalize(left.as_std_path()).ok(),
         fs::canonicalize(right.as_std_path()).ok(),
