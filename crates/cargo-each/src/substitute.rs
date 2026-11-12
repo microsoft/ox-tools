@@ -16,7 +16,8 @@
 //! - The workspace token `{workspace-rust-version}`, valid in Cargo-backed
 //!   per-package, per-target, and once modes. An absent root declaration
 //!   expands to an empty string.
-//! - JSON-record fields through `{json:key}`, valid only in JSON-record mode.
+//! - JSON-record fields through `{json:dotted.path}`, valid only in JSON-record
+//!   mode.
 //!
 //! Using a token in the wrong mode is a usage error ([`PlaceholderMisuseError`]).
 //!
@@ -27,6 +28,7 @@
 //! this passthrough is a deliberate part of the contract, not an oversight.
 
 use crate::error::{EachError, JsonRecordFieldError, PlaceholderMisuseError};
+use crate::filter::lookup_fields;
 use crate::plan::Mode;
 
 /// Per-package placeholder tokens.
@@ -106,10 +108,12 @@ fn visit_json_tokens<'a>(arg: &'a str, mut visit: impl FnMut(usize, usize, &'a s
         };
         let end = key_start + relative_end + 1;
         let key = &arg[key_start..end - 1];
-        if key.is_empty() || key.contains('{') {
-            return Err(
-                PlaceholderMisuseError::new(arg[start..end].to_owned(), "expected a nonempty top-level field name".to_owned()).into(),
-            );
+        if key.contains('{') || key.split('.').any(str::is_empty) {
+            return Err(PlaceholderMisuseError::new(
+                arg[start..end].to_owned(),
+                "expected a dotted field path with non-empty segments".to_owned(),
+            )
+            .into());
         }
         visit(start, end, key)?;
         // #[gamma::skip(stmt.delete_assign, tag = "timeout", reason = "without consuming the JSON placeholder the visitor rediscovers that same token forever; campaign log 8203")]
@@ -128,7 +132,7 @@ fn replace_json_arg(
     let mut cursor = 0;
     visit_json_tokens(arg, |start, end, key| {
         replaced.push_str(&arg[cursor..start]);
-        let Some(value) = fields.get(key) else {
+        let Some(value) = lookup_fields(fields, key) else {
             return Err(JsonRecordFieldError::new(source.to_owned(), line, key.to_owned(), "field is missing".to_owned()).into());
         };
         let Some(value) = value.as_str() else {
@@ -202,7 +206,7 @@ pub(crate) fn uses_workspace_rust_version(args: &[String]) -> bool {
 pub(crate) fn validate_placeholders(args: &[String], mode: Mode) -> Result<(), EachError> {
     for arg in args {
         if arg.contains(JSON_TOKEN_PREFIX) {
-            return Err(PlaceholderMisuseError::new("{json:key}".to_owned(), "only valid in JSON-record mode".to_owned()).into());
+            return Err(PlaceholderMisuseError::new("{json:dotted.path}".to_owned(), "only valid in JSON-record mode".to_owned()).into());
         }
         if mode == Mode::Once {
             if let Some(token) = PER_PACKAGE_TOKENS.iter().find(|t| arg.contains(**t)) {
@@ -372,7 +376,7 @@ mod tests {
         assert!(error.to_string().contains("`{target}`"), "{error}");
         for mode in [Mode::PerPackage, Mode::PerTarget, Mode::Once] {
             let error = validate_placeholders(&args(&["{json:actual}"]), mode).expect_err("JSON placeholders require JSON mode");
-            assert!(error.to_string().contains("{json:key}"), "{error}");
+            assert!(error.to_string().contains("{json:dotted.path}"), "{error}");
         }
         let target = Placeholders::Target {
             name: "n".to_owned(),
@@ -667,12 +671,12 @@ mod tests {
     fn json_fields_expand_without_rescanning_inserted_values() {
         let fields = serde_json::json!({
             "package": "alpha",
-            "test": "{json:package}"
+            "target": {"name": "{json:package}"}
         })
         .as_object()
         .expect("object")
         .clone();
-        let command = args(&["{json:package}:{json:test}:{json:package}"]);
+        let command = args(&["{json:package}:{json:target.name}:{json:package}"]);
         validate_json_placeholders(&command).expect("valid JSON placeholders");
         assert_eq!(
             substitute_json_prevalidated(&command, &fields, "records.jsonl", 4).expect("JSON substitution"),
@@ -687,19 +691,41 @@ mod tests {
             .expect("object")
             .clone();
         for (command, expected) in [
-            ("{json:missing}", "field is missing"),
-            ("{json:number}", "field is not a string"),
-            ("{json:nul}", "field contains a NUL byte"),
-            ("{name}", "not valid in JSON-record mode"),
-            ("{json:", "missing its closing"),
-            ("{json:}", "nonempty top-level field name"),
-            ("{json:{nested}}", "nonempty top-level field name"),
+            (
+                "{json:missing}",
+                "cannot expand `{json:missing}` for records.jsonl line 2: field is missing",
+            ),
+            (
+                "{json:number}",
+                "cannot expand `{json:number}` for records.jsonl line 2: field is not a string",
+            ),
+            (
+                "{json:nul}",
+                "cannot expand `{json:nul}` for records.jsonl line 2: field contains a NUL byte, which cannot be passed in a process argument",
+            ),
+            ("{name}", "placeholder `{name}` cannot be used here: not valid in JSON-record mode"),
+            (
+                "{json:",
+                "placeholder `{json:` cannot be used here: JSON placeholder is missing its closing `}`",
+            ),
+            (
+                "{json:}",
+                "placeholder `{json:}` cannot be used here: expected a dotted field path with non-empty segments",
+            ),
+            (
+                "{json:{nested}}",
+                "placeholder `{json:{nested}` cannot be used here: expected a dotted field path with non-empty segments",
+            ),
+            (
+                "{json:target..name}",
+                "placeholder `{json:target..name}` cannot be used here: expected a dotted field path with non-empty segments",
+            ),
         ] {
             let command = args(&[command]);
             let error = validate_json_placeholders(&command)
                 .and_then(|()| substitute_json_prevalidated(&command, &fields, "records.jsonl", 2))
                 .expect_err("invalid JSON placeholder must fail");
-            assert!(error.to_string().contains(expected), "{command:?}: {error}");
+            assert_eq!(error.to_string(), expected, "{command:?}");
         }
     }
 

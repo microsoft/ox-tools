@@ -526,6 +526,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain explicit-key/newline permutations; focused block/flow patching and byte-boundary tests remain interpreted"
+    )]
     fn explicit_job_keys_retain_their_complete_mapping_entry() {
         let source = concat!(
             "version: 2\nupdates:\n",
@@ -553,6 +557,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain ecosystem merge policy permutations; focused alias, cache and cycle tests remain interpreted"
+    )]
     fn inherited_cargo_ecosystems_do_not_require_repeating_the_key() {
         let source = concat!(
             "version: 2\nupdates:\n",
@@ -578,6 +586,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain ecosystem precedence permutations; focused alias, cache and cycle tests remain interpreted"
+    )]
     fn ecosystem_merge_defaults_follow_precedence_and_explicit_overrides() {
         let defaults = format!(
             "version: 2\nupdates:\n\
@@ -604,6 +616,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain exclusion precedence permutations; focused alias, cache and cycle tests remain interpreted"
+    )]
     fn inherited_exclusions_are_read_only_with_merge_precedence_and_overrides() {
         let paths = quoted_paths(PATHS);
         let defaults = format!(
@@ -647,6 +663,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain the deep merge scaling regression; the small completed-lookup/cycle test remains interpreted"
+    )]
     fn repeated_merge_targets_do_not_repeat_completed_missing_lookups() {
         const SOURCE: &str = concat!(
             "version: 2\nupdates:\n",
@@ -724,6 +744,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain separator permutations; focused block/flow patching and Unicode byte boundaries remain interpreted"
+    )]
     fn survivor_flow_exclusions_preserve_exact_empty_and_nonempty_separators() {
         for (existing, expected) in [
             (
@@ -757,6 +781,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain exclusion-format permutations; focused block/flow patching and idempotence remain interpreted"
+    )]
     fn merges_block_and_flow_exclusions_without_duplicates() {
         for exclusions in [
             "    exclude-paths:\n      # repository policy\n      - vendor/**\n",
@@ -779,6 +807,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain indentless/newline permutations; focused block/flow patching and byte-boundary tests remain interpreted"
+    )]
     fn indentless_exclusions_remain_flat_strings_and_idempotent() {
         let source = concat!(
             "version: 2\nupdates:\n",
@@ -809,6 +841,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain anchor/tag policy permutations; focused alias, cache and cycle tests remain interpreted"
+    )]
     fn anchored_containers_are_safe_when_no_patch_is_needed() {
         let complete = format!("{JOB}    exclude-paths: {}\n", quoted_paths(PATHS));
         for source in [
@@ -825,6 +861,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain complete-alias policy permutations; focused alias, cache and cycle tests remain interpreted"
+    )]
     fn aliased_exclusions_are_read_only_when_every_generated_path_is_present() {
         let source = format!(
             "{JOB}    target-branch: main\n    exclude-paths: &generated {}\n\
@@ -867,6 +907,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain directory policy permutations; focused path selection and YAML patching remain interpreted"
+    )]
     fn subdirectory_jobs_accept_exact_repository_paths() {
         for directory in [
             "directory: /.github/actions/anvil-setup",
@@ -885,6 +929,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain glob policy permutations; focused path selection and YAML patching remain interpreted"
+    )]
     fn literal_glob_filenames_do_not_emit_neighbor_patterns() {
         let paths = [
             ".github/workflows/ci[12].yml",
@@ -918,6 +966,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain the multi-job/newline matrix; the small BOM/Unicode/CRLF flow round trip remains interpreted"
+    )]
     fn handles_flow_jobs_multiple_branches_unicode_and_crlf() {
         let source = concat!(
             "# repository policy\n",
@@ -946,6 +998,25 @@ mod tests {
     }
 
     #[test]
+    fn flow_patch_preserves_bom_unicode_and_crlf() {
+        let source = concat!(
+            "\u{feff}# caf\u{e9}\r\nversion: 2\r\n",
+            "updates: [{package-ecosystem: github-actions, directory: '/', exclude-paths: [vendor/**]}]\r\n",
+        );
+        let paths = &PATHS[..1];
+        let output = update(source, paths).unwrap().unwrap();
+        assert_eq!(
+            output,
+            source.replace("[vendor/**]", "[\".github/actions/anvil-setup/action.yml\", vendor/**]")
+        );
+        assert_eq!(update(&output, paths).unwrap(), None);
+    }
+
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain unrelated-ecosystem policy permutations; focused block/flow patching and alias tests remain interpreted"
+    )]
     fn leaves_other_ecosystems_and_unrelated_anchors_unchanged() {
         let cargo = JOB.replace("github-actions", "cargo");
         assert!(update(&cargo, PATHS).unwrap().is_none());
@@ -978,6 +1049,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain opt-out comment policy permutations; focused BOM/Unicode parsing and YAML patching remain interpreted"
+    )]
     fn source_repository_keeps_receiving_generated_action_updates() {
         let source = include_str!("../../../.github/dependabot.yml");
         assert!(!source.contains("exclude-paths:"));
@@ -998,7 +1073,11 @@ mod tests {
     fn configuration_refusals_retain_specific_causes_and_fields() {
         let error = update("", PATHS).unwrap_err();
         error_cause::<EmptyConfigurationError>(&error);
-        for (source, expected) in [("version: 1\nupdates: []\n", "1"), ("updates: []\n", "<missing>")] {
+        for (source, expected) in [
+            ("version: 1\nupdates: []\n", "1"),
+            ("updates: []\n", "<missing>"),
+            ("xversion: 2\nupdates: []\n", "<missing>"),
+        ] {
             let error = update(source, PATHS).unwrap_err();
             assert_eq!(error_cause::<UnsupportedVersionError>(&error).actual, expected);
         }
@@ -1039,6 +1118,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain document-marker permutations; focused malformed/multi-document parsing and byte boundaries remain interpreted"
+    )]
     fn single_yaml_document_boundaries_and_marker_strings_are_preserved() {
         let expected = update(JOB, PATHS).unwrap().unwrap();
         for (prefix, suffix) in [
@@ -1056,7 +1139,11 @@ mod tests {
 
     #[test]
     fn malformed_yaml_retains_the_parser_error_cause() {
-        for source in ["version: 2\nupdates: [".to_owned(), format!("{JOB}  - *missing\n")] {
+        for source in [
+            "version: 2\nupdates: [".to_owned(),
+            format!("{JOB}  - *missing\n"),
+            "\0version: 2\nupdates: []\n".to_owned(),
+        ] {
             let error = update(&source, PATHS).unwrap_err();
             let diagnostic = error.to_string();
             let context = diagnostic.lines().nth(1).unwrap().split_once(" (at ").unwrap().0;
@@ -1086,6 +1173,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain shared-target policy permutations; focused alias, cache and cycle refusal tests remain interpreted"
+    )]
     fn shared_yaml_targets_are_refused_only_when_they_need_editing() {
         for source in [
             format!("{JOB}    exclude-paths: &paths [vendor/**]\n"),

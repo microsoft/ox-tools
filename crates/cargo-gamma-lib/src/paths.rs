@@ -100,6 +100,7 @@ fn physical_with_filesystem(
                     for remaining in &components[at + 1..] {
                         next.push(remaining.as_str());
                     }
+                    // #[gamma::skip(try.propagate_to_unwrap, reason = "Resolving a relative native symlink target can require the process current directory; scripting its failure needs the deferred complete path-resolution backend.", tag = "native-boundary")]
                     pending = absolute(&next)?;
                     restarted = true;
 

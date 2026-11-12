@@ -511,23 +511,21 @@ fn spawn_once(prepared: PreparedCommand) -> Result<SpawnedCommand, FailedSpawn<P
 /// `EAGAIN` for the process table, `EMFILE` and `ENFILE` for this process's and the system's
 /// descriptor tables, `ENOMEM` for the address space a fork needs. Everything else — a binary that
 /// is not there, one that is not executable — is a standing fact that no amount of waiting changes.
+#[cfg(unix)]
 fn transient(cause: &io::Error) -> bool {
     if cause.kind() == io::ErrorKind::WouldBlock || cause.kind() == io::ErrorKind::Interrupted {
         return true;
     }
 
-    #[cfg(unix)]
-    {
-        matches!(
-            cause.raw_os_error(),
-            Some(libc::EAGAIN | libc::EMFILE | libc::ENFILE | libc::ENOMEM)
-        )
-    }
+    matches!(
+        cause.raw_os_error(),
+        Some(libc::EAGAIN | libc::EMFILE | libc::ENFILE | libc::ENOMEM)
+    )
+}
 
-    #[cfg(not(unix))]
-    {
-        false
-    }
+#[cfg(not(unix))]
+fn transient(cause: &io::Error) -> bool {
+    matches!(cause.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted)
 }
 
 /// Which second look a verdict calls for, or `None` for one that is already evidence.
@@ -6453,6 +6451,20 @@ mod tests {
     }
 
     #[test]
+    fn a_single_libtest_child_keeps_its_exact_selection_without_user_arguments() {
+        let work = Workspace::adopt("uncreated-libtest-workspace".into(), "uncreated-libtest-target".into());
+        let binary = crate::testing::test_binary("unexecuted-libtest-binary");
+        let command = launcher(&work, &binary, Only::One("exec::verdict::tests::stable_libtest_child_passes"), true)
+            .expect("a direct launch needs nothing from a runner");
+
+        assert_eq!(command.get_program(), binary.path.as_str());
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            ["exec::verdict::tests::stable_libtest_child_passes", "--exact"]
+        );
+    }
+
+    #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_direct_mutant_launch_is_accepted_by_the_real_stable_libtest_harness() {
         let (_scratch, work) = crate::testing::helper_workspace("launch-direct-stable-libtest", &[]);
@@ -6461,6 +6473,11 @@ mod tests {
         let binary = crate::testing::test_binary(executable);
         let mut command = launcher(&work, &binary, Only::One("exec::verdict::tests::stable_libtest_child_passes"), true)
             .expect("a direct launch needs nothing from a runner");
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            ["exec::verdict::tests::stable_libtest_child_passes", "--exact"],
+            "refuse to execute a mutated selection that could recursively launch this test suite"
+        );
 
         let output = command.output().expect("the current test harness can be launched");
 
@@ -6468,6 +6485,11 @@ mod tests {
             output.status.success(),
             "stable libtest rejected the mutant launch:\n{}",
             String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("1 passed; 0 failed"),
+            "the selected child did not run exactly once:\n{stdout}"
         );
     }
 

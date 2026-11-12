@@ -302,6 +302,10 @@ mod tests {
         ]
     };
 
+    #[cfg_attr(
+        miri,
+        ignore = "native and cargo-careful retain generated-recipe text contracts; focused recipe tests preserve Miri coverage"
+    )]
     #[test]
     fn tools_just_template_is_not_empty() {
         assert!(TOOLS_JUST.contains("anvil-tool-cargo-spellcheck-source-deps-check"));
@@ -537,6 +541,10 @@ mod tests {
 
     // Each resolver runs in its own PowerShell process and needs its own runtime checks.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain generated-recipe text contracts; artifact construction and focused recipe checks remain interpreted"
+    )]
     fn selection_resolvers_enable_strict_mode() {
         for declaration in ["_anvil-impact-exclude tier:", "_anvil-workspace-exclude +specs:"] {
             let (_, body) = IMPACT_JUST
@@ -546,6 +554,10 @@ mod tests {
         }
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "native and cargo-careful retain generated-recipe text contracts; focused recipe tests preserve Miri coverage"
+    )]
     #[test]
     fn spellcheck_checks_source_prerequisites_before_source_builds() {
         assert!(
@@ -572,6 +584,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain generated-recipe text contracts; artifact construction and focused recipe checks remain interpreted"
+    )]
     fn each_check_file_defines_its_own_check_recipe() {
         // The file `checks/<name>.just` must define `anvil-<name>` -- guards
         // against a mis-split that files a check's recipe under the wrong name.
@@ -615,6 +631,10 @@ mod tests {
         assert_eq!(scoped, 22, "every impact-scoped check must be covered");
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "native and cargo-careful retain generated-recipe text contracts; focused recipe tests preserve Miri coverage"
+    )]
     #[test]
     fn miri_profiles_inherit_the_parallel_artifact_runner() {
         let miri = CHECK_FILES
@@ -659,6 +679,10 @@ mod tests {
         }
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "native and cargo-careful retain generated-recipe text contracts; focused recipe tests preserve Miri coverage"
+    )]
     #[test]
     fn impact_recipe_is_defined_and_reuses_shared_helpers() {
         // The single impact building block: snapshot + compute + resolve.
@@ -800,6 +824,10 @@ mod tests {
         );
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "native and cargo-careful retain generated-recipe text contracts; focused recipe tests preserve Miri coverage"
+    )]
     #[test]
     fn semver_check_compares_locked_snapshots_against_the_pr_branch_baseline() {
         let (_, body) = CHECK_FILES
@@ -835,6 +863,10 @@ mod tests {
         assert!(!body.contains("cargo @stableArgs update"));
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "native and cargo-careful retain generated-recipe text contracts; focused recipe tests preserve Miri coverage"
+    )]
     #[test]
     fn groups_just_template_includes_all_groups_and_pr_slow_groups() {
         let groups = all_group_bodies();
@@ -894,6 +926,10 @@ mod tests {
         }
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "native and cargo-careful retain generated-recipe text contracts; focused recipe tests preserve Miri coverage"
+    )]
     #[test]
     fn impact_scoped_groups_declare_cargo_delta_prereq() {
         for group in ["pr-fast", "pr-test", "pr-msrv", "pr-runtime-analysis", "pr-fuzzing", "pr-mutants"] {
@@ -924,6 +960,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain generated-recipe text contracts; artifact construction and focused recipe checks remain interpreted"
+    )]
     fn tiers_just_template_has_three_tiers() {
         for needle in ["anvil-pr:", "anvil-scheduled:", "anvil-full:", "_anvil-scheduled:", "_anvil-full:"] {
             assert!(TIERS_JUST.contains(needle), "tiers.just missing '{needle}'");
@@ -978,6 +1018,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain generated-recipe text contracts; artifact construction and focused recipe checks remain interpreted"
+    )]
     fn versions_just_has_known_tools() {
         for needle in [
             "cargo_nextest_version",
@@ -991,6 +1035,10 @@ mod tests {
         }
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "native and cargo-careful retain generated-recipe text contracts; focused recipe tests preserve Miri coverage"
+    )]
     #[test]
     fn stable_toolchain_selection_is_scoped_to_each_command() {
         assert!(!VERSIONS_JUST.contains("export RUSTUP_TOOLCHAIN"));
@@ -1113,6 +1161,10 @@ mod tests {
         }
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "native and cargo-careful retain generated-recipe text contracts; focused recipe tests preserve Miri coverage"
+    )]
     #[test]
     fn mod_just_imports_siblings_and_defines_alias() {
         for needle in [

@@ -302,6 +302,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain the generated launcher snapshot; artifact construction and rendering remain interpreted"
+    )]
     fn container_launcher_recipe_contract() {
         let (_, launcher) = RECIPE
             .split_once("anvil-container *command:\n")
@@ -455,6 +459,10 @@ mod tests {
         assert!(DOCKERIGNORE.contains("!rust-toolchain\n"));
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "native and cargo-careful retain generated-container recipe text contracts; focused recipe tests preserve Miri coverage"
+    )]
     #[test]
     fn recipe_has_no_generation_time_placeholders() {
         // Every value is a literal or resolved at run time; nothing is
@@ -484,6 +492,10 @@ mod tests {
         assert!(!RECIPE.contains("anvil-container-rebuild:"));
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "native and cargo-careful retain generated-container recipe text contracts; focused recipe tests preserve Miri coverage"
+    )]
     #[test]
     fn every_public_recipe_lists_with_a_whole_sentence() {
         // `just --list` takes the last comment line before the attributes as
@@ -515,6 +527,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain generated-recipe text contracts; artifact construction and rendering remain interpreted"
+    )]
     fn the_tag_is_computed_in_exactly_one_place() {
         // `anvil-container-tag` is public so a publisher can name the image it
         // is about to build. That only holds while it is the same computation
@@ -535,6 +551,10 @@ mod tests {
         );
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "native and cargo-careful retain generated-container recipe text contracts; focused recipe tests preserve Miri coverage"
+    )]
     #[test]
     fn resolution_is_attempted_before_building_and_never_fatal() {
         // Order: local image, then the hook, then a build. Resolving sits
@@ -588,6 +608,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain generated-recipe text contracts; artifact construction and rendering remain interpreted"
+    )]
     fn resolver_context_is_optional_and_uses_the_selected_engine() {
         assert!(RECIPE.contains("$resolveArgs = @{}"));
         assert!(RECIPE.contains("if ($parameters.ContainsKey('Engine') -and $parameters.ContainsKey('EnginePrefix'))"));
@@ -603,6 +627,10 @@ mod tests {
         assert!(RECIPE.contains("$env:ANVIL_CONTAINER_NO_RESOLVE -ne '1'"));
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "native and cargo-careful retain generated-container recipe text contracts; focused recipe tests preserve Miri coverage"
+    )]
     #[test]
     fn every_interpolation_into_powershell_is_escaped() {
         // A `just` value pasted raw into a '…' literal ends the string on an
@@ -660,6 +688,10 @@ mod tests {
         assert!(RECIPE.contains(r#"replace_regex(lowercase(file_name(justfile_directory())), '[^a-z0-9]+', "-")"#));
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "native and cargo-careful retain generated-container recipe text contracts; focused recipe tests preserve Miri coverage"
+    )]
     #[test]
     fn an_argument_survives_as_its_own_word() {
         // `*command` joins with spaces, so passing it through as one string
@@ -709,6 +741,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain generated-recipe text contracts; artifact construction and rendering remain interpreted"
+    )]
     fn hook_file_is_an_image_input_but_hook_output_is_not() {
         // A changed hook must rename the tag; a minted credential must not. The
         // hook is picked up by the walk of `.anvil/container/`, which is what
@@ -745,6 +781,10 @@ mod tests {
         assert!(RECIPE.contains("anvil: container image input is missing: .anvil/container/Dockerfile"));
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "native and cargo-careful retain generated-container recipe text contracts; focused recipe tests preserve Miri coverage"
+    )]
     #[test]
     fn hook_values_are_passed_by_name_never_by_value() {
         // NAME=VALUE on a command line is recorded by endpoint telemetry and
@@ -754,6 +794,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain generated-recipe text contracts; artifact construction and rendering remain interpreted"
+    )]
     fn empty_hook_values_fail_closed() {
         // Both phases, asserted independently: "for" alone is a substring of
         // the build-side message, so it would pass with the run-side guard
@@ -778,6 +822,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain generated-recipe text contracts; artifact construction and rendering remain interpreted"
+    )]
     fn wsl_calls_bypass_the_login_shell() {
         // `wsl.exe -- <cmd>` re-parses the command line through the default
         // shell: a path holding `$` is silently truncated (and wslpath still
@@ -800,6 +848,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain generated-recipe text contracts; artifact construction and rendering remain interpreted"
+    )]
     fn teardown_reports_a_removal_that_failed() {
         // $ErrorActionPreference does not cover native commands, and this is
         // the only way to clear a cache volume.
@@ -808,6 +860,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain generated-recipe text contracts; artifact construction and rendering remain interpreted"
+    )]
     fn a_mapped_user_gets_a_writable_home() {
         // A uid with no passwd entry is given HOME=/, which is not writable.
         assert!(RECIPE.contains("$runArgs += @('--user', \"${hostUid}:${hostGid}\")"));
@@ -927,6 +983,10 @@ mod tests {
         assert!(RECIPE.contains("if ($indexMode.ContainsKey($rel)) {"));
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "native and cargo-careful retain generated-container recipe text contracts; focused recipe tests preserve Miri coverage"
+    )]
     #[test]
     fn the_credential_phases_are_fail_closed() {
         // Unlike resolution, these must stop the run: a container that starts
@@ -1026,6 +1086,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain generated-recipe text contracts; artifact construction and rendering remain interpreted"
+    )]
     fn the_dockerfile_must_carry_the_canonical_name() {
         // The engine reads the ignore file as `<dockerfile>.dockerignore` and
         // anvil maintains it at `.anvil/container/Dockerfile.dockerignore`, so

@@ -436,6 +436,14 @@ mod tests {
     use crate::CommentSyntax;
     use crate::anvil::artifacts;
 
+    fn region_catalog() -> Catalog {
+        Catalog::builder(CliMeta::new("anvil"))
+            .with_artifact(artifacts::region::rustfmt().with_body("max_width = 100\n"))
+            .with_artifact(artifacts::region::clippy().with_body("msrv = \"1.85\"\n"))
+            .build()
+            .unwrap()
+    }
+
     #[test]
     fn json_validation_does_not_apply_to_a_same_id_on_another_host() {
         let ordinary = RegionSpec {
@@ -545,15 +553,15 @@ mod tests {
 
     #[test]
     fn subcommand_derives_bin_name() {
-        let catalog = Catalog::anvil().into_builder().subcommand("myforge").build().unwrap();
+        let catalog = region_catalog().into_builder().subcommand("myforge").build().unwrap();
         assert_eq!(catalog.cli().subcommand, "myforge");
         assert_eq!(catalog.cli().bin_name, "cargo-myforge");
     }
 
     #[test]
     fn with_artifact_appends_new() {
-        let before = Catalog::anvil().artifacts().len();
-        let catalog = Catalog::anvil()
+        let before = region_catalog().artifacts().len();
+        let catalog = region_catalog()
             .into_builder()
             .with_artifact(Artifact::owned_file("justfiles/anvil/extra.just", "x\n"))
             .build()
@@ -563,7 +571,7 @@ mod tests {
 
     #[test]
     fn with_artifact_errors_on_duplicate() {
-        let err = Catalog::anvil()
+        let err = region_catalog()
             .into_builder()
             .with_artifact(artifacts::region::rustfmt())
             .build()
@@ -573,7 +581,7 @@ mod tests {
 
     #[test]
     fn replace_artifact_overrides_in_place() {
-        let catalog = Catalog::anvil()
+        let catalog = region_catalog()
             .into_builder()
             .replace_artifact(artifacts::region::rustfmt().with_body("custom = true\n"))
             .build()
@@ -605,7 +613,7 @@ mod tests {
 
     #[test]
     fn replace_artifact_errors_when_absent() {
-        let err = Catalog::anvil()
+        let err = region_catalog()
             .into_builder()
             .replace_artifact(Artifact::owned_file("justfiles/anvil/absent.just", "x"))
             .build()
@@ -615,8 +623,8 @@ mod tests {
 
     #[test]
     fn without_artifact_removes() {
-        let before = Catalog::anvil().artifacts().len();
-        let catalog = Catalog::anvil()
+        let before = region_catalog().artifacts().len();
+        let catalog = region_catalog()
             .into_builder()
             .without_artifact(artifacts::region::clippy())
             .build()
@@ -627,7 +635,7 @@ mod tests {
 
     #[test]
     fn without_artifact_errors_when_absent() {
-        let err = Catalog::anvil()
+        let err = region_catalog()
             .into_builder()
             .without_artifact(Artifact::owned_file("nope", "x"))
             .build()
@@ -637,7 +645,7 @@ mod tests {
 
     #[test]
     fn build_rejects_non_recipe_owned_files_under_justfiles() {
-        let err = Catalog::anvil()
+        let err = region_catalog()
             .into_builder()
             .with_artifact(Artifact::owned_file("justfiles/anvil/container/Containerfile", "FROM scratch\n"))
             .build()
@@ -647,7 +655,7 @@ mod tests {
 
     #[test]
     fn build_accepts_recipes_under_justfiles_and_any_path_outside_it() {
-        let catalog = Catalog::anvil()
+        let catalog = region_catalog()
             .into_builder()
             .with_artifact(Artifact::owned_file("justfiles/anvil/extra.just", "x\n"))
             .with_artifact(Artifact::owned_file(".anvil/container/extra.txt", "x\n"))
@@ -792,7 +800,7 @@ mod tests {
 
     #[test]
     fn multiple_errors_are_all_reported() {
-        let err = Catalog::anvil()
+        let err = region_catalog()
             .into_builder()
             .replace_artifact(Artifact::owned_file("absent-1", "x"))
             .without_artifact(Artifact::owned_file("absent-2", "x"))

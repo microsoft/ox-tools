@@ -241,7 +241,9 @@ impl Registry {
     /// Called only by ordinary lifecycle code, never from a signal handler.
     fn quiesce_with(&self, mut waiting: impl FnMut()) {
         while self.handling.load(Ordering::SeqCst) != 0 {
+            // #[gamma::skip(stmt.delete_call, reason = "Deleting the scripted progress notification prevents the outstanding sweep from completing; the observed mutant times out.", tag = "timeout")]
             waiting();
+            // #[gamma::skip(stmt.delete_call, reason = "Yielding changes scheduling and CPU use, not the quiescence condition or the release-before-reuse contract.", tag = "non-contract")]
             #[cfg(not(loom))]
             std::thread::yield_now();
             #[cfg(loom)]
@@ -268,6 +270,7 @@ impl Registry {
     /// Claims a process-group slot and its cgroup kill handle as one registration.
     #[cfg(target_os = "linux")]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    // #[gamma::skip(all, reason = "Registration requires a real Cgroup owning a kill file and watch lifetime; isolated Registry algorithms remain mutation-tested, while this pairing needs the deferred owning-resource seam.", tag = "native-boundary")]
     fn claim_with_cgroup<K: Fn(i32), C: Fn(i32)>(
         &self,
         group: i32,
@@ -305,6 +308,7 @@ impl Registry {
             let _released = entry.compare_exchange(encoded, EMPTY, Ordering::SeqCst, Ordering::SeqCst);
         }
 
+        // #[gamma::skip(stmt.delete_call, reason = "This wait pairs descriptor release with native owning-file closure; its concurrent ordering is covered by Loom rather than sequential mutation tests.", tag = "native-boundary")]
         self.quiesce_with(|| {});
     }
 
@@ -350,6 +354,7 @@ impl Registry {
 
     /// What a slot currently holds, or zero for one that is free.
     fn holding(&self, slot: usize) -> i32 {
+        // #[gamma::skip(fallback.map_or_to_default, reason = "The fallback EMPTY is the i32 default zero; map_or_default preserves both present and absent results.", tag = "equivalent")]
         self.groups.get(slot).map_or(EMPTY, |entry| entry.load(Ordering::SeqCst))
     }
 
@@ -491,6 +496,7 @@ fn arm_result(cached: Result<(), i32>) -> io::Result<()> {
 #[must_use = "the window closes as soon as this is dropped, which reopens the race it exists to close"]
 pub fn spawning() -> Spawning {
     let registry = registry();
+    // #[gamma::skip(stmt.delete_call, reason = "This wrapper opens the process-global registry; owned Registry tests exercise open/close semantics without sharing signal-handler state.", tag = "native-boundary")]
     registry.open();
 
     Spawning(registry)
@@ -524,6 +530,7 @@ impl Spawning {
     /// was given `None` for has a child no interrupt can reach, which is the leak this module
     /// exists to prevent, so the answer has to be acted on rather than stored.
     #[must_use]
+    // #[gamma::skip(all, reason = "This wrapper registers in the process-global signal registry with native killers; owned Registry claim tests exercise policy without signalling fabricated groups.", tag = "native-boundary")]
     pub fn watch(&self, group: i32) -> Option<usize> {
         self.0.claim(group, &kill_group)
     }
@@ -541,6 +548,7 @@ impl Spawning {
     #[cfg(target_os = "linux")]
     #[must_use]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    // #[gamma::skip(all, reason = "This wrapper binds a real cgroup's descriptor lifetime to the global signal registry; deterministic wrapper coverage needs the deferred owning-resource refactor.", tag = "native-boundary")]
     pub fn watch_cgroup(&self, group: i32, cgroup: Option<&mut Cgroup>) -> Option<usize> {
         let Some(cgroup) = cgroup else {
             return self.watch(group);
@@ -571,6 +579,7 @@ impl fmt::Debug for Spawning {
 
 impl Drop for Spawning {
     fn drop(&mut self) {
+        // #[gamma::skip(call_result.default, reason = "This close operates on the global registry and may re-raise a terminal signal; the same close algorithm is mutation-tested with owned registries and recording killers.", tag = "native-boundary")]
         if let Some(signal) = self.0.close_with(&kill_group, &kill_cgroup) {
             die(signal);
         }
@@ -582,6 +591,7 @@ impl Drop for Spawning {
 /// Test support for the process-tree tests in `cargo-gamma-process`, which is a different crate and so
 /// cannot reach a `#[cfg(test)]` item here.
 #[must_use]
+// #[gamma::skip(all, reason = "This adapter reads the process-global signal registry; owned holding tests cover slot selection without shared mutable test state.", tag = "native-boundary")]
 pub fn watched(slot: usize) -> i32 {
     registry().holding(slot)
 }
@@ -657,6 +667,7 @@ impl TestRegistry {
 ///
 /// Waits for sweeps already holding an extracted identity before returning. Call only from ordinary
 /// lifecycle code, before reaping the leader; this wait is not signal-handler-safe.
+// #[gamma::skip(all, reason = "This adapter releases the process-global registry; owned Registry tests and Loom cover identity-aware release and quiescence.", tag = "native-boundary")]
 pub fn forget(slot: usize, group: i32) {
     registry().release(slot, group);
 }
@@ -668,6 +679,7 @@ pub fn forget(slot: usize, group: i32) {
 /// rather than offered to a caller who could skip it, call it twice, or call it too early.
 #[cfg(target_os = "linux")]
 #[cfg_attr(coverage_nightly, coverage(off))]
+// #[gamma::skip(all, reason = "This adapter is tied to native Cgroup drop and the global registry; owned release_cgroup tests retain deterministic slot-reuse coverage.", tag = "native-boundary")]
 pub(crate) fn release_watched_cgroup(slot: usize, descriptor: i32) {
     registry().release_cgroup(slot, descriptor);
 }
@@ -682,6 +694,7 @@ fn kill_group(group: i32) {
 
 /// Kills every process in a cgroup through an already-open `cgroup.kill` descriptor.
 #[cfg_attr(coverage_nightly, coverage(off))]
+// #[gamma::skip(all, reason = "This async-signal-safe adapter writes to a real owning cgroup descriptor; recording callbacks test registry decisions, not kernel write effects.", tag = "native-boundary")]
 fn kill_cgroup(descriptor: i32) {
     // SAFETY: descriptors admitted here come from a live `Cgroup`, whose own `Drop` waits for every
     // active sweep before the owning `File` closes the descriptor, so it cannot have been closed or
@@ -722,6 +735,7 @@ fn die(signal: i32) {
 /// why waiting for the spawn instead would deadlock whenever this handler is running on the very
 /// thread performing it.
 extern "C" fn handler(signal: i32) {
+    // #[gamma::skip(call_result.default, reason = "The native handler uses the global registry and can terminate the harness; owned interrupt_with tests and Loom cover the same handoff algorithm safely.", tag = "native-boundary")]
     if let Some(fatal) = registry().interrupt_with(signal, &kill_group, &kill_cgroup) {
         die(fatal);
     }
@@ -1086,6 +1100,58 @@ mod tests {
         assert_eq!(registry.interrupt_with(libc::SIGINT, &group_kill, &cgroup_kill), Some(libc::SIGINT));
         assert_eq!(*groups.borrow(), vec![4242]);
         assert_eq!(*cgroups.borrow(), vec![17]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn invalid_cgroup_descriptors_are_refused_without_claiming_a_slot() {
+        let registry = Registry::new();
+        for descriptor in [-1, -2, i32::MIN, i32::MAX] {
+            assert_eq!(
+                registry.claim_cgroup(descriptor, &|_| panic!("an invalid descriptor must not be killed")),
+                None
+            );
+        }
+        assert_eq!(registry.claim_cgroup(0, &|_| panic!("a calm registration must not kill")), Some(0));
+        assert_eq!(registry.holding_cgroup(0), Some(0));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_cgroup_registered_after_interruption_is_killed_immediately() {
+        let registry = Registry::new();
+        assert_eq!(registry.interrupt_with(libc::SIGINT, &|_| {}, &|_| {}), Some(libc::SIGINT));
+        let killed = RefCell::new(Vec::new());
+        let slot = registry.claim_cgroup(17, &|descriptor| killed.borrow_mut().push(descriptor));
+        assert_eq!(slot, Some(0));
+        assert_eq!(*killed.borrow(), [17]);
+        assert_eq!(registry.holding_cgroup(0), Some(17));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn holding_selects_the_requested_group_slot() {
+        let registry = Registry::new();
+        let first = registry.claim(11, &|_| panic!("no interruption"));
+        let second = registry.claim(22, &|_| panic!("no interruption"));
+        assert_eq!(first, Some(0));
+        assert_eq!(second, Some(1));
+        assert_eq!(registry.holding(0), 11);
+        assert_eq!(registry.holding(1), 22);
+        assert_eq!(registry.holding(SLOTS), EMPTY);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn releasing_one_cgroup_preserves_the_other_slot() {
+        let registry = Registry::new();
+        assert_eq!(registry.claim_cgroup(17, &|_| panic!("no interruption")), Some(0));
+        assert_eq!(registry.claim_cgroup(23, &|_| panic!("no interruption")), Some(1));
+        registry.release_cgroup(1, 23);
+        assert_eq!(registry.holding_cgroup(0), Some(17));
+        assert_eq!(registry.holding_cgroup(1), None);
+        assert_eq!(registry.claim_cgroup(31, &|_| panic!("no interruption")), Some(1));
+        assert_eq!(registry.holding_cgroup(1), Some(31));
     }
 
     #[cfg(target_os = "linux")]

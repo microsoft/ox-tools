@@ -159,7 +159,11 @@ hint-selection and verdict-state-machine regressions:
 - `exec::testing_state` retains a separate directory-read rejection check;
   bounded JSON size/overflow policy consumes in-memory readers.
 
-These checks require writable owned project-local directories; process cases
+Build-budget supervision instead uses a scripted subtree, clock and wait
+callbacks. Those cases verify deadline and cleanup decisions in process rather
+than launching a native descendant to prove termination.
+
+These native checks require writable owned project-local directories; process cases
 also require the already-built helper/current test executable and native
 process containment support. They need no external service, registry fetch,
 credentials or shared mutable fixture. Temporary trees, cache generations
@@ -175,6 +179,38 @@ runs; no in-test correctness watchdog remains active under mutation testing.
 Production launches retain their configured supervision budgets. Native
 acceptance is not a substitute for controlled policy coverage, nor are test
 helper bodies counted as production coverage.
+
+The direct stable-libtest acceptance validates its exact child selection
+before executing the constructed command. A mutation that removes the filter
+must fail before it can re-execute the entire test suite, including the
+acceptance itself. A separate construction-only regression uses a synthetic
+workspace and executable with no user arguments to check that the selected
+child and `--exact` survive command construction without launching anything.
+Selection-widening mutations can therefore be reproduced through argument
+inspection, without executing the widened suite.
+
+The once-only systemd relaunch policy is exercised with a supplied callback,
+not the native relaunch adapter. A mutation that ignores the already-in-scope
+marker must fail against that callback without starting another copy of the
+test executable in a sibling systemd scope. Unmarked cases separately verify
+one attempt and unchanged success, exit-code and refusal results.
+
+### Mutation scope at native boundaries
+
+The exhaustive score remains 100% of the retained population, with no flaky
+verdict allowance. It is not a claim of mutation coverage for native acceptance
+or every storage adapter. Local, reasoned `gamma::skip` comments exclude native
+relaunch/PATH/environment wiring and filesystem/cache paths whose existing
+partial seams still require actual owning files, native metadata or global
+state. Completing that coverage requires the deferred owning-resource and
+filesystem backend; it must not be simulated by tests changing the shared host.
+
+Injected policy stays eligible, including the once-only relaunch guard, command
+construction, directory synchronization error handling, executable permissions,
+and lexical path normalization. Platform-only policies use compile-time `cfg`
+blocks so an inactive platform branch is not offered as mutation coverage.
+Native acceptance remains valuable but does not establish that excluded
+syscall/storage failures were mutation-tested.
 
 ## Native command and storage acceptance
 

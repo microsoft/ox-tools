@@ -236,6 +236,7 @@ fn create_cache_dir(base_path: impl AsRef<Path>, name: impl AsRef<str>) -> Resul
             #[cfg(not(windows))]
             {
                 let _ = path;
+                // #[gamma::skip(literal.bool_flip, reason = "This non-Windows adapter delegates creation to native create_dir_all instead of the Windows existence probe; observing omission requires native cache fixtures or the deferred complete filesystem backend.", tag = "native-boundary")]
                 false
             }
         },

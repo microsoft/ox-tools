@@ -126,7 +126,7 @@ pub(super) fn supervise_with_limits(
         spawn_failure(&program, work, cause)
     })?;
 
-    let mut subtree = match ProcessTree::adopt(spawned) {
+    let subtree = match ProcessTree::adopt(spawned) {
         Ok(subtree) => subtree,
         Err(reason) => {
             // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
@@ -138,6 +138,19 @@ pub(super) fn supervise_with_limits(
         }
     };
 
+    supervise_tree(subtree, work, budget, events, limits)
+}
+
+/// Supervises an already-adopted build tree with bounded output.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn supervise_tree(
+    mut subtree: ProcessTree,
+    work: &Workspace,
+    budget: Option<Duration>,
+    events: &mut dyn Events,
+    limits: OutputLimits,
+) -> Result<Option<Output>> {
+    let root = encode_controls(work.root.as_str());
     let (sender, lines) = mpsc::sync_channel(limits.backlog);
 
     let stdout = subtree

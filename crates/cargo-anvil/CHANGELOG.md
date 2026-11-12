@@ -2,19 +2,21 @@
 
 ## [Unreleased]
 
-## [0.26.0] - 2026-11-10
+## [0.26.0] - 2026-11-12
 
 - ✨ Features
 
   - cargo-anvil: isolate authenticated dependency preparation
 
+- ✔️ Tasks
+
+  - cargo-anvil: regenerate the optional preparation catalog
+
+## [0.25.1] - 2026-11-06
+
 - 🐛 Bug Fixes
 
-  - cargo-gamma: honor active cfgs and reduce console noise ([#352](https://github.com/microsoft/ox-tools/pull/352))
-
-- 📚 Documentation
-
-  - cargo-anvil: focus documentation on current contracts ([#355](https://github.com/microsoft/ox-tools/pull/355))
+  - cargo-anvil: adopt cargo-coverage-gate 0.7.5 ([#350](https://github.com/microsoft/ox-tools/pull/350))
 
 ## [0.25.0] - 2026-11-04
 

@@ -439,22 +439,20 @@ fn copy_symlink(source: &Utf8Path, destination: &Utf8Path) -> Result<()> {
     copy_symlink_with(source, destination, create_symlink)
 }
 
+#[cfg(unix)]
+pub(super) fn create_symlink(target: &Path, destination: &Path, _: bool) -> io::Result<()> {
+    std::os::unix::fs::symlink(target, destination)
+}
+
+#[cfg(windows)]
 pub(super) fn create_symlink(target: &Path, destination: &Path, directory: bool) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        let _ = directory;
-        std::os::unix::fs::symlink(target, destination)
-    }
-    #[cfg(windows)]
-    {
-        create_windows_symlink(
-            target,
-            destination,
-            directory,
-            |target, destination| std::os::windows::fs::symlink_dir(target, destination),
-            |target, destination| std::os::windows::fs::symlink_file(target, destination),
-        )
-    }
+    create_windows_symlink(
+        target,
+        destination,
+        directory,
+        |target, destination| std::os::windows::fs::symlink_dir(target, destination),
+        |target, destination| std::os::windows::fs::symlink_file(target, destination),
+    )
 }
 
 #[cfg(windows)]
@@ -484,6 +482,7 @@ fn copy_symlink_with(
         .parent()
         .map_or_else(|| target.is_dir(), |parent| parent.as_std_path().join(&target).is_dir());
     #[cfg(not(windows))]
+    // #[gamma::skip(literal.bool_flip, reason = "Unix symlink creation has no file/directory distinction and ignores this Windows-only callback argument.", tag = "equivalent")]
     let directory = false;
 
     create(&target, destination.as_std_path(), directory)
