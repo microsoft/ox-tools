@@ -10,6 +10,8 @@ credentials, runner pools, and additional checks.
 
 - **Adopter toolchains must use Rust and Cargo 1.95 or newer**, including the
   declared MSRV. Older versions are outside the supported contract.
+- The selected stable toolchain for `check-all-targets` requires **Cargo 1.97
+  or newer** to enforce its warnings-as-errors policy.
 - **Building this checkout of cargo-anvil requires Rust 1.97 or newer**, as
   declared in the workspace `Cargo.toml`. This is separate from the minimum
   supported toolchain in an adopting repository.
