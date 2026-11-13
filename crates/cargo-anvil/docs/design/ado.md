@@ -137,6 +137,12 @@ PR templates consume impact; arrange an artifact download to obtain scoping.
 Without that cache, checks fall back to their full-workspace defaults.
 Scheduled templates always disable impact.
 
+The opt-in `.pipelines/anvil/steps/release-profile.yml` template runs
+full-workspace release-profile validation without an impact artifact. Include
+it in a repository-owned stage when optimized Clippy and tests are required.
+It publishes `target/anvil/test-results/release-profile.xml` through
+`PublishTestResults@2`, including when the test recipe fails.
+
 Only `pr-fast` resolves the current PR title through the REST API using
 `System.AccessToken`. A known PR whose metadata cannot be retrieved fails
 validation; non-PR builds leave the title empty. The mutation recipe uses
@@ -185,6 +191,13 @@ Publication runs after success or failure, but not cancellation. Missing
 reports are allowed because unaffected coverage checks can no-op. Collection
 or evaluation failures still fail the recipe. ADO's Code Coverage tab is an
 informational view; the generated recipe determines the coverage verdict.
+
+## Test results
+
+The release-profile group writes nextest JUnit output under
+`target/anvil/test-results/`. Its generated ADO step publishes the report to
+the pipeline's Test Results view after success or failure. The recipe remains
+the validation authority; publication does not change its exit status.
 
 ## Advisory PR comments
 

@@ -126,6 +126,7 @@
 //! just anvil-fmt --fix
 //! just anvil-miri --package my-crate --example basic
 //! just anvil-readme --fix
+//! just anvil-release-profile
 //! just anvil-scheduled
 //! just anvil-full
 //! ```
@@ -154,6 +155,9 @@
 //! The scheduled tier runs full-workspace backstops and expensive checks that
 //! do not belong on every pull request, including extended Miri profiles, full
 //! mutation testing, feature-powerset checks, and benchmark compilation.
+//! Repositories that need optimization-sensitive validation can opt into
+//! `anvil-release-profile`, which runs full-workspace Clippy, nextest, and
+//! doctests with Cargo's release profile. It is not part of any default tier.
 //! GitHub scheduled failures can be published to a durable issue.
 //!
 //! Local and cloud runs call the same generated recipes with the same check

@@ -32,3 +32,4 @@ __PR_TITLE_ENV__
       # pure cost with no cross-run benefit. Mirrors the GitHub impl workflows'
       # workflow-level CARGO_INCREMENTAL=0.
       CARGO_INCREMENTAL: "0"
+__TEST_RESULTS_STEP__

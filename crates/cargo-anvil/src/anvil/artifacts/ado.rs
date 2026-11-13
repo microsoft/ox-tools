@@ -61,7 +61,7 @@ const SCHEDULED_ROOT_PIPELINE: &str = include_str!("../../../templates/ado/sched
 /// The former umbrella group is split so cloud workflow UIs identify the
 /// category that failed while Just remains the source of recipe membership.
 #[cfg(test)]
-const GROUPS: &[&str] = &[
+const TIER_GROUPS: &[&str] = &[
     "pr-fast",
     "pr-test",
     "pr-msrv",
@@ -96,6 +96,20 @@ const PR_TITLE_STEP_PLACEHOLDER: &str = "__PR_TITLE_STEP__";
 /// Placeholder token for the optional `PR_TITLE` environment entry.
 const PR_TITLE_ENV_PLACEHOLDER: &str = "__PR_TITLE_ENV__";
 
+/// Placeholder for group-specific test-result publication.
+const TEST_RESULTS_STEP_PLACEHOLDER: &str = "__TEST_RESULTS_STEP__";
+
+/// ADO publication step for the opt-in release-profile group's `JUnit` report.
+const RELEASE_PROFILE_TEST_RESULTS_STEP: &str = r"  - task: PublishTestResults@2
+    displayName: Publish release-profile test results
+    condition: succeededOrFailed()
+    inputs:
+      testResultsFormat: JUnit
+      testResultsFiles: target/anvil/test-results/release-profile.xml
+      failTaskOnFailedTests: false
+      failTaskOnMissingResultsFile: false
+      testRunTitle: anvil-release-profile";
+
 /// Render the step template for one group.
 #[must_use]
 fn render_group_step(group: &str) -> String {
@@ -108,6 +122,12 @@ fn render_group_step(group: &str) -> String {
     };
     rendered = rendered.replace(PR_TITLE_STEP_PLACEHOLDER, title_step);
     rendered = rendered.replace(PR_TITLE_ENV_PLACEHOLDER, title_env);
+    let test_results_step = if group == "release-profile" {
+        RELEASE_PROFILE_TEST_RESULTS_STEP
+    } else {
+        ""
+    };
+    rendered = rendered.replace(TEST_RESULTS_STEP_PLACEHOLDER, test_results_step);
     rendered
 }
 
@@ -241,6 +261,7 @@ pub(crate) const GROUP_STEPS: &[(&str, &str)] = &[
     ("pr-runtime-analysis", ".pipelines/anvil/steps/pr-runtime-analysis.yml"),
     ("pr-fuzzing", ".pipelines/anvil/steps/pr-fuzzing.yml"),
     ("pr-mutants", ".pipelines/anvil/steps/pr-mutants.yml"),
+    ("release-profile", ".pipelines/anvil/steps/release-profile.yml"),
     ("scheduled-test", ".pipelines/anvil/steps/scheduled-test.yml"),
     ("scheduled-advisories", ".pipelines/anvil/steps/scheduled-advisories.yml"),
     (
@@ -476,8 +497,8 @@ mod tests {
 
     /// Every `steps/job.yml` invocation identifies the ADO stage it renders.
     ///
-    /// The expected stages are DERIVED from [`GROUPS`] rather than restated as
-    /// a third hardcoded list: a group added to `GROUPS` but never threaded
+    /// The expected stages are DERIVED from [`TIER_GROUPS`] rather than restated as
+    /// a third hardcoded list: a group added to `TIER_GROUPS` but never threaded
     /// into a stages template has to fail here, which a literal list copied
     /// alongside it cannot do. `impact` is the one stage with no check group
     /// of its own, so it is the only literal.
@@ -489,7 +510,7 @@ mod tests {
     fn stages_identify_the_stage_for_every_job() {
         let mut pr_stages = vec!["impact".to_owned()];
         let mut scheduled_stages = Vec::new();
-        for group in GROUPS {
+        for group in TIER_GROUPS {
             // The identifier is the ADO stage name, i.e. the group with `-`
             // swapped for `_` -- what the template writes after `stage:` and
             // what `System.StageName` reports at runtime.
@@ -587,6 +608,17 @@ mod tests {
             !body.contains("[ -f target/anvil/impact/impact.state ]"),
             "scheduled group must not gate its mode on a runtime marker-file probe"
         );
+    }
+
+    #[test]
+    fn release_profile_group_is_unscoped_and_publishes_junit() {
+        let body = render_group_step("release-profile");
+        assert!(body.contains("group: release-profile"));
+        assert!(body.contains("just anvil-release-profile"));
+        assert!(body.contains(r#"ANVIL_IMPACT: "off""#));
+        assert!(body.contains("PublishTestResults@2"));
+        assert!(body.contains("target/anvil/test-results/release-profile.xml"));
+        assert!(!body.contains("PR_TITLE"));
     }
 
     #[test]
@@ -768,14 +800,23 @@ mod tests {
 
     #[test]
     fn group_step_paths_match_render() {
-        assert_eq!(GROUP_STEPS.len(), GROUPS.len());
-        for ((group, path), expected_group) in GROUP_STEPS.iter().zip(GROUPS) {
-            assert_eq!(group, expected_group, "group order must match GROUPS");
+        assert_eq!(GROUP_STEPS.len(), TIER_GROUPS.len() + 1);
+        for (group, path) in GROUP_STEPS {
             assert_eq!(
                 *path,
                 group_step_path(group),
                 "registry path must match group_step_path for {group}"
             );
         }
+        for group in TIER_GROUPS {
+            assert!(
+                GROUP_STEPS.iter().any(|(registered, _)| registered == group),
+                "tier group '{group}' must have a generated step"
+            );
+        }
+        assert!(
+            GROUP_STEPS.iter().any(|(group, _)| *group == "release-profile"),
+            "the opt-in release-profile group must have a generated step"
+        );
     }
 }
