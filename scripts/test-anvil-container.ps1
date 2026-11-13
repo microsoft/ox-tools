@@ -37,6 +37,10 @@
     Container engine to test against. Defaults to $env:ANVIL_CONTAINER_ENGINE,
     then 'docker'.
 
+.PARAMETER PreparationContractsOnly
+    Run the provisioned PowerShell launcher/scanner contracts without engines,
+    Cargo builds, just, services, or credentials.
+
 .PARAMETER KeepArtifacts
     Leave the temp repository and built images in place for inspection.
 
@@ -52,6 +56,7 @@
 param(
     [ValidateSet('docker', 'podman')]
     [string]$Engine = $(if ($env:ANVIL_CONTAINER_ENGINE) { $env:ANVIL_CONTAINER_ENGINE } else { 'docker' }),
+    [switch]$PreparationContractsOnly,
     [switch]$KeepArtifacts,
     [switch]$SkipCleanup
 )
@@ -105,6 +110,7 @@ function Invoke-Native {
         [string[]]$Arguments = @(),
         [string]$WorkingDirectory,
         [hashtable]$Environment = @{},
+        [int]$TimeoutSeconds = 0,
         [switch]$AllowFailure
     )
 
@@ -114,14 +120,25 @@ function Invoke-Native {
     $start.RedirectStandardError = $true
     if ($WorkingDirectory) { $start.WorkingDirectory = $WorkingDirectory }
     foreach ($argument in $Arguments) { $start.ArgumentList.Add($argument) }
-    foreach ($key in $Environment.Keys) { $start.Environment[$key] = $Environment[$key] }
+    foreach ($key in $Environment.Keys) {
+        if ($null -eq $Environment[$key]) { $null = $start.Environment.Remove($key) }
+        else { $start.Environment[$key] = $Environment[$key] }
+    }
     $process = [Diagnostics.Process]::new()
     $process.StartInfo = $start
     try {
         if (-not $process.Start()) { throw "could not start $Command" }
         $stdout = $process.StandardOutput.ReadToEndAsync()
         $stderr = $process.StandardError.ReadToEndAsync()
-        $process.WaitForExit()
+        if ($TimeoutSeconds -gt 0) {
+            if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+                $process.Kill($true)
+                $process.WaitForExit()
+                throw "$Command exceeded the system-test safety deadline"
+            }
+        } else {
+            $process.WaitForExit()
+        }
         $result = [pscustomobject]@{
             ExitCode = $process.ExitCode
             StdOut = $stdout.GetAwaiter().GetResult()
@@ -222,6 +239,329 @@ function Remove-AnvilImages([string]$Prefix) {
         Invoke-Engine -Arguments @('volume', 'rm', '-f', $volume) -AllowFailure | Out-Null
     }
 }
+
+function Complete-Report {
+    $elapsed = (Get-Date) - $script:Started
+    Write-Host ''
+    Write-Host ('-' * 78)
+    $summary = "{0}/{1} checks passed in {2:mm\:ss}" -f $script:Passed, ($script:Passed + $script:Failed), $elapsed
+    if ($script:Failed -eq 0) {
+        Write-Host "PASS  $summary" -ForegroundColor Green
+        exit 0
+    }
+    Write-Host "FAIL  $summary ($($script:Failed) failed)" -ForegroundColor Red
+    exit 1
+}
+
+function Invoke-PreparationContracts {
+    Write-Section 'Preparation launcher and bounded-scanner system contracts'
+    $templatePath = Join-Path $PSScriptRoot '../crates/cargo-anvil/templates/justfiles/anvil/container.just'
+    $template = [IO.File]::ReadAllText($templatePath).Replace("`r`n", "`n")
+    $parts = $template.Split("anvil-container *command:`n", 2, [StringSplitOptions]::None)
+    if ($parts.Count -ne 2) { throw 'the actual launcher template is missing' }
+    $lines = [Collections.Generic.List[string]]::new()
+    foreach ($line in ($parts[1] -split "`n")) {
+        if ($line -and -not $line.StartsWith('    ')) { break }
+        $lines.Add($(if ($line.StartsWith('    ')) { $line.Substring(4) } else { $line }))
+    }
+    $launcher = $lines -join "`n"
+    $pwsh = (Get-Process -Id $PID).Path
+    $root = Join-Path ([IO.Path]::GetTempPath()) ('anvil-preparation-contracts-' + [Guid]::NewGuid().ToString('N'))
+    $hostInputs = @{}
+    foreach ($name in @('PREPARATION_TOKEN', 'SECOND_PREPARATION_TOKEN', 'WSLENV', 'ANVIL_CONTAINER_ENGINE')) {
+        $hostInputs[$name] = [Environment]::GetEnvironmentVariable($name)
+    }
+    $hostDirectory = (Get-Location).Path
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    function Get-RemainingSeconds {
+        $remaining = 300 - [int][Math]::Ceiling($clock.Elapsed.TotalSeconds)
+        if ($remaining -le 0) { throw 'preparation contracts exceeded their five-minute safety deadline' }
+        $remaining
+    }
+    $engine = @'
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+$allowed = $false
+if ($args.Count -eq 3 -and $args[0] -eq 'volume' -and $args[1] -in @('create', 'rm')) {
+    $allowed = $args[1] -eq 'create' -and $args[2] -match '^fixture-prepare-[0-9a-f]{32}-(registry|git)$'
+}
+if ($args.Count -eq 4 -and $args[0] -eq 'volume' -and $args[1] -eq 'rm' -and $args[2] -eq '-f') {
+    $allowed = $args[3] -match '^fixture-prepare-[0-9a-f]{32}-(registry|git)$'
+}
+if ($args.Count -eq 4 -and $args[0] -eq 'ps' -and $args[1] -eq '-aq' -and $args[2] -eq '--filter') {
+    $allowed = $args[3] -match '^name=\^/\?fixture-prepare-[0-9a-f]{32}(-validation)?\$$'
+}
+if ($args.Count -gt 10 -and $args[0] -eq 'run' -and $args -contains 'image-owned:test') {
+    $allowed = $args -contains '-EncodedCommand' -or
+        (($args[($args.Count - 3)..($args.Count - 1)] -join '|') -ceq 'cargo|test|--locked')
+}
+$record = @{
+    Args = @($args); Credential = $env:PREPARATION_TOKEN
+    SecondCredential = $env:SECOND_PREPARATION_TOKEN
+    Unexpected = -not $allowed
+}
+Add-Content -LiteralPath $env:FAKE_ENGINE_LOG -Value (ConvertTo-Json -InputObject $record -Compress)
+if (-not $allowed) { throw "unexpected engine operation: $($args -join ' ')" }
+if ($args[0] -eq 'run') {
+    if ($args -contains '-EncodedCommand') {
+        [Console]::Out.Write($env:FAKE_PREPARATION_STDOUT)
+        [Console]::Error.Write($env:FAKE_PREPARATION_STDERR)
+        exit ([int]$env:FAKE_PREPARATION_STATUS)
+    }
+    Write-Output 'validation executed'
+    exit ([int]$env:FAKE_VALIDATION_STATUS)
+}
+if ($args[0] -eq 'volume' -and $args[1] -eq 'rm' -and $env:FAKE_CLEANUP_FAILURE -eq '1') { exit 1 }
+exit 0
+'@
+    $prelude = @'
+$ErrorActionPreference = 'Stop'
+$ErrorView = 'NormalView'
+$PSStyle.OutputRendering = 'PlainText'
+function Invoke-Just {
+    $global:LASTEXITCODE = 0
+    switch ($args[0]) {
+        '_anvil-container-engine' { "$((Get-Process -Id $PID).Path)|-NoLogo|-NoProfile|-File|$env:FAKE_ENGINE_SCRIPT" }
+        '_anvil-container-image' { 'image-owned:test' }
+        '_anvil-container-path' { $args[1] }
+        default { throw "unexpected just call: $args" }
+    }
+}
+function Get-Command {
+    param($Name, $ErrorAction, $CommandType)
+    if ($Name -eq 'git') { return }
+    if ($Name -notin @('Anvil-PrepareEnv', 'Anvil-RunEnv')) { throw "unexpected command lookup: $Name" }
+    Microsoft.PowerShell.Core\Get-Command @PSBoundParameters
+}
+function id {
+    if ($args.Count -ne 1 -or $args[0] -notin @('-u', '-g')) { throw 'unexpected identity lookup' }
+    $global:LASTEXITCODE = 0
+    '1000'
+}
+'@
+    $hook = @'
+function Anvil-PrepareEnv {
+    Add-Content -LiteralPath $env:HOOK_ACQUISITIONS -Value 'acquired'
+    @{ Env = @{ PREPARATION_TOKEN = 'synthetic.a+[credential]'; SECOND_PREPARATION_TOKEN = 'second.synthetic.credential' } }
+}
+'@
+    function Invoke-LauncherCase([string]$Hook, [string]$Command = 'cargo test --locked', [hashtable]$Overrides = @{}) {
+        $caseRoot = Join-Path $root ([Guid]::NewGuid().ToString('N'))
+        $hookPath = Join-Path $caseRoot '.anvil/container/hooks.ps1'
+        Write-Fixture $hookPath $Hook
+        Write-Fixture (Join-Path $caseRoot 'engine.ps1') $engine
+        $script = $launcher
+        $escapedRoot = $caseRoot.Replace("'", "''")
+        $replacements = [ordered]@{
+            '{{ replace(command, "''", "''''") }}' = $Command
+            '{{ replace(just_executable(), "''", "''''") }}' = 'Invoke-Just'
+            '{{ replace(justfile_directory(), "''", "''''") }}' = $escapedRoot
+            '{{ replace(invocation_directory_native(), "''", "''''") }}' = $escapedRoot
+            '{{anvil_container_workdir}}' = '/workspace'
+            '{{anvil_container_name}}' = 'fixture'
+        }
+        foreach ($expression in $replacements.Keys) { $script = $script.Replace($expression, $replacements[$expression]) }
+        if ($script.Contains('{{')) { throw 'uncontrolled launcher interpolation' }
+        Write-Fixture (Join-Path $caseRoot 'launcher.ps1') ($prelude + "`n" + $script)
+        $environment = @{
+            FAKE_ENGINE_SCRIPT = Join-Path $caseRoot 'engine.ps1'
+            FAKE_ENGINE_LOG = Join-Path $caseRoot 'engine.jsonl'
+            HOOK_ACQUISITIONS = Join-Path $caseRoot 'acquisitions'
+            GITHUB_TOKEN = 'host-token-not-forwarded'
+            FAKE_PREPARATION_STDOUT = ''; FAKE_PREPARATION_STDERR = ''
+            FAKE_PREPARATION_STATUS = '0'; FAKE_VALIDATION_STATUS = '0'; FAKE_CLEANUP_FAILURE = '0'
+        }
+        foreach ($name in @('ANVIL_IN_CONTAINER', 'ANVIL_IMPACT', 'ANVIL_IMPACT_INPUT_DIR',
+                            'PREPARATION_TOKEN', 'SECOND_PREPARATION_TOKEN',
+                            'PR_TITLE', 'BASE_REF', 'GITHUB_BASE_REF', 'SYSTEM_PULLREQUEST_TARGETBRANCH', 'ANVIL_MIRI_JOBS')) {
+            $environment[$name] = $null
+        }
+        foreach ($name in $Overrides.Keys) { $environment[$name] = $Overrides[$name] }
+        $result = Invoke-Native -Command $pwsh -Arguments @('-NoLogo', '-NoProfile', '-File', (Join-Path $caseRoot 'launcher.ps1')) `
+            -WorkingDirectory $caseRoot -Environment $environment -TimeoutSeconds (Get-RemainingSeconds) -AllowFailure
+        $records = @(if (Test-Path -LiteralPath $environment.FAKE_ENGINE_LOG) {
+            Get-Content -LiteralPath $environment.FAKE_ENGINE_LOG | ForEach-Object { $_ | ConvertFrom-Json }
+        })
+        if (@($records | Where-Object Unexpected).Count) { throw 'launcher invoked an unscripted engine operation' }
+        $acquisitions = if (Test-Path -LiteralPath $environment.HOOK_ACQUISITIONS) {
+            @(Get-Content -LiteralPath $environment.HOOK_ACQUISITIONS).Count
+        } else { 0 }
+        [pscustomobject]@{ Result = $result; Records = $records; Acquisitions = $acquisitions }
+    }
+    function Assert-CacheRemoval([string]$Case, $Records) {
+        $created = @($Records | Where-Object { $_.Args[0] -eq 'volume' -and $_.Args[1] -eq 'create' } | ForEach-Object { $_.Args[2] })
+        $removed = @($Records | Where-Object { $_.Args[0] -eq 'volume' -and $_.Args[1] -eq 'rm' } | ForEach-Object { $_.Args[3] })
+        Assert-That "$Case removes exactly its two created caches" `
+            ($created.Count -eq 2 -and (($created -join '|') -ceq ($removed -join '|')))
+    }
+    New-Item -ItemType Directory -Path $root | Out-Null
+    try {
+        $previousName = ''
+        foreach ($attempt in 1..2) {
+            $case = Invoke-LauncherCase $hook
+            Assert-Equal "fresh invocation $attempt succeeds" 0 $case.Result.ExitCode
+            Assert-Equal "fresh invocation $attempt acquires once" 1 $case.Acquisitions
+            $runs = @($case.Records | Where-Object { $_.Args[0] -eq 'run' })
+            if ($runs.Count -ne 2) { throw "expected preparation and validation: $($case.Result.StdErr)" }
+            $prep = @($runs[0].Args); $validation = @($runs[1].Args)
+            Assert-That "fresh invocation $attempt runs fixed preparation only" `
+                ($prep -contains '-EncodedCommand' -and $prep -notcontains 'test')
+            $encodedAt = [Array]::IndexOf($prep, '-EncodedCommand')
+            $body = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($prep[$encodedAt + 1]))
+            Assert-That "fresh invocation $attempt executes the fixed locked fetch body" ($body.Contains('& $cargo fetch --locked'))
+            foreach ($control in @('LD_PRELOAD=', 'LD_AUDIT=', 'LD_LIBRARY_PATH=', 'CARGO_ENV_LD_PRELOAD=',
+                                    'CARGO_ENV_LD_AUDIT=', 'CARGO_ENV_LD_LIBRARY_PATH=', 'CARGO_UNSTABLE_HOST_CONFIG=false',
+                                    'CARGO_ENCODED_RUSTFLAGS=-Zcodegen-backend=llvm', 'RUSTC_BOOTSTRAP=1',
+                                    'CARGO_ENV_RUSTC_BOOTSTRAP=', 'RUSTC_WRAPPER=', 'RUSTC_WORKSPACE_WRAPPER=')) {
+                Assert-That "fresh invocation $attempt scopes $control to preparation" `
+                    ($prep -contains $control -and $validation -notcontains $control)
+            }
+            Assert-Equal "fresh invocation $attempt sends the first value only to preparation" 'synthetic.a+[credential]' $runs[0].Credential
+            Assert-Equal "fresh invocation $attempt sends the second value only to preparation" 'second.synthetic.credential' $runs[0].SecondCredential
+            Assert-That "fresh invocation $attempt leaves validation credential-free" `
+                ($null -eq $runs[1].Credential -and $null -eq $runs[1].SecondCredential) `
+                (ConvertTo-Json -InputObject $runs[1] -Compress)
+            Assert-That "fresh invocation $attempt uses offline requested argv" `
+                ($validation -contains 'CARGO_NET_OFFLINE=true' -and
+                 (($validation[($validation.Count - 4)..($validation.Count - 1)] -join '|') -ceq 'image-owned:test|cargo|test|--locked'))
+            Assert-That "fresh invocation $attempt mounts preparation read-only" `
+                (@($prep | Where-Object { $_.EndsWith(':/workspace:ro') }).Count -eq 1)
+            foreach ($value in @('synthetic.a+[credential]', 'second.synthetic.credential')) {
+                Assert-That "fresh invocation $attempt keeps a value out of all argv" `
+                    (-not (($prep + $validation) -join '|').Contains($value))
+            }
+            Assert-That "fresh invocation $attempt keeps credential names out of validation" `
+                (-not ($validation -join '|').Contains('PREPARATION_TOKEN'))
+            $name = $prep[[Array]::IndexOf($prep, '--name') + 1]
+            Assert-That "fresh invocation $attempt uses unique container identity" `
+                ($name -cne $previousName -and $validation -contains "$name-validation")
+            $previousName = $name
+            foreach ($cache in @('registry', 'git')) {
+                $mount = "${name}-${cache}:/usr/local/cargo/$cache"
+                Assert-That "fresh invocation $attempt shares only its selected $cache cache" `
+                    ($prep -contains $mount -and $validation -contains $mount)
+            }
+            $runIndices = @(for ($i = 0; $i -lt $case.Records.Count; $i++) {
+                if ($case.Records[$i].Args[0] -eq 'run') { $i }
+            })
+            Assert-That "fresh invocation $attempt confirms preparation removal before validation" `
+                (@($case.Records[($runIndices[0] + 1)..($runIndices[1] - 1)] |
+                    Where-Object { $_.Args[0] -eq 'ps' }).Count -eq 2)
+            Assert-CacheRemoval "fresh invocation $attempt" $case.Records
+        }
+        foreach ($failure in @(
+            @{ Label = 'stdout leak'; Values = @{ FAKE_PREPARATION_STDOUT = 'prefix synthetic.a+[credential] suffix' } },
+            @{ Label = 'stderr leak'; Values = @{ FAKE_PREPARATION_STDERR = 'second.synthetic.credential' } },
+            @{ Label = 'fetch failure'; Values = @{ FAKE_PREPARATION_STATUS = '23' } }
+        )) {
+            $case = Invoke-LauncherCase $hook -Overrides $failure.Values
+            Assert-Equal "$($failure.Label) rejects preparation" 1 $case.Result.ExitCode
+            Assert-Equal "$($failure.Label) never starts validation" 1 @($case.Records | Where-Object { $_.Args[0] -eq 'run' }).Count
+            $diagnostic = $case.Result.StdOut + $case.Result.StdErr
+            Assert-That "$($failure.Label) withholds both values and explains redaction" `
+                (-not $diagnostic.Contains('synthetic.a+[credential]') -and
+                 -not $diagnostic.Contains('second.synthetic.credential') -and $diagnostic.Contains('redacted'))
+            Assert-CacheRemoval $failure.Label $case.Records
+        }
+        $case = Invoke-LauncherCase $hook -Overrides @{ FAKE_VALIDATION_STATUS = '23' }
+        Assert-Equal 'validation failure preserves status 23' 23 $case.Result.ExitCode
+        Assert-CacheRemoval 'validation failure' $case.Records
+        $case = Invoke-LauncherCase $hook -Overrides @{ FAKE_CLEANUP_FAILURE = '1' }
+        Assert-Equal 'cleanup failure is not success' 1 $case.Result.ExitCode
+        Assert-That 'cleanup failure explains the failed removal' ($case.Result.StdErr.Contains('invocation cleanup failed'))
+        Assert-CacheRemoval 'cleanup failure still attempts both caches' $case.Records
+        foreach ($conflict in @(
+            @{ Hook = $hook + "`nfunction Anvil-RunEnv { throw 'must not run' }"; Command = 'cargo test --locked' },
+            @{ Hook = $hook; Command = '--github-token cargo test --locked' }
+        )) {
+            $case = Invoke-LauncherCase $conflict.Hook $conflict.Command
+            Assert-That 'runtime authentication conflict rejects before acquisition or engine calls' `
+                ($case.Result.ExitCode -eq 1 -and $case.Acquisitions -eq 0 -and $case.Records.Count -eq 0 -and
+                 $case.Result.StdErr.Contains('cannot be combined')) `
+                "exit=$($case.Result.ExitCode); acquisitions=$($case.Acquisitions); records=$($case.Records.Count)`n$($case.Result.StdErr)"
+        }
+        foreach ($returned in @(
+            '@{ Env = @{} }', "@{ Env = @{ TOKEN = '' } }", "@{ Env = @{ TOKEN = 'value' }; Command = 'cargo test' }",
+            "@{ Env = @{ PATH = 'workspace' } }", "@{ Env = @{ CARGO_HOME = 'workspace' } }",
+            "@{ Env = @{ RUSTC_WRAPPER = 'workspace' } }", "@{ Env = @{ CARGO_ENV_LD_PRELOAD = 'workspace' } }",
+            "@{ Env = @{ CARGO_UNSTABLE_HOST_CONFIG = 'true' } }", "@{ Env = @{ CARGO_ENCODED_RUSTFLAGS = 'workspace' } }",
+            "@{ Env = @{ RUSTC_BOOTSTRAP = '-1' } }"
+        )) {
+            $case = Invoke-LauncherCase "function Anvil-PrepareEnv { $returned }"
+            $expectedError = if ($returned -in @('@{ Env = @{} }', "@{ Env = @{ TOKEN = 'value' }; Command = 'cargo test' }")) {
+                'must return only'
+            } elseif ($returned -eq "@{ Env = @{ TOKEN = '' } }") {
+                'contains an empty or invalid environment value'
+            } else {
+                'contains an invalid or reserved environment name'
+            }
+            Assert-That "invalid hook $returned rejects before engine calls" `
+                ($case.Result.ExitCode -eq 1 -and $case.Records.Count -eq 0 -and
+                 $case.Result.StdErr.Contains($expectedError)) `
+                "exit=$($case.Result.ExitCode); records=$($case.Records.Count)`n$($case.Result.StdErr)"
+        }
+
+        $scannerParts = $launcher.Split("`$prepareScript = @'`n", 2, [StringSplitOptions]::None)
+        if ($scannerParts.Count -ne 2) { throw 'actual preparation body missing' }
+        $scannerParts = $scannerParts[1].Split("`ntry {`n    `$cargo", 2, [StringSplitOptions]::None)
+        if ($scannerParts.Count -ne 2) { throw 'actual scanner boundary missing' }
+        $scanner = $scannerParts[0]
+        $largePath = Join-Path $root 'large-cache'
+        $large = [IO.File]::Create($largePath)
+        try { $large.SetLength(256MB) } finally { $large.Dispose() }
+        $scannerCases = @'
+function Assert-LeakRejected([string]$Path, [string[]]$Needles) {
+    $rejected = $false
+    try { Assert-CredentialFreeCacheFile $Path $Needles } catch {
+        if ($_.Exception.Message -ne 'preparation credential found in cache') { throw }
+        $rejected = $true
+    }
+    if (-not $rejected) { throw 'cache credential was accepted' }
+}
+$limit = [GC]::GetGCMemoryInfo().TotalAvailableMemoryBytes
+if ($limit -ne 128MB) { throw 'the configured managed heap cap was not applied' }
+Assert-CredentialFreeCacheFile ./large-cache @('absent.synthetic.credential')
+$token = 'synthetic.[' + [char]0x20ac + ']+credential'
+$bytes = [Text.Encoding]::UTF8.GetBytes($token)
+$needle = [Text.Encoding]::Latin1.GetString($bytes)
+foreach ($offset in @(0, 65524, 65525, 65526, 65534, 65535, 65536)) {
+    [IO.File]::WriteAllBytes('cache', ([byte[]]::new($offset) + $bytes + [byte[]]@(255, 0)))
+    Assert-LeakRejected ./cache @('decoy', $needle)
+}
+$long = [Text.Encoding]::UTF8.GetBytes(('x' * 140000) + 'long-credential-end')
+[IO.File]::WriteAllBytes('cache', ([byte[]]@(0, 255) + $long))
+Assert-LeakRejected ./cache @([Text.Encoding]::Latin1.GetString($long))
+[IO.File]::WriteAllBytes('cache', [byte[]]@(0, 255, 128))
+Assert-CredentialFreeCacheFile ./cache @($needle, 'x')
+[IO.File]::WriteAllBytes('cache', [byte[]]::new(0))
+Assert-CredentialFreeCacheFile ./cache @($needle)
+$readFailed = $false
+try { Assert-CredentialFreeCacheFile ./missing-cache @($needle) } catch [IO.FileNotFoundException] { $readFailed = $true }
+if (-not $readFailed) { throw 'a missing cache file passed inspection' }
+Write-Output 'bounded scan, exact binary boundaries, long credential, empty file and read failure verified'
+'@
+        $scannerPath = Join-Path $root 'scanner.ps1'
+        Write-Fixture $scannerPath ($scanner + "`n" + $scannerCases)
+        $scan = Invoke-Native -Command $pwsh -Arguments @('-NoLogo', '-NoProfile', '-File', $scannerPath) `
+            -WorkingDirectory $root -Environment @{ DOTNET_GCHeapHardLimit = '8000000' } `
+            -TimeoutSeconds (Get-RemainingSeconds) -AllowFailure
+        Assert-Equal 'actual scanner passes bounded-memory and exact-byte regressions' 0 $scan.ExitCode
+        Assert-Equal 'all scanner cases executed' `
+            'bounded scan, exact binary boundaries, long credential, empty file and read failure verified' $scan.StdOut.Trim()
+        if ($scan.ExitCode -ne 0) { Write-Detail $scan.StdErr }
+    } finally {
+        Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction Stop
+    }
+    Assert-That 'focused fixtures are removed' (-not (Test-Path -LiteralPath $root))
+    foreach ($name in $hostInputs.Keys) {
+        Assert-That "focused mode preserves host $name" `
+            ([object]::Equals($hostInputs[$name], [Environment]::GetEnvironmentVariable($name)))
+    }
+    Assert-Equal 'focused mode preserves host working directory' $hostDirectory (Get-Location).Path
+}
+
+Invoke-PreparationContracts
+if ($PreparationContractsOnly -or $script:Failed -gt 0) { Complete-Report }
 
 # ------------------------------------------------------------ prerequisites --
 
@@ -1121,13 +1461,4 @@ if ($KeepArtifacts) {
     Write-Step 'removed the fixture repository'
 }
 
-$elapsed = (Get-Date) - $script:Started
-Write-Host ''
-Write-Host ('-' * 78)
-$summary = "{0}/{1} checks passed in {2:mm\:ss}" -f $script:Passed, ($script:Passed + $script:Failed), $elapsed
-if ($script:Failed -eq 0) {
-    Write-Host "PASS  $summary" -ForegroundColor Green
-    exit 0
-}
-Write-Host "FAIL  $summary ($($script:Failed) failed)" -ForegroundColor Red
-exit 1
+Complete-Report

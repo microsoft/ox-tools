@@ -349,3 +349,32 @@ an old image and require an explicit no-cache rebuild.
   does not isolate those artifacts or reproduce every CI-agent condition.
 - Input-derived tags do not guarantee reproducible system packages or
   authenticate registry images.
+
+## 10. Provisioned system-test suite
+
+`scripts/test-anvil-container.ps1 -PreparationContractsOnly` executes the real
+launcher template and extracted cache scanner with scripted engine/host
+collaborators. It covers ordering, child-scoped credentials, rejection,
+redaction, cleanup/status and bounded exact-byte scanning. It needs PowerShell
+7 and its .NET APIs, the worktree template and temporary storage, but no engine,
+Cargo build, just, service or credentials. Missing prerequisites fail; no cases
+are silently skipped. Cargo's `test-util` artifact contracts and snapshots
+prove emission in-process, not PowerShell execution.
+
+Focused runs own a unique temporary directory and child environments. They
+reject unscripted collaborator calls, preserve host environment and working
+directory, and remove their exact fixtures in `finally`. The target budget is
+two minutes, with a five-minute safety deadline and no retries; the scanner
+probe reads a 256 MiB cache under a 128 MiB managed-heap cap.
+
+The normal `-Engine docker` and `-Engine podman` modes run these contracts too,
+then exercise genuine authenticated fetching and fresh offline compilation
+with synthetic credentials. Only those real-engine cases prove actual mounts,
+registry authentication and build-script/procedural-macro/test isolation.
+They retain the Cargo/just/engine/default-network prerequisites and exclusively
+own the existing fixture namespace; run them serially. Check invocation cleanup
+before final fixture teardown. Budget roughly 50 minutes for Docker and
+30 minutes for Podman on the supported worker. Relevant unchanged engine proof
+can be retained after comparing product, fixture/oracle, toolchain/image and
+environment inputs; relocating focused contracts alone does not require
+repeating the full campaigns.

@@ -1891,7 +1891,7 @@ fn the_image_names_its_default_toolchain() {
     );
 }
 
-fn container_recipe_script(command: &str, root: &str) -> String {
+fn container_impact_script() -> String {
     let recipe = CONTAINER.split_once("anvil-container *command:\n").unwrap().1;
     let mut recipe = recipe
         .lines()
@@ -1900,25 +1900,21 @@ fn container_recipe_script(command: &str, root: &str) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     for (expression, value) in [
-        ("{{ replace(command, \"'\", \"''\") }}", command),
+        ("{{ replace(command, \"'\", \"''\") }}", "echo ok"),
         ("{{ replace(just_executable(), \"'\", \"''\") }}", "Invoke-Just"),
-        ("{{ replace(justfile_directory(), \"'\", \"''\") }}", root),
-        ("{{ replace(invocation_directory_native(), \"'\", \"''\") }}", root),
+        ("{{ replace(justfile_directory(), \"'\", \"''\") }}", "."),
+        ("{{ replace(invocation_directory_native(), \"'\", \"''\") }}", "."),
         ("{{anvil_container_workdir}}", "/workspace"),
         ("{{anvil_container_name}}", "fixture"),
     ] {
         recipe = recipe.replace(expression, value);
     }
     assert!(!recipe.contains("{{"), "all recipe interpolation inputs must be controlled");
-    recipe
-}
-
-fn container_impact_script() -> String {
     // Execute the complete recipe, with host/process collaborators scripted in
     // the same interpreter. No nested just/pwsh startup or mutable disk fixture
     // participates in the refusal or forwarding verdict.
     format!(
-        "{}\n{}",
+        "{}\n{recipe}",
         r#"
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -1959,304 +1955,7 @@ function Fake-Engine {
     $global:LASTEXITCODE = 0
 }
 "#,
-        container_recipe_script("echo ok", "."),
     )
-}
-
-const PREPARATION_ENGINE: &str = r"
-$ErrorActionPreference = 'Stop'
-$record = @{
-    Args = @($args)
-    Credential = $env:PREPARATION_TOKEN
-    SecondCredential = $env:SECOND_PREPARATION_TOKEN
-    Bridge = $env:WSLENV
-}
-Add-Content -LiteralPath $env:FAKE_ENGINE_LOG -Value (ConvertTo-Json -InputObject $record -Compress)
-if ($args[0] -eq 'run') {
-    if ($args -contains '-EncodedCommand') {
-        [Console]::Out.Write($env:FAKE_PREPARATION_STDOUT)
-        [Console]::Error.Write($env:FAKE_PREPARATION_STDERR)
-        exit ([int]($env:FAKE_PREPARATION_STATUS ?? '0'))
-    }
-    Write-Output 'validation executed'
-    exit ([int]($env:FAKE_VALIDATION_STATUS ?? '0'))
-}
-if ($args[0] -eq 'volume' -and $args[1] -eq 'rm' -and $env:FAKE_CLEANUP_FAILURE -eq '1') { exit 1 }
-exit 0
-";
-
-fn run_preparation_contract(hook: &str, command: &str, environment: &[(&str, &str)]) -> (TempDir, Output, Vec<serde_json::Value>) {
-    let tmp = TempDir::new().unwrap();
-    write(&tmp.path().join(".anvil/container/hooks.ps1"), hook);
-    write(&tmp.path().join("engine.ps1"), PREPARATION_ENGINE);
-    let root = tmp.path().to_str().unwrap().replace('\'', "''");
-    let prelude = r#"
-$ErrorActionPreference = 'Stop'
-function Invoke-Just {
-    $global:LASTEXITCODE = 0
-    switch ($args[0]) {
-        '_anvil-container-engine' { "$((Get-Process -Id $PID).Path)|-NoLogo|-NoProfile|-File|$env:FAKE_ENGINE_SCRIPT" }
-        '_anvil-container-image' { 'image-owned:test' }
-        '_anvil-container-path' { $args[1] }
-        default { throw "unexpected just call: $args" }
-    }
-}
-function Get-Command {
-    param($Name, $ErrorAction, $CommandType)
-    if ($Name -ne 'git') { Microsoft.PowerShell.Core\Get-Command @PSBoundParameters }
-}
-function id { $global:LASTEXITCODE = 0; '1000' }
-"#;
-    let script = format!("{prelude}\n{}", container_recipe_script(command, &root));
-    let mut child = Command::new("pwsh");
-    child
-        .args(["-NoLogo", "-NoProfile", "-Command", &script])
-        .current_dir(tmp.path())
-        .env("FAKE_ENGINE_SCRIPT", tmp.path().join("engine.ps1"))
-        .env("FAKE_ENGINE_LOG", tmp.path().join("engine.jsonl"))
-        .env("HOOK_ACQUISITIONS", tmp.path().join("acquisitions"))
-        .env("GITHUB_TOKEN", "host-token-not-forwarded");
-    for name in [
-        "ANVIL_IN_CONTAINER",
-        "ANVIL_IMPACT",
-        "ANVIL_IMPACT_INPUT_DIR",
-        "PREPARATION_TOKEN",
-        "SECOND_PREPARATION_TOKEN",
-        "FAKE_PREPARATION_STDOUT",
-        "FAKE_PREPARATION_STDERR",
-        "FAKE_PREPARATION_STATUS",
-        "FAKE_VALIDATION_STATUS",
-        "FAKE_CLEANUP_FAILURE",
-    ] {
-        child.env_remove(name);
-    }
-    child.envs(environment.iter().copied());
-    let output = child.output().expect("pwsh was checked by tools_available");
-    let records = fs::read_to_string(tmp.path().join("engine.jsonl"))
-        .unwrap_or_default()
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
-    (tmp, output, records)
-}
-
-const PREPARATION_HOOK: &str = r"
-function Anvil-PrepareEnv {
-    Add-Content -LiteralPath $env:HOOK_ACQUISITIONS -Value 'acquired'
-    @{ Env = @{ PREPARATION_TOKEN = 'synthetic.a+[credential]'; SECOND_PREPARATION_TOKEN = 'second.synthetic.credential' } }
-}
-";
-
-#[test]
-fn preparation_cache_scan_bounds_memory_and_checks_chunk_boundaries() {
-    if !tools_available() {
-        return;
-    }
-    let _powershell = powershell_process_lock();
-    let scanner = CONTAINER
-        .split_once("$prepareScript = @'\n")
-        .unwrap()
-        .1
-        .split_once("\n    try {\n        $cargo")
-        .unwrap()
-        .0;
-    let tmp = TempDir::new().unwrap();
-    let large = fs::File::create(tmp.path().join("large-cache")).unwrap();
-    large.set_len(256 * 1024 * 1024).unwrap();
-    drop(large);
-    let cases = r"
-function Assert-LeakRejected([string]$Path, [string[]]$Needles) {
-    $rejected = $false
-    try { Assert-CredentialFreeCacheFile $Path $Needles } catch {
-        if ($_.Exception.Message -ne 'preparation credential found in cache') { throw }
-        $rejected = $true
-    }
-    if (-not $rejected) { throw 'cache credential was accepted' }
-}
-$limit = [GC]::GetGCMemoryInfo().TotalAvailableMemoryBytes
-if ($limit -gt 128MB) { throw 'the bounded-memory probe requires its configured heap limit' }
-Assert-CredentialFreeCacheFile ./large-cache @('absent.synthetic.credential')
-$token = 'synthetic.[' + [char]0x20ac + ']+credential'
-$bytes = [Text.Encoding]::UTF8.GetBytes($token)
-$needle = [Text.Encoding]::Latin1.GetString($bytes)
-foreach ($offset in @(0, 65524, 65525, 65526, 65534, 65535, 65536)) {
-    $content = [byte[]]::new($offset) + $bytes + [byte[]]@(255, 0)
-    [IO.File]::WriteAllBytes('cache', $content)
-    Assert-LeakRejected ./cache @('decoy', $needle)
-}
-$long = [Text.Encoding]::UTF8.GetBytes(('x' * 140000) + 'long-credential-end')
-[IO.File]::WriteAllBytes('cache', ([byte[]]@(0, 255) + $long))
-Assert-LeakRejected ./cache @([Text.Encoding]::Latin1.GetString($long))
-[IO.File]::WriteAllBytes('cache', [byte[]]@(0, 255, 128))
-Assert-CredentialFreeCacheFile ./cache @($needle, 'x')
-[IO.File]::WriteAllBytes('cache', [byte[]]::new(0))
-Assert-CredentialFreeCacheFile ./cache @($needle)
-$readFailed = $false
-try { Assert-CredentialFreeCacheFile ./missing-cache @($needle) } catch { $readFailed = $true }
-if (-not $readFailed) { throw 'a missing cache file passed inspection' }
-Remove-Item -LiteralPath cache
-Write-Output 'bounded scan, exact binary boundaries, long credential, empty file and read failure verified'
-";
-    write(&tmp.path().join("scan.ps1"), &format!("{scanner}\n{cases}"));
-    let output = Command::new("pwsh")
-        .args(["-NoLogo", "-NoProfile", "-File", "scan.ps1"])
-        .current_dir(tmp.path())
-        .env("DOTNET_GCHeapHardLimit", "8000000")
-        .output()
-        .expect("pwsh was checked by tools_available");
-    assert!(
-        output.status.success(),
-        "cache scanner regression failed:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("bounded scan, exact binary boundaries"));
-}
-
-fn engine_arguments(record: &serde_json::Value) -> Vec<&str> {
-    record["Args"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|value| value.as_str().unwrap())
-        .collect()
-}
-
-#[test]
-fn prepared_container_is_fresh_offline_and_receives_no_preparation_environment() {
-    if !tools_available() {
-        return;
-    }
-    let _powershell = powershell_process_lock();
-    let mut previous_name = String::new();
-    for _ in 0..2 {
-        let (tmp, output, records) = run_preparation_contract(PREPARATION_HOOK, "cargo test --locked", &[]);
-        assert!(
-            output.status.success(),
-            "prepared invocation failed:\n{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert_eq!(fs::read_to_string(tmp.path().join("acquisitions")).unwrap().lines().count(), 1);
-        let runs: Vec<_> = records.iter().filter(|record| record["Args"][0] == "run").collect();
-        assert_eq!(runs.len(), 2, "one preparation and one requested validation are required");
-        let prep = engine_arguments(runs[0]);
-        let validation = engine_arguments(runs[1]);
-        assert!(prep.contains(&"-EncodedCommand") && !prep.contains(&"test"));
-        assert_eq!(runs[0]["Credential"], "synthetic.a+[credential]");
-        assert_eq!(runs[0]["SecondCredential"], "second.synthetic.credential");
-        assert!(runs[1]["Credential"].is_null() && runs[1]["SecondCredential"].is_null());
-        assert!(validation.contains(&"CARGO_NET_OFFLINE=true"));
-        assert_eq!(
-            &validation[validation.len() - 4..],
-            ["image-owned:test", "cargo", "test", "--locked"]
-        );
-        assert!(prep.iter().any(|arg| arg.ends_with(":/workspace:ro")));
-        assert!(!validation.iter().any(|arg| arg.contains("PREPARATION_TOKEN")));
-        for secret in ["synthetic.a+[credential]", "second.synthetic.credential"] {
-            assert!(
-                !prep.iter().any(|arg| arg.contains(secret)),
-                "credentials must not enter process arguments"
-            );
-            assert!(!validation.iter().any(|arg| arg.contains(secret)));
-        }
-        let name = prep[prep.iter().position(|arg| *arg == "--name").unwrap() + 1];
-        assert_ne!(name, previous_name, "readiness/caches cannot be reused by a later invocation");
-        assert!(validation.contains(&format!("{name}-validation").as_str()));
-        previous_name = name.to_owned();
-        let first_run = records.iter().position(|record| record["Args"][0] == "run").unwrap();
-        let last_run = records.iter().rposition(|record| record["Args"][0] == "run").unwrap();
-        assert!(
-            records[first_run + 1..last_run].iter().any(|record| record["Args"][0] == "ps"),
-            "preparation removal must be confirmed before validation"
-        );
-        let removed = records
-            .iter()
-            .filter(|record| record["Args"][0] == "volume" && record["Args"][1] == "rm")
-            .count();
-        assert_eq!(removed, 2, "both invocation caches must be removed after validation");
-    }
-}
-
-#[test]
-fn preparation_output_leaks_and_failures_stop_before_validation_and_cleanup() {
-    if !tools_available() {
-        return;
-    }
-    let _powershell = powershell_process_lock();
-    for environment in [
-        vec![("FAKE_PREPARATION_STDOUT", "prefix synthetic.a+[credential] suffix")],
-        vec![("FAKE_PREPARATION_STDERR", "second.synthetic.credential")],
-        vec![("FAKE_PREPARATION_STATUS", "23")],
-    ] {
-        let (_, output, records) = run_preparation_contract(PREPARATION_HOOK, "cargo test", &environment);
-        assert_failed(&output, "rejected preparation");
-        let diagnostic = format!(
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(!diagnostic.contains("synthetic.a+[credential]") && !diagnostic.contains("second.synthetic.credential"));
-        assert!(diagnostic.contains("redacted"), "failure must explain the withheld diagnostics");
-        assert_eq!(records.iter().filter(|record| record["Args"][0] == "run").count(), 1);
-        assert_eq!(
-            records
-                .iter()
-                .filter(|record| record["Args"][0] == "volume" && record["Args"][1] == "rm")
-                .count(),
-            2
-        );
-    }
-    let (_, failed_validation, records) = run_preparation_contract(PREPARATION_HOOK, "cargo test", &[("FAKE_VALIDATION_STATUS", "23")]);
-    assert_eq!(
-        failed_validation.status.code(),
-        Some(23),
-        "preserve the requested command's failure"
-    );
-    assert_eq!(
-        records
-            .iter()
-            .filter(|record| record["Args"][0] == "volume" && record["Args"][1] == "rm")
-            .count(),
-        2
-    );
-    let (_, failed_cleanup, _) = run_preparation_contract(PREPARATION_HOOK, "cargo test", &[("FAKE_CLEANUP_FAILURE", "1")]);
-    assert_failed(&failed_cleanup, "failed invocation cleanup");
-    assert!(String::from_utf8_lossy(&failed_cleanup.stderr).contains("cleanup failed"));
-}
-
-#[test]
-fn preparation_rejects_runtime_authentication_and_driver_overrides_before_acquisition() {
-    if !tools_available() {
-        return;
-    }
-    let _powershell = powershell_process_lock();
-    for (hook, command) in [
-        (
-            format!("{PREPARATION_HOOK}\nfunction Anvil-RunEnv {{ throw 'must not run' }}"),
-            "cargo test",
-        ),
-        (PREPARATION_HOOK.to_owned(), "--github-token cargo test"),
-    ] {
-        let (tmp, output, records) = run_preparation_contract(&hook, command, &[]);
-        assert_failed(&output, "incompatible runtime authentication");
-        assert!(!tmp.path().join("acquisitions").exists());
-        assert!(records.is_empty(), "neither preparation nor validation may start");
-    }
-    for returned in [
-        "@{ Env = @{} }",
-        "@{ Env = @{ TOKEN = '' } }",
-        "@{ Env = @{ TOKEN = 'value' }; Command = 'cargo test' }",
-        "@{ Env = @{ PATH = 'workspace' } }",
-        "@{ Env = @{ CARGO_HOME = 'workspace' } }",
-        "@{ Env = @{ RUSTC_WRAPPER = 'workspace' } }",
-        "@{ Env = @{ CARGO_ENV_LD_PRELOAD = 'workspace' } }",
-        "@{ Env = @{ CARGO_UNSTABLE_HOST_CONFIG = 'true' } }",
-        "@{ Env = @{ CARGO_ENCODED_RUSTFLAGS = 'workspace' } }",
-        "@{ Env = @{ RUSTC_BOOTSTRAP = '-1' } }",
-    ] {
-        let (_, output, records) = run_preparation_contract(&format!("function Anvil-PrepareEnv {{ {returned} }}"), "cargo test", &[]);
-        assert_failed(&output, "invalid preparation hook");
-        assert_eq!(records, [] as [serde_json::Value; 0]);
-    }
 }
 
 #[test]
