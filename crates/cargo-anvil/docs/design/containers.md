@@ -255,7 +255,10 @@ returned value is sensitive; blank values and driver-control overrides are
 rejected. Defining `Anvil-RunEnv` as well, or passing `--github-token`, fails
 before acquiring preparation credentials.
 
-Preparation output is captured rather than streamed. Any exact credential
+Preparation output is captured rather than streamed to the caller. Both
+streams are drained and inspected incrementally, retaining only enough text
+to detect credentials spanning reads; no output-size cap rejects an otherwise
+successful fetch. Any exact credential
 value in either output stream or any cache-file bytes rejects preparation;
 incomplete inspection also fails. Sensitive diagnostics are withheld. After
 the preparation container is removed, only inspected registry/git caches
@@ -365,7 +368,9 @@ Focused runs own a unique temporary directory and child environments. They
 reject unscripted collaborator calls, preserve host environment and working
 directory, and remove their exact fixtures in `finally`. The target budget is
 two minutes, with a five-minute safety deadline and no retries; the scanner
-probe reads a 256 MiB cache under a 128 MiB managed-heap cap.
+probe reads a 256 MiB cache under a 128 MiB managed-heap cap. Output-capture
+probes drain 64 MiB from each stream under the same cap, preserve successful
+validation/cleanup, and detect split credentials without retaining the output.
 
 The normal `-Engine docker` and `-Engine podman` modes run these contracts too,
 then exercise genuine authenticated fetching and fresh offline compilation

@@ -304,6 +304,13 @@ Add-Content -LiteralPath $env:FAKE_ENGINE_LOG -Value (ConvertTo-Json -InputObjec
 if (-not $allowed) { throw "unexpected engine operation: $($args -join ' ')" }
 if ($args[0] -eq 'run') {
     if ($args -contains '-EncodedCommand') {
+        if ($env:FAKE_PREPARATION_LARGE -eq '1') {
+            $block = 'x' * 8192
+            for ($i = 0; $i -lt 8192; $i++) {
+                [Console]::Out.Write($block)
+                [Console]::Error.Write($block)
+            }
+        }
         [Console]::Out.Write($env:FAKE_PREPARATION_STDOUT)
         [Console]::Error.Write($env:FAKE_PREPARATION_STDERR)
         exit ([int]$env:FAKE_PREPARATION_STATUS)
@@ -370,6 +377,7 @@ function Anvil-PrepareEnv {
             GITHUB_TOKEN = 'host-token-not-forwarded'
             FAKE_PREPARATION_STDOUT = ''; FAKE_PREPARATION_STDERR = ''
             FAKE_PREPARATION_STATUS = '0'; FAKE_VALIDATION_STATUS = '0'; FAKE_CLEANUP_FAILURE = '0'
+            FAKE_PREPARATION_LARGE = '0'
         }
         foreach ($name in @('ANVIL_IN_CONTAINER', 'ANVIL_IMPACT', 'ANVIL_IMPACT_INPUT_DIR',
                             'PREPARATION_TOKEN', 'SECOND_PREPARATION_TOKEN',
@@ -449,6 +457,11 @@ function Anvil-PrepareEnv {
                     Where-Object { $_.Args[0] -eq 'ps' }).Count -eq 2)
             Assert-CacheRemoval "fresh invocation $attempt" $case.Records
         }
+        $largeCase = Invoke-LauncherCase $hook -Overrides @{ FAKE_PREPARATION_LARGE = '1'; DOTNET_GCHeapHardLimit = '8000000' }
+        Assert-Equal 'large nonleaking preparation reaches successful validation' 0 $largeCase.Result.ExitCode
+        Assert-Equal 'large nonleaking preparation acquires once' 1 $largeCase.Acquisitions
+        Assert-Equal 'large nonleaking preparation starts both phases' 2 @($largeCase.Records | Where-Object { $_.Args[0] -eq 'run' }).Count
+        Assert-CacheRemoval 'large nonleaking preparation' $largeCase.Records
         foreach ($failure in @(
             @{ Label = 'stdout leak'; Values = @{ FAKE_PREPARATION_STDOUT = 'prefix synthetic.a+[credential] suffix' } },
             @{ Label = 'stderr leak'; Values = @{ FAKE_PREPARATION_STDERR = 'second.synthetic.credential' } },
@@ -549,6 +562,64 @@ Write-Output 'bounded scan, exact binary boundaries, long credential, empty file
         Assert-Equal 'all scanner cases executed' `
             'bounded scan, exact binary boundaries, long credential, empty file and read failure verified' $scan.StdOut.Trim()
         if ($scan.ExitCode -ne 0) { Write-Detail $scan.StdErr }
+
+        $captureParts = $launcher.Split('function Invoke-Preparation([string[]]$Arguments) {', 2, [StringSplitOptions]::None)
+        if ($captureParts.Count -ne 2) { throw 'actual capture helper missing' }
+        $captureParts = $captureParts[1].Split('function Remove-InvocationContainers', 2, [StringSplitOptions]::None)
+        if ($captureParts.Count -ne 2) { throw 'actual capture helper boundary missing' }
+        $capture = 'function Invoke-Preparation([string[]]$Arguments) {' + $captureParts[0]
+        Write-Fixture (Join-Path $root 'output-emitter.ps1') @'
+$ErrorActionPreference = 'Stop'
+switch ($args[0]) {
+    'large' {
+        $block = 'x' * 8192
+        for ($i = 0; $i -lt 8192; $i++) {
+            [Console]::Out.Write($block)
+            [Console]::Error.Write($block)
+        }
+    }
+    'stdout-leak' {
+        [Console]::Out.Write(('x' * 4094) + $env:PREPARATION_TOKEN)
+        [Console]::Error.Write('clean stderr')
+    }
+    'stderr-leak' {
+        [Console]::Error.Write(('x' * 8190) + $env:SECOND_PREPARATION_TOKEN)
+        [Console]::Out.Write('clean stdout')
+    }
+    'long-leak' { [Console]::Out.Write(('x' * 4095) + $env:PREPARATION_TOKEN) }
+    'failure' { [Console]::Error.Write('nonleaking failure'); exit 23 }
+    default { throw 'unscripted output emitter mode' }
+}
+'@
+        $captureCases = @'
+$ErrorActionPreference = 'Stop'
+if ([GC]::GetGCMemoryInfo().TotalAvailableMemoryBytes -ne 128MB) { throw 'capture heap cap was not applied' }
+$engineExe = (Get-Process -Id $PID).Path
+$enginePrefix = @()
+$prepareVars = @{ PREPARATION_TOKEN = 'synthetic.[' + [char]0x20ac + ']+capture'; SECOND_PREPARATION_TOKEN = 'second.synthetic.capture' }
+foreach ($case in @('large', 'stdout-leak', 'stderr-leak', 'long-leak', 'failure')) {
+    if ($case -eq 'long-leak') { $prepareVars.PREPARATION_TOKEN = ('z' * 9000) + 'long-secret-end' }
+    $result = Invoke-Preparation @('-NoLogo', '-NoProfile', '-File', './output-emitter.ps1', $case)
+    $expectedExit = if ($case -eq 'failure') { 23 } else { 0 }
+    $expectedLeak = $case -in @('stdout-leak', 'stderr-leak', 'long-leak')
+    if ($result.ExitCode -ne $expectedExit -or $result.Leaked -ne $expectedLeak) {
+        throw "incorrect capture status for $case"
+    }
+    if ($result.Count -ne 2 -or $result.ContainsKey('StdOut') -or $result.ContainsKey('StdErr')) {
+        throw 'capture retained stream content'
+    }
+}
+Write-Output 'large stdout/stderr success, split Unicode/multiple/long credentials, EOF and failure status verified'
+'@
+        $capturePath = Join-Path $root 'capture.ps1'
+        Write-Fixture $capturePath ($capture + "`n" + $captureCases)
+        $capturedProbe = Invoke-Native -Command $pwsh -Arguments @('-NoLogo', '-NoProfile', '-File', $capturePath) `
+            -WorkingDirectory $root -Environment @{ DOTNET_GCHeapHardLimit = '8000000' } `
+            -TimeoutSeconds (Get-RemainingSeconds) -AllowFailure
+        Assert-Equal 'actual capture drains 64 MiB per stream successfully under a 128 MiB heap' 0 $capturedProbe.ExitCode
+        Assert-Equal 'all incremental output-capture cases executed' `
+            'large stdout/stderr success, split Unicode/multiple/long credentials, EOF and failure status verified' $capturedProbe.StdOut.Trim()
+        if ($capturedProbe.ExitCode -ne 0) { Write-Detail $capturedProbe.StdErr }
     } finally {
         Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction Stop
     }
