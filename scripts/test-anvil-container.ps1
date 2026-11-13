@@ -1369,8 +1369,11 @@ $cargo = & rustup which cargo
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 $rustc = & rustup which rustc
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+$rustdoc = & rustup which rustdoc
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 New-Item -ItemType Directory -Force /workspace/custom-toolchain/bin | Out-Null
 Copy-Item -LiteralPath $cargo -Destination /workspace/custom-toolchain/bin/cargo
+New-Item -ItemType SymbolicLink -Path /workspace/custom-toolchain/bin/rustdoc -Target $rustdoc | Out-Null
 $probe = @(
     '#!/bin/sh'
     'if [ -n "${CARGO_REGISTRIES_FIXTURE_TOKEN:-}" ]; then'
