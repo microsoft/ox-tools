@@ -119,9 +119,12 @@ registry tags and restricted push access.
 
 ## 5. Runtime, mounts, and environment
 
-Each invocation creates one container and removes it on exit. The caller must
-run from inside the repository; its working directory is mapped beneath
-`/workspace`.
+Without `Anvil-PrepareEnv`, each invocation creates one container and removes
+it on exit, using the persistent download caches listed below. Prepared mode
+instead uses two sequential disposable containers and invocation-scoped caches
+removed on exit; see **Authenticated preparation, credential-free validation**.
+The caller must run from inside the repository; its working directory is
+mapped beneath `/workspace`.
 
 | Host resource | Container path |
 | --- | --- |
@@ -139,9 +142,10 @@ Tools and toolchains come from the image, not host Cargo or rustup directories.
 `target/` remains on the repository bind mount; switching between native and
 container builds can trigger recompilation.
 
-Image and volume names use the sanitized repository directory name. Checkouts
-with the same sanitized name share download caches, so `anvil-container-down`
-can affect another checkout.
+Image names and non-prepared volume names use the sanitized repository
+directory name. Without `Anvil-PrepareEnv`, checkouts with the same sanitized
+name share download caches, so `anvil-container-down` can affect another
+checkout. Prepared-mode caches are unique to each invocation.
 
 Linux engines run as the invoking non-root user's UID/GID; engines reached
 through WSL use the WSL user's IDs. Docker Desktop handles Windows/macOS
@@ -205,6 +209,7 @@ permissions**. Only use hooks and recipes from trusted repositories.
 | --- | --- |
 | `Anvil-BuildSecrets` | `@{ Secrets = @{ id = value } }`, before building. |
 | `Anvil-RunEnv` | `@{ Env = @{ NAME = value } }`, before running. |
+| `Anvil-PrepareEnv` | Only `@{ Env = @{ NAME = value } }`, for fixed authenticated dependency preparation instead of runtime forwarding. |
 | `Anvil-ResolveImage $tag` | A locally available image reference, or nothing, on a local cache miss. |
 
 Omit a credential function when it is unnecessary. A defined function returning
@@ -231,6 +236,54 @@ Secret values and run-environment values are passed to the engine by name,
 not embedded in process arguments. Build secret mounts do not become image
 layers, but files written using them do: remove credential files in the same
 `RUN` instruction that creates them.
+
+### Authenticated preparation, credential-free validation
+
+Use `Anvil-PrepareEnv` instead of `Anvil-RunEnv` when credentials are needed
+only to download locked Cargo dependencies:
+
+```powershell
+function Anvil-PrepareEnv {
+    @{ Env = @{ CARGO_REGISTRIES_INTERNAL_TOKEN = $env:CARGO_REGISTRIES_INTERNAL_TOKEN } }
+}
+```
+
+Anvil runs exactly `cargo fetch --locked` in a disposable container with a
+read-only checkout/history and fresh invocation-scoped registry/git caches.
+The hook supplies environment only, not a command, file or mount. Every
+returned value is sensitive; blank values and driver-control overrides are
+rejected. Defining `Anvil-RunEnv` as well, or passing `--github-token`, fails
+before acquiring preparation credentials.
+
+Preparation output is captured rather than streamed to the caller. Both
+streams are drained and inspected incrementally, retaining only enough text
+to detect credentials spanning reads; no output-size cap rejects an otherwise
+successful fetch. Any exact credential
+value in either output stream or any cache-file bytes rejects preparation;
+incomplete inspection also fails. Sensitive diagnostics are withheld. After
+the preparation container is removed, only inspected registry/git caches
+reach a **fresh** validation container. Its requested command runs with
+`CARGO_NET_OFFLINE=true`, without the hook values, preparation home,
+configuration, credential files or mounts. Containers and temporary cache
+volumes are removed on success and failure; cleanup errors fail the run.
+Every invocation prepares anew. Missing locked dependencies fail offline;
+there is no retry with credentials or fallback to runtime authentication.
+
+Preparation resolves Cargo/rustc from the image default outside the checkout
+and canonicalizes their complete paths, including parent aliases. Workspace
+toolchain overrides remain effective only in credential-free validation.
+Preparation disables compiler wrappers and
+workspace host/compiler-backend flags, and neutralizes Cargo-forced native
+loader settings. The image LLVM backend is selected with a preparation-only
+`RUSTC_BOOTSTRAP=1`; neither bootstrap nor these compiler/loader overrides
+reach validation or legacy runs. Source/authentication configuration remains
+available. Hooks, the image and authentication providers must be trusted;
+workspace compiler callbacks need not be trusted with the preparation values.
+
+This mode is not a network or general execution sandbox. It does not intercept
+independently supplied or renamed Cargo executables, restrict arbitrary
+network clients, or make an untrusted hook safe. Without `Anvil-PrepareEnv`,
+the existing runtime authentication behavior is unchanged.
 
 ### Resolving published images
 
@@ -262,7 +315,9 @@ Anvil does not publish or promote images.
 This is not a sandbox for untrusted code. Commands can modify the mounted
 repository and Git data. Everything executed inside the container, including
 dependency build scripts and procedural macros, can read forwarded
-credentials. Keep the forwarded set narrow and use short-lived,
+runtime credentials in the legacy `Anvil-RunEnv`/`--github-token` mode.
+Prepared mode keeps its credentials out of that validation container.
+Keep the forwarded set narrow and use short-lived,
 least-privilege tokens only with reviewed code.
 
 ## 8. Customization
@@ -300,3 +355,34 @@ an old image and require an explicit no-cache rebuild.
   does not isolate those artifacts or reproduce every CI-agent condition.
 - Input-derived tags do not guarantee reproducible system packages or
   authenticate registry images.
+
+## 10. Provisioned system-test suite
+
+`scripts/test-anvil-container.ps1 -PreparationContractsOnly` executes the real
+launcher template and extracted cache scanner with scripted engine/host
+collaborators. It covers ordering, child-scoped credentials, rejection,
+redaction, cleanup/status and bounded exact-byte scanning. It needs PowerShell
+7 and its .NET APIs, the worktree template and temporary storage, but no engine,
+Cargo build, just, service or credentials. Missing prerequisites fail; no cases
+are silently skipped. Cargo's `test-util` artifact contracts and snapshots
+prove emission in-process, not PowerShell execution.
+
+Focused runs own a unique temporary directory and child environments. They
+reject unscripted collaborator calls, preserve host environment and working
+directory, and remove their exact fixtures in `finally`. The target budget is
+two minutes, with a five-minute safety deadline and no retries; the scanner
+probe reads a 256 MiB cache under a 128 MiB managed-heap cap. Output-capture
+probes drain 64 MiB from each stream under the same cap, preserve successful
+validation/cleanup, and detect split credentials without retaining the output.
+
+The normal `-Engine docker` and `-Engine podman` modes run these contracts too,
+then exercise genuine authenticated fetching and fresh offline compilation
+with synthetic credentials. Only those real-engine cases prove actual mounts,
+registry authentication and build-script/procedural-macro/test isolation.
+They retain the Cargo/just/engine/default-network prerequisites and exclusively
+own the existing fixture namespace; run them serially. Check invocation cleanup
+before final fixture teardown. Budget roughly 50 minutes for Docker and
+30 minutes for Podman on the supported worker. Relevant unchanged engine proof
+can be retained after comparing product, fixture/oracle, toolchain/image and
+environment inputs; relocating focused contracts alone does not require
+repeating the full campaigns.

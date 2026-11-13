@@ -70,6 +70,56 @@ expression: body
         '{{anvil_container_workdir}}/' + $rel
     }
 
+    $hookPath = Join-Path $repoRoot '.anvil/container/hooks.ps1'
+    $prepared = $false
+    $prepareVars = @{}
+    if (Test-Path -LiteralPath $hookPath -PathType Leaf) {
+        try {
+            . $hookPath
+        } catch {
+            Write-Error "anvil: failed to load .anvil/container/hooks.ps1: $($_.Exception.Message)"
+            exit 1
+        }
+        $prepared = [bool](Get-Command Anvil-PrepareEnv -CommandType Function -ErrorAction SilentlyContinue)
+        if ($prepared) {
+            if ($forwardGithubToken -or (Get-Command Anvil-RunEnv -CommandType Function -ErrorAction SilentlyContinue)) {
+                Write-Error 'anvil: Anvil-PrepareEnv cannot be combined with Anvil-RunEnv or --github-token'
+                exit 1
+            }
+            try {
+                $hook = @(Anvil-PrepareEnv) | Select-Object -Last 1
+            } catch {
+                Write-Error 'anvil: Anvil-PrepareEnv failed; credential acquisition diagnostics withheld'
+                exit 1
+            }
+            if ($hook -isnot [System.Collections.IDictionary] -or $hook.Count -ne 1 -or
+                -not $hook.Contains('Env') -or $hook.Env -isnot [System.Collections.IDictionary] -or $hook.Env.Count -eq 0) {
+                Write-Error 'anvil: Anvil-PrepareEnv must return only @{ Env = @{ NAME = value } } with nonempty entries'
+                exit 1
+            }
+            foreach ($name in $hook.Env.Keys) {
+                # The hook supplies credentials, never executable, mount, home,
+                # compiler, cache, loader or driver-control replacements.
+                if ($name -isnot [string] -or $name -cnotmatch '^[A-Za-z_][A-Za-z0-9_]*$' -or
+                    $name -imatch '^(ANVIL_(CONTAINER_|IN_CONTAINER$|IMPACT|MIRI_JOBS$)|CARGO_(HOME$|BUILD_|TARGET_|ENCODED_|ENV_|NET_|UNSTABLE_)|RUSTC|RUSTDOC|RUSTFLAGS$|RUSTUP_|LD_|DYLD_|MSRUSTUP_(HOME|TOOLCHAIN)$)' -or
+                    $name -iin @('PATH', 'HOME', 'USERPROFILE', 'WSLENV', 'BASH_ENV', 'ENV', 'SHELLOPTS', 'RUSTC_BOOTSTRAP',
+                                  'PR_TITLE', 'BASE_REF', 'GITHUB_BASE_REF', 'SYSTEM_PULLREQUEST_TARGETBRANCH')) {
+                    Write-Error 'anvil: Anvil-PrepareEnv contains an invalid or reserved environment name'
+                    exit 1
+                }
+                $value = $hook.Env[$name]
+                if ($value -isnot [string] -or [string]::IsNullOrWhiteSpace($value) -or $value.Contains([char]0)) {
+                    Write-Error 'anvil: Anvil-PrepareEnv contains an empty or invalid environment value'
+                    exit 1
+                }
+                $prepareVars[$name] = $value
+            }
+        }
+    }
+
+    $invocation = if ($prepared) { '{{anvil_container_name}}-prepare-' + [Guid]::NewGuid().ToString('N') } else { $null }
+    $registryVolume = if ($prepared) { "$invocation-registry" } else { '{{anvil_container_name}}-cargo-registry' }
+    $gitVolume = if ($prepared) { "$invocation-git" } else { '{{anvil_container_name}}-cargo-git' }
     $interactive = $argv.Count -eq 0
     $runArgs = @('run', '--rm', '--platform', 'linux/amd64')
     $runArgs += $interactive ? '-it' : '-i'
@@ -155,8 +205,8 @@ expression: body
     # populated from the image only when it is first created. Mounting them
     # would pin the first image's binaries over every later one, so a tool bump
     # would change the tag, build a new image, and still run the old tools.
-    $runArgs += @('-v', '{{anvil_container_name}}-cargo-registry:/usr/local/cargo/registry')
-    $runArgs += @('-v', '{{anvil_container_name}}-cargo-git:/usr/local/cargo/git')
+    $runArgs += @('-v', "${registryVolume}:/usr/local/cargo/registry")
+    $runArgs += @('-v', "${gitVolume}:/usr/local/cargo/git")
     # Match the caller's uid/gid on Linux. Without this everything the run
     # writes under the bind mount -- target/, generated files -- lands as root
     # on the host, and the next native cargo build or git clean fails with
@@ -243,16 +293,7 @@ expression: body
         }
     }
 
-    $hookPath = Join-Path $repoRoot '.anvil/container/hooks.ps1'
-    if (Test-Path -LiteralPath $hookPath -PathType Leaf) {
-        # Fail-closed like Anvil-BuildSecrets: a run that cannot obtain its
-        # credentials fails inside the container in a far less obvious way.
-        try {
-            . $hookPath
-        } catch {
-            Write-Error "anvil: failed to load .anvil/container/hooks.ps1: $($_.Exception.Message)"
-            exit 1
-        }
+    if (-not $prepared -and (Test-Path -LiteralPath $hookPath -PathType Leaf)) {
         if (Get-Command Anvil-RunEnv -CommandType Function -ErrorAction SilentlyContinue) {
             [Console]::Error.WriteLine("anvil: running Anvil-RunEnv from .anvil/container/hooks.ps1")
             try {
@@ -289,6 +330,207 @@ expression: body
             # container can read it -- including third-party build scripts.
             [Console]::Error.WriteLine("anvil: forwarding env: $($hookVars.Keys -join ', ')")
         }
+    }
+
+    if ($prepared) {
+        # Only the engine child receives the hook environment. In particular,
+        # neither the host process nor a later validation child inherits it.
+        function Invoke-Preparation([string[]]$Arguments) {
+            $start = [Diagnostics.ProcessStartInfo]::new($engineExe)
+            $start.UseShellExecute = $false
+            $start.RedirectStandardOutput = $true
+            $start.RedirectStandardError = $true
+            foreach ($argument in @($enginePrefix) + $Arguments) { $start.ArgumentList.Add($argument) }
+            foreach ($name in $prepareVars.Keys) { $start.Environment[$name] = $prepareVars[$name] }
+            if ($engineExe -eq 'wsl.exe') {
+                $bridge = @($start.Environment['WSLENV'] -split ':' | Where-Object { $_ -and ($prepareVars.Keys -inotcontains $_.Split('/')[0]) })
+                $start.Environment['WSLENV'] = (@($bridge) + @($prepareVars.Keys | ForEach-Object { "$_/u" })) -join ':'
+            }
+            $process = [Diagnostics.Process]::new()
+            $process.StartInfo = $start
+            try {
+                if (-not $process.Start()) { throw 'anvil: could not start preparation' }
+                $streams = @($process.StandardOutput, $process.StandardError)
+                $buffers = @([char[]]::new(4096), [char[]]::new(4096))
+                $tails = @('', '')
+                $reads = @($streams[0].ReadAsync($buffers[0], 0, 4096),
+                           $streams[1].ReadAsync($buffers[1], 0, 4096))
+                $overlap = ($prepareVars.Values | Measure-Object -Property Length -Maximum).Maximum - 1
+                $leaked = $false
+                while (@($reads | Where-Object { $null -ne $_ }).Count -gt 0) {
+                    $pending = [Threading.Tasks.Task[]]@($reads | Where-Object { $null -ne $_ })
+                    [Threading.Tasks.Task]::WaitAny($pending) | Out-Null
+                    for ($i = 0; $i -lt 2; $i++) {
+                        if ($null -eq $reads[$i] -or -not $reads[$i].IsCompleted) { continue }
+                        $count = $reads[$i].GetAwaiter().GetResult()
+                        if ($count -eq 0) { $reads[$i] = $null; continue }
+                        # Keep only enough decoded text to match across reads;
+                        # both streams keep draining even after a leak is found.
+                        $text = $tails[$i] + [string]::new($buffers[$i], 0, $count)
+                        foreach ($value in $prepareVars.Values) {
+                            if ($text.Contains($value, [StringComparison]::Ordinal)) { $leaked = $true }
+                        }
+                        $tails[$i] = $text.Substring([Math]::Max(0, $text.Length - $overlap))
+                        $reads[$i] = $streams[$i].ReadAsync($buffers[$i], 0, 4096)
+                    }
+                }
+                $process.WaitForExit()
+                @{ ExitCode = $process.ExitCode; Leaked = $leaked }
+            } finally {
+                $process.Dispose()
+                $start.Environment.Clear()
+            }
+        }
+        function Remove-InvocationContainers {
+            foreach ($name in @($invocation, "$invocation-validation")) {
+                $remaining = @(& $engineExe @enginePrefix ps -aq --filter "name=^/?${name}$")
+                if ($LASTEXITCODE -ne 0) { throw 'anvil: could not inspect invocation container cleanup' }
+                if ($remaining.Count -gt 0) {
+                    & $engineExe @enginePrefix rm -f $name | Out-Null
+                    if ($LASTEXITCODE -ne 0) { throw 'anvil: could not remove invocation container' }
+                }
+            }
+        }
+        $status = 1
+        try {
+            foreach ($volume in @($registryVolume, $gitVolume)) {
+                & $engineExe @enginePrefix volume create $volume | Out-Null
+                if ($LASTEXITCODE -ne 0) { throw 'anvil: could not create preparation cache volume' }
+            }
+            $prepareArgs = @('run', '--rm', '--name', $invocation, '--platform', 'linux/amd64',
+                             '-v', "${engineRoot}:{{anvil_container_workdir}}:ro",
+                             '-v', "${registryVolume}:/usr/local/cargo/registry",
+                             '-v', "${gitVolume}:/usr/local/cargo/git")
+            if ($gitFile) {
+                $prepareArgs += @('-v', "${engineGitCommon}:/anvil/gitdir:ro",
+                                  '-v', "${engineGitFile}:{{anvil_container_workdir}}/.git:ro")
+            }
+            for ($i = 0; $i -lt $runArgs.Count - 1; $i++) {
+                if ($runArgs[$i] -eq '--user') { $prepareArgs += @('--user', $runArgs[$i + 1], '-e', 'HOME=/tmp') }
+            }
+            foreach ($name in $prepareVars.Keys) { $prepareArgs += @('-e', $name) }
+            foreach ($name in @('LD_PRELOAD', 'LD_AUDIT', 'LD_LIBRARY_PATH')) {
+                $prepareArgs += @('-e', "$name=", '-e', "CARGO_ENV_$name=")
+            }
+            $prepareArgs += @('-e', 'CARGO_UNSTABLE_HOST_CONFIG=false',
+                              '-e', 'CARGO_ENCODED_RUSTFLAGS=-Zcodegen-backend=llvm',
+                              '-e', 'RUSTC_BOOTSTRAP=1', '-e', 'CARGO_ENV_RUSTC_BOOTSTRAP=',
+                              '-e', 'RUSTC_WRAPPER=', '-e', 'RUSTC_WORKSPACE_WRAPPER=')
+            $credentialNames = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(
+                (ConvertTo-Json -InputObject @($prepareVars.Keys) -Compress)))
+            $prepareScript = @'
+    $ErrorActionPreference = 'Stop'
+    function Assert-CredentialFreeCacheFile([string]$Path, [string[]]$Needles) {
+        $buffer = [byte[]]::new(65536)
+        $overlapLength = ($Needles | Measure-Object -Property Length -Maximum).Maximum - 1
+        $tail = ''
+        $stream = [IO.File]::OpenRead($Path)
+        try {
+            while (($read = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                # Latin1 preserves each byte, including split UTF-8 sequences.
+                $content = $tail + [Text.Encoding]::Latin1.GetString($buffer, 0, $read)
+                foreach ($needle in $Needles) {
+                    if ($content.Contains($needle, [StringComparison]::Ordinal)) { throw 'preparation credential found in cache' }
+                }
+                $tail = $content.Substring([Math]::Max(0, $content.Length - $overlapLength))
+            }
+        } finally {
+            $stream.Dispose()
+        }
+    }
+    try {
+        # Select the trusted image default, not a workspace toolchain override.
+        Push-Location /
+        try {
+            $cargo = & rustup which cargo
+            if ($LASTEXITCODE -ne 0) { throw 'image Cargo resolution failed' }
+            $rustc = & rustup which rustc
+            if ($LASTEXITCODE -ne 0) { throw 'image compiler resolution failed' }
+        } finally {
+            Pop-Location
+        }
+        $tools = @()
+        foreach ($tool in @($cargo, $rustc)) {
+            $path = & /usr/bin/realpath --canonicalize-existing -- $tool
+            if ($LASTEXITCODE -ne 0) { throw 'image tool canonicalization failed' }
+            if (-not [IO.Path]::IsPathRooted($path) -or $path -match '^/(workspace|anvil|usr/local/cargo/(registry|git))(/|$)') {
+                throw 'preparation requires image-owned Cargo and rustc'
+            }
+            $tools += $path
+        }
+        $cargo, $env:RUSTC = $tools
+        & $cargo fetch --locked
+        $fetchStatus = $LASTEXITCODE
+        $names = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__CREDENTIAL_NAMES__')) | ConvertFrom-Json
+        $needles = @($names | ForEach-Object {
+            [Text.Encoding]::Latin1.GetString([Text.Encoding]::UTF8.GetBytes([Environment]::GetEnvironmentVariable($_)))
+        })
+        $roots = @('/usr/local/cargo/registry', '/usr/local/cargo/git')
+        foreach ($root in $roots) {
+            foreach ($entry in Get-ChildItem -LiteralPath $root -Recurse -Force -FollowSymlink -ErrorAction Stop -WarningAction Stop) {
+                if ($entry.LinkType) {
+                    $target = $entry.ResolveLinkTarget($true)
+                    if (-not $target -or -not @($roots | Where-Object { $target.FullName.StartsWith("$_/", [StringComparison]::Ordinal) }).Count) {
+                        throw 'cache inspection encountered a link outside the caches'
+                    }
+                }
+                if (-not $entry.PSIsContainer) {
+                    Assert-CredentialFreeCacheFile $entry.FullName $needles
+                }
+            }
+        }
+        exit $fetchStatus
+    } catch {
+        [Console]::Error.WriteLine('anvil: fixed fetch or complete cache inspection failed; sensitive diagnostics withheld')
+        exit 1
+    }
+    '@
+            $prepareScript = $prepareScript.Replace('__CREDENTIAL_NAMES__', $credentialNames)
+            $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($prepareScript))
+            $prepareArgs += @('--pull=never', '-w', $containerCwd, $image, 'pwsh', '-NoLogo', '-NoProfile', '-EncodedCommand', $encoded)
+            $captured = Invoke-Preparation $prepareArgs
+            Remove-InvocationContainers
+            if ($captured.Leaked) {
+                [Console]::Error.WriteLine('anvil: preparation credential detected in captured output; diagnostics redacted')
+                throw 'preparation output rejected'
+            }
+            if ($captured.ExitCode -ne 0) {
+                [Console]::Error.WriteLine("anvil: authenticated preparation failed (exit $($captured.ExitCode)); diagnostics redacted")
+                throw 'preparation failed'
+            }
+            $captured = $null
+            $prepareVars.Clear()
+            $hook = $null
+            $runArgs += @('--name', "$invocation-validation", '-e', 'CARGO_NET_OFFLINE=true',
+                          '--pull=never', '-w', $containerCwd, $image)
+            if (-not $interactive) { $runArgs += $argv }
+            if ($engineExe -eq 'wsl.exe' -and $forwardedEnv.Count -gt 0) {
+                $env:WSLENV = (@($env:WSLENV) + ($forwardedEnv | ForEach-Object { "$_/u" }) | Where-Object { $_ }) -join ':'
+            }
+            & $engineExe @enginePrefix @runArgs
+            $status = $LASTEXITCODE
+        } catch {
+            # Never render an engine exception that may embed captured output.
+            [Console]::Error.WriteLine('anvil: authenticated preparation or validation failed; sensitive diagnostics redacted')
+            $status = 1
+        } finally {
+            $prepareVars.Clear()
+            $hook = $null
+            $cleanupFailed = $false
+            try { Remove-InvocationContainers } catch { $cleanupFailed = $true }
+            foreach ($volume in @($registryVolume, $gitVolume)) {
+                & $engineExe @enginePrefix volume rm -f $volume | Out-Null
+                if ($LASTEXITCODE -ne 0) { $cleanupFailed = $true }
+            }
+            if ($gitFile) {
+                try { Remove-Item -LiteralPath $gitFile -Force -ErrorAction Stop } catch { $cleanupFailed = $true }
+            }
+            if ($cleanupFailed) {
+                [Console]::Error.WriteLine('anvil: invocation cleanup failed')
+                $status = 1
+            }
+        }
+        exit $status
     }
 
     try {
