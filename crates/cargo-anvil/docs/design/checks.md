@@ -263,6 +263,11 @@ from the PR tier. `anvil-full` also disables impact scoping for its PR checks.
 
 ## 5. Impact-scoping check → include mapping
 
+Release-candidate discovery is separate from code-impact checks.
+`just anvil-release-candidates` compares full-workspace versions and emits a
+report; it does not change this mapping, validate releases, or replace the
+advisory SemVer check. See [release-candidate discovery](./local.md#release-candidate-discovery).
+
 Cargo-delta selects packages from the committed diff against the base.
 `modified` contains changed packages; `affected` adds workspace dependents;
 `required` also includes their workspace dependencies.
