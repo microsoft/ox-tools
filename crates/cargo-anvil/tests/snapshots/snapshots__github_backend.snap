@@ -424,6 +424,37 @@ anvil_container_workdir := "/workspace"
 # engine rejects as malformed, from a directory name nobody would suspect.
 anvil_container_name := trim_end_matches("anvil-" + replace_regex(lowercase(file_name(justfile_directory())), '[^a-z0-9]+', "-"), "-")
 
+# Read the root MSRV without rustup or cargo-each resolution. Container image
+# identity can be needed before cargo-each is installed, while image setup can
+# supply ANVIL_RUST_VERSION without copying the repository manifest.
+[private]
+[script("pwsh", "-NoProfile")]
+_anvil-root-msrv:
+    if ($env:ANVIL_RUST_VERSION) {
+        Write-Output $env:ANVIL_RUST_VERSION
+        exit 0
+    }
+    $manifest = Join-Path '{{ replace(justfile_directory(), "'", "''") }}' 'Cargo.toml'
+    $values = @{}
+    $section = ''
+    foreach ($line in Get-Content -LiteralPath $manifest) {
+        if ($line -match '^\s*\[\s*([^\]]+)\s*\]\s*(?:#.*)?$') {
+            $section = $Matches[1].Trim()
+            continue
+        }
+        if ($section -in @('workspace.package', 'package') -and
+            $line -match '^\s*["'']?rust-version["'']?\s*=\s*(["''])([^"'']+)\1\s*(?:#.*)?$') {
+            $values[$section] = $Matches[2]
+        }
+    }
+    if ($values.ContainsKey('workspace.package')) {
+        Write-Output $values['workspace.package']
+    } elseif ($values.ContainsKey('package')) {
+        Write-Output $values['package']
+    } else {
+        Write-Output 'none'
+    }
+
 # Resolve how to invoke the engine, as a pipe-separated command.
 #
 # There is deliberately no probe *between* engines: presence is not
@@ -2184,16 +2215,6 @@ anvil-scheduled-exhaustive: (_anvil-unscoped "scheduled-exhaustive")
 # Update cargo-anvil and regenerate; repository-specific edits stop automatic updates.
 # Regenerate with cargo-anvil to update this file.
 
-# Used by container orchestration to read the root MSRV without rustup or
-# cargo-each resolution. TOML forbids raw U+001E, so it is a safe temporary
-# separator between table bodies.
-anvil_root_manifest := read(justfile_directory() / "Cargo.toml")
-anvil_root_manifest_sections := replace_regex(anvil_root_manifest, "(?m)^\\s*\\[[^\\]\\r\\n]+\\]\\s*(?:#.*)?$", "\u{001e}$0")
-anvil_root_manifest_section(section) := replace_regex(anvil_root_manifest_sections, "(?ms)\\A.*?\\x{1e}\\s*\\[\\s*" + section + "\\s*\\]\\s*(?:#.*)?\\r?\\n([^\\x{1e}]*)(?:\\x{1e}.*)?\\z", "$1")
-anvil_root_manifest_section_msrv(section) := replace_regex(anvil_root_manifest_section(section), "(?ms)\\A.*?^\\s*[\"']?rust-version[\"']?\\s*=\\s*[\"']([^\"']+)[\"']\\s*(?:#.*)?$.*\\z", "$1")
-anvil_root_manifest_section_has_msrv(section) := if anvil_root_manifest_section(section) == anvil_root_manifest_sections { "false" } else if anvil_root_manifest_section_msrv(section) == anvil_root_manifest_section(section) { "false" } else { "true" }
-anvil_root_msrv := if env("ANVIL_RUST_VERSION", "") != "" { env("ANVIL_RUST_VERSION") } else if anvil_root_manifest_section_has_msrv("workspace\\.package") == "true" { anvil_root_manifest_section_msrv("workspace\\.package") } else if anvil_root_manifest_section_has_msrv("package") == "true" { anvil_root_manifest_section_msrv("package") } else { "none" }
-
 # Used by scheduled and full wrappers to disable impact scoping before dependencies run.
 [private]
 _anvil-unscoped name:
@@ -2898,10 +2919,6 @@ cargo_nextest_version := "0.9.150"
 cargo_sort_version := "2.1.4"
 cargo_spellcheck_version := "0.15.7"
 cargo_udeps_version := "0.1.61"
-
-[private]
-_anvil-root-msrv:
-    @echo {{ anvil_root_msrv }}
 
 # Install prerequisites for the `anvil-pr` recipe.
 [private]

@@ -434,10 +434,6 @@ cargo_sort_version := "2.1.4"
 cargo_spellcheck_version := "0.15.7"
 cargo_udeps_version := "0.1.61"
 
-[private]
-_anvil-root-msrv:
-    @echo {{ anvil_root_msrv }}
-
 # Install prerequisites for the `anvil-pr` recipe.
 [private]
 anvil-pr-setup installer="install": \

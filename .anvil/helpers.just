@@ -4,16 +4,6 @@
 # Update cargo-anvil and regenerate; repository-specific edits stop automatic updates.
 # Regenerate with cargo-anvil to update this file.
 
-# Used by container orchestration to read the root MSRV without rustup or
-# cargo-each resolution. TOML forbids raw U+001E, so it is a safe temporary
-# separator between table bodies.
-anvil_root_manifest := read(justfile_directory() / "Cargo.toml")
-anvil_root_manifest_sections := replace_regex(anvil_root_manifest, "(?m)^\\s*\\[[^\\]\\r\\n]+\\]\\s*(?:#.*)?$", "\u{001e}$0")
-anvil_root_manifest_section(section) := replace_regex(anvil_root_manifest_sections, "(?ms)\\A.*?\\x{1e}\\s*\\[\\s*" + section + "\\s*\\]\\s*(?:#.*)?\\r?\\n([^\\x{1e}]*)(?:\\x{1e}.*)?\\z", "$1")
-anvil_root_manifest_section_msrv(section) := replace_regex(anvil_root_manifest_section(section), "(?ms)\\A.*?^\\s*[\"']?rust-version[\"']?\\s*=\\s*[\"']([^\"']+)[\"']\\s*(?:#.*)?$.*\\z", "$1")
-anvil_root_manifest_section_has_msrv(section) := if anvil_root_manifest_section(section) == anvil_root_manifest_sections { "false" } else if anvil_root_manifest_section_msrv(section) == anvil_root_manifest_section(section) { "false" } else { "true" }
-anvil_root_msrv := if env("ANVIL_RUST_VERSION", "") != "" { env("ANVIL_RUST_VERSION") } else if anvil_root_manifest_section_has_msrv("workspace\\.package") == "true" { anvil_root_manifest_section_msrv("workspace\\.package") } else if anvil_root_manifest_section_has_msrv("package") == "true" { anvil_root_manifest_section_msrv("package") } else { "none" }
-
 # Used by scheduled and full wrappers to disable impact scoping before dependencies run.
 [private]
 _anvil-unscoped name:

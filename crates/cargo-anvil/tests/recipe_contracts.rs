@@ -727,8 +727,12 @@ fn container_identity_uses_the_declared_msrv_not_the_installed_patch() {
     assert_eq!(String::from_utf8(container_value.stdout).unwrap().trim(), "container-msrv");
 
     assert!(
-        !generated.setup.contains("[script(\"pwsh\", \"-NoProfile\")]\n_anvil-root-msrv"),
-        "root MSRV lookup must not require PowerShell"
+        !generated.setup.contains("_anvil-root-msrv"),
+        "root MSRV lookup must not be part of shared setup recipes"
+    );
+    assert!(
+        generated.container.contains("[script(\"pwsh\", \"-NoProfile\")]\n_anvil-root-msrv"),
+        "root MSRV lookup must stay with PowerShell-backed container orchestration"
     );
 }
 

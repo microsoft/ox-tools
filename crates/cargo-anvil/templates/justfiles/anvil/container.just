@@ -35,6 +35,37 @@ anvil_container_workdir := "/workspace"
 # engine rejects as malformed, from a directory name nobody would suspect.
 anvil_container_name := trim_end_matches("anvil-" + replace_regex(lowercase(file_name(justfile_directory())), '[^a-z0-9]+', "-"), "-")
 
+# Read the root MSRV without rustup or cargo-each resolution. Container image
+# identity can be needed before cargo-each is installed, while image setup can
+# supply ANVIL_RUST_VERSION without copying the repository manifest.
+[private]
+[script("pwsh", "-NoProfile")]
+_anvil-root-msrv:
+    if ($env:ANVIL_RUST_VERSION) {
+        Write-Output $env:ANVIL_RUST_VERSION
+        exit 0
+    }
+    $manifest = Join-Path '{{ replace(justfile_directory(), "'", "''") }}' 'Cargo.toml'
+    $values = @{}
+    $section = ''
+    foreach ($line in Get-Content -LiteralPath $manifest) {
+        if ($line -match '^\s*\[\s*([^\]]+)\s*\]\s*(?:#.*)?$') {
+            $section = $Matches[1].Trim()
+            continue
+        }
+        if ($section -in @('workspace.package', 'package') -and
+            $line -match '^\s*["'']?rust-version["'']?\s*=\s*(["''])([^"'']+)\1\s*(?:#.*)?$') {
+            $values[$section] = $Matches[2]
+        }
+    }
+    if ($values.ContainsKey('workspace.package')) {
+        Write-Output $values['workspace.package']
+    } elseif ($values.ContainsKey('package')) {
+        Write-Output $values['package']
+    } else {
+        Write-Output 'none'
+    }
+
 # Resolve how to invoke the engine, as a pipe-separated command.
 #
 # There is deliberately no probe *between* engines: presence is not

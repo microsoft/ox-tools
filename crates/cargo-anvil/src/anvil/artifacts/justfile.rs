@@ -226,7 +226,6 @@ fn is_setup_recipe(id: &str) -> bool {
         || name.starts_with("anvil-toolchain-")
         || name.starts_with("_install-")
         || name.starts_with("_check-")
-        || name == "_anvil-root-msrv"
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -775,7 +774,6 @@ mod tests {
             "anvil-toolchain-example",
             "_install-example",
             "_check-example",
-            "_anvil-root-msrv",
         ] {
             assert!(is_setup_recipe(&format!("recipe:{name}")), "{name} must route to setup.just");
         }
