@@ -516,7 +516,7 @@ function Anvil-PrepareEnv {
 
         $scannerParts = $launcher.Split("`$prepareScript = @'`n", 2, [StringSplitOptions]::None)
         if ($scannerParts.Count -ne 2) { throw 'actual preparation body missing' }
-        $scannerParts = $scannerParts[1].Split("`ntry {`n    `$cargo", 2, [StringSplitOptions]::None)
+        $scannerParts = $scannerParts[1].Split("`ntry {`n", 2, [StringSplitOptions]::None)
         if ($scannerParts.Count -ne 2) { throw 'actual scanner boundary missing' }
         $scanner = $scannerParts[0]
         $largePath = Join-Path $root 'large-cache'
@@ -1361,6 +1361,53 @@ function Anvil-PrepareEnv {
     Assert-That 'the build-script and procedural-macro probes actually executed' `
         ($compiled.StdErr.Contains('BUILD_SCRIPT_CREDENTIAL_FREE') -and $compiled.StdErr.Contains('PROC_MACRO_CREDENTIAL_FREE'))
     Assert-That 'the actual dependency-using test ran' ($compiled.StdOut.Contains('1 passed'))
+
+    Write-Section '11b. Parent-aliased workspace toolchains cannot select preparation tools'
+    Write-Fixture (Join-Path $repo 'setup-alias-toolchain.ps1') @'
+$ErrorActionPreference = 'Stop'
+$cargo = & rustup which cargo
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+$rustc = & rustup which rustc
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+New-Item -ItemType Directory -Force /workspace/custom-toolchain/bin | Out-Null
+Copy-Item -LiteralPath $cargo -Destination /workspace/custom-toolchain/bin/cargo
+$probe = @(
+    '#!/bin/sh'
+    'if [ -n "${CARGO_REGISTRIES_FIXTURE_TOKEN:-}" ]; then'
+    '    echo ALIASED_COMPILER_WITH_CREDENTIAL >&2'
+    '    exit 91'
+    'fi'
+    'echo aliased-compiler-credential-free >> /workspace/alias-observations'
+    ('exec "' + $rustc + '" "$@"')
+) -join "`n"
+[IO.File]::WriteAllText('/workspace/custom-toolchain/bin/rustc', $probe.Replace("`r`n", "`n") + "`n")
+& chmod +x /workspace/custom-toolchain/bin/rustc
+exit $LASTEXITCODE
+'@
+    Invoke-Engine -Arguments @('run', '--rm', '-v', "${engineRepo}:/workspace", '-w', '/workspace',
+        $preparedImage, 'pwsh', '-NoLogo', '-NoProfile', '-File', '/workspace/setup-alias-toolchain.ps1') | Out-Null
+    $toolchainPath = Join-Path $repo 'rust-toolchain.toml'
+    $originalToolchain = [IO.File]::ReadAllText($toolchainPath)
+    try {
+        Write-Fixture $toolchainPath "[toolchain]`npath = '/proc/self/cwd/custom-toolchain'"
+        Clear-CompilerQueryCache
+        $aliasControl = Invoke-Engine -Arguments @('run', '--rm', '-v', "${engineRepo}:/workspace", '-w', '/workspace',
+            '-e', "CARGO_REGISTRIES_FIXTURE_TOKEN=$fixtureToken", $preparedImage, 'cargo', 'fetch', '--locked') -AllowFailure
+        Assert-That 'parent alias selects a live uncontrolled compiler callback' `
+            ($aliasControl.ExitCode -ne 0 -and
+             ($aliasControl.StdOut + $aliasControl.StdErr).Contains('ALIASED_COMPILER_WITH_CREDENTIAL'))
+        $aliasValidated = Invoke-PreparedCase 'image-owned preparation ignores the parent-alias toolchain and offline validation succeeds' `
+            @('cargo', 'test', '--locked', '--', '--nocapture')
+        Assert-That 'parent-alias validation actually runs the dependency-using test' `
+            ($aliasValidated.StdOut.Contains('1 passed'))
+        $aliasObservations = Join-Path $repo 'alias-observations'
+        Assert-That 'the parent-alias compiler remains usable without credentials in validation' `
+            ((Test-Path -LiteralPath $aliasObservations) -and
+             ([IO.File]::ReadAllText($aliasObservations).Contains('aliased-compiler-credential-free')))
+    } finally {
+        Write-Fixture $toolchainPath $originalToolchain
+    }
+
     Invoke-PreparedCase 'a bad preparation credential fails without validation' @('pwsh', '-File', '/workspace/assert-prepared.ps1') $false `
         @{ FIXTURE_TOKEN = 'synthetic-wrong-token' } | Out-Null
     Write-Fixture (Join-Path $repo 'incomplete-cache.ps1') @'

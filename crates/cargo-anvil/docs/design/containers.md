@@ -269,7 +269,10 @@ volumes are removed on success and failure; cleanup errors fail the run.
 Every invocation prepares anew. Missing locked dependencies fail offline;
 there is no retry with credentials or fallback to runtime authentication.
 
-Preparation uses image-owned Cargo/rustc, disables compiler wrappers and
+Preparation resolves Cargo/rustc from the image default outside the checkout
+and canonicalizes their complete paths, including parent aliases. Workspace
+toolchain overrides remain effective only in credential-free validation.
+Preparation disables compiler wrappers and
 workspace host/compiler-backend flags, and neutralizes Cargo-forced native
 loader settings. The image LLVM backend is selected with a preparation-only
 `RUSTC_BOOTSTRAP=1`; neither bootstrap nor these compiler/loader overrides
