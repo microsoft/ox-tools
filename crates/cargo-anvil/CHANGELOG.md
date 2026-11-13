@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-## [0.26.0] - 2026-11-12
+## [0.26.0] - 2026-11-13
 
 - ✨ Features
 
@@ -10,11 +10,13 @@
 
 - 🐛 Bug Fixes
 
+  - cargo-anvil: inspect preparation output incrementally
   - cargo-anvil: bound preparation cache inspection memory
   - stabilize scheduled checks and close Linux mutation coverage gaps ([#357](https://github.com/microsoft/ox-tools/pull/357))
 
 - ✔️ Tasks
 
+  - cargo-anvil: regenerate bounded preparation artifacts
   - cargo-anvil: reconcile main release metadata
   - cargo-anvil: regenerate the optional preparation catalog
 

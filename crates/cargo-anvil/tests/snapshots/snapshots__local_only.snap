@@ -4289,14 +4289,32 @@ anvil-container *command:
             $process.StartInfo = $start
             try {
                 if (-not $process.Start()) { throw 'anvil: could not start preparation' }
-                $stdout = $process.StandardOutput.ReadToEndAsync()
-                $stderr = $process.StandardError.ReadToEndAsync()
-                $process.WaitForExit()
-                @{
-                    ExitCode = $process.ExitCode
-                    StdOut = $stdout.GetAwaiter().GetResult()
-                    StdErr = $stderr.GetAwaiter().GetResult()
+                $streams = @($process.StandardOutput, $process.StandardError)
+                $buffers = @([char[]]::new(4096), [char[]]::new(4096))
+                $tails = @('', '')
+                $reads = @($streams[0].ReadAsync($buffers[0], 0, 4096),
+                           $streams[1].ReadAsync($buffers[1], 0, 4096))
+                $overlap = ($prepareVars.Values | Measure-Object -Property Length -Maximum).Maximum - 1
+                $leaked = $false
+                while (@($reads | Where-Object { $null -ne $_ }).Count -gt 0) {
+                    $pending = [Threading.Tasks.Task[]]@($reads | Where-Object { $null -ne $_ })
+                    [Threading.Tasks.Task]::WaitAny($pending) | Out-Null
+                    for ($i = 0; $i -lt 2; $i++) {
+                        if ($null -eq $reads[$i] -or -not $reads[$i].IsCompleted) { continue }
+                        $count = $reads[$i].GetAwaiter().GetResult()
+                        if ($count -eq 0) { $reads[$i] = $null; continue }
+                        # Keep only enough decoded text to match across reads;
+                        # both streams keep draining even after a leak is found.
+                        $text = $tails[$i] + [string]::new($buffers[$i], 0, $count)
+                        foreach ($value in $prepareVars.Values) {
+                            if ($text.Contains($value, [StringComparison]::Ordinal)) { $leaked = $true }
+                        }
+                        $tails[$i] = $text.Substring([Math]::Max(0, $text.Length - $overlap))
+                        $reads[$i] = $streams[$i].ReadAsync($buffers[$i], 0, 4096)
+                    }
                 }
+                $process.WaitForExit()
+                @{ ExitCode = $process.ExitCode; Leaked = $leaked }
             } finally {
                 $process.Dispose()
                 $start.Environment.Clear()
@@ -4404,13 +4422,8 @@ anvil-container *command:
             $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($prepareScript))
             $prepareArgs += @('--pull=never', '-w', $containerCwd, $image, 'pwsh', '-NoLogo', '-NoProfile', '-EncodedCommand', $encoded)
             $captured = Invoke-Preparation $prepareArgs
-            $leaked = $false
-            foreach ($value in $prepareVars.Values) {
-                if ($captured.StdOut.Contains($value, [StringComparison]::Ordinal) -or
-                    $captured.StdErr.Contains($value, [StringComparison]::Ordinal)) { $leaked = $true }
-            }
             Remove-InvocationContainers
-            if ($leaked) {
+            if ($captured.Leaked) {
                 [Console]::Error.WriteLine('anvil: preparation credential detected in captured output; diagnostics redacted')
                 throw 'preparation output rejected'
             }
