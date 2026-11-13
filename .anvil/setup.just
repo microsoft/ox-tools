@@ -434,34 +434,9 @@ cargo_sort_version := "2.1.4"
 cargo_spellcheck_version := "0.15.7"
 cargo_udeps_version := "0.1.61"
 
-# Used by _anvil-msrv-test-setup to read the root MSRV without rustup resolution.
-[script("pwsh", "-NoProfile")]
 [private]
 _anvil-root-msrv:
-    if ($env:ANVIL_RUST_VERSION) {
-        Write-Output $env:ANVIL_RUST_VERSION
-        exit 0
-    }
-    $manifest = Join-Path '{{ replace(justfile_directory(), "'", "''") }}' 'Cargo.toml'
-    $values = @{}
-    $section = ''
-    foreach ($line in Get-Content -LiteralPath $manifest) {
-        if ($line -match '^\s*\[\s*([^\]]+)\s*\]\s*(?:#.*)?$') {
-            $section = $Matches[1].Trim()
-            continue
-        }
-        if ($section -in @('workspace.package', 'package') -and
-            $line -match '^\s*["'']?rust-version["'']?\s*=\s*(["''])([^"'']+)\1\s*(?:#.*)?$') {
-            $values[$section] = $Matches[2]
-        }
-    }
-    if ($values.ContainsKey('workspace.package')) {
-        Write-Output $values['workspace.package']
-    } elseif ($values.ContainsKey('package')) {
-        Write-Output $values['package']
-    } else {
-        Write-Output 'none'
-    }
+    @echo {{ anvil_root_msrv }}
 
 # Install prerequisites for the `anvil-pr` recipe.
 [private]

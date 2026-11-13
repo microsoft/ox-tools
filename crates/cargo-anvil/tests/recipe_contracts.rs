@@ -697,15 +697,39 @@ fn container_identity_uses_the_declared_msrv_not_the_installed_patch() {
     assert!(output.status.success());
     assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), "1.95");
 
+    write(
+        &root.join("Cargo.toml"),
+        "[workspace]\nresolver = \"2\"\nmembers = [\"crate\"]\n\
+         [workspace.package]\nauthors = [\n  \"Example\"\n]\n'rust-version' = '1.96' # root floor\n\
+         [profile.dev]\nopt-level = 1\n",
+    );
+    let output = run_just(root, &["_anvil-root-msrv"], &[]);
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), "1.96");
+
     write(&root.join("Cargo.toml"), "[workspace]\nresolver = \"2\"\nmembers = [\"crate\"]\n");
     let output = run_just(root, &["_anvil-root-msrv"], &[]);
     assert!(output.status.success());
     assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), "none");
 
+    write(
+        &root.join("Cargo.toml"),
+        "[package]\nname = \"root\"\nversion = \"0.1.0\"\nrust-version = \"1.97\"\n\
+         [dependencies]\nrust-version = \"9.9\"\n",
+    );
+    let output = run_just(root, &["_anvil-root-msrv"], &[]);
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), "1.97");
+
     std::fs::remove_file(root.join("Cargo.toml")).unwrap();
     let container_value = run_just(root, &["_anvil-root-msrv"], &[("ANVIL_RUST_VERSION", "container-msrv")]);
     assert!(container_value.status.success());
     assert_eq!(String::from_utf8(container_value.stdout).unwrap().trim(), "container-msrv");
+
+    assert!(
+        !generated.setup.contains("[script(\"pwsh\", \"-NoProfile\")]\n_anvil-root-msrv"),
+        "root MSRV lookup must not require PowerShell"
+    );
 }
 
 #[test]

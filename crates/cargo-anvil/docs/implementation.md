@@ -97,13 +97,15 @@ Environments substituting an internally built compiler must expose it through
 rustup under the declared public name rather than supplying a separate Anvil
 mapping.
 
-`tools.just` additionally exposes the declared root MSRV as the `root-msrv`
-action, answering with the version or `none`. It exists for the container image
-tag, which hashes that value, and being total matters there: an empty answer and
-an unasked question must not hash alike. This container-only boundary retains
-its manifest scanner because image construction can run before cargo-each is
-available and can receive `ANVIL_RUST_VERSION` when manifests are outside the
-build context.
+`helpers.just` additionally exposes the declared root MSRV through
+`_anvil-root-msrv`, answering with the version or `none`. It exists for the
+container image tag, which hashes that value, and being total matters there: an
+empty answer and an unasked question must not hash alike. This container-only
+boundary uses lazy Just expressions rather than cargo-each because image
+construction can run before cargo-each is available. The expressions isolate
+the root `[workspace.package]` or `[package]` table and read its string
+`rust-version`; `ANVIL_RUST_VERSION` bypasses manifest access when manifests
+are outside the build context.
 
 Setup dependencies, rather than the cloud templates, route provisioning.
 Cargo-tool installers use the caller's Cargo; default-component installers act
