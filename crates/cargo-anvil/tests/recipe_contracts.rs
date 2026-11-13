@@ -384,7 +384,7 @@ fn released_domain_tool_versions_are_pinned() {
         "cargo_aprz_version := \"1.2.2\"",
         "cargo_coverage_gate_version := \"0.7.4\"",
         "cargo_delta_version := \"0.5.0\"",
-        "cargo_each_version := \"0.7.0\"",
+        "cargo_each_version := \"0.8.0\"",
     ] {
         assert!(recipes.contains(pin), "missing released tool pin: {pin}");
     }
@@ -587,70 +587,26 @@ fn mutants_diff_includes_committed_and_uncommitted_changes() {
 
 #[test]
 fn miri_profiles_set_their_distinct_environment() {
-    if !Command::new("pwsh")
-        .arg("--version")
-        .output()
-        .is_ok_and(|output| output.status.success())
-    {
-        return;
-    }
-
-    let mut builder = Catalog::anvil().into_builder();
-    for recipe_name in [
-        "anvil-miri-tree-borrows-validate-prereqs",
-        "anvil-miri-strict-provenance-validate-prereqs",
-        "anvil-miri-race-coverage-validate-prereqs",
+    let checks = generated().all_recipes();
+    for (miri_flags, rust_flags) in [
+        ("-Zmiri-tree-borrows ", "--cfg miri_tree_borrows "),
+        ("-Zmiri-strict-provenance ", "--cfg miri_strict_provenance "),
+        ("-Zmiri-many-seeds=", "--cfg miri_race_coverage "),
     ] {
-        builder = builder.replace_artifact(
-            cargo_anvil::artifacts::justfile::recipe(recipe_name)
-                .unwrap()
-                .with_body(format!("{recipe_name}:\n")),
-        );
+        assert!(checks.contains(miri_flags), "{checks}");
+        assert!(checks.contains(rust_flags), "{checks}");
     }
-    let generated = generated_with_catalog(&builder.build().unwrap());
-    let root = generated.temp.path();
-    let fake_bin = install_fake_cargo(root);
-
-    for (recipe, miri_flags, rust_flags) in [
-        ("anvil-miri-tree-borrows", "-Zmiri-tree-borrows", "--cfg miri_tree_borrows"),
-        (
-            "anvil-miri-strict-provenance",
-            "-Zmiri-strict-provenance",
-            "--cfg miri_strict_provenance",
-        ),
-        ("anvil-miri-race-coverage", "-Zmiri-many-seeds=", "--cfg miri_race_coverage"),
-    ] {
-        let log = root.join(format!("{recipe}.log"));
-        let output = Command::new("just")
-            .arg(recipe)
-            .current_dir(root)
-            .env("PATH", prepend_path(&fake_bin))
-            .env("ANVIL_IMPACT", "off")
-            .env("MIRIFLAGS", "-Zmiri-disable-isolation")
-            .env("RUSTFLAGS", "--cfg inherited_miri_test")
-            .env("FAKE_CARGO_LOG", &log)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{recipe} failed:\n{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let invocation = std::fs::read_to_string(log).unwrap();
-        assert!(invocation.contains(miri_flags), "{invocation}");
-        assert!(invocation.contains("-Zmiri-disable-isolation"), "{invocation}");
-        assert!(invocation.contains(rust_flags), "{invocation}");
-        assert!(invocation.contains("--cfg inherited_miri_test"), "{invocation}");
-        assert!(invocation.contains("miri test"), "{invocation}");
+    for inherited in [r#"env("MIRIFLAGS", "")"#, r#"env("RUSTFLAGS", "")"#] {
+        assert!(checks.contains(inherited), "{checks}");
     }
-
-    for args in [
-        ["_anvil-miri-test", "standard", "fixture", "test-name", "example-name"],
-        ["_anvil-miri-test", "standard", "", "", "example-name"],
-    ] {
-        let invalid = run_just(root, &args, &[("ANVIL_IMPACT", "off")]);
-        assert!(!invalid.status.success(), "{args:?} must fail");
-    }
+    assert!(checks.contains("anvil_miri_race_seed_window"), "{checks}");
+    assert!(
+        checks.contains("reason=compiler-artifact and profile.test=true and executable"),
+        "{checks}"
+    );
+    assert!(checks.contains("--json-work-dir-parent manifest_path"), "{checks}");
+    assert!(!checks.contains("ForEach-Object -Parallel"), "{checks}");
+    assert!(!checks.contains("[script(\"pwsh\", \"-NoProfile\")]\n_anvil-miri-test"), "{checks}");
 }
 
 #[test]

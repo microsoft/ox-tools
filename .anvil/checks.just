@@ -109,36 +109,11 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
 anvil-loom: anvil-loom-validate-prereqs anvil-impact
     cargo each {{ anvil_affected_selection }} --filter feature:loom --each-target test --target-filter required-feature:loom --require-target-per-package -- cargo {{ anvil_stable_toolchain_arg }} test --config {{ quote('build.rustflags=["--cfg","loom"]') }} --package '{cargo-spec}' --release --all-features --locked --test '{target}' -- --test-threads=1
 
-# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
-
-# Scope: a clean direct or PR invocation is impact-scoped -- anvil-impact
-# computes the cache and _anvil-impact-include returns the affected set, so
-# unaffected packages are skipped. Full-workspace runs come from the
-# scheduled/full tiers (which force ANVIL_IMPACT=off) or a dirty local tree
-# (which widens for safety).
-
-# Compile all selected packages together, then run their Miri test executables in
-# parallel. The single Cargo invocation preserves workspace feature unification,
-# while executable-level parallelism uses host logical processors that
-# `cargo miri test` otherwise leaves idle.
-#
-# Packages can opt their own test targets out through:
-#
-# [package.metadata.anvil.miri]
-# exclude = true
-#
-# They can still compile as dependencies of selected consumers. Selection is
-# `--workspace --exclude ...` (unambiguous even when a registry dependency
-# shares a member's name and version); opted-out packages are added to the
-# `--exclude` list.
-#
-# ANVIL_MIRI_JOBS overrides the default of one artifact worker per logical processor.
-
 # Run Miri tests for affected workspace packages.
-[group("anvil")]
+[arg("example", long, pattern='(?:[A-Za-z0-9_.-]+)?')]
 [arg("package", long, pattern='(?:[A-Za-z0-9_.-]+)?')]
 [arg("test", long, pattern='(?:[A-Za-z0-9_.:-]+)?')]
-[arg("example", long, pattern='(?:[A-Za-z0-9_.-]+)?')]
+[group("anvil")]
 anvil-miri package="" test="" example="": anvil-miri-validate-prereqs (_anvil-miri-test "standard" package test example)
 
 # Run affected Miri tests across a rotating seed range.

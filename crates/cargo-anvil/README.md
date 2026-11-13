@@ -288,10 +288,11 @@ catalog supports explicit coverage-target configuration.
 
 #### Miri
 
-Anvil uses cargo-each to run Miri once per selected package with all features
-enabled. `ANVIL_MIRI_JOBS` controls concurrent package processes while
-cargo-each provides deterministic output, process-tree cleanup, and
-aggregate failure. Local callers can use
+Anvil compiles the selected package scope together once with all features
+enabled, then uses cargo-each’s JSON-record mode to run the emitted Miri test
+executables from their package roots. `ANVIL_MIRI_JOBS` controls concurrent
+artifact processes while cargo-each provides deterministic output,
+process-tree cleanup, and aggregate failure. Local callers can use
 `--package` to override impact scope, `--test` to select libtest names, or
 `--example` with `--package` to run one example instead of the test suite.
 
@@ -461,7 +462,7 @@ More detailed design and operational guidance is available in the
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbYgROgVc2bYEbbFf7RTl06T0bssVyWOhROYQbFsrhTCD57eVhZIGDa2NhcmdvLWFudmlsZjAuMjYuMGtjYXJnb19hbnZpbA
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbNZxwzJawtW8b_rMQGJKMMTgbwmi8y94UMs4b8z3qwYFiHURhZIGDa2NhcmdvLWFudmlsZjAuMjcuMGtjYXJnb19hbnZpbA
  [__link0]: https://github.com/casey/just
  [__link1]: https://rust-lang.github.io/rustfmt/
  [__link10]: https://www.conventionalcommits.org/
@@ -480,14 +481,14 @@ This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Br
  [__link22]: https://crates.io/crates/cargo-gamma
  [__link23]: https://crates.io/crates/cargo-hack
  [__link24]: https://crates.io/crates/cargo-coverage-gate
- [__link25]: https://docs.rs/cargo-anvil/0.26.0/cargo_anvil/?search=Catalog::anvil
- [__link26]: https://docs.rs/cargo-anvil/0.26.0/cargo_anvil/?search=Artifact
- [__link27]: https://docs.rs/cargo-anvil/0.26.0/cargo_anvil/fn.run_app.html
- [__link28]: https://docs.rs/cargo-anvil/0.26.0/cargo_anvil/?search=update
- [__link29]: https://docs.rs/cargo-anvil/0.26.0/cargo_anvil/?search=UpdateOptions
+ [__link25]: https://docs.rs/cargo-anvil/0.27.0/cargo_anvil/?search=Catalog::anvil
+ [__link26]: https://docs.rs/cargo-anvil/0.27.0/cargo_anvil/?search=Artifact
+ [__link27]: https://docs.rs/cargo-anvil/0.27.0/cargo_anvil/fn.run_app.html
+ [__link28]: https://docs.rs/cargo-anvil/0.27.0/cargo_anvil/?search=update
+ [__link29]: https://docs.rs/cargo-anvil/0.27.0/cargo_anvil/?search=UpdateOptions
  [__link3]: https://crates.io/crates/cargo-each
- [__link30]: https://docs.rs/cargo-anvil/0.26.0/cargo_anvil/?search=UpdateIo
- [__link31]: https://docs.rs/cargo-anvil/0.26.0/cargo_anvil/?search=UpdateResult
+ [__link30]: https://docs.rs/cargo-anvil/0.27.0/cargo_anvil/?search=UpdateIo
+ [__link31]: https://docs.rs/cargo-anvil/0.27.0/cargo_anvil/?search=UpdateResult
  [__link4]: https://crates.io/crates/cargo-sort
  [__link5]: https://crates.io/crates/cargo-heather
  [__link6]: https://crates.io/crates/cargo-ensure-no-cyclic-deps

@@ -998,7 +998,7 @@ mod tests {
                 );
             }
         }
-        assert_eq!(scoped, 19, "every cargo-each impact-scoped check must be covered");
+        assert_eq!(scoped, 20, "every cargo-each impact-scoped check must be covered");
     }
 
     #[test]
@@ -1008,15 +1008,24 @@ mod tests {
             .find_map(|(path, body)| path.ends_with("/miri.just").then_some(*body))
             .expect("miri.just is registered in CHECK_FILES");
         for needle in [
-            "_anvil-miri-test profile package=\"\" test_filter=\"\" example=\"\": anvil-impact",
-            "[script(\"pwsh\", \"-NoProfile\")]",
-            "miri test --all-features --tests --no-run --message-format=json-render-diagnostics",
-            "ForEach-Object -Parallel",
-            "$env:MIRIFLAGS",
-            "$env:RUSTFLAGS",
+            "_anvil-miri-test profile package=\"\" test_filter=\"\" example=\"\": anvil-impact _ensure-target-dir",
+            "miri test '{packages}' --all-features --tests --no-run --locked --message-format=json,json-render-diagnostics",
+            "--json-filter ",
+            "reason=compiler-artifact and profile.test=true and executable",
+            "--json-work-dir-parent manifest_path",
+            "--jobs ",
+            "--keep-going -- rustup run ",
+            "cargo-miri runner '{json:executable}'",
+            "not metadata:anvil.miri.exclude=true",
+            "anvil_cargo_env_config(\"MIRIFLAGS\"",
+            "anvil_cargo_env_config(\"RUSTFLAGS\"",
         ] {
             assert!(miri.contains(needle), "miri runner is missing '{needle}'");
         }
+        assert!(
+            !miri.contains("[script(\"pwsh\", \"-NoProfile\")]"),
+            "the cargo-each artifact protocol must not require PowerShell"
+        );
         for (check, profile) in [
             ("miri", "standard"),
             ("miri-tree-borrows", "tree-borrows"),
@@ -1048,8 +1057,8 @@ mod tests {
         assert!(miri.contains(
             "anvil-miri-setup installer=\"install\": anvil-component-nightly-miri-install anvil-component-nightly-rust-src-install"
         ));
-        assert!(miri.contains("& cargo '+{{ rust_nightly }}' miri setup"));
-        assert!(miri.contains("if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }"));
+        assert!(miri.contains("cargo +{{ rust_nightly }} miri setup"));
+        assert!(!miri.contains("[script(\"pwsh\", \"-NoProfile\")]"));
     }
 
     #[test]

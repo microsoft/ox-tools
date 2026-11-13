@@ -130,9 +130,10 @@ refresh owned mirrors and `.anvil/manifest.toml`; regenerate crate README conten
 
 The Miri recipes compile the selected package scope together, preserving
 workspace feature unification, and then run the emitted Miri test executables
-concurrently. Anvil owns artifact discovery, the cargo-miri runner environment,
-package-root working directories, deterministic log replay, and aggregate
-failure.
+concurrently. Cargo emits the artifact handoff as JSON Lines, and cargo-each
+owns record filtering, package-root working directories, bounded execution,
+deterministic log replay, and aggregate failure. Anvil supplies the matching
+cargo-miri runner environment.
 
 ### Ownership and recipe graph
 
@@ -142,11 +143,11 @@ The canonical recipe set comprises
 `templates/justfiles/anvil/checks/miri-strict-provenance.just`, and
 `templates/justfiles/anvil/checks/miri-race-coverage.just`. `miri.just` owns the
 shared implementation, while the three stricter profile templates contain only
-their public recipe and setup leaves. Each public recipe uses a parameterized
-`_anvil-miri-test` dependency, keeping one shared execution path. The shared
-recipe maps the profile to `MIRIFLAGS` and `RUSTFLAGS`, validates explicit
-test/example arguments, resolves impact-selected packages, and performs the
-compile-and-execute protocol.
+their public recipe and setup leaves. Each public recipe uses a parameterized `_anvil-miri-test` dependency, keeping
+one shared execution path. The shared recipe maps the profile to `MIRIFLAGS`
+and `RUSTFLAGS`, validates explicit test/example arguments, resolves
+impact-selected packages, and performs the compile-and-execute protocol with
+ordinary Just command lines.
 
 `src/anvil/artifacts/justfile.rs` registers these templates and structurally
 pins the public-to-private delegation. Full emitted-tree snapshots pin the
@@ -155,18 +156,25 @@ copies and `.anvil/manifest.toml`.
 
 ### Scope and execution
 
-After `anvil-impact` refreshes the cache, the shared recipe reads
-`affected.packages` and converts each source-qualified member into a Cargo
-`--package` argument. A local `--package` replaces that selection, and
-`ANVIL_IMPACT=off` selects the workspace. Metadata-based Miri exclusions remove
-only a member's own targets, leaving it available as a dependency.
+After `anvil-impact` refreshes the cache, the shared recipe gives cargo-each the
+affected package file directly. A local `--package` replaces that selection,
+and `ANVIL_IMPACT=off` selects the workspace. Cargo-each's metadata filter
+removes packages with `[package.metadata.anvil.miri] exclude = true` from the
+root selection while leaving them available as dependencies.
 
-For tests, one `cargo miri test --no-run --message-format=json-render-diagnostics`
-invocation emits the runnable libtest artifacts. The recipe restores the
-prepared cargo-miri sysroot and runner environment, then runs artifacts from
-their package roots. `ANVIL_MIRI_JOBS` controls artifact concurrency; logs are
-buffered independently and replayed in stable artifact order before failures
-are aggregated. A libtest filter is forwarded to each executable. Explicit
+For tests, cargo-each first invokes one
+`cargo miri test --no-run --message-format=json,json-render-diagnostics`
+command and redirects Cargo's JSON Lines artifact stream to a PID-scoped file.
+Cargo continues rendering compiler diagnostics to stderr. A second cargo-each
+invocation selects executable `compiler-artifact` records whose
+`profile.test` field is true, derives each working directory from the parent of
+`manifest_path`, and invokes the pinned cargo-miri runner. The runner receives
+the prepared sysroot, host-mode sentinel, target library path, and
+profile-specific `MIRIFLAGS` through Cargo's portable environment
+configuration. `ANVIL_MIRI_JOBS` controls artifact concurrency; cargo-each
+buffers complete outputs and replays them in input order before aggregating
+failures. A libtest filter is forwarded to each executable. Successful runs
+remove the JSON Lines handoff; failures retain it for diagnosis. Explicit
 examples still use `cargo miri run` and require an explicit package.
 
 ### Verification boundaries

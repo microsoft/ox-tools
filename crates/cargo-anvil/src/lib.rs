@@ -288,10 +288,11 @@
 //!
 //! ### Miri
 //!
-//! Anvil uses cargo-each to run Miri once per selected package with all features
-//! enabled. `ANVIL_MIRI_JOBS` controls concurrent package processes while
-//! cargo-each provides deterministic output, process-tree cleanup, and
-//! aggregate failure. Local callers can use
+//! Anvil compiles the selected package scope together once with all features
+//! enabled, then uses cargo-each's JSON-record mode to run the emitted Miri test
+//! executables from their package roots. `ANVIL_MIRI_JOBS` controls concurrent
+//! artifact processes while cargo-each provides deterministic output,
+//! process-tree cleanup, and aggregate failure. Local callers can use
 //! `--package` to override impact scope, `--test` to select libtest names, or
 //! `--example` with `--package` to run one example instead of the test suite.
 //!

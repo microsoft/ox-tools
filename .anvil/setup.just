@@ -422,7 +422,7 @@ cargo_coverage_gate_version := "0.7.4"
 cargo_delta_version := "0.5.0"
 cargo_deny_version := "0.20.2"
 cargo_doc2readme_version := "0.7.3"
-cargo_each_version := "0.7.0"
+cargo_each_version := "0.8.0"
 cargo_ensure_no_cyclic_deps_version := "0.2.0"
 cargo_ensure_no_default_features_version := "1.1.1"
 cargo_hack_version := "0.6.45"
@@ -722,12 +722,9 @@ anvil-loom-validate-prereqs: anvil-tool-rustc-validate-prereqs anvil-tool-cargo-
 # --- pr-runtime-analysis members ---
 
 # Install prerequisites and prepare the sysroot for the `anvil-miri` recipe.
-[script("pwsh", "-NoProfile")]
 [private]
 anvil-miri-setup installer="install": anvil-component-nightly-miri-install anvil-component-nightly-rust-src-install
-    $ErrorActionPreference = 'Stop'
-    & cargo '+{{ rust_nightly }}' miri setup
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    cargo +{{ rust_nightly }} miri setup
 
 # Validate prerequisites for the `anvil-miri` recipe.
 [private]
