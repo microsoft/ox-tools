@@ -5634,14 +5634,20 @@ anvil-container *command:
         }
     }
     try {
-        $cargo = & rustup which cargo
-        if ($LASTEXITCODE -ne 0) { throw 'image Cargo resolution failed' }
-        $rustc = & rustup which rustc
-        if ($LASTEXITCODE -ne 0) { throw 'image compiler resolution failed' }
+        # Select the trusted image default, not a workspace toolchain override.
+        Push-Location /
+        try {
+            $cargo = & rustup which cargo
+            if ($LASTEXITCODE -ne 0) { throw 'image Cargo resolution failed' }
+            $rustc = & rustup which rustc
+            if ($LASTEXITCODE -ne 0) { throw 'image compiler resolution failed' }
+        } finally {
+            Pop-Location
+        }
         $tools = @()
         foreach ($tool in @($cargo, $rustc)) {
-            $resolved = (Get-Item -LiteralPath $tool -Force).ResolveLinkTarget($true)
-            $path = if ($resolved) { $resolved.FullName } else { (Get-Item -LiteralPath $tool).FullName }
+            $path = & /usr/bin/realpath --canonicalize-existing -- $tool
+            if ($LASTEXITCODE -ne 0) { throw 'image tool canonicalization failed' }
             if (-not [IO.Path]::IsPathRooted($path) -or $path -match '^/(workspace|anvil|usr/local/cargo/(registry|git))(/|$)') {
                 throw 'preparation requires image-owned Cargo and rustc'
             }
