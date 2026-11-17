@@ -9,6 +9,11 @@ yanked = "deny"
 unmaintained = "all"
 # <<< anvil-managed: anvil-deny-advisories
 
+ignore = [
+    { id = "RUSTSEC-2026-0543", reason = "Temporary until APRZ's public date models and CEL timestamp integration can migrate from chrono; Gamma also tests chrono operator support. Tracked in #365; revisit by 2026-12-31." },
+    { id = "RUSTSEC-2026-0555", reason = "Temporary until CEL's chrono feature no longer requires chrono-tz; remove with the APRZ timestamp migration. Tracked in #365; revisit by 2026-12-31." },
+]
+
 # >>> anvil-managed: anvil-deny-bans
 [bans]
 multiple-versions = "warn"
