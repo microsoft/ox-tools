@@ -870,7 +870,8 @@ impl Provider {
             return (HashMap::default(), HashMap::default());
         }
 
-        self.aggregate_monthly_rows(
+        Self::aggregate_monthly_rows(
+            self.now,
             self.table_mgr.version_downloads_table().iter().map(|(row, _)| row),
             version_ids,
             all_version_to_crate,
@@ -883,7 +884,7 @@ impl Provider {
         reason = "the two maps distinguish requested-version downloads from all crate downloads"
     )]
     fn aggregate_monthly_rows(
-        &self,
+        now: Timestamp,
         rows: impl IntoIterator<Item = VersionDownloadRow>,
         version_ids: &HashSet<VersionId>,
         all_version_to_crate: &HashMap<VersionId, CrateId>,
@@ -896,7 +897,7 @@ impl Provider {
         // back, and consumers of this series report downloads over the last 90 days: taking
         // the most recent months present in the data instead would report years-old traffic
         // for a crate that has stopped being downloaded.
-        let cutoff = self.now - (RECENT_DOWNLOADS_DAYS * 24).hours();
+        let cutoff = now - (RECENT_DOWNLOADS_DAYS * 24).hours();
         let cutoff_date = cutoff.to_zoned_datetime(jiff::tz::TimeZone::UTC).date();
         let cutoff_days = u64::from((cutoff_date - Date::constant(1970, 1, 1)).get_days().max(0).cast_unsigned());
 
@@ -1874,13 +1875,11 @@ mod tests {
         assert_eq!(crates[&CrateId(20)].iter().map(|(_, downloads)| downloads).sum::<u64>(), 34);
     }
 
-    #[tokio::test]
-    #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
-    async fn monthly_aggregation_keeps_the_exact_far_future_cutoff_day() {
+    #[test]
+    fn monthly_aggregation_keeps_the_exact_far_future_cutoff_day() {
         let now = "9999-12-30T00:00:00Z"
             .parse::<Timestamp>()
             .expect("the fixed test timestamp is valid");
-        let provider = provider_from_dump(now).await;
         let version_ids = HashSet::from_iter([VersionId(103)]);
         let all_versions = HashMap::from_iter([(VersionId(103), CrateId(10))]);
         let crate_data = HashMap::from_iter([(CrateId(10), empty_per_crate_data())]);
@@ -1897,16 +1896,14 @@ mod tests {
             },
         ];
 
-        let (versions, _) = provider.aggregate_monthly_rows(rows, &version_ids, &all_versions, &crate_data);
+        let (versions, _) = Provider::aggregate_monthly_rows(now, rows, &version_ids, &all_versions, &crate_data);
 
         assert_eq!(versions[&VersionId(103)].iter().map(|(_, downloads)| downloads).sum::<u64>(), 42);
     }
 
-    #[tokio::test]
-    #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
-    async fn monthly_aggregation_skips_corrupt_dates_without_losing_later_rows() {
+    #[test]
+    fn monthly_aggregation_skips_corrupt_dates_without_losing_later_rows() {
         let now = "2026-08-11T04:13:36Z".parse::<Timestamp>().unwrap();
-        let provider = provider_from_dump(now).await;
         let valid_date = u64::try_from(
             now.to_zoned_datetime(jiff::tz::TimeZone::UTC)
                 .date()
@@ -1935,7 +1932,7 @@ mod tests {
                 },
             ];
             let logs = crate::facts::test_logging::capture_logs(|| {
-                let (versions, crate_totals) = provider.aggregate_monthly_rows(rows, &ids, &all_versions, &crates);
+                let (versions, crate_totals) = Provider::aggregate_monthly_rows(now, rows, &ids, &all_versions, &crates);
                 assert_eq!(versions[&VersionId(103)].iter().map(|(_, downloads)| downloads).sum::<u64>(), 42);
                 assert_eq!(crate_totals[&CrateId(10)].iter().map(|(_, downloads)| downloads).sum::<u64>(), 42);
             });
