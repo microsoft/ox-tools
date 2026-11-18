@@ -451,6 +451,14 @@ pub(super) fn run_session<H: Host>(host: &mut H, args: &RunArgs, progress_when: 
     Ok(finish_run(host, args, styler, executed))
 }
 
+fn policy_excluded_diff(args: &RunArgs, mutants: &[Mutant]) -> bool {
+    args.select.in_diff.is_some()
+        && !mutants.is_empty()
+        && mutants
+            .iter()
+            .all(|mutant| mutant.outcome == Outcome::Ignored && mutant.suppression.is_some() && mutant.expectation.is_none())
+}
+
 fn finish_run<H: Host>(host: &mut H, args: &RunArgs, styler: Styler, executed: Executed) -> i32 {
     let Executed { plan, stuck } = executed;
 
@@ -541,13 +549,7 @@ fn finish_run<H: Host>(host: &mut H, args: &RunArgs, styler: Styler, executed: E
         return EXIT_GATE_FAILED;
     }
 
-    if args.select.in_diff.is_some()
-        && !plan.mutants.is_empty()
-        && plan
-            .mutants
-            .iter()
-            .all(|mutant| mutant.outcome == Outcome::Ignored && mutant.suppression.is_some() && mutant.expectation.is_none())
-    {
+    if policy_excluded_diff(args, &plan.mutants) {
         let _ = writeln!(
             host.error(),
             "no eligible mutants remain in the diff after source and configuration exclusions; mutation gates are not applicable"
@@ -3123,7 +3125,14 @@ mod tests {
                 );
                 assert_eq!(code, if in_diff { EXIT_OK } else { EXIT_GATE_FAILED });
                 assert_eq!(host.out(), "");
-                assert_eq!(host.err().contains("mutation gates are not applicable"), in_diff);
+                assert_eq!(
+                    host.err(),
+                    if in_diff {
+                        "no eligible mutants remain in the diff after source and configuration exclusions; mutation gates are not applicable\n"
+                    } else {
+                        "error: no mutant counted toward the `--min-score` and `--max-flaky` gates, so it was never evaluated; check that the selection — `--in-diff`, `--exclude-file`, `--re`, `--shard-count`/`--shard-index`, `--incremental` — leaves something to test\n"
+                    }
+                );
             }
         }
     }
