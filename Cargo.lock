@@ -2901,9 +2901,9 @@ dependencies = [
 
 [[package]]
 name = "rallocator"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9fd808d66c79bff707b16f916e14015447818dbde2e1afd14716831853900e8c"
+checksum = "cf6bb274145beb01358ea1c933fbaaecaab4b01294ac2cb605fe00f004c5dbc8"
 dependencies = [
  "libc",
  "seismograph",
@@ -3386,9 +3386,9 @@ dependencies = [
 
 [[package]]
 name = "seismograph"
-version = "0.3.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c5f8d2898334476c6b661421262c82eac7dfeed85d218d260722cb792f1c94eb"
+checksum = "72e989b3769e67e611e84979b2119a26481e15c39046acb1946bde6b5e1e9b79"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
@@ -3396,9 +3396,9 @@ dependencies = [
 
 [[package]]
 name = "seismograph_rallocator"
-version = "0.3.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "344e725a2343dda56fb7d0349433ac5d89f40b68f659f26141a6a5d1383aceac"
+checksum = "ec245aa0d69083eb1b645119015fbd845c67918c13e90cbde24b293f7fa461b0"
 dependencies = [
  "seismograph",
 ]

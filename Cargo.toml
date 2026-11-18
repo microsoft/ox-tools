@@ -82,7 +82,7 @@ proc-macro2 = { version = "1.0.107", default-features = false }
 quote = { version = "1.0.47", default-features = false }
 # Newer releases require Rust 1.98, beyond the Azure publishing compiler.
 ra_ap_syntax = { version = "=0.0.349", default-features = false }
-rallocator = { version = "0.3.0", default-features = false }
+rallocator = { version = "0.4.0", default-features = false }
 reflink-copy = { version = "0.1.30", default-features = false }
 regex = { version = "1.13.1", default-features = false }
 regex-syntax = { version = "0.8.11", default-features = false }
