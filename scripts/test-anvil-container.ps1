@@ -499,6 +499,10 @@ function Anvil-PrepareEnv {
             "@{ Env = @{ RUSTC_WRAPPER = 'workspace' } }", "@{ Env = @{ CARGO_ENV_LD_PRELOAD = 'workspace' } }",
             "@{ Env = @{ CARGO_UNSTABLE_HOST_CONFIG = 'true' } }", "@{ Env = @{ CARGO_ENCODED_RUSTFLAGS = 'workspace' } }",
             "@{ Env = @{ RUSTC_BOOTSTRAP = '-1' } }"
+            "@{ Env = @{ DOCKER_HOST = 'tcp://fixture.invalid:2375' } }"
+            "@{ Env = @{ docker_context = 'fixture' } }"
+            "@{ Env = @{ DoCkEr_CoNfIg = 'fixture' } }"
+            "@{ Env = @{ CONTAINER_HOST = 'ssh://fixture.invalid' } }"
         )) {
             $case = Invoke-LauncherCase "function Anvil-PrepareEnv { $returned }"
             $expectedError = if ($returned -in @('@{ Env = @{} }', "@{ Env = @{ TOKEN = 'value' }; Command = 'cargo test' }")) {
