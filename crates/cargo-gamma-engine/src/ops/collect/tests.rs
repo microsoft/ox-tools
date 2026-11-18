@@ -3598,6 +3598,27 @@ fn a_loop_that_can_break_with_a_value_is_still_perturbed() {
 }
 
 #[test]
+fn statically_divergent_boolean_values_are_not_negated() {
+    // `!` coerces to `bool`, so a divergent tail passes the expected-type check that admits a
+    // boolean value, yet `!(loop { .. })` never reaches its negation: control leaves, or spins
+    // forever, before a value exists to invert. A value that a `return` hands to the caller is
+    // still a boolean someone observes, so it keeps its own negation.
+    let cases = [
+        ("fn f(n: u32) -> bool { loop { if n > 3 { return true; } } }", vec![]),
+        ("fn f(c: bool) -> bool { return c }", vec!["c"]),
+    ];
+
+    for (source, expected) in cases {
+        let negated: Vec<&str> = candidates(source, "bool_expr.negate")
+            .iter()
+            .map(|candidate| &source[candidate.span.clone()])
+            .collect();
+
+        assert_eq!(negated, expected, "{source}");
+    }
+}
+
+#[test]
 fn a_non_numeric_argument_is_not_perturbed() {
     let source = "fn f(s: &str, c: bool, n: usize) { g(s, c, &s, |x| x, \"lit\", n); }";
     let found = candidates(source, "expr");

@@ -1117,6 +1117,14 @@ A replacement that reproduces the code it replaces is not offered at all. `fn re
 could distinguish it, and it would be reported forever as a survivor you cannot kill. The comparison
 is made on tokens, so layout and comments do not affect it. The other values are still offered.
 
+A value that is never produced is not changed. A `return`, `break` or `continue`, a `loop` without a
+`break`, a `panic!`, `unreachable!`, `todo!` or `unimplemented!`, and an `if` or `match` whose every
+branch is one of these all have type `!`, which fits wherever a number or a boolean is expected.
+Control leaves such an expression before it produces a value, so `expr.increment` and
+`expr.decrement` do not add or subtract one from it, and `bool_expr.negate` does not negate it:
+`!(return ready)` behaves exactly like `return ready`. The values it carries are still mutated, so
+`return !(ready)` is offered.
+
 `Default::default()` is not offered for the `default` method of an `impl Default`, because there it
 names the very function being replaced and the mutant is unbounded recursion rather than a different
 answer. The rest of that method is mutated normally — the `7` in `fn default() -> Self { Thing

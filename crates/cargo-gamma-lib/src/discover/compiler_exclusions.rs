@@ -199,7 +199,6 @@ fn block_leading_binary_or_cast(original: &str) -> bool {
         return false;
     }
     let mut leading = &expression;
-    // #[gamma::skip(bool_expr.negate, tag = "equivalent", reason = "every loop exit returns directly from this function, so a negation outside the loop never receives a value")]
     loop {
         // #[gamma::skip(stmt.delete_assign, tag = "timeout", reason = "the leading operand must advance or a binary or cast expression is inspected forever")]
         leading = match leading {

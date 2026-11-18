@@ -512,11 +512,12 @@ pub(super) fn is_numeric_return(output: &ReturnType) -> bool {
 
 /// Returns whether an expression's value is unreachable because control leaves before it is used.
 ///
-/// A divergent expression has type `!`, which coerces to the numeric return type and so slips past
-/// the signature-only proof that a tail is a number. Perturbing it is pointless: `(return 5) + 1`
-/// returns before the `+ 1` ever runs, so the mutant behaves exactly like the original and survives
-/// every test. Only the cases the source states outright are reported. This never tries to prove a
-/// value *is* reachable, so anything it is unsure about answers `false` and is perturbed as before.
+/// A divergent expression has type `!`, which coerces to any expected type and so slips past the
+/// proof that a position holds a number or a boolean. Wrapping it is pointless: `(return 5) + 1`
+/// returns before the `+ 1` ever runs, and `!(return true)` before the `!` does, so the mutant
+/// behaves exactly like the original and survives every test. Only the cases the source states
+/// outright are reported. This never tries to prove a value *is* reachable, so anything it is
+/// unsure about answers `false` and is mutated as before.
 pub(super) fn diverges(expression: &Expr) -> bool {
     match expression {
         // Control leaves the function, or the enclosing loop, outright.
@@ -541,7 +542,7 @@ pub(super) fn diverges(expression: &Expr) -> bool {
             .is_some_and(|(_else, otherwise)| block_diverges(&node.then_branch) && diverges(otherwise)),
 
         // A `match` diverges when it has arms and every one of them does. A match on an empty type
-        // has no arm to reach here as a numeric tail, so the emptiness check only guards the logic.
+        // has no arm to reach here as a value, so the emptiness check only guards the logic.
         Expr::Match(node) => !node.arms.is_empty() && node.arms.iter().all(|arm| diverges(&arm.body)),
 
         _ => false,

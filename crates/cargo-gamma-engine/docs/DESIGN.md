@@ -498,6 +498,15 @@ in a disabled trailing platform branch.
   so aliasing a dependency to `std` cannot manufacture standard-type evidence.
   Only result defaulting is omitted: deleting the unit call still changes its
   side effects and remains eligible.
+  Value wrappers selected by expected type are also proven no-ops around
+  syntactically divergent expressions: `return`, `break`, `continue`, the
+  standard never-returning macros, a `loop` without any `break`, and an `if`
+  or `match` whose branches all diverge. Their type `!` satisfies a numeric or
+  boolean expectation, but control leaves before `expr.increment`,
+  `expr.decrement`, or `bool_expr.negate` can change the value. Values that
+  such an expression carries keep their own candidates. The site's own syntax
+  decides divergence, so every same-text site is withheld alike and no
+  identity occurrence is reserved.
 - Early-return defaulting additionally recognizes zero-argument standard
   `new` and `default` constructors for `Vec`, `String`, `VecDeque`,
   `LinkedList`, `BinaryHeap`, `BTreeSet`, and `BTreeMap`, when both constructor
