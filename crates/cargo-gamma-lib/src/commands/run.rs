@@ -338,7 +338,7 @@ fn emit_ci<H: Host>(host: &mut H, args: &RunArgs, plan: &Plan, advice: Option<&s
         // The diagnosis rides along with the score rather than in a file of its own: the summary
         // panel is the artifact a team reads every morning, and a score nobody knows what to do
         // about is the reason mutation testing gets run nightly and then ignored.
-        let mut summary = crate::ci::summary(&plan.mutants, &plan.root);
+        let mut summary = crate::ci::summary_for_run(&plan.mutants, &plan.root, policy_excluded_diff(args, &plan.mutants));
 
         if let Some(advice) = advice {
             summary.push('\n');
@@ -3134,6 +3134,49 @@ mod tests {
                     }
                 );
             }
+        }
+    }
+
+    #[test]
+    fn diff_policy_exclusions_have_a_not_applicable_ci_summary() {
+        use crate::model::{Channel, Suppression};
+
+        let directory = crate::testing::workdir("ci-summary-policy-exclusions-");
+        let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).unwrap();
+        let mutants = [Channel::Config, Channel::Comment]
+            .into_iter()
+            .enumerate()
+            .map(|(index, channel)| {
+                let mut excluded = mutant(index, Outcome::Ignored, 1);
+                excluded.suppression = Some(Suppression {
+                    channel,
+                    reason: Some("diagnostic formatting is excluded".into()),
+                    tag: None,
+                    line: None,
+                });
+                excluded
+            })
+            .collect();
+        let mut plan = fixtures::plan(mutants);
+        plan.root = root.clone();
+        for in_diff in [false, true] {
+            let path = root.join(format!("summary-{in_diff}.md"));
+            let mut host = Sink::default().with_env("GITHUB_STEP_SUMMARY", path.as_str());
+            let mut args = RunArgs {
+                annotations: crate::ci::Annotations::Github,
+                ..RunArgs::default()
+            };
+            args.select.in_diff = in_diff.then(|| "changes.patch".into());
+            emit_ci(&mut host, &args, &plan, None, Styler::new(false)).unwrap();
+            let headline = if in_diff {
+                "**Not applicable**: no eligible mutants remain after source and configuration exclusions."
+            } else {
+                "**Score 100.0%** — 0 detected, 0 not detected of 0 mutants."
+            };
+            assert_eq!(
+                fs::read_to_string(path).unwrap(),
+                format!("## Mutation testing\n\n{headline}\n\n| Outcome | Count |\n|---|---:|\n| Suppressed | 2 |\n")
+            );
         }
     }
 

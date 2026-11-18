@@ -315,6 +315,7 @@ when a configured gate requires something to grade. An `--in-diff` population th
 source- or configuration-excluded mutations also succeeds if none carries a source expectation.
 Its reports retain those exclusions. The command states that no eligible mutations remain and
 that mutation gates are not applicable. This is not a measured passing score.
+The GitHub Actions summary shows a not-applicable headline and retains the suppression counts.
 Other populations with no gradeable mutations still fail the applicable gate, including with `--in-diff`. A partially
 completed population fails when either `--min-score` or `--max-flaky` is configured; with no strict
 gate it remains a reportable result. Build convergence that leaves stuck mutants is still status

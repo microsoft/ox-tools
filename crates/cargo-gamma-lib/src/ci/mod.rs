@@ -24,8 +24,8 @@ pub use annotations::{Annotations, annotations, wanted};
 pub use level::Level;
 #[doc(inline)]
 pub use sarif::sarif;
-pub(crate) use summary::append;
 #[doc(inline)]
 pub use summary::summary;
+pub(crate) use summary::{append, summary_for_run};
 #[doc(inline)]
 pub use truncation::Truncation;
