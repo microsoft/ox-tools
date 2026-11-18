@@ -541,6 +541,20 @@ fn finish_run<H: Host>(host: &mut H, args: &RunArgs, styler: Styler, executed: E
         return EXIT_GATE_FAILED;
     }
 
+    if args.select.in_diff.is_some()
+        && !plan.mutants.is_empty()
+        && plan
+            .mutants
+            .iter()
+            .all(|mutant| mutant.outcome == Outcome::Ignored && mutant.suppression.is_some() && mutant.expectation.is_none())
+    {
+        let _ = writeln!(
+            host.error(),
+            "no eligible mutants remain in the diff after source and configuration exclusions; mutation gates are not applicable"
+        );
+        return EXIT_OK;
+    }
+
     // Every mutant was suppressed, unviable, or never built, so the score is a ratio with nothing
     // in its denominator. That prints as 100%, which is the right answer to "how much of what ran
     // was caught" and the wrong one to hand a threshold.
@@ -3075,6 +3089,107 @@ mod tests {
             assert_eq!(code, expected, "{}", host.err());
             assert_eq!(host.err(), diagnostic);
             assert_eq!(host.out(), "");
+        }
+    }
+
+    #[test]
+    fn diff_with_only_policy_exclusions_has_no_applicable_mutation_gate() {
+        use crate::model::{Channel, Suppression};
+
+        for in_diff in [false, true] {
+            for channel in [Channel::Config, Channel::Comment, Channel::Attribute] {
+                let mut args = RunArgs {
+                    min_score: Some(100.0),
+                    max_flaky: Some(0),
+                    ..RunArgs::default()
+                };
+                args.select.in_diff = in_diff.then(|| "changes.patch".into());
+                let mut excluded = mutant(0, Outcome::Ignored, 1);
+                excluded.suppression = Some(Suppression {
+                    channel,
+                    reason: Some("diagnostic formatting is excluded".into()),
+                    tag: None,
+                    line: None,
+                });
+                let mut host = Sink::default();
+                let code = finish_run(
+                    &mut host,
+                    &args,
+                    Styler::new(false),
+                    Executed {
+                        plan: Some(fixtures::plan(vec![excluded])),
+                        stuck: Vec::new(),
+                    },
+                );
+                assert_eq!(code, if in_diff { EXIT_OK } else { EXIT_GATE_FAILED });
+                assert_eq!(host.out(), "");
+                assert_eq!(host.err().contains("mutation gates are not applicable"), in_diff);
+            }
+        }
+    }
+
+    #[test]
+    fn diff_policy_exclusions_do_not_hide_incomplete_or_failing_mutations() {
+        use crate::model::{Channel, Suppression};
+
+        let mut args = RunArgs {
+            min_score: Some(100.0),
+            max_flaky: Some(0),
+            ..RunArgs::default()
+        };
+        args.select.in_diff = Some("changes.patch".into());
+        let mut excluded = mutant(0, Outcome::Ignored, 1);
+        excluded.suppression = Some(Suppression {
+            channel: Channel::Config,
+            reason: Some("diagnostic formatting is excluded".into()),
+            tag: None,
+            line: None,
+        });
+        for outcome in [
+            Outcome::Survived,
+            Outcome::NoCoverage,
+            Outcome::Pending,
+            Outcome::Flaky,
+            Outcome::CompileError,
+            Outcome::NotBuilt,
+            Outcome::Ignored,
+        ] {
+            let mut host = Sink::default();
+            let code = finish_run(
+                &mut host,
+                &args,
+                Styler::new(false),
+                Executed {
+                    plan: Some(fixtures::plan(vec![excluded.clone(), mutant(1, outcome, 2)])),
+                    stuck: Vec::new(),
+                },
+            );
+            assert_eq!(code, EXIT_GATE_FAILED, "{outcome}: {}", host.err());
+            assert!(!host.err().contains("mutation gates are not applicable"));
+        }
+
+        for (expectation, stuck, expected) in [
+            (true, Vec::new(), EXIT_GATE_FAILED),
+            (false, vec!["instrumented build failed".into()], EXIT_CANNOT_PROCEED),
+        ] {
+            let mut excluded = excluded.clone();
+            if expectation {
+                excluded.expectation = expecting(Outcome::Ignored, true).expectation;
+            }
+            let mut host = Sink::default();
+            assert_eq!(
+                finish_run(
+                    &mut host,
+                    &args,
+                    Styler::new(false),
+                    Executed {
+                        plan: Some(fixtures::plan(vec![excluded])),
+                        stuck,
+                    },
+                ),
+                expected
+            );
+            assert!(!host.err().contains("mutation gates are not applicable"));
         }
     }
 
