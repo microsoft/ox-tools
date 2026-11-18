@@ -5663,7 +5663,7 @@ anvil-container *command:
         $roots = @('/usr/local/cargo/registry', '/usr/local/cargo/git')
         foreach ($root in $roots) {
             foreach ($entry in Get-ChildItem -LiteralPath $root -Recurse -Force -FollowSymlink -ErrorAction Stop -WarningAction Stop) {
-                if ($entry.LinkType) {
+                if ($entry.LinkType -in @('SymbolicLink', 'Junction')) {
                     $target = $entry.ResolveLinkTarget($true)
                     if (-not $target -or -not @($roots | Where-Object { $target.FullName.StartsWith("$_/", [StringComparison]::Ordinal) }).Count) {
                         throw 'cache inspection encountered a link outside the caches'

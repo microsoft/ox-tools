@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-## [0.26.0] - 2026-11-13
+## [0.26.0] - 2026-11-18
 
 - ✨ Features
 
@@ -10,6 +10,7 @@
 
 - 🐛 Bug Fixes
 
+  - cargo-anvil: inspect regular hard-linked cache files
   - cargo-anvil: select preparation tools outside workspace overrides
   - cargo-anvil: inspect preparation output incrementally
   - cargo-anvil: bound preparation cache inspection memory
@@ -17,6 +18,7 @@
 
 - ✔️ Tasks
 
+  - cargo-anvil: regenerate image tool provenance artifacts
   - cargo-anvil: regenerate incremental capture artifacts
   - cargo-anvil: regenerate bounded preparation artifacts
   - cargo-anvil: reconcile main release metadata
