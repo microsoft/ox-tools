@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use chrono::{DateTime, NaiveDateTime, TimeDelta, Utc};
+use std::time::{Duration, SystemTime};
 
 macro_rules! not_implemented {
     ($ty:ty, $bound:path) => {
@@ -15,31 +15,31 @@ macro_rules! not_implemented {
         };
     };
 }
-not_implemented!(DateTime<Utc>, std::ops::Add<DateTime<Utc>>);
-not_implemented!(DateTime<Utc>, std::ops::Div<DateTime<Utc>>);
-not_implemented!(TimeDelta, std::ops::Rem<i32>);
+not_implemented!(SystemTime, std::ops::Add<SystemTime>);
+not_implemented!(SystemTime, std::ops::Div<SystemTime>);
+not_implemented!(Duration, std::ops::Rem<u32>);
 
-pub fn difference(left: DateTime<Utc>, right: DateTime<Utc>) -> TimeDelta {
-    left - right
+pub fn difference(left: SystemTime, right: SystemTime) -> Duration {
+    left.duration_since(right).expect("left is after right")
 }
-pub fn shifted(left: DateTime<Utc>, right: TimeDelta) -> DateTime<Utc> {
+pub fn shifted(left: SystemTime, right: Duration) -> SystemTime {
     left + right
 }
-pub fn naive_shifted(left: NaiveDateTime, right: std::time::Duration) -> NaiveDateTime {
+pub fn naive_shifted(left: SystemTime, right: Duration) -> SystemTime {
     left + right
 }
-pub fn scaled(left: TimeDelta, right: i32) -> TimeDelta {
+pub fn scaled(left: Duration, right: u32) -> Duration {
     left / right
 }
-pub fn endpoint(start: DateTime<Utc>, end: DateTime<Utc>) -> std::ops::Range<DateTime<Utc>> {
+pub fn endpoint(start: SystemTime, end: SystemTime) -> std::ops::Range<SystemTime> {
     start..end
 }
-pub fn compiled_shift(left: DateTime<Utc>, right: TimeDelta) -> DateTime<Utc> {
+pub fn compiled_shift(left: SystemTime, right: Duration) -> SystemTime {
     left - right
 }
-pub fn compiled_naive_shift(left: NaiveDateTime, right: std::time::Duration) -> NaiveDateTime {
+pub fn compiled_naive_shift(left: SystemTime, right: Duration) -> SystemTime {
     left - right
 }
-pub fn compiled_scale(left: TimeDelta, right: i32) -> TimeDelta {
+pub fn compiled_scale(left: Duration, right: u32) -> Duration {
     left * right
 }

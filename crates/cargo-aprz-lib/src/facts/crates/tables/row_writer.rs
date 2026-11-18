@@ -3,7 +3,8 @@
 
 use std::io::Write;
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
+use jiff::civil::Date;
 use ohno::{IntoAppError, bail};
 use semver::Version;
 use url::Url;
@@ -144,21 +145,18 @@ impl<'a, W: Write> RowWriter<'a, W> {
 }
 
 fn parse_pg_timestamp(s: &str) -> Result<u64> {
-    let dt = DateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f%#z")
-        .or_else(|_| DateTime::parse_from_rfc3339(s))
-        .into_app_err_with(|| format!("parsing timestamp '{s}'"))?
-        .with_timezone(&Utc);
-    Ok(dt.timestamp().max(0).cast_unsigned())
+    let timestamp = s.parse::<Timestamp>().into_app_err_with(|| format!("parsing timestamp '{s}'"))?;
+    Ok(timestamp.as_second().max(0).cast_unsigned())
 }
 
 fn parse_pg_date(s: &str) -> Result<u64> {
-    Ok(u64::from(
-        chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
-            .into_app_err_with(|| format!("parsing date '{s}'"))?
-            .to_epoch_days()
-            .max(0)
-            .cast_unsigned(),
-    ))
+    let date = s.parse::<Date>().into_app_err_with(|| format!("parsing date '{s}'"))?;
+    let timestamp = date
+        .at(0, 0, 0, 0)
+        .in_tz("UTC")
+        .into_app_err_with(|| format!("converting date '{s}' to a UTC timestamp"))?
+        .timestamp();
+    Ok(timestamp.as_second().div_euclid(86_400).max(0).cast_unsigned())
 }
 
 #[cfg(test)]

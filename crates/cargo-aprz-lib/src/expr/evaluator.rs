@@ -10,7 +10,8 @@ use std::sync::{Arc, LazyLock};
 
 use cel::objects::Map;
 use cel::{Context, Program, Value};
-use chrono::{DateTime, Local};
+use chrono::{DateTime, FixedOffset, Utc};
+use jiff::{Timestamp, ZonedDateTime};
 
 use super::{Appraisal, Expression, ExpressionDisposition, ExpressionOutcome, Risk};
 use crate::metrics::{METRIC_DEFINITIONS, Metric, MetricValue};
@@ -43,7 +44,7 @@ pub fn evaluate(
     high_risk: &[Expression],
     eval: &[Expression],
     metrics: impl IntoIterator<Item: core::borrow::Borrow<Metric>>,
-    now: DateTime<Local>,
+    now: &ZonedDateTime,
     medium_risk_threshold: f64,
     low_risk_threshold: f64,
 ) -> Appraisal {
@@ -171,7 +172,7 @@ fn metric_key(name: &str, suffix: &str) -> Arc<String> {
     METRIC_KEYS.get(name).map_or_else(|| Arc::new(suffix.to_string()), Arc::clone)
 }
 
-fn build_cel_context(metrics: impl IntoIterator<Item: core::borrow::Borrow<Metric>>, now: DateTime<Local>) -> Context<'static, 'static> {
+fn build_cel_context(metrics: impl IntoIterator<Item: core::borrow::Borrow<Metric>>, now: &ZonedDateTime) -> Context<'static, 'static> {
     use core::borrow::Borrow;
 
     let mut context = Context::default();
@@ -207,7 +208,7 @@ fn build_cel_context(metrics: impl IntoIterator<Item: core::borrow::Borrow<Metri
     }
 
     // Add now variable
-    context.add_variable_from_value("now", Value::Timestamp(now.fixed_offset()));
+    context.add_variable_from_value("now", Value::Timestamp(to_cel_timestamp(now.timestamp(), now.offset().seconds())));
 
     context
 }
@@ -219,7 +220,7 @@ fn convert_metric_value(value: &MetricValue) -> Value {
         MetricValue::Float(f) => Value::Float(*f),
         MetricValue::Boolean(b) => Value::Bool(*b),
         MetricValue::String(s) => Value::String(Arc::new(s.to_string())),
-        MetricValue::DateTime(dt) => Value::Timestamp(dt.fixed_offset()),
+        MetricValue::DateTime(dt) => Value::Timestamp(to_cel_timestamp(*dt, 0)),
         MetricValue::List(values) => {
             // Recursively convert each MetricValue to CEL Value
             let cel_values: Vec<Value> = values.iter().map(convert_metric_value).collect();
@@ -228,21 +229,28 @@ fn convert_metric_value(value: &MetricValue) -> Value {
     }
 }
 
+fn to_cel_timestamp(timestamp: Timestamp, offset_seconds: i32) -> DateTime<FixedOffset> {
+    let utc = DateTime::<Utc>::from_timestamp(timestamp.as_second(), timestamp.subsec_nanosecond().cast_unsigned())
+        .expect("Jiff timestamps are within Chrono's supported calendar range");
+    let offset = FixedOffset::east_opt(offset_seconds).expect("time-zone offsets fit Chrono's fixed-offset range");
+    utc.with_timezone(&offset)
+}
+
 #[cfg(test)]
 #[cfg(not(miri))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use core::iter::empty;
 
-    use chrono::TimeZone;
-
     use super::*;
 
     const MEDIUM_THRESHOLD: f64 = 30.0;
     const LOW_THRESHOLD: f64 = 70.0;
 
-    fn test_timestamp() -> DateTime<Local> {
-        Local.with_ymd_and_hms(2024, 1, 15, 10, 30, 0).unwrap()
+    fn test_timestamp() -> ZonedDateTime {
+        jiff::tz::TimeZone::system()
+            .to_zoned_datetime(jiff::civil::date(2024, 1, 15).at(10, 30, 0, 0))
+            .expect("the test date is valid in the system time zone")
     }
 
     #[test]
@@ -256,7 +264,7 @@ mod tests {
             &high_risk_expressions,
             &eval_expressions,
             &metrics,
-            test_timestamp(),
+            &test_timestamp(),
             MEDIUM_THRESHOLD,
             LOW_THRESHOLD,
         );
@@ -270,7 +278,7 @@ mod tests {
         let required = Expression::new("required", None, "true", None).unwrap();
         for (medium, low) in [(30.0, 70.0), (101.0, 102.0), (f64::NAN, f64::NAN)] {
             for high_risk in [Vec::new(), vec![required.clone()]] {
-                let appraisal = evaluate(&high_risk, &[], empty::<Metric>(), test_timestamp(), medium, low);
+                let appraisal = evaluate(&high_risk, &[], empty::<Metric>(), &test_timestamp(), medium, low);
                 assert_eq!(appraisal.risk(), Risk::Low);
                 assert_eq!(appraisal.point_totals(), Some((0, 0)));
                 assert_eq!(appraisal.weighted_score(), Some(100.0));
@@ -283,12 +291,26 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     fn implicit_one_point_checks_preserve_weight_and_failure_semantics() {
         let passed = Expression::new("passed", None, "true", None).unwrap();
-        let outcome = evaluate(&[], &[passed], empty::<Metric>(), test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
+        let outcome = evaluate(
+            &[],
+            &[passed],
+            empty::<Metric>(),
+            &test_timestamp(),
+            MEDIUM_THRESHOLD,
+            LOW_THRESHOLD,
+        );
         assert_eq!(outcome.point_totals(), Some((1, 1)));
         assert_eq!(outcome.weighted_score(), Some(100.0));
 
         let failed = Expression::new("failed", None, "missing_metric > 0", None).unwrap();
-        let outcome = evaluate(&[], &[failed], empty::<Metric>(), test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
+        let outcome = evaluate(
+            &[],
+            &[failed],
+            empty::<Metric>(),
+            &test_timestamp(),
+            MEDIUM_THRESHOLD,
+            LOW_THRESHOLD,
+        );
         assert!(outcome.is_weighted_evaluation_failure());
         assert_eq!(outcome.point_totals(), None);
     }
@@ -352,7 +374,7 @@ mod tests {
 
     fn eval_expr(expr: &str, metrics: &[Metric]) -> Result<bool, String> {
         let program = Program::compile(expr).map_err(|e| format!("could not compile expression: {e}"))?;
-        let context = build_cel_context(metrics, test_timestamp());
+        let context = build_cel_context(metrics, &test_timestamp());
         evaluate_expression(&program, "test", &context)
     }
 
@@ -403,10 +425,8 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore)]
     fn test_now_variable_with_datetime_metric() {
-        use chrono::{TimeZone, Utc};
-
         // Create a datetime metric set to a fixed past date
-        let past_date = Utc.with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap();
+        let past_date = "2023-01-01T00:00:00Z".parse::<Timestamp>().unwrap();
         let metrics = vec![Metric::with_value(&CREATED_AT_DEF, MetricValue::DateTime(past_date))];
 
         // Test that "now" is greater than a past date
@@ -468,7 +488,7 @@ mod tests {
             Metric::with_value(&XRAY_DEF, MetricValue::UInt(7)),
             Metric::with_value(&STARS_DEF, MetricValue::UInt(9)),
         ];
-        let context = build_cel_context(&metrics, test_timestamp());
+        let context = build_cel_context(&metrics, &test_timestamp());
         assert_eq!(
             Program::compile("xray").unwrap().execute(&context).unwrap(),
             Value::Map(Map::from(std::collections::HashMap::from([(
@@ -527,7 +547,7 @@ mod tests {
     fn test_high_risk_expression_evaluation_error() {
         let expr = Expression::new("bad_expr", None, "undefined_var > 100", None).unwrap();
         let metrics = vec![];
-        let appraisal = evaluate(&[expr], &[], &metrics, test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
+        let appraisal = evaluate(&[expr], &[], &metrics, &test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
         assert!(matches!(
             appraisal.expression_outcomes[0].disposition,
             ExpressionDisposition::Failed(_)
@@ -541,7 +561,7 @@ mod tests {
     fn test_eval_expression_evaluation_error() {
         let expr = Expression::new("bad_expr", None, "undefined.field", None).unwrap();
         let metrics = vec![];
-        let appraisal = evaluate(&[], &[expr], &metrics, test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
+        let appraisal = evaluate(&[], &[expr], &metrics, &test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
         assert!(matches!(
             appraisal.expression_outcomes[0].disposition,
             ExpressionDisposition::Failed(_)
@@ -592,7 +612,7 @@ mod tests {
         // Expression is true => crate passes this high-risk check => not high risk
         let expr = Expression::new("high_stars", None, "stars > 100", None).unwrap();
         let metrics = vec![Metric::with_value(&STARS_DEF, MetricValue::UInt(150))];
-        let outcome = evaluate(&[expr], &[], &metrics, test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
+        let outcome = evaluate(&[expr], &[], &metrics, &test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
         assert_eq!(outcome.risk, Risk::Low);
         assert!(outcome.expression_outcomes[0].name.contains("high_stars"));
         assert!(matches!(outcome.expression_outcomes[0].disposition, ExpressionDisposition::True));
@@ -604,7 +624,7 @@ mod tests {
         // Single eval expression that fails => score 0/1 = 0% => High risk
         let expr = Expression::new("high_stars", None, "stars > 200", None).unwrap();
         let metrics = vec![Metric::with_value(&STARS_DEF, MetricValue::UInt(150))];
-        let outcome = evaluate(&[], &[expr], &metrics, test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
+        let outcome = evaluate(&[], &[expr], &metrics, &test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
         assert_eq!(outcome.risk, Risk::High);
         assert!(matches!(outcome.expression_outcomes[0].disposition, ExpressionDisposition::False));
     }
@@ -616,7 +636,7 @@ mod tests {
         let high_risk_expr = Expression::new("d", None, "stars > 200", None).unwrap();
         let metrics = vec![Metric::with_value(&STARS_DEF, MetricValue::UInt(150))];
 
-        let outcome = evaluate(&[high_risk_expr], &[], &metrics, test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
+        let outcome = evaluate(&[high_risk_expr], &[], &metrics, &test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
         assert_eq!(outcome.risk, Risk::High);
         assert_eq!(outcome.expression_outcomes.len(), 1);
         assert!(matches!(outcome.expression_outcomes[0].disposition, ExpressionDisposition::False));
@@ -685,7 +705,7 @@ mod tests {
             Metric::with_value(&COVERAGE_DEF, MetricValue::Float(85.5)),
         ];
 
-        let outcome = evaluate(&[], &[expr1, expr2], &metrics, test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
+        let outcome = evaluate(&[], &[expr1, expr2], &metrics, &test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
         assert_eq!(outcome.risk, Risk::Low);
         assert_eq!(outcome.expression_outcomes.len(), 2);
     }
@@ -701,7 +721,7 @@ mod tests {
             Metric::with_value(&COVERAGE_DEF, MetricValue::Float(85.5)),
         ];
 
-        let outcome = evaluate(&[], &[expr1, expr2], &metrics, test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
+        let outcome = evaluate(&[], &[expr1, expr2], &metrics, &test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
         assert_eq!(outcome.risk, Risk::Medium);
     }
 
@@ -721,7 +741,7 @@ mod tests {
             &[],
             &[expr1, expr2, expr3],
             &metrics,
-            test_timestamp(),
+            &test_timestamp(),
             MEDIUM_THRESHOLD,
             LOW_THRESHOLD,
         );
@@ -736,7 +756,7 @@ mod tests {
         let expr2 = Expression::new("e2", None, "stars > 200", Some(5)).unwrap();
         let metrics = vec![Metric::with_value(&STARS_DEF, MetricValue::UInt(150))];
 
-        let outcome = evaluate(&[], &[expr1, expr2], &metrics, test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
+        let outcome = evaluate(&[], &[expr1, expr2], &metrics, &test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
         assert_eq!(outcome.risk, Risk::Medium);
     }
 
@@ -748,7 +768,7 @@ mod tests {
         let expr2 = Expression::new("e2", None, "stars > 200", Some(10)).unwrap();
         let metrics = vec![Metric::with_value(&STARS_DEF, MetricValue::UInt(150))];
 
-        let outcome = evaluate(&[], &[expr1, expr2], &metrics, test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
+        let outcome = evaluate(&[], &[expr1, expr2], &metrics, &test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
         assert_eq!(outcome.risk, Risk::High);
     }
 
@@ -763,7 +783,7 @@ mod tests {
             Metric::with_value(&COVERAGE_DEF, MetricValue::Float(85.5)),
         ];
 
-        let outcome = evaluate(&[], &[expr1, expr2], &metrics, test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
+        let outcome = evaluate(&[], &[expr1, expr2], &metrics, &test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
         assert_eq!(outcome.risk, Risk::High);
     }
 
@@ -775,7 +795,7 @@ mod tests {
         let expr2 = Expression::new("e2", Some("bad"), "stars > 200", None).unwrap();
         let metrics = vec![Metric::with_value(&STARS_DEF, MetricValue::UInt(150))];
 
-        let outcome = evaluate(&[], &[expr1, expr2], &metrics, test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
+        let outcome = evaluate(&[], &[expr1, expr2], &metrics, &test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
         assert_eq!(outcome.expression_outcomes.len(), 2);
         assert_eq!(&*outcome.expression_outcomes[0].name, "e1");
         assert_eq!(&*outcome.expression_outcomes[0].description, "good");
@@ -790,7 +810,7 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore)]
     fn test_points_no_expressions_returns_zero_points_and_perfect_score() {
-        let outcome = evaluate(&[], &[], Vec::<Metric>::new(), test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
+        let outcome = evaluate(&[], &[], Vec::<Metric>::new(), &test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
         assert_eq!(outcome.available_points, 0);
         assert_eq!(outcome.awarded_points, 0);
         assert!((outcome.score - 100.0).abs() < 0.001);
@@ -803,7 +823,7 @@ mod tests {
         // Expression is false => high risk triggered
         let expr = Expression::new("hr", None, "stars > 200", None).unwrap();
         let metrics = vec![Metric::with_value(&STARS_DEF, MetricValue::UInt(150))];
-        let outcome = evaluate(&[expr], &[], &metrics, test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
+        let outcome = evaluate(&[expr], &[], &metrics, &test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
         assert_eq!(outcome.risk, Risk::High);
         assert_eq!(outcome.available_points, 0);
         assert_eq!(outcome.awarded_points, 0);
@@ -817,7 +837,7 @@ mod tests {
         let hr = Expression::new("hr", None, "stars > 200", None).unwrap();
         let ev = Expression::new("ev", None, "stars > 0", Some(5)).unwrap();
         let metrics = vec![Metric::with_value(&STARS_DEF, MetricValue::UInt(150))];
-        let outcome = evaluate(&[hr], &[ev], &metrics, test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
+        let outcome = evaluate(&[hr], &[ev], &metrics, &test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
         assert_eq!(outcome.risk, Risk::High);
         // Only the high-risk outcome should be present; eval expression should not be evaluated
         assert_eq!(outcome.expression_outcomes.len(), 1);
@@ -831,7 +851,7 @@ mod tests {
     fn test_points_single_eval_true_default_points() {
         let expr = Expression::new("e1", None, "stars > 100", None).unwrap();
         let metrics = vec![Metric::with_value(&STARS_DEF, MetricValue::UInt(150))];
-        let outcome = evaluate(&[], &[expr], &metrics, test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
+        let outcome = evaluate(&[], &[expr], &metrics, &test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
         assert_eq!(outcome.available_points, 1);
         assert_eq!(outcome.awarded_points, 1);
         assert!((outcome.score - 100.0).abs() < 0.001);
@@ -843,7 +863,7 @@ mod tests {
     fn test_points_single_eval_false_default_points() {
         let expr = Expression::new("e1", None, "stars > 200", None).unwrap();
         let metrics = vec![Metric::with_value(&STARS_DEF, MetricValue::UInt(150))];
-        let outcome = evaluate(&[], &[expr], &metrics, test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
+        let outcome = evaluate(&[], &[expr], &metrics, &test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
         assert_eq!(outcome.available_points, 1);
         assert_eq!(outcome.awarded_points, 0);
         assert!((outcome.score - 0.0).abs() < 0.001);
@@ -859,7 +879,7 @@ mod tests {
             Metric::with_value(&STARS_DEF, MetricValue::UInt(150)),
             Metric::with_value(&COVERAGE_DEF, MetricValue::Float(85.5)),
         ];
-        let outcome = evaluate(&[], &[e1, e2], &metrics, test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
+        let outcome = evaluate(&[], &[e1, e2], &metrics, &test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
         assert_eq!(outcome.available_points, 10);
         assert_eq!(outcome.awarded_points, 10);
         assert!((outcome.score - 100.0).abs() < 0.001);
@@ -873,7 +893,7 @@ mod tests {
         let e1 = Expression::new("e1", None, "stars > 100", Some(3)).unwrap();
         let e2 = Expression::new("e2", None, "stars > 200", Some(7)).unwrap();
         let metrics = vec![Metric::with_value(&STARS_DEF, MetricValue::UInt(150))];
-        let outcome = evaluate(&[], &[e1, e2], &metrics, test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
+        let outcome = evaluate(&[], &[e1, e2], &metrics, &test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
         assert_eq!(outcome.available_points, 10);
         assert_eq!(outcome.awarded_points, 3);
         assert!((outcome.score - 30.0).abs() < 0.001);
@@ -886,7 +906,7 @@ mod tests {
         let e1 = Expression::new("e1", None, "stars > 100", Some(5)).unwrap();
         let e2 = Expression::new("e2", None, "undefined_var > 0", Some(5)).unwrap();
         let metrics = vec![Metric::with_value(&STARS_DEF, MetricValue::UInt(150))];
-        let outcome = evaluate(&[], &[e1, e2], &metrics, test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
+        let outcome = evaluate(&[], &[e1, e2], &metrics, &test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
         assert_eq!(outcome.available_points, 10);
         assert_eq!(outcome.awarded_points, 5);
         assert!((outcome.score - 50.0).abs() < 0.001);
@@ -908,7 +928,7 @@ mod tests {
         }
         let metrics = vec![Metric::with_value(&STARS_DEF, MetricValue::UInt(150))];
 
-        let outcome = evaluate(&[], &expressions, &metrics, test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
+        let outcome = evaluate(&[], &expressions, &metrics, &test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
 
         assert_eq!(outcome.point_totals(), Some((10, 100)));
         assert_eq!(outcome.weighted_score(), Some(10.0));
@@ -925,7 +945,7 @@ mod tests {
             &[],
             &[e1, e2],
             Vec::<Metric>::new(),
-            test_timestamp(),
+            &test_timestamp(),
             MEDIUM_THRESHOLD,
             LOW_THRESHOLD,
         );
@@ -943,7 +963,7 @@ mod tests {
         let e2 = Expression::new("e2", None, "undefined > 0", Some(0)).unwrap();
         let metrics = vec![Metric::with_value(&STARS_DEF, MetricValue::UInt(150))];
 
-        let outcome = evaluate(&[], &[e1, e2], &metrics, test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
+        let outcome = evaluate(&[], &[e1, e2], &metrics, &test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
 
         assert_eq!(outcome.weighted_score(), Some(100.0));
         assert_eq!(outcome.risk, Risk::Low);
@@ -960,7 +980,7 @@ mod tests {
             &[],
             &[zero_weight_success, positive_failure],
             &metrics,
-            test_timestamp(),
+            &test_timestamp(),
             MEDIUM_THRESHOLD,
             LOW_THRESHOLD,
         );
@@ -980,7 +1000,7 @@ mod tests {
             &[],
             &[zero_weight_false, positive_failure],
             &metrics,
-            test_timestamp(),
+            &test_timestamp(),
             MEDIUM_THRESHOLD,
             LOW_THRESHOLD,
         );
@@ -1000,7 +1020,7 @@ mod tests {
             &[],
             &[false_check, failed_check],
             &metrics,
-            test_timestamp(),
+            &test_timestamp(),
             MEDIUM_THRESHOLD,
             LOW_THRESHOLD,
         );
@@ -1019,7 +1039,7 @@ mod tests {
         let e1 = Expression::new("e1", None, "stars > 100", Some(7)).unwrap();
         let e2 = Expression::new("e2", None, "stars > 200", Some(3)).unwrap();
         let metrics = vec![Metric::with_value(&STARS_DEF, MetricValue::UInt(150))];
-        let outcome = evaluate(&[], &[e1, e2], &metrics, test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
+        let outcome = evaluate(&[], &[e1, e2], &metrics, &test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
         assert_eq!(outcome.available_points, 10);
         assert_eq!(outcome.awarded_points, 7);
         assert!((outcome.score - 70.0).abs() < 0.001);
@@ -1034,7 +1054,7 @@ mod tests {
         let e1 = Expression::new("e1", None, "stars > 100", Some(69)).unwrap();
         let e2 = Expression::new("e2", None, "stars > 200", Some(31)).unwrap();
         let metrics = vec![Metric::with_value(&STARS_DEF, MetricValue::UInt(150))];
-        let outcome = evaluate(&[], &[e1, e2], &metrics, test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
+        let outcome = evaluate(&[], &[e1, e2], &metrics, &test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
         assert_eq!(outcome.available_points, 100);
         assert_eq!(outcome.awarded_points, 69);
         assert!((outcome.score - 69.0).abs() < 0.01);
@@ -1049,7 +1069,7 @@ mod tests {
         let e1 = Expression::new("e1", None, "stars > 100", Some(3)).unwrap();
         let e2 = Expression::new("e2", None, "stars > 200", Some(7)).unwrap();
         let metrics = vec![Metric::with_value(&STARS_DEF, MetricValue::UInt(150))];
-        let outcome = evaluate(&[], &[e1, e2], &metrics, test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
+        let outcome = evaluate(&[], &[e1, e2], &metrics, &test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
         assert!((outcome.score - 30.0).abs() < 0.001);
         assert_eq!(outcome.risk, Risk::Medium);
     }
@@ -1062,7 +1082,7 @@ mod tests {
         let e1 = Expression::new("e1", None, "stars > 100", Some(29)).unwrap();
         let e2 = Expression::new("e2", None, "stars > 200", Some(71)).unwrap();
         let metrics = vec![Metric::with_value(&STARS_DEF, MetricValue::UInt(150))];
-        let outcome = evaluate(&[], &[e1, e2], &metrics, test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
+        let outcome = evaluate(&[], &[e1, e2], &metrics, &test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
         assert!((outcome.score - 29.0).abs() < 0.01);
         assert_eq!(outcome.risk, Risk::High);
     }
@@ -1074,7 +1094,7 @@ mod tests {
         let hr = Expression::new("hr1", None, "stars > 100", None).unwrap();
         let ev = Expression::new("ev1", None, "stars > 100", Some(5)).unwrap();
         let metrics = vec![Metric::with_value(&STARS_DEF, MetricValue::UInt(150))];
-        let outcome = evaluate(&[hr], &[ev], &metrics, test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
+        let outcome = evaluate(&[hr], &[ev], &metrics, &test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
         assert_eq!(outcome.risk, Risk::Low);
         assert_eq!(outcome.expression_outcomes.len(), 2);
         assert_eq!(&*outcome.expression_outcomes[0].name, "hr1");
@@ -1092,7 +1112,7 @@ mod tests {
         let hr1 = Expression::new("hr1", None, "stars > 100", None).unwrap();
         let hr2 = Expression::new("hr2", None, "stars > 50", None).unwrap();
         let metrics = vec![Metric::with_value(&STARS_DEF, MetricValue::UInt(150))];
-        let outcome = evaluate(&[hr1, hr2], &[], &metrics, test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
+        let outcome = evaluate(&[hr1, hr2], &[], &metrics, &test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
         assert_eq!(outcome.risk, Risk::Low);
         assert_eq!(outcome.available_points, 0);
         assert_eq!(outcome.awarded_points, 0);
@@ -1107,7 +1127,7 @@ mod tests {
         let hr1 = Expression::new("hr1", None, "stars > 200", None).unwrap();
         let hr2 = Expression::new("hr2", None, "stars > 100", None).unwrap();
         let metrics = vec![Metric::with_value(&STARS_DEF, MetricValue::UInt(150))];
-        let outcome = evaluate(&[hr1, hr2], &[], &metrics, test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
+        let outcome = evaluate(&[hr1, hr2], &[], &metrics, &test_timestamp(), MEDIUM_THRESHOLD, LOW_THRESHOLD);
         assert_eq!(outcome.risk, Risk::High);
         assert_eq!(outcome.expression_outcomes.len(), 2);
         assert!(matches!(outcome.expression_outcomes[0].disposition, ExpressionDisposition::False));

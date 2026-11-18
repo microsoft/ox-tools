@@ -8,6 +8,12 @@ The minimum supported Rust version is 1.97. The development toolchain remains
 newer. The parser dependency stays on `ra_ap_syntax` 0.0.349 because later
 releases require Rust 1.98, beyond the supported Azure publishing compiler.
 
+APRZ represents instants as Jiff timestamps and calendar dates as Jiff civil
+dates. Date-only report values and crates.io download-table day counts use UTC;
+local time is used only for user-facing rate-limit display. Expression
+evaluation converts timestamps to Chrono at the CEL boundary because CEL's
+timestamp feature still requires Chrono.
+
 ## Policy string sizes
 
 For string metrics in custom policies, both `size(crate.description)` and

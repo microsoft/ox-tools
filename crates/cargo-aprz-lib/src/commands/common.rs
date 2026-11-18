@@ -12,8 +12,8 @@ use std::sync::Arc;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use cargo_metadata::{Metadata, MetadataCommand};
-use chrono::Local;
 use clap::{Args, ValueEnum};
+use jiff::ZonedDateTime;
 use ohno::IntoAppError;
 
 use super::ProgressReporter;
@@ -474,7 +474,7 @@ impl<H: Host> Reporting<'_, H> {
 
         // A single instant is used for every crate: expressions such as `now - crate.updated_at`
         // must compare each crate against the same baseline, and it avoids a clock lookup per crate.
-        let now = Local::now();
+        let now = ZonedDateTime::now();
 
         let mut reportable_crates: Vec<ReportableCrate> = if should_eval {
             analyzable_crates
@@ -485,7 +485,7 @@ impl<H: Host> Reporting<'_, H> {
                         &self.config.high_risk,
                         &self.config.eval,
                         &metrics,
-                        now,
+                        &now,
                         self.config.medium_risk_threshold,
                         self.config.low_risk_threshold,
                     );
@@ -541,7 +541,7 @@ impl<H: Host> Reporting<'_, H> {
 
         if let Some(filename) = &self.html {
             let mut html = String::new();
-            generate_html(&reportable_crates, Local::now(), &mut html)
+            generate_html(&reportable_crates, &ZonedDateTime::now(), &mut html)
                 .expect("writing HTML into a String cannot fail because fmt::Write for String is infallible");
             write_text(filename, html)?;
         }

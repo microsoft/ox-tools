@@ -1,7 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use chrono::NaiveDate;
+use jiff::Span;
+use jiff::civil::Date;
 
 use super::{VersionId, define_rows, define_table};
 
@@ -13,9 +14,9 @@ define_rows! {
         ///
         /// This is by far the largest table (on the order of `10^8` rows) and a full scan of it
         /// rejects nearly every row, so the day count is left encoded rather than converted to a
-        /// [`NaiveDate`] while reading. The conversion runs a proleptic-calendar computation that
+        /// [`Date`] while reading. The conversion runs a proleptic-calendar computation that
         /// is wasted on a row that is about to be discarded, so callers filter on this raw count
-        /// and call [`VersionDownloadRow::date_naive`] only for the rows they keep.
+        /// and call [`VersionDownloadRow::date`] only for the rows they keep.
         pub date: u64,
     }
 }
@@ -25,8 +26,10 @@ impl VersionDownloadRow {
     ///
     /// Returns `None` when cached data contains a day count the table writer cannot produce.
     #[must_use]
-    pub fn date_naive(&self) -> Option<NaiveDate> {
-        i32::try_from(self.date).ok().and_then(NaiveDate::from_epoch_days)
+    pub fn date(&self) -> Option<Date> {
+        let days = i64::try_from(self.date).ok()?;
+        let span = Span::new().try_days(days).ok()?;
+        Date::constant(1970, 1, 1).checked_add(span).ok()
     }
 }
 
@@ -74,10 +77,7 @@ mod tests {
 
         assert_eq!(row.version_id, VersionId(123));
         assert_eq!(row.downloads, 4567);
-        assert_eq!(
-            row.date_naive(),
-            Some(NaiveDate::from_ymd_opt(2024, 7, 8).expect("valid date literal"))
-        );
+        assert_eq!(row.date(), Some(Date::constant(2024, 7, 8)));
     }
 
     #[test]
@@ -89,7 +89,7 @@ mod tests {
                 date,
             };
 
-            assert_eq!(row.date_naive(), None, "day count {date} cannot be emitted by the table writer");
+            assert_eq!(row.date(), None, "day count {date} cannot be emitted by the table writer");
         }
     }
 }

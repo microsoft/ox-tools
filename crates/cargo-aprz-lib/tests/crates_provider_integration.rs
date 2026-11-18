@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use cargo_aprz_lib::internals::facts::crates::Provider;
 use cargo_aprz_lib::internals::facts::{CrateRef, CratesData, Progress, ProviderResult};
-use chrono::{DateTime, Duration, Utc};
+use jiff::{Timestamp, ToSpan};
 use semver::Version;
 use support::dump::Dump;
 use support::{NoOpProgress, dump_server, dump_url, failing_server};
@@ -35,7 +35,7 @@ fn progress() -> Arc<dyn Progress> {
     Arc::new(NoOpProgress)
 }
 
-async fn make_provider(cache_dir: &Path, server: &MockServer, now: DateTime<Utc>) -> Provider {
+async fn make_provider(cache_dir: &Path, server: &MockServer, now: Timestamp) -> Provider {
     Provider::new(cache_dir, LONG_TTL, progress(), now, false, Some(&dump_url(server)))
         .await
         .expect("the synthetic dump must be accepted by the provider")
@@ -63,7 +63,7 @@ fn found(results: &HashMap<String, ProviderResult<CratesData>>, name: &str) -> C
 
 #[tokio::test]
 async fn suggestions_are_ranked_after_a_later_slot_is_replaced() {
-    let now = "2026-08-11T04:13:36Z".parse::<DateTime<Utc>>().unwrap();
+    let now = "2026-08-11T04:13:36Z".parse::<Timestamp>().unwrap();
     let mut dump = Dump::sample(now);
     // The first three fill the slots, with the second weakest. The best candidate arrives last,
     // replacing that second slot: retained slot order then differs from descending score order.
@@ -89,7 +89,7 @@ async fn suggestions_are_ranked_after_a_later_slot_is_replaced() {
 #[tokio::test]
 #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
 async fn reports_full_facts_for_a_requested_version() {
-    let now = Utc::now();
+    let now = Timestamp::now();
     let server = dump_server(Dump::sample(now).to_tar_gz(), Some(1)).await;
     let cache = tempfile::tempdir().expect("creating a temp dir");
 
@@ -133,7 +133,7 @@ async fn reports_full_facts_for_a_requested_version() {
 #[tokio::test]
 #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
 async fn reports_both_kinds_of_owner() {
-    let now = Utc::now();
+    let now = Timestamp::now();
     let server = dump_server(Dump::sample(now).to_tar_gz(), Some(1)).await;
     let cache = tempfile::tempdir().expect("creating a temp dir");
 
@@ -166,7 +166,7 @@ async fn reports_both_kinds_of_owner() {
 #[tokio::test]
 #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
 async fn resolves_latest_version_skipping_prereleases_and_yanked_versions() {
-    let now = Utc::now();
+    let now = Timestamp::now();
     let server = dump_server(Dump::sample(now).to_tar_gz(), Some(1)).await;
     let cache = tempfile::tempdir().expect("creating a temp dir");
 
@@ -185,7 +185,7 @@ async fn resolves_latest_version_skipping_prereleases_and_yanked_versions() {
 #[tokio::test]
 #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
 async fn reports_missing_crates_and_versions() {
-    let now = Utc::now();
+    let now = Timestamp::now();
     let server = dump_server(Dump::sample(now).to_tar_gz(), Some(1)).await;
     let cache = tempfile::tempdir().expect("creating a temp dir");
 
@@ -219,7 +219,7 @@ async fn reports_missing_crates_and_versions() {
 #[tokio::test]
 #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
 async fn suggests_similar_names_for_misspellings() {
-    let now = Utc::now();
+    let now = Timestamp::now();
     let server = dump_server(Dump::sample(now).to_tar_gz(), Some(1)).await;
     let cache = tempfile::tempdir().expect("creating a temp dir");
 
@@ -240,7 +240,7 @@ async fn suggests_similar_names_for_misspellings() {
 #[tokio::test]
 #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
 async fn suppresses_suggestions_when_not_requested() {
-    let now = Utc::now();
+    let now = Timestamp::now();
     let server = dump_server(Dump::sample(now).to_tar_gz(), Some(1)).await;
     let cache = tempfile::tempdir().expect("creating a temp dir");
 
@@ -260,7 +260,7 @@ async fn suppresses_suggestions_when_not_requested() {
 #[tokio::test]
 #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
 async fn normalizes_repository_urls() {
-    let now = Utc::now();
+    let now = Timestamp::now();
     let server = dump_server(Dump::sample(now).to_tar_gz(), Some(1)).await;
     let cache = tempfile::tempdir().expect("creating a temp dir");
 
@@ -291,7 +291,7 @@ async fn normalizes_repository_urls() {
 #[tokio::test]
 #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
 async fn reuses_cached_tables() {
-    let now = Utc::now();
+    let now = Timestamp::now();
     // The mock asserts on drop that the dump was downloaded exactly once.
     let server = dump_server(Dump::sample(now).to_tar_gz(), Some(1)).await;
     let cache = tempfile::tempdir().expect("creating a temp dir");
@@ -301,28 +301,28 @@ async fn reuses_cached_tables() {
         assert!(query(&provider, &[crate_ref("itoa", None)]).await["itoa"].is_found());
     }
 
-    let provider = make_provider(cache.path(), &server, now + Duration::days(1)).await;
+    let provider = make_provider(cache.path(), &server, now + 24.hours()).await;
     assert!(query(&provider, &[crate_ref("itoa", None)]).await["itoa"].is_found());
 }
 
 #[tokio::test]
 #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
 async fn redownloads_when_cached_tables_are_stale() {
-    let now = Utc::now();
+    let now = Timestamp::now();
     let server = dump_server(Dump::sample(now).to_tar_gz(), Some(2)).await;
     let cache = tempfile::tempdir().expect("creating a temp dir");
 
     drop(make_provider(cache.path(), &server, now).await);
 
     // Far enough in the future that the cached tables exceed their TTL.
-    let provider = make_provider(cache.path(), &server, now + Duration::days(400)).await;
+    let provider = make_provider(cache.path(), &server, now + (400 * 24).hours()).await;
     assert!(query(&provider, &[crate_ref("itoa", None)]).await["itoa"].is_found());
 }
 
 #[tokio::test]
 #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
 async fn redownloads_when_cache_is_ignored() {
-    let now = Utc::now();
+    let now = Timestamp::now();
     let server = dump_server(Dump::sample(now).to_tar_gz(), Some(2)).await;
     let cache = tempfile::tempdir().expect("creating a temp dir");
 
@@ -337,7 +337,7 @@ async fn redownloads_when_cache_is_ignored() {
 #[tokio::test]
 #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
 async fn redownloads_when_a_cached_table_is_corrupt() {
-    let now = Utc::now();
+    let now = Timestamp::now();
     let server = dump_server(Dump::sample(now).to_tar_gz(), Some(2)).await;
     let cache = tempfile::tempdir().expect("creating a temp dir");
 
@@ -361,7 +361,7 @@ async fn rejects_a_dump_that_is_not_served() {
         cache.path(),
         LONG_TTL,
         progress(),
-        Utc::now(),
+        Timestamp::now(),
         false,
         Some(&format!("{}/db-dump.tar.gz", server.uri())),
     )
@@ -375,7 +375,7 @@ async fn rejects_a_dump_that_is_not_served() {
 #[tokio::test]
 #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
 async fn recovers_from_a_transient_server_error() {
-    let now = Utc::now();
+    let now = Timestamp::now();
     let server = MockServer::start().await;
 
     // The first attempt fails with a 5xx; the retry layer then gets the real dump.
@@ -403,7 +403,7 @@ async fn recovers_from_a_transient_server_error() {
 #[tokio::test]
 #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
 async fn rejects_a_truncated_dump() {
-    let now = Utc::now();
+    let now = Timestamp::now();
     let body = support::dump::truncate(&Dump::sample(now).to_tar_gz());
     let server = dump_server(body, None).await;
     let cache = tempfile::tempdir().expect("creating a temp dir");
@@ -416,7 +416,7 @@ async fn rejects_a_truncated_dump() {
 #[tokio::test]
 #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
 async fn rejects_a_dump_with_a_malformed_column() {
-    let now = Utc::now();
+    let now = Timestamp::now();
     let dump = Dump::sample(now);
     let mut files = dump.csv_files();
 
@@ -444,7 +444,7 @@ async fn rejects_a_dump_with_a_malformed_column() {
 #[tokio::test]
 #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
 async fn rejects_a_dump_with_a_missing_column() {
-    let now = Utc::now();
+    let now = Timestamp::now();
     let dump = Dump::sample(now);
     let mut files = dump.csv_files();
 
@@ -466,7 +466,7 @@ async fn rejects_a_dump_with_a_missing_column() {
 #[tokio::test]
 #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
 async fn handles_an_empty_request_list() {
-    let now = Utc::now();
+    let now = Timestamp::now();
     let server = dump_server(Dump::sample(now).to_tar_gz(), Some(1)).await;
     let cache = tempfile::tempdir().expect("creating a temp dir");
 
@@ -481,7 +481,7 @@ async fn handles_an_empty_request_list() {
 // ---------------------------------------------------------------------------
 
 /// The CSV files of the sample dump, with `extra` crates appended.
-fn files_with_extra_crates(now: DateTime<Utc>, extra: Vec<support::dump::Crate>) -> Vec<(String, String)> {
+fn files_with_extra_crates(now: Timestamp, extra: Vec<support::dump::Crate>) -> Vec<(String, String)> {
     let mut dump = Dump::sample(now);
     dump.crates.extend(extra);
     dump.csv_files()
@@ -499,7 +499,7 @@ fn append_rows(files: &mut [(String, String)], name: &str, rows: &str) {
 #[tokio::test]
 #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
 async fn reports_every_edition_and_drops_unparseable_version_urls() {
-    let now = Utc::now();
+    let now = Timestamp::now();
 
     // One crate per edition the table knows about, plus one with an edition it does not, and one
     // whose documentation and homepage URLs cannot be parsed at all.
@@ -575,7 +575,7 @@ async fn reports_every_edition_and_drops_unparseable_version_urls() {
 #[tokio::test]
 #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
 async fn resolves_the_latest_version_when_versions_ascend() {
-    let now = Utc::now();
+    let now = Timestamp::now();
 
     // The sample dump lists `serde`'s newest version first, so the "this candidate beats the one
     // we already have" branch never runs for it. This crate lists its versions the other way up.
@@ -604,7 +604,7 @@ async fn resolves_the_latest_version_when_versions_ascend() {
 #[tokio::test]
 #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
 async fn keeps_only_the_closest_suggestions() {
-    let now = Utc::now();
+    let now = Timestamp::now();
 
     // Three candidates at the same distance fill every suggestion slot, then a closer one has to
     // evict the weakest of them.
@@ -648,7 +648,7 @@ async fn keeps_only_the_closest_suggestions() {
 #[tokio::test]
 #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
 async fn tolerates_dangling_references_in_the_dump() {
-    let now = Utc::now();
+    let now = Timestamp::now();
 
     // The real dump is a consistent snapshot, but nothing in the reader depends on that: rows
     // pointing at owners, categories, keywords and versions that do not exist are dropped rather
@@ -682,7 +682,7 @@ async fn tolerates_dangling_references_in_the_dump() {
 #[tokio::test]
 #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
 async fn keeps_a_repository_url_that_is_not_a_known_repository() {
-    let now = Utc::now();
+    let now = Timestamp::now();
 
     // A well-formed URL that has no owner/repo path, so `RepoSpec` cannot be derived from it.
     let odd_repo = support::dump::Crate {
@@ -721,7 +721,7 @@ async fn keeps_a_repository_url_that_is_not_a_known_repository() {
 #[tokio::test]
 #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
 async fn redownloads_when_a_cached_table_is_too_short() {
-    let now = Utc::now();
+    let now = Timestamp::now();
     let server = dump_server(Dump::sample(now).to_tar_gz(), Some(2)).await;
     let cache = tempfile::tempdir().expect("creating a temp dir");
 
@@ -740,7 +740,7 @@ async fn fails_when_a_table_file_cannot_be_replaced() {
     // Covers the diagnostics that only evaluate their arguments when debug logging is on.
     log::set_max_level(log::LevelFilter::Debug);
 
-    let now = Utc::now();
+    let now = Timestamp::now();
     let server = dump_server(Dump::sample(now).to_tar_gz(), None).await;
     let cache = tempfile::tempdir().expect("creating a temp dir");
 
@@ -763,7 +763,7 @@ async fn logs_diagnostics_while_downloading_and_reusing_tables() {
     // evaluated once logging is turned up.
     log::set_max_level(log::LevelFilter::Debug);
 
-    let now = Utc::now();
+    let now = Timestamp::now();
     let server = dump_server(Dump::sample(now).to_tar_gz(), Some(1)).await;
     let cache = tempfile::tempdir().expect("creating a temp dir");
 
@@ -803,7 +803,7 @@ impl Progress for EagerProgress {
 #[tokio::test]
 #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
 async fn renders_the_progress_callbacks() {
-    let now = Utc::now();
+    let now = Timestamp::now();
     let server = dump_server(Dump::sample(now).to_tar_gz(), Some(1)).await;
     let cache = tempfile::tempdir().expect("creating a temp dir");
 
@@ -887,7 +887,7 @@ fn chunked_dump_server(body: Vec<u8>) -> String {
 #[tokio::test]
 #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
 async fn retries_a_response_without_a_content_length_that_dies_mid_body() {
-    let now = Utc::now();
+    let now = Timestamp::now();
     let url = chunked_dump_server(Dump::sample(now).to_tar_gz());
     let cache = tempfile::tempdir().expect("creating a temp dir");
 
@@ -902,7 +902,7 @@ async fn retries_a_response_without_a_content_length_that_dies_mid_body() {
 #[tokio::test]
 #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
 async fn stops_streaming_once_the_archive_has_been_read() {
-    let now = Utc::now();
+    let now = Timestamp::now();
 
     // Padding past the end of the archive: the reader stops at the end-of-archive marker while
     // the download is still pumping bytes, so the sender finds nobody left to hand them to.
@@ -919,7 +919,7 @@ async fn stops_streaming_once_the_archive_has_been_read() {
 #[tokio::test]
 #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
 async fn rejects_a_dump_with_an_unknown_owner_kind() {
-    let now = Utc::now();
+    let now = Timestamp::now();
 
     // crates.io only has user (0) and team (1) owners; anything else means the table layout
     // changed under us, which must be reported instead of silently mis-decoded.

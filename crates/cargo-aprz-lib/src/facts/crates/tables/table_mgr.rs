@@ -14,9 +14,9 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use bytes::Bytes;
-use chrono::{DateTime, Utc};
 use flate2::bufread::GzDecoder;
 use futures_util::{Stream, StreamExt};
+use jiff::Timestamp;
 use ohno::{EnrichableExt, IntoAppError};
 use tar::Archive;
 use tokio::sync::mpsc;
@@ -71,7 +71,7 @@ macro_rules! define_tables {
             fn open_tables_from_scratch(
                 tables_root: impl AsRef<Path>,
                 max_ttl: Duration,
-                now: DateTime<Utc>,
+                now: Timestamp,
                 progress: &dyn Progress,
             ) -> Result<Self> {
                 const NUM_TABLES: u64 = count_tables!($($field)*);
@@ -112,7 +112,7 @@ macro_rules! define_tables {
             fn open_tables_from_files(
                 files: HashMap<&'static str, File>,
                 max_ttl: Duration,
-                now: DateTime<Utc>,
+                now: Timestamp,
                 progress: &dyn Progress,
             ) -> Result<Self> {
                 const NUM_TABLES: u64 = count_tables!($($field)*);
@@ -202,7 +202,7 @@ macro_rules! define_tables {
             filename: &str,
             entry: &mut tar::Entry<impl Read>,
             tables_root: &Path,
-            now: DateTime<Utc>,
+            now: Timestamp,
         ) -> Result<Option<(&'static str, File)>> {
             match filename {
                 $(
@@ -262,7 +262,7 @@ impl TableMgr {
         source: &Url,
         tables_root: impl AsRef<Path>,
         max_ttl: Duration,
-        now: DateTime<Utc>,
+        now: Timestamp,
         ignore_cached: bool,
         progress: Arc<dyn Progress>,
     ) -> Result<Self> {
@@ -301,7 +301,7 @@ impl TableMgr {
     }
 
     #[must_use]
-    pub fn created_at(&self) -> DateTime<Utc> {
+    pub fn created_at(&self) -> Timestamp {
         self.crates_table.timestamp()
     }
 
@@ -470,7 +470,7 @@ async fn prep_tables(
     source: &Url,
     tables_root: impl AsRef<Path>,
     max_ttl: Duration,
-    now: DateTime<Utc>,
+    now: Timestamp,
     progress: Arc<dyn Progress>,
 ) -> Result<TableMgr> {
     prep_tables_with_client(
@@ -489,7 +489,7 @@ async fn prep_tables_with_client(
     source: &Url,
     tables_root: PathBuf,
     max_ttl: Duration,
-    now: DateTime<Utc>,
+    now: Timestamp,
     progress: Arc<dyn Progress>,
 ) -> Result<TableMgr> {
     let source = source.clone();
@@ -510,7 +510,7 @@ async fn prep_tables_core(
     source: &Url,
     tables_root: std::path::PathBuf,
     max_ttl: Duration,
-    now: DateTime<Utc>,
+    now: Timestamp,
     progress: Arc<dyn Progress>,
 ) -> Result<Result<TableMgr>> {
     log::info!(target: LOG_TARGET, "Starting crates database download from {source}");
@@ -630,7 +630,7 @@ fn process_download(
     rx: mpsc::Receiver<Result<Bytes>>,
     tables_root: &Path,
     max_ttl: Duration,
-    now: DateTime<Utc>,
+    now: Timestamp,
     progress: &dyn Progress,
 ) -> Result<TableMgr> {
     log::info!(target: LOG_TARGET, "Processing crates database download");
@@ -728,7 +728,7 @@ mod tests {
     use std::sync::{Arc, Mutex as StdMutex};
     use std::time::Duration;
 
-    use chrono::DateTime;
+    use jiff::Timestamp;
     use tempfile::TempDir;
     use url::Url;
     use wiremock::matchers::{header, method, path};
@@ -764,7 +764,7 @@ mod tests {
             &Url::parse("https://example.test/db-dump.tar.gz").unwrap(),
             Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf(),
             Duration::from_hours(1),
-            DateTime::UNIX_EPOCH,
+            Timestamp::UNIX_EPOCH,
             Arc::clone(&progress) as Arc<dyn Progress>,
         )
         .await;
@@ -845,7 +845,7 @@ mod tests {
             rx,
             tables_root,
             Duration::from_hours(1),
-            chrono::DateTime::UNIX_EPOCH,
+            Timestamp::UNIX_EPOCH,
             &RecordingProgress::default(),
         )
     }
@@ -1346,7 +1346,7 @@ mod tests {
             &source,
             dir.path().to_path_buf(),
             Duration::from_hours(1),
-            chrono::DateTime::UNIX_EPOCH,
+            Timestamp::UNIX_EPOCH,
             Arc::new(RecordingProgress::default()),
         )
         .await
@@ -1375,7 +1375,7 @@ mod tests {
             &source,
             dir.path().to_path_buf(),
             Duration::from_hours(1),
-            chrono::DateTime::UNIX_EPOCH,
+            Timestamp::UNIX_EPOCH,
             Arc::clone(&progress) as Arc<dyn Progress>,
         )
         .await
@@ -1420,7 +1420,7 @@ mod tests {
                 &source,
                 destination.path().to_path_buf(),
                 Duration::from_hours(1),
-                chrono::DateTime::UNIX_EPOCH,
+                Timestamp::UNIX_EPOCH,
                 Arc::new(RecordingProgress::default()),
             ));
             let mut result = None;
@@ -1463,7 +1463,7 @@ mod tests {
             &source,
             dir.path(),
             Duration::from_hours(1),
-            chrono::DateTime::UNIX_EPOCH,
+            Timestamp::UNIX_EPOCH,
             true,
             Arc::new(RecordingProgress::default()),
         )

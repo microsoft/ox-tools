@@ -26,7 +26,7 @@ const TTL: Duration = Duration::from_hours(1);
 #[tokio::test]
 #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
 async fn collector_debug_lists_every_provider() {
-    let dump = dump_server(Dump::sample(chrono::Utc::now()).to_tar_gz(), None).await;
+    let dump = dump_server(Dump::sample(jiff::Timestamp::now()).to_tar_gz(), None).await;
     let services = failing_server(404).await;
     let cache = tempfile::tempdir().expect("creating a temp dir");
     seed_advisory_db(cache.path());

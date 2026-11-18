@@ -5,8 +5,8 @@ use std::io::Write;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use cargo_metadata::MetadataCommand;
-use chrono::Local;
 use clap::Parser;
+use jiff::ZonedDateTime;
 use ohno::{IntoAppError, app_err};
 
 use super::Host;
@@ -61,7 +61,7 @@ fn validate_config_inner(config_path: &Utf8Path) -> Result<()> {
             &config.high_risk,
             &config.eval,
             default_metrics(),
-            Local::now(),
+            &ZonedDateTime::now(),
             config.medium_risk_threshold,
             config.low_risk_threshold,
         );

@@ -4,7 +4,7 @@
 use core::fmt::Write;
 use std::borrow::Cow;
 
-use chrono::{DateTime, Local};
+use jiff::ZonedDateTime;
 use percent_encoding::{AsciiSet, CONTROLS, NON_ALPHANUMERIC, utf8_percent_encode};
 
 use super::{ReportableCrate, common};
@@ -50,7 +50,7 @@ fn crate_description(c: &ReportableCrate) -> String {
     clippy::too_many_lines,
     reason = "HTML generation is inherently sequential; splitting would reduce readability"
 )]
-pub fn generate<W: Write>(crates: &[ReportableCrate], timestamp: DateTime<Local>, writer: &mut W) -> Result<()> {
+pub fn generate<W: Write>(crates: &[ReportableCrate], timestamp: &ZonedDateTime, writer: &mut W) -> Result<()> {
     let has_appraisals = crates.iter().any(|c| c.appraisal.is_some());
     let total = crates.len();
     let crates_by_risk = |risk: Risk| -> Vec<(&str, String, String, f64)> {
@@ -580,8 +580,8 @@ fn write_styles<W: Write>(writer: &mut W) -> Result<()> {
     Ok(())
 }
 
-fn write_header<W: Write>(writer: &mut W, timestamp: DateTime<Local>) -> Result<()> {
-    let date = timestamp.format("%Y-%m-%d").to_string();
+fn write_header<W: Write>(writer: &mut W, timestamp: &ZonedDateTime) -> Result<()> {
+    let date = timestamp.date().to_string();
     writeln!(writer, "  <div class=\"header\">")?;
     writeln!(
         writer,
@@ -1201,14 +1201,14 @@ mod tests {
     use core::fmt;
     use std::sync::Arc;
 
-    use chrono::TimeZone;
-
     use super::*;
     use crate::expr::ExpressionOutcome;
     use crate::metrics::{Metric, MetricDef, MetricValue};
 
-    fn test_timestamp() -> DateTime<Local> {
-        Local.with_ymd_and_hms(2024, 1, 15, 10, 30, 0).unwrap()
+    fn test_timestamp() -> ZonedDateTime {
+        jiff::tz::TimeZone::system()
+            .to_zoned_datetime(jiff::civil::date(2024, 1, 15).at(10, 30, 0, 0))
+            .expect("the test date is valid in the system time zone")
     }
 
     static NAME_DEF: MetricDef = MetricDef {
@@ -1280,7 +1280,7 @@ mod tests {
     fn test_generate_empty_crates() {
         let crates: Vec<ReportableCrate> = vec![];
         let mut output = String::new();
-        let result = generate(&crates, test_timestamp(), &mut output);
+        let result = generate(&crates, &test_timestamp(), &mut output);
         result.unwrap();
         // Should still generate valid HTML structure
         assert!(output.contains("<!DOCTYPE html>"));
@@ -1293,7 +1293,7 @@ mod tests {
     fn test_generate_single_crate() {
         let crates = vec![create_test_crate("test_crate", "1.2.3", None)];
         let mut output = String::new();
-        let result = generate(&crates, test_timestamp(), &mut output);
+        let result = generate(&crates, &test_timestamp(), &mut output);
         result.unwrap();
         assert!(output.contains("<!DOCTYPE html>"));
         assert!(output.contains("Crate Appraisal Report"));
@@ -1313,7 +1313,7 @@ mod tests {
                 create_test_crate("other", "1.0.0", Some(Appraisal::new(Risk::Low, vec![], 1, 1, 100.0))),
             ];
             let mut output = String::new();
-            generate(&crates, test_timestamp(), &mut output).unwrap();
+            generate(&crates, &test_timestamp(), &mut output).unwrap();
             assert!(
                 output.contains("title=\"described v1.0.0\nA precise crate description\""),
                 "{output}"
@@ -1379,7 +1379,7 @@ mod tests {
         ];
         let mut output = String::new();
 
-        generate(&crates, test_timestamp(), &mut output).unwrap();
+        generate(&crates, &test_timestamp(), &mut output).unwrap();
 
         assert!(output.contains("data-name=\"event-listener\" data-score=\"0\""));
         assert!(!output.contains("data-score=\"-0\""));
@@ -1390,7 +1390,7 @@ mod tests {
     fn test_generate_contains_ferris() {
         let crates = vec![create_test_crate("test", "1.0.0", None)];
         let mut output = String::new();
-        let result = generate(&crates, test_timestamp(), &mut output);
+        let result = generate(&crates, &test_timestamp(), &mut output);
         result.unwrap();
         // Should contain Ferris SVG
         assert!(output.contains("<svg class=\"ferris\""));
@@ -1401,7 +1401,7 @@ mod tests {
     fn test_generate_contains_theme_toggle() {
         let crates = vec![create_test_crate("test", "1.0.0", None)];
         let mut output = String::new();
-        let result = generate(&crates, test_timestamp(), &mut output);
+        let result = generate(&crates, &test_timestamp(), &mut output);
         result.unwrap();
         // Should contain theme toggle functionality
         assert!(output.contains("toggleTheme"));
@@ -1414,7 +1414,7 @@ mod tests {
     fn test_generate_contains_css_styles() {
         let crates = vec![create_test_crate("test", "1.0.0", None)];
         let mut output = String::new();
-        let result = generate(&crates, test_timestamp(), &mut output);
+        let result = generate(&crates, &test_timestamp(), &mut output);
         result.unwrap();
         // Should contain CSS styles
         assert!(output.contains("<style>"));
@@ -1561,7 +1561,7 @@ mod tests {
             create_test_crate("unevaluated_crate", "0.1.0", None),
         ];
         let mut output = String::new();
-        generate(&crates, test_timestamp(), &mut output).unwrap();
+        generate(&crates, &test_timestamp(), &mut output).unwrap();
 
         // Summary section should be present
         assert!(output.contains("class=\"summary\""));
@@ -1641,7 +1641,7 @@ mod tests {
             )),
         )];
         let mut output = String::new();
-        generate(&crates, test_timestamp(), &mut output).unwrap();
+        generate(&crates, &test_timestamp(), &mut output).unwrap();
 
         assert!(output.contains("INCONCLUSIVE"));
         assert!(output.contains("Required facts &lt;must&gt; be available."));
@@ -1677,7 +1677,7 @@ mod tests {
             )),
         )];
         let mut output = String::new();
-        generate(&crates, test_timestamp(), &mut output).unwrap();
+        generate(&crates, &test_timestamp(), &mut output).unwrap();
 
         assert!(output.contains("PASSED"));
         assert!(output.contains("FAILED"));
@@ -1698,7 +1698,7 @@ mod tests {
             Some(Appraisal::new(Risk::Low, vec![], 0, 0, 100.0)),
         )];
         let mut output = String::new();
-        generate(&crates, test_timestamp(), &mut output).unwrap();
+        generate(&crates, &test_timestamp(), &mut output).unwrap();
 
         // Should still have the card header with risk badge
         assert!(output.contains("LOW RISK"));
@@ -1733,7 +1733,7 @@ mod tests {
             None,
         )];
         let mut output = String::new();
-        generate(&crates, test_timestamp(), &mut output).unwrap();
+        generate(&crates, &test_timestamp(), &mut output).unwrap();
 
         assert!(output.contains("href=\"https://github.com/example/repo\""));
         assert!(output.contains("target=\"_blank\""));
@@ -1762,7 +1762,7 @@ mod tests {
             None,
         )];
         let mut output = String::new();
-        generate(&crates, test_timestamp(), &mut output).unwrap();
+        generate(&crates, &test_timestamp(), &mut output).unwrap();
 
         assert!(output.contains("<span class=\"na\">n/a</span>"));
     }
@@ -1793,7 +1793,7 @@ mod tests {
             None,
         )];
         let mut output = String::new();
-        generate(&crates, test_timestamp(), &mut output).unwrap();
+        generate(&crates, &test_timestamp(), &mut output).unwrap();
 
         assert!(output.contains("https://crates.io/categories/"));
         assert!(output.contains("#web"));
@@ -1809,7 +1809,7 @@ mod tests {
             create_test_crate("crate_b", "2.0.0", None),
         ];
         let mut output = String::new();
-        generate(&crates, test_timestamp(), &mut output).unwrap();
+        generate(&crates, &test_timestamp(), &mut output).unwrap();
 
         // No summary when no appraisals
         assert!(!output.contains("class=\"summary\""));
@@ -1836,7 +1836,7 @@ mod tests {
             )),
         )];
         let mut output = String::new();
-        generate(&crates, test_timestamp(), &mut output).unwrap();
+        generate(&crates, &test_timestamp(), &mut output).unwrap();
 
         // No summary for a single crate
         assert!(!output.contains("class=\"summary\""));
@@ -1869,7 +1869,7 @@ mod tests {
             ),
         ];
         let mut output = String::new();
-        generate(&crates, test_timestamp(), &mut output).unwrap();
+        generate(&crates, &test_timestamp(), &mut output).unwrap();
 
         // Summary pills should use selectCrate onclick for crate card selection
         assert!(output.contains("selectCrate('crate-risky-crate-0.5.0'"));
@@ -1885,7 +1885,7 @@ mod tests {
             create_test_crate("second", "1.0.0", Some(Appraisal::new(Risk::Low, vec![], 1, 1, 100.0))),
         ];
         let mut output = String::new();
-        generate(&crates, test_timestamp(), &mut output).unwrap();
+        generate(&crates, &test_timestamp(), &mut output).unwrap();
 
         assert!(output.contains(r#"<div class="crate-card" id="crate-first-1.0.0">"#), "{output}");
         assert!(
@@ -1902,7 +1902,7 @@ mod tests {
             create_test_crate("medium-first", "1.0.0", Some(Appraisal::new(Risk::Medium, vec![], 10, 1, 10.0))),
         ];
         let mut output = String::new();
-        generate(&crates, test_timestamp(), &mut output).unwrap();
+        generate(&crates, &test_timestamp(), &mut output).unwrap();
         assert!(
             output.contains(r#"<div class="crate-card" id="crate-medium-first-1.0.0">"#),
             "{output}"
@@ -1922,7 +1922,7 @@ mod tests {
             create_test_crate("alpha", "1.0.0", None),
         ];
         let mut output = String::new();
-        generate(&crates, test_timestamp(), &mut output).unwrap();
+        generate(&crates, &test_timestamp(), &mut output).unwrap();
         let alpha = output.find(r#"data-name="alpha""#).expect("alpha must be listed");
         let zeta = output.find(r#"data-name="zeta""#).expect("zeta must be listed");
         assert!(alpha < zeta, "unevaluated crates must be sorted alphabetically: {output}");
@@ -1937,7 +1937,7 @@ mod tests {
             Some(Appraisal::new(Risk::Low, vec![], 1, 1, 100.0)),
         )];
         let mut output = String::new();
-        generate(&appraised, test_timestamp(), &mut output).unwrap();
+        generate(&appraised, &test_timestamp(), &mut output).unwrap();
         assert!(
             !output.contains("class=\"summary-row\""),
             "single appraised crate has no summary: {output}"
@@ -1949,7 +1949,7 @@ mod tests {
 
         let unappraised = vec![create_test_crate("a", "1.0.0", None), create_test_crate("b", "1.0.0", None)];
         output.clear();
-        generate(&unappraised, test_timestamp(), &mut output).unwrap();
+        generate(&unappraised, &test_timestamp(), &mut output).unwrap();
         assert!(
             !output.contains("class=\"summary-row\""),
             "multiple unappraised crates have no summary: {output}"
@@ -1967,7 +1967,7 @@ mod tests {
     fn test_generate_html_escapes_crate_name() {
         let crates = vec![create_test_crate("crate<xss>", "1.0.0", None)];
         let mut output = String::new();
-        generate(&crates, test_timestamp(), &mut output).unwrap();
+        generate(&crates, &test_timestamp(), &mut output).unwrap();
 
         // Name should be escaped
         assert!(output.contains("crate&lt;xss&gt;"));
@@ -1993,7 +1993,7 @@ mod tests {
             )),
         )];
         let mut output = String::new();
-        generate(&crates, test_timestamp(), &mut output).unwrap();
+        generate(&crates, &test_timestamp(), &mut output).unwrap();
 
         assert!(output.contains("switchTab"));
         assert!(output.contains("tab-btn"));
@@ -2104,7 +2104,7 @@ mod tests {
         ];
         let mut output = String::new();
 
-        generate(&crates, test_timestamp(), &mut output).unwrap();
+        generate(&crates, &test_timestamp(), &mut output).unwrap();
 
         assert!(output.contains("High Risk"));
         assert!(output.contains("Medium Risk"));
@@ -2274,7 +2274,7 @@ mod tests {
         )];
         let mut output = String::new();
 
-        generate(&crates, test_timestamp(), &mut output).unwrap();
+        generate(&crates, &test_timestamp(), &mut output).unwrap();
 
         assert!(
             output.contains("https://crates.io/crates/serde/1.0.0"),
@@ -2304,7 +2304,7 @@ mod tests {
         )];
         let mut output = String::new();
 
-        generate(&crates, test_timestamp(), &mut output).unwrap();
+        generate(&crates, &test_timestamp(), &mut output).unwrap();
 
         assert!(
             !output.contains("https://crates.io/crates/serde/"),
@@ -2390,14 +2390,14 @@ mod tests {
             budget: usize::MAX,
             writes: 0,
         };
-        generate(&crates, test_timestamp(), &mut counter).expect("a writer that never fails must succeed");
+        generate(&crates, &test_timestamp(), &mut counter).expect("a writer that never fails must succeed");
         let total = counter.writes;
         assert!(total > 0, "the generator must write something");
 
         for budget in 0..total {
             let mut writer = FailAfter { budget, writes: 0 };
             assert!(
-                generate(&crates, test_timestamp(), &mut writer).is_err(),
+                generate(&crates, &test_timestamp(), &mut writer).is_err(),
                 "the writer failed on write {budget} of {total}, so generation must fail too"
             );
         }
@@ -2413,7 +2413,7 @@ mod tests {
         ];
         let mut output = String::new();
 
-        generate(&crates, test_timestamp(), &mut output).unwrap();
+        generate(&crates, &test_timestamp(), &mut output).unwrap();
 
         assert!(
             output.contains("2 Low Risk Crates"),

@@ -17,6 +17,9 @@ use fetch::tokio::TokioDeps;
 use fetch::{HeaderMap, HeaderValue, HttpClient, HttpResponse, StatusCode};
 use futures_util::{Stream, StreamExt};
 use http_body_util::BodyExt;
+use jiff::Timestamp;
+use jiff::fmt::strtime::BrokenDownTime;
+use jiff::tz::TimeZone;
 use layered::{Execute, Service, Stack};
 use ohno::{IntoAppError, app_err};
 use seatbelt::retry::{Backoff, Retry};
@@ -144,34 +147,32 @@ const RETRY_BASE_DELAY: Duration = Duration::from_secs(1);
 /// RFC 9110 allows either delta-seconds or an HTTP-date. Treating a date-valued header as
 /// unparseable would turn a transient rate limit into an immediate failure (403) or force a
 /// much longer default wait (429), so both forms are accepted. A date in the past yields `0`.
-pub fn parse_retry_after_value(value: &str, now: chrono::DateTime<chrono::Utc>) -> Option<u64> {
+pub fn parse_retry_after_value(value: &str, now: Timestamp) -> Option<u64> {
     let value = value.trim();
 
     if let Ok(seconds) = value.parse::<u64>() {
         return Some(seconds);
     }
 
-    let when = chrono::DateTime::parse_from_rfc2822(value)
-        .ok()
-        .map(|dt| dt.with_timezone(&chrono::Utc))
-        .or_else(|| {
-            chrono::NaiveDateTime::parse_from_str(value, "%A, %d-%b-%y %H:%M:%S GMT")
-                .ok()
-                .map(|dt| dt.and_utc())
-        })
-        .or_else(|| {
-            chrono::NaiveDateTime::parse_from_str(value, "%a %b %e %H:%M:%S %Y")
-                .ok()
-                .map(|dt| dt.and_utc())
-        })?;
+    let parse_with_offset = |format| BrokenDownTime::parse(format, value).ok().and_then(|tm| tm.to_timestamp().ok());
+    let parse_as_utc = |format| {
+        BrokenDownTime::parse(format, value)
+            .ok()
+            .and_then(|tm| tm.to_datetime().ok())
+            .and_then(|dt| TimeZone::UTC.to_timestamp(dt).ok())
+    };
+    let when = parse_with_offset("%a, %d %b %Y %H:%M:%S %z")
+        .or_else(|| parse_as_utc("%a, %d %b %Y %H:%M:%S GMT"))
+        .or_else(|| parse_as_utc("%A, %d-%b-%y %H:%M:%S GMT"))
+        .or_else(|| parse_as_utc("%a %b %e %H:%M:%S %Y"))?;
 
-    Some((when - now).num_seconds().max(0).cast_unsigned())
+    Some((when - now).as_secs().max(0).cast_unsigned())
 }
 
 /// Parse the `Retry-After` header as seconds.
 fn parse_retry_after(headers: &HeaderMap) -> Option<u64> {
     let s = headers.get(RETRY_AFTER).and_then(|h| h.to_str().ok())?;
-    parse_retry_after_value(s, chrono::Utc::now())
+    parse_retry_after_value(s, Timestamp::now())
 }
 
 /// Classify an HTTP response for retry purposes.
@@ -331,7 +332,6 @@ where
 mod tests {
     use core::sync::atomic::{AtomicU32, Ordering};
 
-    use chrono::{TimeZone as _, Utc};
     use seatbelt::RecoveryKind;
     use tracing::Subscriber;
     use wiremock::matchers::{method, path};
@@ -538,7 +538,7 @@ mod tests {
     }
     #[test]
     fn parses_delta_seconds() {
-        let now = Utc.with_ymd_and_hms(1994, 11, 6, 8, 49, 37).unwrap();
+        let now = "1994-11-06T08:49:37Z".parse::<Timestamp>().unwrap();
         assert_eq!(parse_retry_after_value("120", now), Some(120));
         assert_eq!(parse_retry_after_value("  120 ", now), Some(120));
         assert_eq!(parse_retry_after_value("0", now), Some(0));
@@ -546,7 +546,7 @@ mod tests {
 
     #[test]
     fn parses_http_date() {
-        let now = Utc.with_ymd_and_hms(1994, 11, 6, 8, 49, 37).unwrap();
+        let now = "1994-11-06T08:49:37Z".parse::<Timestamp>().unwrap();
 
         // IMF-fixdate, the form servers are required to send.
         assert_eq!(parse_retry_after_value("Sun, 06 Nov 1994 08:51:37 GMT", now), Some(120));
@@ -557,14 +557,20 @@ mod tests {
     }
 
     #[test]
+    fn parses_rfc_2822_date_with_non_utc_offset() {
+        let now = "1994-11-06T08:49:37Z".parse::<Timestamp>().unwrap();
+        assert_eq!(parse_retry_after_value("Sun, 06 Nov 1994 09:51:37 +0100", now), Some(120));
+    }
+
+    #[test]
     fn past_dates_do_not_underflow() {
-        let now = Utc.with_ymd_and_hms(1994, 11, 6, 8, 49, 37).unwrap();
+        let now = "1994-11-06T08:49:37Z".parse::<Timestamp>().unwrap();
         assert_eq!(parse_retry_after_value("Sun, 06 Nov 1994 08:00:00 GMT", now), Some(0));
     }
 
     #[test]
     fn rejects_unparseable_values() {
-        let now = Utc.with_ymd_and_hms(1994, 11, 6, 8, 49, 37).unwrap();
+        let now = "1994-11-06T08:49:37Z".parse::<Timestamp>().unwrap();
         assert_eq!(parse_retry_after_value("soon", now), None);
         assert_eq!(parse_retry_after_value("", now), None);
         assert_eq!(parse_retry_after_value("-5", now), None);
