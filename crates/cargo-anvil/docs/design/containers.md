@@ -260,8 +260,10 @@ streams are drained and inspected incrementally, retaining only enough text
 to detect credentials spanning reads; no output-size cap rejects an otherwise
 successful fetch. Any exact credential
 value in either output stream or any cache-file bytes rejects preparation;
-incomplete inspection also fails. Sensitive diagnostics are withheld. After
-the preparation container is removed, only inspected registry/git caches
+incomplete inspection also fails. Sensitive diagnostics are withheld.
+Clean hard-linked regular files are usable just like other cache
+files; symbolic links and junctions must remain within the inspected caches.
+After the preparation container is removed, only inspected registry/git caches
 reach a **fresh** validation container. Its requested command runs with
 `CARGO_NET_OFFLINE=true`, without the hook values, preparation home,
 configuration, credential files or mounts. Containers and temporary cache

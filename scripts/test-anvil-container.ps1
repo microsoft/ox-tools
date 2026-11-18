@@ -563,6 +563,54 @@ Write-Output 'bounded scan, exact binary boundaries, long credential, empty file
             'bounded scan, exact binary boundaries, long credential, empty file and read failure verified' $scan.StdOut.Trim()
         if ($scan.ExitCode -ne 0) { Write-Detail $scan.StdErr }
 
+        $inspectionParts = $launcher.Split('foreach ($root in $roots) {', 2, [StringSplitOptions]::None)
+        if ($inspectionParts.Count -ne 2) { throw 'actual cache enumeration missing' }
+        $inspectionParts = $inspectionParts[1].Split('exit $fetchStatus', 2, [StringSplitOptions]::None)
+        if ($inspectionParts.Count -ne 2) { throw 'actual cache enumeration boundary missing' }
+        $inspection = 'foreach ($root in $roots) {' + $inspectionParts[0]
+        $hardlinkCases = @'
+$ErrorActionPreference = 'Stop'
+$cacheRoot = Join-Path $PWD 'hardlink-cache'
+$outside = Join-Path $PWD 'outside-cache'
+New-Item -ItemType Directory -Path $cacheRoot, $outside | Out-Null
+$original = Join-Path $cacheRoot 'original'
+$linked = Join-Path $cacheRoot 'linked'
+[IO.File]::WriteAllText($original, 'clean cache content')
+New-Item -ItemType HardLink -Path $linked -Target $original | Out-Null
+if ((Get-Item -LiteralPath $linked).LinkType -ne 'HardLink') { throw 'fixture did not create an actual hard link' }
+$roots = @($cacheRoot)
+$needles = @('synthetic.hardlink+[credential]')
+Invoke-ActualCacheInspection
+[IO.File]::WriteAllText($original, $needles[0])
+$rejected = $false
+try { Invoke-ActualCacheInspection } catch {
+    if ($_.Exception.Message -ne 'preparation credential found in cache') { throw }
+    $rejected = $true
+}
+if (-not $rejected) { throw 'credential-bearing hard link was accepted' }
+Remove-Item -LiteralPath $original, $linked
+[IO.File]::WriteAllText((Join-Path $outside 'clean'), 'clean outside content')
+$linkType = if ($IsWindows) { 'Junction' } else { 'SymbolicLink' }
+$escape = Join-Path $cacheRoot 'escape'
+New-Item -ItemType $linkType -Path $escape -Target $outside | Out-Null
+$rejected = $false
+try { Invoke-ActualCacheInspection } catch {
+    if ($_.Exception.Message -ne 'cache inspection encountered a link outside the caches') { throw }
+    $rejected = $true
+}
+if (-not $rejected) { throw 'cache target escape was accepted' }
+Remove-Item -LiteralPath $escape -Force
+Write-Output 'actual hard-linked clean bytes accepted, credential bytes rejected, and link escape rejected'
+'@
+        $inspectionPath = Join-Path $root 'hardlink-inspection.ps1'
+        Write-Fixture $inspectionPath ($scanner + "`nfunction Invoke-ActualCacheInspection {`n" + $inspection + "`n}`n" + $hardlinkCases)
+        $inspected = Invoke-Native -Command $pwsh -Arguments @('-NoLogo', '-NoProfile', '-File', $inspectionPath) `
+            -WorkingDirectory $root -TimeoutSeconds (Get-RemainingSeconds) -AllowFailure
+        Assert-Equal 'actual cache enumeration accepts clean hard links and rejects leaks and escapes' 0 $inspected.ExitCode
+        Assert-Equal 'all actual cache-enumeration hard-link cases executed' `
+            'actual hard-linked clean bytes accepted, credential bytes rejected, and link escape rejected' $inspected.StdOut.Trim()
+        if ($inspected.ExitCode -ne 0) { Write-Detail $inspected.StdErr }
+
         $captureParts = $launcher.Split('function Invoke-Preparation([string[]]$Arguments) {', 2, [StringSplitOptions]::None)
         if ($captureParts.Count -ne 2) { throw 'actual capture helper missing' }
         $captureParts = $captureParts[1].Split('function Remove-InvocationContainers', 2, [StringSplitOptions]::None)
@@ -1275,10 +1323,30 @@ version = "0.1.0"
 edition = "2021"
 [dependencies]
 private-dependency = { version = "=0.1.0", registry = "fixture" }
+git-dependency = { git = "file:///workspace/fixture-git" }
 probe-macro = { path = "probe-macro" }
 [workspace]
 members = ["probe-macro"]
 '@
+    Write-Fixture (Join-Path $repo 'fixture-git/Cargo.toml') @'
+[package]
+name = "git-dependency"
+version = "0.1.0"
+edition = "2021"
+[workspace]
+'@
+    Write-Fixture (Join-Path $repo 'fixture-git/src/lib.rs') 'pub fn answer() -> u8 { 7 }'
+    Write-Fixture (Join-Path $repo 'setup-git-dependency.ps1') @'
+$ErrorActionPreference = 'Stop'
+& git -C /workspace/fixture-git init -q
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+& git -C /workspace/fixture-git add Cargo.toml src/lib.rs
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+& git -C /workspace/fixture-git -c user.name=AnvilFixture -c user.email=fixture@example.invalid commit -qm fixture
+exit $LASTEXITCODE
+'@
+    Invoke-Engine -Arguments @('run', '--rm', '-v', "${engineRepo}:/workspace", '-w', '/workspace',
+        $preparedImage, 'pwsh', '-NoLogo', '-NoProfile', '-File', '/workspace/setup-git-dependency.ps1') | Out-Null
     Write-Fixture (Join-Path $repo 'build.rs') @'
 fn main() {
     assert!(std::env::var_os("CARGO_REGISTRIES_FIXTURE_TOKEN").is_none());
@@ -1318,6 +1386,7 @@ fn prepared_dependency_is_usable_without_credentials() {
     assert!(cfg!(fixture_flag));
     assert!(probe_macro::credential_free!());
     assert_eq!(private_dependency::answer(), 42);
+    assert_eq!(git_dependency::answer(), 7);
 }
 '@
     Write-Fixture (Join-Path $repo 'assert-prepared.ps1') @'
@@ -1326,6 +1395,10 @@ foreach ($name in @('CARGO_REGISTRIES_FIXTURE_TOKEN', 'FIXTURE_SECOND_CREDENTIAL
     if ($null -ne [Environment]::GetEnvironmentVariable($name)) { throw "preparation environment survived: $name" }
 }
 if ($env:CARGO_NET_OFFLINE -ne 'true') { throw 'validation must be offline' }
+$hardlinks = @(Get-ChildItem -LiteralPath "$env:CARGO_HOME/git" -Recurse -Force -File |
+    Where-Object { $_.LinkType -eq 'HardLink' })
+if ($hardlinks.Count -eq 0) { throw 'locked Git dependency did not exercise a hard-linked cache' }
+Write-Output 'GIT_CACHE_HARDLINKS_VERIFIED'
 foreach ($file in @("$env:CARGO_HOME/credentials", "$env:CARGO_HOME/credentials.toml", "$env:HOME/.netrc")) {
     if (Test-Path -LiteralPath $file) { throw 'credential file reached validation' }
 }
@@ -1357,6 +1430,7 @@ function Anvil-PrepareEnv {
 '@
     $direct = Invoke-PreparedCase 'a direct command runs without preparation credentials' @('pwsh', '-NoLogo', '-NoProfile', '-File', '/workspace/assert-prepared.ps1')
     Assert-That 'the direct credential-absence probe actually executed' ($direct.StdOut.Contains('DIRECT_COMMAND_CREDENTIAL_FREE'))
+    Assert-That 'successful locked preparation inspected an actual hard-linked Git cache' ($direct.StdOut.Contains('GIT_CACHE_HARDLINKS_VERIFIED'))
     $compiled = Invoke-PreparedCase 'fresh offline build scripts, procedural macros and tests succeed' @('cargo', 'test', '--locked', '--', '--nocapture')
     Assert-That 'the build-script and procedural-macro probes actually executed' `
         ($compiled.StdErr.Contains('BUILD_SCRIPT_CREDENTIAL_FREE') -and $compiled.StdErr.Contains('PROC_MACRO_CREDENTIAL_FREE'))
