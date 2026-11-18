@@ -27,7 +27,7 @@ const SECONDS_PER_DAY: f64 = 86400.0;
 const ISSUE_LOOKBACK_DAYS: i64 = 365 * 10;
 const ISSUE_PAGE_SIZE: u8 = 100;
 const MAX_ISSUE_PAGES: u32 = 10;
-const MAX_RATE_LIMIT_WAIT_SECS: u64 = 3600;
+pub(super) const MAX_RATE_LIMIT_WAIT_SECS: u64 = 3600;
 const MAX_CONCURRENT_REQUESTS: usize = 5;
 
 /// Which caller-supplied API token belongs to a host.
@@ -297,7 +297,7 @@ impl Provider {
                         "{} API rate limit for '{repo_spec}': {} remaining, resets at {}",
                         host.display_name,
                         rl.remaining,
-                        local_time(rl.reset_at)
+                        local_time(rl.reset_at, TimeZone::system())
                     );
                 }
                 if let Some(rate_limit) = result.rate_limit {
@@ -329,7 +329,7 @@ impl Provider {
         let wait_duration = Duration::try_from(wait_until - now).expect("rate limit pauses are started only for future reset times");
         if self.throttler.pause_for(wait_duration) {
             tracker.set_topic_status(TrackedTopic::Repos, TopicStatus::Blocked);
-            let formatted_time = local_time(wait_until);
+            let formatted_time = local_time(wait_until, TimeZone::system());
             log::warn!(target: LOG_TARGET, "Hit {} rate limit for repository '{repo_spec}'", host.display_name);
             // #[gamma::skip(call_result.default, tag = "equivalent", reason = "the call returns unit and still prints its message before unit is replaced with unit")]
             print_to_tracker_if_needed(tracker, log::log_enabled!(log::Level::Warn), || {
@@ -626,8 +626,8 @@ fn should_start_rate_limit_pause(now: Timestamp, wait_until: Timestamp) -> bool 
     wait_until > now
 }
 
-fn local_time(timestamp: Timestamp) -> String {
-    timestamp.to_zoned_datetime(TimeZone::system()).strftime("%T").to_string()
+fn local_time(timestamp: Timestamp, time_zone: TimeZone) -> String {
+    timestamp.to_zoned_datetime(time_zone).strftime("%T").to_string()
 }
 
 fn print_to_tracker_if_needed(tracker: &RequestTracker, log_enabled: bool, message: impl FnOnce() -> String) {
@@ -1202,7 +1202,7 @@ mod tests {
         let (host, _) = github_client(&provider);
         let now = Timestamp::now();
         let until = now + 90.seconds();
-        let formatted = local_time(until);
+        let formatted = local_time(until, TimeZone::system());
         provider.begin_rate_limit_pause(host, &github_repo_spec(), &tracker, now, until);
         assert_eq!(
             progress.messages(),
@@ -1216,7 +1216,7 @@ mod tests {
     async fn rate_limit_reporting_uses_scripted_ticks_without_wall_clock_deadlines() {
         test_logging::enable_log_argument_evaluation();
         let now = Timestamp::from_second(1_700_000_000).unwrap();
-        for seconds in [90, 30, -30] {
+        for seconds in [90, 60, 59, 30, -30] {
             for logged in [false, true] {
                 let progress = Arc::new(RecordingProgress::default());
                 let erased: Arc<dyn Progress> = Arc::<RecordingProgress>::clone(&progress);
@@ -1237,7 +1237,7 @@ mod tests {
                 );
                 let mut expected = Vec::new();
                 if !logged {
-                    if seconds == 90 {
+                    if seconds >= 60 {
                         expected.extend([
                             "GitHub rate limit: ~1 minute(s) remaining until fixed reset".to_owned(),
                             "GitHub rate limit: ~1 minute(s) remaining until fixed reset".to_owned(),
@@ -1472,6 +1472,13 @@ mod tests {
         assert!(should_report_remaining_minutes(1));
         assert!(!should_report_remaining_minutes(0));
         assert!(!should_report_remaining_minutes(-1));
+    }
+
+    #[test]
+    fn local_time_formats_seconds_in_the_supplied_time_zone() {
+        let timestamp = "2024-01-02T03:04:05Z".parse::<Timestamp>().expect("the fixed timestamp is valid");
+
+        assert_eq!(local_time(timestamp, TimeZone::UTC), "03:04:05");
     }
 
     #[test]

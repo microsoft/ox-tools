@@ -151,12 +151,7 @@ fn parse_pg_timestamp(s: &str) -> Result<u64> {
 
 fn parse_pg_date(s: &str) -> Result<u64> {
     let date = s.parse::<Date>().into_app_err_with(|| format!("parsing date '{s}'"))?;
-    let timestamp = date
-        .at(0, 0, 0, 0)
-        .in_tz("UTC")
-        .into_app_err_with(|| format!("converting date '{s}' to a UTC timestamp"))?
-        .timestamp();
-    Ok(timestamp.as_second().div_euclid(86_400).max(0).cast_unsigned())
+    Ok(u64::from((date - Date::constant(1970, 1, 1)).get_days().max(0).cast_unsigned()))
 }
 
 #[cfg(test)]
@@ -293,6 +288,18 @@ mod tests {
     fn pre_epoch_dates_and_timestamps_are_clamped_to_zero() {
         assert_eq!(parse_pg_timestamp("1969-12-31T23:59:59Z").unwrap(), 0);
         assert_eq!(parse_pg_date("1969-12-31").unwrap(), 0);
+    }
+
+    #[test]
+    fn far_future_dates_encode_the_exact_unix_day_count() {
+        let mut buffer = Vec::new();
+        let mut writer = RowWriter::new(&mut buffer);
+        writer
+            .write_str_as_date("9999-12-31")
+            .expect("the date is within Jiff's supported range");
+        writer.row_done().expect("writing to a Vec cannot fail");
+
+        assert_eq!(buffer, encoded(2_932_896));
     }
 
     #[test]

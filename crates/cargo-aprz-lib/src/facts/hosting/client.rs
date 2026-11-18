@@ -9,6 +9,7 @@ use fetch::{HeaderMap, HeaderValue, HttpResponse, StatusExt};
 use jiff::{Timestamp, ToSpan};
 use serde::Deserialize;
 
+use super::provider::MAX_RATE_LIMIT_WAIT_SECS;
 use crate::facts::resilient_http::LazyHttpClient;
 
 const LOG_TARGET: &str = "   hosting";
@@ -122,13 +123,13 @@ impl Client {
 
         // #[gamma::skip(call.replace_with_default, call_result.default, tag = "timeout", reason = "discarding rate-limit headers turns bounded mocked responses into long retry pauses")]
         let rate_limit = extract_rate_limit_from_headers(resp.headers());
-        classify_response(resp, rate_limit, url)
+        classify_response(resp, rate_limit, url, Timestamp::now())
     }
 }
 
 /// Classify an HTTP response into a [`HostingApiResult`].
 // #[gamma::skip(parameter.default_shadow, tag = "timeout", reason = "discarding supplied rate-limit state replaces the mocked reset time with a one-hour retry pause")]
-fn classify_response(resp: HttpResponse, rate_limit: Option<RateLimitInfo>, url: &str) -> HostingApiResult<HttpResponse> {
+fn classify_response(resp: HttpResponse, rate_limit: Option<RateLimitInfo>, url: &str, now: Timestamp) -> HostingApiResult<HttpResponse> {
     let status = resp.status();
     log::debug!(target: LOG_TARGET, "HTTP {status} for {url}");
 
@@ -144,14 +145,14 @@ fn classify_response(resp: HttpResponse, rate_limit: Option<RateLimitInfo>, url:
             .headers()
             .get(fetch::http::header::RETRY_AFTER)
             .and_then(|h| h.to_str().ok())
-            .and_then(|s| crate::facts::resilient_http::parse_retry_after_value(s, Timestamp::now()));
+            .and_then(|s| crate::facts::resilient_http::parse_retry_after_value(s, now));
 
         // Secondary rate limit: Retry-After header present — honor the requested delay
         if let Some(secs) = retry_after_secs {
             log::warn!(target: LOG_TARGET, "Secondary rate limit (HTTP {status_code}, Retry-After: {secs}s) for {url}");
             return HostingApiResult::RateLimited(RateLimitInfo {
                 remaining: 0,
-                reset_at: Timestamp::now() + secs.cast_signed().seconds(),
+                reset_at: now + secs.min(MAX_RATE_LIMIT_WAIT_SECS).cast_signed().seconds(),
             });
         }
 
@@ -161,7 +162,7 @@ fn classify_response(resp: HttpResponse, rate_limit: Option<RateLimitInfo>, url:
             log::warn!(target: LOG_TARGET, "Primary rate limit exhausted (HTTP {status_code}) for {url}");
             let rate_limit = rate_limit.unwrap_or_else(|| RateLimitInfo {
                 remaining: 0,
-                reset_at: Timestamp::now() + 1.hour(),
+                reset_at: now + 1.hour(),
             });
             return HostingApiResult::RateLimited(rate_limit);
         }
@@ -539,7 +540,7 @@ mod tests {
         let url = server.uri();
         let resp = client.get(url.as_str()).fetch().await.unwrap();
         let rate_limit = extract_rate_limit_from_headers(resp.headers());
-        classify_response(resp, rate_limit, &url)
+        classify_response(resp, rate_limit, &url, Timestamp::now())
     }
 
     #[tokio::test]
@@ -704,6 +705,22 @@ mod tests {
             }
             _ => panic!("expected RateLimited"),
         }
+    }
+
+    #[test]
+    fn classify_large_retry_after_caps_before_timestamp_addition() {
+        let now = Timestamp::from_second(1_704_067_200).expect("the fixed timestamp is valid");
+        let response = fetch::HttpResponseBuilder::new_fake()
+            .status(fetch::StatusCode::FORBIDDEN)
+            .header(fetch::http::header::RETRY_AFTER, "300000000000")
+            .build()
+            .expect("the fake response is valid");
+
+        let HostingApiResult::RateLimited(rate_limit) = classify_response(response, None, "https://example.test", now) else {
+            panic!("Retry-After must classify the response as rate limited");
+        };
+
+        assert_eq!(rate_limit.reset_at, now + MAX_RATE_LIMIT_WAIT_SECS.cast_signed().seconds());
     }
 
     #[tokio::test]

@@ -230,7 +230,14 @@ fn convert_metric_value(value: &MetricValue) -> Value {
 }
 
 fn to_cel_timestamp(timestamp: Timestamp, offset_seconds: i32) -> DateTime<FixedOffset> {
-    let utc = DateTime::<Utc>::from_timestamp(timestamp.as_second(), timestamp.subsec_nanosecond().cast_unsigned())
+    let seconds = timestamp.as_second();
+    let nanoseconds = timestamp.subsec_nanosecond();
+    let (seconds, nanoseconds) = if nanoseconds < 0 {
+        (seconds - 1, nanoseconds + 1_000_000_000)
+    } else {
+        (seconds, nanoseconds)
+    };
+    let utc = DateTime::<Utc>::from_timestamp(seconds, nanoseconds.cast_unsigned())
         .expect("Jiff timestamps are within Chrono's supported calendar range");
     let offset = FixedOffset::east_opt(offset_seconds).expect("time-zone offsets fit Chrono's fixed-offset range");
     utc.with_timezone(&offset)
@@ -270,6 +277,33 @@ mod tests {
         );
         assert_eq!(outcome.risk, Risk::Low);
         assert!(outcome.expression_outcomes.is_empty());
+    }
+
+    #[test]
+    fn metric_datetime_preserves_fractional_pre_epoch_time_at_the_cel_boundary() {
+        let timestamp = "1969-12-31T23:59:59.5Z"
+            .parse::<Timestamp>()
+            .expect("the fixed pre-epoch timestamp is valid");
+
+        let Value::Timestamp(converted) = convert_metric_value(&MetricValue::DateTime(timestamp)) else {
+            panic!("datetime metrics must become CEL timestamps");
+        };
+
+        assert_eq!(converted.timestamp(), -1);
+        assert_eq!(converted.timestamp_subsec_nanos(), 500_000_000);
+        assert_eq!(converted.offset().local_minus_utc(), 0);
+    }
+
+    #[test]
+    fn cel_timestamp_preserves_the_requested_offset() {
+        let timestamp = "2024-01-15T10:30:45.123Z"
+            .parse::<Timestamp>()
+            .expect("the fixed timestamp is valid");
+
+        let converted = to_cel_timestamp(timestamp, 19_800);
+
+        assert_eq!(converted.timestamp(), timestamp.as_second());
+        assert_eq!(converted.offset().local_minus_utc(), 19_800);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 macro_rules! not_implemented {
     ($ty:ty, $bound:path) => {
@@ -15,12 +15,12 @@ macro_rules! not_implemented {
         };
     };
 }
-not_implemented!(SystemTime, std::ops::Add<SystemTime>);
-not_implemented!(SystemTime, std::ops::Div<SystemTime>);
+not_implemented!(Instant, std::ops::Add<Instant>);
+not_implemented!(Instant, std::ops::Div<Instant>);
 not_implemented!(Duration, std::ops::Rem<u32>);
 
-pub fn difference(left: SystemTime, right: SystemTime) -> Duration {
-    left.duration_since(right).expect("left is after right")
+pub fn difference(left: Instant, right: Instant) -> Duration {
+    left - right
 }
 pub fn shifted(left: SystemTime, right: Duration) -> SystemTime {
     left + right

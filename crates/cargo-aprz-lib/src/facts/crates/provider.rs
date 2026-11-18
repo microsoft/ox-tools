@@ -896,7 +896,9 @@ impl Provider {
         // back, and consumers of this series report downloads over the last 90 days: taking
         // the most recent months present in the data instead would report years-old traffic
         // for a crate that has stopped being downloaded.
-        let cutoff_days = u64::try_from((self.now - (RECENT_DOWNLOADS_DAYS * 24).hours()).as_second().div_euclid(86_400)).unwrap_or(0);
+        let cutoff = self.now - (RECENT_DOWNLOADS_DAYS * 24).hours();
+        let cutoff_date = cutoff.to_zoned_datetime(jiff::tz::TimeZone::UTC).date();
+        let cutoff_days = u64::from((cutoff_date - Date::constant(1970, 1, 1)).get_days().max(0).cast_unsigned());
 
         // Rows keep their date encoded so the two rejection tests below are plain integer and
         // hash comparisons. Only rows that pass both pay for the date conversion.
@@ -1870,6 +1872,34 @@ mod tests {
         assert_eq!(versions[&VersionId(103)].iter().map(|(_, downloads)| downloads).sum::<u64>(), 102);
         assert_eq!(versions[&VersionId(203)].iter().map(|(_, downloads)| downloads).sum::<u64>(), 34);
         assert_eq!(crates[&CrateId(20)].iter().map(|(_, downloads)| downloads).sum::<u64>(), 34);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
+    async fn monthly_aggregation_keeps_the_exact_far_future_cutoff_day() {
+        let now = "9999-12-30T00:00:00Z"
+            .parse::<Timestamp>()
+            .expect("the fixed test timestamp is valid");
+        let provider = provider_from_dump(now).await;
+        let version_ids = HashSet::from_iter([VersionId(103)]);
+        let all_versions = HashMap::from_iter([(VersionId(103), CrateId(10))]);
+        let crate_data = HashMap::from_iter([(CrateId(10), empty_per_crate_data())]);
+        let rows = [
+            VersionDownloadRow {
+                version_id: VersionId(103),
+                downloads: 42,
+                date: 2_932_805,
+            },
+            VersionDownloadRow {
+                version_id: VersionId(103),
+                downloads: 999,
+                date: 2_932_804,
+            },
+        ];
+
+        let (versions, _) = provider.aggregate_monthly_rows(rows, &version_ids, &all_versions, &crate_data);
+
+        assert_eq!(versions[&VersionId(103)].iter().map(|(_, downloads)| downloads).sum::<u64>(), 42);
     }
 
     #[tokio::test]
