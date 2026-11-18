@@ -46,6 +46,7 @@ const TOOLS: &str = include_str!("../templates/justfiles/anvil/tools.just");
 const APRZ: &str = include_str!("../templates/justfiles/anvil/checks/aprz.just");
 const MUTANTS_DIFF: &str = include_str!("../templates/justfiles/anvil/checks/mutants-diff.just");
 const MUTANTS_FULL: &str = include_str!("../templates/justfiles/anvil/checks/mutants-full.just");
+const RELEASE_PROFILE: &str = include_str!("../templates/justfiles/anvil/groups/release-profile.just");
 const VERSIONS: &str = include_str!("../templates/justfiles/anvil/versions.just");
 const REGENERATE_WORKFLOW: &str = include_str!("../../../.github/workflows/regenerate-check.yml");
 const CONTAINER: &str = include_str!("../templates/justfiles/anvil/container.just");
@@ -219,6 +220,12 @@ if ($env:FAKE_CARGO_AUTO_INSTALL_LOG) {
 }
 if ($env:FAKE_CARGO_BUILD_LAYOUT_LOG) {
     Add-Content -LiteralPath $env:FAKE_CARGO_BUILD_LAYOUT_LOG -Value $env:__CARGO_TEMPORARY_BUILD_DIR_NEW_LAYOUT_OPT_OUT
+}
+if ($args -contains 'nextest' -and $args -contains 'run' -and $env:FAKE_NEXTEST_JUNIT) {
+    $junit = Join-Path $env:FAKE_WORKSPACE_ROOT 'target/nextest/anvil-release-profile/release-profile.xml'
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $junit) | Out-Null
+    Set-Content -LiteralPath $junit -Value '<testsuites tests="1" failures="0" errors="0" />'
+    if ($env:FAKE_NEXTEST_EXIT) { exit [int]$env:FAKE_NEXTEST_EXIT }
 }
 if ($args -contains 'each') {
     $featureExit = if ($args -contains '--no-default-features') {
@@ -928,7 +935,92 @@ fn run_just_with_real_cargo_env(root: &Path, arguments: &[&str], environment: &[
     for &(key, value) in environment {
         command.env(key, value);
     }
+
     command.output().expect("just is required to verify generated recipe behavior")
+}
+
+#[test]
+fn release_profile_group_runs_full_workspace_commands_and_writes_nextest_config() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(
+        &[("release-profile.just", RELEASE_PROFILE)],
+        &[
+            "anvil-component-default-clippy-install",
+            "anvil-tool-cargo-nextest-install installer",
+            "anvil-component-default-clippy-validate-prereqs",
+            "anvil-tool-cargo-nextest-validate-prereqs",
+        ],
+    );
+    let cargo_log = tmp.path().join("cargo.log");
+
+    let output = run_just(
+        tmp.path(),
+        &["anvil-release-profile"],
+        &[("FAKE_CARGO_LOG", cargo_log.as_os_str()), ("FAKE_NEXTEST_JUNIT", OsStr::new("1"))],
+    );
+
+    assert!(
+        output.status.success(),
+        "release-profile fixture failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let commands = fs::read_to_string(cargo_log).unwrap();
+    let config_path = tmp.path().join("target/anvil/test-results/release-profile-nextest.toml");
+    let command_config_path = config_path.to_string_lossy().replace(['/', '\\'], std::path::MAIN_SEPARATOR_STR);
+    let expected = vec![
+        "clippy --workspace --all-targets --all-features --locked --profile release -- -D warnings".to_owned(),
+        format!(
+            "nextest run --config-file {} --profile anvil-release-profile --cargo-profile release --workspace --all-features --locked",
+            command_config_path
+        ),
+        "test --doc --workspace --all-features --locked --profile release".to_owned(),
+    ];
+    assert_eq!(commands.lines().collect::<Vec<_>>(), expected);
+    let config = fs::read_to_string(config_path).unwrap();
+    assert_eq!(
+        config.trim(),
+        "[profile.anvil-release-profile.junit]\npath = \"release-profile.xml\""
+    );
+    assert_eq!(
+        fs::read_to_string(tmp.path().join("target/anvil/test-results/release-profile.xml"))
+            .unwrap()
+            .trim(),
+        "<testsuites tests=\"1\" failures=\"0\" errors=\"0\" />"
+    );
+}
+
+#[test]
+fn release_profile_group_preserves_junit_when_nextest_fails() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(
+        &[("release-profile.just", RELEASE_PROFILE)],
+        &[
+            "anvil-component-default-clippy-install",
+            "anvil-tool-cargo-nextest-install installer",
+            "anvil-component-default-clippy-validate-prereqs",
+            "anvil-tool-cargo-nextest-validate-prereqs",
+        ],
+    );
+    let cargo_log = tmp.path().join("cargo.log");
+
+    let output = run_just(
+        tmp.path(),
+        &["anvil-release-profile"],
+        &[
+            ("FAKE_CARGO_LOG", cargo_log.as_os_str()),
+            ("FAKE_NEXTEST_JUNIT", OsStr::new("1")),
+            ("FAKE_NEXTEST_EXIT", OsStr::new("23")),
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(23));
+    assert_eq!(fs::read_to_string(cargo_log).unwrap().lines().count(), 2);
+    assert!(tmp.path().join("target/anvil/test-results/release-profile.xml").is_file());
 }
 
 fn assert_failed(output: &Output, context: &str) {

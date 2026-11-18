@@ -9186,6 +9186,7 @@ mod tests {
             ".github/actions/anvil-impact/action.yml",
             ".github/workflows/anvil-pr-impl.yml",
             ".github/workflows/anvil-scheduled-impl.yml",
+            ".github/workflows/anvil-release-profile.yml",
             ".github/workflows/anvil-pr.yml",
             ".github/workflows/anvil-scheduled.yml",
             ".github/skills/code-review/SKILL.md",

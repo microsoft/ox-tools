@@ -1,7 +1,7 @@
 version = 2
 tool = "anvil"
-tool_version = "0.25.1"
-catalog_checksum = "sha256:8aa682e5e6f988d7435c30343bf422e5d5d1f2da67b0f1d968c329e6771d83de"
+tool_version = "0.26.0"
+catalog_checksum = "sha256:54084ee7e50aad84d6dbbf8eed7e1ad97f285802558c7c1cd99455cb2c2b9a8f"
 
 [[file]]
 path = ".anvil/container/Dockerfile.dockerignore"
@@ -17,7 +17,7 @@ checksum = "sha256:eef931fadde132d3771cef8a11737236f75bcce7170ea460b33525577f083
 
 [[file]]
 path = ".github/actions/anvil-run-group/action.yml"
-checksum = "sha256:3505d10a4f895d1c3693d6a6b88a18d76165df499618a570e4707c75e65463cd"
+checksum = "sha256:4963cbdc8014cb7f81582c1ead36516269278ce6b473829a4858a9fe619236ae"
 
 [[file]]
 path = ".github/actions/anvil-setup/action.yml"
@@ -50,6 +50,10 @@ checksum = "sha256:d797c0cf2365981f73574fd9f78cbf594a4c25fb6681a6e4a6ca6f54f4b91
 [[file]]
 path = ".github/workflows/anvil-pr.yml"
 checksum = "sha256:f87e953dc0f258404a7c3dfb66192f776b8b7e67283feda1036b74e460e1c7e6"
+
+[[file]]
+path = ".github/workflows/anvil-release-profile.yml"
+checksum = "sha256:7b51762cb728f1a5b9cd850e37d292c0647a09fc8e6b89f0ed5a32ab083c22b9"
 
 [[file]]
 path = ".github/workflows/anvil-scheduled-impl.yml"
@@ -224,6 +228,10 @@ path = "justfiles/anvil/groups/pr-test.just"
 checksum = "sha256:0bd55f1dfe7ed811bebd59a633b92199eb73543e26c409a0ce33f3a75d0f9d27"
 
 [[file]]
+path = "justfiles/anvil/groups/release-profile.just"
+checksum = "sha256:720b3015ae4955339d8aba8defc4fd88a807d78dad03cf2667dba9c67d1bf9cd"
+
+[[file]]
 path = "justfiles/anvil/groups/scheduled-advisories.just"
 checksum = "sha256:79f84815de90b473d1d9d46325bb662215452c155472716b8b86b705addb2392"
 
@@ -249,7 +257,7 @@ checksum = "sha256:0019ed8bc150f573d480c1f70699f33d48eeb421da60f8bde4a213738a865
 
 [[file]]
 path = "justfiles/anvil/mod.just"
-checksum = "sha256:91bac4bb4d4767841164844f4ce1fb6aa071d488477f94c27e8d17eb289d8656"
+checksum = "sha256:8ef707f2a225e702e65ad55d6df1619cbb7ea5070d8abceb36c545614c79e208"
 
 [[file]]
 path = "justfiles/anvil/tiers.just"

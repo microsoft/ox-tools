@@ -126,6 +126,7 @@ just anvil-examples
 just anvil-fmt --fix
 just anvil-miri --package my-crate --example basic
 just anvil-readme --fix
+just anvil-release-profile
 just anvil-scheduled
 just anvil-full
 ```
@@ -154,6 +155,9 @@ the generated cloud workflow:
 The scheduled tier runs full-workspace backstops and expensive checks that
 do not belong on every pull request, including extended Miri profiles, full
 mutation testing, feature-powerset checks, and benchmark compilation.
+Repositories that need optimization-sensitive validation can opt into
+`anvil-release-profile`, which runs full-workspace Clippy, nextest, and
+doctests with Cargo’s release profile. It is not part of any default tier.
 GitHub scheduled failures can be published to a durable issue.
 
 Local and cloud runs call the same generated recipes with the same check
@@ -467,7 +471,7 @@ More detailed design and operational guidance is available in the
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbBB0rQ4OCwxEbsR1IHqTyVmAbLictnbHgN60bG7Uxykcwxd5hZIGDa2NhcmdvLWFudmlsZjAuMjUuMWtjYXJnb19hbnZpbA
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbguLMU-UHuPobSj2m4QgRNlkbUs0zbScDwQgboM4IL6B-RMVhZIGDa2NhcmdvLWFudmlsZjAuMjYuMGtjYXJnb19hbnZpbA
  [__link0]: https://github.com/casey/just
  [__link1]: https://rust-lang.github.io/rustfmt/
  [__link10]: https://www.conventionalcommits.org/
@@ -487,14 +491,14 @@ This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Br
  [__link23]: https://crates.io/crates/cargo-gamma
  [__link24]: https://crates.io/crates/cargo-hack
  [__link25]: https://crates.io/crates/cargo-coverage-gate
- [__link26]: https://docs.rs/cargo-anvil/0.25.1/cargo_anvil/?search=Catalog::anvil
- [__link27]: https://docs.rs/cargo-anvil/0.25.1/cargo_anvil/?search=Artifact
- [__link28]: https://docs.rs/cargo-anvil/0.25.1/cargo_anvil/fn.run_app.html
- [__link29]: https://docs.rs/cargo-anvil/0.25.1/cargo_anvil/?search=update
+ [__link26]: https://docs.rs/cargo-anvil/0.26.0/cargo_anvil/?search=Catalog::anvil
+ [__link27]: https://docs.rs/cargo-anvil/0.26.0/cargo_anvil/?search=Artifact
+ [__link28]: https://docs.rs/cargo-anvil/0.26.0/cargo_anvil/fn.run_app.html
+ [__link29]: https://docs.rs/cargo-anvil/0.26.0/cargo_anvil/?search=update
  [__link3]: https://crates.io/crates/cargo-each
- [__link30]: https://docs.rs/cargo-anvil/0.25.1/cargo_anvil/?search=UpdateOptions
- [__link31]: https://docs.rs/cargo-anvil/0.25.1/cargo_anvil/?search=UpdateIo
- [__link32]: https://docs.rs/cargo-anvil/0.25.1/cargo_anvil/?search=UpdateResult
+ [__link30]: https://docs.rs/cargo-anvil/0.26.0/cargo_anvil/?search=UpdateOptions
+ [__link31]: https://docs.rs/cargo-anvil/0.26.0/cargo_anvil/?search=UpdateIo
+ [__link32]: https://docs.rs/cargo-anvil/0.26.0/cargo_anvil/?search=UpdateResult
  [__link4]: https://crates.io/crates/cargo-sort
  [__link5]: https://crates.io/crates/cargo-heather
  [__link6]: https://crates.io/crates/cargo-ensure-no-cyclic-deps

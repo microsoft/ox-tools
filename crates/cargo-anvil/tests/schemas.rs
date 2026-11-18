@@ -149,6 +149,10 @@ fn just_lists_emitted_recipes() {
         ("anvil-pr-runtime-analysis", "# Run the pull request runtime analysis."),
         ("anvil-pr-slow", "# Run the slow pull request checks."),
         ("anvil-pr-test", "# Run the pull request tests."),
+        (
+            "anvil-release-profile",
+            "# Run full-workspace Clippy and tests with Cargo's release profile.",
+        ),
         ("anvil-scheduled", "# Run all scheduled checks."),
         ("anvil-scheduled-advisories", "# Run the scheduled advisory checks."),
         ("anvil-scheduled-exhaustive", "# Run the scheduled exhaustive checks."),

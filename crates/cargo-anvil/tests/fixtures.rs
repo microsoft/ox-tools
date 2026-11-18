@@ -127,6 +127,7 @@ fn single_crate_emits_crate_lints_and_justfiles() {
         "justfiles/anvil/checks/fmt.just",
         "justfiles/anvil/checks/miri.just",
         "justfiles/anvil/groups/pr-fast.just",
+        "justfiles/anvil/groups/release-profile.just",
         "justfiles/anvil/groups/scheduled-exhaustive.just",
         "justfiles/anvil/tiers.just",
         "justfiles/anvil/versions.just",

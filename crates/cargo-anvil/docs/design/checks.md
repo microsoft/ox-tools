@@ -17,6 +17,7 @@ that floor universally.
 | `pr-runtime-analysis` | miri, careful, loom |
 | `pr-fuzzing` | bolero |
 | `pr-mutants` | mutants-diff |
+| `release-profile` | release-profile Clippy, nextest, and doctests |
 | `scheduled-test` | check-all-targets, llvm-cov, doc-test, examples, Bolero scheduled campaign |
 | `scheduled-advisories` | deny, audit, aprz, clippy |
 | `scheduled-runtime-analysis` | miri, miri-tree-borrows, miri-strict-provenance, miri-race-coverage |
@@ -26,7 +27,7 @@ that floor universally.
 PR group except `pr-fast`. `anvil-scheduled` runs the scheduled groups, and
 `anvil-full` runs both tiers. Local groups run sequentially; CI runs independent
 groups in parallel. Checks within a group run sequentially and a failure stops
-the group.
+the group. `release-profile` is an opt-in group outside every tier.
 
 ### Default CI platforms
 
@@ -210,6 +211,22 @@ Both mutation recipes require a 100% assertion-killed score and zero unresolved
 flaky outcomes, then merge learned hints even after a failed campaign.
 See [Gamma configuration and outcomes](./local.md#9-mutation-testing-with-cargo-gamma).
 
+### `release-profile`
+
+This opt-in group validates optimization-sensitive behavior across the full
+workspace. It runs Clippy with all targets and all features, then nextest and
+doctests with all features. Every command uses locked dependencies and Cargo's
+`release` profile.
+
+The group never uses impact analysis. It writes nextest JUnit output to
+`target/anvil/test-results/release-profile.xml`. Generated ADO steps publish
+that file to Test Results, and the shared GitHub group action uploads it as a
+workflow artifact.
+
+Use this group when release-only build scripts, `cfg(debug_assertions)`, native
+linking, or optimization can change behavior. It is not part of `anvil-pr`,
+`anvil-scheduled`, or `anvil-full` because it duplicates expensive compilation.
+
 ### `scheduled-test`
 
 The group runs `check-all-targets`, the PR test checks, and finally the Bolero
@@ -285,7 +302,7 @@ Cargo-delta selects packages from the committed diff against the base.
 | modified | fmt, cargo-sort, license-headers, ensure-no-cyclic-deps, ensure-no-default-features | Skip when empty; otherwise check the tool's normal workspace/input domain. |
 | affected | clippy, check-all-targets, llvm-cov, doc-test, examples, msrv-test, mutants-diff, all Miri profiles, careful, loom, bolero, semver-check, external-types, bench | Select affected packages; mutation testing further selects changed lines across the workspace. |
 | required | doc-build, udeps, cargo-hack | Include affected packages and their workspace dependencies. |
-| unscoped | pr-title, deny, audit, aprz, mutants-full, readme-check, spellcheck | Run regardless of impact. |
+| unscoped | pr-title, deny, audit, aprz, mutants-full, readme-check, spellcheck, release-profile | Run regardless of impact. |
 
 README templates and spelling dictionaries can be repository-level inputs, so
 their checks are unscoped. Empty categories skip scoped checks successfully;
