@@ -5298,6 +5298,7 @@ anvil-container *command:
                 if ($name -isnot [string] -or $name -cnotmatch '^[A-Za-z_][A-Za-z0-9_]*$' -or
                     $name -imatch '^(ANVIL_(CONTAINER_|IN_CONTAINER$|IMPACT|MIRI_JOBS$)|CARGO_(HOME$|BUILD_|TARGET_|ENCODED_|ENV_|NET_|UNSTABLE_)|RUSTC|RUSTDOC|RUSTFLAGS$|RUSTUP_|LD_|DYLD_|MSRUSTUP_(HOME|TOOLCHAIN)$)' -or
                     $name -iin @('PATH', 'HOME', 'USERPROFILE', 'WSLENV', 'BASH_ENV', 'ENV', 'SHELLOPTS', 'RUSTC_BOOTSTRAP',
+                                  'DOCKER_HOST', 'DOCKER_CONTEXT', 'DOCKER_CONFIG', 'CONTAINER_HOST',
                                   'PR_TITLE', 'BASE_REF', 'GITHUB_BASE_REF', 'SYSTEM_PULLREQUEST_TARGETBRANCH')) {
                     Write-Error 'anvil: Anvil-PrepareEnv contains an invalid or reserved environment name'
                     exit 1

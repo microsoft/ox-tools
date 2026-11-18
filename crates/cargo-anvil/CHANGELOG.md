@@ -10,6 +10,7 @@
 
 - 🐛 Bug Fixes
 
+  - cargo-anvil: reject preparation engine selector overrides
   - cargo-anvil: inspect regular hard-linked cache files
   - cargo-anvil: select preparation tools outside workspace overrides
   - cargo-anvil: inspect preparation output incrementally
@@ -18,6 +19,7 @@
 
 - ✔️ Tasks
 
+  - cargo-anvil: regenerate regular hard-link inspection artifacts
   - cargo-anvil: regenerate image tool provenance artifacts
   - cargo-anvil: regenerate incremental capture artifacts
   - cargo-anvil: regenerate bounded preparation artifacts
