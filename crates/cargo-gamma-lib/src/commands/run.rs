@@ -554,7 +554,9 @@ fn finish_run<H: Host>(host: &mut H, args: &RunArgs, styler: Styler, executed: E
             host.error(),
             "no eligible mutants remain in the diff after source and configuration exclusions; mutation gates are not applicable"
         );
-        return EXIT_OK;
+        return
+        // #[gamma::skip(return_value.default, reason = "EXIT_OK and i32::default() are both zero; this replacement changes neither exit status nor side effects.", tag = "equivalent")]
+        EXIT_OK;
     }
 
     // Every mutant was suppressed, unviable, or never built, so the score is a ratio with nothing
