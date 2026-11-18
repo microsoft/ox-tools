@@ -220,6 +220,9 @@ then with no default features. This catches dependencies accidentally supplied
 by feature unification with other workspace members. All targets are checked,
 including tests, examples, and benches, but none are executed by this check.
 
+Compiler lint warnings from local packages fail the check. The selected stable
+toolchain requires Cargo 1.97 or newer for this warnings-as-errors policy.
+
 Targets requiring features must declare `required-features` or gate the relevant
 code. Cargo skips targets whose requirements are disabled; libraries must build
 with defaults disabled. Dependency defaults still apply. All failing packages

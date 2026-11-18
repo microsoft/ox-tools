@@ -1027,10 +1027,10 @@ fn all_targets_checks_packages_in_both_configurations_and_preserves_exit_codes()
             fs::read_to_string(&log).unwrap().lines().collect::<Vec<_>>(),
             [
                 format!(
-                    "+stable-test each {selection} --keep-going -- cargo +stable-test check --package {{cargo-spec}} --all-targets --locked"
+                    "+stable-test each {selection} --keep-going -- cargo +stable-test check --package {{cargo-spec}} --all-targets --locked --config build.warnings='deny'"
                 ),
                 format!(
-                    "+stable-test each {selection} --keep-going -- cargo +stable-test check --package {{cargo-spec}} --all-targets --no-default-features --locked"
+                    "+stable-test each {selection} --keep-going -- cargo +stable-test check --package {{cargo-spec}} --all-targets --no-default-features --locked --config build.warnings='deny'"
                 ),
             ],
             "both configurations must check packages independently, with both Cargo processes selecting stable"
@@ -1067,8 +1067,8 @@ fn all_targets_checks_packages_in_both_configurations_and_preserves_exit_codes()
     assert_eq!(
         fs::read_to_string(&log).unwrap().lines().collect::<Vec<_>>(),
         [
-            "+stable-test each --workspace --keep-going -- cargo +stable-test check --package {cargo-spec} --all-targets --locked",
-            "+stable-test each --workspace --keep-going -- cargo +stable-test check --package {cargo-spec} --all-targets --no-default-features --locked",
+            "+stable-test each --workspace --keep-going -- cargo +stable-test check --package {cargo-spec} --all-targets --locked --config build.warnings='deny'",
+            "+stable-test each --workspace --keep-going -- cargo +stable-test check --package {cargo-spec} --all-targets --no-default-features --locked --config build.warnings='deny'",
         ]
     );
 }
@@ -1089,6 +1089,36 @@ fn all_targets_skips_empty_affected_selection() {
     );
     assert!(!log.exists(), "Cargo must not run for an empty affected selection");
     assert!(String::from_utf8_lossy(&output.stdout).contains("no affected packages"));
+}
+
+#[test]
+fn all_targets_emits_warning_errors_and_propagates_check_failures() {
+    let execution = CHECK_ALL_TARGETS
+        .split_once("    $configs = ")
+        .unwrap()
+        .1
+        .split_once("\n# Install prerequisites")
+        .unwrap()
+        .0;
+
+    // Literal TOML quotes survive legacy PowerShell native argument passing.
+    assert_eq!(
+        execution.trim_end(),
+        concat!(
+            "@(\n",
+            "        @{ name = 'default';    flags = @() },\n",
+            "        @{ name = 'no-default'; flags = @('--no-default-features') }\n",
+            "    )\n",
+            "    foreach ($cfg in $configs) {\n",
+            "        Write-Host \"anvil-check-all-targets: checking $($cfg.name) features\"\n",
+            "        $featureArgs = $cfg.flags\n",
+            "        & cargo {{_anvil_stable_toolchain_args}} each @pkg --keep-going '--' cargo {{_anvil_stable_toolchain_args}} check --package '{cargo-spec}' --all-targets @featureArgs --locked --config \"build.warnings='deny'\"\n",
+            "        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n",
+            "    }",
+        )
+    );
+    assert!(!CHECK_ALL_TARGETS.contains("$env:RUSTFLAGS"));
+    assert!(!CHECK_ALL_TARGETS.contains("$env:CARGO_ENCODED_RUSTFLAGS"));
 }
 
 #[test]
