@@ -3181,6 +3181,61 @@ mod tests {
     }
 
     #[test]
+    fn empty_diff_ci_summaries_do_not_claim_policy_exclusions() {
+        let directory = crate::testing::workdir("ci-summary-empty-diff-");
+        let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).unwrap();
+        let path = root.join("summary.md");
+        let mut plan = fixtures::plan(Vec::new());
+        plan.root = root;
+        let mut args = RunArgs {
+            annotations: crate::ci::Annotations::Github,
+            ..RunArgs::default()
+        };
+        args.select.in_diff = Some("changes.patch".into());
+        let mut host = Sink::default().with_env("GITHUB_STEP_SUMMARY", path.as_str());
+
+        emit_ci(&mut host, &args, &plan, None, Styler::new(false)).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(path).unwrap(),
+            "## Mutation testing\n\n**Score 100.0%** — 0 detected, 0 not detected of 0 mutants.\n\n| Outcome | Count |\n|---|---:|\n"
+        );
+    }
+
+    #[test]
+    fn diff_policy_exclusions_do_not_hide_restored_survivors() {
+        use crate::model::{Channel, Suppression};
+
+        let mut restored = mutant(0, Outcome::Survived, 1);
+        restored.suppression = Some(Suppression {
+            channel: Channel::Config,
+            reason: Some("diagnostic formatting is excluded".into()),
+            tag: None,
+            line: None,
+        });
+        let mut args = RunArgs {
+            min_score: Some(100.0),
+            max_flaky: Some(0),
+            ..RunArgs::default()
+        };
+        args.select.in_diff = Some("changes.patch".into());
+        let mut host = Sink::default();
+        let code = finish_run(
+            &mut host,
+            &args,
+            Styler::new(false),
+            Executed {
+                plan: Some(fixtures::plan(vec![restored])),
+                stuck: Vec::new(),
+            },
+        );
+
+        assert_eq!(code, EXIT_GATE_FAILED);
+        assert_eq!(host.err(), "error: mutation score 0.0% is below the required 100.0%\n");
+        assert_eq!(host.out(), "");
+    }
+
+    #[test]
     fn diff_policy_exclusions_do_not_hide_incomplete_or_failing_mutations() {
         use crate::model::{Channel, Suppression};
 
