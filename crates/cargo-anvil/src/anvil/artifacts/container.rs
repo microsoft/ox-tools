@@ -216,22 +216,29 @@ pub fn dockerignore() -> Artifact {
 /// catalog adds one with [`crate::CatalogBuilder::with_artifact`]; a single
 /// repository can write the same path by hand. The recipe loads it either way.
 ///
-/// The script may define any of three functions, and is dot-sourced before the
+/// The script may define any of four functions, and is dot-sourced before the
 /// phase that needs it. Each is named for what it supplies rather than for when
-/// it runs, because all three exist to provide credentials or an image, not as
+/// it runs, because all four exist to provide credentials or an image, not as
 /// general-purpose extension points:
 ///
 /// - `Anvil-BuildSecrets` returns `@{ Secrets = @{ <id> = <value> } }`. Each entry
 ///   becomes a `BuildKit` `--secret id=<id>`, passed by environment variable
 ///   name so the value never reaches a process argument, and never a layer.
 /// - `Anvil-RunEnv` returns `@{ Env = @{ <NAME> = <value> } }`. Each entry is
-///   forwarded into the container by name, for the same reason.
+///   forwarded into the requested command's container by name. This explicit
+///   legacy mode exposes the values to workspace code.
+/// - `Anvil-PrepareEnv` returns only `@{ Env = @{ <NAME> = <value> } }`.
+///   Its values reach only a disposable fixed `cargo fetch --locked` phase.
+///   Captured output and invocation-scoped registry/git caches are inspected
+///   for every value before a fresh, credential-free offline validation run.
+///   It cannot coexist with `Anvil-RunEnv` or `--github-token`; empty values,
+///   driver-control replacements, leaks and incomplete inspection fail closed.
 /// - `Anvil-ResolveImage` takes the computed reference and returns one to use
 ///   instead, or nothing. A hook declaring both `Engine` and `EnginePrefix`
 ///   also receives the exact selected engine invocation. Declaring only one
 ///   supplies neither, and hooks declaring neither remain compatible.
 ///
-/// The two credential phases are fail-closed: an empty value, a return with no
+/// The credential phases are fail-closed: an empty value, a return with no
 /// entries, a throw, or a script that cannot even be loaded stops the run. A
 /// build that silently proceeded without its credential would install a reduced
 /// tool set and then be tagged with the same content hash a credentialed build
@@ -458,10 +465,13 @@ mod tests {
     )]
     #[test]
     fn recipe_has_no_generation_time_placeholders() {
-        // Every value is a literal or resolved at run time; nothing is
-        // substituted at emit time, so the recipe cannot drift from a
-        // configuration file.
-        assert!(!RECIPE.contains("__"), "the recipe must not carry rendering placeholders");
+        // The credential-name marker is replaced by the launcher at runtime,
+        // not by the generator.
+        let without_runtime_marker = RECIPE.replace("__CREDENTIAL_NAMES__", "");
+        assert!(
+            !without_runtime_marker.contains("__"),
+            "the recipe must not carry generation-time placeholders"
+        );
         assert!(!RECIPE.contains("anvil.toml"));
     }
 
@@ -783,7 +793,9 @@ mod tests {
         // NAME=VALUE on a command line is recorded by endpoint telemetry and
         // retained far longer than a short-lived token is meant to live.
         assert!(RECIPE.contains("$runArgs += @('-e', $name)"));
-        assert!(!RECIPE.contains("-e', \"$name="));
+        assert!(RECIPE.contains("foreach ($name in $prepareVars.Keys) { $prepareArgs += @('-e', $name) }"));
+        let without_empty_loader_controls = RECIPE.replace("$prepareArgs += @('-e', \"$name=\", '-e', \"CARGO_ENV_$name=\")", "");
+        assert!(!without_empty_loader_controls.contains("-e', \"$name="));
     }
 
     #[test]
@@ -808,8 +820,8 @@ mod tests {
         // An engine seeds a named volume from the image only on first
         // creation, so mounting a directory that holds installed binaries
         // pins the first image's tools over every later tag.
-        assert!(RECIPE.contains("-cargo-registry:/usr/local/cargo/registry"));
-        assert!(RECIPE.contains("-cargo-git:/usr/local/cargo/git"));
+        assert!(RECIPE.contains("\"${registryVolume}:/usr/local/cargo/registry\""));
+        assert!(RECIPE.contains("\"${gitVolume}:/usr/local/cargo/git\""));
         assert!(!RECIPE.contains("-cargo:/usr/local/cargo'"));
         assert!(!RECIPE.contains(":/usr/local/rustup"));
     }

@@ -1910,7 +1910,6 @@ fn container_impact_script() -> String {
         recipe = recipe.replace(expression, value);
     }
     assert!(!recipe.contains("{{"), "all recipe interpolation inputs must be controlled");
-
     // Execute the complete recipe, with host/process collaborators scripted in
     // the same interpreter. No nested just/pwsh startup or mutable disk fixture
     // participates in the refusal or forwarding verdict.
@@ -3260,6 +3259,9 @@ fn doc_test_locked_capability_discovery_rejects_a_stale_lockfile() {
         &[("doc-test.just", DOC_TEST), ("impact.just", IMPACT)],
         &["anvil-doc-test-validate-prereqs", "anvil-toolchain-stable-install", "anvil-impact"],
     );
+    let manifest = tmp.path().join("Cargo.toml");
+    let standalone_manifest = format!("{}\n[workspace]\n", fs::read_to_string(&manifest).unwrap());
+    write(&manifest, &standalone_manifest);
     write(
         &tmp.path().join("src/lib.rs"),
         "/// A doctest.\n/// ```\n/// assert!(true);\n/// ```\npub fn documented() {}\n",
@@ -3272,7 +3274,7 @@ fn doc_test_locked_capability_discovery_rejects_a_stale_lockfile() {
     assert!(lock.status.success(), "failed to create fixture lockfile");
     write(
         &tmp.path().join("Cargo.toml"),
-        "[package]\nname = \"fixture\"\nversion = \"0.2.0\"\nrust-version = \"1.97\"\n",
+        "[package]\nname = \"fixture\"\nversion = \"0.2.0\"\nrust-version = \"1.97\"\n\n[workspace]\n",
     );
 
     let output = run_just_with_real_cargo_env(tmp.path(), &["anvil-doc-test"], &[("ANVIL_IMPACT", OsStr::new("off"))]);
