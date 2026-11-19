@@ -488,16 +488,16 @@ impl<H: Host> Reporting<'_, H> {
                         &now,
                         self.config.medium_risk_threshold,
                         self.config.low_risk_threshold,
-                    );
+                    )?;
 
-                    ReportableCrate::new(
+                    Ok(ReportableCrate::new(
                         Arc::clone(facts.crate_spec.name_arc()),
                         Arc::clone(facts.crate_spec.version_arc()),
                         metrics,
                         Some(evaluation),
-                    )
+                    ))
                 })
-                .collect()
+                .collect::<Result<Vec<_>>>()?
         } else {
             analyzable_crates
                 .into_iter()

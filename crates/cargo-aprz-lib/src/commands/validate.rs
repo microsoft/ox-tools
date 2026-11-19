@@ -64,7 +64,7 @@ fn validate_config_inner(config_path: &Utf8Path) -> Result<()> {
             &ZonedDateTime::now(),
             config.medium_risk_threshold,
             config.low_risk_threshold,
-        );
+        )?;
 
         // Check if any expression evaluation failed
         for outcome in &appraisal.expression_outcomes {

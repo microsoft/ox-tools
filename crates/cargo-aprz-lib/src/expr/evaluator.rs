@@ -12,6 +12,7 @@ use cel::objects::Map;
 use cel::{Context, Program, Value};
 use chrono::{DateTime, FixedOffset, Utc};
 use jiff::{Timestamp, ZonedDateTime};
+use ohno::app_err;
 
 use super::{Appraisal, Expression, ExpressionDisposition, ExpressionOutcome, Risk};
 use crate::metrics::{METRIC_DEFINITIONS, Metric, MetricValue};
@@ -40,6 +41,10 @@ enum PositiveWeightProgress {
 /// rather than causing the function to fail.
 ///
 /// Expressions without explicit points default to 1 point each.
+///
+/// # Errors
+///
+/// Returns an error when the `now` time-zone offset cannot be represented by CEL.
 pub fn evaluate(
     high_risk: &[Expression],
     eval: &[Expression],
@@ -47,8 +52,8 @@ pub fn evaluate(
     now: &ZonedDateTime,
     medium_risk_threshold: f64,
     low_risk_threshold: f64,
-) -> Appraisal {
-    let context = build_cel_context(metrics, now);
+) -> crate::Result<Appraisal> {
+    let context = build_cel_context(metrics, now)?;
 
     // Evaluate all high-risk expressions, capturing outcomes for each
     let mut high_risk_triggered = false;
@@ -74,11 +79,11 @@ pub fn evaluate(
     }
 
     if high_risk_triggered {
-        return Appraisal::required_check_failure(high_risk_outcomes);
+        return Ok(Appraisal::required_check_failure(high_risk_outcomes));
     }
 
     if eval.is_empty() {
-        return Appraisal::new(Risk::Low, high_risk_outcomes, 0, 0, 100.0);
+        return Ok(Appraisal::new(Risk::Low, high_risk_outcomes, 0, 0, 100.0));
     }
 
     let mut available_points: u32 = 0;
@@ -119,7 +124,7 @@ pub fn evaluate(
     }
 
     if matches!(positive_weight_progress, PositiveWeightProgress::AllInconclusive) {
-        return Appraisal::weighted_evaluation_failure(outcomes);
+        return Ok(Appraisal::weighted_evaluation_failure(outcomes));
     }
 
     // Empty or zero-weight policies have nothing weighted to fail.
@@ -137,7 +142,7 @@ pub fn evaluate(
         Risk::High
     };
 
-    Appraisal::new(risk, outcomes, available_points, awarded_points, score)
+    Ok(Appraisal::new(risk, outcomes, available_points, awarded_points, score))
 }
 
 /// Evaluates a pre-parsed boolean expression against a context
@@ -172,9 +177,18 @@ fn metric_key(name: &str, suffix: &str) -> Arc<String> {
     METRIC_KEYS.get(name).map_or_else(|| Arc::new(suffix.to_string()), Arc::clone)
 }
 
-fn build_cel_context(metrics: impl IntoIterator<Item: core::borrow::Borrow<Metric>>, now: &ZonedDateTime) -> Context<'static, 'static> {
+fn build_cel_context(
+    metrics: impl IntoIterator<Item: core::borrow::Borrow<Metric>>,
+    now: &ZonedDateTime,
+) -> crate::Result<Context<'static, 'static>> {
     use core::borrow::Borrow;
 
+    let offset_seconds = now.offset().seconds();
+    let offset = FixedOffset::east_opt(offset_seconds).ok_or_else(|| {
+        app_err!(
+            "CEL cannot represent the current time-zone offset of {offset_seconds} seconds; use a time zone with an offset between -23:59:59 and +23:59:59"
+        )
+    })?;
     let mut context = Context::default();
 
     // Build nested map structure for dotted metric names
@@ -208,9 +222,9 @@ fn build_cel_context(metrics: impl IntoIterator<Item: core::borrow::Borrow<Metri
     }
 
     // Add now variable
-    context.add_variable_from_value("now", Value::Timestamp(to_cel_timestamp(now.timestamp(), now.offset().seconds())));
+    context.add_variable_from_value("now", Value::Timestamp(to_cel_timestamp(now.timestamp(), offset)));
 
-    context
+    Ok(context)
 }
 
 /// Convert a `MetricValue` to a CEL Value
@@ -220,7 +234,10 @@ fn convert_metric_value(value: &MetricValue) -> Value {
         MetricValue::Float(f) => Value::Float(*f),
         MetricValue::Boolean(b) => Value::Bool(*b),
         MetricValue::String(s) => Value::String(Arc::new(s.to_string())),
-        MetricValue::DateTime(dt) => Value::Timestamp(to_cel_timestamp(*dt, 0)),
+        MetricValue::DateTime(dt) => Value::Timestamp(to_cel_timestamp(
+            *dt,
+            FixedOffset::east_opt(0).expect("UTC's zero offset is always representable in Chrono"),
+        )),
         MetricValue::List(values) => {
             // Recursively convert each MetricValue to CEL Value
             let cel_values: Vec<Value> = values.iter().map(convert_metric_value).collect();
@@ -229,7 +246,7 @@ fn convert_metric_value(value: &MetricValue) -> Value {
     }
 }
 
-fn to_cel_timestamp(timestamp: Timestamp, offset_seconds: i32) -> DateTime<FixedOffset> {
+fn to_cel_timestamp(timestamp: Timestamp, offset: FixedOffset) -> DateTime<FixedOffset> {
     let seconds = timestamp.as_second();
     let nanoseconds = timestamp.subsec_nanosecond();
     let (seconds, nanoseconds) = if nanoseconds < 0 {
@@ -239,7 +256,6 @@ fn to_cel_timestamp(timestamp: Timestamp, offset_seconds: i32) -> DateTime<Fixed
     };
     let utc = DateTime::<Utc>::from_timestamp(seconds, nanoseconds.cast_unsigned())
         .expect("Jiff timestamps are within Chrono's supported calendar range");
-    let offset = FixedOffset::east_opt(offset_seconds).expect("time-zone offsets fit Chrono's fixed-offset range");
     utc.with_timezone(&offset)
 }
 
@@ -253,6 +269,17 @@ mod tests {
 
     const MEDIUM_THRESHOLD: f64 = 30.0;
     const LOW_THRESHOLD: f64 = 70.0;
+
+    fn evaluate(
+        high_risk: &[Expression],
+        eval: &[Expression],
+        metrics: impl IntoIterator<Item: core::borrow::Borrow<Metric>>,
+        now: &ZonedDateTime,
+        medium: f64,
+        low: f64,
+    ) -> Appraisal {
+        super::evaluate(high_risk, eval, metrics, now, medium, low).expect("the test offset is representable by CEL")
+    }
 
     fn test_timestamp() -> ZonedDateTime {
         jiff::tz::TimeZone::system()
@@ -300,10 +327,26 @@ mod tests {
             .parse::<Timestamp>()
             .expect("the fixed timestamp is valid");
 
-        let converted = to_cel_timestamp(timestamp, 19_800);
+        let converted = to_cel_timestamp(timestamp, FixedOffset::east_opt(19_800).unwrap());
 
         assert_eq!(converted.timestamp(), timestamp.as_second());
         assert_eq!(converted.offset().local_minus_utc(), 19_800);
+    }
+
+    #[test]
+    fn cel_offset_boundaries_are_checked_even_for_empty_policies() {
+        for seconds in [-93_599, -86_400, 86_400, 93_599] {
+            let offset = jiff::tz::Offset::from_seconds(seconds).unwrap();
+            let now = Timestamp::UNIX_EPOCH.to_zoned_datetime(jiff::tz::TimeZone::fixed(offset));
+            let error = super::evaluate(&[], &[], empty::<Metric>(), &now, MEDIUM_THRESHOLD, LOW_THRESHOLD).unwrap_err();
+            assert!(error.to_string().contains(&format!("{seconds} seconds")));
+        }
+        for seconds in [-86_399, 86_399] {
+            let offset = jiff::tz::Offset::from_seconds(seconds).unwrap();
+            let now = Timestamp::UNIX_EPOCH.to_zoned_datetime(jiff::tz::TimeZone::fixed(offset));
+            let appraisal = super::evaluate(&[], &[], empty::<Metric>(), &now, MEDIUM_THRESHOLD, LOW_THRESHOLD).unwrap();
+            assert_eq!(appraisal.risk, Risk::Low);
+        }
     }
 
     #[test]
@@ -408,7 +451,7 @@ mod tests {
 
     fn eval_expr(expr: &str, metrics: &[Metric]) -> Result<bool, String> {
         let program = Program::compile(expr).map_err(|e| format!("could not compile expression: {e}"))?;
-        let context = build_cel_context(metrics, &test_timestamp());
+        let context = build_cel_context(metrics, &test_timestamp()).expect("the test offset is representable by CEL");
         evaluate_expression(&program, "test", &context)
     }
 
@@ -522,7 +565,7 @@ mod tests {
             Metric::with_value(&XRAY_DEF, MetricValue::UInt(7)),
             Metric::with_value(&STARS_DEF, MetricValue::UInt(9)),
         ];
-        let context = build_cel_context(&metrics, &test_timestamp());
+        let context = build_cel_context(&metrics, &test_timestamp()).expect("the test offset is representable by CEL");
         assert_eq!(
             Program::compile("xray").unwrap().execute(&context).unwrap(),
             Value::Map(Map::from(std::collections::HashMap::from([(

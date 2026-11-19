@@ -153,7 +153,8 @@ instants with Jiff timestamps; calendar dates are interpreted in UTC for
 download-table encoding and date-only metric values. The HTML report header
 and rate-limit display use local time; the CEL `now` value retains the local
 offset. The CEL timestamp feature still requires a Chrono conversion at the
-expression-evaluation boundary.
+expression-evaluation boundary. Local offsets of 24 hours or more cannot be
+represented by CEL and cause an evaluation error.
 
 The process takes an advisory lock on the cache root before collection so two
 instances do not concurrently mutate shared cache state.

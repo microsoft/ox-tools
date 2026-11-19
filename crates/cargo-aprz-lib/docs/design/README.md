@@ -16,6 +16,8 @@ timestamps to Chrono at the CEL boundary because CEL's
 timestamp feature still requires Chrono. Negative fractional Jiff timestamps
 are normalized to Chrono's floor-second and nonnegative-nanosecond representation
 so the conversion preserves the instant.
+CEL cannot represent UTC offsets of 24 hours or more; APRZ reports an
+evaluation error for such local offsets rather than changing the offset.
 
 ## Policy string sizes
 
