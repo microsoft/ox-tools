@@ -6,12 +6,13 @@
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/local.md
 #
 # Impact analysis lives in one place: the `anvil-impact` recipe. It runs
-# cargo-delta against the working tree vs. the base ref and writes durable
-# artifacts under target/anvil/impact/ that the per-crate check recipes
-# consume via _anvil-impact-include. The same recipe runs locally and in
-# cloud workflows: a cloud impact job runs `just anvil-impact` and uploads
-# target/anvil/impact/ as an artifact; each downstream group job downloads
-# it, so the checks read the cache instead of recomputing.
+# cargo-delta against the working tree vs. the base ref. Clean runs write a
+# durable cache under target/anvil/impact/; dirty local runs write their
+# ephemeral projections under target/anvil/impact-dirty/. The per-crate check
+# recipes consume both via _anvil-impact-include. Cloud impact jobs require a
+# clean checkout, run `just anvil-impact`, and upload target/anvil/impact/ as
+# an artifact; each downstream group job downloads it, so the checks read the
+# clean cache instead of recomputing.
 #
 # The base ref is resolved by the shared _anvil-base-ref helper (helpers.just,
 # also reused by anvil-mutants-diff). The impact -> `--package name@version`
@@ -39,16 +40,19 @@
 # consume mode, for example a checked-in fixture. Unset/empty uses the default
 # target/anvil/impact directory. Computing impact never writes to this override.
 
-# Private. Produces the two cargo-delta snapshots under
-# target/anvil/impact/snapshots/ with two independent cache keys:
+# Private. Produces cargo-delta snapshots with two independent cache keys:
 #   * baseline.json  -- snapshot of the base ref. EXPENSIVE (needs a throwaway
 #     git worktree). Keyed on the base commit sha, effective .delta.toml
 #     identity, and pinned cargo-delta version (baseline.key stores
-#     "<base-sha> <config-hash> <cargo-delta-version>").
+#     "<base-sha> <config-hash> <cargo-delta-version>"). A clean run stores
+#     it under target/anvil/impact/snapshots/ and reuses it while fresh.
 #   * current.json   -- snapshot of the working tree. Cheap. Keyed on
-#     "<HEAD sha> <cargo-delta-version>" (current.key); the dirty-tree guard
-#     means a clean tree corresponds exactly to HEAD. Tool upgrades invalidate
-#     both snapshots so incompatible formats are never reused.
+#     "<HEAD sha> <cargo-delta-version>" (current.key) for a clean tree.
+#     Dirty local runs always snapshot the files on disk into
+#     target/anvil/impact-dirty/snapshots/ and write no current key. Tool
+#     upgrades invalidate cached clean snapshots so incompatible formats are
+#     never reused. If .delta.toml itself is dirty, the baseline is also
+#     rebuilt in the dirty directory so snapshots always use one config.
 
 # Snapshot the base ref and working tree for impact analysis.
 [script("pwsh", "-NoProfile")]
@@ -67,30 +71,43 @@ _anvil-impact-snapshot:
     }
     if ($env:ANVIL_IMPACT -eq 'off' -or $env:ANVIL_IMPACT -eq 'consume') { exit 0 }
 
-    # Short-circuit on a dirty working tree, BEFORE the expensive recompute
-    # below. anvil-impact widens every tier to --workspace when the tree is
-    # dirty (see its safety net) and never reads these snapshots, so computing
-    # them would be wasted work -- and the recompute path needs cargo-delta +
-    # a resolvable, non-shallow base ref, which a first-time checkout or local
-    # working-tree edit may lack. Without this, a dirty run that could not recompute
-    # would hard-fail here instead of gracefully widening. Same probe as
-    # anvil-impact (excluding target/, which holds our own cache artifacts).
-    # Let git itself exclude target/ via an :(exclude) pathspec rather than
-    # string-slicing porcelain records -- git then reports both sides of a
-    # rename and applies the checkout's real path-case rules, so a change whose
-    # only out-of-target/ side is a rename destination (or a case-distinct
-    # path) is still seen as dirty.
-    if (@(git status --porcelain -- . ':(exclude)target/' | Where-Object { $_ }).Count -gt 0) {
-        exit 0
+    # A dirty local tree snapshots the current files on disk. target/ is
+    # excluded because both clean and dirty impact products live there. Git
+    # handles rename and case semantics through the pathspec.
+    $dirtyChanges = @(git status --porcelain -- . ':(exclude)target/' | Where-Object { $_ })
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $dirty = $dirtyChanges.Count -gt 0
+    $cloudCompute = ($env:GITHUB_ACTIONS -eq 'true') -or ($env:TF_BUILD -eq 'True')
+    if ($dirty -and $cloudCompute) {
+        Write-Error 'anvil-impact: cloud impact computation requires a clean working tree; restore or commit all checkout changes before running the impact job.'
+        exit 1
     }
 
-    $impactDir = 'target/anvil/impact'
+    $cleanImpactDir = 'target/anvil/impact'
+    $dirtyImpactDir = 'target/anvil/impact-dirty'
+    $dirtyActiveMarker = Join-Path $dirtyImpactDir 'active'
+    $impactDir = if ($dirty) { $dirtyImpactDir } else { $cleanImpactDir }
+    if ($dirty) {
+        # Dirty filesystem contents are the cache identity, so every invocation
+        # starts from an empty isolated output instead of reusing stale data.
+        if (Test-Path -LiteralPath $dirtyImpactDir) {
+            Remove-Item -LiteralPath $dirtyImpactDir -Recurse -Force -ErrorAction Stop
+        }
+        [System.IO.Directory]::CreateDirectory($dirtyImpactDir) | Out-Null
+        New-Item -ItemType File -Path $dirtyActiveMarker -Force | Out-Null
+    } elseif (Test-Path -LiteralPath $dirtyActiveMarker) {
+        Remove-Item -LiteralPath $dirtyActiveMarker -Force -ErrorAction Stop
+    }
+    $deltaConfigDirty = $dirty -and (@(git status --porcelain -- .delta.toml | Where-Object { $_ }).Count -gt 0)
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $baselineImpactDir = if ($deltaConfigDirty) { $dirtyImpactDir } else { $cleanImpactDir }
+    $baselineSnapDir = Join-Path $baselineImpactDir 'snapshots'
     $snapDir = Join-Path $impactDir 'snapshots'
-    $baselineJson = Join-Path $snapDir 'baseline.json'
-    $baselineKeyFile = Join-Path $snapDir 'baseline.key'
+    $baselineJson = Join-Path $baselineSnapDir 'baseline.json'
+    $baselineKeyFile = Join-Path $baselineSnapDir 'baseline.key'
     $currentJson = Join-Path $snapDir 'current.json'
     $currentKeyFile = Join-Path $snapDir 'current.key'
-    $noWorkspaceMarker = Join-Path $snapDir 'baseline-no-workspace'
+    $noWorkspaceMarker = Join-Path $baselineSnapDir 'baseline-no-workspace'
 
     # Effective cargo-delta config identity -- part of the baseline cache key.
     # Resolve the repo's `.delta.toml` ONCE here, at the repo root, before the
@@ -144,10 +161,10 @@ _anvil-impact-snapshot:
         [Console]::Error.WriteLine("anvil-impact: warning: no .delta.toml found at the repo root; cargo-delta will run under its defaults (trip_wire_patterns and file_exclude_patterns inactive), which can under-scope the impact set. Restore the anvil-managed .delta.toml to get conservative scoping.")
     }
 
-    # The dirty-tree guard leaves a clean tree corresponding exactly to HEAD.
-    # Include the pinned cargo-delta version without invoking the tool, so an
-    # upgrade invalidates old snapshot formats even when HEAD is unchanged.
-    # target/ changes must not perturb this key.
+    # Only a clean tree corresponds exactly to HEAD. Include the pinned
+    # cargo-delta version in the clean current key without invoking the tool,
+    # so an upgrade invalidates old snapshot formats. target/ changes do not
+    # perturb this key.
     $currentState = "$((git rev-parse HEAD).Trim()) {{ cargo_delta_version }}"
 
     # Consumer fast path: reuse an already-present, matching snapshot set
@@ -160,7 +177,7 @@ _anvil-impact-snapshot:
     # $baseSha stays $null, the baseline is treated as not fresh, and we fall
     # through to the recompute path, which fails fast with git-fetch guidance
     # rather than scoping against a stale baseline.
-    $currentFresh = (Test-Path $currentJson) -and (Test-Path $currentKeyFile) -and `
+    $currentFresh = (-not $dirty) -and (Test-Path $currentJson) -and (Test-Path $currentKeyFile) -and `
         ("$(Get-Content -Raw $currentKeyFile)".Trim() -eq $currentState)
     $baseSha = $null
     $base = (& "{{ just_executable() }}" _anvil-base-ref 2>$null)
@@ -172,7 +189,7 @@ _anvil-impact-snapshot:
     # A moved base ref, changed config, or tool upgrade invalidates the
     # baseline, so it is never reused across incompatible rules or formats.
     $baselineKey = "$baseSha $deltaConfigId {{ cargo_delta_version }}"
-    $baselineFresh = (Test-Path $baselineKeyFile) -and `
+    $baselineFresh = (-not $deltaConfigDirty) -and (Test-Path $baselineKeyFile) -and `
         ((Test-Path $baselineJson) -or (Test-Path $noWorkspaceMarker)) -and `
         ("$(Get-Content -Raw $baselineKeyFile)".Trim() -eq $baselineKey)
     if ($currentFresh -and $baselineFresh) {
@@ -194,6 +211,7 @@ _anvil-impact-snapshot:
     # tool-agnostic.
     & "{{ just_executable() }}" anvil-tool-cargo-delta-validate-prereqs
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    [System.IO.Directory]::CreateDirectory($baselineSnapDir) | Out-Null
     [System.IO.Directory]::CreateDirectory($snapDir) | Out-Null
 
     # The best-effort base-ref resolution above may have left `$baseSha` unset
@@ -339,28 +357,34 @@ _anvil-impact-snapshot:
         }
     }
 
-    # --- Current snapshot: only when the working tree changed
-    # ($currentState was computed at the top of this recipe). ---
-    $haveCurrent = (Test-Path $currentJson) -and (Test-Path $currentKeyFile) -and `
+    # --- Current snapshot: clean content is cached by HEAD, while dirty
+    # content is always captured fresh from the filesystem. ---
+    $haveCurrent = (-not $dirty) -and (Test-Path $currentJson) -and (Test-Path $currentKeyFile) -and `
         ("$(Get-Content -Raw $currentKeyFile)".Trim() -eq $currentState)
     if ($haveCurrent) {
         Write-Host 'anvil-impact: current snapshot up to date'
     } else {
-        Write-Host 'anvil-impact: snapshotting working tree'
+        if ($dirty) {
+            Write-Host 'anvil-impact: snapshotting dirty working tree'
+        } else {
+            Write-Host 'anvil-impact: snapshotting working tree'
+        }
         $curSnap = & cargo {{_anvil_stable_toolchain_args}} delta @deltaArgs snapshot
         if ($LASTEXITCODE -ne 0) { Write-Error 'anvil-impact: cargo delta snapshot (current) failed'; exit 1 }
         Set-Content -LiteralPath $currentJson -Value $curSnap -Encoding UTF8
-        Set-Content -LiteralPath $currentKeyFile -Value $currentState -Encoding UTF8 -NoNewline
+        if (-not $dirty) {
+            Set-Content -LiteralPath $currentKeyFile -Value $currentState -Encoding UTF8 -NoNewline
+        }
     }
 
 # Public. Computes the impact set from the two snapshots and projects each
 # tier into a pre-built `--package name@version ...` string (or the sentinel
 # `--skip` when the tier is empty) via the shared _anvil-impact-format
 # helper, written to include_<tier>.txt. Per-crate checks depend on this
-# recipe and read those files via _anvil-impact-include. Cache-aware: no-ops
-# when the snapshots haven't changed.
+# recipe and read those files via _anvil-impact-include. Clean projections
+# are cached; dirty local projections are always recomputed.
 
-# Compute the impact set and write the target/anvil/impact cache.
+# Compute the impact set and write its clean cache or dirty local output.
 [group("anvil")]
 [script("pwsh", "-NoProfile")]
 anvil-impact: _anvil-impact-snapshot
@@ -390,71 +414,63 @@ anvil-impact: _anvil-impact-snapshot
         exit 0
     }
 
-    $impactDir = 'target/anvil/impact'
+    $dirtyChanges = @(git status --porcelain -- . ':(exclude)target/' | Where-Object { $_ })
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $dirty = $dirtyChanges.Count -gt 0
+    $cloudCompute = ($env:GITHUB_ACTIONS -eq 'true') -or ($env:TF_BUILD -eq 'True')
+    if ($dirty -and $cloudCompute) {
+        Write-Error 'anvil-impact: cloud impact computation requires a clean working tree; restore or commit all checkout changes before running the impact job.'
+        exit 1
+    }
+    $cleanImpactDir = 'target/anvil/impact'
+    $impactDir = if ($dirty) { 'target/anvil/impact-dirty' } else { $cleanImpactDir }
+    $deltaConfigDirty = $dirty -and (@(git status --porcelain -- .delta.toml | Where-Object { $_ }).Count -gt 0)
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $baselineImpactDir = if ($deltaConfigDirty) { $impactDir } else { $cleanImpactDir }
     $snapDir = Join-Path $impactDir 'snapshots'
-    $baselineJson = Join-Path $snapDir 'baseline.json'
+    $baselineSnapDir = Join-Path $baselineImpactDir 'snapshots'
+    $baselineJson = Join-Path $baselineSnapDir 'baseline.json'
     $currentJson = Join-Path $snapDir 'current.json'
-    $baselineKeyFile = Join-Path $snapDir 'baseline.key'
+    $baselineKeyFile = Join-Path $baselineSnapDir 'baseline.key'
     $currentKeyFile = Join-Path $snapDir 'current.key'
     $impactJson = Join-Path $impactDir 'impact.json'
     $impactStateFile = Join-Path $impactDir 'impact.state'
     $doctestPackages = Join-Path $impactDir 'doctest_packages.txt'
 
-    # Local safety net + warning for a dirty working tree. cargo-delta scopes
-    # on the *committed* diff of HEAD against the base ref, so uncommitted
-    # changes -- a crate you are actively editing but have not committed -- are
-    # invisible to it and would be silently scoped out (its checks skipped).
-    # When the tree has any uncommitted change (tracked edits or new,
-    # non-ignored untracked files), warn and widen every tier to the full
-    # workspace so work-in-progress is never skipped; commit to scope by impact
-    # instead. This runs BEFORE the cache-freshness check below so the warning
-    # is shown on every dirty invocation, not just the first. Cloud-workflow
-    # checkouts are clean, so this only affects local runs. cargo-delta and
-    # anvil write only under target/ (snapshots, include files), and target/
-    # may not be gitignored in every adopter repo, so exclude it from the probe
-    # -- otherwise anvil's own artifacts would make every run look dirty. git
-    # itself does the excluding via an :(exclude) pathspec, so renames report
-    # both sides and path-case follows the checkout's real behavior.
-    $dirty = @(git status --porcelain -- . ':(exclude)target/' | Where-Object { $_ })
-    if ($dirty.Count -gt 0) {
-        Write-Host "anvil-impact: warning: $($dirty.Count) uncommitted change(s) in the working tree are invisible to cargo-delta (it scopes on the committed diff vs the base ref); widening all tiers to --workspace so nothing you are editing is skipped -- commit to scope by impact, or set ANVIL_IMPACT=off to disable scoping." -ForegroundColor Yellow
-        [System.IO.Directory]::CreateDirectory($impactDir) | Out-Null
-        Set-Content -LiteralPath (Join-Path $impactDir 'include_modified.txt') -Value '' -Encoding UTF8 -NoNewline
-        Set-Content -LiteralPath (Join-Path $impactDir 'include_affected.txt') -Value '--workspace' -Encoding UTF8 -NoNewline
-        Set-Content -LiteralPath (Join-Path $impactDir 'include_required.txt') -Value '--workspace' -Encoding UTF8 -NoNewline
-        Set-Content -LiteralPath $impactJson -Value '{}' -Encoding UTF8
-        # Invalidate prior clean-tree projections so widened checks discover
-        # current workspace capabilities instead of trusting stale metadata.
-        Remove-Item -LiteralPath $impactStateFile -ErrorAction SilentlyContinue
-        Remove-Item -LiteralPath $doctestPackages -ErrorAction SilentlyContinue
-        exit 0
+    if ($dirty) {
+        Write-Host "anvil-impact: using fresh impact for $($dirtyChanges.Count) uncommitted change(s) in the local working tree" -ForegroundColor Yellow
     }
 
-    # Content cache key: regenerate the projection only when a snapshot moved
-    # or an output is missing. Keyed on the snapshot markers, not mtimes, so a
-    # downstream cloud-workflow job that downloaded the artifact recognizes it.
-    $wantState = ("$(Get-Content -Raw $baselineKeyFile)".Trim()) + ' ' + ("$(Get-Content -Raw $currentKeyFile)".Trim())
+    # Clean runs key the projection on both clean snapshot markers. Dirty runs
+    # intentionally skip this cache and always compare the fresh disk snapshot
+    # with the baseline selected by _anvil-impact-snapshot.
     $includeFiles = @('modified', 'affected', 'required') | ForEach-Object { Join-Path $impactDir "include_$_.txt" }
-    $fresh = (Test-Path $impactJson) -and (Test-Path $impactStateFile) -and `
-        ("$(Get-Content -Raw $impactStateFile)".Trim() -eq $wantState) -and `
-        (@($includeFiles | Where-Object { -not (Test-Path $_) }).Count -eq 0) -and `
-        (Test-Path -LiteralPath $doctestPackages -PathType Leaf)
-    if ($fresh) {
-        Write-Host 'anvil-impact: impact set up to date (cache hit)'
-        exit 0
+    $wantState = $null
+    if (-not $dirty) {
+        $wantState = ("$(Get-Content -Raw $baselineKeyFile)".Trim()) + ' ' + ("$(Get-Content -Raw $currentKeyFile)".Trim())
+        $fresh = (Test-Path $impactJson) -and (Test-Path $impactStateFile) -and `
+            ("$(Get-Content -Raw $impactStateFile)".Trim() -eq $wantState) -and `
+            (@($includeFiles | Where-Object { -not (Test-Path $_) }).Count -eq 0) -and `
+            (Test-Path -LiteralPath $doctestPackages -PathType Leaf)
+        if ($fresh) {
+            Write-Host 'anvil-impact: impact set up to date (cache hit)'
+            exit 0
+        }
     }
 
     # First-time anvil adoption: the base predates the cargo workspace, so
     # there is no baseline to diff against. Fall back to full-workspace
     # validation -- modified runs unconditionally (empty), affected/required
     # default to --workspace -- rather than failing the impact computation.
-    if (Test-Path (Join-Path $snapDir 'baseline-no-workspace')) {
+    if (Test-Path (Join-Path $baselineSnapDir 'baseline-no-workspace')) {
         Write-Host 'anvil-impact: baseline has no workspace; defaulting all tiers to full-workspace'
         Set-Content -LiteralPath (Join-Path $impactDir 'include_modified.txt') -Value '' -Encoding UTF8 -NoNewline
         Set-Content -LiteralPath (Join-Path $impactDir 'include_affected.txt') -Value '--workspace' -Encoding UTF8 -NoNewline
         Set-Content -LiteralPath (Join-Path $impactDir 'include_required.txt') -Value '--workspace' -Encoding UTF8 -NoNewline
         Set-Content -LiteralPath $impactJson -Value '{}' -Encoding UTF8
-        Set-Content -LiteralPath $impactStateFile -Value $wantState -Encoding UTF8 -NoNewline
+        if (-not $dirty) {
+            Set-Content -LiteralPath $impactStateFile -Value $wantState -Encoding UTF8 -NoNewline
+        }
         Remove-Item -LiteralPath $doctestPackages -ErrorAction SilentlyContinue
         exit 0
     }
@@ -487,7 +503,9 @@ anvil-impact: _anvil-impact-snapshot
         Set-Content -LiteralPath (Join-Path $impactDir "include_$tier.txt") -Value $value.Trim() -Encoding UTF8 -NoNewline
         Write-Host "anvil-impact: $tier -> $($value.Trim())"
     }
-    Set-Content -LiteralPath $impactStateFile -Value $wantState -Encoding UTF8 -NoNewline
+    if (-not $dirty) {
+        Set-Content -LiteralPath $impactStateFile -Value $wantState -Encoding UTF8 -NoNewline
+    }
 
 # _anvil-impact-format: turns a cargo-delta impact report into the
 # `--package <spec> ...` string the scoped checks consume, projected per
@@ -591,7 +609,7 @@ _anvil-impact-format tier impactJson:
 # Private. Returns the workspace-member package specs with at least one Cargo
 # target marked doctest=true. Prefer the projection written while impact
 # metadata was already in memory; fall back to one locked metadata query when
-# impact is disabled, widened before projection, or an older cache is consumed.
+# impact is disabled, the baseline lacks a workspace, or an older cache is consumed.
 #
 # Output is one space-delimited line of name@version specs, sorted ordinally.
 
@@ -603,7 +621,19 @@ _anvil-impact-doctest-packages:
         [Console]::Error.WriteLine("anvil: ANVIL_IMPACT='$($env:ANVIL_IMPACT)' is not recognized (expected 'off', 'consume', or unset).")
         exit 2
     }
-    $inputDir = if ($env:ANVIL_IMPACT -eq 'consume' -and $env:ANVIL_IMPACT_INPUT_DIR) { $env:ANVIL_IMPACT_INPUT_DIR } else { 'target/anvil/impact' }
+    if ($env:ANVIL_IMPACT -eq 'consume' -and $env:ANVIL_IMPACT_INPUT_DIR) {
+        $inputDir = $env:ANVIL_IMPACT_INPUT_DIR
+    } elseif ($env:ANVIL_IMPACT -eq 'off') {
+        $inputDir = 'target/anvil/impact'
+    } elseif ($env:ANVIL_IMPACT -eq 'consume') {
+        $inputDir = 'target/anvil/impact'
+    } else {
+        $inputDir = if (Test-Path -LiteralPath 'target/anvil/impact-dirty/active' -PathType Leaf) {
+            'target/anvil/impact-dirty'
+        } else {
+            'target/anvil/impact'
+        }
+    }
     $file = Join-Path $inputDir 'doctest_packages.txt'
     if ($env:ANVIL_IMPACT -ne 'off' -and (Test-Path -LiteralPath $file -PathType Leaf)) {
         $specs = @(Get-Content -LiteralPath $file | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
@@ -643,8 +673,8 @@ _anvil-impact-doctest-packages:
 # Tier default: --workspace for affected/required; empty (run) for modified.
 # Each scoped check calls this directly (into a local $include variable) to
 # read its category's scope from the impact cache -- target/anvil/impact by
-# default, or ANVIL_IMPACT_INPUT_DIR when that is set under consume -- the same
-# cache both locally and in cloud workflows (where the group job downloaded it).
+# default, target/anvil/impact-dirty for a dirty local tree, or
+# ANVIL_IMPACT_INPUT_DIR under consume.
 
 # Resolve a tier's package scope from the impact cache.
 [script("pwsh", "-NoProfile")]
@@ -659,7 +689,15 @@ _anvil-impact-include tier:
         exit 2
     }
     if ($env:ANVIL_IMPACT -eq 'off') { Write-Output $default; exit 0 }
-    $inputDir = if ($env:ANVIL_IMPACT -eq 'consume' -and $env:ANVIL_IMPACT_INPUT_DIR) { $env:ANVIL_IMPACT_INPUT_DIR } else { 'target/anvil/impact' }
+    if ($env:ANVIL_IMPACT -eq 'consume') {
+        $inputDir = if ($env:ANVIL_IMPACT_INPUT_DIR) { $env:ANVIL_IMPACT_INPUT_DIR } else { 'target/anvil/impact' }
+    } else {
+        $inputDir = if (Test-Path -LiteralPath 'target/anvil/impact-dirty/active' -PathType Leaf) {
+            'target/anvil/impact-dirty'
+        } else {
+            'target/anvil/impact'
+        }
+    }
     $file = Join-Path $inputDir "include_$tier.txt"
     if (Test-Path -LiteralPath $file -PathType Leaf) {
         Write-Output ("$(Get-Content -Raw -LiteralPath $file)".Trim())

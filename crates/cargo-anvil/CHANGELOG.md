@@ -2,6 +2,52 @@
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-11-19
+
+- ✨ Features
+
+  - cargo-anvil: scope dirty local impact
+  - support in-process cargo-anvil updates with fakeable repository I/O ([#340](https://github.com/microsoft/ox-tools/pull/340))
+  - cargo-anvil: pin cargo-coverage-gate 0.7.3 ([#329](https://github.com/microsoft/ox-tools/pull/329))
+  - cargo-anvil: exclude generated actions from downstream Dependabot updates ([#316](https://github.com/microsoft/ox-tools/pull/316))
+
+- 🐛 Bug Fixes
+
+  - cargo-gamma: strengthen admission proofs and compiler isolation ([#367](https://github.com/microsoft/ox-tools/pull/367))
+  - stabilize scheduled checks and close Linux mutation coverage gaps ([#357](https://github.com/microsoft/ox-tools/pull/357))
+  - cargo-anvil: adopt cargo-coverage-gate 0.7.5 ([#350](https://github.com/microsoft/ox-tools/pull/350))
+  - cargo-gamma: honor active cfgs and reduce console noise ([#352](https://github.com/microsoft/ox-tools/pull/352))
+  - cargo-anvil: release 0.23.5 with coverage-gate 0.7.4 ([#343](https://github.com/microsoft/ox-tools/pull/343))
+  - cargo-anvil: prepare the Miri sysroot during setup ([#328](https://github.com/microsoft/ox-tools/pull/328))
+  - cargo-anvil: drop test-only PowerShell 7.6 restriction ([#337](https://github.com/microsoft/ox-tools/pull/337))
+  - make SemVer checks reproducible with locked API snapshots ([#334](https://github.com/microsoft/ox-tools/pull/334))
+  - cargo-anvil: isolate mutation diffs and normalize Git prefixes ([#323](https://github.com/microsoft/ox-tools/pull/323))
+  - cargo-anvil: isolate recipe tests from host rustup ([#324](https://github.com/microsoft/ox-tools/pull/324))
+  - cargo-anvil: install APRZ 1.2.1 from crates.io ([#313](https://github.com/microsoft/ox-tools/pull/313))
+  - cargo-anvil: refresh action pins and coverage gate in 0.20.1 ([#310](https://github.com/microsoft/ox-tools/pull/310))
+
+- ⚡ Performance
+
+  - cargo-anvil: streamline PR checks and isolate Linux fuzzing ([#336](https://github.com/microsoft/ox-tools/pull/336))
+
+- 📚 Documentation
+
+  - cargo-anvil: focus documentation on current contracts ([#355](https://github.com/microsoft/ox-tools/pull/355))
+
+- ✔️ Tasks
+
+  - update dependencies, build tools, actions, and Rust ([#330](https://github.com/microsoft/ox-tools/pull/330))
+  - cargo-anvil: pin cargo-delta 0.5.0 ([#311](https://github.com/microsoft/ox-tools/pull/311))
+
+- ♻️ Code Refactoring
+
+  - cargo-anvil: clarify locked SemVer snapshot policy ([#339](https://github.com/microsoft/ox-tools/pull/339))
+
+- 🧩 Miscellaneous
+
+  - Adopt cargo-gamma in Anvil and remediate campaign survivors ([#327](https://github.com/microsoft/ox-tools/pull/327))
+  - Kill a bunch of mutants ([#315](https://github.com/microsoft/ox-tools/pull/315))
+
 ## [0.25.3] - 2026-11-18
 
 - 🐛 Bug Fixes

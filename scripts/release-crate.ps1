@@ -1,6 +1,8 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
+#Requires -Version 7.6
+
 <#
 .SYNOPSIS
     Updates the version of a Rust crate and generates a CHANGELOG.md file based on git history.
@@ -72,6 +74,10 @@ param(
     [Parameter(Mandatory = $false)]
     [string]$BackfillVersion
 )
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
 
 # --- CONFIGURATION ---
 
@@ -904,7 +910,7 @@ try {
 
         if (Test-SemverIncompatibleBump -oldVersion $oldVersion -newVersion $newVersion) {
             $dependentCrates = Get-DirectDependents -crateName $CrateName -repoRoot $repoRoot
-            if ($dependentCrates.Count -gt 0) {
+            if (@($dependentCrates).Count -gt 0) {
                 Show-DependentCratesWarning -crateName $CrateName -oldVersion $oldVersion -newVersion $newVersion -dependentCrates $dependentCrates
             }
         }

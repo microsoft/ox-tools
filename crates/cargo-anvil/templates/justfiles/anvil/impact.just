@@ -85,6 +85,7 @@ _anvil-impact-snapshot:
 
     $cleanImpactDir = 'target/anvil/impact'
     $dirtyImpactDir = 'target/anvil/impact-dirty'
+    $dirtyActiveMarker = Join-Path $dirtyImpactDir 'active'
     $impactDir = if ($dirty) { $dirtyImpactDir } else { $cleanImpactDir }
     if ($dirty) {
         # Dirty filesystem contents are the cache identity, so every invocation
@@ -92,6 +93,10 @@ _anvil-impact-snapshot:
         if (Test-Path -LiteralPath $dirtyImpactDir) {
             Remove-Item -LiteralPath $dirtyImpactDir -Recurse -Force -ErrorAction Stop
         }
+        [System.IO.Directory]::CreateDirectory($dirtyImpactDir) | Out-Null
+        New-Item -ItemType File -Path $dirtyActiveMarker -Force | Out-Null
+    } elseif (Test-Path -LiteralPath $dirtyActiveMarker) {
+        Remove-Item -LiteralPath $dirtyActiveMarker -Force -ErrorAction Stop
     }
     $deltaConfigDirty = $dirty -and (@(git status --porcelain -- .delta.toml | Where-Object { $_ }).Count -gt 0)
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -623,9 +628,11 @@ _anvil-impact-doctest-packages:
     } elseif ($env:ANVIL_IMPACT -eq 'consume') {
         $inputDir = 'target/anvil/impact'
     } else {
-        $dirtyChanges = @(git status --porcelain -- . ':(exclude)target/' | Where-Object { $_ })
-        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-        $inputDir = if ($dirtyChanges.Count -gt 0) { 'target/anvil/impact-dirty' } else { 'target/anvil/impact' }
+        $inputDir = if (Test-Path -LiteralPath 'target/anvil/impact-dirty/active' -PathType Leaf) {
+            'target/anvil/impact-dirty'
+        } else {
+            'target/anvil/impact'
+        }
     }
     $file = Join-Path $inputDir 'doctest_packages.txt'
     if ($env:ANVIL_IMPACT -ne 'off' -and (Test-Path -LiteralPath $file -PathType Leaf)) {
@@ -685,9 +692,11 @@ _anvil-impact-include tier:
     if ($env:ANVIL_IMPACT -eq 'consume') {
         $inputDir = if ($env:ANVIL_IMPACT_INPUT_DIR) { $env:ANVIL_IMPACT_INPUT_DIR } else { 'target/anvil/impact' }
     } else {
-        $dirtyChanges = @(git status --porcelain -- . ':(exclude)target/' | Where-Object { $_ })
-        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-        $inputDir = if ($dirtyChanges.Count -gt 0) { 'target/anvil/impact-dirty' } else { 'target/anvil/impact' }
+        $inputDir = if (Test-Path -LiteralPath 'target/anvil/impact-dirty/active' -PathType Leaf) {
+            'target/anvil/impact-dirty'
+        } else {
+            'target/anvil/impact'
+        }
     }
     $file = Join-Path $inputDir "include_$tier.txt"
     if (Test-Path -LiteralPath $file -PathType Leaf) {
