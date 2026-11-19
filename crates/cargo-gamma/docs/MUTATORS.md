@@ -992,6 +992,11 @@ mind is about reading a report rather than about the catalog: a file full of `co
 few mutants or none, and that is a statement about where this tool can reach, not evidence that the
 code is well tested.
 
+**Already-default return values are omitted.** `None` in an `Option` return and `false` in a
+boolean return are omitted when `Default::default()` is proven to resolve to the standard trait.
+An unrelated same-named type elsewhere in the package does not invalidate lexical proof;
+actual shadows, unresolved imports, and opaque expansion still prevent it.
+
 ### How return values are synthesized
 
 `fn_value` recurses through the return type rather than reaching straight for `Default::default()`.

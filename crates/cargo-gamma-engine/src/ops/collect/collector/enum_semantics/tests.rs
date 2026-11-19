@@ -1411,7 +1411,7 @@ fn direct_enum_generators_reject_unrecognized_variants_and_predicate_names() {
     with_collector(|collector| {
         collector.control_flow_constructor(&syn::parse_quote!(core::ops::ControlFlow::Unknown(1)));
         collector.ordering_variant(&syn::parse_quote!(core::cmp::Ordering::Unknown));
-        collector.enum_predicate(&syn::parse_quote!(value.reverse()), "reverse");
+        collector.enum_predicate(&syn::parse_quote!(value.reverse()), "reverse", None);
         assert_eq!(collector.candidates.len(), 0);
     });
 }

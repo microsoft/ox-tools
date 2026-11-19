@@ -330,7 +330,6 @@ impl TestEnvironment {
         let mut packages = package_environments(&metadata);
         let mut integration_tests = crate::HashSet::default();
 
-        // #[gamma::skip(call_result.default, reason = "apply_build_messages returns unit and this mutator still applies the same messages before replacing unit with unit")]
         apply_build_messages(artifacts, &mut packages, &mut integration_tests);
 
         let known: crate::HashSet<&str> = binaries.iter().map(|binary| binary.package_id.as_str()).collect();
@@ -372,29 +371,20 @@ fn package_environments(metadata: &Value) -> HashMap<String, PackageEnvironment>
             let manifest_dir = manifest_path.parent().unwrap_or_else(|| Utf8Path::new(""));
             let mut variables = BTreeMap::new();
 
-            // #[gamma::skip(call_result.default, reason = "insert returns unit and this mutator still inserts the same variable before replacing unit with unit")]
             insert(&mut variables, "CARGO_MANIFEST_DIR", manifest_dir);
-            // #[gamma::skip(call_result.default, reason = "insert returns unit and this mutator still inserts the same variable before replacing unit with unit")]
             insert(&mut variables, "CARGO_MANIFEST_PATH", manifest_path);
             let package_name = package.get("name").and_then(Value::as_str).unwrap_or("");
-            // #[gamma::skip(call_result.default, reason = "insert returns unit and this mutator still inserts the same variable before replacing unit with unit")]
             insert(&mut variables, "CARGO_PKG_NAME", package_name);
-            // #[gamma::skip(call_result.default, reason = "insert returns unit and this mutator still inserts the same variable before replacing unit with unit")]
             insert(&mut variables, "CARGO_PKG_VERSION", version_text);
             let major = version.major.to_string();
             let minor = version.minor.to_string();
             let patch = version.patch.to_string();
             let pre = version.pre.as_str();
-            // #[gamma::skip(call_result.default, reason = "insert returns unit and this mutator still inserts the same variable before replacing unit with unit")]
             insert(&mut variables, "CARGO_PKG_VERSION_MAJOR", major);
-            // #[gamma::skip(call_result.default, reason = "insert returns unit and this mutator still inserts the same variable before replacing unit with unit")]
             insert(&mut variables, "CARGO_PKG_VERSION_MINOR", minor);
-            // #[gamma::skip(call_result.default, reason = "insert returns unit and this mutator still inserts the same variable before replacing unit with unit")]
             insert(&mut variables, "CARGO_PKG_VERSION_PATCH", patch);
-            // #[gamma::skip(call_result.default, reason = "insert returns unit and this mutator still inserts the same variable before replacing unit with unit")]
             insert(&mut variables, "CARGO_PKG_VERSION_PRE", pre);
 
-            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
             insert(
                 &mut variables,
                 "CARGO_PKG_AUTHORS",
@@ -418,7 +408,6 @@ fn package_environments(metadata: &Value) -> HashMap<String, PackageEnvironment>
                 ("CARGO_PKG_RUST_VERSION", "rust_version"),
             ] {
                 let value = package.get(field).and_then(Value::as_str).unwrap_or("");
-                // #[gamma::skip(call_result.default, reason = "insert returns unit and this mutator still inserts the same variable before replacing unit with unit")]
                 insert(&mut variables, variable, value);
             }
 
@@ -452,11 +441,9 @@ fn apply_build_messages(
 
         match message.get("reason").and_then(Value::as_str) {
             Some("build-script-executed") => {
-                // #[gamma::skip(call_result.default, reason = "apply_build_script returns unit and this mutator still applies the same message before replacing unit with unit")]
                 apply_build_script(&message, package);
             }
             Some("compiler-artifact") => {
-                // #[gamma::skip(call_result.default, reason = "apply_artifact returns unit and this mutator still applies the same artifact before replacing unit with unit")]
                 apply_artifact(&message, package, integration_tests);
             }
             _ => {}
@@ -467,7 +454,6 @@ fn apply_build_messages(
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn apply_build_script(message: &Value, package: &mut PackageEnvironment) {
     if let Some(out_dir) = message.get("out_dir").and_then(Value::as_str) {
-        // #[gamma::skip(call_result.default, reason = "insert returns unit and this mutator still inserts the same variable before replacing unit with unit")]
         insert(&mut package.variables, "OUT_DIR", out_dir);
     }
 
@@ -480,7 +466,6 @@ fn apply_build_script(message: &Value, package: &mut PackageEnvironment) {
                 continue;
             };
             if let (Some(name), Some(value)) = (name.as_str(), value.as_str()) {
-                // #[gamma::skip(call_result.default, reason = "insert returns unit and this mutator still inserts the same variable before replacing unit with unit")]
                 insert(&mut package.variables, name, value);
             }
         }
@@ -511,7 +496,6 @@ fn apply_artifact(message: &Value, package: &mut PackageEnvironment, integration
         && let Some(name) = message.get("target").and_then(|target| target.get("name")).and_then(Value::as_str)
     {
         let variable = format!("CARGO_BIN_EXE_{name}");
-        // #[gamma::skip(call_result.default, reason = "insert returns unit and this mutator still inserts the same executable before replacing unit with unit")]
         insert(&mut package.binary_executables, variable, executable);
     }
 }
@@ -532,24 +516,18 @@ fn common_environment(
         .or_else(|| rustup.as_ref().map(|environment| environment.cargo.clone()))
         .unwrap_or_else(|| resolve_executable(cargo, windows, &mut lookup, current_dir, is_file).unwrap_or_else(|| cargo.to_owned()));
 
-    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
     insert(&mut variables, "CARGO", cargo);
     if let Some(home) = lookup("CARGO_HOME").or_else(|| default_cargo_home(windows, &mut lookup)) {
-        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
         insert(&mut variables, "CARGO_HOME", home);
     }
 
     if let Some(rustup) = rustup {
-        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
         insert(&mut variables, "RUSTUP_TOOLCHAIN", rustup.toolchain);
 
-        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
         insert(&mut variables, "RUSTUP_TOOLCHAIN_SOURCE", rustup.source);
 
-        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
         insert(&mut variables, "RUSTUP_HOME", rustup.home);
 
-        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
         insert(
             &mut variables,
             "RUST_RECURSION_COUNT",
@@ -557,7 +535,6 @@ fn common_environment(
         );
         #[cfg(windows)]
         if lookup("LD_LIBRARY_PATH").is_none() {
-            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
             insert(&mut variables, "LD_LIBRARY_PATH", rustup.sysroot.join("lib"));
         }
     }

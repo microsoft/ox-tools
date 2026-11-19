@@ -75,6 +75,13 @@ impl Sources {
         }
     }
 
+    pub(super) fn root(&self, source: &str) -> Option<&str> {
+        self.contexts
+            .get(&source.replace('\\', "/"))
+            .and_then(Option::as_ref)
+            .map(|(root, _)| root.as_str())
+    }
+
     fn resolve(&self, source: &str, inline: &[String], path: &[String]) -> Option<(&Identities, Vec<String>)> {
         let (root, base) = self.contexts.get(&source.replace('\\', "/"))?.as_ref()?;
         let mut module = base.clone();
@@ -122,14 +129,12 @@ impl Sources {
 
     pub(super) fn same_type(&self, source: &str, inline: &[String], left: &[String], right: &[String]) -> bool {
         let Some((identities, left)) = self.resolve(source, inline, left) else {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+            return false;
         };
         let Some((_, right)) = self.resolve(source, inline, right) else {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+            return false;
         };
         identities
             .resolve_path(&left)

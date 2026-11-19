@@ -885,6 +885,301 @@ fn empty_group_proof_preserves_nonzero_mutable_and_effectful_cases() {
 }
 
 #[test]
+fn nonempty_group_proof_omits_deleted_progress_only_with_closed_scalar_effects() {
+    let original = include_str!("../fixtures/grouping.rs");
+    for (description, source, omitted) in [
+        ("scalar projection and ordering", original.to_owned(), true),
+        (
+            "unknown mapper call",
+            format!(
+                "{}\nfn inspect(value: u32) -> u32 {{ panic!(\"mapper escape\") }}",
+                original.replace("entry.ordinal)", "inspect(entry.ordinal))")
+            ),
+            false,
+        ),
+        (
+            "unknown comparator",
+            format!(
+                "{}\nfn inspect(left: &u32, right: &u32) -> std::cmp::Ordering {{ panic!(\"comparator escape\") }}",
+                original.replace("left.cmp(right)", "inspect(left, right)")
+            ),
+            false,
+        ),
+        (
+            "custom element",
+            format!(
+                "{}\n#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)] struct Custom(u32);",
+                original.replace("u32", "Custom")
+            ),
+            false,
+        ),
+        (
+            "progress assertion",
+            original.replacen("cursor = end;", "cursor = end; assert!(cursor > 0);", 1),
+            false,
+        ),
+        (
+            "conditional scalar field",
+            original.replace("pub(super) ordinal: u32", "#[cfg(feature = \"scalar\")] pub(super) ordinal: u32"),
+            false,
+        ),
+        (
+            "attributed mapper",
+            original.replace(".map(|entry| entry.ordinal)", ".map(#[custom] |entry| entry.ordinal)"),
+            false,
+        ),
+        (
+            "attributed scalar projection",
+            original.replace(".map(|entry| entry.ordinal)", ".map(|entry| #[custom] entry.ordinal)"),
+            false,
+        ),
+        (
+            "attributed comparator",
+            original.replace(".sort_by(|left, right|", ".sort_by(#[custom] |left, right|"),
+            false,
+        ),
+        ("shadowed primitive namespace", format!("struct u32;\n{original}"), false),
+        ("shadowed character namespace", format!("struct char;\n{original}"), false),
+        ("open method namespace", format!("use extension::*;\n{original}"), false),
+    ] {
+        let file = SourceFile::parse("grouping.rs", source).unwrap();
+        let candidates = collect_in(&file, &Selection::parse("stmt.delete_assign").unwrap(), &CfgSet::unconditional());
+        let retained = candidates
+            .iter()
+            .any(|candidate| &*candidate.item_path == "groups" && file.slice(&candidate.span) == "cursor = end;");
+        assert_eq!(retained, !omitted, "{description}");
+        for item in ["nonzero", "mutable", "unknown_factory"] {
+            assert!(
+                candidates
+                    .iter()
+                    .any(|candidate| &*candidate.item_path == item && file.slice(&candidate.span) == "cursor = end;"),
+                "{description}: {item}"
+            );
+        }
+    }
+}
+
+#[test]
+fn nonempty_group_proof_keeps_unknown_effects_that_empty_groups_never_execute() {
+    for statement in [
+        parse_quote!(let ids = group.iter().map(|entry| inspect(entry.ordinal)).collect::<Vec<_>>();),
+        parse_quote!(let ids = group.iter().filter_map(|entry| Some(entry.ordinal)).collect::<Vec<_>>();),
+        parse_quote!(let ids = group.iter().map(|entry| entry.other).collect::<Vec<_>>();),
+    ] {
+        let mut before = group_loop();
+        let Expr::While(loop_) = &mut before else { unreachable!() };
+        loop_.body.stmts[3] = statement;
+        let mut after = before.clone();
+        let Expr::While(loop_) = &mut after else { unreachable!() };
+        let _removed = loop_.body.stmts.pop();
+        assert!(!grouping().proves(&before, &after));
+        assert!(
+            grouping().proves(&before, &multiplied(&before)),
+            "empty groups do not invoke the mapper"
+        );
+    }
+}
+
+#[test]
+fn nonempty_scalar_mapper_requires_a_single_named_primitive_projection() {
+    for (source, accepted) in [
+        ("|entry| entry.ordinal", true),
+        ("|entry| (((entry.ordinal)))", true),
+        ("mapper", false),
+        ("#[custom] |entry| entry.ordinal", false),
+        ("|| entry.ordinal", false),
+        ("|entry, extra| entry.ordinal", false),
+        ("|(entry,)| entry.ordinal", false),
+        ("|entry| inspect(entry.ordinal)", false),
+        ("|entry| entry.0", false),
+        ("|entry| #[custom] entry.ordinal", false),
+        ("|entry| other.ordinal", false),
+        ("|entry| entry.path", false),
+    ] {
+        assert_eq!(
+            grouping().scalar_mapper(&parse_str(source).unwrap()),
+            accepted.then_some(()),
+            "{source}"
+        );
+    }
+    for (depth, accepted) in [(16, true), (17, false)] {
+        let source = format!("|entry| {}entry.ordinal{}", "(".repeat(depth), ")".repeat(depth));
+        assert_eq!(
+            grouping().scalar_mapper(&parse_str(&source).unwrap()),
+            accepted.then_some(()),
+            "{depth} projection wrappers"
+        );
+    }
+}
+
+#[test]
+fn nonempty_scalar_comparator_requires_both_exact_parameter_identities() {
+    for (source, accepted) in [
+        ("|left, right| left.cmp(right)", true),
+        ("|left, right| (((left.cmp(right))))", true),
+        ("compare", false),
+        ("#[custom] |left, right| left.cmp(right)", false),
+        ("|left| left.cmp(right)", false),
+        ("|left| left.cmp(left)", false),
+        ("|left, right, extra| left.cmp(right)", false),
+        ("|left, extra, right| left.cmp(right)", false),
+        ("|(left,), right| left.cmp(right)", false),
+        ("|left, (right,)| left.cmp(right)", false),
+        ("|left, right| compare(left, right)", false),
+        ("|left, right| other.cmp(right)", false),
+        ("|left, right| left.cmp(other)", false),
+        ("|left, right| left.cmp(left)", false),
+    ] {
+        assert_eq!(
+            super::scalar_comparator(&parse_str(source).unwrap()),
+            accepted.then_some(()),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn nonempty_grouping_requires_deletion_of_only_the_final_unattributed_progress_assignment() {
+    let before = group_loop();
+    let mut after = before.clone();
+    let Expr::While(loop_) = &mut after else { unreachable!() };
+    let _removed = loop_.body.stmts.pop();
+    assert_eq!(grouping().nonempty(&before, &after), Some(()));
+    assert_eq!(grouping().nonempty(&parse_quote!(true), &after), None);
+    assert_eq!(grouping().nonempty(&before, &parse_quote!(true)), None);
+    assert_eq!(grouping().nonempty(&parse_quote!(while ready {}), &after), None);
+    assert_eq!(
+        grouping().nonempty(
+            &parse_quote!(while ready {
+                cursor = end;
+            }),
+            &parse_quote!(while ready {})
+        ),
+        None
+    );
+    for (tail, expected) in [
+        (parse_quote!(cursor = end;), true),
+        (parse_quote!(#[custom] cursor = end;), false),
+        (parse_quote!(other = end;), false),
+        (parse_quote!(cursor = other;), false),
+        (parse_quote!(inspect();), false),
+    ] {
+        let mut before = before.clone();
+        let Expr::While(loop_) = &mut before else { unreachable!() };
+        *loop_.body.stmts.last_mut().unwrap() = tail;
+        assert_eq!(grouping().nonempty(&before, &after), expected.then_some(()));
+    }
+    let mut attributed_assignment = before.clone();
+    let Expr::While(loop_) = &mut attributed_assignment else {
+        unreachable!()
+    };
+    let Some(Stmt::Expr(Expr::Assign(assignment), _)) = loop_.body.stmts.last_mut() else {
+        unreachable!()
+    };
+    assignment.attrs.push(parse_quote!(#[custom]));
+    assert_eq!(grouping().nonempty(&attributed_assignment, &after), None);
+    let mut changed_condition = after.clone();
+    let Expr::While(loop_) = &mut changed_condition else {
+        unreachable!()
+    };
+    *loop_.cond = parse_quote!(cursor <= input.entries.len());
+    assert_eq!(grouping().nonempty(&before, &changed_condition), None);
+    let mut missing_boundary = before;
+    let Expr::While(loop_) = &mut missing_boundary else {
+        unreachable!()
+    };
+    loop_.body.stmts[1] = parse_quote!(inspect(););
+    assert_eq!(grouping().nonempty(&missing_boundary, &after), None);
+    let Expr::While(loop_) = &mut missing_boundary else {
+        unreachable!()
+    };
+    loop_.body.stmts[1] = parse_quote!(let end = unknown(););
+    assert_eq!(grouping().nonempty(&missing_boundary, &after), None);
+}
+
+#[test]
+fn nonempty_grouping_rejects_an_assignment_left_inside_the_recurrence() {
+    let mut before = group_loop();
+    let Expr::While(loop_) = &mut before else { unreachable!() };
+    loop_.body.stmts.push(parse_quote!(cursor = end;));
+    let mut after = before.clone();
+    let Expr::While(loop_) = &mut after else { unreachable!() };
+    let _removed = loop_.body.stmts.pop();
+    assert_eq!(
+        grouping().nonempty(&before, &after),
+        None,
+        "deleting a duplicate assignment still leaves progress, not retained growth"
+    );
+}
+
+#[test]
+fn nonempty_grouping_does_not_substitute_filter_map_for_scalar_map() {
+    let mut before = group_loop();
+    let Expr::While(loop_) = &mut before else { unreachable!() };
+    loop_.body.stmts[3] = parse_quote!(let ids = group.iter().filter_map(|entry| entry.ordinal).collect::<Vec<_>>(););
+    let mut after = before.clone();
+    let Expr::While(loop_) = &mut after else { unreachable!() };
+    let _removed = loop_.body.stmts.pop();
+    assert_eq!(grouping().nonempty(&before, &after), None);
+    assert!(grouping().proves(&before, &multiplied(&before)));
+}
+
+#[test]
+fn nonempty_scalar_schema_requires_unattributed_short_primitive_field_declarations() {
+    let fixture = include_str!("../fixtures/grouping.rs");
+    for (declaration, scalar) in [
+        ("pub(super) ordinal: u32".to_owned(), true),
+        ("#[cfg(feature = \"ordinal\")] pub(super) ordinal: u32".to_owned(), false),
+        ("pub(super) ordinal: &u32".to_owned(), false),
+        ("pub(super) ordinal: std::primitive::u32".to_owned(), false),
+        (
+            format!("pub(super) ordinal:{}u32", " ".repeat(255 - "pub(super) ordinal:u32".len())),
+            true,
+        ),
+        (
+            format!("pub(super) ordinal:{}u32", " ".repeat(256 - "pub(super) ordinal:u32".len())),
+            true,
+        ),
+        (
+            format!("pub(super) ordinal:{}u32", " ".repeat(257 - "pub(super) ordinal:u32".len())),
+            false,
+        ),
+    ] {
+        let source = fixture.replacen("pub(super) ordinal: u32", &declaration, 1);
+        let file = parse_file(&source).unwrap();
+        let Item::Struct(entry) = &file.items[1] else { unreachable!() };
+        let ordinal = entry
+            .fields
+            .iter()
+            .find(|field| field.ident.as_ref().is_some_and(|ident| ident == "ordinal"))
+            .unwrap();
+        assert_eq!(ordinal.span().byte_range().len(), declaration.len());
+        let Item::Fn(function) = file
+            .items
+            .iter()
+            .find(|item| matches!(item, Item::Fn(function) if function.sig.ident == "groups"))
+            .unwrap()
+        else {
+            unreachable!()
+        };
+        let Stmt::Expr(before, _) = &function.block.stmts[2] else {
+            unreachable!()
+        };
+        let sources = crate::ops::collect::resource_namespaces::Namespaces::of(&file, &CfgSet::unconditional());
+        let bindings = crate::HashMap::from_iter([("input.entries".into(), super::Binding::Vec)]);
+        let proof = super::Grouping::new(&file, before, &bindings, &sources, "", &[]).unwrap();
+        let mut after = before.clone();
+        let Expr::While(loop_) = &mut after else { unreachable!() };
+        let _removed = loop_.body.stmts.pop();
+        assert_eq!(proof.proves(before, &after), scalar, "{declaration}");
+        assert!(
+            proof.proves(before, &multiplied(before)),
+            "an empty group does not evaluate even an unsupported scalar mapper"
+        );
+    }
+}
+
+#[test]
 fn finite_grouping_controls_have_distinct_ordinary_results() {
     let input = Input {
         entries: ["a", "b", "c", "c", "c", "d"]
@@ -925,6 +1220,8 @@ fn grouping() -> super::Grouping {
         outputs: core::iter::once("files".into()).collect(),
         output_record: "Output".into(),
         vector_fields: core::iter::once("ids".into()).collect(),
+        scalar_fields: core::iter::once("ordinal".into()).collect(),
+        record_body: None,
     }
 }
 

@@ -680,9 +680,7 @@ fn plain_configuration_command(
 ) -> Command {
     let mut command = cargo_command(workspace, tools);
     command.args(["nextest", "run"]);
-    // #[gamma::skip(call_result.default, reason = "append_package_selection returns unit; all arguments are still appended and () is replaced with ()")]
     append_package_selection(&mut command, selection);
-    // #[gamma::skip(call_result.default, reason = "append_nextest_options returns unit; all arguments are still appended and () is replaced with ()")]
     append_nextest_options(&mut command, args, configuration, Some(target));
     command.arg("--no-tests=pass");
     command
@@ -816,9 +814,7 @@ fn nextest_command_for_host(execution: &CollectionExecution<'_>, configuration: 
     if windows_host {
         command.arg("--no-rustc-wrapper");
     }
-    // #[gamma::skip(call_result.default, reason = "append_package_selection returns unit; all arguments are still appended and () is replaced with ()")]
     append_package_selection(&mut command, execution.selection);
-    // #[gamma::skip(call_result.default, reason = "append_nextest_options returns unit; all arguments are still appended and () is replaced with ()")]
     append_nextest_options(&mut command, execution.args, configuration, execution.target);
     command.arg("--no-tests=pass");
     command
@@ -897,7 +893,6 @@ fn run_report(execution: &CollectionExecution<'_>, configuration: FeatureConfigu
             #[cfg(not(windows))]
             {
                 let _ = (execution, configuration, lcov_path, arguments);
-                // #[gamma::skip(result.err_to_ok, literal.str_to_empty, literal.str_to_xyzzy, reason = "With allow_windows_fallback false on non-Windows, handle_report_output_with cannot return WindowsFallback, so this defensive arm is unreachable.", tag = "equivalent")]
                 Err(AppError::new("Windows response-file fallback was requested on a non-Windows host"))
             }
         }
@@ -960,7 +955,6 @@ fn report_command_for_host(
         command.env_remove("MSYSTEM");
     }
     command.args(["llvm-cov", "report", "--lcov", "--output-path"]).arg(lcov_path);
-    // #[gamma::skip(call_result.default, reason = "append_package_selection returns unit; all arguments are still appended and () is replaced with ()")]
     append_package_selection(&mut command, execution.selection);
     if let Some(target) = execution.target {
         command.arg("--target").arg(target);
@@ -1121,7 +1115,6 @@ fn windows_response_contents(arguments: &[String]) -> Result<Vec<u8>, AppError> 
                 "cargo-llvm-cov's Windows command-too-long diagnostic contained a null byte",
             ));
         }
-        // #[gamma::skip(call_result.default, reason = "quote_windows_argument returns unit; every quoted byte is still written and () is replaced with ()")]
         quote_windows_argument(argument, &mut response);
         response.push('\n');
     }
@@ -1241,7 +1234,6 @@ fn execute_windows_export(
     output_file: fs::File,
 ) -> Result<(String, Output), AppError> {
     let mut command = Command::new(llvm_cov);
-    // #[gamma::skip(call_result.default, reason = "configure_windows_export_command returns unit; command configuration still executes and () is replaced with ()")]
     configure_windows_export_command(&mut command, workspace_root, response);
     // #[gamma::skip(stmt.delete_call, reason = "This redirects a native subprocess into an owning file; command-policy tests do not observe spawned-process output routing.", tag = "native-boundary")]
     command.stdout(Stdio::from(output_file));

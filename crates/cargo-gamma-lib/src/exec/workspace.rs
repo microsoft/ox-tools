@@ -12,6 +12,8 @@ use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 use std::path::PathBuf;
 use std::process::{Command, Output};
 use std::sync::{Arc, OnceLock};
+#[cfg(not(test))]
+use std::{env as replay_env, fs as replay_fs};
 use std::{env, io, thread};
 
 use camino::{Utf8Component, Utf8Path, Utf8PathBuf};
@@ -28,6 +30,8 @@ use super::loader::{Launch, toolchain_libraries};
 use super::manifest::{CAP_LINTS, Manifest, RUNTIME_CRATE, RUNTIME_PACKAGE, WorkspaceRuntimeFeatures, anchor_cargo_config, cap_lints};
 use super::nextest::Harness;
 use super::resources::{ResourcePermit, Resources};
+#[cfg(test)]
+use super::rustc_replay::snapshot_io::{self as replay_fs, environment as replay_env};
 use super::rustc_wrapper::{CAPTURE_DIR_VAR, ORIGINAL_WRAPPER_VAR, reset_capture_directory, wrapper_path};
 use super::sync::sync_or_copy;
 use super::test_binary::{TEST_THREADS_VAR, TestBinary, harness_threads};
@@ -874,11 +878,16 @@ impl Workspace {
         // variable is scrubbed rather than trusted to be absent, since test processes set it and a
         // user debugging a mutant by hand may export it.
         let _ = command.env_remove(gamma_rt::ACTIVE_VAR);
+        let _ = command
+            .env_remove(super::rustc_replay::REPLAY_VAR)
+            .env_remove(super::rustc_replay::ROOT_VAR)
+            .env_remove(super::rustc_replay::TARGET_VAR)
+            .env_remove(super::rustc_replay::RUNTIME_VAR)
+            .env_remove(super::rustc_replay::COMMAND_VAR);
 
         if self.rustc_captures_ready.load(Ordering::Acquire)
             && let Some(captures) = &self.rustc_captures
-            && let Some(wrapper) = wrapper_path()
-            && let cfg::RustcWrapperChain::Interpose(original) = cfg::rustc_wrapper_chain(&self.root)
+            && let Some((wrapper, cfg::RustcWrapperChain::Interpose(original))) = capture_wrapper(&self.root)
         {
             let _ = command.env(CAPTURE_DIR_VAR, captures.as_std_path());
 
@@ -892,6 +901,46 @@ impl Workspace {
         }
 
         command
+    }
+
+    /// Enables conservative compiler reuse only for this process's owned capture generation.
+    pub(super) fn configure_compiler_replay(&self, command: &mut Command) {
+        self.configure_compiler_capture(command, true);
+    }
+
+    pub(super) fn configure_compiler_capture(&self, command: &mut Command, selective: bool) {
+        if self.rustc_captures().is_none() {
+            return;
+        }
+        let Some(identity) = super::rustc_replay::command_fingerprint(command, replay_env::vars_os()) else {
+            return;
+        };
+        let identity = blake3::Hash::from(identity).to_hex();
+        let _command = command
+            .env(super::rustc_replay::COMMAND_VAR, identity.as_str())
+            .env(super::rustc_replay::ROOT_VAR, &self.root)
+            .env(super::rustc_replay::RUNTIME_VAR, &self.runtime)
+            .env(super::rustc_replay::TARGET_VAR, &self.target);
+        if selective
+            && let Some(captures) = self.rustc_captures()
+            && replay_fs::create_dir_all(captures.join("replay").join(identity.as_str())).is_ok()
+        {
+            let _command = command.env(super::rustc_replay::REPLAY_VAR, identity.as_str());
+        }
+    }
+
+    pub(super) fn compiler_runtime(&self) -> &Utf8Path {
+        &self.runtime
+    }
+
+    /// Fingerprints a complete, static source-only metadata proof context without unit outputs.
+    ///
+    /// Dynamic dependencies, build scripts, procedural macros, uncaptured units, changed control
+    /// files, and unknown filesystem expansion deliberately make this identity unavailable.
+    /// The caller must separately key the frozen sources and schema for `plan.files`: those
+    /// explicitly mutable files are checked for static closure but not hashed into this identity.
+    pub(crate) fn proof_context_identity(&self, plan: &crate::discover::Plan) -> Option<[u8; 32]> {
+        super::proof_context::identity(self, plan)
     }
 
     /// The persistent compiler-capture directory, only when this process can populate it.
@@ -2275,7 +2324,6 @@ fn inspect_cache_path(path: &Utf8Path) -> io::Result<fs::Metadata> {
 /// can write to their own cache can still change it under a run they started themselves, and no
 /// check here would be about a trust boundary.
 #[cfg(unix)]
-// #[gamma::skip(all, reason = "This policy consumes native ancestor Metadata, current credentials and physical paths; exercising foreign ownership and metadata failures without changing host state requires the deferred owned metadata backend.", tag = "native-boundary")]
 fn reject_foreign_writers(base: &Utf8Path) -> Result<()> {
     /// The bits that let a group member or anyone else write to a directory.
     const SHARED_WRITE: u32 = 0o022;
@@ -2489,7 +2537,6 @@ fn write_cache_owner(marker: &mut impl Write, source: &Utf8Path, owner: &Utf8Pat
 }
 
 #[cfg(unix)]
-// #[gamma::skip(bitwise.or_to_and, reason = "The open flags enforce no-follow and nonblocking behavior on native file types; testing their removal needs real links/FIFOs or the deferred owning-file backend.", tag = "native-boundary")]
 fn open_cache_owner(owner: &Utf8Path) -> io::Result<File> {
     // O_NOFOLLOW rejects a final-component symlink at open time. O_NONBLOCK prevents a planted
     // special file such as a FIFO from blocking before handle metadata can reject it.
@@ -2847,7 +2894,7 @@ fn anchor_manifest_paths(
 /// are withdrawn as unviable — a score computed over a silently smaller denominator.
 fn cap_ambient_rustflags(command: &mut Command) {
     // #[gamma::skip(call_result.default, tag = "equivalent", reason = "cap_ambient_rustflags_from returns unit and default_after preserves its environment updates")]
-    cap_ambient_rustflags_from(command, |name| env::var_os(name), env::vars_os);
+    cap_ambient_rustflags_from(command, |name| replay_env::var_os(name), replay_env::vars_os);
 }
 
 fn cap_ambient_rustflags_from<I>(command: &mut Command, lookup: impl Fn(&str) -> Option<OsString>, variables: impl FnOnce() -> I)
@@ -2895,7 +2942,15 @@ fn extend(command: &mut Command, name: &str, inherited: OsString, separator: &st
 
 /// Returns the cargo executable to use, honouring the one that invoked us.
 fn cargo_binary() -> String {
-    env::var("CARGO").unwrap_or_else(|_missing| "cargo".to_owned())
+    replay_env::var("CARGO").unwrap_or_else(|_missing| "cargo".to_owned())
+}
+
+fn capture_wrapper(root: &Utf8Path) -> Option<(Utf8PathBuf, cfg::RustcWrapperChain)> {
+    #[cfg(test)]
+    if replay_fs::active() {
+        return Some((root.join("cargo-gamma.exe"), cfg::RustcWrapperChain::Interpose(None)));
+    }
+    wrapper_path().map(|wrapper| (wrapper, cfg::rustc_wrapper_chain(root)))
 }
 
 /// Writes the guard runtime as a standalone crate outside the copied workspace.
@@ -3452,6 +3507,55 @@ mod testing_resume_tests {
 #[cfg(not(miri))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    #[test]
+    fn compiler_capture_directory_failures_do_not_enable_replay_or_change_the_generation() {
+        use super::super::rustc_replay::snapshot_io::{self, Script};
+        use super::super::rustc_replay::{COMMAND_VAR, REPLAY_VAR, ROOT_VAR, TARGET_VAR};
+        use super::*;
+
+        let root = Utf8PathBuf::from(if cfg!(windows) { r"C:\capture-command" } else { "/capture-command" });
+        let target = root.join("target");
+        let captures = target.join("captures");
+        let mut work = Workspace::adopt(root.clone(), target.clone());
+        work.set_rustc_captures(Some(captures.clone()));
+        let command = || {
+            let mut command = Command::new("compiler-free-cargo");
+            let _command = command.current_dir(&root).args(["check", "--all-targets"]);
+            command
+        };
+        let generation = snapshot_io::with(Script::default(), || {
+            let mut command = command();
+            work.configure_compiler_capture(&mut command, false);
+            command
+                .get_envs()
+                .find_map(|(name, value)| (name == COMMAND_VAR).then_some(value).flatten())
+                .unwrap()
+                .to_owned()
+        });
+        for failure in [false, true] {
+            let directory = captures.join("replay").join(generation.to_str().unwrap());
+            let mut script = Script::default();
+            if failure {
+                let _previous = script
+                    .directory_errors
+                    .insert(directory.clone().into_std_path_buf(), io::ErrorKind::PermissionDenied);
+            }
+            snapshot_io::with(script, || {
+                let mut command = command();
+                work.configure_compiler_replay(&mut command);
+                let environment = command.get_envs().collect::<std::collections::BTreeMap<_, _>>();
+                assert_eq!(environment[OsStr::new(COMMAND_VAR)], Some(generation.as_os_str()));
+                assert_eq!(environment[OsStr::new(ROOT_VAR)], Some(root.as_os_str()));
+                assert_eq!(environment[OsStr::new(TARGET_VAR)], Some(target.as_os_str()));
+                assert_eq!(
+                    environment.get(OsStr::new(REPLAY_VAR)).copied().flatten(),
+                    (!failure).then_some(generation.as_os_str())
+                );
+                assert_eq!(snapshot_io::read_dir(&directory).is_ok(), !failure);
+            });
+        }
+    }
+
     #[test]
     fn failed_test_enumeration_retains_retry_artifacts_but_success_does_not_settle_the_workspace() {
         use cargo_gamma_process::MemoryRequest;
@@ -5955,7 +6059,8 @@ mod tests {
 
     #[test]
     fn an_external_target_preserves_git_context_for_a_checkout_and_linked_worktree() {
-        let directory = crate::testing::workdir("git-");
+        // Nested self-hosting checkouts can exceed the native linker's output-path limit.
+        let directory = private_system_tempdir("git-");
         let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("UTF-8 root");
         let repository = root.join("r");
         let target = root.join("t");

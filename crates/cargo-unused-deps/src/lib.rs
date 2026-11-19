@@ -536,7 +536,6 @@ fn source_checks_with(
         return Ok(false);
     }
 
-    // #[gamma::skip(call_result.default, reason = "report_findings returns unit; diagnostics still execute and () is replaced with ()")]
     report_findings(&wanted);
 
     Ok(true)

@@ -36,9 +36,11 @@ mod memory;
 mod nextest;
 mod process_output;
 mod progress;
+mod proof_context;
 #[cfg(target_os = "linux")]
 pub(crate) mod relaunch;
 pub(crate) mod resources;
+mod rustc_replay;
 mod rustc_wrapper;
 mod session;
 mod stall;

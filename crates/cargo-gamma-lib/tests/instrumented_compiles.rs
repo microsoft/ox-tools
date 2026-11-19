@@ -13,9 +13,9 @@
 //! reaches the user as an unviable mutant: a full build round spent to learn nothing, on a tool
 //! whose whole cost is builds.
 //!
-//! So these tests hand the instrumented text to `rustc` and insist it type-checks. They are slower
-//! than the unit tests beside the collector, and they are the only thing that actually answers the
-//! question.
+//! Legacy compiler-backed cases hand the instrumented text to `rustc`. New admission regressions
+//! check collection, replacements, and schema rendering in-process; compiled correctness fixtures
+//! separately exercise active and inactive guards without launching child processes.
 
 use std::env;
 use std::env::consts::{DLL_PREFIX, DLL_SUFFIX};
@@ -101,6 +101,225 @@ fn guard_crate() -> &'static Path {
 
 fn rustc() -> String {
     env::var("RUSTC").unwrap_or_else(|_missing| "rustc".to_owned())
+}
+
+#[test]
+fn configured_boolean_blocks_preserve_statement_grammar_and_selected_values() {
+    let selection = Selection::parse("bool_expr.negate").unwrap();
+    for attributes in ["#[cfg(all())]", "#[cfg_attr(all(), cfg(all()))] #[allow(unused_braces)]"] {
+        for (expression, other) in [
+            (
+                "{ let left = left.trim(); left.eq_ignore_ascii_case(right) }",
+                "match (left, right) { (a, b) => a == b }",
+            ),
+            ("match (left.trim(), right) { (a, b) => a.eq_ignore_ascii_case(b) }", "{ false }"),
+        ] {
+            for (layout, body) in [
+                format!("{attributes} {expression} #[cfg(any())] {other}"),
+                format!("#[cfg(any())] {other} {attributes} {expression}"),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let source = format!(
+                    r#"
+                extern crate self as gamma_rt;
+                pub fn a(_ordinal: u32) -> bool {{ std::hint::black_box(false) }}
+                fn same(left: &str, right: &str) -> bool {{ {body} }}
+                fn main() {{ print!("{{}} {{}}", same(" a ", "A"), same("a", "b")); }}
+                "#
+                );
+                let file = SourceFile::parse("subject.rs", source.clone()).unwrap();
+                let defaults = collect::Defaults::of(file.ast());
+                let candidates = collect::collect_with(&file, &selection, &CfgSet::parse(""), &defaults)
+                    .into_iter()
+                    .filter(|candidate| candidate.item_path.as_ref() == "same" && file.slice(&candidate.span).trim() == expression)
+                    .collect();
+                let mut mutants = collect::into_mutants(&file, "subject", candidates);
+                assert_eq!(mutants.len(), 1, "{body}");
+                mutants[0].ordinal = 1;
+                let mutant = &mutants[0];
+                assert_eq!(rust_tokens(&mutant.replacement), rust_tokens(&format!("!({expression})")));
+                let instrumented = schema::instrument(&source, &[mutant]).unwrap();
+                syn::parse_file(&instrumented).unwrap();
+                let guard = format!("if ::gamma_rt::a(1u32) {{ !({expression}) }} else {{ {expression} }}");
+                let guarded = if layout == 0 {
+                    format!("{{ {guard} }}")
+                } else {
+                    format!("({guard})")
+                };
+                let expected = source.replacen(expression, &guarded, 1);
+                assert_eq!(rust_tokens(&instrumented), rust_tokens(&expected), "{body}");
+            }
+        }
+    }
+}
+
+fn rust_tokens(source: &str) -> String {
+    source
+        .parse::<proc_macro2::TokenStream>()
+        .expect("test fixtures must contain valid Rust tokens")
+        .to_string()
+}
+
+fn schema_replacements(source: &str, selectors: &str) -> Vec<(String, String)> {
+    let file = SourceFile::parse("subject.rs", source.to_owned()).expect("test fixtures must contain valid Rust source");
+    let selection = Selection::parse(selectors).expect("test selectors must name registered mutators");
+    let candidates = collect::collect_with(&file, &selection, &CfgSet::unconditional(), &collect::Defaults::of(file.ast()));
+    let mut mutants = collect::into_mutants(&file, "subject", candidates);
+    for (index, mutant) in mutants.iter_mut().enumerate() {
+        mutant.ordinal = u32::try_from(index + 1).expect("the small fixture candidate count fits u32");
+    }
+    let instrumented =
+        schema::instrument(source, &mutants.iter().collect::<Vec<_>>()).expect("collected mutations must form nonconflicting schema edits");
+    syn::parse_file(&instrumented).expect("mutation schema rendering must preserve Rust syntax");
+    assert_eq!(instrumented.matches("::gamma_rt::a(").count(), mutants.len());
+    let mut replacements = mutants
+        .iter()
+        .map(|mutant| (mutant.mutator.to_string(), rust_tokens(&mutant.replacement)))
+        .collect::<Vec<_>>();
+    replacements.sort();
+    replacements
+}
+
+#[test]
+fn ownership_generation_nested_generic_retry_schema_preserves_required_restorations() {
+    let source = r"
+        fn retry<P>(mut prepared: P, mut spawn: impl FnMut(P) -> Result<(), P>,
+                    mut backoff: impl FnMut(P) -> P) {
+            let mut waited = std::time::Duration::from_secs(1);
+            for _ in 0..3 {
+                match spawn(prepared) {
+                    Ok(()) => return,
+                    Err(returned) => { prepared = backoff(returned); }
+                }
+                waited = waited.saturating_mul(2);
+            }
+            let _ = spawn(prepared);
+        }";
+    assert_eq!(
+        schema_replacements(source, "stmt.delete_assign"),
+        [("stmt.delete_assign".into(), String::new())]
+    );
+    let nested = r"
+        fn consume(_: String) {}
+        fn make() -> String { String::new() }
+        fn use_value(_: String) {}
+        fn f(mut value: String) { consume(value); { value = make(); use_value(value); } }";
+    assert_eq!(schema_replacements(nested, "stmt.delete_assign"), []);
+}
+
+#[test]
+fn ownership_generation_returned_owner_and_alternate_copy_exit_remain_distinct() {
+    let source = r"
+        fn acquire(mut make: impl FnMut() -> String, paused: bool) -> String {
+            loop {
+                let permit = make();
+                if paused { drop(permit); continue; }
+                return permit;
+            }
+        }";
+    assert_eq!(schema_replacements(source, "loop.delete_continue"), []);
+    assert_eq!(
+        schema_replacements(&source.replace("String", "u32"), "loop.delete_continue"),
+        [("loop.delete_continue".into(), String::new())]
+    );
+    let value_arm = r"
+        fn required(flag: bool) -> u32 {
+            loop {
+                let _: u32 = match flag { true => { let _mark = 1; continue; }, false => 7 };
+                return 0;
+            }
+        }";
+    assert_eq!(schema_replacements(value_arm, "loop.delete_continue"), []);
+}
+
+#[test]
+fn ownership_generation_moved_exit_keeps_only_viable_neighbors() {
+    let source = r"
+        use std::cell::Cell;
+        fn notify(progress: &Cell<usize>) { progress.set(progress.get() + 1); }
+        fn moved_exit(mut line: String, word: &str, out: &mut Vec<String>, progress: &Cell<usize>) {
+            for flag in [false, true] {
+                if flag {
+                    out.push(line);
+                    notify(progress);
+                    break;
+                }
+                line.push_str(word);
+            }
+        }";
+    let selectors = "loop.delete_break,loop.break_to_continue";
+    assert_eq!(schema_replacements(source, selectors), []);
+    assert_eq!(
+        schema_replacements(&source.replace("out.push(line)", "out.push(line.clone())"), selectors),
+        [
+            ("loop.break_to_continue".into(), "continue".into()),
+            ("loop.delete_break".into(), String::new())
+        ]
+    );
+    assert_eq!(
+        schema_replacements(
+            &source.replace("line.push_str(word);", "line = String::new(); line.push_str(word);"),
+            selectors
+        ),
+        [(
+            "loop.delete_break".into(),
+            rust_tokens(
+                "for flag in [false, true] { if flag { out.push(line); notify(progress); } line = String::new(); line.push_str(word); }"
+            ),
+        )]
+    );
+}
+
+#[test]
+fn ownership_generation_path_collection_reversals_preserve_move_order() {
+    let source = r#"
+        fn paths(directory: &std::path::Path, name: String) -> Vec<std::path::PathBuf> {
+            vec![directory.join(format!("{name}.rs")), directory.join(name).join("mod.rs")]
+        }"#;
+    assert_eq!(schema_replacements(source, "collection.reverse_vec"), []);
+    assert_eq!(
+        schema_replacements(&source.replace("join(name)", "join(&name)"), "collection.reverse_vec"),
+        [(
+            "collection.reverse_vec".into(),
+            rust_tokens(r#"vec![directory.join(&name).join("mod.rs"), directory.join(format!("{name}.rs"))]"#)
+        )]
+    );
+    assert_eq!(
+        schema_replacements(
+            "fn owned(first: String, second: String) -> Vec<String> { vec![first, second] }",
+            "collection.reverse_vec"
+        ),
+        [("collection.reverse_vec".into(), rust_tokens("vec![second, first]"))]
+    );
+    assert_eq!(
+        schema_replacements(
+            r#"fn owned(name: String) -> [String; 2] { [format!("{name}"), name] }"#,
+            "collection.reverse_array"
+        ),
+        []
+    );
+    let fields = r"
+        struct Pair { left: String, right: String }
+        fn borrow(value: &String) -> usize { value.len() }
+        fn take(value: String) -> usize { value.len() }
+        fn fields(pair: Pair) -> [usize; 2] { [borrow(&pair.left), take(pair.right)] }";
+    assert_eq!(
+        schema_replacements(fields, "collection.reverse_array"),
+        [(
+            "collection.reverse_array".into(),
+            rust_tokens("[take(pair.right), borrow(&pair.left)]")
+        )]
+    );
+    assert_eq!(
+        schema_replacements(&fields.replace("take(pair.right)", "take(pair.left)"), "collection.reverse_array"),
+        []
+    );
+    assert_eq!(
+        schema_replacements("fn copy(value: u32) -> [u32; 2] { [value, 0] }", "collection.reverse_array"),
+        [("collection.reverse_array".into(), rust_tokens("[0, value]"))]
+    );
 }
 
 /// Builds a stand-in for the `gamma` attribute crate, once for the whole test binary.
@@ -527,6 +746,52 @@ pub fn first_even(values: &[i32]) -> i32 {
 ";
 
     assert!(compiles("loop_exits", source, "loop") > 0);
+}
+
+#[test]
+fn campaign_operand_and_borrowed_predicate_schema_replacements_are_exact() {
+    let source = r"
+        use std::time::{Duration, Instant};
+        struct Timing { elapsed: Duration }
+        fn update(value: &mut Timing, tuple: &mut (u8, Duration), delta: Duration) {
+            value.elapsed += delta;
+            tuple.1 += delta;
+        }
+        fn deadline(budget: Duration) -> Instant {
+            let clock = || Instant::now();
+            clock() + budget
+        }
+        fn text(first: char, chars: std::str::Chars<'_>) -> String {
+            first.to_uppercase().collect::<String>() + chars.as_str()
+        }
+        struct Position(usize);
+        fn range(start: Position, ends: (Position, Position)) -> std::ops::Range<Position> {
+            start..ends.1
+        }
+        fn find(values: &[(usize, bool)]) -> Option<(usize, &(usize, bool))> {
+            values.iter().enumerate().skip(1).find(|(_, (_, opens))| !opens)
+        }
+        fn contains(markers: &[usize]) -> bool {
+            markers.iter().any(|offset| (1usize..9usize).contains(offset))
+        }
+        fn owned(value: usize) -> usize { value }
+        fn dereferenced(value: &usize) -> usize { *value }
+    ";
+    assert_eq!(
+        schema_replacements(
+            source,
+            "assign.add_to_mul,arith.add_to_mul,arith.add_to_sub,range.exclusive_to_inclusive,expr.increment,expr.decrement,unary.remove_not"
+        ),
+        [
+            ("arith.add_to_sub".into(), rust_tokens("(clock()) - (budget)")),
+            ("expr.decrement".into(), rust_tokens("(*value) - 1")),
+            ("expr.decrement".into(), rust_tokens("(value) - 1")),
+            ("expr.increment".into(), rust_tokens("(*value) + 1")),
+            ("expr.increment".into(), rust_tokens("(value) + 1")),
+            ("range.exclusive_to_inclusive".into(), rust_tokens("(1usize)..((9usize) + 1)")),
+            ("unary.remove_not".into(), rust_tokens("*(opens)")),
+        ]
+    );
 }
 
 #[test]

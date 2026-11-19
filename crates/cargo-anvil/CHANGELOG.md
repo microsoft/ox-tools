@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [0.25.3] - 2026-11-18
+
+- 🐛 Bug Fixes
+
+  - cargo-gamma: strengthen admission proofs and compiler isolation
+  - stabilize scheduled checks and close Linux mutation coverage gaps ([#357](https://github.com/microsoft/ox-tools/pull/357))
+
+## [0.25.2] - 2026-11-18
+
+- 🐛 Bug Fixes
+
+  - cargo-gamma: strengthen admission proofs and compiler isolation
+  - stabilize scheduled checks and close Linux mutation coverage gaps ([#357](https://github.com/microsoft/ox-tools/pull/357))
+
 ## [0.25.1] - 2026-11-06
 
 - 🐛 Bug Fixes

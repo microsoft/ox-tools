@@ -515,9 +515,8 @@ pub(super) fn nominal_expansion(attributes: &[syn::Attribute], cfg: &CfgSet) -> 
             .parse_args_with(syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated)
             .ok()?;
         if nested.len() < 2 {
-            return
-            // #[gamma::skip(return_value.default, reason = "The return type is Option<Vec<Attribute>>; its Default is the same None returned for malformed conditional attributes.", tag = "equivalent")]
-            None;
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+            return None;
         }
         let mut nested = nested.into_iter();
         let condition =
@@ -527,9 +526,8 @@ pub(super) fn nominal_expansion(attributes: &[syn::Attribute], cfg: &CfgSet) -> 
             Verdict::Yes => pending.extend(nested.map(|meta| syn::parse_quote!(#[#meta]))),
             Verdict::No => {}
             Verdict::Unknown => {
-                return
-            // #[gamma::skip(return_value.default, reason = "The return type is Option<Vec<Attribute>>; its Default is the same None returned for an undecided expansion.", tag = "equivalent")]
-            None;
+                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                return None;
             }
         }
     }
@@ -553,9 +551,8 @@ pub(super) fn known_derives(attributes: &[syn::Attribute], paths: &DefaultPaths)
 
 fn nominal_macro(node: &syn::Macro, paths: &DefaultPaths) -> bool {
     if !paths.known_value_macro(&node.path) {
-        return
-        // #[gamma::skip(return_value.default, reason = "The return type is bool and Default::default() is exactly this false.", tag = "equivalent")]
-        false;
+        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+        return false;
     }
     if node.path.segments.last().is_some_and(|segment| segment.ident == "stringify") {
         return true;
@@ -573,9 +570,8 @@ fn nominal_macro(node: &syn::Macro, paths: &DefaultPaths) -> bool {
         if
         // #[gamma::skip(cond.always_false, reason = "If this early overflow check is removed, the extra sentinel token still exhausts checked_sub(1) and returns false before any queued group is visited. No state escapes this pure predicate; only inspection work differs.", tag = "resource")]
         tokens.len() > remaining {
-            return
-            // #[gamma::skip(return_value.default, reason = "The return type is bool and Default::default() is exactly this false.", tag = "equivalent")]
-            false;
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+            return false;
         }
         let mut inert_group = None;
         for (index, token) in tokens.iter().enumerate() {
@@ -588,14 +584,12 @@ fn nominal_macro(node: &syn::Macro, paths: &DefaultPaths) -> bool {
             match token {
                 proc_macro2::TokenTree::Group(group) if inert_group != Some(index) => pending.push(group.stream()),
                 proc_macro2::TokenTree::Ident(name) if name == "impl" => {
-                    return
-                // #[gamma::skip(return_value.default, reason = "The return type is bool and Default::default() is exactly this false.", tag = "equivalent")]
-                false;
+                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+                    return false;
                 }
                 proc_macro2::TokenTree::Punct(punct) if matches!(punct.as_char(), '#' | '$') => {
-                    return
-                // #[gamma::skip(return_value.default, reason = "The return type is bool and Default::default() is exactly this false.", tag = "equivalent")]
-                false;
+                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+                    return false;
                 }
                 proc_macro2::TokenTree::Punct(punct)
                     if punct.as_char() == '!' && matches!(tokens.get(index + 1), Some(proc_macro2::TokenTree::Group(_))) && index > 0 =>
@@ -617,9 +611,8 @@ fn nominal_macro(node: &syn::Macro, paths: &DefaultPaths) -> bool {
                     let path = tokens[start..index].iter().cloned().collect();
                     if let Ok(path) = syn::parse2::<syn::Path>(path) {
                         if !paths.known_value_macro(&path) {
-                            return
-                            // #[gamma::skip(return_value.default, reason = "The return type is bool and Default::default() is exactly this false.", tag = "equivalent")]
-                            false;
+                            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+                            return false;
                         }
                         if path.segments.last().is_some_and(|segment| segment.ident == "stringify") {
                             inert_group = Some(index + 1);
@@ -826,9 +819,8 @@ impl Identities {
         while remaining > 0 {
             *work = work.checked_sub(1)?;
             if path.len() > MODULE_PATH_SEGMENT_LIMIT {
-                return
-                // #[gamma::skip(return_value.default, reason = "The return type is Option<Vec<String>> and its Default is exactly this None.", tag = "equivalent")]
-                None;
+                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                return None;
             }
             remaining -= 1;
             if matches!(path.first().map(String::as_str), Some("crate" | "self")) {
@@ -991,9 +983,8 @@ impl Identities {
             if
             // #[gamma::skip(logical.or_remove_right, reason = "Identities::resolve_path retains its finite decreasing budget and visited-path guard. Removing the visited check still returns None at the budget for cycles; permitting one extra unchanged iteration after no link matches immediately hits visited (or the budget) and returns the same None. Positive declaration resolutions and chosen link replacements are unchanged.", tag = "equivalent")]
             remaining == 0 || !visited.insert(path.clone()) {
-                return
-                // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-                None;
+                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                return None;
             }
             // #[gamma::skip(all, reason = "this decreasing budget bounds alias cycles whose expanded paths never repeat")]
             remaining -= 1;
@@ -1018,9 +1009,8 @@ impl Identities {
             if
             // #[gamma::skip(cond.always_false, reason = "Identities::resolve_path retains its finite decreasing budget and visited-path guard. Removing the visited check still returns None at the budget for cycles; permitting one extra unchanged iteration after no link matches immediately hits visited (or the budget) and returns the same None. Positive declaration resolutions and chosen link replacements are unchanged.", tag = "equivalent")]
             !replaced {
-                return
-                // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-                None;
+                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                return None;
             }
         }
     }

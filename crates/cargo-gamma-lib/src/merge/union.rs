@@ -126,7 +126,6 @@ pub fn merge(reports: &[(String, Report)], now: u64, window: Option<u64>) -> Mer
                     verdict_provenance(input_name, report, mutant, source_name_filtered(report, path), &mut lineages);
                 let compatible = file.source == source.file.source && file.language == source.file.language;
 
-                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
                 retain(
                     &mut latest,
                     Candidate {

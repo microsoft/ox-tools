@@ -210,6 +210,44 @@ pub fn configured() -> bool {
     (if ::gamma_rt::a(4u32) { !({ true }) } else { { true } })
 }
 
+pub fn configured_block_first(left: &str, right: &str) -> bool {
+    #[cfg(all())]
+    {
+        if ::gamma_rt::a(34u32) {
+            !({
+                let left = left.trim();
+                left.eq_ignore_ascii_case(right)
+            })
+        } else {
+            {
+                let left = left.trim();
+                left.eq_ignore_ascii_case(right)
+            }
+        }
+    }
+    #[cfg(any())]
+    match (left, right) {
+        (a, b) => a == b,
+    }
+}
+
+pub fn configured_match_last(left: &str, right: &str) -> bool {
+    #[cfg(any())]
+    {
+        false
+    }
+    #[cfg_attr(all(), cfg(all()))]
+    (if ::gamma_rt::a(35u32) {
+        !(match (left.trim(), right) {
+            (a, b) => a.eq_ignore_ascii_case(b),
+        })
+    } else {
+        match (left.trim(), right) {
+            (a, b) => a.eq_ignore_ascii_case(b),
+        }
+    })
+}
+
 pub fn configured_body() -> bool {
     if ::gamma_rt::a(5u32) {
         false

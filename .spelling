@@ -14,6 +14,7 @@ ACLs
 accessor
 accessors
 bitset
+cacheable
 catchable
 Ctrl
 unanalyzable
@@ -52,6 +53,7 @@ autodetects
 memoizes
 Tarjan
 uncached
+uncaptured
 umask
 B6
 backend
@@ -159,6 +161,7 @@ enums
 env
 EOF
 extens
+extern
 FFI-compatible
 fhl-scus4-app-win
 fhl-scus4-app-win2
