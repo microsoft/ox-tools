@@ -152,7 +152,6 @@ fn write_if_unchanged_with(
         .stage(scratch, contents, destination)
         .map_err(|cause| discard_with(scratch, path, cause, || filesystem.remove_file(scratch)))?;
 
-    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
     before_publication(scratch);
 
     if !filesystem.matches_contents(destination, expected).map_err(|cause| {
@@ -168,7 +167,6 @@ fn write_if_unchanged_with(
     }
 
     // #[gamma::skip(call.replace_with_default, stmt.delete_call, reason = "Production cfg(not(test)) after_comparison is an empty const fn returning (). Removing its call cannot change production publication. cfg(test) replaces it with an observer-only hook, so a test-only observation differs, but that is not a missing production behavior oracle.", tag = "equivalent")]
-    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
     after_comparison(destination);
     filesystem
         .rename(scratch, destination)
@@ -197,7 +195,6 @@ pub(crate) fn remove_if_unchanged(workspace: &Utf8Path, path: &Utf8Path, expecte
 /// integration tests; line coverage cannot deterministically force those host boundaries.
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub(crate) fn remove_if_unchanged_locked(destination: &Utf8Path, path: &Utf8Path, expected: &str) -> Result<Publication> {
-    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
     before_publication(destination);
 
     if !matches_contents(destination, Some(expected))
@@ -501,7 +498,6 @@ pub(crate) fn scratch_path(path: &Utf8Path) -> Utf8PathBuf {
 fn scratch_path_from_identity(path: &Utf8Path, process_id: u32, invocation: u64, mut hasher: impl core::hash::Hasher) -> Utf8PathBuf {
     let name = path.file_name().unwrap_or("report");
 
-    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
     write_scratch_identity(&mut hasher, process_id, invocation);
     path.with_file_name(format!(".{name}.{process_id}.{invocation}.{:016x}.tmp", hasher.finish()))
 }

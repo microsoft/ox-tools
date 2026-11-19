@@ -159,7 +159,6 @@ fn dispatched_with<H: Host>(
         }
     };
 
-    // #[gamma::skip(call_result.default, reason = "say_notes returns unit and this mutator still emits the same notes before replacing unit with unit")]
     say_notes(host, styler);
 
     code
@@ -203,7 +202,6 @@ fn normalize(args: impl IntoIterator<Item = impl Into<OsString> + Clone>) -> Vec
         normalized.insert(1, "run".into());
     }
 
-    // #[gamma::skip(call_result.default, reason = "normalize_list_mode returns unit and this mutator still normalizes the same arguments before replacing unit with unit")]
     normalize_list_mode(&mut normalized);
 
     normalized
@@ -327,7 +325,6 @@ fn implies_run(args: &[OsString]) -> bool {
 /// whether that is an error or a degradation based on whether the user asked for one.
 #[cfg(target_os = "linux")]
 #[cfg_attr(coverage_nightly, coverage(off))]
-// #[gamma::skip(all, reason = "This Linux adapter queries cached native delegation and can replace the process; covering its wiring without launching the harness requires the deferred relaunch dependency injection.", tag = "native-boundary")]
 fn relaunch_for_memory_control<H: Host>(host: &H, args: &super::cli::RunArgs) -> Option<i32> {
     use crate::exec::relaunch;
 
@@ -357,14 +354,12 @@ pub(super) fn dispatch<H: Host>(host: &mut H, cli: Cli, styler: Styler) -> crate
             check_run_shard(&args)?;
 
             #[cfg(target_os = "linux")]
-            // #[gamma::skip(unary.remove_not, call.replace_with_default, call_result.default, reason = "This branch invokes native process replacement; relaunch policy and command construction are tested without executing systemd-run.", tag = "native-boundary")]
             if !args.resume_testing
                 && let Some(code) = relaunch_for_memory_control(host, &args)
             {
                 return Ok(code);
             }
             #[cfg(target_os = "linux")]
-            // #[gamma::skip(try.propagate_to_unwrap, reason = "This call reaches native saved-state and process-replacement adapters; scripted hosts refuse replacement, while resume_relaunch_with tests checkpoint and delegation error propagation without relaunching the harness.", tag = "native-boundary")]
             if args.resume_testing
                 && let Some(code) = super::run::resume_relaunch(host, &args)?
             {

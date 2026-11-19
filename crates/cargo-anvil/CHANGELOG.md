@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-## [0.26.0] - 2026-11-18
+## [0.26.0] - 2026-11-19
 
 - ✨ Features
 
@@ -19,12 +19,27 @@
 
 - ✔️ Tasks
 
+  - cargo-anvil: regenerate reserved engine-control artifacts
   - cargo-anvil: regenerate regular hard-link inspection artifacts
   - cargo-anvil: regenerate image tool provenance artifacts
   - cargo-anvil: regenerate incremental capture artifacts
   - cargo-anvil: regenerate bounded preparation artifacts
   - cargo-anvil: reconcile main release metadata
   - cargo-anvil: regenerate the optional preparation catalog
+
+## [0.25.3] - 2026-11-18
+
+- 🐛 Bug Fixes
+
+  - cargo-gamma: strengthen admission proofs and compiler isolation
+  - stabilize scheduled checks and close Linux mutation coverage gaps ([#357](https://github.com/microsoft/ox-tools/pull/357))
+
+## [0.25.2] - 2026-11-18
+
+- 🐛 Bug Fixes
+
+  - cargo-gamma: strengthen admission proofs and compiler isolation
+  - stabilize scheduled checks and close Linux mutation coverage gaps ([#357](https://github.com/microsoft/ox-tools/pull/357))
 
 ## [0.25.1] - 2026-11-06
 

@@ -27,6 +27,8 @@ fn machine() -> Machine<'static> {
         stable_calls: None,
         paths: HashMap::default(),
         assumptions: Vec::new(),
+        retry: None,
+        breaks: false,
     }
 }
 

@@ -183,7 +183,6 @@ pub(super) fn copy_tree_with(from: &Utf8Path, to: &Utf8Path, skip: &Utf8Path, op
                 // file missing from the copy produces a build failure naming something unrelated,
                 // which is far harder to act on than the permission error that caused it.
                 Err(cause) => {
-                    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
                     record(failure, error!("could not read the source tree").caused_by(cause));
 
                     return WalkState::Quit;
@@ -191,7 +190,6 @@ pub(super) fn copy_tree_with(from: &Utf8Path, to: &Utf8Path, skip: &Utf8Path, op
             };
 
             let Some(source) = Utf8Path::from_path(entry.path()) else {
-                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
                 record(
                     failure,
                     error!("`{}` is not valid UTF-8 and cannot be copied", entry.path().display()),
@@ -218,7 +216,6 @@ pub(super) fn copy_tree_with(from: &Utf8Path, to: &Utf8Path, skip: &Utf8Path, op
             match copy_entry(source, &destination.join(relative), &reflinks) {
                 Ok(()) => WalkState::Continue,
                 Err(cause) => {
-                    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
                     record(failure, cause);
 
                     WalkState::Quit
@@ -482,7 +479,6 @@ fn copy_symlink_with(
         .parent()
         .map_or_else(|| target.is_dir(), |parent| parent.as_std_path().join(&target).is_dir());
     #[cfg(not(windows))]
-    // #[gamma::skip(literal.bool_flip, reason = "Unix symlink creation has no file/directory distinction and ignores this Windows-only callback argument.", tag = "equivalent")]
     let directory = false;
 
     create(&target, destination.as_std_path(), directory)
@@ -540,7 +536,6 @@ const fn reflink_supported() -> bool {
 /// `/var/folders` once they pass three days, so a scratch tree cloned from an old checkout can
 /// have files deleted out from under a run that is still using them.
 fn freshen(destination: &Utf8Path) {
-    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
     freshen_at(destination, SystemTime::now());
 }
 
@@ -713,7 +708,7 @@ mod final_survivor_tests {
 
     #[test]
     fn a_native_unrepresentable_source_name_fails_the_actual_parallel_copy_without_discarding_prior_destination_bytes() {
-        let directory = tempfile::tempdir_in(".").unwrap();
+        let directory = tempfile::tempdir().unwrap();
         let root = Utf8Path::from_path(directory.path()).unwrap();
         let source = root.join("source");
         let destination = root.join("destination");
@@ -736,6 +731,8 @@ mod final_survivor_tests {
             fs::read_to_string(destination.join("preserved")).unwrap(),
             "prior destination bytes"
         );
+        fs::remove_file(&path).unwrap();
+        directory.close().unwrap();
     }
 
     #[test]

@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use std::process::Output;
+use std::process::{Command, Output};
 use std::time::Duration;
 
 #[doc(hidden)]
@@ -15,7 +15,7 @@ pub use super::isolation::{
 pub use super::{BuildScope, Convergence, Converger, Isolation};
 use super::{Events, Plan, Result, Workspace};
 
-type ScriptedCompiler = Box<dyn FnMut(&Workspace, &[String], Option<Duration>, &mut dyn Events) -> Result<Option<Output>>>;
+type ScriptedCompiler = Box<dyn FnMut(&Workspace, &[String], Option<Duration>, &mut dyn Events, &Command) -> Result<Option<Output>>>;
 
 std::thread_local! {
     pub(super) static SCRIPTED_COMPILER: std::cell::RefCell<Option<ScriptedCompiler>> = const { std::cell::RefCell::new(None) };
@@ -24,7 +24,14 @@ std::thread_local! {
 // Supplies synchronous compile results on this thread, bypassing command supervision. Installation
 // cannot nest and resets after the body, including unwinding; it does not cover native supervision.
 pub fn with_compiler<T>(
-    runner: impl FnMut(&Workspace, &[String], Option<Duration>, &mut dyn Events) -> Result<Option<Output>> + 'static,
+    mut runner: impl FnMut(&Workspace, &[String], Option<Duration>, &mut dyn Events) -> Result<Option<Output>> + 'static,
+    body: impl FnOnce() -> T,
+) -> T {
+    with_compiler_command(move |work, args, budget, events, _command| runner(work, args, budget, events), body)
+}
+
+pub(in crate::exec) fn with_compiler_command<T>(
+    runner: impl FnMut(&Workspace, &[String], Option<Duration>, &mut dyn Events, &Command) -> Result<Option<Output>> + 'static,
     body: impl FnOnce() -> T,
 ) -> T {
     struct Reset;

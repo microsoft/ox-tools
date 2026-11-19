@@ -408,7 +408,7 @@ pub fn release(process: u32) -> bool {
     // here is what closes it once, on every path out of this function.
     let snapshot = unsafe { OwnedHandle::from_raw_handle(snapshot) };
 
-    main_thread(&snapshot, process).is_some_and(resume)
+    snapshot_thread(&snapshot, process).is_some_and(resume)
 }
 
 /// Takes the thread snapshot [`release`] scans.
@@ -421,7 +421,19 @@ fn valid_snapshot(snapshot: HANDLE) -> bool {
 }
 
 /// The id of the one thread a suspended child has, if the snapshot still lists it.
-fn main_thread(snapshot: &OwnedHandle, process: u32) -> Option<u32> {
+fn snapshot_thread(snapshot: &OwnedHandle, process: u32) -> Option<u32> {
+    main_thread(
+        process,
+        |entry| NATIVE_CALLS.first_thread(snapshot.as_raw_handle(), entry),
+        |entry| NATIVE_CALLS.next_thread(snapshot.as_raw_handle(), entry),
+    )
+}
+
+fn main_thread(
+    process: u32,
+    first: impl FnOnce(&mut THREADENTRY32) -> bool,
+    mut next: impl FnMut(&mut THREADENTRY32) -> bool,
+) -> Option<u32> {
     let mut entry = THREADENTRY32 {
         // The API rejects an entry whose declared size is not its own, which is how it tells
         // the versions of this structure apart.
@@ -429,7 +441,7 @@ fn main_thread(snapshot: &OwnedHandle, process: u32) -> Option<u32> {
         ..Default::default()
     };
 
-    let mut found = NATIVE_CALLS.first_thread(snapshot.as_raw_handle(), &mut entry);
+    let mut found = first(&mut entry);
 
     while found {
         if let Some(thread) = thread_owned_by(&entry, process) {
@@ -437,7 +449,7 @@ fn main_thread(snapshot: &OwnedHandle, process: u32) -> Option<u32> {
         }
 
         // #[gamma::skip(stmt.delete_assign, reason = "not advancing the thread snapshot repeats the first unrelated entry forever")]
-        found = NATIVE_CALLS.next_thread(snapshot.as_raw_handle(), &mut entry);
+        found = next(&mut entry);
     }
 
     // #[gamma::skip(option.none_to_some, reason = "the default thread id is zero, which Win32 never assigns; attempting to open it also reports release failure, so the public result remains false")]
@@ -943,6 +955,43 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_selection_preserves_the_matching_thread_id_after_unrelated_entries() {
+        for selected in [1, 73, u32::MAX] {
+            let mut advances = 0;
+            let found = main_thread(
+                41,
+                |entry| {
+                    assert_eq!(entry.dwSize as usize, size_of::<THREADENTRY32>());
+                    entry.th32OwnerProcessID = 40;
+                    entry.th32ThreadID = 5;
+                    true
+                },
+                |entry| {
+                    advances += 1;
+                    assert_eq!(advances, 1, "stop enumerating as soon as the owner matches");
+                    entry.th32OwnerProcessID = 41;
+                    entry.th32ThreadID = selected;
+                    true
+                },
+            );
+            assert_eq!(found, Some(selected));
+            assert_eq!(advances, 1);
+        }
+        assert_eq!(main_thread(41, |_| false, |_| panic!("empty snapshots cannot advance")), None);
+        assert_eq!(
+            main_thread(
+                41,
+                |entry| {
+                    entry.th32OwnerProcessID = 40;
+                    true
+                },
+                |_| false,
+            ),
+            None,
+        );
+    }
+
+    #[test]
     fn completion_draining_returns_and_retains_the_actual_limit_hit() {
         for expected in [false, true] {
             let completion = core::ptr::dangling_mut::<c_void>();
@@ -1121,7 +1170,7 @@ mod tests {
 
         // SAFETY: the successful snapshot call above returned this newly owned handle.
         let snapshot = unsafe { OwnedHandle::from_raw_handle(snapshot) };
-        let thread = main_thread(&snapshot, child.id()).expect("the suspended child's thread is listed");
+        let thread = snapshot_thread(&snapshot, child.id()).expect("the suspended child's thread is listed");
         let opened = SystemCalls.open_thread(thread);
 
         assert!(valid_handle(opened), "the child thread can be opened for resumption");
@@ -1342,7 +1391,7 @@ mod tests {
 
         // SAFETY: the successful snapshot call above returned this newly owned handle.
         let snapshot = unsafe { OwnedHandle::from_raw_handle(snapshot) };
-        let thread = main_thread(&snapshot, child.id()).expect("the suspended child's thread is listed");
+        let thread = snapshot_thread(&snapshot, child.id()).expect("the suspended child's thread is listed");
         let handle = SystemCalls.open_thread(thread);
 
         assert!(!handle.is_null(), "the suspended thread can be opened");

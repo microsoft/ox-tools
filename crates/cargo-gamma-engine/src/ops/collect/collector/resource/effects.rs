@@ -47,7 +47,8 @@ impl Kind {
             Self::Char => Binding::Char,
             Self::Unsigned => Binding::Integer,
             Self::Bool => Binding::Bool,
-            _ => return None, // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+            _ => return None,
         })
     }
 }
@@ -122,7 +123,8 @@ impl Analysis<'_> {
             || self.active.len() >= 8
             || !self.sources.primitive_scope(function.root, &function.module)
         {
-            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+            return None;
         }
         self.remaining -= 1;
         let item =
@@ -133,11 +135,13 @@ impl Analysis<'_> {
             || item.sig.abi.is_some()
             || !item.sig.generics.params.is_empty()
         {
-            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+            return None;
         }
         let identity = (function.root.to_owned(), function.module.clone(), item.sig.ident.to_string());
         if !self.active.insert(identity.clone()) {
-            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+            return None;
         }
         let output = match &item.sig.output {
             ReturnType::Default => Kind::Unit,
@@ -146,10 +150,13 @@ impl Analysis<'_> {
         let mut parameters = Vec::new();
         let mut values = HashMap::default();
         for argument in &item.sig.inputs {
-            let FnArg::Typed(argument) = argument else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
-            let Pat::Ident(pattern) = &*argument.pat else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+            let FnArg::Typed(argument) = argument else { return None };
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+            let Pat::Ident(pattern) = &*argument.pat else { return None };
             if pattern.by_ref.is_some() || pattern.subpat.is_some() {
-                return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                return None;
             }
             let kind = ty(&argument.ty)?;
             parameters.push(kind);
@@ -176,7 +183,8 @@ impl Checker<'_, '_> {
         let mut result = Kind::Unit;
         for statement in &block.stmts {
             if self.analysis.remaining == 0 {
-                return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                return None;
             }
             self.analysis.remaining -= 1;
             result = match statement {
@@ -187,9 +195,11 @@ impl Checker<'_, '_> {
                         Pat::Type(pattern) if ty(&pattern.ty) == Some(kind) => &*pattern.pat,
                         pattern => pattern,
                     };
-                    let Pat::Ident(pattern) = pattern else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                    let Pat::Ident(pattern) = pattern else { return None };
                     if pattern.by_ref.is_some() || pattern.subpat.is_some() {
-                        return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                        return None;
                     }
                     let _old = self.values.insert(pattern.ident.to_string(), kind);
                     Kind::Unit
@@ -198,7 +208,8 @@ impl Checker<'_, '_> {
                     let kind = self.expr(expression)?;
                     if semi.is_some() { Kind::Unit } else { kind }
                 }
-                _ => return None, // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                _ => return None,
             };
         }
         self.values = saved;
@@ -212,7 +223,8 @@ impl Checker<'_, '_> {
     )]
     fn expr(&mut self, expression: &Expr) -> Option<Kind> {
         if self.analysis.remaining == 0 {
-            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+            return None;
         }
         self.analysis.remaining -= 1;
         match expression {
@@ -226,7 +238,8 @@ impl Checker<'_, '_> {
                 syn::Lit::Char(_) => Kind::Char,
                 syn::Lit::Int(_) => Kind::Unsigned,
                 syn::Lit::Bool(_) => Kind::Bool,
-                _ => return None, // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                _ => return None,
             }),
             Expr::Tuple(tuple) if tuple.elems.is_empty() && tuple.attrs.is_empty() => Some(Kind::Unit),
             Expr::Paren(paren) if paren.attrs.is_empty() => self.expr(&paren.expr),
@@ -237,7 +250,8 @@ impl Checker<'_, '_> {
                 (left == right && matches!(left, Kind::Char | Kind::Unsigned | Kind::Bool | Kind::MaybeChar)).then_some(Kind::Bool)
             }
             Expr::Call(call) if call.attrs.is_empty() => {
-                let Expr::Path(path) = &*call.func else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                let Expr::Path(path) = &*call.func else { return None };
                 let path = path.path.segments.iter().map(|part| part.ident.to_string()).collect::<Vec<_>>();
                 if path.as_slice() == ["String", "with_capacity"] && call.args.len() == 1 && self.expr(&call.args[0])? == Kind::Unsigned {
                     return Some(Kind::String);
@@ -248,18 +262,21 @@ impl Checker<'_, '_> {
                 let source = self.analysis.sources.function_in(&self.root, &self.module, &path)?;
                 let (parameters, output) = self.analysis.function(source)?;
                 if parameters.len() != call.args.len() {
-                    return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                    return None;
                 }
                 for (argument, expected) in call.args.iter().zip(parameters) {
                     if self.expr(argument)? != expected {
-                        return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                        return None;
                     }
                 }
                 Some(output)
             }
             Expr::MethodCall(call) if call.attrs.is_empty() && call.turbofish.is_none() => {
                 if !self.analysis.sources.closed_methods(&self.root, &self.module) {
-                    return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                    return None;
                 }
                 let receiver = self.expr(&call.receiver)?;
                 let arguments = call.args.iter().map(|argument| self.expr(argument)).collect::<Option<Vec<_>>>()?;
@@ -279,7 +296,8 @@ impl Checker<'_, '_> {
             }
             Expr::If(condition) if condition.attrs.is_empty() => {
                 if self.expr(&condition.cond)? != Kind::Bool {
-                    return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                    return None;
                 }
                 let then_kind = self.block(&condition.then_branch)?;
                 let else_kind = match &condition.else_branch {
@@ -289,19 +307,25 @@ impl Checker<'_, '_> {
                 (then_kind == else_kind).then_some(then_kind)
             }
             Expr::While(loop_) if loop_.attrs.is_empty() && loop_.label.is_none() => {
-                let Expr::Let(condition) = &*loop_.cond else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
-                let Expr::MethodCall(next) = &*condition.expr else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                let Expr::Let(condition) = &*loop_.cond else { return None };
+                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                let Expr::MethodCall(next) = &*condition.expr else { return None };
                 if !matches!(&*next.receiver, Expr::Path(path) if path.path.get_ident()
                     .is_some_and(|name| self.values.get(&name.to_string()) == Some(&Kind::Chars)))
                     || self.expr(&condition.expr)? != Kind::MaybeChar
                 {
-                    return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                    return None;
                 }
-                let Pat::TupleStruct(pattern) = &*condition.pat else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                let Pat::TupleStruct(pattern) = &*condition.pat else { return None };
                 if !pattern.path.is_ident("Some") || pattern.elems.len() != 1 {
-                    return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                    return None;
                 }
-                let Pat::Ident(binding) = &pattern.elems[0] else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                let Pat::Ident(binding) = &pattern.elems[0] else { return None };
                 let saved = self.values.clone();
                 let _old = self.values.insert(binding.ident.to_string(), Kind::Char);
                 self.loops += 1;
@@ -312,9 +336,11 @@ impl Checker<'_, '_> {
             }
             Expr::ForLoop(loop_) if loop_.attrs.is_empty() && loop_.label.is_none() => {
                 if self.expr(&loop_.expr)? != Kind::Chars {
-                    return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                    return None;
                 }
-                let Pat::Ident(binding) = &*loop_.pat else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                let Pat::Ident(binding) = &*loop_.pat else { return None };
                 let saved = self.values.clone();
                 let _old = self.values.insert(binding.ident.to_string(), Kind::Char);
                 self.loops += 1;
@@ -346,7 +372,8 @@ impl Checker<'_, '_> {
                 };
                 let (expression, pattern) = parser.parse2(mac.mac.tokens.clone()).ok()?;
                 if self.expr(&expression)? != Kind::Char || !character_pattern(&pattern) {
-                    return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                    return None;
                 }
                 Some(Kind::Bool)
             }

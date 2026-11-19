@@ -68,7 +68,7 @@ fn compiler_status(command: &mut Command) -> std::io::Result<Option<i32>> {
     if let Some(status) = COMPILER_OBSERVER.with_borrow_mut(|slot| slot.as_mut().map(|observer| observer(command))) {
         return status;
     }
-    command.status().map(|status| status.code())
+    super::rustc_replay::compiler_status(command)
 }
 
 fn run_if_requested_with<I: IntoIterator<Item = OsString>>(
@@ -249,12 +249,10 @@ pub(crate) fn parse_invocation(args: &[OsString]) -> Option<RustcInvocation> {
             // #[gamma::skip(all, reason = "not consuming the joined option retries the same argument forever and is observed only as a timeout")]
             index += 1;
         } else if separate("--extern") {
-            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
             parse_extern(&args[index + 1], &mut externs, &mut opaque_extern);
             // #[gamma::skip(all, reason = "moving backward or not consuming the split option makes the parser intrinsically nonterminating and is observed only as a timeout")]
             index += 2;
         } else if let Some(value) = argument.strip_prefix("--extern=") {
-            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
             parse_extern(OsStr::new(value), &mut externs, &mut opaque_extern);
             // #[gamma::skip(all, reason = "moving backward or not consuming the joined option makes the parser intrinsically nonterminating and is observed only as a timeout")]
             index += 1;

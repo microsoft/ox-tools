@@ -898,7 +898,6 @@ fn configured_launcher(work: &Workspace, binary: &TestBinary, attempt: Attempt<'
     } else {
         Some("1")
     };
-    // #[gamma::skip(call_result.default, reason = "configure returns unit and this mutator retains all command mutations before replacing unit with unit")]
     configure(&mut command, binary, launch, threads, attempt.active, None);
     Ok(command)
 }

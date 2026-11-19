@@ -184,9 +184,8 @@ fn push_escape(out: &mut String, control: char) {
 /// of its own sequence, so it must be encoded rather than passed on in the hope of a later `m`.
 fn style_sequence_end(bytes: &[u8], start: usize) -> Option<usize> {
     if bytes.get(start + 1) != Some(&b'[') {
-        return
-        // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-        None;
+        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+        return None;
     }
 
     let mut cursor = start + 2;
@@ -206,9 +205,8 @@ fn style_sequence_end(bytes: &[u8], start: usize) -> Option<usize> {
                 return allowed_style(parameters).then_some(cursor + 1);
             }
             _ => {
-                return
-            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-            None;
+                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                return None;
             }
         }
     }
@@ -227,50 +225,44 @@ fn allowed_style(parameters: &str) -> bool {
     while let Some(parameter) = parameters.next() {
         if parameter.contains(':') {
             if !allowed_colon_color(parameter) {
-                return
-                // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-                false;
+                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+                return false;
             }
 
             continue;
         }
 
         let Ok(code) = parameter.parse::<u16>() else {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+            return false;
         };
 
         match code {
             0 | 1 | 22 | 30..=37 | 39 | 40..=47 | 49 | 90..=97 | 100..=107 => {}
             38 | 48 => {
                 let Some(mode) = parameters.next().and_then(|value| value.parse::<u16>().ok()) else {
-                    return
-                    // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-                    false;
+                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+                    return false;
                 };
                 let components = if mode == 5 {
                     1
                 } else if mode == 2 {
                     3
                 } else {
-                    return
-                    // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-                    false;
+                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+                    return false;
                 };
 
                 for _component in 0..components {
                     if !parameters.next().is_some_and(color_component) {
-                        return
-                        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-                        false;
+                        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+                        return false;
                     }
                 }
             }
             _ => {
-                return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+                return false;
             }
         }
     }
@@ -283,9 +275,8 @@ fn allowed_colon_color(parameter: &str) -> bool {
     let mut parts = parameter.split(':');
 
     if !matches!(parts.next(), Some("38" | "48")) {
-        return
-        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-        false;
+        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+        return false;
     }
 
     match parts.next() {

@@ -3402,7 +3402,7 @@ fn coverage_recipe_runs_the_owned_collector_or_installed_tool_and_propagates_fai
         return;
     }
     // PowerShell consumes `--` when it binds arguments to the script-based Cargo fixture.
-    let local = "run --locked --package cargo-coverage-gate --bin cargo-coverage-gate --target aarch64-unknown-linux-gnu coverage-gate run";
+    let local = "run --release --locked --package cargo-coverage-gate --bin cargo-coverage-gate --target aarch64-unknown-linux-gnu coverage-gate run";
     for (name, target_name, binary, member, expected) in [
         ("fixture", "fixture", false, true, "coverage-gate run"),
         ("cargo-coverage-gate", "cargo_coverage_gate", false, true, "coverage-gate run"),

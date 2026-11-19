@@ -6,6 +6,7 @@
 use core::fmt::Write as _;
 use core::time::Duration;
 use std::fs;
+use std::sync::Arc;
 use std::time::Instant;
 
 use camino::Utf8PathBuf;
@@ -30,7 +31,7 @@ use crate::discover::{LibraryTestTarget, Plan, Survey};
 use crate::error::error;
 use crate::model::{Mutant, Outcome};
 use crate::ops::registry::Selection;
-use crate::{HashMap, Result};
+use crate::{HashMap, HashSet, Result};
 
 /// How many groups a "not run, by …" line names before it starts counting the rest.
 const GROUP_LIMIT: usize = 5;
@@ -171,7 +172,6 @@ pub(crate) fn run_with_locks(
         Err(failure) => {
             // An incomplete campaign has no completed record to carry its partial learning.
 
-            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
             store_incomplete_learning(incremental, &killers, &base, &plan.mutants);
             failed.plan = Some(plan);
 
@@ -206,7 +206,6 @@ pub(crate) fn resume_testing(
     events.sweep_planning(&state.plan, state.session.binaries.len(), state.settings.jobs);
     let reach = Reachability::build(&state.plan, &state.session.binaries, &scope);
 
-    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
     announce_measurement(events, &state.plan, &state.session);
     let started = Instant::now();
     let sweep = Sweep {
@@ -229,7 +228,6 @@ pub(crate) fn resume_testing(
     let spent = match swept {
         Ok(spent) => spent,
         Err(failure) => {
-            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
             store_incomplete_learning(state.settings.incremental, &state.killers, &state.record.base, &state.plan.mutants);
             return Err(failure);
         }
@@ -307,7 +305,6 @@ fn store_learning(killers: &Killers, base: &camino::Utf8Path, mutants: &[crate::
 
 fn store_incomplete_learning(incremental: bool, killers: &Killers, base: &camino::Utf8Path, mutants: &[crate::model::Mutant]) {
     if incremental {
-        // #[gamma::skip(call_result.default, reason = "store_learning returns unit and this mutator retains its cache publication effects before replacing unit with unit")]
         store_learning(killers, base, mutants);
     }
 }
@@ -746,9 +743,8 @@ fn measure_with_locks(
         });
     }
 
-    // Build only packages whose tests can actually be selected: the rest would be compiled,
-    // baselined and never consulted. All target packages have already been instrumented, so this
-    // one convergence sees every mutation that can affect those test targets.
+    // Compiler convergence may retain wider validation roots for stable feature unification.
+    // Restrict its emitted test binaries to the oracle before measuring them below.
     let select = build_packages(&plan, &scope);
     // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
     begin_schema_build(events, converger.historical_exclusions.saturating_add(converger.census.len()));
@@ -785,25 +781,13 @@ fn measure_with_locks(
     }
 
     let (unviable, viable, not_built) = schema_build_counts(&plan.mutants);
-    // #[gamma::skip(call_result.default, reason = "finish_schema_build returns unit and this mutator retains the completion event before replacing unit with unit")]
     finish_schema_build(events, unviable, viable, not_built);
 
     // Before the baseline, so the shares `apportion` computes describe the suite that will actually
     // run. A run with nothing left to run it cannot decide anything: every mutant would survive
     // unopposed and the report would read as a total failure of the test suite rather than as the
     // filter having eaten it.
-    if config.test_lib && build.binaries.is_empty() {
-        let error = error!(
-            "`--test-lib` selected no runnable library unit-test harness; ensure a selected package \
-             has a library target with `test = true`"
-        )
-        .usage();
-        failed.plan = Some(plan);
-
-        return Err(error);
-    }
-
-    let filtered = match restrict_binaries(&mut build.binaries, config) {
+    let filtered = match restrict_binaries(&mut build.binaries, &plan, &scope, config) {
         Ok(filtered) => filtered,
         Err(error) => {
             failed.plan = Some(plan);
@@ -923,7 +907,25 @@ fn begin_baseline(events: &mut impl Events) {
     events.begin(ACTIVE, COMPLETE, DETAIL);
 }
 
-fn restrict_binaries(binaries: &mut Vec<TestBinary>, config: &Config) -> Result<usize> {
+fn restrict_binaries(binaries: &mut Vec<TestBinary>, plan: &Plan, scope: &TestScope<'_>, config: &Config) -> Result<usize> {
+    let mutated: crate::HashSet<&str> = plan
+        .mutants
+        .iter()
+        .filter(|mutant| mutant.ordinal > 0 && mutant.outcome == Outcome::Pending)
+        .map(|mutant| &*mutant.package)
+        .collect();
+    binaries.retain(|binary| {
+        scope.admits(&binary.package) && (!scope.package_local || mutated.iter().any(|package| reaches(binary, package, plan, scope)))
+    });
+
+    if config.test_lib && binaries.is_empty() {
+        return Err(error!(
+            "`--test-lib` selected no runnable library unit-test harness; ensure a selected package \
+             has a library target with `test = true`"
+        )
+        .usage());
+    }
+
     let present = binaries.len();
     restrict(binaries, &config.include_tests, &config.exclude_tests);
     let filtered = present.saturating_sub(binaries.len());
@@ -1058,15 +1060,18 @@ fn instrument_population(
     let source_indices = plan.source_indices();
     let packages = survey.packages();
     let mut live = usize::default();
+    let mut mutated_packages = HashSet::default();
 
     // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
-    begin_population(events, packages.len());
+    begin_population(events);
     for stage in &crate::discover::stages(&packages, &survey.reach) {
         for package in stage {
             let scanned = survey.scan_excluding(Some(package), selection, &mut ordinals, exclusions)?;
 
             live = live.saturating_add(live_mutants(&scanned.mutants));
             validate_synchronized_sources(work, &scanned.digests)?;
+            // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
+            update_population(events, &mut mutated_packages, &scanned.mutants);
             plan.absorb_indexed(scanned, &source_indices);
         }
     }
@@ -1120,7 +1125,6 @@ fn instrument_compiler_population(
 ) -> Result<bool> {
     let anything_live = instrument_population(survey, selection, plan, work, events, Some(&exclusions))?;
 
-    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
     retain_compiler_exclusions(converger, plan, exclusions);
     Ok(anything_live)
 }
@@ -1139,10 +1143,26 @@ fn prepare_compiler_exclusions(work: &Workspace, plan: &Plan) -> Result<crate::d
     Ok(exclusions)
 }
 
-fn begin_population(events: &mut impl Events, packages: usize) {
-    let detail = crate::report::quantity(packages, "target package");
+fn begin_population(events: &mut impl Events) {
     // #[gamma::skip(all, reason = "this literal belongs to a Cargo process protocol or diagnostic boundary that cannot be isolated deterministically without replacing process-global integration state")]
-    events.begin("Mutating", "Mutated", &detail);
+    events.begin("Mutating", "Mutated", "the workspace (0 packages)");
+}
+
+fn population_mutant(mutant: &Mutant) -> bool {
+    mutant.ordinal > 0 || mutant.outcome == Outcome::CompileError
+}
+
+fn update_population(events: &mut impl Events, packages: &mut HashSet<Arc<str>>, mutants: &[Mutant]) {
+    let previous = packages.len();
+    packages.extend(
+        mutants
+            .iter()
+            .filter(|mutant| population_mutant(mutant))
+            .map(|mutant| Arc::clone(&mutant.package)),
+    );
+    if packages.len() != previous {
+        events.population_progress(packages.len());
+    }
 }
 
 fn live_mutants(mutants: &[crate::model::Mutant]) -> usize {
@@ -1150,12 +1170,18 @@ fn live_mutants(mutants: &[crate::model::Mutant]) -> usize {
 }
 
 fn finish_population(events: &mut impl Events, mutants: &[Mutant]) {
-    let population = mutants
-        .iter()
-        .filter(|mutant| mutant.ordinal > 0 || mutant.outcome == Outcome::CompileError)
-        .count();
-    let detail = format!(", {}", crate::report::quantity(population, "mutant"));
-    events.end(&detail);
+    let mut population = 0;
+    let mut packages = HashSet::default();
+    for mutant in mutants.iter().filter(|mutant| population_mutant(mutant)) {
+        population += 1;
+        let _new = packages.insert(mutant.package.as_ref());
+    }
+    let detail = format!(
+        "{}, {}",
+        crate::report::quantity(packages.len(), "package"),
+        crate::report::quantity(population, "mutant")
+    );
+    events.complete(&detail);
 }
 
 fn schema_build_counts(mutants: &[Mutant]) -> (usize, usize, usize) {
@@ -1534,10 +1560,10 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(failure.message(), "owned runtime link refusal");
-        assert_eq!(
-            from_slice::<Value>(&std::fs::read(base.join("compiler-exclusions.json")).unwrap()).unwrap(),
-            json!({"version": 1, "evidence_revision": 2, "mutants": {}})
-        );
+        let saved = from_slice::<Value>(&std::fs::read(base.join("compiler-exclusions.json")).unwrap()).unwrap();
+        assert_eq!(saved["mutants"], json!({}));
+        let reloaded = crate::discover::CompilerExclusions::load(base, &plan.root).unwrap();
+        assert_eq!(saved, to_value(reloaded).unwrap());
     }
 
     #[test]
@@ -1883,11 +1909,16 @@ mod tests {
     struct MeasurementEvents {
         recorded: Recorder,
         measurements: usize,
+        population: Vec<usize>,
         planning: Vec<(usize, usize)>,
         before_baseline: Option<Box<dyn FnOnce()>>,
     }
 
     impl Events for MeasurementEvents {
+        fn population_progress(&mut self, packages: usize) {
+            self.population.push(packages);
+        }
+
         fn phase(&mut self, verb: &str, detail: &str) {
             self.recorded.phase(verb, detail);
             if verb == "Baselining"
@@ -2016,6 +2047,7 @@ mod tests {
                 assert!(test_build.iter().any(|argument| argument == "--lib"), "{test_build:?}");
             }
             assert_eq!(events.planning, [(1, 3)]);
+            assert_eq!(events.population, [1]);
             assert!(
                 events
                     .recorded
@@ -2058,7 +2090,7 @@ mod tests {
         assert!(result.learning.is_none());
         assert_eq!(result.stuck.len(), 0);
         assert!(!events.phases.iter().any(|(verb, _)| verb == "Excluding"));
-        assert!(events.phases.iter().any(|(_, detail)| detail == ", 0 mutants"));
+        assert!(events.phases.iter().any(|(_, detail)| detail == "0 packages, 0 mutants"));
     }
 
     #[test]
@@ -3091,14 +3123,21 @@ mod tests {
         assert!(retreated.whole_workspace);
         assert_eq!(retreated.dropped, ["a"]);
 
+        let plan = oracle_plan("core");
+        let scope = capped(&[]);
         let mut none = Vec::new();
-        assert_eq!(restrict_binaries(&mut none, &Config::default()).expect("empty stays empty"), 0);
+        assert_eq!(
+            restrict_binaries(&mut none, &plan, &scope, &Config::default()).expect("empty stays empty"),
+            0
+        );
         let mut binaries = [oracle_binary("core", Some(1)), oracle_binary("core", Some(1))].to_vec();
         binaries[0].target = "keep".to_owned();
         binaries[1].target = "drop".to_owned();
         assert_eq!(
             restrict_binaries(
                 &mut binaries,
+                &plan,
+                &scope,
                 &Config {
                     exclude_tests: vec!["drop".to_owned()],
                     ..Config::default()
@@ -3109,6 +3148,123 @@ mod tests {
         );
         assert_eq!(binaries.len(), 1);
         assert_eq!(binaries[0].target, "keep");
+    }
+
+    #[test]
+    fn baseline_oracle_retains_every_local_target_only_for_pending_mutant_packages() {
+        let mut plan = oracle_plan("core");
+        for (package, ordinal, outcome) in [
+            ("unselected", 0, Outcome::Pending),
+            ("withdrawn", 2, Outcome::CompileError),
+            ("settled", 3, Outcome::Killed),
+            ("unbuilt", 4, Outcome::NotBuilt),
+            ("peer", 5, Outcome::Pending),
+        ] {
+            let mut mutant = plan.mutants[0].clone();
+            mutant.package = package.to_owned().into();
+            mutant.ordinal = ordinal;
+            mutant.outcome = outcome;
+            plan.mutants.push(mutant);
+        }
+        let selected = ["core", "app", "unselected", "withdrawn", "settled", "unbuilt", "peer"].map(str::to_owned);
+        let scope = TestScope {
+            package_local: true,
+            ..capped(&selected)
+        };
+        let mut binaries: Vec<TestBinary> = selected
+            .iter()
+            .map(|package| TestBinary {
+                target: package.clone(),
+                ..oracle_binary(package, Some(1))
+            })
+            .collect();
+        binaries[0].target = "unit".to_owned();
+        let mut integration = binaries[0].clone();
+        integration.target = "integration".to_owned();
+        binaries.push(integration);
+
+        assert_eq!(restrict_binaries(&mut binaries, &plan, &scope, &Config::default()).unwrap(), 0);
+        assert_eq!(
+            binaries
+                .iter()
+                .map(|binary| (&*binary.package, &*binary.target))
+                .collect::<Vec<_>>(),
+            [("core", "unit"), ("peer", "peer"), ("core", "integration")]
+        );
+    }
+
+    #[test]
+    fn baseline_oracle_preserves_explicit_package_and_workspace_selections() {
+        let mut plan = oracle_plan("core");
+        plan.reach.insert("app".to_owned(), core::iter::once("app".to_owned()).collect());
+        let selected = ["app".to_owned()];
+        for (scope, expected) in [
+            (capped(&selected), vec!["app"]),
+            (
+                TestScope {
+                    whole_workspace: true,
+                    ..capped(&[])
+                },
+                vec!["core", "app", "unrelated"],
+            ),
+        ] {
+            let mut binaries = ["core", "app", "unrelated"].map(|package| oracle_binary(package, Some(1))).to_vec();
+            restrict_binaries(&mut binaries, &plan, &scope, &Config::default()).unwrap();
+            assert_eq!(binaries.iter().map(|binary| binary.package.as_str()).collect::<Vec<_>>(), expected);
+        }
+    }
+
+    #[test]
+    fn baseline_oracle_filtering_precedes_test_target_selection() {
+        let plan = oracle_plan("core");
+        let selected = ["core".to_owned(), "app".to_owned()];
+        let scope = TestScope {
+            package_local: true,
+            ..capped(&selected)
+        };
+        let mut binaries = ["core", "app"].map(|package| oracle_binary(package, Some(1))).to_vec();
+        binaries[0].target = "unit".to_owned();
+        binaries[1].target = "unrelated".to_owned();
+
+        let error = restrict_binaries(
+            &mut binaries,
+            &plan,
+            &scope,
+            &Config {
+                include_tests: vec!["unrelated".to_owned()],
+                ..Config::default()
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("left no test target to decide a verdict"), "{error}");
+    }
+
+    #[test]
+    fn baseline_oracle_does_not_accept_an_unrelated_library_as_the_selected_harness() {
+        let plan = oracle_plan("core");
+        let selected = ["core".to_owned(), "app".to_owned()];
+        let scope = TestScope {
+            package_local: true,
+            ..capped(&selected)
+        };
+        let mut binaries = vec![oracle_binary("app", Some(1))];
+
+        let error = restrict_binaries(
+            &mut binaries,
+            &plan,
+            &scope,
+            &Config {
+                test_lib: true,
+                ..Config::default()
+            },
+        )
+        .unwrap_err();
+
+        assert!(
+            error.to_string().contains("selected no runnable library unit-test harness"),
+            "{error}"
+        );
     }
 
     /// A baseline with the given elapsed time and quiet period, and nothing else measured.
@@ -3320,15 +3476,15 @@ mod tests {
         assert_eq!(live_mutants(&mutants), 2);
 
         let mut events = Recorder::default();
-        begin_population(&mut events, 12);
+        begin_population(&mut events);
         finish_population(&mut events, &mutants);
         begin_schema_build(&mut events, 0);
         finish_schema_build(&mut events, 1, 2, 0);
         assert_eq!(
             events.phases,
             [
-                ("Mutating".to_owned(), "12 target packages".to_owned()),
-                (String::new(), ", 3 mutants".to_owned()),
+                ("Mutating".to_owned(), "the workspace (0 packages)".to_owned()),
+                (String::new(), "1 package, 3 mutants".to_owned()),
                 ("Excluding".to_owned(), "unviable mutants".to_owned()),
                 (String::new(), "1 unviable mutant, leaving 2 viable mutants".to_owned()),
             ]
@@ -3358,8 +3514,83 @@ mod tests {
         assert_eq!(
             events.phases,
             [
-                (String::new(), ", 3 mutants".to_owned()),
+                (String::new(), "1 package, 3 mutants".to_owned()),
                 (String::new(), "2 unviable mutants, leaving 1 viable mutant".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn population_package_progress_counts_only_distinct_selected_owners_and_matches_completion() {
+        #[derive(Default)]
+        struct PopulationEvents {
+            recorded: Recorder,
+            packages: Vec<usize>,
+        }
+
+        impl Events for PopulationEvents {
+            fn phase(&mut self, verb: &str, detail: &str) {
+                self.recorded.phase(verb, detail);
+            }
+
+            fn mutant(&mut self, mutant: &Mutant) {
+                self.recorded.mutant(mutant);
+            }
+
+            fn population_progress(&mut self, packages: usize) {
+                self.packages.push(packages);
+            }
+        }
+
+        let mut live = [stuck_mutant(1, "first", "f"), stuck_mutant(2, "second", "g")];
+        for mutant in &mut live {
+            mutant.package = "owner".into();
+            mutant.outcome = Outcome::Pending;
+        }
+        let mut historical = stuck_mutant(0, "historical", "h");
+        historical.package = "peer".into();
+        historical.outcome = Outcome::CompileError;
+        let inactive: Vec<Mutant> = [Outcome::Pending, Outcome::Killed, Outcome::Ignored]
+            .into_iter()
+            .map(|outcome| Mutant {
+                package: "inactive".into(),
+                outcome,
+                ..stuck_mutant(0, "inactive", "i")
+            })
+            .collect();
+        let mut events = PopulationEvents::default();
+        let mut packages = HashSet::default();
+        begin_population(&mut events);
+        update_population(&mut events, &mut packages, &inactive);
+        update_population(&mut events, &mut packages, &live);
+        update_population(&mut events, &mut packages, &live);
+        update_population(&mut events, &mut packages, std::slice::from_ref(&historical));
+        let mut mutants = live.to_vec();
+        mutants.push(historical);
+        mutants.extend(inactive.clone());
+        finish_population(&mut events, &mutants);
+
+        assert_eq!(events.packages, [1, 2]);
+        assert_eq!(packages.len(), 2);
+        assert_eq!(
+            events.recorded.phases,
+            [
+                ("Mutating".to_owned(), "the workspace (0 packages)".to_owned()),
+                (String::new(), "2 packages, 3 mutants".to_owned()),
+            ]
+        );
+
+        let mut events = PopulationEvents::default();
+        let mut packages = HashSet::default();
+        begin_population(&mut events);
+        update_population(&mut events, &mut packages, &inactive);
+        finish_population(&mut events, &inactive);
+        assert_eq!(events.packages, Vec::<usize>::new());
+        assert_eq!(
+            events.recorded.phases,
+            [
+                ("Mutating".to_owned(), "the workspace (0 packages)".to_owned()),
+                (String::new(), "0 packages, 0 mutants".to_owned()),
             ]
         );
     }
@@ -3384,13 +3615,13 @@ mod tests {
         let mut events = Labels::default();
         begin_schema_build(&mut events, 0);
         begin_preflight(&mut events);
-        begin_population(&mut events, 2);
+        begin_population(&mut events);
         assert_eq!(
             events.0,
             [
                 ("Excluding".to_owned(), "Excluded".to_owned(), "unviable mutants".to_owned()),
                 ("Validating".to_owned(), "Validated".to_owned(), "the workspace".to_owned()),
-                ("Mutating".to_owned(), "Mutated".to_owned(), "2 target packages".to_owned()),
+                ("Mutating".to_owned(), "Mutated".to_owned(), "the workspace (0 packages)".to_owned()),
             ]
         );
     }

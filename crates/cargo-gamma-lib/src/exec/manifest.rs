@@ -424,7 +424,6 @@ impl Manifest {
 
             for registry in registries {
                 if let Some(table) = patch.get_mut(&registry).and_then(Item::as_table_like_mut) {
-                    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
                     anchor_dependencies(table, original, &self.within, &mut self.changed);
                 }
             }
@@ -441,7 +440,6 @@ impl Manifest {
 
                 for name in DEPENDENCY_TABLES {
                     if let Some(dependencies) = table.get_mut(name).and_then(Item::as_table_like_mut) {
-                        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
                         anchor_dependencies(dependencies, original, &self.within, &mut self.changed);
                     }
                 }
@@ -452,7 +450,6 @@ impl Manifest {
         if let Some(workspace) = self.document.get_mut("workspace").and_then(Item::as_table_like_mut)
             && let Some(dependencies) = workspace.get_mut("dependencies").and_then(Item::as_table_like_mut)
         {
-            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
             anchor_dependencies(dependencies, original, &self.within, &mut self.changed);
         }
     }
@@ -460,7 +457,6 @@ impl Manifest {
     /// Rewrites the paths in one top-level table.
     fn anchor_table(&mut self, name: &str, original: &Utf8Path) {
         if let Some(table) = self.document.get_mut(name).and_then(Item::as_table_like_mut) {
-            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
             anchor_dependencies(table, original, &self.within, &mut self.changed);
         }
     }
