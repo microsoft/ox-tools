@@ -162,9 +162,19 @@ determine which package set each check uses.
 Other nonempty values fail with exit code 2. Scheduled groups and the
 scheduled/full tiers set `off` automatically.
 
-Any tracked edit or non-ignored untracked file widens local checks to the full
-workspace. Commit changes to restore committed-diff scoping. An empty impact
-set skips scoped checks successfully; unscoped checks still run.
+Local runs with tracked edits, staged edits, deletions, renames, or non-ignored
+untracked files snapshot the current filesystem and compute fresh package
+selections. These selections match the tiers produced if that filesystem state
+were committed. The dirty result is isolated from the clean cache and is never
+published. The next clean run therefore retains or refreshes its normal cache
+according to the clean commit and tool state. An empty impact set skips scoped
+checks successfully; unscoped checks still run.
+
+GitHub Actions and Azure Pipelines impact jobs must use clean checkouts and fail
+if tracked or non-ignored untracked content is present. This keeps the artifact
+path deterministic and prevents a cloud job from publishing local dirty output.
+`ANVIL_IMPACT=consume` retains its existing trust semantics, including when the
+consumer checkout later acquires local ignored build output.
 
 ### Base ref and failures
 
@@ -180,17 +190,24 @@ commands are errors, not empty selections.
 
 ### Cache
 
-Results live under `target/anvil/impact/`:
+Clean results live under `target/anvil/impact/`:
 
 | File | Meaning |
 |------|---------|
 | `snapshots/baseline.json`, `snapshots/current.json` | Cached cargo-delta snapshots. |
-| `impact.json` | Impact report; may be `{}` when safety widening applies. |
+| `impact.json` | Impact report; may be `{}` when no workspace or package is impacted. |
 | `include_modified.txt`, `include_affected.txt`, `include_required.txt` | Selected scope for each category, including explicit skips and full-workspace selections. |
 | `doctest_packages.txt` | Doctest-capable workspace members. |
 
 Use the include files, not an empty `impact.json`, to determine the selected
-scope. Delete `target/anvil/impact/` to force recomputation.
+scope. Delete `target/anvil/impact/` to force clean recomputation.
+
+Dirty local results use `target/anvil/impact-dirty/` with the same selection
+files and a fresh current snapshot. An invocation replaces that directory
+before analysis. Checks in the same `just` invocation share those selections;
+they do not repeat snapshot or impact commands. Clean runs neither read nor
+modify dirty selections. The dirty directory is never an artifact input or a
+fallback for consume mode.
 
 In consume mode, `ANVIL_IMPACT_INPUT_DIR` selects another read-only cache
 directory, using an absolute path or a path relative to the recipe's working

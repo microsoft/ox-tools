@@ -299,8 +299,9 @@ dependency sharing both a workspace member's name and version can make that
 selection ambiguous. Other Cargo checks use workspace exclusions or
 source-qualified per-package selectors.
 
-Dirty local trees widen to the full workspace. `ANVIL_IMPACT=off` disables
-scoping; `consume` reads an existing CI artifact. See
+Dirty local trees snapshot the files on disk and produce the same package
+selections as that content committed to a clean tree. `ANVIL_IMPACT=off`
+disables scoping; `consume` reads an existing CI artifact. See
 [impact controls and failures](./local.md#4-impact-scoping-via-the-anvil-impact-recipe).
 
 ## 6. Advisory PR comments

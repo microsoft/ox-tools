@@ -61,6 +61,8 @@ Two preparation jobs compute impact on Linux and Windows and upload
 family's artifact into `target/anvil/impact/`; ARM legs reuse the corresponding
 x64 result. **Impact is per OS family, not per architecture:** ARM-only
 dependency differences do not receive a separate impact computation.
+Impact preparation fails if its checkout is dirty; only the normal clean cache
+path is eligible for upload.
 
 Most PR groups depend on both preparation jobs; fuzzing depends only on Linux
 impact. A failed preparation blocks its dependent groups. Successful impact
