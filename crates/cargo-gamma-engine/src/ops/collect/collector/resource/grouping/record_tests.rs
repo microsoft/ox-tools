@@ -740,6 +740,35 @@ fn record_grouping_certificate_replays_the_exact_body_with_source_and_dependency
 }
 
 #[test]
+fn record_grouping_rejects_incomplete_copy_and_slice_projection_shapes() {
+    for (original, replacement) in [
+        ("hints.mutants[start].file.clone()", "hints.clone()"),
+        ("hints.mutants[start].file.clone()", "hints.mutants.file.clone()"),
+        ("hints.mutants[start].file.clone()", "hints[start].file.clone()"),
+        ("fn from(hints: &Hints)", "fn from(_: &Hints)"),
+        ("fn from(hints: &Hints)", "fn from(hints: &())"),
+        ("fn from(hints: &Hints)", "fn from(hints: &module::Hints)"),
+        ("mutants: Vec<Hint>,", "mutants: [Hint; 1],"),
+        ("mutants: Vec<Hint>,", "mutants: Vec,"),
+        ("mutants: Vec<Hint>,", "mutants: Vec<>,"),
+        ("mutants: Vec<Hint>,", "mutants: Vec<'static>,"),
+        ("&hints.mutants[start..end]", "&hints.mutants"),
+        ("&hints.mutants[start..end]", "&hints.mutants[start]"),
+        ("&hints.mutants[start..end]", "&hints.mutants[..end]"),
+        ("&hints.mutants[start..end]", "&hints.mutants[start..]"),
+        ("&hints.mutants[start..end]", "&hints.mutants[start..=end]"),
+        ("&hints.mutants[start..end]", "&other.mutants[start..end]"),
+    ] {
+        assert!(HINTS.contains(original), "the controlled fixture must contain {original}");
+        assert_eq!(
+            record_certificate(&HINTS.replace(original, replacement), true),
+            None,
+            "{replacement}"
+        );
+    }
+}
+
+#[test]
 fn record_grouping_cached_nonempty_replay_does_not_certify_an_empty_group_without_progress() {
     let (file, defaults) = indexed(HINTS, true);
     let original = syn::Expr::While(record_loop(&file.ast).clone());

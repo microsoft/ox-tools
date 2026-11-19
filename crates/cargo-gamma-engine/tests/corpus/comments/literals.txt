@@ -1,0 +1,9 @@
+// Ordinary, byte, raw, and raw-byte strings.
+"// hidden \" /* hidden */" // visible
+b"/* hidden */" /* visible */
+r#"a "# // hidden /* hidden */"#
+r###"a "## // hidden"### // visible
+br##"a "# /* hidden */"## /* visible */
+'/' '\n' '\'' '🦀' // visible
+'life: loop { break 'life; } // visible
+/* outer /* nested */ outer */ // visible

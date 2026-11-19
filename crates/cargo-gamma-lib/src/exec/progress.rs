@@ -6,17 +6,13 @@ use std::time::Instant;
 
 use super::nextest;
 
-/// How a failure is recognised in a harness's output, if it can be recognised safely at all.
+/// Which harness format supplies progress and diagnostic failure announcements.
 ///
-/// Reading a failure out of the output as it arrives lets a mutant be convicted the moment the
-/// first test catches it, instead of after the whole binary has run. That is only sound where a
-/// line announcing a failure could not have been written by a test rather than by the harness.
+/// Announcements are not completed verdicts. Inherited child-process descriptors bypass libtest's
+/// Rust-print capture and can carry failure-shaped lines while the outer test passes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Watch {
-    /// Take no verdict from the output; wait for the process to exit and judge that.
-    ///
-    /// The safe reading, and the necessary one wherever a test's own writing reaches the same
-    /// stream as the harness's.
+    /// Do not parse diagnostic failure announcements from interleaved output.
     Off,
 
     /// libtest's `test <name> ... FAILED`.
@@ -29,19 +25,18 @@ pub(super) enum Watch {
 /// What the harness has said so far, published by the reader for the waiting thread to watch.
 #[derive(Debug)]
 pub(super) struct Progress {
-    /// How to recognise a failure announcement, if this run's output can be trusted to carry one.
+    /// How to recognise diagnostic failure announcements in this run's output.
     watch: Watch,
 
-    /// The first test the harness announced as failed, once one has been announced.
+    /// The first failure-shaped test announcement, once one has been announced.
     ///
-    /// The first is kept rather than the last because it is the one that convicted the mutant, and
-    /// it is what the run would have reported had it read the output to exhaustion.
+    /// Kept for diagnostics; the real harness exit, not this field, establishes a failure.
     pub(super) failed: Option<String>,
 
     /// Every test the harness announced as failed, in announcement order.
     ///
-    /// Mutant attempts still stop at the first entry. Baselines run the harness to completion and
-    /// retain the complete list so one pass can publish every known failure.
+    /// Every attempt waits for harness exit. Baselines retain this complete list so one pass can
+    /// publish every known failure.
     pub(super) failures: Vec<String>,
 
     /// Whether the guard runtime reported that process startup could not establish a selection.
@@ -331,7 +326,7 @@ mod tests {
         assert_eq!(progress.tests, None);
     }
 
-    /// libtest announcing a failure is recorded, so the run can stop at the test that caught it.
+    /// Failure-shaped lines remain available for progress without settling a verdict.
     #[test]
     fn a_libtest_failure_is_recorded_as_soon_as_it_is_announced() {
         let mut progress = Progress::new(Watch::Libtest);

@@ -406,7 +406,6 @@ fn canonical_import(name: &str, imports: &HashMap<String, Option<Vec<String>>>) 
         }
         // #[gamma::skip(cond.always_false, reason = "disabling cycle detection makes cyclic import aliases alternate forever")]
         if !expanded.insert(first.clone()) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let _replaced = path.splice(..1, prefix.iter().cloned());

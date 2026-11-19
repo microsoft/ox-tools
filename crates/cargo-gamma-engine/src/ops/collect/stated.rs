@@ -23,12 +23,11 @@ use core::fmt::{self, Display, Formatter};
 use core::ops::Range;
 
 use proc_macro2::TokenStream;
-use syn::spanned::Spanned as _;
 use syn::visit::{self, Visit};
 use syn::{Attribute, Expr, ImplItemFn, ItemFn, Meta, TraitItemFn};
 
 use crate::error::Error;
-use crate::parse::SourceFile;
+use crate::parse::{Extent as _, SourceFile};
 use crate::text::encode_controls;
 use crate::{HashSet, Result};
 
@@ -106,7 +105,6 @@ pub(super) fn stated_range(attrs: &[Attribute]) -> Option<Range<usize>> {
     let arguments = attrs.iter().find_map(arguments)?;
 
     if syn::parse2::<Expr>(arguments.clone()).is_err() {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
 
@@ -203,16 +201,16 @@ impl Audit {
         let stated: Vec<&Attribute> = attrs.iter().filter(|attribute| is_stated_value(attribute)).collect();
 
         if let Some(second) = stated.get(1) {
-            self.faults.push((second.span().byte_range(), StatedValueError::Duplicated));
+            self.faults.push((second.extent().byte_range(), StatedValueError::Duplicated));
         }
 
         for attribute in stated {
-            let _claimed = self.on_functions.insert(attribute.span().byte_range().start);
+            let _claimed = self.on_functions.insert(attribute.extent().byte_range().start);
 
             let malformed = arguments(attribute).is_none_or(|tokens| syn::parse2::<Expr>(tokens).is_err());
 
             if malformed {
-                self.faults.push((attribute.span().byte_range(), StatedValueError::Malformed));
+                self.faults.push((attribute.extent().byte_range(), StatedValueError::Malformed));
             } else if let Some(message) = inert {
                 let fault = if message == CONSTANT {
                     StatedValueError::Constant
@@ -223,7 +221,7 @@ impl Audit {
                 } else {
                     StatedValueError::Bodiless
                 };
-                self.faults.push((attribute.span().byte_range(), fault));
+                self.faults.push((attribute.extent().byte_range(), fault));
             }
         }
     }
@@ -231,7 +229,7 @@ impl Audit {
     /// The local update `visit_attribute` makes, without its recursive continuation.
     pub(super) fn on_attribute(&mut self, node: &Attribute) {
         if is_stated_value(node) {
-            self.stated.push(node.span().byte_range());
+            self.stated.push(node.extent().byte_range());
         }
     }
 
@@ -252,8 +250,8 @@ impl Audit {
         // would read as a hint that works and generate nothing anywhere.
         let Some(default) = node.default.as_ref() else {
             for attribute in node.attrs.iter().filter(|attribute| is_stated_value(attribute)) {
-                self.faults.push((attribute.span().byte_range(), StatedValueError::Bodiless));
-                let _claimed = self.on_functions.insert(attribute.span().byte_range().start);
+                self.faults.push((attribute.extent().byte_range(), StatedValueError::Bodiless));
+                let _claimed = self.on_functions.insert(attribute.extent().byte_range().start);
             }
 
             return;
@@ -324,7 +322,6 @@ fn is_stated_value(attribute: &Attribute) -> bool {
 /// expression could be read out of, so both are reported rather than guessed at.
 fn arguments(attribute: &Attribute) -> Option<TokenStream> {
     if !is_stated_value(attribute) {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
 

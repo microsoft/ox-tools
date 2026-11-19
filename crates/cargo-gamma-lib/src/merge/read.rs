@@ -19,6 +19,7 @@ use super::status::scoring;
 use crate::Result;
 use crate::elements::Report;
 use crate::error::error;
+use crate::report::encode_controls;
 
 /// The largest report a merge will read.
 ///
@@ -94,15 +95,16 @@ fn read_limited_with_io(
     metadata: impl FnOnce(&File) -> IoResult<Metadata>,
     open_input: impl FnOnce(&Utf8Path) -> IoResult<File>,
 ) -> Result<ReadReport> {
-    let mut input = open_input(path).map_err(|cause| error!("could not read `{path}`").caused_by(cause))?;
-    let metadata = metadata(&input).map_err(|cause| error!("could not read `{path}`").caused_by(cause))?;
+    let shown_path = encode_controls(path.as_str());
+    let mut input = open_input(path).map_err(|cause| error!("could not read `{shown_path}`").caused_by(cause))?;
+    let metadata = metadata(&input).map_err(|cause| error!("could not read `{shown_path}`").caused_by(cause))?;
 
     #[expect(
         clippy::filetype_is_file,
         reason = "a merge report must be a regular file, not merely something other than a directory"
     )]
     if !metadata.file_type().is_file() {
-        return Err(error!("{path} is not a regular file, so it cannot be a merge report").usage());
+        return Err(error!("{shown_path} is not a regular file, so it cannot be a merge report").usage());
     }
 
     let limit = limit.min(MAX_BYTES);
@@ -115,24 +117,24 @@ fn read_limited_with_io(
     let (text, bytes_read) = read_contents(&mut input, path, limit)?;
 
     let document: Value =
-        serde_json::from_str(&text).map_err(|cause| error!("{path} is not a mutation report").caused_by(cause).usage())?;
+        serde_json::from_str(&text).map_err(|cause| error!("{shown_path} is not a mutation report").caused_by(cause).usage())?;
 
     // Drop the source text now that it has been parsed — the Value owns all needed strings.
     drop(text);
 
-    crate::elements::validate_schema(&document).map_err(|cause| error!("{path} is not a mutation report: {cause}").usage())?;
+    crate::elements::validate_schema(&document).map_err(|cause| error!("{shown_path} is not a mutation report: {cause}").usage())?;
 
     let incoming: Incoming =
 
         // #[gamma::skip(try.propagate_to_unwrap, reason = "The immediately preceding schema validator checks every field decoded by Incoming, including nested file/mutant DTO types and ranges; on supported 64-bit targets this validated Value has no remaining serde conversion error.", tag = "equivalent")]
-        serde_json::from_value(document).map_err(|cause| error!("{path} is not a mutation report").caused_by(cause).usage())?;
+        serde_json::from_value(document).map_err(|cause| error!("{shown_path} is not a mutation report").caused_by(cause).usage())?;
 
     if
     // #[gamma::skip(cond.always_false, reason = "The same parsed document has already passed elements::validate_schema, whose schemaVersion string check calls supported_schema_version accepting only majors1/2. Incoming.has_supported_schema_version uses that same predicate, so its false/unsupported branch is unreachable here.", tag = "equivalent")]
     !incoming.has_supported_schema_version() {
         return Err(error!(
-            "{path} declares unsupported schema version `{}`; merge accepts only schema versions 1 and 2",
-            incoming.schema_version()
+            "{shown_path} declares unsupported schema version `{}`; merge accepts only schema versions 1 and 2",
+            encode_controls(incoming.schema_version())
         )
         .usage());
     }
@@ -144,8 +146,10 @@ fn read_limited_with_io(
         for mutant in &result.mutants {
             if let Some(first_file) = ids.insert(mutant.id.as_str(), file.as_str()) {
                 return Err(error!(
-                    "{path} repeats mutant ID `{}` in `{first_file}` and `{file}`; mutant IDs must be unique across a report",
-                    mutant.id
+                    "{shown_path} repeats mutant ID `{}` in `{}` and `{}`; mutant IDs must be unique across a report",
+                    encode_controls(&mutant.id),
+                    encode_controls(first_file),
+                    encode_controls(file)
                 )
                 .usage());
             }
@@ -155,7 +159,7 @@ fn read_limited_with_io(
     if let Some(shard) = report.config.as_ref().and_then(|config| config.shard) {
         if shard.count > MAX_SHARDS {
             return Err(error!(
-                "{path} claims a rotation of {} shards, more than the {MAX_SHARDS} a merge will account for",
+                "{shown_path} claims a rotation of {} shards, more than the {MAX_SHARDS} a merge will account for",
                 shard.count
             )
             .usage());
@@ -168,7 +172,7 @@ fn read_limited_with_io(
         // the rotation on one line and a shard never run on the next.
         if shard.index >= shard.count {
             return Err(error!(
-                "{path} claims shard {} of a rotation of {}, which is outside it",
+                "{shown_path} claims shard {} of a rotation of {}, which is outside it",
                 shard.index, shard.count
             )
             .usage());
@@ -189,8 +193,10 @@ fn read_limited_with_io(
 
     if let Some((file, mutant)) = undefined {
         return Err(error!(
-            "{path} gives mutant `{}` in `{file}` the status `{}`, which a mutation report cannot carry",
-            mutant.id, mutant.status
+            "{shown_path} gives mutant `{}` in `{}` the status `{}`, which a mutation report cannot carry",
+            encode_controls(&mutant.id),
+            encode_controls(file),
+            encode_controls(&mutant.status)
         )
         .usage());
     }
@@ -202,7 +208,7 @@ fn read_limited_with_io(
         && config.started_at > now.saturating_add(MAX_SKEW)
     {
         return Err(error!(
-            "{path} says its run started at {}, {} seconds ahead of this machine's clock and beyond the {MAX_SKEW} a merge allows",
+            "{shown_path} says its run started at {}, {} seconds ahead of this machine's clock and beyond the {MAX_SKEW} a merge allows",
             config.started_at,
             config.started_at.saturating_sub(now)
         )
@@ -228,6 +234,7 @@ fn open(path: &Utf8Path) -> IoResult<File> {
 }
 
 fn too_large(path: &Utf8Path, size: u64, limit: u64) -> crate::error::Error {
+    let path = encode_controls(path.as_str());
     error!(
         "{path} is at least {size} bytes, more than the {limit} bytes a merge will retain; \
          use a smaller report or split the inputs into separate merges"
@@ -237,22 +244,23 @@ fn too_large(path: &Utf8Path, size: u64, limit: u64) -> crate::error::Error {
 
 /// Reads one stream without retaining more than the caller's cap plus one overflow byte.
 fn read_contents(input: &mut impl std::io::Read, path: &Utf8Path, limit: u64) -> Result<(String, u64)> {
+    let shown_path = encode_controls(path.as_str());
     let mut bytes = Vec::new();
     let mut capped = input.by_ref().take(limit.saturating_add(1));
 
     let _read = capped
         .read_to_end(&mut bytes)
-        .map_err(|cause| error!("could not read `{path}`").caused_by(cause))?;
+        .map_err(|cause| error!("could not read `{shown_path}`").caused_by(cause))?;
 
     let bytes_read =
     // #[gamma::skip(try.propagate_to_unwrap, reason = "bytes.len() is usize and cannot exceed u64::MAX on any supported32/64-bit target. The conversion to u64 cannot fail; wrapping its mapped Result in panic_on_failure changes no behavior.", tag = "equivalent")]
-    u64::try_from(bytes.len()).map_err(|cause| error!("could not read `{path}`").caused_by(cause))?;
+    u64::try_from(bytes.len()).map_err(|cause| error!("could not read `{shown_path}`").caused_by(cause))?;
 
     if bytes_read > limit {
         return Err(too_large(path, bytes_read, limit));
     }
 
-    let text = String::from_utf8(bytes).map_err(|cause| error!("could not read `{path}`").caused_by(cause))?;
+    let text = String::from_utf8(bytes).map_err(|cause| error!("could not read `{shown_path}`").caused_by(cause))?;
 
     Ok((text, bytes_read))
 }
@@ -918,20 +926,23 @@ mod tests {
     /// this way. Refusing it costs a `stat`; letting it through costs an OOM kill with no message.
     #[test]
     fn a_file_over_the_ceiling_is_refused_by_its_size_alone() {
+        const LIMIT: u64 = 16;
         let directory = workdir("merge-read-");
         let path = Utf8PathBuf::from_path_buf(directory.path().join("report.json")).expect("a utf-8 path");
 
-        // Sized rather than written: the point is that nothing reads the contents, and a quarter of
-        // a gigabyte of real bytes would make the test cost what the bound exists to avoid.
+        // Windows reserves the extended length, so exercise metadata refusal with a small limit.
         File::create(&path)
             .expect("the report should be creatable")
-            .set_len(MAX_BYTES + 1)
+            .set_len(LIMIT + 1)
             .expect("the report should be sizable");
 
-        let error = read(&path).expect_err("a file over the ceiling").to_string();
+        let error = read_limited(&path, LIMIT)
+            .map(|input| input.report)
+            .expect_err("a file over the ceiling")
+            .to_string();
 
-        assert!(error.contains(&(MAX_BYTES + 1).to_string()), "{error}");
-        assert!(error.contains(&MAX_BYTES.to_string()), "{error}");
+        assert!(error.contains(&format!("{} bytes", LIMIT + 1)), "{error}");
+        assert!(error.contains(&format!("{LIMIT} bytes")), "{error}");
         assert!(error.contains(path.as_str()), "{error}");
     }
 

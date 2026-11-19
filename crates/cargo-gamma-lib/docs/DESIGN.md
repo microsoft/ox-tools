@@ -73,9 +73,11 @@ Gamma does not probe for `.cargo/mutants.toml` or emit a hint about it.
   representable process exit code, and the executable returns that `ExitCode`
   directly to Cargo. Launch failures and processes without a representable
   exit code become failure; successful captures remain success. Compiler
-  capture stands down when Cargo configuration declares `build.rustc-wrapper`
-  or `build.rustc-workspace-wrapper`, because a relative configured path cannot
-  be moved safely into the scratch workspace.
+  capture forwards usable configured Cargo wrapper chains, including
+  `build.rustc-wrapper` and `build.rustc-workspace-wrapper`. Malformed or
+  unresolvable wrapper configuration makes capture stand down rather than select
+  a different executable. Bare executable names remain under Cargo's lookup
+  rather than being identified as Gamma by a matching filename stem.
 - The agreement tests use `cargo-gamma-attrs-impl` through a versionless path
   dev-dependency. Cargo omits that test-only edge from published packages, so
   it adds no downstream dependency or release-order constraint.
@@ -92,6 +94,9 @@ evidence before emitting candidates, preserving implementations in other files
 without losing negative evidence for unrelated local types. Evidence remains
 package-local. An unanalyzable source disables negative evidence only for its
 own package and is reported even when excluded from mutation.
+Skipped declaration parses are retried on later discovery passes rather than
+cached without a source digest. Successful declaration evidence retains its
+digest validation, so reuse cannot hide a change to previously captured source.
 Source labels additionally bind declarations to unique active crate roots and
 module paths before collection. Cross-file aliases and re-export chains use
 that identity, so selecting only a consumer file still retains evidence about
@@ -155,6 +160,10 @@ configuration, reports, diagnostics, and exit codes. The Rust API is an
 implementation detail used by the thin executable crate. Its rustdoc is hidden,
 and its hand-written README warns downstream users not to depend on it.
 
+`suppress` permits source edits outside a Git repository, including Git's
+filesystem-boundary no-repository result. Other Git failures, including dubious
+ownership, remain errors unless the caller explicitly passes `--allow-dirty`.
+
 `--re` compiles one or more Rust regular expressions into a single alternative match. Discovery
 matches them against the same full name printed by `list mutants`, including the workspace-relative
 file and location, qualified item path, mutation summary, and any suppression marker. A malformed pattern is a usage error.
@@ -168,6 +177,9 @@ remain renderable and counted; a current unfiltered listing supplies current pre
 If a filtered source introduces a mutant absent from that selected presentation, merge reports an
 error and produces no staged document until a complete listing for the current source is included.
 Otherwise staging would discard that mutant's verdict permanently.
+For unfiltered inputs, an informational merge may display the compatible subset,
+but JSON publication is refused if it would omit source-incompatible verdicts
+needed by later gates. This refusal precedes any output-file writes.
 Staged merges retain this per-file source property in merge provenance, so a second merge cannot
 mistake a filtered source for a complete presentation, and retain whether each verdict came from a
 name-filtered source. They also retain each mutant's latest source sighting separately from its
@@ -213,8 +225,10 @@ failures.
 
 `compiler-exclusions.json` in the campaign cache is a cumulative inventory of
 exact mutant IDs previously established as individually unviable. On first use,
-it imports compiler failures from completed and incomplete campaign records and
-`gamma-hints.yaml`. Mutation discovery retains matching mutants as compile-error
+it imports compiler failures from completed and incomplete campaign records.
+Checked-in `gamma-hints.yaml` compiler hints only influence build ordering;
+they do not initialize the inventory or withdraw fresh candidates.
+Mutation discovery retains matching mutants as compile-error
 results, without assigning executable ordinals or emitting their mutation
 branches. These historical exclusions count as unviable immediately and remain
 part of the population reported by the `Mutated` summary, so subtracting the
@@ -249,6 +263,9 @@ retains the instrumented source of unaffected, successfully compiled dependency
 components; connected components may legitimately need edits while establishing
 individual failure or interaction evidence. Successful compilation does not
 unconditionally freeze a dependency that a later failure implicates.
+
+Compiler snapshots distinguish capture-limit refusals from underlying I/O failures.
+Reported streaming read failures retain their original I/O cause rather than a generic limit error.
 
 ### Exact-first adaptive sweep
 
@@ -686,7 +703,10 @@ offsets is never attempted.
 Diff paths are resolved to the workspace-relative Rust files discovered by the
 survey. Absolute or rooted paths inside the workspace are normalized to those
 candidates; one from another checkout is normalized only when its suffix
-uniquely identifies one candidate. Nonmutation target helpers are inventoried
+uniquely identifies one candidate. Git's C-quoted filename bytes are decoded
+before matching. Non-UTF-8 Rust paths are refused, never matched to a valid
+filename containing Unicode replacement characters.
+Nonmutation target helpers are inventoried
 with validation-only walks that prune Cargo's resolved target directory and
 conventional `target` and `.git` directories at workspace and package roots;
 ordinary mutation-source walks retain their full source inventory.
@@ -882,8 +902,11 @@ excluded generated output. The snapshot records the link spelling and resolved
 target identity; the ordinary input scan records the target files. This supports
 aliases and ancestor cycles without recursive link walks. Links to external or
 otherwise uncaptured directories are rejected, as are linked roots whose contents
-were not scanned independently. Resume repeats the same coverage and identity
-checks in addition to validating the recorded target files.
+were not scanned independently. Supported non-Git metadata directory links
+directly under the prepared workspace root, such as `.jj` and `.hg`, may point
+outside captured input trees; their targets are not traversed. Resume repeats
+the same coverage and identity checks in addition to validating the recorded
+target files.
 Resume checks the recorded files, not whether the tree gained new files:
 tests may create temporary inputs anywhere in their working directory.
 New files are permitted without rediscovery or rebuilding; recorded prepared

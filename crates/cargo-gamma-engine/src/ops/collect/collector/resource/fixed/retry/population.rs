@@ -25,7 +25,6 @@ fn count(value: &Value) -> Option<u16> {
 }
 
 fn method<'a>(expression: &'a Expr, name: &str, arity: usize) -> Option<&'a syn::ExprMethodCall> {
-    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
     let Expr::MethodCall(call) = expression else { return None };
     (call.attrs.is_empty() && call.method == name && call.args.len() == arity && call.turbofish.is_none()).then_some(call)
 }
@@ -45,7 +44,6 @@ pub(in super::super) fn repeats(machine: &mut Machine<'_>, condition: &Expr, bod
             Some(super::super::Binding::Bool),
         ) != Some(Value::Bool(true))
         {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         if seen.contains(&machine.values) {
@@ -57,7 +55,6 @@ pub(in super::super) fn repeats(machine: &mut Machine<'_>, condition: &Expr, bod
         machine.breaks = false;
         if machine.block(body).is_none() || machine.breaks || population.iter().any(|(name, value)| machine.values.get(name) != Some(value))
         {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
     }
@@ -68,7 +65,6 @@ pub(in super::super) fn eval(machine: &mut Machine<'_>, expression: &Expr) -> Op
     match expression {
         Expr::Binary(binary) if binary.attrs.is_empty() => {
             let left = machine.eval(&binary.left, None)?;
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             let Value::Count(a) = left else { return None };
             let b = count(&machine.eval(&binary.right, Some(super::super::Binding::Integer))?)?;
             Some(Value::Bool(match binary.op {
@@ -78,7 +74,6 @@ pub(in super::super) fn eval(machine: &mut Machine<'_>, expression: &Expr) -> Op
                 BinOp::Ge(_) => a >= b,
                 BinOp::Eq(_) => a == b,
                 BinOp::Ne(_) => a != b,
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 _ => return None,
             }))
         }
@@ -92,7 +87,6 @@ pub(in super::super) fn eval(machine: &mut Machine<'_>, expression: &Expr) -> Op
                 return collect(machine, call);
             }
             if call.turbofish.is_some() {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
             let receiver = machine.eval(&call.receiver, None)?;
@@ -113,7 +107,6 @@ pub(in super::super) fn eval(machine: &mut Machine<'_>, expression: &Expr) -> Op
                         "saturating_mul" => left.checked_mul(right)?,
                         "min" => left.min(right),
                         "max" => left.max(right),
-                        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                         _ => return None,
                     };
                     (result <= MAX_COUNT).then_some(Value::Count(result))
@@ -127,20 +120,17 @@ pub(in super::super) fn eval(machine: &mut Machine<'_>, expression: &Expr) -> Op
 
 fn collect(machine: &mut Machine<'_>, collect: &syn::ExprMethodCall) -> Option<Value> {
     if !collect.args.is_empty() || !collection_type(collect) {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
     if let Some(map) = method(&collect.receiver, "map", 1) {
         if let Some(chunks) = method(&map.receiver, "chunks", 1) {
             let Value::Population(population) = machine.eval(&chunks.receiver, None)? else {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             };
             let argument = machine.eval(&chunks.args[0], Some(super::super::Binding::Integer))?;
             // #[gamma::skip(try.propagate_to_unwrap, reason = "A successfully evaluated well-typed chunks width has Count, IntegerZero or IntegerSmall form.", tag = "equivalent")]
             let width = count(&argument)?;
             if width == 0 || map.args[0] != syn::parse_quote!(<[_]>::to_vec) || !vector_collection(collect) {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
             return Some(Value::Partitions(
@@ -149,13 +139,10 @@ fn collect(machine: &mut Machine<'_>, collect: &syn::ExprMethodCall) -> Option<V
         }
         let iter = method(&map.receiver, "iter", 0)?;
         let Value::Population(population) = machine.eval(&iter.receiver, None)? else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         };
         let (parameter, body) = closure(&map.args[0])?;
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         let Expr::Field(field) = body else { return None };
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         let syn::Member::Named(ordinal) = &field.member else { return None };
         if !field.attrs.is_empty()
             || bare_name(&field.base)? != parameter
@@ -164,7 +151,6 @@ fn collect(machine: &mut Machine<'_>, collect: &syn::ExprMethodCall) -> Option<V
             !machine.retry?.ordinals.contains(&ordinal.to_string())
             || !set_collection(collect)
         {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         return Some(Value::Ordinals(population));
@@ -173,28 +159,21 @@ fn collect(machine: &mut Machine<'_>, collect: &syn::ExprMethodCall) -> Option<V
     let copied = method(&filter.receiver, "copied", 0)?;
     let iter = method(&copied.receiver, "iter", 0)?;
     let Value::Population(population) = machine.eval(&iter.receiver, None)? else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     };
     let (parameter, body) = closure(&filter.args[0])?;
-    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
     let Expr::Unary(negation) = body else { return None };
     if !negation.attrs.is_empty() || !matches!(negation.op, syn::UnOp::Not(_)) || !vector_collection(collect) {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
     let contains = method(&negation.expr, "contains", 1)?;
     let Value::Ordinals(removed) = machine.eval(&contains.receiver, None)? else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     };
     let Expr::Reference(reference) = &contains.args[0] else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     };
-    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
     let Expr::Field(field) = &*reference.expr else { return None };
-    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
     let syn::Member::Named(ordinal) = &field.member else { return None };
     if !reference.attrs.is_empty()
         || reference.mutability.is_some()
@@ -204,7 +183,6 @@ fn collect(machine: &mut Machine<'_>, collect: &syn::ExprMethodCall) -> Option<V
         // #[gamma::skip(try.propagate_to_unwrap, reason = "Machine dispatches to population evaluation only with retry evidence.", tag = "equivalent")]
         !machine.retry?.ordinals.contains(&ordinal.to_string())
     {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
     Some(Value::Population(
@@ -213,7 +191,6 @@ fn collect(machine: &mut Machine<'_>, collect: &syn::ExprMethodCall) -> Option<V
 }
 
 fn closure(expression: &Expr) -> Option<(String, &Expr)> {
-    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
     let Expr::Closure(closure) = expression else { return None };
     let unsupported_closure = !closure.attrs.is_empty()
         || closure.inputs.len() != 1
@@ -227,10 +204,8 @@ fn closure(expression: &Expr) -> Option<(String, &Expr)> {
         || closure.modifiers.require_empty().is_err()
         || !matches!(closure.output, syn::ReturnType::Default)
     {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
-    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
     let Pat::Ident(parameter) = &closure.inputs[0] else { return None };
     (parameter.attrs.is_empty() && parameter.by_ref.is_none() && parameter.subpat.is_none())
         .then(|| (parameter.ident.to_string(), &*closure.body))
@@ -240,20 +215,16 @@ fn collection_type(call: &syn::ExprMethodCall) -> bool {
     let Some(arguments) = &call.turbofish else { return true };
     let mut arguments = arguments.args.iter();
     let Some(syn::GenericArgument::Type(syn::Type::Path(ty))) = arguments.next() else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
         return false; // #[gamma::skip(literal.bool_flip, reason = "Both vector_collection and set_collection independently reject a non-TypePath collection argument.", tag = "equivalent")]
     };
     if arguments.next().is_some() || ty.qself.is_some() || ty.path.segments.len() != 1 {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
         return false;
     }
     // #[gamma::skip(iter.first_to_last, reason = "The preceding exact singleton path check makes first and last identical.", tag = "equivalent")]
     let Some(segment) = ty.path.segments.first() else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
         return false; // #[gamma::skip(literal.bool_flip, reason = "The preceding exact singleton path check guarantees this segment exists.", tag = "equivalent")]
     };
     let syn::PathArguments::AngleBracketed(element) = &segment.arguments else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
         return false;
     };
     // #[gamma::skip(logical.and_remove_left, reason = "Every collection branch independently requires vector_collection or set_collection with the same accepted first-segment names.", tag = "equivalent")]
@@ -278,16 +249,13 @@ fn set_collection(call: &syn::ExprMethodCall) -> bool {
 
 pub(in super::super) fn clone_from(machine: &mut Machine<'_>, call: &syn::ExprMethodCall) -> Option<()> {
     if !call.attrs.is_empty() || call.turbofish.is_some() || call.args.len() != 1 {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
     let receiver = place_name(&call.receiver)?;
     if !matches!(machine.values.get(&receiver), Some(Value::Population(_))) {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
     let Value::Population(population) = machine.eval(&call.args[0], None)? else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     };
     let _old = machine.values.insert(receiver.clone(), Value::Population(population));
@@ -297,17 +265,14 @@ pub(in super::super) fn clone_from(machine: &mut Machine<'_>, call: &syn::ExprMe
 
 pub(in super::super) fn for_loop(machine: &mut Machine<'_>, loop_: &syn::ExprForLoop) -> Option<()> {
     if !loop_.attrs.is_empty() || loop_.label.is_some() {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
-    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
     let Pat::Ident(pattern) = &*loop_.pat else { return None };
     if (
         // #[gamma::skip(logical.or_remove_left, reason = "Pinned Syn stores parsed for-loop attributes on ExprForLoop and initializes this simple PatIdent attributes list empty.", tag = "equivalent")]
         !pattern.attrs.is_empty() || pattern.by_ref.is_some()
     ) || pattern.subpat.is_some()
     {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
     let iterable = match &*loop_.expr {
@@ -315,11 +280,9 @@ pub(in super::super) fn for_loop(machine: &mut Machine<'_>, loop_: &syn::ExprFor
         expression => expression,
     };
     let Value::Partitions(partitions) = machine.eval(iterable, None)? else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     };
     if partitions.len() > MAX_PARTITIONS {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
     let name = pattern.ident.to_string();
@@ -327,7 +290,6 @@ pub(in super::super) fn for_loop(machine: &mut Machine<'_>, loop_: &syn::ExprFor
     let previous_local = machine.locals.contains(&name);
     let prefix = format!("{name}.");
     if machine.values.keys().any(|key| key.starts_with(&prefix)) {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
     let _new = machine.locals.insert(name.clone());

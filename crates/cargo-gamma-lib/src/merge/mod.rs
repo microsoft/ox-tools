@@ -31,6 +31,7 @@
 //!   the actual problem behind a score that will not move.
 
 mod incoming;
+mod lineage;
 mod merged;
 mod read;
 mod status;

@@ -3,15 +3,17 @@
 
 //! Source-visible call signatures, indexed by declaration scope and calling convention.
 
+use std::sync::Arc;
+
 use syn::visit::{self, Visit};
-use syn::{Expr, FnArg, GenericArgument, Member, PathArguments, Signature, Type};
+use syn::{Expr, File, FnArg, GenericArgument, Member, PathArguments, Signature, Type};
 
 use crate::cfg::CfgSet;
 use crate::ops::collect::collector::indexes::{
-    ABSOLUTE_ROOT, EXTERN_ROOT_PREFIX, EXTERNAL_ROOT, ROOT_EXTERN_PREFIX, ScopePath, block_id, module_id,
+    ABSOLUTE_ROOT, EXTERN_ROOT_PREFIX, EXTERNAL_ROOT, Indexes, ROOT_EXTERN_PREFIX, ScopePath, block_id, module_id,
 };
 use crate::ops::collect::collector::predicates::{expr_attrs, stmt_attrs};
-use crate::ops::collect::defaults::{Defaults, impl_item_attrs, item_attrs, trait_item_attrs};
+use crate::ops::collect::defaults::{Declarations, Defaults, impl_item_attrs, item_attrs, trait_item_attrs};
 use crate::{HashMap, HashSet};
 
 type ScopedSignature = (Signature, ScopePath);
@@ -44,7 +46,7 @@ pub(super) struct Calls {
     enums: HashSet<Vec<String>>,
     structures: HashSet<Vec<String>>,
     block_types: HashMap<ScopePath, HashSet<String>>,
-    identities: crate::ops::collect::default_identity::Identities,
+    declarations: Arc<Declarations>,
     operators: Vec<(Vec<String>, String, Type, Type)>,
     // Negative operator evidence is usable only while the local inventory is complete.
     closed: bool,
@@ -84,7 +86,6 @@ impl Calls {
         loop {
             on_scope();
             if binding_scope == Some(&scope) {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
             if let Some((key, _)) = self.free.get_key_value(&(scope.clone(), name.to_owned())) {
@@ -94,7 +95,6 @@ impl Calls {
                 return Some(imported);
             }
             if !self.blocks.contains(&scope) {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
             let _scope = scope.pop();
@@ -144,7 +144,6 @@ impl Calls {
 
     pub(super) fn method_absent(&self, ty: &Type, name: &str, scope: &ScopePath, imports: &HashMap<String, Option<Vec<String>>>) -> bool {
         if !self.closed || self.open_methods || self.named_methods.contains(name) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         let ty = match super::values::strip(ty) {
@@ -152,7 +151,6 @@ impl Calls {
             other => other,
         };
         let Type::Path(path) = ty else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         };
         if path
@@ -160,7 +158,6 @@ impl Calls {
             .get_ident()
             .is_some_and(|name| super::values::primitive_kind(&name.to_string()).is_some())
         {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         self.nominal_path(&path.path, scope, imports)
@@ -191,11 +188,9 @@ impl Calls {
             other => other,
         };
         let Type::Path(path) = ty else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         };
         if path.path.leading_colon.is_some() {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let mut owner = self.nominal_path(&path.path, scope, imports)?;
@@ -212,18 +207,24 @@ impl Calls {
         noncopy: impl Fn(&Type) -> bool,
     ) -> bool {
         let Type::Path(path) = super::values::strip(ty) else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         };
         let Some(owner) = self.nominal_path(&path.path, scope, imports) else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         };
         self.noncopy_members.get(&owner).is_some_and(|fields| fields.iter().any(noncopy))
     }
 
     /// Builds declaration-scope evidence under the active cfg and existing lexical indexes.
-    pub(super) fn of(file: &syn::File, cfg: &CfgSet, indexes: &super::indexes::Indexes) -> Self {
+    #[cfg(test)]
+    pub(super) fn of(file: &File, cfg: &CfgSet, indexes: &Indexes) -> Self {
+        Self::with_declarations(file, cfg, indexes, Arc::new(Declarations::of(file, cfg)))
+    }
+
+    /// Builds fresh declaration-scope call evidence while sharing existing nominal identities.
+    /// The supplied snapshot must match this file and active configuration; it is reused without
+    /// derivation or comparison and retained for lookups after the indexing walk.
+    pub(super) fn with_declarations(file: &File, cfg: &CfgSet, indexes: &Indexes, declarations: Arc<Declarations>) -> Self {
         let mut walk = Walk {
             calls: Self::default(),
             scope: Vec::new(),
@@ -247,7 +248,7 @@ impl Calls {
             .collect();
         walk.calls.closed = super::noop::LocalCalls::nontransforming_attributes(&file.attrs);
         walk.visit_file(file);
-        walk.calls.identities = crate::ops::collect::default_identity::Identities::of(file, cfg);
+        walk.calls.declarations = declarations;
         walk.calls
     }
 
@@ -274,7 +275,6 @@ impl Calls {
             other => other,
         };
         let Type::Path(path) = ty else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         };
         let owner = self.nominal_path(&path.path, scope, imports)?;
@@ -329,7 +329,7 @@ impl Calls {
         let Some(owner) = self.nominal_path(&left.path, scope, imports) else {
             return OperatorResult::Unknown;
         };
-        if self.identities.resolve_path(&owner).is_none() {
+        if self.declarations.identities.resolve_path(&owner).is_none() {
             return OperatorResult::Unknown;
         }
         let right_identity = super::types::frozen_type_identity(right);
@@ -374,22 +374,18 @@ impl Calls {
         imports: &HashMap<String, Option<Vec<String>>>,
     ) -> bool {
         if !self.closed {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         let Type::Path(path) = ty else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         };
         if path.path.leading_colon.is_some() {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         let Some(owner) = self.nominal_path(&path.path, scope, imports) else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         };
-        self.identities.resolve_path(&owner).is_some()
+        self.declarations.identities.resolve_path(&owner).is_some()
             && !self
                 .operators
                 .iter()
@@ -420,7 +416,7 @@ impl Calls {
     /// Resolves lexical imports and relative modules without crossing an unresolved block shadow.
     fn nominal_path(&self, path: &syn::Path, scope: &ScopePath, imports: &HashMap<String, Option<Vec<String>>>) -> Option<Vec<String>> {
         let module = self.source_path(path, scope, imports)?;
-        Some(self.identities.resolve_path(&module).unwrap_or(module))
+        Some(self.declarations.identities.resolve_path(&module).unwrap_or(module))
     }
 
     fn source_path(&self, path: &syn::Path, scope: &ScopePath, imports: &HashMap<String, Option<Vec<String>>>) -> Option<Vec<String>> {
@@ -431,7 +427,6 @@ impl Calls {
         if path.leading_colon.is_some() {
             if !matches!(root.as_str(), "crate" | "self" | "super") {
                 if !self.crate_aliases.contains(root) {
-                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                     return None;
                 }
                 // #[gamma::skip(stmt.delete_call, tag = "equivalent", reason = "The later first_mut crate_aliases check rewrites this same root to crate before resolution. No intervening operation changes the root (it is not an absolute import marker), so omitting this earlier rewrite leaves the same local owner.")]
@@ -443,7 +438,6 @@ impl Calls {
                 .and_then(Option::as_ref)
                 .is_some_and(|shadows| shadows.contains(root))
             {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
             if let Some(imported) = imports.get(root) {
@@ -453,7 +447,6 @@ impl Calls {
         if names.first().is_some_and(|name| name == ABSOLUTE_ROOT) {
             let _absolute = names.remove(0);
             if names.first().is_some_and(|name| name == EXTERNAL_ROOT) {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
         }
@@ -542,11 +535,9 @@ impl Calls {
         mut on_scope: impl FnMut(&ScopePath),
     ) -> Option<&ScopedSignature> {
         let Expr::Path(callee) = callee else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         };
         if callee.qself.is_some() {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let mut names = callee
@@ -559,7 +550,6 @@ impl Calls {
         // #[gamma::skip(try.propagate_to_unwrap, reason = "These names are copied from the nonempty source-parsed callee path before import expansion.", tag = "equivalent")]
         names.first()?.clone();
         if bound(&first) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         if names.len() == 1 && callee.path.leading_colon.is_none() && !imports.contains_key(&first) {
@@ -570,7 +560,6 @@ impl Calls {
                     return signature.as_ref();
                 }
                 if !self.blocks.contains(&scope) {
-                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                     return None;
                 }
                 let _last = scope.pop();
@@ -578,7 +567,6 @@ impl Calls {
         }
         if first == "Self" {
             let Type::Path(ty) = self_type? else {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             };
             let _replaced = names.splice(..1, ty.path.segments.iter().map(|segment| segment.ident.to_string()));

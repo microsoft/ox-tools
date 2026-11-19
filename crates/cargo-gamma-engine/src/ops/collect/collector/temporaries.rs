@@ -5,80 +5,101 @@
 
 use core::ops::Range;
 
+#[cfg(test)]
 use syn::spanned::Spanned as _;
+#[cfg(test)]
 use syn::visit::{self, Visit};
 use syn::{Expr, ExprMethodCall};
 
 use crate::HashMap;
+use crate::parse::Extent as _;
 
-pub(super) fn consuming_sites(file: &syn::File) -> HashMap<Range<usize>, Range<usize>> {
-    #[derive(Default)]
-    struct Walk<'a> {
-        stack: Vec<&'a Expr>,
-        sites: HashMap<Range<usize>, Range<usize>>,
+/// Records consuming expressions for temporary-backed borrows.
+/// Callers must pair `enter` and `leave` around each nested expression visit.
+#[derive(Default, PartialEq, Eq)]
+pub(super) struct Walk<'a> {
+    stack: Vec<&'a Expr>,
+    pub(super) sites: HashMap<Range<usize>, Range<usize>>,
+}
+impl<'ast> Walk<'ast> {
+    pub(super) fn assignment(&mut self, assignment: &'ast syn::ExprAssign) {
+        assignment_arrays(&assignment.left, &assignment.extent().byte_range(), &mut self.sites);
     }
-    #[expect(clippy::renamed_function_params, reason = "visitor parameters use descriptive names")]
-    impl<'ast> Visit<'ast> for Walk<'ast> {
-        fn visit_expr_assign(&mut self, assignment: &'ast syn::ExprAssign) {
-            // #[gamma::skip(call_result.default, tag = "equivalent", reason = "assignment_arrays returns unit; default_after executes it with identical sites mutations before returning the same unit value.")]
-            assignment_arrays(&assignment.left, &assignment.span().byte_range(), &mut self.sites);
-            visit::visit_expr_assign(self, assignment);
-        }
 
-        fn visit_expr(&mut self, expression: &'ast Expr) {
-            let expression_span = expression.span().byte_range();
-            let boundary = self
-                .stack
-                .iter()
-                .rposition(|expression| {
-                    matches!(
-                        expression,
-                        Expr::Block(_)
-                            | Expr::If(_)
-                            | Expr::Closure(_)
-                            | Expr::Async(_)
-                            | Expr::Loop(_)
-                            | Expr::ForLoop(_)
-                            | Expr::While(_)
-                            | Expr::Return(_)
-                    ) || matches!(expression, Expr::Match(matched) if {
-                        let scrutinee = matched.expr.span().byte_range();
-                        let current = &expression_span;
-                        current.start < scrutinee.start || current.end > scrutinee.end
-                    }) || matches!(expression, Expr::Binary(binary) if matches!(binary.op, syn::BinOp::And(_) | syn::BinOp::Or(_)))
-                })
-                .map_or(0, |index| index + 1);
-            let ancestors = &self.stack[boundary..];
-            let borrowed = borrows_temporary(expression);
-            let root = ancestors.first().copied().and_then(|root| {
-                if !matches!(root, Expr::Let(_)) {
-                    return Some(root);
-                }
-                self.stack.iter().rev().copied().find(|ancestor| {
-                    let condition = match ancestor {
-                        Expr::If(conditional) => &conditional.cond,
-                        Expr::While(conditional) => &conditional.cond,
-                        _ => return false,
-                    };
-                    let condition = condition.span().byte_range();
-                    // #[gamma::skip(logical.and_remove_left, reason = "Candidates are ancestor if/while nodes in the parsed expression stack, so a descendant expression never begins before their condition. When borrowed evidence is published with an Expr::Let root, the borrowed descendant necessarily starts strictly after the condition's leading let token. Removing the first bound or making it strict changes no published site.", tag = "equivalent")]
-                    (
-                        // #[gamma::skip(relational.le_to_lt, reason = "Candidates are ancestor if/while nodes in the parsed expression stack, so a descendant expression never begins before their condition. When borrowed evidence is published with an Expr::Let root, the borrowed descendant necessarily starts strictly after the condition's leading let token. Removing the first bound or making it strict changes no published site.", tag = "equivalent")]
-                        condition.start <= expression_span.start
-                    ) && expression_span.end <= condition.end
-                })
-            });
-            if borrowed
-                && let Some(root) = root
-                && root.span().byte_range() != expression.span().byte_range()
-            {
-                let _prior = self.sites.insert(expression.span().byte_range(), root.span().byte_range());
+    pub(super) fn enter(&mut self, expression: &'ast Expr) {
+        let expression_span = expression.extent().byte_range();
+        let boundary = self
+            .stack
+            .iter()
+            .rposition(|expression| {
+                matches!(
+                    expression,
+                    Expr::Block(_)
+                        | Expr::If(_)
+                        | Expr::Closure(_)
+                        | Expr::Async(_)
+                        | Expr::Loop(_)
+                        | Expr::ForLoop(_)
+                        | Expr::While(_)
+                        | Expr::Return(_)
+                ) || matches!(expression, Expr::Match(matched) if {
+                    let scrutinee = matched.expr.extent().byte_range();
+                    let current = &expression_span;
+                    current.start < scrutinee.start || current.end > scrutinee.end
+                }) || matches!(expression, Expr::Binary(binary) if matches!(binary.op, syn::BinOp::And(_) | syn::BinOp::Or(_)))
+            })
+            .map_or(0, |index| index + 1);
+        let ancestors = &self.stack[boundary..];
+        let borrowed = borrows_temporary(expression);
+        let root = ancestors.first().copied().and_then(|root| {
+            if !matches!(root, Expr::Let(_)) {
+                return Some(root);
             }
-            self.stack.push(expression);
-            visit::visit_expr(self, expression);
-            let _expression = self.stack.pop();
+            self.stack.iter().rev().copied().find(|ancestor| {
+                let condition = match ancestor {
+                    Expr::If(conditional) => &conditional.cond,
+                    Expr::While(conditional) => &conditional.cond,
+                    _ => return false,
+                };
+                let condition = condition.extent().byte_range();
+                // #[gamma::skip(logical.and_remove_left, reason = "Candidates are ancestor if/while nodes in the parsed expression stack, so a descendant expression never begins before their condition. When borrowed evidence is published with an Expr::Let root, the borrowed descendant necessarily starts strictly after the condition's leading let token. Removing the first bound or making it strict changes no published site.", tag = "equivalent")]
+                (
+                    // #[gamma::skip(relational.le_to_lt, reason = "Candidates are ancestor if/while nodes in the parsed expression stack, so a descendant expression never begins before their condition. When borrowed evidence is published with an Expr::Let root, the borrowed descendant necessarily starts strictly after the condition's leading let token. Removing the first bound or making it strict changes no published site.", tag = "equivalent")]
+                    condition.start <= expression_span.start
+                ) && expression_span.end <= condition.end
+            })
+        });
+        if borrowed
+            && let Some(root) = root
+            && root.extent().byte_range() != expression.extent().byte_range()
+        {
+            let _prior = self.sites.insert(expression.extent().byte_range(), root.extent().byte_range());
         }
+        self.stack.push(expression);
     }
+
+    pub(super) fn leave(&mut self) {
+        let _expression = self.stack.pop();
+    }
+}
+
+#[cfg(test)]
+#[expect(clippy::renamed_function_params, reason = "visitor parameters use descriptive names")]
+impl<'ast> Visit<'ast> for Walk<'ast> {
+    fn visit_expr(&mut self, expression: &'ast Expr) {
+        self.enter(expression);
+        visit::visit_expr(self, expression);
+        self.leave();
+    }
+
+    fn visit_expr_assign(&mut self, assignment: &'ast syn::ExprAssign) {
+        self.assignment(assignment);
+        visit::visit_expr_assign(self, assignment);
+    }
+}
+
+#[cfg(test)]
+pub(super) fn consuming_sites(file: &syn::File) -> HashMap<Range<usize>, Range<usize>> {
     let mut walk = Walk::default();
     walk.visit_file(file);
     walk.sites
@@ -87,7 +108,7 @@ pub(super) fn consuming_sites(file: &syn::File) -> HashMap<Range<usize>, Range<u
 fn assignment_arrays(expression: &Expr, assignment: &Range<usize>, sites: &mut HashMap<Range<usize>, Range<usize>>) {
     let elements = match expression {
         Expr::Array(array) => {
-            let _prior = sites.insert(array.span().byte_range(), assignment.clone());
+            let _prior = sites.insert(array.extent().byte_range(), assignment.clone());
             &array.elems
         }
         Expr::Tuple(tuple) => &tuple.elems,
@@ -98,11 +119,9 @@ fn assignment_arrays(expression: &Expr, assignment: &Range<usize>, sites: &mut H
             return;
         }
         Expr::Paren(paren) => {
-            // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
             return assignment_arrays(&paren.expr, assignment, sites);
         }
         Expr::Group(group) => {
-            // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
             return assignment_arrays(&group.expr, assignment, sites);
         }
         _ => return,

@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.28.1] - 2026-11-24
+
+- ✨ Features
+
+  - cargo-anvil: add cargo-unused-deps check ([#378](https://github.com/microsoft/ox-tools/pull/378))
+
+- 🐛 Bug Fixes
+
+  - harden cargo-gamma and require 0.7.0 for Anvil mutation checks
+
 ## [0.28.0] - 2026-11-23
 
 - ✨ Features

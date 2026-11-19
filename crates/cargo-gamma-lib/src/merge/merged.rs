@@ -3,7 +3,8 @@
 
 //! What a merge concluded: the merged report plus the numbers that make it trustworthy.
 
-use std::collections::BTreeSet;
+use core::fmt;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::elements::Report;
 
@@ -22,7 +23,7 @@ use crate::elements::Report;
 pub(crate) const MAX_SHARDS: u32 = 65_536;
 
 /// What a merge concluded.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct Merged {
     /// The merged report, ready to render when every filtered verdict has a compatible presentation.
     pub report: Option<Report>,
@@ -78,14 +79,42 @@ pub struct Merged {
     /// silence about an id says nothing about whether that code still exists.
     pub unchecked: usize,
 
-    /// Verdicts omitted because their mutation presentation does not fit the selected source.
-    pub incompatible: usize,
+    /// Omitted verdict counts by file, when their presentations do not fit the selected source.
+    pub(crate) incompatible_files: BTreeMap<String, usize>,
 
     /// Filtered verdicts without a compatible presentation, which would be lost by staging.
     pub unpresentable_filtered: usize,
 }
 
+impl fmt::Debug for Merged {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct(core::any::type_name::<Self>())
+            .field("report_present", &self.report.is_some())
+            .field("fresh", &self.fresh)
+            .field("stale", &self.stale)
+            .field("freshness_unavailable", &self.freshness_unavailable)
+            .field("never_tested", &self.never_tested)
+            .field("flaky", &self.flaky.len())
+            .field("shards_seen", &self.shards_seen.len())
+            .field("shard_count", &self.shard_count)
+            .field("inconsistent", &self.inconsistent.len())
+            .field("identity_incompatible", &self.identity_incompatible.len())
+            .field("detected", &self.detected)
+            .field("valid", &self.valid)
+            .field("withdrawn", &self.withdrawn)
+            .field("unchecked", &self.unchecked)
+            .field("incompatible", &self.incompatible())
+            .field("incompatible_files", &self.incompatible_files.len())
+            .field("unpresentable_filtered", &self.unpresentable_filtered)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Merged {
+    pub(crate) fn incompatible(&self) -> usize {
+        self.incompatible_files.values().sum()
+    }
+
     /// The merged mutation score, as a percentage.
     ///
     /// Answers 100% for an empty population rather than dividing by zero, which is the only sensible

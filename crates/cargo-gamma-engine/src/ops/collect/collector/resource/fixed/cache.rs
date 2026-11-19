@@ -13,46 +13,35 @@ pub(super) fn constructor(expression: &Expr) -> bool {
 
 pub(super) fn initial_value(call: &syn::ExprCall) -> Option<Value> {
     if !constructor(&call.func) || call.args.len() != 1 || !call.attrs.is_empty() {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
-    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
     let Expr::Array(array) = &call.args[0] else { return None };
     if !array.attrs.is_empty() || array.elems.len() > 16 {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
     let mut entries = Vec::new();
     for element in &array.elems {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         let Expr::Tuple(tuple) = element else { return None };
         if !tuple.attrs.is_empty() {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         if tuple.elems.len() != 2 {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let (Expr::Lit(key), Expr::Lit(value)) = (&tuple.elems[0], &tuple.elems[1]) else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         };
         if !key.attrs.is_empty() || !value.attrs.is_empty() {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let (Lit::Int(key), Lit::Bool(value)) = (&key.lit, &value.lit) else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         };
         if !matches!(key.suffix(), "" | "u32") {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let key = key.base10_parse::<u32>().ok()?;
         if entries.iter().any(|(known, _)| *known == key) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         entries.push((key, value.value));
@@ -62,132 +51,100 @@ pub(super) fn initial_value(call: &syn::ExprCall) -> Option<Value> {
 
 pub(super) fn hit(machine: &mut Machine<'_>, function: &syn::ItemFn, call: &syn::ExprCall) -> Option<Value> {
     if function.sig.inputs.len() != call.args.len() || function.sig.output != syn::parse_quote!(-> bool) {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
     let Stmt::Expr(Expr::If(branch), _) = function.block.stmts.first()? else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     };
     if !branch.attrs.is_empty() {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
-    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
     let Expr::Let(binding) = &*branch.cond else { return None };
     if !binding.attrs.is_empty() {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
-    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
     let Pat::TupleStruct(pattern) = &*binding.pat else { return None };
     if !pattern.attrs.is_empty() || !pattern.path.is_ident("Some") || pattern.elems.len() != 1 {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
-    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
     let Pat::Ident(cached) =
         // #[gamma::skip(iter.first_to_last, try.propagate_to_unwrap, reason = "The preceding exact singleton check guarantees this element exists and first equals last.", tag = "equivalent")]
         pattern.elems.first()? else { return None };
     if !cached.attrs.is_empty() || cached.by_ref.is_some() || cached.subpat.is_some() {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
-    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
     let Expr::MethodCall(get) = &*binding.expr else { return None };
     if !get.attrs.is_empty() || get.method != "get" || get.turbofish.is_some() || get.args.len() != 1 {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
     let cache_name = bare_name(&get.receiver)?;
     let Expr::Reference(key_reference) = &get.args[0] else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     };
     if !key_reference.attrs.is_empty() || key_reference.mutability.is_some() {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
     let key_name = bare_name(&key_reference.expr)?;
     let mut cache = None;
     let mut key = None;
     for (parameter, argument) in function.sig.inputs.iter().zip(&call.args) {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         let FnArg::Typed(parameter) = parameter else { return None };
         if !parameter.attrs.is_empty() {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         let Pat::Ident(parameter_name) = &*parameter.pat else { return None };
         if !parameter_name.attrs.is_empty() || parameter_name.by_ref.is_some() || parameter_name.subpat.is_some() {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let name = parameter_name.ident.to_string();
         if name == cache_name {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             let Type::Reference(reference) = &*parameter.ty else { return None };
             if reference.mutability.is_some() || !super::super::bool_cache_type(&reference.elem) {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             let Expr::Reference(argument) = argument else { return None };
             if !argument.attrs.is_empty() || argument.mutability.is_some() {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
             let Value::BoolCache(entries) = machine.eval(&argument.expr, Some(Binding::BoolCache))? else {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             };
             cache = Some(entries);
         } else if name == key_name {
             if primitive_type(&parameter.ty) != Some(Primitive::Unsigned(32)) {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
             let Value::Int(value, Primitive::Unsigned(32)) = machine.eval(argument, Some(Binding::Primitive(Primitive::Unsigned(32))))?
             else {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             };
             key = u32::try_from(value).ok();
         } else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             let Type::Reference(reference) = &*parameter.ty else { return None };
             let primitive = primitive_type(&reference.elem)?;
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             let Expr::Reference(argument) = argument else { return None };
             if !argument.attrs.is_empty() || bare_name(&argument.expr).is_none() {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
             let value = machine.eval(&argument.expr, None)?;
             if value.kind() != Binding::Primitive(primitive) {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
         }
     }
     let [Stmt::Expr(Expr::Return(returned), _)] = branch.then_branch.stmts.as_slice() else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     };
     if !returned.attrs.is_empty() {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
     let Expr::Unary(dereference) = &**returned.expr.as_ref()? else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     };
     if !dereference.attrs.is_empty()
         || !matches!(dereference.op, UnOp::Deref(_))
         || bare_name(&dereference.expr).as_deref() != Some(&cached.ident.to_string())
     {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
     let key = key?;

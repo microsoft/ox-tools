@@ -97,6 +97,14 @@ fn resource_leaves_the_annotated_test_callable() {
 }
 
 #[gamma::resource("cargo-subprocess")]
+#[test]
+fn r#type() {}
+
+#[gamma::resource("cargo-subprocess")]
+#[test]
+fn café() {}
+
+#[gamma::resource("cargo-subprocess")]
 mod alpha_resource_tests {
     #[test]
     fn callable() {}
@@ -138,6 +146,13 @@ fn resource_marker_is_exposed_to_harness_listing() {
                 "{module}::__cargo_gamma_resource_636172676f2d73756270726f63657373_binary: test"
             )),
             "{listing}"
+        );
+    }
+    for (source, name) in [("r#type", "74797065"), ("café", "636166c3a9")] {
+        let marker = format!("__cargo_gamma_resource_636172676f2d73756270726f63657373_test_{name}: test");
+        assert!(
+            listing.contains(&marker),
+            "{source} should expose {marker:?} in the listing:\n{listing}"
         );
     }
 }

@@ -253,6 +253,8 @@ enum Previous {
     Expression,
     Operator,
     Prefix,
+    Break,
+    BreakLabel,
 }
 
 impl Previous {
@@ -363,12 +365,13 @@ pub(super) fn exceeds_nesting_limit(stream: &TokenStream, limit: usize) -> bool 
 
                     // Blocks start a sibling body after their condition. Other groups continue
                     // the enclosing expression path, including prefix operators before them.
-                    let inherited = if group.delimiter() == Delimiter::Brace && frame.previous != Previous::Prefix {
-                        frame.base
-                    } else {
-                        frame.links
-                    }
-                    .saturating_add(CHAIN_FACTOR);
+                    let inherited =
+                        if group.delimiter() == Delimiter::Brace && !matches!(frame.previous, Previous::Prefix | Previous::Break) {
+                            frame.base
+                        } else {
+                            frame.links
+                        }
+                        .saturating_add(CHAIN_FACTOR);
 
                     // Each nested group spends CHAIN_FACTOR, also enforcing delimiter depth.
                     if inherited > chain_limit {
@@ -384,6 +387,11 @@ pub(super) fn exceeds_nesting_limit(stream: &TokenStream, limit: usize) -> bool 
                     continue 'walk;
                 }
 
+                TokenTree::Ident(_) if frame.previous == Previous::BreakLabel => {
+                    // A break label belongs to its existing prefix, so it spends no extra link.
+                    frame.previous = Previous::Prefix;
+                }
+
                 TokenTree::Ident(ident) if ident == "as" => {
                     frame.end_possible_ladder();
                     if frame.add_link(chain_limit) {
@@ -391,6 +399,17 @@ pub(super) fn exceeds_nesting_limit(stream: &TokenStream, limit: usize) -> bool 
                     }
 
                     frame.previous = Previous::Other;
+                }
+
+                TokenTree::Ident(ident) if ident == "return" || ident == "break" || ident == "yield" || ident == "become" => {
+                    frame.end_possible_ladder();
+                    if frame.previous == Previous::Expression {
+                        frame.links = frame.base;
+                    }
+                    if frame.add_link(chain_limit) {
+                        return true;
+                    }
+                    frame.previous = if ident == "break" { Previous::Break } else { Previous::Prefix };
                 }
 
                 TokenTree::Ident(ident) if ident == "else" && frame.awaiting_else => {
@@ -440,7 +459,9 @@ pub(super) fn exceeds_nesting_limit(stream: &TokenStream, limit: usize) -> bool 
                         frame.ladders = 0;
                     }
 
-                    frame.previous = if matches!(punct.as_char(), '?' | '>') {
+                    frame.previous = if punct.as_char() == '\'' && frame.previous == Previous::Break {
+                        Previous::BreakLabel
+                    } else if matches!(punct.as_char(), '?' | '>') {
                         Previous::Operator
                     } else if matches!(punct.as_char(), '+' | '-' | '*' | '/' | '%' | '&' | '|' | '^' | '!' | '<' | '=') {
                         Previous::Prefix
@@ -1054,6 +1075,55 @@ mod tests {
         ] {
             assert_eq!(exceeds_nesting_limit(&stream(source), limit), exceeds, "{source}");
         }
+    }
+
+    #[test]
+    fn statement_prefixes_carry_their_path_into_a_returned_block() {
+        assert!(!exceeds_nesting_limit(&stream("return { !!!!!!!true }"), 3));
+        assert!(exceeds_nesting_limit(&stream("return { !!!!!!!!true }"), 3));
+    }
+
+    #[test]
+    fn labelled_breaks_preserve_the_exact_operand_budget() {
+        let limit = 2;
+        let chain_limit = limit * CHAIN_FACTOR;
+        for prefix in [
+            "break ",
+            "break 'out ",
+            "break 'r#a ",
+            "break 'r#out ",
+            "break /* label */ 'out /* value */ ",
+        ] {
+            for operand in ["1", "'q'", "{}"] {
+                let boundary = chain_limit - if operand == "{}" { CHAIN_FACTOR } else { 0 };
+                for (count, exceeds) in [(boundary, false), (boundary + 1, true)] {
+                    let source = format!("{}{operand}", prefix.repeat(count));
+                    assert_eq!(exceeds_nesting_limit(&stream(&source), limit), exceeds, "{source}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn only_break_apostrophes_consume_a_label_in_opaque_tokens() {
+        for keyword in ["return", "yield", "become"] {
+            let source = format!("!!!!!!!{keyword} 'out value +");
+            assert!(!exceeds_nesting_limit(&stream(&source), 2), "{source}");
+        }
+        assert!(!exceeds_nesting_limit(&stream("break + break + 1"), 1));
+        assert!(exceeds_nesting_limit(&stream("break + break + break 1"), 1));
+    }
+
+    #[test]
+    fn a_prefix_after_a_ladder_does_not_turn_a_syntax_error_into_a_depth_error() {
+        let expression = format!(
+            "if true {{}} {} return else if true {{}}",
+            "else if true {}".repeat(NESTING_LIMIT * CHAIN_FACTOR)
+        );
+        assert!(!exceeds_nesting_limit(&stream(&expression), NESTING_LIMIT));
+        let output = value(stream(&expression), stream("fn fixture() -> bool { true }")).to_string();
+        assert!(output.contains("compile_error"), "{output}");
+        assert!(!output.contains("nests too deeply"), "{output}");
     }
 
     #[test]
@@ -2142,6 +2212,26 @@ mod tests {
     }
 
     #[test]
+    fn operand_keyword_chains_spend_one_link_per_prefix() {
+        let limit = 4;
+        let links = limit * CHAIN_FACTOR;
+        for keyword in ["return ", "break ", "yield ", "become "] {
+            assert!(
+                !exceeds_nesting_limit(&stream(&format!("{}1", keyword.repeat(links))), limit),
+                "{keyword}"
+            );
+            assert!(
+                exceeds_nesting_limit(&stream(&format!("{}1", keyword.repeat(links + 1))), limit),
+                "{keyword}"
+            );
+        }
+        assert!(!exceeds_nesting_limit(
+            &stream(&"return_value; break_value; yield_value; become_value;".repeat(links)),
+            limit
+        ));
+    }
+
+    #[test]
     fn postfix_punctuation_uses_the_exact_chain_boundary() {
         let chain_limit = NESTING_LIMIT * CHAIN_FACTOR;
         let at_limit = format!("value{}", ".field".repeat(chain_limit));
@@ -2161,10 +2251,14 @@ mod tests {
 
     #[test]
     fn new_operands_restart_with_the_whole_chain_budget() {
-        for expression in ["return value.a.b.c.d", "break value.a.b.c.d"] {
-            assert!(!exceeds_nesting_limit(&stream(expression), 1), "{expression}");
+        for keyword in ["return", "break", "yield", "become"] {
+            let at_limit = format!("{keyword} value.a.b.c");
+            let over_limit = format!("{keyword} value.a.b.c.d");
+            assert!(!exceeds_nesting_limit(&stream(&at_limit), 1), "{at_limit}");
+            assert!(exceeds_nesting_limit(&stream(&over_limit), 1), "{over_limit}");
+            let sibling = format!("if value.a.b.c.d {{}} {at_limit}");
+            assert!(!exceeds_nesting_limit(&stream(&sibling), 1), "{sibling}");
         }
-        assert!(exceeds_nesting_limit(&stream("return value.a.b.c.d.e"), 1));
     }
 
     #[test]

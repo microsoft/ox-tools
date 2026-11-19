@@ -4,6 +4,7 @@
 //! Live per-binary kill counts for fallback execution order.
 
 use core::cmp::Reverse;
+use core::fmt;
 use std::sync::Arc;
 
 use super::{BinaryIdentity, Killers, Plan, TestBinary};
@@ -11,16 +12,79 @@ use crate::HashMap;
 
 #[derive(Debug, Default)]
 pub(super) struct BinaryKills {
-    counts: HashMap<BinaryIdentity, usize>,
+    counts: TargetCounts<usize>,
     credited: HashMap<u32, BinaryIdentity>,
     packages: HashMap<u32, Arc<str>>,
+}
+
+/// Separates persisted target qualifiers so live lookups can borrow all three string components.
+pub(super) struct TargetCounts<V> {
+    packages: HashMap<String, HashMap<String, HashMap<String, V>>>,
+}
+
+impl<V> fmt::Debug for TargetCounts<V> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct(core::any::type_name::<Self>())
+            .field("packages", &self.packages.len())
+            .finish()
+    }
+}
+
+impl<V> Default for TargetCounts<V> {
+    fn default() -> Self {
+        Self {
+            packages: HashMap::default(),
+        }
+    }
+}
+
+impl<V: Default> TargetCounts<V> {
+    pub(super) fn entry(&mut self, package: &str, target: &str) -> &mut V {
+        let (kind, name) = split_target(target);
+        self.packages
+            .entry(package.to_owned())
+            .or_default()
+            .entry(kind.to_owned())
+            .or_default()
+            .entry(name.to_owned())
+            .or_default()
+    }
+
+    pub(super) fn get_mut(&mut self, package: &str, target: &str) -> Option<&mut V> {
+        let (kind, name) = split_target(target);
+        // #[gamma::skip(try.propagate_to_unwrap, tag = "equivalent", reason = "Production callers move previously credited killers whose package and kind entries were already inserted and never removed.")]
+        self.packages.get_mut(package)?.get_mut(kind)?.get_mut(name)
+    }
+
+    pub(super) fn for_binary(&self, binary: &TestBinary) -> impl Iterator<Item = &V> {
+        let package = self.packages.get(&binary.package);
+        let qualified = package
+            .and_then(|kinds| kinds.get(binary.target_kind.as_str()))
+            .and_then(|names| names.get(binary.target.as_str()));
+        let legacy = (!binary.target_kind.is_empty())
+            .then(|| {
+                package
+                    .and_then(|kinds| kinds.get(""))
+                    .and_then(|names| names.get(binary.target.as_str()))
+            })
+            .flatten();
+        // #[gamma::skip(collection.reverse_array, tag = "equivalent", reason = "Both production consumers sum these bounded counts; lookup order changes neither membership nor the sum.")]
+        [qualified, legacy].into_iter().flatten()
+    }
+}
+
+fn split_target(target: &str) -> (&str, &str) {
+    target
+        .split_once(':')
+        .filter(|(kind, _name)| !kind.is_empty())
+        .unwrap_or(("", target))
 }
 
 impl BinaryKills {
     pub(super) fn new(plan: &Plan, killers: &Killers) -> Self {
         let mut result = Self::default();
         for (_, killer) in killers.iter() {
-            *result.counts.entry(BinaryIdentity::from_killer(killer)).or_default() += 1;
+            *result.counts.entry(&killer.package, &killer.target) += 1;
         }
         for mutant in plan.mutants.iter().filter(|mutant| mutant.ordinal > 0) {
             result.packages.insert(mutant.ordinal, Arc::clone(&mutant.package));
@@ -41,17 +105,17 @@ impl BinaryKills {
             }
             let count = self
                 .counts
-                .get_mut(&previous)
+                .get_mut(&previous.package, &previous.target)
                 .expect("each credited mutant contributes to its binary's count");
             *count = count.checked_sub(1).expect("a credited mutant contributes at least one kill");
         }
-        *self.counts.entry(identity).or_default() += 1;
+        *self.counts.entry(&identity.package, &identity.target) += 1;
     }
 
     pub(super) fn order(&self, ordinal: u32, reachable: &[&TestBinary]) -> Vec<usize> {
         let package = self.packages.get(&ordinal);
         let mut order = (0..reachable.len()).collect::<Vec<_>>();
-        order.sort_by_key(|index| {
+        order.sort_by_cached_key(|index| {
             let binary = reachable[*index];
             (
                 package.is_some_and(|package| package.as_ref() != binary.package),
@@ -63,16 +127,7 @@ impl BinaryKills {
     }
 
     fn count(&self, binary: &TestBinary) -> usize {
-        let identity = BinaryIdentity::from_binary(binary);
-        let qualified = self.counts.get(&identity).copied().unwrap_or(0);
-        if identity.target == binary.target {
-            return qualified;
-        }
-        let legacy = BinaryIdentity {
-            package: binary.package.clone(),
-            target: binary.target.clone(),
-        };
-        qualified + self.counts.get(&legacy).copied().unwrap_or(0)
+        self.counts.for_binary(binary).copied().sum()
     }
 }
 
@@ -86,6 +141,13 @@ mod tests {
     use crate::exec::sweep::staged::killer_for;
     use crate::exec::sweep::tests::{ranked_binaries, unreachable_harness};
     use crate::fixtures;
+
+    #[test]
+    fn target_count_debug_does_not_require_debuggable_values() {
+        struct Opaque;
+
+        let _summary = format!("{:?}", TargetCounts::<Opaque>::default());
+    }
 
     #[test]
     fn recovered_missing_legacy_binary_credit_is_exactly_zero_after_a_qualified_hit() {

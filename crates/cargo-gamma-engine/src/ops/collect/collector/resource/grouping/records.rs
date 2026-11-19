@@ -4,11 +4,11 @@
 //! Closed declaration effects for replaying a record-valued grouping iteration.
 
 use syn::punctuated::Punctuated;
-use syn::spanned::Spanned as _;
 use syn::{Expr, FnArg, GenericArgument, Item, Member, Pat, PathArguments, ReturnType, Stmt, Token, Type};
 
 use super::{bare, field, local, method, name, record, text};
 use crate::ops::collect::resource_namespaces::{Namespaces, declaration_attributes};
+use crate::parse::Extent as _;
 use crate::{HashMap, HashSet};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -22,7 +22,6 @@ enum Kind {
 
 fn closed_record(file: &syn::File, record_name: &str) -> bool {
     let Some(schema) = record(file, record_name) else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
         return false; // #[gamma::skip(literal.bool_flip, reason = "Both callers already found this same immutable record declaration before calling closed_record.", tag = "equivalent")]
     };
     // Namespace evidence does not expose impl bodies from other physical files.
@@ -54,17 +53,14 @@ impl Effects<'_> {
     fn kind(&mut self, ty: &Type, depth: usize) -> Option<Kind> {
         self.spend()?;
         if depth > 12 {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         let Type::Path(path) = ty else { return None };
         if (
             // #[gamma::skip(logical.or_remove_right, reason = "Parsed qself paths retain either a leading colon or multiple segments, independently rejected by the other path checks.", tag = "equivalent")]
             !path.attrs.is_empty() || path.qself.is_some()
         ) || path.path.leading_colon.is_some()
         {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         if self.sources.stable_path_for(self.source, self.inline, ty) {
@@ -77,22 +73,18 @@ impl Effects<'_> {
         // #[gamma::skip(iter.first_to_last, try.propagate_to_unwrap, reason = "Parsed TypePath and ExprStruct paths are nonempty; the following check permits only a singleton before using the selected segment.", tag = "equivalent")]
         let segment = path.path.segments.first()?;
         if path.path.segments.len() != 1 {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         if segment.ident == "Option" {
             let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             };
             let [GenericArgument::Type(inner)] = arguments.args.iter().collect::<Vec<_>>().as_slice() else {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             };
             return Some(Kind::Option(Box::new(self.kind(inner, depth + 1)?)));
         }
         if !matches!(segment.arguments, PathArguments::None) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let ident = segment.ident.to_string();
@@ -113,7 +105,6 @@ impl Effects<'_> {
             .collect::<Vec<_>>();
         if let [alias] = aliases.as_slice() {
             if !alias.generics.params.is_empty() || !plain_attributes(&alias.attrs) {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
             return self.kind(&alias.ty, depth + 1);
@@ -121,7 +112,6 @@ impl Effects<'_> {
         if
         // #[gamma::skip(logical.or_remove_left, reason = "The single alias already returned; duplicate aliases cannot also form the unique local record required by namespace evidence.", tag = "equivalent")]
         !aliases.is_empty() || !self.sources.local_record_for(self.source, self.inline, &ident) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let schema = record(self.file, &ident)?;
@@ -130,18 +120,15 @@ impl Effects<'_> {
             || schema.fields.len() > 32
             || !closed_record(self.file, &ident)
         {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         // Even a pure-looking Clone implementation or an unrelated inherent method can
         // change dispatch. Only standard derives and structurally inert fields are used.
         if conflicting_impl(self.file, &ident) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         for projected in &schema.fields {
             if !field_attributes(&projected.attrs) {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
             let _kind = self.kind(&projected.ty, depth + 1)?;
@@ -151,7 +138,6 @@ impl Effects<'_> {
 
     fn projected(&mut self, kind: &Kind, member: &Member) -> Option<Kind> {
         let (Kind::Record(record_name), Member::Named(member)) = (kind, member) else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         };
         self.kind(
@@ -179,7 +165,6 @@ impl Effects<'_> {
                     .flatten()
                     .any(|path| path.is_ident(wanted));
                 if !found {
-                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                     return None;
                 }
                 for projected in &schema.fields {
@@ -198,10 +183,8 @@ impl Effects<'_> {
     }
 
     fn projection(&mut self, expression: &Expr, parameter: &str, kind: &Kind) -> Option<Kind> {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         let Expr::Field(projected) = bare(expression) else { return None };
         if !projected.attrs.is_empty() || name(&projected.base).as_deref() != Some(parameter) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         self.projected(kind, &projected.member)
@@ -227,10 +210,8 @@ impl Effects<'_> {
                 )?,
             ]
         {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             let Expr::Call(call) = bare(expression) else { return None };
             if parameters.contains(&name(&call.func)?) {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
         }
@@ -246,7 +227,6 @@ impl Effects<'_> {
 
     fn key(&mut self, expression: &Expr, parameter: &str, kind: &Kind) -> Option<Vec<String>> {
         self.spend()?;
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         let Expr::Call(call) = bare(expression) else { return None };
         if !call.attrs.is_empty()
             || call.args.len() != 1
@@ -257,12 +237,10 @@ impl Effects<'_> {
             .as_deref()
                 != Some(parameter)
         {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let helper = name(&call.func)?;
         if self.shadows.contains(&helper) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let resolved = self.sources.function(self.source, self.inline, std::slice::from_ref(&helper))?;
@@ -277,10 +255,8 @@ impl Effects<'_> {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         let [declaration] = declarations.as_slice() else { return None };
         if text(*declaration) != text(&function) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let unsupported_signature = !plain_attributes(&function.attrs)
@@ -293,17 +269,13 @@ impl Effects<'_> {
             unsupported_signature || function.sig.variadic.is_some()
         ) || function.sig.inputs.len() != 1
         {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         // #[gamma::skip(iter.first_to_last, try.propagate_to_unwrap, reason = "The preceding signature guard established exactly one argument.", tag = "equivalent")]
         let FnArg::Typed(argument) = function.sig.inputs.first()? else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None; // #[gamma::skip(option.none_to_some, reason = "This helper resolves only free ItemFn declarations; receiver parameters are not supported Rust free-function syntax.", tag = "equivalent")]
         };
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         let Pat::Ident(pattern) = &*argument.pat else { return None };
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         let Type::Reference(ty) = &*argument.ty else { return None };
         if !argument.attrs.is_empty()
             || pattern.mutability.is_some()
@@ -312,37 +284,28 @@ impl Effects<'_> {
             || ty.mutability.is_some()
             || self.kind(&ty.elem, 0)? != *kind
         {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let [Stmt::Expr(Expr::Tuple(tuple), None)] = function.block.stmts.as_slice() else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         };
         let ReturnType::Type(_, output) = &function.sig.output else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         };
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         let Type::Tuple(output) = &**output else { return None };
         if tuple.elems.is_empty() || tuple.elems.len() > 16 || tuple.elems.len() != output.elems.len() || !tuple.attrs.is_empty() {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let mut keys = Vec::with_capacity(tuple.elems.len());
         for (projected, output) in tuple.elems.iter().zip(&output.elems) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             let Type::Reference(output) = output else { return None };
             if output.mutability.is_some() || text(&output.elem) != "str" {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
             let string = method(projected, "as_str", 0)?;
             if self.projection(&string.receiver, &pattern.ident.to_string(), kind)? != Kind::String {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             let Expr::Field(projected) = &*string.receiver else { return None };
             keys.push(text(&projected.member));
         }
@@ -413,7 +376,6 @@ fn field_attributes(attributes: &[syn::Attribute]) -> bool {
 }
 
 fn closure(expression: &Expr, count: usize) -> Option<(Vec<String>, &Expr)> {
-    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
     let Expr::Closure(closure) = bare(expression) else { return None };
     let unsupported_closure = !closure.attrs.is_empty() || closure.inputs.len() != count || closure.asyncness.is_some();
     if (
@@ -424,7 +386,6 @@ fn closure(expression: &Expr, count: usize) -> Option<(Vec<String>, &Expr)> {
         || closure.constness.is_some()
         || !matches!(closure.output, ReturnType::Default)
     {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
     let parameters = closure
@@ -443,7 +404,6 @@ fn closure(expression: &Expr, count: usize) -> Option<(Vec<String>, &Expr)> {
 
 fn reference(expression: &Expr) -> Option<&Expr> {
     let Expr::Reference(reference) = bare(expression) else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     };
     (reference.mutability.is_none() && reference.attrs.is_empty()).then_some(&reference.expr)
@@ -464,23 +424,18 @@ fn collected(expression: &Expr) -> Option<(&syn::ExprMethodCall, &Expr)> {
     let collect = method(expression, "collect", 0)?;
     if let Some(arguments) = &collect.turbofish {
         let [GenericArgument::Type(Type::Path(path))] = arguments.args.iter().collect::<Vec<_>>().as_slice() else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         };
         let segments = path.path.segments.iter().collect::<Vec<_>>();
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         let [segment] = segments.as_slice() else { return None };
         if !path.attrs.is_empty() || path.qself.is_some() || segment.ident != "Vec" {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
     }
     let Expr::MethodCall(adapter) = &*collect.receiver else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     };
     if !adapter.attrs.is_empty() || adapter.turbofish.is_some() || adapter.args.len() != 1 {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
     Some((
@@ -493,17 +448,14 @@ fn collected(expression: &Expr) -> Option<(&syn::ExprMethodCall, &Expr)> {
 fn pool_projection(effects: &mut Effects<'_>, expression: &Expr, input: &Kind, slice: &str) -> Option<Pool> {
     let (adapter, mapper) = collected(expression)?;
     if adapter.method != "filter_map" || iterated(&adapter.receiver).as_deref() != Some(slice) {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
     let (parameters, body) = closure(mapper, 1)?;
     let Kind::Option(kind) = effects.clone_projection(body, &parameters[0], input)? else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     };
     effects.derived(&kind, "PartialEq")?;
     let clone = method(body, "clone", 0)?;
-    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
     let Expr::Field(projected) = &*clone.receiver else { return None };
     Some(Pool {
         kind: *kind,
@@ -516,21 +468,17 @@ fn pool_projection(effects: &mut Effects<'_>, expression: &Expr, input: &Kind, s
 fn mapped_record(effects: &mut Effects<'_>, expression: &Expr, input: &Kind, slice: &str, pools: &HashMap<String, Pool>) -> Option<Kind> {
     let (adapter, mapper) = collected(expression)?;
     if adapter.method != "map" || iterated(&adapter.receiver).as_deref() != Some(slice) {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
     let (parameters, body) = closure(mapper, 1)?;
     if pools.contains_key(&parameters[0]) {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
-    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
     let Expr::Struct(output) = bare(body) else { return None };
     let unsupported_output = !output.attrs.is_empty() || output.rest.is_some();
     if
     // #[gamma::skip(logical.or_remove_right, reason = "The derived TypePath retains the qualified path's leading colon or multiple segments, independently rejected by effects.kind.", tag = "equivalent")]
     unsupported_output || output.qself.is_some() {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
     let ty = Type::Path(syn::TypePath {
@@ -539,29 +487,24 @@ fn mapped_record(effects: &mut Effects<'_>, expression: &Expr, input: &Kind, sli
         path: output.path.clone(),
     });
     let kind = effects.kind(&ty, 0)?;
-    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
     let Kind::Record(record_name) = &kind else { return None };
     // #[gamma::skip(try.propagate_to_unwrap, reason = "The preceding effects.kind call created this Record kind only after validating the same declaration.", tag = "equivalent")]
     let schema = record(effects.file, record_name)?;
     if output.fields.len() != schema.fields.len() {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
     let mut fields = HashSet::default();
     for projected in &output.fields {
         if !projected.attrs.is_empty() || !fields.insert(text(&projected.member)) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let expected = effects.projected(&kind, &projected.member)?;
         if let Some(actual) = effects.clone_projection(&projected.expr, &parameters[0], input) {
             if expected != actual {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
         } else if let Some(actual @ Kind::Scalar(_)) = effects.projection(&projected.expr, &parameters[0], input) {
             if expected != actual {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
         } else {
@@ -579,15 +522,12 @@ fn indexed_option(
     expected: &Kind,
     pools: &HashMap<String, Pool>,
 ) -> Option<()> {
-    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
     let Kind::Option(expected) = expected else { return None };
     let map = method(expression, "map", 1)?;
     let as_ref = method(&map.receiver, "as_ref", 0)?;
     let Kind::Option(kind) = effects.projection(&as_ref.receiver, parameter, input)? else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     };
-    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
     let Expr::Field(projected) = &*as_ref.receiver else { return None };
     let (parameters, body) = closure(
         // #[gamma::skip(iter.first_to_last, try.propagate_to_unwrap, reason = "method(map, 1) already established exactly one argument.", tag = "equivalent")]
@@ -595,25 +535,20 @@ fn indexed_option(
         1,
     )?;
     if parameters[0] == parameter || pools.contains_key(&parameters[0]) {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
-    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
     let Expr::Block(block) = bare(body) else { return None };
     if !block.attrs.is_empty() || block.label.is_some() || block.block.stmts.len() != 2 {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
     let (index, search) = local(&block.block.stmts[0])?;
     if index == parameters[0] || index == parameter || pools.contains_key(&index) {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
     let search = expect(search)?;
     let position = method(search, "position", 1)?;
     let pool = pools.get(&iterated(&position.receiver)?)?;
     if pool.kind != *kind || pool.field != text(&projected.member) || !pool.sorted || !pool.deduplicated {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
     let (known, predicate) = closure(
@@ -621,7 +556,6 @@ fn indexed_option(
         position.args.first()?,
         1,
     )?;
-    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
     let Expr::Binary(predicate) = bare(predicate) else { return None };
     if !predicate.attrs.is_empty()
         || !matches!(predicate.op, syn::BinOp::Eq(_))
@@ -629,20 +563,15 @@ fn indexed_option(
         || name(&predicate.right).as_deref() != Some(&parameters[0])
         || known[0] == parameters[0]
     {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
     effects.derived(&kind, "PartialEq")?;
     let Stmt::Expr(conversion, None) = &block.block.stmts[1] else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     };
-    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
     let Expr::Call(conversion) = expect(conversion)? else { return None };
-    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
     let Expr::Path(path) = &*conversion.func else { return None };
     let segments = path.path.segments.iter().collect::<Vec<_>>();
-    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
     let [ty, function] = segments.as_slice() else { return None };
     if !conversion.attrs.is_empty()
         || conversion.args.len() != 1
@@ -659,7 +588,6 @@ fn indexed_option(
             != Some(&index)
         || **expected != Kind::Scalar(ty.ident.to_string())
     {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
     // Narrowing may reject an oversized artifact on its first iteration. It is not
@@ -721,10 +649,9 @@ pub(super) fn prove(
     outputs: &HashSet<String>,
 ) -> Option<String> {
     if !sources.primitive_scope_for(source, inline)
-        || !super::super::fixed::numeric_names(file, &loop_.span().byte_range())
+        || !super::super::fixed::numeric_names(file, &loop_.extent().byte_range())
         || !closed_dispatch(file, sources, source, inline)
     {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
     // #[gamma::skip(try.propagate_to_unwrap, reason = "The sole caller Grouping::new already resolved this same immutable enclosing function.", tag = "equivalent")]
@@ -755,15 +682,12 @@ pub(super) fn prove(
     // #[gamma::skip(try.propagate_to_unwrap, reason = "Grouping::new already validated this unchanged initializer as a zero-argument clone.", tag = "equivalent")]
     let copy = method(copied, "clone", 0)?;
     let Expr::Field(projected) = &*copy.receiver else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None; // #[gamma::skip(option.none_to_some, reason = "An empty returned body certificate cannot equal any token-rendered Rust block in the sole consumer.", tag = "equivalent")]
     };
     let Expr::Index(index) = &*projected.base else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None; // #[gamma::skip(option.none_to_some, reason = "An empty returned body certificate cannot equal any token-rendered Rust block in the sole consumer.", tag = "equivalent")]
     };
     let Expr::Field(input) = &*index.expr else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None; // #[gamma::skip(option.none_to_some, reason = "An empty returned body certificate cannot equal any token-rendered Rust block in the sole consumer.", tag = "equivalent")]
     };
     // #[gamma::skip(try.propagate_to_unwrap, reason = "Grouping::new already resolved this same input root while validating the copied input index.", tag = "equivalent")]
@@ -772,41 +696,33 @@ pub(super) fn prove(
         FnArg::Typed(argument) if matches!(&*argument.pat, Pat::Ident(pattern) if pattern.ident == root) => Some(&*argument.ty),
         _ => None,
     })?;
-    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
     let Type::Reference(parameter) = parameter else { return None };
     let Type::Path(parameter) = &*parameter.elem else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None; // #[gamma::skip(option.none_to_some, reason = "An empty returned body certificate cannot equal any token-rendered Rust block in the sole consumer.", tag = "equivalent")]
     };
     // #[gamma::skip(try.propagate_to_unwrap, reason = "Grouping::new already validated this same bare parameter identifier and its immutable record declaration.", tag = "equivalent")]
     let schema = record(file, &parameter.path.get_ident()?.to_string())?;
     if !plain_attributes(&schema.attrs) || conflicting_impl(file, &schema.ident.to_string()) {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
     let Member::Named(member) = &input.member else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None; // #[gamma::skip(option.none_to_some, reason = "An empty returned body certificate cannot equal any token-rendered Rust block in the sole consumer.", tag = "equivalent")]
     };
     // #[gamma::skip(try.propagate_to_unwrap, reason = "Grouping::new already found this same immutable named input field.", tag = "equivalent")]
     let input_field = schema.fields.iter().find(|field| field.ident.as_ref() == Some(member))?;
     if !field_attributes(&input_field.attrs) {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
     // #[gamma::skip(try.propagate_to_unwrap, reason = "Grouping::new already found this same immutable named input field.", tag = "equivalent")]
     let Type::Path(vector) = field(schema, &member.to_string())? else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None; // #[gamma::skip(option.none_to_some, reason = "An empty returned body certificate cannot equal any token-rendered Rust block in the sole consumer.", tag = "equivalent")]
     };
     // #[gamma::skip(try.propagate_to_unwrap, reason = "Parsed TypePath values contain at least one path segment.", tag = "equivalent")]
     let PathArguments::AngleBracketed(arguments) = &vector.path.segments.first()?.arguments else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     };
     // #[gamma::skip(try.propagate_to_unwrap, reason = "Grouping::new already required the first type argument of this same input vector.", tag = "equivalent")]
     let GenericArgument::Type(element) = arguments.args.first()? else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None; // #[gamma::skip(option.none_to_some, reason = "An empty returned body certificate cannot equal any token-rendered Rust block in the sole consumer.", tag = "equivalent")]
     };
     let input_kind = effects.kind(element, 0)?;
@@ -815,11 +731,9 @@ pub(super) fn prove(
         loop_.body.stmts.get(2)?,
     )?;
     let Expr::Index(slice_index) = reference(slice_value)? else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None; // #[gamma::skip(option.none_to_some, reason = "An empty returned body certificate cannot equal any token-rendered Rust block in the sole consumer.", tag = "equivalent")]
     };
     let Expr::Range(range) = &*slice_index.index else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None; // #[gamma::skip(option.none_to_some, reason = "An empty returned body certificate cannot equal any token-rendered Rust block in the sole consumer.", tag = "equivalent")]
     };
     // #[gamma::skip(try.propagate_to_unwrap, reason = "Grouping::new already validated this unchanged second statement as the boundary local.", tag = "equivalent")]
@@ -831,7 +745,6 @@ pub(super) fn prove(
         || range.start.as_deref().and_then(name).as_deref() != Some(&cursor)
         || range.end.as_deref().and_then(name).as_deref() != Some(&boundary)
     {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
     let mut pools = HashMap::default();
@@ -853,12 +766,10 @@ pub(super) fn prove(
     for statement in &loop_.body.stmts[3..end] {
         effects.spend()?;
         if grew {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         if let Some((binding, initializer)) = local(statement) {
             if !bound.insert(binding.clone()) {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
             if let Some(pool) = pool_projection(&mut effects, initializer, &input_kind, &slice) {
@@ -872,11 +783,9 @@ pub(super) fn prove(
             continue;
         }
         let Stmt::Expr(Expr::MethodCall(call), Some(_)) = statement else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         };
         if !call.attrs.is_empty() || call.turbofish.is_some() {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let receiver = name(&call.receiver)?;
@@ -898,18 +807,15 @@ pub(super) fn prove(
                 effects.derived(&pool.kind, "PartialEq")?;
                 pool.deduplicated = true;
             } else {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
             continue;
         }
         if call.method != "push" || call.args.len() != 1 || bound.contains(&receiver) || !outputs.contains(&receiver) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         // #[gamma::skip(iter.first_to_last, try.propagate_to_unwrap, reason = "The preceding output-push guard established exactly one argument.", tag = "equivalent")]
         let Expr::Struct(output) = call.args.first()? else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None; // #[gamma::skip(option.none_to_some, reason = "An empty returned body certificate cannot equal any token-rendered Rust block in the sole consumer.", tag = "equivalent")]
         };
         let output_name = output.path.get_ident()?.to_string();
@@ -924,24 +830,20 @@ pub(super) fn prove(
             || output.fields.len() != output_schema.fields.len()
             || conflicting_impl(file, &output_name)
         {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let mut members = HashSet::default();
         for projected in &output.fields {
             let Member::Named(member) = &projected.member else {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None; // #[gamma::skip(option.none_to_some, reason = "An empty returned body certificate cannot equal any token-rendered Rust block in the sole consumer.", tag = "equivalent")]
             };
             if
             // #[gamma::skip(logical.or_remove_right, reason = "Supported struct literals cannot initialize the same named field twice; attributed fields remain independently rejected.", tag = "equivalent")]
             !projected.attrs.is_empty() || !members.insert(member.to_string()) {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
             let schema_field = output_schema.fields.iter().find(|field| field.ident.as_ref() == Some(member))?;
             if !field_attributes(&schema_field.attrs) {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
             let value = name(&projected.expr)?;
@@ -960,7 +862,6 @@ pub(super) fn prove(
                     local(loop_.body.stmts.first()?)?.0
                     || effects.kind(&schema_field.ty, 0)? != copied_kind
                 {
-                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                     return None;
                 }
             }
@@ -968,7 +869,6 @@ pub(super) fn prove(
         grew = pools.is_empty() && vectors.is_empty();
     }
     if !grew {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
     let mut body = loop_.body.clone();
@@ -978,23 +878,18 @@ pub(super) fn prove(
 }
 
 fn super_member(copy: &syn::ExprMethodCall) -> Option<Member> {
-    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
     let Expr::Field(projected) = &*copy.receiver else { return None };
     Some(projected.member.clone())
 }
 
 fn vector_element(effects: &mut Effects<'_>, ty: &Type, expected: &Kind) -> Option<()> {
-    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
     let Type::Path(path) = ty else { return None };
     let segments = path.path.segments.iter().collect::<Vec<_>>();
-    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
     let [segment] = segments.as_slice() else { return None };
     let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     };
     let [GenericArgument::Type(element)] = arguments.args.iter().collect::<Vec<_>>().as_slice() else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     };
     ((
@@ -1007,7 +902,6 @@ fn vector_element(effects: &mut Effects<'_>, ty: &Type, expected: &Kind) -> Opti
 }
 
 fn local_vector(effects: &mut Effects<'_>, statement: &Stmt, expected: &Kind) -> Option<()> {
-    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
     let Stmt::Local(local) = statement else { return None };
     match &local.pat {
         Pat::Type(pattern) => vector_element(effects, &pattern.ty, expected),
