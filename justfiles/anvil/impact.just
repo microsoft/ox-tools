@@ -558,6 +558,7 @@ anvil-impact:
                 $retiredGenerations = @($completedGenerations | Select-Object -Skip 8)
                 $abandonedGenerations = @(Get-ChildItem -LiteralPath $dirtyImpactRoot -Directory -ErrorAction SilentlyContinue |
                     Where-Object {
+                        if (Test-Path -LiteralPath (Join-Path $_.FullName 'complete') -PathType Leaf) { return $false }
                         $producerFile = Join-Path $_.FullName 'producer.pid'
                         if (-not (Test-Path -LiteralPath $producerFile -PathType Leaf)) { return $false }
                         $producerId = 0

@@ -11,6 +11,7 @@
 
 - 🐛 Bug Fixes
 
+  - cargo-anvil: preserve concurrent impact selectors
   - cargo-anvil: bind dirty impact to invocation
   - cargo-anvil: bound dirty impact generations
   - cargo-anvil: isolate concurrent impact generations
