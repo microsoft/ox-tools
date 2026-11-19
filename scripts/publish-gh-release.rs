@@ -44,7 +44,7 @@ enum Category {
 
 impl From<Type<'_>> for Category {
     fn from(kind: Type<'_>) -> Self {
-        match kind.as_str() {
+        match kind.as_str().to_ascii_lowercase().as_str() {
             "breaking" => Self::Breaking,
             "feat" => Self::Features,
             "fix" => Self::BugFixes,
@@ -449,13 +449,13 @@ mod tests {
         let commits = [
             "chore: update tooling",
             "docs(api): explain usage  (#9)",
-            "feat(parser): accept new syntax (#12)",
+            "Feat(parser): accept new syntax (#12)",
             "fix(config)!: reject invalid input",
             "feat(api): change the contract\n\nBREAKING CHANGE: new contract",
             "plain subject (#13)\n\nBody must not become a bullet.",
             "doc: document migration",
             "misc: update examples",
-            "unknown: title",
+            "UNKNOWN: title",
         ]
         .map(str::to_owned);
         assert_eq!(

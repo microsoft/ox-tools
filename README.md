@@ -178,7 +178,8 @@ Tasks, Code Refactoring, Build System, Continuous Integration, Styling, and Misc
 categories are omitted. `chore` maps to Tasks, `doc` to Documentation, and `misc` to
 Miscellaneous. Other conventional types get their own capitalized heading after the
 standard categories, sorted alphabetically. Messages that cannot be parsed as conventional
-commits retain their subject under Miscellaneous.
+commits retain their subject under Miscellaneous. Conventional commit types are matched
+case-insensitively and custom category names are normalized to lowercase.
 
 PR references such as `(#123)` are
 retained verbatim for GitHub to link. Entries within each category retain Git's log order.
