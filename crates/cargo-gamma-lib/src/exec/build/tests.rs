@@ -13,6 +13,7 @@ use std::os::windows::process::ExitStatusExt as _;
 use std::process::{Command, ExitStatus, Stdio};
 use std::rc::Rc;
 use std::sync::{Mutex, OnceLock, mpsc};
+use std::time::Instant;
 use std::{fs, io};
 
 use serde_json::Value;
@@ -201,6 +202,201 @@ fn settlement_preserves_conflict_members_but_clears_stale_notes_for_unqualified_
     );
     assert_eq!(plan.mutants[1].outcome, Outcome::CompileError);
     assert_eq!(plan.mutants[1].note, None);
+}
+
+fn cross_target_proof_plan(work: &Workspace, path: &Utf8Path, source: &str) -> Plan {
+    let mut plan = empty_plan(work);
+    plan.files.push(TargetFile {
+        absolute: work.root.join(path),
+        path: path.to_owned(),
+        package: "trivial".into(),
+        source: None,
+    });
+    plan.mutants = source
+        .match_indices("= 1")
+        .enumerate()
+        .map(|(index, (start, _matched))| {
+            let ordinal = u32::try_from(index + 1).expect("the fixture contains only two mutation sites");
+            Mutant {
+                id: format!("mutant-{index}").into(),
+                ordinal,
+                file: path.to_owned().into(),
+                package: "trivial".into(),
+                span: start + 2..start + 3,
+                replacement: format!("isolated_mutant_{ordinal}").into(),
+                ..mutant()
+            }
+        })
+        .collect();
+    plan
+}
+
+#[test]
+fn convergence_prefers_singleton_proof_to_an_earlier_cross_target_interaction_and_records_proof_time() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = Utf8PathBuf::from_path_buf(directory.path().to_owned()).unwrap();
+    let work = Workspace::adopt(root.clone(), root.join("target"));
+    let source = "pub fn f0() -> i32 { let value = 1; value }\npub fn f1() -> i32 { let value = 1; value }\n";
+    let path = Utf8PathBuf::from("lib.rs");
+    // Overwrite requires an existing output file; pristine input is supplied only through Splices.
+    drop(fs::File::create(work.root.join(&path)).unwrap());
+    let mut plan = cross_target_proof_plan(&work, &path, source);
+    let diagnostics = ["a_pair", "b_single"]
+        .map(|target| {
+            serde_json::json!({
+                "reason": "compiler-message",
+                "package_id": "trivial 0.0.0",
+                "target": {"name": target, "kind": ["test"]},
+                "message": {"level": "error", "message": "target-specific failure", "spans": []}
+            })
+            .to_string()
+        })
+        .join("\n");
+    let outer_calls = Rc::new(Cell::new(0));
+    let proof_time = Rc::new(Cell::new(Duration::ZERO));
+    let control = tick::ClockControl::new();
+    let mut converger = Converger {
+        clock: Some(control.to_simple_clock()),
+        splices: Splices::with_original_for_test(work.root.clone(), path, source),
+        ..Converger::default()
+    };
+    let result = native_test_util::with_compiler(
+        {
+            let outer_calls = Rc::clone(&outer_calls);
+            let proof_time = Rc::clone(&proof_time);
+            move |work, arguments, _budget, _events| {
+                let source = fs::read_to_string(work.root.join("lib.rs")).unwrap();
+                let first = source.contains("isolated_mutant_1");
+                let second = source.contains("isolated_mutant_2");
+                let target = arguments.windows(2).find(|pair| pair[0] == "--test").map(|pair| pair[1].as_str());
+                let failed = match target {
+                    Some("a_pair") => first && second,
+                    Some("b_single") => first,
+                    Some(other) => panic!("unexpected proof target {other}"),
+                    None => {
+                        let call = outer_calls.get();
+                        assert!(call < 2, "one failed build and one successful retry are expected");
+                        outer_calls.set(call + 1);
+                        first
+                    }
+                };
+                let elapsed = if target.is_some() {
+                    let elapsed = Duration::from_millis(13);
+                    proof_time.set(proof_time.get() + elapsed);
+                    elapsed
+                } else if outer_calls.get() == 1 {
+                    Duration::from_millis(7)
+                } else {
+                    Duration::from_millis(11)
+                };
+                control.advance(elapsed);
+                Ok(Some(scripted_output(
+                    !failed,
+                    if target.is_none() && failed { &diagnostics } else { "" },
+                    "",
+                )))
+            }
+        },
+        || {
+            converger.converge(
+                &work,
+                &plan,
+                None,
+                &["check", "--tests"],
+                BuildLimits::default(),
+                &mut Recorder::default(),
+            )
+        },
+    )
+    .unwrap();
+
+    assert!(matches!(result, Convergence::Built(_)));
+    assert_eq!(outer_calls.get(), 2);
+    assert_eq!(converger.withdrawn, HashSet::from_iter([1]));
+    assert_eq!(converger.census, HashMap::from_iter([(1, CompilerReason::isolated())]));
+    assert!(converger.abandoned.is_empty());
+    assert!(converger.interactions.is_empty());
+    assert_eq!(converger.per_round, [1]);
+    assert_eq!(converger.history.len(), 2);
+    assert_eq!(converger.history[0].withdrew, 1);
+    assert_eq!(converger.first_round, Some(Duration::from_millis(7)));
+    assert_ne!(proof_time.get(), Duration::ZERO, "isolation must execute proof builds");
+    assert_eq!(converger.history[0].elapsed, Duration::from_millis(7) + proof_time.get());
+    assert_eq!(converger.history[1].elapsed, Duration::from_millis(11));
+    converger.settle(&mut plan);
+    assert_eq!(plan.mutants[0].outcome, Outcome::CompileError);
+    assert_eq!(plan.mutants[1].outcome, Outcome::Pending);
+}
+
+#[test]
+fn convergence_counts_repeated_cross_target_conflicts_once() {
+    let work = policy_workspace();
+    let mut plan = empty_plan(&work);
+    plan.mutants = [(1, "alpha"), (2, "alpha"), (3, "beta"), (4, "beta")]
+        .map(|(ordinal, item)| Mutant {
+            ordinal,
+            package: "trivial".into(),
+            file: Utf8PathBuf::from(format!("src/{item}.rs")).into(),
+            item_path: item.into(),
+            ..mutant()
+        })
+        .into();
+    let diagnostics = [("a_first", "alpha"), ("b_second", "beta"), ("c_third", "alpha")]
+        .map(|(target, item)| {
+            serde_json::json!({
+                "reason": "compiler-message",
+                "package_id": "trivial 0.0.0",
+                "target": {"name": target, "kind": ["test"]},
+                "message": {
+                    "level": "error",
+                    "message": "repeated compiler conflict",
+                    "spans": [{"file_name": format!("src/{item}.rs"), "is_primary": true}]
+                }
+            })
+            .to_string()
+        })
+        .join("\n");
+    let mut converger = Converger {
+        subset_oracle: Some(|active| Some(active.contains(&1) && active.contains(&2) || active.contains(&3) && active.contains(&4))),
+        ..Converger::default()
+    };
+    let calls = Rc::new(Cell::new(0));
+    let result = native_test_util::with_compiler(
+        {
+            let calls = Rc::clone(&calls);
+            move |_work, _arguments, _budget, _events| {
+                let call = calls.get();
+                assert!(call < 2, "all conflicts must be removed in one withdrawal round");
+                calls.set(call + 1);
+                Ok(Some(scripted_output(call == 1, if call == 0 { &diagnostics } else { "" }, "")))
+            }
+        },
+        || {
+            converger.converge(
+                &work,
+                &plan,
+                None,
+                &["check", "--tests"],
+                BuildLimits::default(),
+                &mut Recorder::default(),
+            )
+        },
+    )
+    .unwrap();
+
+    assert!(matches!(result, Convergence::Built(_)));
+    assert_eq!(calls.get(), 2);
+    assert_eq!(converger.isolation_budget.contexts, 3);
+    assert_eq!(converger.per_round, [2]);
+    assert_eq!(converger.withdrawn, HashSet::from_iter([1, 3]));
+    assert_eq!(converger.abandoned, HashSet::from_iter([1, 3]));
+    assert_eq!(converger.interactions, HashMap::from_iter([(1, vec![1, 2]), (3, vec![3, 4])]));
+    assert!(converger.census.is_empty());
+    assert_eq!(converger.history.len(), 2);
+    assert_eq!(converger.history[0].withdrew, 2);
+    assert_eq!(converger.history[0].packages.len(), 1);
+    assert_eq!(converger.history[0].packages[0].package.as_ref(), "trivial");
+    assert_eq!(converger.history[0].packages[0].mutants, 2);
 }
 
 #[test]

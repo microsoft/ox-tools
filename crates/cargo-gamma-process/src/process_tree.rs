@@ -1392,6 +1392,7 @@ impl ProcessTree {
     ///
     /// The child is still killed when sweeping the surrounding subtree fails. A direct child-kill
     /// failure takes precedence over the sweep failure after both cleanup attempts complete.
+    // #[gamma::skip(fn_value.ok, reason = "Returning without killing leaves native descendants and output readers alive; the observed mutant times out instead of producing a completed test verdict.", tag = "timeout")]
     fn kill(&self, child: &mut Child) -> io::Result<()> {
         #[cfg(target_os = "macos")]
         {
@@ -1569,44 +1570,67 @@ const STDOUT_READER_THREAD: &str = "cargo-gamma-process-stdout";
 const STDERR_READER_THREAD: &str = "cargo-gamma-process-stderr";
 const STDOUT_STREAM: &str = "stdout";
 const STDERR_STREAM: &str = "stderr";
+/// Amortizes reads and capture locking while bounding each reader's stack buffer to 8 KiB.
+const OUTPUT_READ_CHUNK_SIZE: usize = 8192;
+/// Trades exit-observation latency for less busy polling by pausing between checks.
+const OUTPUT_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(1);
 
 fn output_reader<R>(pipe: Option<R>, name: &'static str) -> io::Result<Option<OutputReader>>
 where
     R: io::Read + Send + 'static,
 {
-    pipe.map(|mut pipe| {
+    output_reader_with_spawn(pipe, |pipe, captured, capture_enabled| {
+        thread::Builder::new()
+            .name(name.to_owned())
+            .spawn(move || read_output(pipe, &captured, &capture_enabled))
+    })
+}
+
+fn output_reader_with_spawn<R>(
+    pipe: Option<R>,
+    spawn: impl FnOnce(R, Arc<Mutex<Vec<u8>>>, Arc<AtomicBool>) -> io::Result<JoinHandle<io::Result<()>>>,
+) -> io::Result<Option<OutputReader>>
+where
+    R: io::Read + Send + 'static,
+{
+    pipe.map(|pipe| {
         let bytes = Arc::new(Mutex::new(Vec::new()));
         let retaining = Arc::new(AtomicBool::new(true));
         let captured = Arc::clone(&bytes);
         let capture_enabled = Arc::clone(&retaining);
-        let thread = thread::Builder::new().name(name.to_owned()).spawn(move || {
-            // The initialization value is not observed: `Read` initializes the reported prefix,
-            // and the unreported suffix is never copied into the capture.
-            // #[gamma::skip(literal.int_increment, reason = "the reader overwrites every byte in the reported prefix and the untouched suffix is never observed")]
-            let mut chunk = [0_u8; 8192];
-
-            loop {
-                let read = match pipe.read(&mut chunk) {
-                    Ok(read) => read,
-                    // #[gamma::skip(all, reason = "retrying every read error spins forever instead of terminating the output reader")]
-                    Err(cause) if cause.kind() == io::ErrorKind::Interrupted => continue,
-                    Err(cause) => return Err(cause),
-                };
-                // #[gamma::skip(all, reason = "failing to recognize EOF leaves the output reader blocked or spinning after the child exits")]
-                if read == 0 {
-                    return Ok(());
-                }
-
-                let mut captured = captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                if capture_enabled.load(Ordering::Acquire) {
-                    captured.extend_from_slice(&chunk[..read]);
-                }
-            }
-        })?;
+        let thread = spawn(pipe, captured, capture_enabled)?;
 
         Ok(OutputReader { thread, bytes, retaining })
     })
     .transpose()
+}
+
+fn read_output<R>(mut pipe: R, captured: &Mutex<Vec<u8>>, capture_enabled: &AtomicBool) -> io::Result<()>
+where
+    R: io::Read,
+{
+    // The initialization value is not observed: `Read` initializes the reported prefix,
+    // and the unreported suffix is never copied into the capture.
+    // #[gamma::skip(literal.int_increment, reason = "the reader overwrites every byte in the reported prefix and the untouched suffix is never observed")]
+    let mut chunk = [0_u8; OUTPUT_READ_CHUNK_SIZE];
+
+    loop {
+        let read = match pipe.read(&mut chunk) {
+            Ok(read) => read,
+            // #[gamma::skip(all, reason = "retrying every read error spins forever instead of terminating the output reader")]
+            Err(cause) if cause.kind() == io::ErrorKind::Interrupted => continue,
+            Err(cause) => return Err(cause),
+        };
+        // #[gamma::skip(all, reason = "failing to recognize EOF leaves the output reader blocked or spinning after the child exits")]
+        if read == 0 {
+            return Ok(());
+        }
+
+        let mut captured = captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if capture_enabled.load(Ordering::Acquire) {
+            captured.extend_from_slice(&chunk[..read]);
+        }
+    }
 }
 
 fn discard_output_reader(reader: Option<&OutputReader>) {
@@ -1620,9 +1644,7 @@ fn discard_output_reader(reader: Option<&OutputReader>) {
 }
 
 fn discard_output_before_error(error: io::Error, stdout: Option<&OutputReader>, stderr: Option<&OutputReader>) -> io::Error {
-    // #[gamma::skip(call_result.default, reason = "discard_output_reader returns unit; cleanup still executes and () is replaced with ()")]
     discard_output_reader(stdout);
-    // #[gamma::skip(call_result.default, reason = "discard_output_reader returns unit; cleanup still executes and () is replaced with ()")]
     discard_output_reader(stderr);
     error
 }
@@ -1650,12 +1672,13 @@ fn wait_for_output(subtree: &mut ProcessTree) -> io::Result<ExitStatus> {
             return Err(io::Error::other("output wait failed as requested by a test"));
         }
 
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "This wrapper polls native Child observation; injecting a failure here without spawning needs the deferred process lifecycle backend.", tag = "native-boundary")]
         if let Some(status) = subtree.observe()? {
             return Ok(status);
         }
 
         // #[gamma::skip(all, reason = "this positive delay only throttles polling; zero or deletion busy-spins, while one or two milliseconds has the same result")]
-        thread::sleep(Duration::from_millis(1));
+        thread::sleep(OUTPUT_WAIT_POLL_INTERVAL);
     }
 }
 
@@ -1688,6 +1711,7 @@ fn group_id(child_id: u32) -> Result<i32, PlatformError> {
 fn abandoning(refusal: PlatformError, child: &mut Child, guard: &SpawnGuard) -> PlatformError {
     let cleanup = abandon(child, guard);
     #[cfg(any(test, feature = "fault-injection"))]
+    // #[gamma::skip(cond.always_true, reason = "This override is test-only fault-injection plumbing, not production abandonment policy.", tag = "non-contract")]
     let cleanup = if faults::fired(faults::Fault::AbandonCleanup) {
         Err(io::Error::other("abandonment cleanup failed as requested by a test"))
     } else {
@@ -1883,6 +1907,7 @@ fn kill_if_running(child: &mut Child) -> io::Result<()> {
 }
 
 #[cfg(any(test, not(target_os = "macos")))]
+// #[gamma::skip(fn_value.ok, reason = "The no-op mutant leaves native descendants and their readers running and timed out in the exhaustive campaign; callback-level cleanup mutations remain enabled.", tag = "timeout")]
 fn kill_with<C>(child: &mut C, sweep: impl FnOnce() -> io::Result<()>, kill: impl FnOnce(&mut C) -> io::Result<()>) -> io::Result<()> {
     let swept = sweep();
     let killed = kill(child);
@@ -2059,6 +2084,21 @@ mod tests {
                 _ => Ok(0),
             }
         }
+    }
+
+    #[test]
+    fn nov7_output_reader_returns_thread_creation_errors() {
+        let mut spawns = 0;
+        let result = output_reader_with_spawn(Some(io::Cursor::new(Vec::<u8>::new())), |_, _, _| {
+            spawns += 1;
+            Err(io::Error::new(io::ErrorKind::PermissionDenied, "scripted thread-spawn refusal"))
+        });
+        assert_eq!(spawns, 1);
+        let Err(error) = result else {
+            panic!("expected the injected thread-spawn refusal");
+        };
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(error.to_string(), "scripted thread-spawn refusal");
     }
 
     #[test]

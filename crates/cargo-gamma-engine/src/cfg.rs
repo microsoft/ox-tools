@@ -170,12 +170,10 @@ impl CfgSet {
         while let Some(attribute) = pending.pop() {
             if attribute.path().is_ident("cfg") {
                 if cfg_predicate(&attribute).is_none_or(|predicate| self.verdict(&predicate) != Verdict::Yes) {
-                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "the inferred bool default is already false")]
                     return false;
                 }
             } else if attribute.path().is_ident("cfg_attr") {
                 let Some((condition, nested)) = cfg_attr(&attribute) else {
-                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "the inferred bool default is already false")]
                     return false;
                 };
                 match self.verdict(&condition) {
@@ -454,15 +452,13 @@ impl CfgSet {
 /// evidence that code should be omitted from the population.
 fn cfg_predicate(attribute: &Meta) -> Option<Meta> {
     let Meta::List(list) = attribute else {
-        return
-        // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-        None;
+        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+        return None;
     };
 
     if !attribute.path().is_ident("cfg") {
-        return
-        // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-        None;
+        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+        return None;
     }
 
     list.parse_args::<Meta>().ok()
@@ -474,15 +470,13 @@ fn cfg_predicate(attribute: &Meta) -> Option<Meta> {
 /// just like an unparsable `cfg`: it must not shrink the population on a guess.
 fn cfg_attr(attribute: &Meta) -> Option<(Meta, Vec<Meta>)> {
     let Meta::List(list) = attribute else {
-        return
-        // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-        None;
+        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+        return None;
     };
 
     if !attribute.path().is_ident("cfg_attr") {
-        return
-        // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-        None;
+        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+        return None;
     }
 
     let parser = Punctuated::<Meta, Token![,]>::parse_terminated;

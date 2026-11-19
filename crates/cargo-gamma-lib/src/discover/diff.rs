@@ -168,7 +168,6 @@ impl Diff {
         }
 
         sources.retain(|path, _raw| touched.contains_key(path));
-        // #[gamma::skip(call_result.default, reason = "normalize_lines returns unit and this mutator still sorts and deduplicates the same lines before replacing unit with unit")]
         normalize_lines(&mut touched);
 
         Self { touched, sources }
@@ -248,7 +247,6 @@ impl Diff {
             .usage());
         }
 
-        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
         normalize_lines(&mut resolved);
         self.touched = resolved;
 
@@ -507,6 +505,19 @@ fn parse_range(field: &str) -> Option<(u32, u32)> {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod survivor_tests {
     use super::*;
+
+    #[test]
+    fn an_inventoried_absolute_rust_path_needs_no_filesystem_probe() {
+        let root = Utf8Path::new(if cfg!(windows) { r"C:\workspace" } else { "/workspace" });
+        let relative = Utf8Path::new("src/selected.rs");
+        let absolute = root.join(relative);
+        assert_eq!(
+            locate_with(&absolute, &absolute, root, &HashSet::from_iter([relative]), &[], |_| {
+                panic!("an inventoried Rust source must not need a filesystem probe")
+            }),
+            Some(relative.to_owned())
+        );
+    }
 
     #[test]
     fn recovered_diff_location_continues_from_an_untracked_absolute_path_to_the_raw_path() {

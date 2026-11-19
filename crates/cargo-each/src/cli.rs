@@ -65,6 +65,22 @@ pub(crate) struct EachArgs {
     #[arg(long = "json-lines-file", value_name = "PATH")]
     pub(crate) json_lines_files: Vec<PathBuf>,
 
+    /// Keep only JSON records matching this Boolean expression. Repeatable;
+    /// expressions are AND-combined. Atoms are dotted paths (`executable`)
+    /// or typed equality checks (`profile.test=true`).
+    #[arg(long = "json-filter", value_name = "EXPR")]
+    pub(crate) json_filters: Vec<String>,
+
+    /// Run each JSON-record command from the directory in this dotted string
+    /// field.
+    #[arg(long = "json-work-dir", value_name = "DOTTED_PATH", conflicts_with = "json_work_dir_parent")]
+    pub(crate) json_work_dir: Option<String>,
+
+    /// Run each JSON-record command from the parent directory of the path in
+    /// this dotted string field.
+    #[arg(long = "json-work-dir-parent", value_name = "DOTTED_PATH", conflicts_with = "json_work_dir")]
+    pub(crate) json_work_dir_parent: Option<String>,
+
     // --- filtering ---
     /// Keep only members matching this Boolean expression. Repeatable;
     /// expressions are AND-combined. Supports `not`, `and`, `or`, and
@@ -108,10 +124,11 @@ pub(crate) struct EachArgs {
     #[arg(long)]
     pub(crate) keep_going: bool,
 
-    /// Run at most N per-package, per-target, or JSON-record commands concurrently. Use
-    /// `auto` to detect available parallelism once. Defaults to 1. Buffered
-    /// output is redirected to unique temporary files and emitted in plan order.
-    /// Only an effective count above 1 disconnects child standard input for capture.
+    /// Run at most N per-package, per-target, or JSON-record commands
+    /// concurrently. Use `auto` to detect available parallelism once. Defaults
+    /// to 1. Buffered output is redirected to unique temporary files and
+    /// emitted in plan order. Only an effective count above 1 disconnects child
+    /// standard input for capture.
     #[arg(long, default_value_t = NonZeroUsize::MIN, value_name = "N|auto", value_parser = parse_jobs)]
     pub(crate) jobs: NonZeroUsize,
 

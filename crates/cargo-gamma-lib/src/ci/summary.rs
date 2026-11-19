@@ -22,6 +22,7 @@ const SUMMARY_FILES: usize = 10;
 /// write, so the file lock spans the whole panel and prevents another cargo-gamma process from
 /// placing its panel between those retries.
 pub(crate) fn append(path: &Utf8Path, panel: &str) -> io::Result<()> {
+    // #[gamma::skip(literal.bool_flip, reason = "These OpenOptions affect a real owning lock/file; checking append access without filesystem fixtures requires the deferred native-open adapter.", tag = "native-boundary")]
     let lock = OpenOptions::new().append(true).create(true).read(true).open(path)?;
     append_with_lock(&lock, panel, File::try_clone, |lock, writer, panel| {
         append_locked(lock, writer, panel, File::lock, File::unlock)

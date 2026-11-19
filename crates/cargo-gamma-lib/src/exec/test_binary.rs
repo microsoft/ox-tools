@@ -172,10 +172,8 @@ pub(super) fn apportion(binaries: &mut [TestBinary], multiplier: f64, floor: Dur
 pub(super) fn calibrate(binaries: &mut [TestBinary], config: &Config, memory: &MemoryPolicy) {
     binaries.sort_by_key(|binary| binary.baseline);
 
-    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
     apportion(binaries, config.test_timeout_multiplier, config.timeout_floor, config.baseline);
 
-    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
     bound(binaries, memory, config.baseline);
 }
 
@@ -304,7 +302,6 @@ pub(super) fn test_binaries_with_linkage(stdout: &str, root: &Utf8Path, capture_
         }
     }
 
-    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
     normalize_binaries(&mut binaries);
     binaries
 }
@@ -381,7 +378,6 @@ fn read_capture_entries(entries: impl IntoIterator<Item = io::Result<fs::DirEntr
         captures.push(serde_json::from_slice(&bytes).ok()?);
     }
 
-    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
     normalize_captures(&mut captures);
 
     (!captures.is_empty()).then_some(captures)
@@ -593,7 +589,7 @@ fn workspace_relative(path: &Utf8Path, root: &Utf8Path) -> Option<Utf8PathBuf> {
         )
     }) {
         return
-        // #[gamma::skip(return_value.default, reason = "no_target_selection<T>() returns None; in this Option-valued return position Default is also None.", tag = "equivalent")]
+        // #[gamma::skip(return_value.default, call_result.default, reason = "no_target_selection<T>() returns None without side effects; in this Option-valued return position Default is also None.", tag = "equivalent")]
         no_target_selection();
     }
 
@@ -645,15 +641,6 @@ fn populations_intersect(pending: &crate::HashSet<&Utf8Path>, sources: &crate::H
 
 const fn no_target_selection<T>() -> Option<T> {
     None
-}
-
-/// Whether a target name survives the include and exclude patterns.
-///
-/// Exclusion is checked first and wins, which is what makes `--include-test "*"` plus a few
-/// exclusions mean what it looks like. An empty include list admits everything, so exclusion alone
-/// is a subtraction from the whole suite rather than a selection of nothing.
-pub(super) fn admits_target(name: &str, include: &[String], exclude: &[String]) -> bool {
-    TargetPatterns::new(include, exclude).admits(name)
 }
 
 /// Returns the first `--include-test` or `--exclude-test` pattern that names no test target.
@@ -818,7 +805,6 @@ impl<'binaries> Reachability<'binaries> {
                 .filter(|binary| reaches_mutant(binary, mutant, plan, scope))
                 .collect();
 
-            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
             order_reachable(&mut found, &mutant.package);
 
             let _fresh = by_source.insert(key, found);

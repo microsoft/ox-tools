@@ -106,9 +106,8 @@ pub(super) fn stated_range(attrs: &[Attribute]) -> Option<Range<usize>> {
     let arguments = attrs.iter().find_map(arguments)?;
 
     if syn::parse2::<Expr>(arguments.clone()).is_err() {
-        return
-        // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-        None;
+        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+        return None;
     }
 
     let mut tokens = arguments.into_iter();
@@ -325,9 +324,8 @@ fn is_stated_value(attribute: &Attribute) -> bool {
 /// expression could be read out of, so both are reported rather than guessed at.
 fn arguments(attribute: &Attribute) -> Option<TokenStream> {
     if !is_stated_value(attribute) {
-        return
-        // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-        None;
+        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+        return None;
     }
 
     match &attribute.meta {

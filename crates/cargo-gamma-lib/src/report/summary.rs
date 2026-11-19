@@ -129,39 +129,16 @@ fn outcome_blocks(plan: &Plan, styler: Styler, listings: Listings) -> Vec<(Strin
     blocks
 }
 
-/// Names the mutants this run did not itself test, as a tail for the summary line.
+/// Names mutants outside this shard as a tail for the summary line.
 ///
-/// Each of these changes what the total is a total of, so leaving them out entirely would make the
-/// score look like it covered more than it did. None of them is a finding about the code, so each
-/// appears only when it is not zero, and a clean run gets nothing.
-///
-/// Settled mutants are the subtle one: they *are* in the score, carried at the verdict an earlier
-/// report gave them, and they are named here only so the reader knows this run did not re-run them.
-///
-/// Two kinds are never named here. Unviable mutants are a fact about what the compiler would accept
-/// rather than about what the tests check, and they are withdrawn automatically. Unbuilt ones sit
-/// behind conditional compilation the run's feature selection left switched off. Both run to
-/// thousands on a large workspace — numbers nobody acts on, on the one line everybody reads. `-V`
-/// lists them and `--diag` counts them. Suppressed mutants are left out for the same reason: one
-/// directive on a dense function accounts for hundreds of them, so the figure reads as a count of
-/// annotations and misleads far more than it informs.
-// #[gamma::skip(all, reason = "the zero defaults are identity elements in the rendered exclusion sum and exact nonzero listings are covered by summary tests")]
+/// Cached verdicts and other internal exclusions remain in diagnostics rather than the summary.
+// #[gamma::skip(all, reason = "zero and nonzero shard counts and the absence of cached-verdict bookkeeping are covered by summary tests")]
 fn excluded(plan: &Plan) -> String {
-    let mut parts: Vec<String> = Vec::new();
-
-    if plan.sharded_out > 0 {
-        parts.push(format!("{} outside this shard", plan.sharded_out));
-    }
-
-    if plan.settled_out > 0 {
-        parts.push(format!("{} already settled", plan.settled_out));
-    }
-
-    if parts.is_empty() {
+    if plan.sharded_out == 0 {
         return String::new();
     }
 
-    format!(", {}", parts.join(", "))
+    format!(", {} outside this shard", plan.sharded_out)
 }
 
 /// Names the flakes, when a run produced any.
@@ -580,7 +557,10 @@ mod tests {
         assert_eq!(excluded(&population), ", 2 outside this shard");
 
         population.settled_out = 3;
-        assert_eq!(excluded(&population), ", 2 outside this shard, 3 already settled");
+        assert_eq!(excluded(&population), ", 2 outside this shard");
+
+        population.sharded_out = 0;
+        assert_eq!(excluded(&population), "");
     }
 
     #[test]
@@ -1026,16 +1006,16 @@ mod tests {
     }
 
     #[test]
-    fn the_summary_still_names_mutants_already_settled_out_of_the_run() {
-        let mut plan = plan();
+    fn cached_verdict_counts_do_not_change_scored_or_untested_summary_output() {
+        for outcome in [Outcome::Killed, Outcome::CompileError] {
+            let mut plan = plan();
+            plan.mutants = vec![mutant(1, outcome)];
+            let expected = rendered(&plan, false);
 
-        plan.settled_out = 5;
+            plan.settled_out = 5;
 
-        let text = rendered(&plan, false);
-
-        // Settled mutants were deliberately excluded from this run, and that changes the
-        // denominator a reader would otherwise infer from the workspace.
-        assert!(text.contains("5 already settled"), "{text}");
+            assert_eq!(rendered(&plan, false), expected);
+        }
     }
 
     #[test]

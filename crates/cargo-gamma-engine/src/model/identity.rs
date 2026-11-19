@@ -343,6 +343,7 @@ pub fn normalize_site_text(text: &str) -> CompactString {
                 .get(offset..end)
                 .expect("literal_end returns an in-bounds UTF-8 boundary in this same text");
             out.push_str(literal);
+            // #[gamma::skip(stmt.delete_assign, tag = "outofmem", reason = "Without advancing past a literal, this loop repeatedly appends the same literal until allocation fails.")]
             offset = end;
             continue;
         }
@@ -352,6 +353,7 @@ pub fn normalize_site_text(text: &str) -> CompactString {
             .and_then(|rest| rest.chars().next())
             .expect("the loop keeps the UTF-8 boundary below the text length");
         // #[gamma::skip(stmt.delete_assign, tag = "timeout", reason = "removing the character advance revisits the same nonliteral character indefinitely")]
+        // #[gamma::skip(assign.add_to_mul, tag = "timeout", reason = "At offset zero, multiplying by the character width leaves offset zero and revisits the same character indefinitely.")]
         offset += character.len_utf8();
 
         if character.is_whitespace() {

@@ -34,13 +34,13 @@ bytes = { version = "1.12.1", default-features = false }
 camino = { version = "1.2.6", default-features = false }
 # local dependencies
 cargo-aprz-lib = { path = "crates/cargo-aprz-lib", default-features = false, version = "1.2.2" }
-cargo-gamma-attrs = { path = "crates/cargo-gamma-attrs", default-features = false, version = "0.4.0" }
-cargo-gamma-attrs-impl = { path = "crates/cargo-gamma-attrs-impl", default-features = false, version = "0.4.0" }
-cargo-gamma-engine = { path = "crates/cargo-gamma-engine", default-features = false, version = "0.4.0" }
-cargo-gamma-lib = { path = "crates/cargo-gamma-lib", default-features = false, version = "0.5.0" }
-cargo-gamma-process = { path = "crates/cargo-gamma-process", default-features = false, version = "0.4.0" }
-cargo-gamma-rt = { path = "crates/cargo-gamma-rt", default-features = false, version = "0.4.0" }
-cargo-gamma-unsafe = { path = "crates/cargo-gamma-unsafe", default-features = false, version = "0.4.0" }
+cargo-gamma-attrs = { path = "crates/cargo-gamma-attrs", default-features = false, version = "0.6.0" }
+cargo-gamma-attrs-impl = { path = "crates/cargo-gamma-attrs-impl", default-features = false, version = "0.6.0" }
+cargo-gamma-engine = { path = "crates/cargo-gamma-engine", default-features = false, version = "0.6.0" }
+cargo-gamma-lib = { path = "crates/cargo-gamma-lib", default-features = false, version = "0.6.0" }
+cargo-gamma-process = { path = "crates/cargo-gamma-process", default-features = false, version = "0.6.0" }
+cargo-gamma-rt = { path = "crates/cargo-gamma-rt", default-features = false, version = "0.6.0" }
+cargo-gamma-unsafe = { path = "crates/cargo-gamma-unsafe", default-features = false, version = "0.6.0" }
 # external dependencies
 cargo-platform = { version = "0.3.3", default-features = false }
 cargo_metadata = { version = "0.23.1", default-features = false }
@@ -50,8 +50,6 @@ clap = { version = "4.6.7", default-features = false }
 clap_complete = { version = "4.6.11", default-features = false }
 command-group = { version = "5.0.1", default-features = false }
 compact_str = { version = "0.10.0", default-features = false }
-# blake3 accepts yanked 0.4.3; the registry mirror still selects it.
-constant_time_eq = { version = "=0.4.2", default-features = false }
 csv = { version = "1.4.0", default-features = false }
 duct = { version = "1.1.2", default-features = false }
 env_logger = { version = "0.11.11", default-features = false }
@@ -84,7 +82,7 @@ proc-macro2 = { version = "1.0.107", default-features = false }
 quote = { version = "1.0.47", default-features = false }
 # Newer releases require Rust 1.98, beyond the Azure publishing compiler.
 ra_ap_syntax = { version = "=0.0.349", default-features = false }
-rallocator = { version = "0.3.0", default-features = false }
+rallocator = { version = "0.4.0", default-features = false }
 reflink-copy = { version = "0.1.30", default-features = false }
 regex = { version = "1.13.1", default-features = false }
 regex-syntax = { version = "0.8.11", default-features = false }
@@ -100,7 +98,7 @@ rustdoc-types-v54 = { package = "rustdoc-types", version = "0.54.0", default-fea
 rustdoc-types-v55 = { package = "rustdoc-types", version = "0.55.0", default-features = false }
 rustdoc-types-v56 = { package = "rustdoc-types", version = "0.56.0", default-features = false }
 rustdoc-types-v57 = { package = "rustdoc-types", version = "0.57.4", default-features = false }
-rustsec = { version = "0.33.0", default-features = false }
+rustsec = { version = "0.34.1", default-features = false }
 saphyr-parser = { version = "0.3.3", default-features = false }
 seatbelt = { version = "0.11.0", default-features = false }
 semver = { version = "1.0.28", default-features = false }

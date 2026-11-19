@@ -433,7 +433,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-anvil"
-version = "0.28.0"
+version = "0.29.0"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -477,7 +477,6 @@ dependencies = [
  "chrono",
  "clap",
  "compact_str",
- "constant_time_eq",
  "csv",
  "env_logger",
  "fakeable",
@@ -534,7 +533,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-coverage-gate"
-version = "0.7.4"
+version = "0.7.5"
 dependencies = [
  "assert_cmd",
  "cargo-platform",
@@ -552,7 +551,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-each"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "assert_cmd",
  "cargo_metadata",
@@ -590,7 +589,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-gamma"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "cargo-gamma-attrs",
  "cargo-gamma-lib",
@@ -601,7 +600,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-gamma-attrs"
-version = "0.4.0"
+version = "0.6.0"
 dependencies = [
  "cargo-gamma-attrs-impl",
  "cargo_metadata",
@@ -611,7 +610,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-gamma-attrs-impl"
-version = "0.4.0"
+version = "0.6.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -620,14 +619,13 @@ dependencies = [
 
 [[package]]
 name = "cargo-gamma-engine"
-version = "0.4.0"
+version = "0.6.0"
 dependencies = [
  "blake3",
  "bolero",
  "bolero-engine",
  "camino",
  "compact_str",
- "constant_time_eq",
  "proc-macro2",
  "quote",
  "regex-syntax",
@@ -642,7 +640,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-gamma-lib"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "blake3",
  "bolero",
@@ -682,7 +680,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-gamma-process"
-version = "0.4.0"
+version = "0.6.0"
 dependencies = [
  "camino",
  "cargo-gamma-unsafe",
@@ -692,7 +690,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-gamma-rt"
-version = "0.4.0"
+version = "0.6.0"
 dependencies = [
  "loom",
  "tempfile",
@@ -700,7 +698,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-gamma-unsafe"
-version = "0.4.0"
+version = "0.6.0"
 dependencies = [
  "cargo-gamma-rt",
  "libc",
@@ -1085,9 +1083,9 @@ dependencies = [
 
 [[package]]
 name = "cvss"
-version = "2.2.0"
+version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f7fb220d3ce1b565af39cee5b89e47fd8dd1dab162900ee4363c8ee4169ee8a2"
+checksum = "11147ff68f855ef1b74c07e9b64489d0967baf41047e82505e13f0a96cf41360"
 dependencies = [
  "serde",
 ]
@@ -2278,9 +2276,9 @@ checksum = "2e126dda6f34391ab7b444f9922055facc83c07a910da3eb16f1e4d9c45dc777"
 
 [[package]]
 name = "libz-sys"
-version = "1.1.31"
+version = "1.1.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff20308ecabd635a2dc1dd5834a86c462cca20efba1d5d3ddab1f8aea3455cb2"
+checksum = "fee3f59f4321dab0c78d828942e7aa09d0bd8ad6e78a501977e6bf3d02938045"
 dependencies = [
  "cc",
  "pkg-config",
@@ -2702,9 +2700,9 @@ checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
 name = "platforms"
-version = "3.12.0"
+version = "4.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9245c6e7c5a6bcdd7977fdf6d1e1c67f4cc2d0d58c041df0ea5940953033e6ca"
+checksum = "88cbb777b9edffacb1c3f67902fbd3b3654744476402ad0a0c867daf9b2e549c"
 dependencies = [
  "serde",
 ]
@@ -2903,9 +2901,9 @@ dependencies = [
 
 [[package]]
 name = "rallocator"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9fd808d66c79bff707b16f916e14015447818dbde2e1afd14716831853900e8c"
+checksum = "cf6bb274145beb01358ea1c933fbaaecaab4b01294ac2cb605fe00f004c5dbc8"
 dependencies = [
  "libc",
  "seismograph",
@@ -3266,9 +3264,9 @@ dependencies = [
 
 [[package]]
 name = "rustsec"
-version = "0.33.0"
+version = "0.34.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c60fd662f245fd3d6ae7ee2371f59042c4e9dc00a02183c0b1735f4da2aa5ed"
+checksum = "8a65c868e3db10a21acb88c55c123fc6e850187901e9ee7b352ff7cb290558b4"
 dependencies = [
  "cargo-lock",
  "cvss",
@@ -3388,9 +3386,9 @@ dependencies = [
 
 [[package]]
 name = "seismograph"
-version = "0.3.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c5f8d2898334476c6b661421262c82eac7dfeed85d218d260722cb792f1c94eb"
+checksum = "72e989b3769e67e611e84979b2119a26481e15c39046acb1946bde6b5e1e9b79"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
@@ -3398,9 +3396,9 @@ dependencies = [
 
 [[package]]
 name = "seismograph_rallocator"
-version = "0.3.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "344e725a2343dda56fb7d0349433ac5d89f40b68f659f26141a6a5d1383aceac"
+checksum = "ec245aa0d69083eb1b645119015fbd845c67918c13e90cbde24b293f7fa461b0"
 dependencies = [
  "seismograph",
 ]

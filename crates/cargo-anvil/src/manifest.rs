@@ -116,6 +116,7 @@ fn ensure_contained_with<'a>(
         bail!("{context} '{path}' must be a relative path inside the repository");
     }
     let (names, last) = shape(path, context)?;
+    // #[gamma::skip(expr.increment, reason = "A real component scan with zero names ends in an empty segment or dot, which independently rejects the path; increasing a positive component count cannot change whether a file is named.", tag = "equivalent")]
     if path_names_no_file(names, last) {
         bail!("{context} '{path}' must name a file inside the repository");
     }

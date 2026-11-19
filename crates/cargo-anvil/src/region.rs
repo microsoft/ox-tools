@@ -930,6 +930,8 @@ pub(crate) fn render_body_with_newline(body: &str, newline: &str) -> String {
             1
         };
         // #[gamma::skip(arith.add_to_mul, tag = "timeout", reason = "With a newline at offset zero, multiplication selects rest[0..], retaining the same newline forever.")]
+        // #[gamma::skip(stmt.delete_assign, tag = "outofmem", reason = "Removing the input advance repeatedly appends the same line and newline until allocation fails.")]
+        // #[gamma::skip(arith.add_to_sub, tag = "timeout", reason = "Subtracting the ending width can leave the same newline in rest instead of consuming it, so the loop never finishes.")]
         rest = &rest[at + ending_len..];
     }
     if !rest.is_empty() {

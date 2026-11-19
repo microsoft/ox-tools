@@ -94,7 +94,6 @@ fn plan_survey(survey: Survey, selection: &Selection, notify: &mut impl FnMut(&s
     let mut ordinals = 0;
     let scanned = survey.scan(None, selection, &mut ordinals)?;
 
-    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
     report_by_package(&survey.files, &scanned.mutants, notify);
 
     Ok(survey.into_plan(scanned))
@@ -599,10 +598,13 @@ impl Survey {
 
         files.sort_by(|left, right| left.path.cmp(&right.path));
 
-        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
         normalize_file_lists(&mut declaration_files, &mut exclusion_files);
 
-        let cfgs = configuration(&root, cargo, &enabled).feature_uncertainty(&features::uncertain_packages(metadata, &selected));
+        let cfgs = configuration(&root, cargo, &enabled).feature_uncertainty(&features::uncertain_packages(
+            metadata,
+            &selected,
+            features.all_features,
+        ));
         validate_exclusions(&args.exclude_trait_impls, &exclusion_files, &cfgs)?;
 
         // The diff names files; only the workspace can say which files those are. Resolving it
@@ -867,7 +869,6 @@ impl Survey {
         }
 
         if let Some(patterns) = self.name_patterns.as_ref() {
-            // #[gamma::skip(call_result.default, reason = "retain_name_matches returns unit; default_after still executes its filtering side effects and replaces only () with ().", tag = "equivalent")]
             retain_name_matches(&mut mutants, patterns);
         }
 
@@ -1333,7 +1334,6 @@ fn scan_with_declarations(
                 // first is a race. The earliest in file order is reported so the message does not
                 // change between runs.
                 Err((at, error)) => {
-                    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
                     retain_first_failure(&mut failure, at, error);
                 }
             }
@@ -1889,11 +1889,9 @@ fn sort_target_files(files: &mut [TargetFile]) {
 
 fn normalize_file_lists(declaration_files: &mut HashMap<String, Vec<Utf8PathBuf>>, exclusion_files: &mut [TargetFile]) {
     for paths in declaration_files.values_mut() {
-        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
         sort_paths(paths);
     }
 
-    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
     sort_target_files(exclusion_files);
 }
 
@@ -2083,7 +2081,6 @@ fn strongly_connected_components(edges: &[Vec<usize>]) -> Vec<usize> {
 
             if frame.edge_at < edges[node].len() {
                 let neighbor = edges[node][frame.edge_at];
-                // #[gamma::skip(stmt.delete_assign, reason = "without advancing the edge cursor Tarjan's traversal repeatedly processes the same edge and never terminates")]
                 frame.edge_at += 1;
 
                 if let Some(neighbor_index) = index_of[neighbor] {
@@ -2310,7 +2307,6 @@ fn load_metadata_using(
 
     let _builder = command.current_dir(dir).no_deps();
 
-    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
     apply_metadata_features(&mut command, features);
 
     read(&command).map_err(|cause| error!("could not read cargo metadata for `{dir}`").caused_by(cause))
@@ -2329,7 +2325,6 @@ fn load_survey_metadata_using(
     let mut command = MetadataCommand::new();
     let _builder = command.current_dir(dir).other_options(vec!["--offline".to_owned()]);
 
-    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
     apply_metadata_features(&mut command, features);
 
     read(&command).map_err(|cause| {

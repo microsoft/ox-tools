@@ -413,6 +413,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain the full generated-lint composition; focused TOML parsing, splicing and rendering remain interpreted"
+    )]
     fn namespace_bodies_compose_as_valid_workspace_toml() {
         let host = "[workspace]\nmembers = [\"crates/a\"]\n";
         let spliced = [
@@ -536,6 +540,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "native/cargo-careful retain all embedded-config round trips; focused TOML parsing, splicing and rendering remain interpreted"
+    )]
     fn shared_config_bodies_round_trip_through_toml_parser() {
         for (id, body) in [
             (DENY_ADVISORIES_REGION_ID, DENY_ADVISORIES_BODY),

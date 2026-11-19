@@ -18,6 +18,7 @@ use super::super::cargo_options::BuildLimits;
 use super::super::events::Events;
 #[cfg(test)]
 use super::super::faults::{self, Fault};
+use super::super::rustc_replay::PROGRESS_WIDTH;
 use super::super::workspace::Workspace;
 use super::messages::cargo_message;
 #[cfg(any(test, feature = "internals"))]
@@ -61,11 +62,16 @@ pub(super) fn spawn_failure(program: &str, work: &Workspace, cause: io::Error) -
 /// against a compiler blocked writing to it — which would look exactly like the hang this is meant
 /// to catch.
 pub(super) fn compile(work: &Workspace, args: &[String], budget: Option<Duration>, events: &mut dyn Events) -> Result<Option<Output>> {
-    #[cfg(any(test, feature = "internals"))]
-    if let Some(output) = SCRIPTED_COMPILER.with_borrow_mut(|runner| runner.as_mut().map(|runner| runner(work, args, budget, events))) {
-        return output;
-    }
+    compile_with_replay(work, args, budget, events, false)
+}
 
+fn compile_with_replay(
+    work: &Workspace,
+    args: &[String],
+    budget: Option<Duration>,
+    events: &mut dyn Events,
+    selective: bool,
+) -> Result<Option<Output>> {
     let mut command = work.cargo();
 
     let _command = command
@@ -75,6 +81,15 @@ pub(super) fn compile(work: &Workspace, args: &[String], budget: Option<Duration
         .args(args)
         .stderr(Stdio::piped())
         .stdout(Stdio::piped());
+
+    work.configure_compiler_capture(&mut command, selective);
+
+    #[cfg(any(test, feature = "internals"))]
+    if let Some(output) =
+        SCRIPTED_COMPILER.with_borrow_mut(|runner| runner.as_mut().map(|runner| runner(work, args, budget, events, &command)))
+    {
+        return output;
+    }
 
     supervise(command, work, budget, events)
 }
@@ -126,10 +141,9 @@ pub(super) fn supervise_with_limits(
         spawn_failure(&program, work, cause)
     })?;
 
-    let mut subtree = match ProcessTree::adopt(spawned) {
+    let subtree = match ProcessTree::adopt(spawned) {
         Ok(subtree) => subtree,
         Err(reason) => {
-            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
             finish_build(events);
             let raw_reason = reason.to_string();
             let reason = encode_controls(&raw_reason);
@@ -138,6 +152,19 @@ pub(super) fn supervise_with_limits(
         }
     };
 
+    supervise_tree(subtree, work, budget, events, limits)
+}
+
+/// Supervises an already-adopted build tree with bounded output.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn supervise_tree(
+    mut subtree: ProcessTree,
+    work: &Workspace,
+    budget: Option<Duration>,
+    events: &mut dyn Events,
+    limits: OutputLimits,
+) -> Result<Option<Output>> {
+    let root = encode_controls(work.root.as_str());
     let (sender, lines) = mpsc::sync_channel(limits.backlog);
 
     let stdout = subtree
@@ -270,12 +297,6 @@ fn collect(subtree: &mut ProcessTree) -> io::Result<()> {
 
     subtree.terminate().map(|_status| ())
 }
-
-/// How wide cargo is asked to draw its progress bar.
-///
-/// Fixed rather than taken from the terminal, because cargo is writing to a pipe and has no
-/// terminal to measure. The display this is handed to truncates to the real width.
-pub(super) const PROGRESS_WIDTH: usize = 100;
 
 /// Turns cargo's two streams into the handful of things a reader needs told while a build runs.
 ///
@@ -713,6 +734,38 @@ pub(super) fn run_cargo(
     first_round: Option<Duration>,
     events: &mut dyn Events,
 ) -> Result<Compiled> {
+    run_cargo_with_replay::<false>(work, plan, verb, select, limits, first_round, events)
+}
+
+/// Keeps Cargo's complete invocation and scheduler, reusing only closed successful rustc units.
+///
+/// Uncaptured, changed, failed, and unsupported units execute normally under the same containment
+/// and budget as a broad build. Schema differences are discovered from actual dep-info inputs on
+/// every invocation, not merely from the most recently written subset.
+pub(super) fn run_cargo_selective(
+    work: &Workspace,
+    plan: &Plan,
+    verb: &[&str],
+    select: Option<&[String]>,
+    limits: BuildLimits,
+    first_round: Option<Duration>,
+    events: &mut dyn Events,
+) -> Result<Compiled> {
+    run_cargo_with_replay::<true>(work, plan, verb, select, limits, first_round, events)
+}
+
+fn run_cargo_with_replay<const SELECTIVE: bool>(
+    work: &Workspace,
+    plan: &Plan,
+    verb: &[&str],
+    select: Option<&[String]>,
+    limits: BuildLimits,
+    first_round: Option<Duration>,
+    events: &mut dyn Events,
+) -> Result<Compiled> {
+    if SELECTIVE && verb.first() != Some(&"check") {
+        super::super::proof_context::invalidate(work);
+    }
     let mut args: Vec<String> = verb.iter().map(|arg| (*arg).to_owned()).collect();
 
     args.push("--message-format=json".to_owned());
@@ -730,7 +783,12 @@ pub(super) fn run_cargo(
     // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
     extend_build_arguments(work, &mut args);
 
-    let Some(output) = compile(work, &args, limits.budget(first_round), events)? else {
+    let output = if SELECTIVE {
+        compile_with_replay(work, &args, limits.budget(first_round), events, true)?
+    } else {
+        compile(work, &args, limits.budget(first_round), events)?
+    };
+    let Some(output) = output else {
         return Ok(Compiled {
             succeeded: false,
             failure_context: String::new(),
@@ -747,6 +805,9 @@ pub(super) fn run_cargo(
     };
 
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    if SELECTIVE && output.status.success() {
+        super::super::proof_context::seal(work, plan, &args, &stdout);
+    }
     let mut failure_context = format!("Cargo finished with {}", output.status);
     #[cfg(windows)]
     if let Some(code) = output.status.code() {
@@ -813,12 +874,212 @@ fn extend_build_arguments(work: &Workspace, args: &mut Vec<String>) {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod mutation_tests {
     use std::collections::VecDeque;
+    use std::ffi::OsString;
     use std::io::Cursor;
 
     use cargo_gamma_process::faults::{self as process_faults, Fault as ProcessFault};
 
     use super::*;
     use crate::model::Mutant;
+
+    #[test]
+    fn compiler_command_seam_observes_capture_configuration_for_broad_and_selective_builds() {
+        use crate::exec::rustc_replay::snapshot_io::{self, Script};
+        use crate::exec::rustc_replay::{COMMAND_VAR, REPLAY_VAR, ROOT_VAR, TARGET_VAR};
+
+        let root = camino::Utf8PathBuf::from(if cfg!(windows) {
+            r"C:\scripted-command"
+        } else {
+            "/scripted-command"
+        });
+        let target = root.join("target");
+        let captures = target.join("captures");
+        for ready in [false, true] {
+            let mut work = Workspace::adopt(root.clone(), target.clone());
+            work.set_rustc_captures(ready.then(|| captures.clone()));
+            let plan = Plan {
+                root: root.clone(),
+                files: Vec::new(),
+                mutants: Vec::new(),
+                suppressed: 0,
+                idle: Vec::new(),
+                sharded_out: 0,
+                settled_out: 0,
+                digests: crate::HashMap::default(),
+                skipped: Vec::new(),
+                reach: crate::HashMap::default(),
+                specs: crate::HashMap::default(),
+            };
+            let script = Script::default();
+            snapshot_io::with(script, || {
+                for selective in [false, true] {
+                    let expected_root = root.clone();
+                    let expected_target = target.clone();
+                    let expected_captures = captures.clone();
+                    let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+                    let observed = std::rc::Rc::clone(&calls);
+                    super::super::native_test_util::with_compiler_command(
+                        move |_, args, _, _, command| {
+                            observed.set(observed.get() + 1);
+                            assert_eq!(
+                                command.get_args().map(OsString::from).collect::<Vec<_>>(),
+                                args.iter().map(OsString::from).collect::<Vec<_>>()
+                            );
+                            let environment = command.get_envs().collect::<std::collections::BTreeMap<_, _>>();
+                            let identity = environment[std::ffi::OsStr::new(COMMAND_VAR)];
+                            assert_eq!(identity.is_some(), ready);
+                            assert_eq!(environment[std::ffi::OsStr::new(REPLAY_VAR)].is_some(), ready && selective);
+                            assert_eq!(
+                                environment.get(std::ffi::OsStr::new("RUSTC_WRAPPER")).copied().flatten().is_some(),
+                                ready
+                            );
+                            if ready {
+                                assert_eq!(
+                                    environment[std::ffi::OsStr::new("RUSTC_WRAPPER")],
+                                    Some(expected_root.join("cargo-gamma.exe").as_os_str())
+                                );
+                                assert_eq!(environment[std::ffi::OsStr::new(ROOT_VAR)], Some(expected_root.as_os_str()));
+                                assert_eq!(environment[std::ffi::OsStr::new(TARGET_VAR)], Some(expected_target.as_os_str()));
+                            }
+                            if ready && selective {
+                                assert_eq!(environment[std::ffi::OsStr::new(REPLAY_VAR)], identity);
+                                let _directory =
+                                    snapshot_io::read_dir(expected_captures.join("replay").join(identity.unwrap().to_str().unwrap()))
+                                        .unwrap();
+                            }
+                            Ok(None)
+                        },
+                        || {
+                            let result = if selective {
+                                run_cargo_selective(
+                                    &work,
+                                    &plan,
+                                    &["check"],
+                                    None,
+                                    BuildLimits::default(),
+                                    None,
+                                    &mut Recorded::default(),
+                                )
+                            } else {
+                                run_cargo(
+                                    &work,
+                                    &plan,
+                                    &["check"],
+                                    None,
+                                    BuildLimits::default(),
+                                    None,
+                                    &mut Recorded::default(),
+                                )
+                            }
+                            .unwrap();
+                            assert!(!result.succeeded);
+                            assert_eq!(result.stdout, None);
+                        },
+                    );
+                    assert_eq!(calls.get(), 1);
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn selective_build_preserves_the_full_cargo_invocation_budget_streams_and_failure_semantics() {
+        #[cfg(unix)]
+        use std::os::unix::process::ExitStatusExt as _;
+        #[cfg(windows)]
+        use std::os::windows::process::ExitStatusExt as _;
+
+        for (result, operation) in ["success", "failure", "timeout"]
+            .into_iter()
+            .flat_map(|result| ["check", "build"].map(|operation| (result, operation)))
+        {
+            let root = camino::Utf8PathBuf::from("owned-scratch");
+            let mut work = Workspace::adopt(root.clone(), root.join("target"));
+            work.cargo.features = vec!["--all-features".into()];
+            work.cargo.profile = Some("custom-profile".into());
+            work.cargo.extra = vec!["--target".into(), "explicit-target".into()];
+            let plan = Plan {
+                root,
+                files: Vec::new(),
+                mutants: Vec::new(),
+                suppressed: 0,
+                idle: Vec::new(),
+                sharded_out: 0,
+                settled_out: 0,
+                digests: crate::HashMap::default(),
+                skipped: Vec::new(),
+                reach: crate::HashMap::default(),
+                specs: crate::HashMap::default(),
+            };
+            let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let observed = std::rc::Rc::clone(&calls);
+            let context = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let observed_context = std::rc::Rc::clone(&context);
+            super::super::native_test_util::with_compiler(
+                move |_work, args, budget, _events| {
+                    observed.borrow_mut().push((args.to_vec(), budget));
+                    if result == "timeout" {
+                        return Ok(None);
+                    }
+                    Ok(Some(Output {
+                        status: ExitStatus::from_raw(if result == "success" { 0 } else { 256 }),
+                        stdout: b"original Cargo JSON".to_vec(),
+                        stderr: b"original Cargo error".to_vec(),
+                    }))
+                },
+                || {
+                    super::super::super::proof_context::with_operations(
+                        move |action| {
+                            use super::super::super::proof_context::Operation;
+                            observed_context.borrow_mut().push(match action {
+                                Operation::Seal(args, stdout) => ("seal", args.to_vec(), stdout.to_owned()),
+                                Operation::Invalidate => ("invalidate", Vec::new(), String::new()),
+                                Operation::Identity(_) => panic!("build orchestration does not query the proof identity"),
+                            });
+                            None
+                        },
+                        || {
+                            let limits = BuildLimits {
+                                multiplier: Some(6.0),
+                                ..BuildLimits::default()
+                            };
+                            let first_round = Some(Duration::from_secs(10));
+                            let roots = ["original-root".into()];
+                            let verb = [operation, "--all-targets", "--keep-going"];
+                            let broad =
+                                run_cargo(&work, &plan, &verb, Some(&roots), limits, first_round, &mut Recorded::default()).unwrap();
+                            let selective =
+                                run_cargo_selective(&work, &plan, &verb, Some(&roots), limits, first_round, &mut Recorded::default())
+                                    .unwrap();
+                            assert_eq!(selective.succeeded, broad.succeeded);
+                            assert_eq!(selective.stdout, broad.stdout);
+                            assert_eq!(selective.stderr, broad.stderr);
+                            assert_eq!(selective.failure_context, broad.failure_context);
+                        },
+                    );
+                },
+            );
+            let calls = calls.borrow();
+            assert_eq!(calls.len(), 2);
+            assert_eq!(
+                calls[0], calls[1],
+                "replay changes neither roots, verb, target, features, profile, nor budget"
+            );
+            assert_eq!(calls[0].1, Some(Duration::from_mins(1)));
+            let context = context.borrow();
+            let expected = match (operation, result) {
+                ("check", "success") => vec!["seal"],
+                ("check", _) => Vec::new(),
+                (_, "success") => vec!["invalidate", "seal"],
+                _ => vec!["invalidate"],
+            };
+            assert_eq!(context.iter().map(|entry| entry.0).collect::<Vec<_>>(), expected);
+            if let Some((_, arguments, stdout)) = context.iter().find(|entry| entry.0 == "seal") {
+                assert_eq!(arguments, &calls[1].0, "the seal uses the actual complete Cargo invocation");
+                assert_eq!(stdout, "original Cargo JSON");
+            }
+        }
+    }
 
     #[derive(Default)]
     struct Recorded {

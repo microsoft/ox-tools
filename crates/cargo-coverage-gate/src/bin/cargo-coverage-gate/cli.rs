@@ -51,8 +51,9 @@ pub(crate) struct CoverageGateArgs {
 
     /// Rust target triple whose coverage should be collected and evaluated.
     ///
-    /// Defaults to the rustc host target. `run` passes the resolved target
-    /// explicitly, overriding Cargo's configured build target.
+    /// Defaults to the rustc host target, overriding Cargo's configured build
+    /// target. Native collection omits redundant target arguments when Cargo
+    /// has no configured build target.
     #[arg(long, value_name = "TRIPLE", global = true)]
     pub(crate) target: Option<String>,
 

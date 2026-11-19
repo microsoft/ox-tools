@@ -59,7 +59,8 @@ impl<'ast> Visit<'ast> for Shadows<'_> {
 
 pub(in super::super) fn scalar_sources(file: &syn::File, target: &Range<usize>) -> Option<ScalarSources> {
     if file.items.len() > 256 {
-        return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+        return None;
     }
     let function = file.items.iter().find_map(|item| match item {
         syn::Item::Fn(function) if function.block.span().byte_range().contains(&target.start) => Some(function),
@@ -77,7 +78,8 @@ pub(in super::super) fn scalar_sources(file: &syn::File, target: &Range<usize>) 
             if
             // #[gamma::skip(relational.gt_to_ge, reason = "An equal-start direct target statement returned above; other containing statements start strictly earlier.", tag = "equivalent")]
             statement.span().byte_range().start > target.start {
-                return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                return None;
             }
             let mut shadows = Shadows {
                 target: target.start,
@@ -87,7 +89,8 @@ pub(in super::super) fn scalar_sources(file: &syn::File, target: &Range<usize>) 
             };
             shadows.visit_stmt(statement);
             if shadows.budget == 0 {
-                return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                return None;
             }
             return Some(ScalarSources { locals, nonzero_get });
         }

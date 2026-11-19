@@ -30,13 +30,6 @@ allowed_external_types = []
 # public rustdoc for cargo-doc2readme to turn into a README.
 disable = true
 
-# This dependency constrains a transitive version without being used directly.
-[package.metadata.cargo-udeps.ignore]
-normal = ["constant_time_eq"]
-
-[package.metadata.unused-deps]
-allowed = ["constant_time_eq"]
-
 [package.metadata.coverage-gate]
 # Production-only coverage excludes test modules and scaffolding. The measured
 # baseline is 99.93%; retain a 99.9% floor without counting test code.
@@ -77,7 +70,6 @@ clap = { workspace = true, features = [
     "wrap_help",
 ] }
 compact_str = { workspace = true, features = ["std", "serde"] }
-constant_time_eq = { workspace = true }
 csv = { workspace = true }
 env_logger = { workspace = true }
 fetch = { workspace = true, features = ["json", "rustls", "tokio"] }

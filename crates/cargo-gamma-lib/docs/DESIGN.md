@@ -193,6 +193,12 @@ Runtime dependency links are installed before this validation, not between
 validation and instrumented compilation.
 Checks and isolation proofs use that same metadata-check invocation; the final
 build adds code generation without narrowing the target or package selection.
+Before baseline execution, resource discovery, and runner setup, emitted test
+binaries are restricted to the test oracle. The default package-local oracle
+retains only binaries from packages with ordinal-positive pending mutants, so
+survivor filtering and compiler withdrawals do not baseline unrelated packages.
+Explicit package and workspace test-oracle selections are preserved; source
+linkage and test-target filters still apply.
 Isolation reuses the initial pristine validation instead of launching new
 pristine controls. Compilation failures are published as they are established,
 not deferred until a package-selected convergence finishes.
@@ -444,12 +450,14 @@ rather than rendered visibly and its color styling remains intact. Without
 that flag, Cargo progress and convergence diagnostics remain hidden behind the
 stable cargo-gamma phase line.
 
-Compile-fail advice is one warning, with each affected test target on its own
-continuation line naming its package and compiler-test harness. It says that
-the test binaries may have cases that invoke the Rust compiler and may lead
-to very long mutation test runs, rather than asserting measured behavior.
-It suggests omitting specific test cases using harness `--skip` filters, not
-excluding whole binaries; no case is excluded automatically.
+Compiler-driving test detection is retained in `Survey::compile_fail`, and
+`compile_fail_advice` remains available to library callers. The advice names
+each affected test target, package, and compiler-test harness on its own line.
+It describes possible compiler invocation and long mutation-test runs, rather
+than asserting measured behavior, and suggests omitting specific cases using
+harness `--skip` filters instead of excluding whole binaries. The CLI does not
+emit this advice as a console warning. Detection does not change test eligibility
+or automatically exclude any case or binary from the mutation oracle.
 Detection requires a `trybuild` or `compiletest_rs` dev-dependency and a matching
 Rust identifier in the target's root source. Comments and string literals,
 including documentation, do not count as harness usage. This remains a
@@ -534,7 +542,14 @@ control-character-encoded stdout and stderr tails with a truncation flag.
 
 All selected target packages are scanned in dependency order and instrumented
 before instrumented compilation begins. Historical compiler exclusions are filtered
-before ordinal assignment and are never instrumented. Schema convergence runs
+before ordinal assignment and are never instrumented. Mutation progress starts at
+`Mutating the workspace (0 packages)` and updates only when a new package contributes
+to the selected population. The completed line reports
+`Mutated N packages, M mutants`. Both counts include ordinal-positive
+mutants and selected historical compiler exclusions, but not other ordinal-zero
+results. Survivor, name, file, diff, and shard filtering therefore affect the
+package count without changing the broader compiler-validation context.
+Schema convergence runs
 `cargo check --tests --keep-going` with the exact roots, features, and compiler
 options already validated by pristine preflight. Proofs repeat that command;
 the final code-generating build uses `cargo build --tests --keep-going` with
@@ -1006,6 +1021,8 @@ baseline-runtime estimate avoided by successful explicit or inferred hints.
 
 On Unix, cargo-gamma creates a previously absent redirected cache with
 permissions limited to the invoking user, independently of the process umask.
+Workspace preparation uses the same private creation policy for scratch and
+campaign directories before claiming the cache.
 It does not change permissions on a pre-existing directory: the directory and
 its physical ancestry must already be owned by the invoking user or root and
 must not permit another user to replace entries. Sticky shared ancestors such

@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-06
+
+- ✨ Features
+
+  - gamma: add ControlFlow and Ordering mutators ([#342](https://github.com/microsoft/ox-tools/pull/342))
+
 ## [0.4.0] - 2026-10-28
 
 - ✨ Features

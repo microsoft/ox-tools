@@ -3,9 +3,9 @@
 
 use core::time::Duration;
 use std::sync::Arc;
-use std::time::Instant;
 
 use camino::{Utf8Path, Utf8PathBuf};
+use tick::{SimpleClock, Stopwatch};
 
 use super::cargo_options::BuildLimits;
 use super::events::Events;
@@ -1080,12 +1080,15 @@ pub struct Abandoned {
 #[derive(Debug, Default)]
 pub struct Converger {
     #[cfg(test)]
+    clock: Option<SimpleClock>,
+    #[cfg(test)]
     exclusion_store: Option<fn(&crate::discover::CompilerExclusions, &Utf8Path) -> Result<()>>,
     pub fixed_roots: Option<Vec<String>>,
     pub compiler_exclusions: Option<crate::discover::CompilerExclusions>,
     pub historical_exclusions: usize,
     pub proof_background: HashSet<u32>,
     pub proof_active: HashSet<u32>,
+    pub proof_cache: isolation::proof_cache::ProofCache,
     pub withdrawn: HashSet<u32>,
 
     /// The subset of `withdrawn` that was given up on rather than blamed.
@@ -1278,7 +1281,6 @@ impl Converger {
     /// those additional packages still have to be restored to pristine source: filtering their
     /// diagnostics after compilation is too late, because they may already have broken or masked
     /// the build.
-    // #[gamma::skip(fn_value.empty_collection, tag = "timeout", reason = "dropping withdrawn mutants repeatedly rebuilds contexts that cannot be isolated in the campaign")]
     fn scoped_withdrawn(&self, plan: &Plan, packages: Option<&[String]>) -> HashSet<u32> {
         let mut withdrawn = self.withdrawn.clone();
         let Some(packages) = packages else {
@@ -1342,6 +1344,9 @@ impl Converger {
         // that failed. The withdrawal set is deliberately left alone — a mutant already known not
         // to compile stays withdrawn for the rest of the run.
         self.begin_convergence();
+        let clock = SimpleClock::new_system();
+        #[cfg(test)]
+        let clock = self.clock.clone().unwrap_or(clock);
         let may_compile_test_harnesses = compiles_test_harnesses(verb);
 
         loop {
@@ -1356,7 +1361,7 @@ impl Converger {
                 self.historical_exclusions + self.census.len(),
                 self.isolation_budget.proof_count(),
             );
-            let started = Instant::now();
+            let started = Stopwatch::new(&clock);
             let outcome = run_cargo(work, plan, verb, scope.roots, limits, self.first_round, events)?;
             let mut elapsed = started.elapsed();
 
@@ -1400,7 +1405,7 @@ impl Converger {
             blamed.retain(|_ordinal, reason| !reason.needs_confirmation());
 
             if blamed.is_empty() {
-                let proof_started = Instant::now();
+                let proof_started = Stopwatch::new(&clock);
                 let isolated = if positional.is_empty() {
                     self.isolate_scoped(work, plan, &stdout, verb, scope.roots, limits, events)?
                 } else {
@@ -1430,12 +1435,6 @@ impl Converger {
                         }
                     }
                     interactions.retain(|(excluded, _members)| !blamed.contains_key(excluded));
-                    for (ordinals, _context) in &mut unresolved {
-                        // #[gamma::skip(unary.remove_not, tag = "timeout", reason = "retaining blamed ordinals prevents isolation from removing resolved work")]
-                        ordinals.retain(|ordinal| !blamed.contains_key(ordinal));
-                    }
-                    // #[gamma::skip(unary.remove_not, tag = "timeout", reason = "retaining empty unresolved contexts prevents build recovery from making progress")]
-                    unresolved.retain(|(ordinals, _context)| !ordinals.is_empty());
                 }
 
                 if blamed.is_empty() && interactions.is_empty() {
@@ -1477,7 +1476,6 @@ impl Converger {
                         let _ = self.census.entry(ordinal).or_insert(reason);
                     }
                     for (excluded, members) in interactions {
-                        withdrawn.push(excluded);
                         let _ = self.withdrawn.insert(excluded);
                         let _ = self.abandoned.insert(excluded);
                         let _ = self.interactions.insert(excluded, members);

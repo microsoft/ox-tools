@@ -356,7 +356,6 @@ impl Environment {
         self.target_rustflags.get(&variable_component(triple)).map(String::as_str)
     }
 
-    // #[gamma::skip(fn_value.default, reason = "this adapter reads process-wide variables that parallel tests cannot safely replace; Environment::read is tested with an injected lookup")]
     /// Reads the variables this process was launched with.
     fn ambient() -> Self {
         #[cfg(any(test, feature = "internals"))]

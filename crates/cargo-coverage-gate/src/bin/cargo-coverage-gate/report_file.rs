@@ -48,6 +48,7 @@ pub(crate) trait SynchronizedWrite: io::Write {
 }
 
 impl SynchronizedWrite for fs::File {
+    // #[gamma::skip(fn_value.ok, reason = "This adapter asks the operating system to synchronize an actual owning file; in-memory writer tests cannot prove native durability.", tag = "native-boundary")]
     fn sync_all(&self) -> io::Result<()> {
         Self::sync_all(self)
     }

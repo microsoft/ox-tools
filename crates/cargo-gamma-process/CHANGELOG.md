@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-06
+
+- ✨ Features
+
+  - cargo-gamma: cover nextest test processes on macOS ([#332](https://github.com/microsoft/ox-tools/pull/332))
+
+- ✔️ Tasks
+
+  - update dependencies, build tools, actions, and Rust ([#330](https://github.com/microsoft/ox-tools/pull/330))
+
 ## [0.4.0] - 2026-10-28
 
 - ✨ Features

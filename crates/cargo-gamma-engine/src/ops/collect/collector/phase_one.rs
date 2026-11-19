@@ -111,7 +111,6 @@ impl<'ast> Visit<'ast> for PhaseOne<'_> {
     /// any of them.
     fn visit_item(&mut self, node: &'ast Item) {
         if !self.cfg.skip_gate(item_attrs(node)) {
-            self.walk.on_local_attributes(item_attrs(node));
             visit::visit_item(self, node);
         }
     }
@@ -155,8 +154,8 @@ impl<'ast> Visit<'ast> for PhaseOne<'_> {
     fn visit_stmt(&mut self, node: &'ast Stmt) {
         if !self.cfg.skip_gate(stmt_attrs(node)) {
             self.walk.on_local_attributes(stmt_attrs(node));
-            if matches!(node, Stmt::Expr(Expr::Macro(_), _)) {
-                self.walk.on_opaque_macro();
+            if let Stmt::Expr(Expr::Macro(expression), _) = node {
+                self.walk.on_macro(&expression.mac);
             }
             visit::visit_stmt(self, node);
         }
@@ -184,7 +183,7 @@ impl<'ast> Visit<'ast> for PhaseOne<'_> {
     }
 
     fn visit_item_macro(&mut self, node: &'ast syn::ItemMacro) {
-        self.walk.on_opaque_macro();
+        self.walk.on_item_macro(node);
         visit::visit_item_macro(self, node);
     }
 
@@ -194,7 +193,7 @@ impl<'ast> Visit<'ast> for PhaseOne<'_> {
     }
 
     fn visit_stmt_macro(&mut self, node: &'ast syn::StmtMacro) {
-        self.walk.on_opaque_macro();
+        self.walk.on_macro(&node.mac);
         visit::visit_stmt_macro(self, node);
     }
 
@@ -340,15 +339,23 @@ mod tests {
     }
 
     #[test]
-    fn expression_attributes_close_only_the_containing_block_local_call_proof() {
+    fn expression_and_item_attributes_close_only_the_containing_block_local_call_proof() {
         for (attribute, transparent) in [("allow(dead_code)", true), ("transform", false)] {
-            let source = format!("fn outer() {{ consume(#[{attribute}] value); }}");
-            let file = SourceFile::parse("fixture.rs", source).unwrap();
-            let Item::Fn(function) = &file.ast.items[0] else { unreachable!() };
-            let scope = vec![super::super::indexes::block_id(&function.block)];
-            let indexes = run(&file, &Selection::everything(), &CfgSet::unconditional()).unwrap();
-            assert_eq!(indexes.local_calls.scope_is_transparent(&scope), transparent, "{attribute}");
-            assert!(indexes.local_calls.scope_is_transparent(&Vec::new()));
+            for body in [format!("consume(#[{attribute}] value);"), format!("#[{attribute}] struct Local;")] {
+                let source = format!("fn outer() {{ {body} }}");
+                let file = SourceFile::parse("fixture.rs", source).unwrap();
+                let Item::Fn(function) = &file.ast.items[0] else { unreachable!() };
+                let scope = vec![super::super::indexes::block_id(&function.block)];
+                let selection = Selection::everything();
+                let cfg = CfgSet::unconditional();
+                for indexes in [
+                    run(&file, &selection, &cfg).unwrap(),
+                    super::super::indexes::indexes_in(&file.ast, &selection, &cfg),
+                ] {
+                    assert_eq!(indexes.local_calls.scope_is_transparent(&scope), transparent, "{body}");
+                    assert!(indexes.local_calls.scope_is_transparent(&Vec::new()));
+                }
+            }
         }
     }
 
@@ -466,7 +473,11 @@ mod tests {
             assert_eq!(indexes.root_imports.get("*"), Some(&None));
             assert_eq!(
                 indexes.root_imports.get("imported"),
-                Some(&Some(vec![ABSOLUTE_ROOT.into(), "external".into()]))
+                Some(&Some(vec![
+                    ABSOLUTE_ROOT.into(),
+                    super::super::indexes::EXTERNAL_ROOT.into(),
+                    "external".into()
+                ]))
             );
             assert_eq!(indexes.fields.get("kept"), Some(&false));
             assert!(!indexes.fields.contains_key("absent"));

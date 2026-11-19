@@ -30,6 +30,7 @@ pub(crate) fn run(args: &HeatherArgs) -> Result<(), AppError> {
     println!("Checking {} file(s)...", files.len());
 
     if args.fix {
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "This CLI wrapper runs native header publication; deterministic storage failure needs an injected file-publication backend.", tag = "native-boundary")]
         run_fix(&files, &config, &project_dir)?;
         Ok(())
     } else {
@@ -101,11 +102,13 @@ fn run_fix(files: &[PathBuf], config: &HeatherConfig, project_dir: &Path) -> Res
         match &result {
             CheckResult::Ok => {}
             CheckResult::Missing => {
+                // #[gamma::skip(try.propagate_to_unwrap, reason = "Writing a missing header uses native publication; a storage refusal requires the deferred file-publication backend.", tag = "native-boundary")]
                 write_fixed(path, &output)?;
                 println!("  Fixed (added header): {}", relative.display());
                 fixed_count += 1;
             }
             CheckResult::Mismatch { .. } => {
+                // #[gamma::skip(try.propagate_to_unwrap, reason = "Replacing a mismatched header uses native publication; a storage refusal requires the deferred file-publication backend.", tag = "native-boundary")]
                 write_fixed(path, &output)?;
                 println!("  Fixed (replaced header): {}", relative.display());
                 fixed_count += 1;

@@ -608,7 +608,6 @@ impl Hints {
     pub fn changes_from(&self, previous: &Self) -> HintChanges {
         let mut changes = HintChanges::default();
 
-        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
         compare_entries_or_preserved(
             &previous.mutants,
             &self.mutants,
@@ -616,7 +615,6 @@ impl Hints {
             &mut changes,
         );
 
-        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
         compare_entries_or_preserved(
             &previous.generalized.items,
             &self.generalized.items,
@@ -624,7 +622,6 @@ impl Hints {
             &mut changes,
         );
 
-        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
         compare_entries_or_preserved(
             &previous.generalized.binaries,
             &self.generalized.binaries,
@@ -638,7 +635,6 @@ impl Hints {
             let previous_reach = reach_entries(&previous.generalized);
             let current_reach = reach_entries(&self.generalized);
 
-            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
             compare_entries(&previous_reach, &current_reach, |(site, _)| site.clone(), &mut changes);
         }
 
@@ -924,7 +920,6 @@ impl Hints {
             Publication::PublishedUndurable(cause) => return Err(cause),
         }
 
-        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
         after_publication(path);
 
         match verify(path, self) {
@@ -1027,7 +1022,9 @@ fn existing_text(path: &Utf8Path) -> Result<Option<String>> {
                 },
                 |text| Ok(Some(text)),
             ),
+        // #[gamma::skip(match_guard.always_true, reason = "This adapter reads an actual existing hints file; permission/read failures need the deferred native-read backend.", tag = "native-boundary")]
         Err(cause) if cause.kind() == ErrorKind::NotFound => Ok(None),
+        // #[gamma::skip(result.err_to_ok, reason = "A non-NotFound native read refusal requires the deferred file-read backend; parsed hints policy remains mutation-tested.", tag = "native-boundary")]
         Err(cause) => Err(error!("`{path}` is already there and could not be read, so it must not be replaced").caused_by(cause)),
     }
 }
@@ -1042,7 +1039,6 @@ impl From<&Hints> for GroupedHints {
             let path = hints.mutants[start].file.clone();
             let end = hints.mutants[start..]
                 .iter()
-                // #[gamma::skip(relational.ne_to_eq, tag = "outofmemory", reason = "matching the first equal path produces an empty group and repeatedly allocates without advancing start")]
                 .position(|hint| hint.file != path)
                 .map_or(hints.mutants.len(), |offset| start + offset);
             assert!(end > start, "a file group always contains the first mutant at its start");
@@ -1128,7 +1124,6 @@ pub(super) fn merge_generalized(existing: &GeneralizedHints, incoming: &Generali
     }
     reach.extend(incoming_reach);
 
-    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
     rebuild_reach(&mut output, reach.into_iter().collect());
     Ok(output)
 }
@@ -1187,7 +1182,6 @@ fn compare_entries_or_preserved<T: PartialEq, K: Eq + core::hash::Hash>(
     if previous == current {
         changes.preserved += current.len();
     } else {
-        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
         compare_entries(previous, current, key, changes);
     }
 }

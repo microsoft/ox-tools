@@ -100,7 +100,7 @@ fn names_harness(tokens: TokenStream, harness: &str) -> bool {
     })
 }
 
-/// Renders the warning a run shows when it finds one of these.
+/// Renders optional compiler-driving test advice for library callers.
 ///
 /// Detection is heuristic, so advice describes a possible cost and suggests opting individual
 /// cases out rather than excluding entire test binaries.
@@ -130,6 +130,41 @@ mod tests {
     use serde_json::{Value, from_value, json};
 
     use super::*;
+
+    #[test]
+    #[cfg_attr(miri, ignore = "native source discovery requires filesystem access")]
+    fn nov7_native_source_reader_discovers_a_real_compiler_driving_target() {
+        let root = camino::Utf8Path::new(env!("CARGO_MANIFEST_DIR"));
+        let source = root.join("tests").join("fixtures").join("compiler_driving.rs");
+        let metadata: Metadata = from_value(json!({
+            "packages":[{
+                "name":"subject","version":"0.0.0","id":"subject","source":null,
+                "dependencies":[{
+                    "name":"trybuild","source":null,"req":"*","kind":"dev","rename":null,
+                    "optional":false,"uses_default_features":true,"features":[],"target":null,"registry":null
+                }],
+                "targets":[{
+                    "name":"compiler","kind":["test"],"crate_types":["bin"],"src_path":source,
+                    "edition":"2024","test":true,"doc":false,"doctest":false,"required-features":[]
+                }],
+                "features":{},"manifest_path":root.join("Cargo.toml"),"metadata":null,
+                "authors":[],"categories":[],"keywords":[],"edition":"2024","publish":null,
+                "license":null,"license_file":null,"readme":null,"repository":null,"homepage":null,
+                "documentation":null,"description":null,"links":null,"default_run":null,"rust_version":null
+            }],
+            "workspace_members":["subject"],"workspace_default_members":["subject"],
+            "workspace_root":root,"target_directory":root.join("target"),"resolve":null,"metadata":null,"version":1
+        }))
+        .unwrap();
+        assert_eq!(
+            compile_fail_targets(&metadata),
+            [CompileFailTarget {
+                package: "subject".into(),
+                target: "compiler".into(),
+                harness: "trybuild".into(),
+            }]
+        );
+    }
 
     #[test]
     #[cfg_attr(

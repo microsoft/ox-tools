@@ -837,7 +837,6 @@ fn classify_test_only_lines(
     let test_ranges = merge_text_ranges(test_ranges);
     let mut line_flags = vec![0_u8; line_starts.len()];
     for range in &test_ranges {
-        // #[gamma::skip(call_result.default, reason = "This call returns unit; default_after preserves the call and its side effects, then returns the identical unit value.", tag = "equivalent")]
         mark_range_lines(&mut line_flags, line_starts, *range, LINE_TEST_ONLY);
     }
     let mut test_range_cursor = test_ranges.iter().peekable();
@@ -854,7 +853,6 @@ fn classify_test_only_lines(
             test_range_cursor.next().expect("the while guard guarantees a remaining test range");
         }
         if !test_range_cursor.peek().is_some_and(|range| range.contains_range(token_range)) {
-            // #[gamma::skip(call_result.default, reason = "This call returns unit; default_after preserves the call and its side effects, then returns the identical unit value.", tag = "equivalent")]
             mark_range_lines(&mut line_flags, line_starts, token.text_range(), LINE_RELEASED);
         }
     }
@@ -893,14 +891,12 @@ fn collect_test_ranges(root: &SyntaxNode, test_attributes: &BTreeSet<String>, in
             return;
         }
         for child in node.children() {
-            // #[gamma::skip(call_result.default, reason = "This call returns unit; default_after preserves the call and its side effects, then returns the identical unit value.", tag = "equivalent")]
             collect(&child, test_attributes, &guard, possibilities, ranges);
         }
     }
 
     let mut ranges = Vec::new();
 
-    // #[gamma::skip(call_result.default, reason = "This call returns unit; default_after preserves the call and its side effects, then returns the identical unit value.", tag = "equivalent")]
     collect(
         root,
         test_attributes,
@@ -1187,7 +1183,6 @@ fn cfg_formula_possibilities_without_test(formula: &CfgFormula) -> CfgPossibilit
 
     let mut atom_indexes = BTreeMap::new();
 
-    // #[gamma::skip(call_result.default, reason = "This call returns unit; default_after preserves the call and its side effects, then returns the identical unit value.", tag = "equivalent")]
     collect_cfg_atoms(formula, &mut atom_indexes);
     if atom_indexes.len() > MAX_EXACT_CFG_ATOMS {
         return approximate_cfg_possibilities_without_test(formula);
@@ -1221,7 +1216,6 @@ fn cfg_formula_possibilities_without_test(formula: &CfgFormula) -> CfgPossibilit
             break;
         }
 
-        // #[gamma::skip(call_result.default, reason = "This call returns unit; default_after preserves the call and its side effects, then returns the identical unit value.", tag = "equivalent")]
         advance_cfg_assignment(&mut assignment);
     }
     possibilities
@@ -1244,12 +1238,10 @@ fn collect_cfg_atoms(formula: &CfgFormula, atoms: &mut BTreeMap<String, usize>) 
         }
         CfgFormula::All(parts) | CfgFormula::Any(parts) => {
             for part in parts {
-                // #[gamma::skip(call_result.default, reason = "This call returns unit; default_after preserves the call and its side effects, then returns the identical unit value.", tag = "equivalent")]
                 collect_cfg_atoms(part, atoms);
             }
         }
         CfgFormula::Not(part) => {
-            // #[gamma::skip(call_result.default, reason = "This call returns unit; default_after preserves the call and its side effects, then returns the identical unit value.", tag = "equivalent")]
             collect_cfg_atoms(part, atoms);
         }
     }
@@ -5803,6 +5795,31 @@ mod tests {
             .unwrap_err();
         assert_eq!(error_cause::<std::io::Error>(&error).kind(), std::io::ErrorKind::PermissionDenied);
         assert!(!index.files.contains_key(&gap));
+    }
+
+    #[test]
+    fn skipping_a_compiler_section_preserves_later_workspace_sections() {
+        let compiler = Path::new("a-compiler.rs");
+        let workspace = Path::new("z-workspace.rs");
+        let input = format!("{}{}", lcov_section(compiler, &[(1, 1)]), lcov_section(workspace, &[(1, 3)]));
+        let test_only = BTreeSet::new();
+        let mut classified = Vec::new();
+        let output = filter_report_with(parse_lcov(&input), None, |path| {
+            classified.push(path.to_owned());
+            if path == compiler {
+                Ok(SourceDisposition::CompilerLibrary)
+            } else {
+                assert_eq!(path, workspace);
+                Ok(SourceDisposition::Include {
+                    source_file: workspace.to_owned(),
+                    line_count: 1,
+                    test_only_lines: &test_only,
+                })
+            }
+        })
+        .unwrap();
+        assert_eq!(classified, [compiler, workspace]);
+        assert_eq!(output, "TN:\nSF:z-workspace.rs\nDA:1,3\nLF:1\nLH:1\nend_of_record\n");
     }
 
     #[test]

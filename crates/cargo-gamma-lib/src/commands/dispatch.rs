@@ -159,7 +159,6 @@ fn dispatched_with<H: Host>(
         }
     };
 
-    // #[gamma::skip(call_result.default, reason = "say_notes returns unit and this mutator still emits the same notes before replacing unit with unit")]
     say_notes(host, styler);
 
     code
@@ -203,7 +202,6 @@ fn normalize(args: impl IntoIterator<Item = impl Into<OsString> + Clone>) -> Vec
         normalized.insert(1, "run".into());
     }
 
-    // #[gamma::skip(call_result.default, reason = "normalize_list_mode returns unit and this mutator still normalizes the same arguments before replacing unit with unit")]
     normalize_list_mode(&mut normalized);
 
     normalized

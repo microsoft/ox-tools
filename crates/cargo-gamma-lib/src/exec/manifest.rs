@@ -424,7 +424,6 @@ impl Manifest {
 
             for registry in registries {
                 if let Some(table) = patch.get_mut(&registry).and_then(Item::as_table_like_mut) {
-                    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
                     anchor_dependencies(table, original, &self.within, &mut self.changed);
                 }
             }
@@ -441,7 +440,6 @@ impl Manifest {
 
                 for name in DEPENDENCY_TABLES {
                     if let Some(dependencies) = table.get_mut(name).and_then(Item::as_table_like_mut) {
-                        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
                         anchor_dependencies(dependencies, original, &self.within, &mut self.changed);
                     }
                 }
@@ -452,7 +450,6 @@ impl Manifest {
         if let Some(workspace) = self.document.get_mut("workspace").and_then(Item::as_table_like_mut)
             && let Some(dependencies) = workspace.get_mut("dependencies").and_then(Item::as_table_like_mut)
         {
-            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
             anchor_dependencies(dependencies, original, &self.within, &mut self.changed);
         }
     }
@@ -460,7 +457,6 @@ impl Manifest {
     /// Rewrites the paths in one top-level table.
     fn anchor_table(&mut self, name: &str, original: &Utf8Path) {
         if let Some(table) = self.document.get_mut(name).and_then(Item::as_table_like_mut) {
-            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
             anchor_dependencies(table, original, &self.within, &mut self.changed);
         }
     }
@@ -995,6 +991,7 @@ pub(super) fn cap_lints(root: &Utf8Path) -> Result<()> {
     let _destination = crate::paths::require_within(&path, root, "a scratch Cargo configuration")?;
 
     if let Some(parent) = path.parent() {
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "This adapter creates a native manifest parent; injected publication failures do not control mkdir without the deferred filesystem backend.", tag = "native-boundary")]
         fs::create_dir_all(parent.as_std_path()).map_err(|cause| error!("could not create `{parent}`").caused_by(cause))?;
     }
 
@@ -1071,6 +1068,12 @@ fn append_flag(flags: &mut Item) -> bool {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn portable_paths_normalize_windows_separators_on_every_host() {
+        assert_eq!(portable_path(Utf8Path::new(r"C:\workspace\member")), "C:/workspace/member");
+        assert_eq!(portable_path(Utf8Path::new("workspace/member")), "workspace/member");
+    }
 
     #[test]
     fn recovered_non_escaping_dependency_does_not_stop_later_external_path_anchoring() {

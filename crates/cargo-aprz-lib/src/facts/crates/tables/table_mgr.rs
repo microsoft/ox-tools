@@ -643,6 +643,7 @@ fn process_download(
     let entries = archive.entries().into_app_err("reading crates database archive")?;
     for entry in entries {
         let mut entry = entry?;
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "On Unix tar 0.4.46 converts path bytes through OsStr/OsString and always returns Ok; archive_entry_path separately covers supplied failures for platforms that reject non-Unicode paths.", tag = "equivalent")]
         let path = archive_entry_path(entry.path())?;
         let filename = archive_filename(&path).unwrap_or_default();
         let start = Instant::now();

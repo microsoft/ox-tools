@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-06
+
+- ✨ Features
+
+  - gamma: add ControlFlow and Ordering mutators ([#342](https://github.com/microsoft/ox-tools/pull/342))
+
+- ✔️ Tasks
+
+  - update dependencies, build tools, actions, and Rust ([#330](https://github.com/microsoft/ox-tools/pull/330))
+
+- 🧩 Miscellaneous
+
+  - Adopt cargo-gamma in Anvil and remediate campaign survivors ([#327](https://github.com/microsoft/ox-tools/pull/327))
+
 ## [0.4.0] - 2026-10-28
 
 - ✨ Features

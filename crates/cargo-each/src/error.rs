@@ -40,11 +40,13 @@
     PackageFileUtf8Error,
     InvalidPackageFileLineError,
     JsonInputConflictError,
+    JsonInputRequiredError,
     JsonLinesFileReadError,
     JsonLinesFileUtf8Error,
     JsonLineParseError,
     JsonRecordShapeError,
     JsonRecordFieldError,
+    JsonRecordWorkDirError,
     WorkspaceManifestReadError,
     WorkspaceManifestParseError,
     WorkspaceRustVersionError
@@ -150,6 +152,13 @@ pub(crate) struct JsonInputConflictError {
     pub(crate) option: String,
 }
 
+/// A JSON-only control was supplied without any JSON record input.
+#[ohno::error]
+#[display("`{option}` requires `--json-lines` or `--json-lines-file`")]
+pub(crate) struct JsonInputRequiredError {
+    pub(crate) option: String,
+}
+
 /// A `--json-lines-file` could not be read.
 #[ohno::error]
 #[display("could not read JSON Lines file `{path}`")]
@@ -191,6 +200,16 @@ pub(crate) struct JsonRecordFieldError {
     pub(crate) source: String,
     pub(crate) line: usize,
     pub(crate) key: String,
+    pub(crate) reason: String,
+}
+
+/// A selected JSON record could not provide its requested working directory.
+#[ohno::error]
+#[display("cannot derive JSON working directory from `{path}` for {source} line {line}: {reason}")]
+pub(crate) struct JsonRecordWorkDirError {
+    pub(crate) source: String,
+    pub(crate) line: usize,
+    pub(crate) path: String,
     pub(crate) reason: String,
 }
 

@@ -13,6 +13,7 @@
 /// checks on each open and write; the real identity does not determine those checks.
 #[must_use]
 #[inline]
+// #[gamma::skip(all, reason = "This adapter returns the kernel's effective user identity; host-independent tests cannot change process credentials or substitute the syscall.", tag = "native-boundary")]
 pub fn effective_user() -> u32 {
     // SAFETY: `geteuid` reads a field of the calling process's own credentials. POSIX specifies it
     // as always succeeding, it takes no arguments, touches no memory the caller owns, and is one of

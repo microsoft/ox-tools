@@ -6,6 +6,7 @@
 use core::fmt::Write as _;
 use core::time::Duration;
 use std::fs;
+use std::sync::Arc;
 use std::time::Instant;
 
 use camino::Utf8PathBuf;
@@ -23,15 +24,14 @@ use super::session::{PackageSweepCost, Phases, Session, SweepCost};
 use super::stall::Stall;
 use super::sweep::{Sweep, test_all};
 use super::test_binary::{
-    Reachability, TestBinary, TestScope, admits_target, build_packages, calibrate, oracle_packages, reaches, reaching_packages, restrict,
-    unmatched_test,
+    Reachability, TestBinary, TestScope, build_packages, calibrate, oracle_packages, reaches, reaching_packages, restrict, unmatched_test,
 };
 use super::workspace::{Workspace, campaign_base};
-use crate::discover::{CompileFailTarget, LibraryTestTarget, Plan, Survey, compile_fail_advice};
+use crate::discover::{LibraryTestTarget, Plan, Survey};
 use crate::error::error;
 use crate::model::{Mutant, Outcome};
 use crate::ops::registry::Selection;
-use crate::{HashMap, Result};
+use crate::{HashMap, HashSet, Result};
 
 /// How many groups a "not run, by …" line names before it starts counting the rest.
 const GROUP_LIMIT: usize = 5;
@@ -172,7 +172,6 @@ pub(crate) fn run_with_locks(
         Err(failure) => {
             // An incomplete campaign has no completed record to carry its partial learning.
 
-            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
             store_incomplete_learning(incremental, &killers, &base, &plan.mutants);
             failed.plan = Some(plan);
 
@@ -207,7 +206,6 @@ pub(crate) fn resume_testing(
     events.sweep_planning(&state.plan, state.session.binaries.len(), state.settings.jobs);
     let reach = Reachability::build(&state.plan, &state.session.binaries, &scope);
 
-    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
     announce_measurement(events, &state.plan, &state.session);
     let started = Instant::now();
     let sweep = Sweep {
@@ -230,7 +228,6 @@ pub(crate) fn resume_testing(
     let spent = match swept {
         Ok(spent) => spent,
         Err(failure) => {
-            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
             store_incomplete_learning(state.settings.incremental, &state.killers, &state.record.base, &state.plan.mutants);
             return Err(failure);
         }
@@ -308,7 +305,6 @@ fn store_learning(killers: &Killers, base: &camino::Utf8Path, mutants: &[crate::
 
 fn store_incomplete_learning(incremental: bool, killers: &Killers, base: &camino::Utf8Path, mutants: &[crate::model::Mutant]) {
     if incremental {
-        // #[gamma::skip(call_result.default, reason = "store_learning returns unit and this mutator retains its cache publication effects before replacing unit with unit")]
         store_learning(killers, base, mutants);
     }
 }
@@ -685,14 +681,6 @@ fn measure_with_locks(
     // full instrumented build.
     validate_test_oracle(&survey.tests, &survey.library_tests, &survey.selected, config)?;
 
-    // Said before the tree is copied, let alone built. A compile-fail target is expensive per
-    // mutant rather than once, so by the time its cost is visible in the progress display the run
-    // has already committed hours to it — and what it looks like from outside is a run that hung.
-    // Checked against the oracle and its filters so that unrelated workspace packages and targets
-    // the caller has already excluded are not presented as costs of this run.
-    // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
-    announce_compile_fail_costs(survey, config, events);
-
     let mut plan = survey.skeleton();
     let mut converger = configured_converger(config);
 
@@ -755,9 +743,8 @@ fn measure_with_locks(
         });
     }
 
-    // Build only packages whose tests can actually be selected: the rest would be compiled,
-    // baselined and never consulted. All target packages have already been instrumented, so this
-    // one convergence sees every mutation that can affect those test targets.
+    // Compiler convergence may retain wider validation roots for stable feature unification.
+    // Restrict its emitted test binaries to the oracle before measuring them below.
     let select = build_packages(&plan, &scope);
     // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
     begin_schema_build(events, converger.historical_exclusions.saturating_add(converger.census.len()));
@@ -794,25 +781,13 @@ fn measure_with_locks(
     }
 
     let (unviable, viable, not_built) = schema_build_counts(&plan.mutants);
-    // #[gamma::skip(call_result.default, reason = "finish_schema_build returns unit and this mutator retains the completion event before replacing unit with unit")]
     finish_schema_build(events, unviable, viable, not_built);
 
     // Before the baseline, so the shares `apportion` computes describe the suite that will actually
     // run. A run with nothing left to run it cannot decide anything: every mutant would survive
     // unopposed and the report would read as a total failure of the test suite rather than as the
     // filter having eaten it.
-    if config.test_lib && build.binaries.is_empty() {
-        let error = error!(
-            "`--test-lib` selected no runnable library unit-test harness; ensure a selected package \
-             has a library target with `test = true`"
-        )
-        .usage();
-        failed.plan = Some(plan);
-
-        return Err(error);
-    }
-
-    let filtered = match restrict_binaries(&mut build.binaries, config) {
+    let filtered = match restrict_binaries(&mut build.binaries, &plan, &scope, config) {
         Ok(filtered) => filtered,
         Err(error) => {
             failed.plan = Some(plan);
@@ -897,12 +872,6 @@ fn measure_with_locks(
     })
 }
 
-// #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
-fn announce_compile_fail_costs(survey: &Survey, config: &Config, events: &mut dyn Events) {
-    let targets = survey.compile_fail.as_slice();
-    warn_about_compile_fail_targets(targets, &survey.selected, config, events);
-}
-
 fn validate_synchronized_sources(work: &Workspace, digests: &HashMap<Utf8PathBuf, String>) -> Result<()> {
     for (path, expected) in digests {
         let synchronized = work.root.join(path);
@@ -938,7 +907,25 @@ fn begin_baseline(events: &mut impl Events) {
     events.begin(ACTIVE, COMPLETE, DETAIL);
 }
 
-fn restrict_binaries(binaries: &mut Vec<TestBinary>, config: &Config) -> Result<usize> {
+fn restrict_binaries(binaries: &mut Vec<TestBinary>, plan: &Plan, scope: &TestScope<'_>, config: &Config) -> Result<usize> {
+    let mutated: crate::HashSet<&str> = plan
+        .mutants
+        .iter()
+        .filter(|mutant| mutant.ordinal > 0 && mutant.outcome == Outcome::Pending)
+        .map(|mutant| &*mutant.package)
+        .collect();
+    binaries.retain(|binary| {
+        scope.admits(&binary.package) && (!scope.package_local || mutated.iter().any(|package| reaches(binary, package, plan, scope)))
+    });
+
+    if config.test_lib && binaries.is_empty() {
+        return Err(error!(
+            "`--test-lib` selected no runnable library unit-test harness; ensure a selected package \
+             has a library target with `test = true`"
+        )
+        .usage());
+    }
+
     let present = binaries.len();
     restrict(binaries, &config.include_tests, &config.exclude_tests);
     let filtered = present.saturating_sub(binaries.len());
@@ -1073,15 +1060,18 @@ fn instrument_population(
     let source_indices = plan.source_indices();
     let packages = survey.packages();
     let mut live = usize::default();
+    let mut mutated_packages = HashSet::default();
 
     // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
-    begin_population(events, packages.len());
+    begin_population(events);
     for stage in &crate::discover::stages(&packages, &survey.reach) {
         for package in stage {
             let scanned = survey.scan_excluding(Some(package), selection, &mut ordinals, exclusions)?;
 
             live = live.saturating_add(live_mutants(&scanned.mutants));
             validate_synchronized_sources(work, &scanned.digests)?;
+            // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
+            update_population(events, &mut mutated_packages, &scanned.mutants);
             plan.absorb_indexed(scanned, &source_indices);
         }
     }
@@ -1135,7 +1125,6 @@ fn instrument_compiler_population(
 ) -> Result<bool> {
     let anything_live = instrument_population(survey, selection, plan, work, events, Some(&exclusions))?;
 
-    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
     retain_compiler_exclusions(converger, plan, exclusions);
     Ok(anything_live)
 }
@@ -1149,14 +1138,31 @@ fn retain_compiler_exclusions(converger: &mut Converger, plan: &Plan, exclusions
 /// Loads and persists retained compiler evidence before instrumenting a new population.
 fn prepare_compiler_exclusions(work: &Workspace, plan: &Plan) -> Result<crate::discover::CompilerExclusions> {
     let exclusions = crate::discover::CompilerExclusions::load(work.base(), &plan.root)?;
+    // #[gamma::skip(try.propagate_to_unwrap, reason = "This wrapper publishes compiler exclusions into native campaign storage; scripting its failure requires the deferred campaign filesystem backend.", tag = "native-boundary")]
     exclusions.store(work.base())?;
     Ok(exclusions)
 }
 
-fn begin_population(events: &mut impl Events, packages: usize) {
-    let detail = crate::report::quantity(packages, "target package");
+fn begin_population(events: &mut impl Events) {
     // #[gamma::skip(all, reason = "this literal belongs to a Cargo process protocol or diagnostic boundary that cannot be isolated deterministically without replacing process-global integration state")]
-    events.begin("Mutating", "Mutated", &detail);
+    events.begin("Mutating", "Mutated", "the workspace (0 packages)");
+}
+
+fn population_mutant(mutant: &Mutant) -> bool {
+    mutant.ordinal > 0 || mutant.outcome == Outcome::CompileError
+}
+
+fn update_population(events: &mut impl Events, packages: &mut HashSet<Arc<str>>, mutants: &[Mutant]) {
+    let previous = packages.len();
+    packages.extend(
+        mutants
+            .iter()
+            .filter(|mutant| population_mutant(mutant))
+            .map(|mutant| Arc::clone(&mutant.package)),
+    );
+    if packages.len() != previous {
+        events.population_progress(packages.len());
+    }
 }
 
 fn live_mutants(mutants: &[crate::model::Mutant]) -> usize {
@@ -1164,12 +1170,18 @@ fn live_mutants(mutants: &[crate::model::Mutant]) -> usize {
 }
 
 fn finish_population(events: &mut impl Events, mutants: &[Mutant]) {
-    let population = mutants
-        .iter()
-        .filter(|mutant| mutant.ordinal > 0 || mutant.outcome == Outcome::CompileError)
-        .count();
-    let detail = format!(", {}", crate::report::quantity(population, "mutant"));
-    events.end(&detail);
+    let mut population = 0;
+    let mut packages = HashSet::default();
+    for mutant in mutants.iter().filter(|mutant| population_mutant(mutant)) {
+        population += 1;
+        let _new = packages.insert(mutant.package.as_ref());
+    }
+    let detail = format!(
+        "{}, {}",
+        crate::report::quantity(packages.len(), "package"),
+        crate::report::quantity(population, "mutant")
+    );
+    events.complete(&detail);
 }
 
 fn schema_build_counts(mutants: &[Mutant]) -> (usize, usize, usize) {
@@ -1203,30 +1215,6 @@ fn finish_schema_build(events: &mut impl Events, unviable: usize, viable: usize,
         let _ = write!(detail, ", leaving {}", crate::report::quantity(viable, "viable mutant"));
     }
     events.complete(&detail);
-}
-
-/// Says so when a test target is going to run the compiler once per mutant.
-///
-/// Named and never removed. `trybuild` asserts exact compiler output, so on a proc-macro crate such
-/// a target is often the *primary* oracle — a mutant that corrupts a diagnostic message is caught
-/// there and nowhere else. Excluding it automatically would gut the oracle for the code the
-/// technique suits best, and the mutants would come back as survivors rather than as anything
-/// visibly wrong. Whether the catch rate justifies the price is the caller's to weigh, so the run
-/// states the price and the flag and leaves the decision where it belongs.
-fn warn_about_compile_fail_targets(targets: &[CompileFailTarget], selected: &[String], config: &Config, events: &mut dyn Events) {
-    let oracle = oracle_packages(selected, config);
-    let admitted: Vec<_> = targets
-        .iter()
-        .filter(|target| {
-            (config.test_workspace || oracle.contains(&target.package))
-                && admits_target(&target.target, &config.include_tests, &config.exclude_tests)
-        })
-        .cloned()
-        .collect();
-
-    if let Some(warning) = compile_fail_advice(&admitted) {
-        events.warn(&warning);
-    }
 }
 
 /// How many packages a warning names before it starts counting them instead.
@@ -1572,10 +1560,10 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(failure.message(), "owned runtime link refusal");
-        assert_eq!(
-            from_slice::<Value>(&std::fs::read(base.join("compiler-exclusions.json")).unwrap()).unwrap(),
-            json!({"version": 1, "evidence_revision": 2, "mutants": {}})
-        );
+        let saved = from_slice::<Value>(&std::fs::read(base.join("compiler-exclusions.json")).unwrap()).unwrap();
+        assert_eq!(saved["mutants"], json!({}));
+        let reloaded = crate::discover::CompilerExclusions::load(base, &plan.root).unwrap();
+        assert_eq!(saved, to_value(reloaded).unwrap());
     }
 
     #[test]
@@ -1921,11 +1909,16 @@ mod tests {
     struct MeasurementEvents {
         recorded: Recorder,
         measurements: usize,
+        population: Vec<usize>,
         planning: Vec<(usize, usize)>,
         before_baseline: Option<Box<dyn FnOnce()>>,
     }
 
     impl Events for MeasurementEvents {
+        fn population_progress(&mut self, packages: usize) {
+            self.population.push(packages);
+        }
+
         fn phase(&mut self, verb: &str, detail: &str) {
             self.recorded.phase(verb, detail);
             if verb == "Baselining"
@@ -2054,6 +2047,7 @@ mod tests {
                 assert!(test_build.iter().any(|argument| argument == "--lib"), "{test_build:?}");
             }
             assert_eq!(events.planning, [(1, 3)]);
+            assert_eq!(events.population, [1]);
             assert!(
                 events
                     .recorded
@@ -2096,7 +2090,7 @@ mod tests {
         assert!(result.learning.is_none());
         assert_eq!(result.stuck.len(), 0);
         assert!(!events.phases.iter().any(|(verb, _)| verb == "Excluding"));
-        assert!(events.phases.iter().any(|(_, detail)| detail == ", 0 mutants"));
+        assert!(events.phases.iter().any(|(_, detail)| detail == "0 packages, 0 mutants"));
     }
 
     #[test]
@@ -3129,14 +3123,21 @@ mod tests {
         assert!(retreated.whole_workspace);
         assert_eq!(retreated.dropped, ["a"]);
 
+        let plan = oracle_plan("core");
+        let scope = capped(&[]);
         let mut none = Vec::new();
-        assert_eq!(restrict_binaries(&mut none, &Config::default()).expect("empty stays empty"), 0);
+        assert_eq!(
+            restrict_binaries(&mut none, &plan, &scope, &Config::default()).expect("empty stays empty"),
+            0
+        );
         let mut binaries = [oracle_binary("core", Some(1)), oracle_binary("core", Some(1))].to_vec();
         binaries[0].target = "keep".to_owned();
         binaries[1].target = "drop".to_owned();
         assert_eq!(
             restrict_binaries(
                 &mut binaries,
+                &plan,
+                &scope,
                 &Config {
                     exclude_tests: vec!["drop".to_owned()],
                     ..Config::default()
@@ -3147,6 +3148,123 @@ mod tests {
         );
         assert_eq!(binaries.len(), 1);
         assert_eq!(binaries[0].target, "keep");
+    }
+
+    #[test]
+    fn baseline_oracle_retains_every_local_target_only_for_pending_mutant_packages() {
+        let mut plan = oracle_plan("core");
+        for (package, ordinal, outcome) in [
+            ("unselected", 0, Outcome::Pending),
+            ("withdrawn", 2, Outcome::CompileError),
+            ("settled", 3, Outcome::Killed),
+            ("unbuilt", 4, Outcome::NotBuilt),
+            ("peer", 5, Outcome::Pending),
+        ] {
+            let mut mutant = plan.mutants[0].clone();
+            mutant.package = package.to_owned().into();
+            mutant.ordinal = ordinal;
+            mutant.outcome = outcome;
+            plan.mutants.push(mutant);
+        }
+        let selected = ["core", "app", "unselected", "withdrawn", "settled", "unbuilt", "peer"].map(str::to_owned);
+        let scope = TestScope {
+            package_local: true,
+            ..capped(&selected)
+        };
+        let mut binaries: Vec<TestBinary> = selected
+            .iter()
+            .map(|package| TestBinary {
+                target: package.clone(),
+                ..oracle_binary(package, Some(1))
+            })
+            .collect();
+        binaries[0].target = "unit".to_owned();
+        let mut integration = binaries[0].clone();
+        integration.target = "integration".to_owned();
+        binaries.push(integration);
+
+        assert_eq!(restrict_binaries(&mut binaries, &plan, &scope, &Config::default()).unwrap(), 0);
+        assert_eq!(
+            binaries
+                .iter()
+                .map(|binary| (&*binary.package, &*binary.target))
+                .collect::<Vec<_>>(),
+            [("core", "unit"), ("peer", "peer"), ("core", "integration")]
+        );
+    }
+
+    #[test]
+    fn baseline_oracle_preserves_explicit_package_and_workspace_selections() {
+        let mut plan = oracle_plan("core");
+        plan.reach.insert("app".to_owned(), core::iter::once("app".to_owned()).collect());
+        let selected = ["app".to_owned()];
+        for (scope, expected) in [
+            (capped(&selected), vec!["app"]),
+            (
+                TestScope {
+                    whole_workspace: true,
+                    ..capped(&[])
+                },
+                vec!["core", "app", "unrelated"],
+            ),
+        ] {
+            let mut binaries = ["core", "app", "unrelated"].map(|package| oracle_binary(package, Some(1))).to_vec();
+            restrict_binaries(&mut binaries, &plan, &scope, &Config::default()).unwrap();
+            assert_eq!(binaries.iter().map(|binary| binary.package.as_str()).collect::<Vec<_>>(), expected);
+        }
+    }
+
+    #[test]
+    fn baseline_oracle_filtering_precedes_test_target_selection() {
+        let plan = oracle_plan("core");
+        let selected = ["core".to_owned(), "app".to_owned()];
+        let scope = TestScope {
+            package_local: true,
+            ..capped(&selected)
+        };
+        let mut binaries = ["core", "app"].map(|package| oracle_binary(package, Some(1))).to_vec();
+        binaries[0].target = "unit".to_owned();
+        binaries[1].target = "unrelated".to_owned();
+
+        let error = restrict_binaries(
+            &mut binaries,
+            &plan,
+            &scope,
+            &Config {
+                include_tests: vec!["unrelated".to_owned()],
+                ..Config::default()
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("left no test target to decide a verdict"), "{error}");
+    }
+
+    #[test]
+    fn baseline_oracle_does_not_accept_an_unrelated_library_as_the_selected_harness() {
+        let plan = oracle_plan("core");
+        let selected = ["core".to_owned(), "app".to_owned()];
+        let scope = TestScope {
+            package_local: true,
+            ..capped(&selected)
+        };
+        let mut binaries = vec![oracle_binary("app", Some(1))];
+
+        let error = restrict_binaries(
+            &mut binaries,
+            &plan,
+            &scope,
+            &Config {
+                test_lib: true,
+                ..Config::default()
+            },
+        )
+        .unwrap_err();
+
+        assert!(
+            error.to_string().contains("selected no runnable library unit-test harness"),
+            "{error}"
+        );
     }
 
     /// A baseline with the given elapsed time and quiet period, and nothing else measured.
@@ -3358,15 +3476,15 @@ mod tests {
         assert_eq!(live_mutants(&mutants), 2);
 
         let mut events = Recorder::default();
-        begin_population(&mut events, 12);
+        begin_population(&mut events);
         finish_population(&mut events, &mutants);
         begin_schema_build(&mut events, 0);
         finish_schema_build(&mut events, 1, 2, 0);
         assert_eq!(
             events.phases,
             [
-                ("Mutating".to_owned(), "12 target packages".to_owned()),
-                (String::new(), ", 3 mutants".to_owned()),
+                ("Mutating".to_owned(), "the workspace (0 packages)".to_owned()),
+                (String::new(), "1 package, 3 mutants".to_owned()),
                 ("Excluding".to_owned(), "unviable mutants".to_owned()),
                 (String::new(), "1 unviable mutant, leaving 2 viable mutants".to_owned()),
             ]
@@ -3396,8 +3514,83 @@ mod tests {
         assert_eq!(
             events.phases,
             [
-                (String::new(), ", 3 mutants".to_owned()),
+                (String::new(), "1 package, 3 mutants".to_owned()),
                 (String::new(), "2 unviable mutants, leaving 1 viable mutant".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn population_package_progress_counts_only_distinct_selected_owners_and_matches_completion() {
+        #[derive(Default)]
+        struct PopulationEvents {
+            recorded: Recorder,
+            packages: Vec<usize>,
+        }
+
+        impl Events for PopulationEvents {
+            fn phase(&mut self, verb: &str, detail: &str) {
+                self.recorded.phase(verb, detail);
+            }
+
+            fn mutant(&mut self, mutant: &Mutant) {
+                self.recorded.mutant(mutant);
+            }
+
+            fn population_progress(&mut self, packages: usize) {
+                self.packages.push(packages);
+            }
+        }
+
+        let mut live = [stuck_mutant(1, "first", "f"), stuck_mutant(2, "second", "g")];
+        for mutant in &mut live {
+            mutant.package = "owner".into();
+            mutant.outcome = Outcome::Pending;
+        }
+        let mut historical = stuck_mutant(0, "historical", "h");
+        historical.package = "peer".into();
+        historical.outcome = Outcome::CompileError;
+        let inactive: Vec<Mutant> = [Outcome::Pending, Outcome::Killed, Outcome::Ignored]
+            .into_iter()
+            .map(|outcome| Mutant {
+                package: "inactive".into(),
+                outcome,
+                ..stuck_mutant(0, "inactive", "i")
+            })
+            .collect();
+        let mut events = PopulationEvents::default();
+        let mut packages = HashSet::default();
+        begin_population(&mut events);
+        update_population(&mut events, &mut packages, &inactive);
+        update_population(&mut events, &mut packages, &live);
+        update_population(&mut events, &mut packages, &live);
+        update_population(&mut events, &mut packages, std::slice::from_ref(&historical));
+        let mut mutants = live.to_vec();
+        mutants.push(historical);
+        mutants.extend(inactive.clone());
+        finish_population(&mut events, &mutants);
+
+        assert_eq!(events.packages, [1, 2]);
+        assert_eq!(packages.len(), 2);
+        assert_eq!(
+            events.recorded.phases,
+            [
+                ("Mutating".to_owned(), "the workspace (0 packages)".to_owned()),
+                (String::new(), "2 packages, 3 mutants".to_owned()),
+            ]
+        );
+
+        let mut events = PopulationEvents::default();
+        let mut packages = HashSet::default();
+        begin_population(&mut events);
+        update_population(&mut events, &mut packages, &inactive);
+        finish_population(&mut events, &inactive);
+        assert_eq!(events.packages, Vec::<usize>::new());
+        assert_eq!(
+            events.recorded.phases,
+            [
+                ("Mutating".to_owned(), "the workspace (0 packages)".to_owned()),
+                (String::new(), "0 packages, 0 mutants".to_owned()),
             ]
         );
     }
@@ -3422,13 +3615,13 @@ mod tests {
         let mut events = Labels::default();
         begin_schema_build(&mut events, 0);
         begin_preflight(&mut events);
-        begin_population(&mut events, 2);
+        begin_population(&mut events);
         assert_eq!(
             events.0,
             [
                 ("Excluding".to_owned(), "Excluded".to_owned(), "unviable mutants".to_owned()),
                 ("Validating".to_owned(), "Validated".to_owned(), "the workspace".to_owned()),
-                ("Mutating".to_owned(), "Mutated".to_owned(), "2 target packages".to_owned()),
+                ("Mutating".to_owned(), "Mutated".to_owned(), "the workspace (0 packages)".to_owned()),
             ]
         );
     }
@@ -3825,136 +4018,6 @@ mod tests {
         assert!(settled.measuring());
         assert!(!settled.enforcing());
         assert_eq!(note, None);
-    }
-
-    fn target_in(package: &str, name: &str) -> CompileFailTarget {
-        CompileFailTarget {
-            package: package.to_owned(),
-            target: name.to_owned(),
-            harness: "trybuild".to_owned(),
-        }
-    }
-
-    fn target(name: &str) -> CompileFailTarget {
-        target_in("routerama", name)
-    }
-
-    fn config_with(exclude: &[&str]) -> Config {
-        Config {
-            exclude_tests: exclude.iter().map(|pattern| (*pattern).to_owned()).collect(),
-            ..Config::default()
-        }
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn a_compile_fail_target_is_named_before_anything_is_built() {
-        let mut events = Recorder::default();
-
-        warn_about_compile_fail_targets(
-            &[target("router_compile_fail")],
-            &["routerama".to_owned()],
-            &config_with(&[]),
-            &mut events,
-        );
-
-        let [warning] = events.warnings.as_slice() else {
-            panic!("one admitted target is one warning, got {:?}", events.warnings);
-        };
-
-        assert_eq!(
-            warning,
-            "1 test binary may have test cases that invoke the Rust compiler, which may lead to very long mutation test runs:\n  \
-             `router_compile_fail` in routerama (trybuild)\n\
-             Consider omitting the specific test cases using `--skip` harness filters."
-        );
-    }
-
-    /// A caller who has already acted on the advice must not be given it again, or the warning
-    /// becomes noise that is scrolled past on the run where it matters.
-    #[test]
-    fn a_target_already_excluded_is_not_warned_about() {
-        let mut events = Recorder::default();
-
-        warn_about_compile_fail_targets(
-            &[target("router_compile_fail")],
-            &["routerama".to_owned()],
-            &config_with(&["router_compile_fail"]),
-            &mut events,
-        );
-
-        assert!(events.warnings.is_empty(), "{:?}", events.warnings);
-    }
-
-    /// A glob is how these are excluded in practice, and it has to count as having acted.
-    #[test]
-    fn a_target_excluded_by_a_glob_is_not_warned_about() {
-        let mut events = Recorder::default();
-
-        warn_about_compile_fail_targets(
-            &[target("router_compile_fail")],
-            &["routerama".to_owned()],
-            &config_with(&["*_compile_fail"]),
-            &mut events,
-        );
-
-        assert!(events.warnings.is_empty(), "{:?}", events.warnings);
-    }
-
-    /// Targets in unrelated workspace packages are not part of the default oracle and must not
-    /// prompt the caller to exclude tests that this run will never execute.
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn a_compile_fail_target_outside_the_oracle_is_not_warned_about() {
-        let mut events = Recorder::default();
-
-        warn_about_compile_fail_targets(
-            &[target("router_compile_fail"), target_in("internity", "compile_fail")],
-            &["routerama".to_owned()],
-            &config_with(&[]),
-            &mut events,
-        );
-
-        let [warning] = events.warnings.as_slice() else {
-            panic!("only the selected package should produce a warning, got {:?}", events.warnings);
-        };
-
-        assert!(warning.contains("router_compile_fail"), "{warning}");
-        assert!(!warning.contains("internity"), "{warning}");
-        assert!(!warning.contains("`compile_fail` in internity"), "{warning}");
-    }
-
-    #[test]
-    fn whole_workspace_oracles_warn_about_compile_fail_targets_outside_the_selected_packages() {
-        let mut events = Recorder::default();
-        warn_about_compile_fail_targets(
-            &[target_in("external", "external_compile_fail")],
-            &["routerama".to_owned()],
-            &Config {
-                test_workspace: true,
-                ..Config::default()
-            },
-            &mut events,
-        );
-        let [warning] = events.warnings.as_slice() else {
-            panic!("a workspace-wide oracle must include the external compile-fail target");
-        };
-        assert!(warning.contains("`external_compile_fail` in external"), "{warning}");
-        assert!(
-            warning.contains("Consider omitting the specific test cases using `--skip` harness filters."),
-            "{warning}"
-        );
-        assert!(!warning.contains("--exclude-test"), "{warning}");
-    }
-
-    /// The ordinary case is a workspace with no such target at all, which must say nothing.
-    #[test]
-    fn a_workspace_without_one_is_silent() {
-        let mut events = Recorder::default();
-
-        warn_about_compile_fail_targets(&[], &["routerama".to_owned()], &config_with(&[]), &mut events);
-
-        assert!(events.warnings.is_empty(), "{:?}", events.warnings);
     }
 
     /// A workspace where `app` links `core`, and both are their own reach.

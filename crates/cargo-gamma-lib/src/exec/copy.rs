@@ -183,7 +183,6 @@ pub(super) fn copy_tree_with(from: &Utf8Path, to: &Utf8Path, skip: &Utf8Path, op
                 // file missing from the copy produces a build failure naming something unrelated,
                 // which is far harder to act on than the permission error that caused it.
                 Err(cause) => {
-                    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
                     record(failure, error!("could not read the source tree").caused_by(cause));
 
                     return WalkState::Quit;
@@ -191,7 +190,6 @@ pub(super) fn copy_tree_with(from: &Utf8Path, to: &Utf8Path, skip: &Utf8Path, op
             };
 
             let Some(source) = Utf8Path::from_path(entry.path()) else {
-                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
                 record(
                     failure,
                     error!("`{}` is not valid UTF-8 and cannot be copied", entry.path().display()),
@@ -218,7 +216,6 @@ pub(super) fn copy_tree_with(from: &Utf8Path, to: &Utf8Path, skip: &Utf8Path, op
             match copy_entry(source, &destination.join(relative), &reflinks) {
                 Ok(()) => WalkState::Continue,
                 Err(cause) => {
-                    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
                     record(failure, cause);
 
                     WalkState::Quit
@@ -439,22 +436,20 @@ fn copy_symlink(source: &Utf8Path, destination: &Utf8Path) -> Result<()> {
     copy_symlink_with(source, destination, create_symlink)
 }
 
+#[cfg(unix)]
+pub(super) fn create_symlink(target: &Path, destination: &Path, _: bool) -> io::Result<()> {
+    std::os::unix::fs::symlink(target, destination)
+}
+
+#[cfg(windows)]
 pub(super) fn create_symlink(target: &Path, destination: &Path, directory: bool) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        let _ = directory;
-        std::os::unix::fs::symlink(target, destination)
-    }
-    #[cfg(windows)]
-    {
-        create_windows_symlink(
-            target,
-            destination,
-            directory,
-            |target, destination| std::os::windows::fs::symlink_dir(target, destination),
-            |target, destination| std::os::windows::fs::symlink_file(target, destination),
-        )
-    }
+    create_windows_symlink(
+        target,
+        destination,
+        directory,
+        |target, destination| std::os::windows::fs::symlink_dir(target, destination),
+        |target, destination| std::os::windows::fs::symlink_file(target, destination),
+    )
 }
 
 #[cfg(windows)]
@@ -541,7 +536,6 @@ const fn reflink_supported() -> bool {
 /// `/var/folders` once they pass three days, so a scratch tree cloned from an old checkout can
 /// have files deleted out from under a run that is still using them.
 fn freshen(destination: &Utf8Path) {
-    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
     freshen_at(destination, SystemTime::now());
 }
 
@@ -714,7 +708,7 @@ mod final_survivor_tests {
 
     #[test]
     fn a_native_unrepresentable_source_name_fails_the_actual_parallel_copy_without_discarding_prior_destination_bytes() {
-        let directory = tempfile::tempdir_in(".").unwrap();
+        let directory = tempfile::tempdir().unwrap();
         let root = Utf8Path::from_path(directory.path()).unwrap();
         let source = root.join("source");
         let destination = root.join("destination");
@@ -737,6 +731,8 @@ mod final_survivor_tests {
             fs::read_to_string(destination.join("preserved")).unwrap(),
             "prior destination bytes"
         );
+        fs::remove_file(&path).unwrap();
+        directory.close().unwrap();
     }
 
     #[test]

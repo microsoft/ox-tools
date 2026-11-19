@@ -61,7 +61,6 @@ fn physical_with_filesystem(
                         Ok(symlink) => symlink,
 
                         Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => {
-                            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
                             append(
                                 &mut resolved,
                                 core::iter::once(*component).chain(components[at + 1..].iter().copied()),
@@ -100,6 +99,7 @@ fn physical_with_filesystem(
                     for remaining in &components[at + 1..] {
                         next.push(remaining.as_str());
                     }
+                    // #[gamma::skip(try.propagate_to_unwrap, reason = "Resolving a relative native symlink target can require the process current directory; scripting its failure needs the deferred complete path-resolution backend.", tag = "native-boundary")]
                     pending = absolute(&next)?;
                     restarted = true;
 
@@ -205,7 +205,6 @@ fn lexical(path: &Utf8Path) -> Result<Utf8PathBuf> {
     let absolute = absolute(path)?;
     let mut normalized = Utf8PathBuf::new();
 
-    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
     append(&mut normalized, absolute.components());
 
     Ok(normalized)
