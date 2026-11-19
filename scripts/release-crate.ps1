@@ -229,8 +229,17 @@ function Get-DirectDependents {
     )
 
     $rootManifest = Join-Path $repoRoot "Cargo.toml"
-    $metadataJson = cargo metadata --format-version=1 --no-deps --manifest-path $rootManifest
-    if ($LASTEXITCODE -ne 0) {
+    $metadataJson = $null
+    $metadataExitCode = 1
+    $previousNativeErrorPreference = $PSNativeCommandUseErrorActionPreference
+    try {
+        $PSNativeCommandUseErrorActionPreference = $false
+        $metadataJson = cargo metadata --format-version=1 --no-deps --manifest-path $rootManifest
+        $metadataExitCode = $LASTEXITCODE
+    } finally {
+        $PSNativeCommandUseErrorActionPreference = $previousNativeErrorPreference
+    }
+    if ($metadataExitCode -ne 0) {
         Write-Warning "Failed to run 'cargo metadata'. Skipping dependent crate check."
         return @()
     }
@@ -744,8 +753,15 @@ function Update-Readme {
     Write-Host "📝 Updating README.md..."
     Push-Location $crateFolder
     try {
-        $result = cargo doc2readme --lib --template ../README.j2 2>&1
-        if ($LASTEXITCODE -ne 0) {
+        $previousNativeErrorPreference = $PSNativeCommandUseErrorActionPreference
+        try {
+            $PSNativeCommandUseErrorActionPreference = $false
+            $result = cargo doc2readme --lib --template ../README.j2 2>&1
+            $readmeExitCode = $LASTEXITCODE
+        } finally {
+            $PSNativeCommandUseErrorActionPreference = $previousNativeErrorPreference
+        }
+        if ($readmeExitCode -ne 0) {
             Write-Warning "Failed to generate README: $result"
         } else {
             Write-Host "✅ README.md updated."

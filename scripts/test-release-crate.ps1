@@ -100,7 +100,31 @@ try {
     & $releaseScript single -Version 0.2.0
     Assert-Contains (Get-Content (Join-Path $singleFolder 'CHANGELOG.md') -Raw) 'sole unreleased change'
 
-    Write-Host 'Release backfill checks passed (first tag, semantic bounds, stability, unchanged manifests and README).'
+    $fakeBin = Join-Path $fixture 'fake-bin'
+    $null = New-Item -ItemType Directory -Path $fakeBin
+    $realCargo = (Get-Command cargo -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+    $escapedCargo = $realCargo.Replace("'", "''")
+    @"
+if (`$args[0] -in @('metadata', 'doc2readme')) {
+    [Console]::Error.WriteLine('intentional optional command failure')
+    exit 23
+}
+& '$escapedCargo' @args
+exit `$LASTEXITCODE
+"@ | Set-Content (Join-Path $fakeBin 'cargo.ps1')
+    "exit 0" | Set-Content (Join-Path $fakeBin 'cargo-doc2readme.ps1')
+    'release readme template' | Set-Content (Join-Path $fixture 'crates/README.j2')
+    $priorPath = $env:PATH
+    try {
+        $env:PATH = "$fakeBin$([IO.Path]::PathSeparator)$priorPath"
+        $bestEffortOutput = & $releaseScript single -Version 0.3.0 *>&1 | Out-String
+    } finally {
+        $env:PATH = $priorPath
+    }
+    Assert-Contains $bestEffortOutput "Failed to generate README"
+    Assert-Contains $bestEffortOutput "Failed to run 'cargo metadata'"
+
+    Write-Host 'Release checks passed (backfill bounds, single-result handling, and best-effort native failures).'
 }
 finally {
     Pop-Location

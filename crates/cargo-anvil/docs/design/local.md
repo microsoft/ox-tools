@@ -202,12 +202,14 @@ Clean results live under `target/anvil/impact/`:
 Use the include files, not an empty `impact.json`, to determine the selected
 scope. Delete `target/anvil/impact/` to force clean recomputation.
 
-Dirty local results use `target/anvil/impact-dirty/` with the same selection
-files and a fresh current snapshot. An invocation replaces that directory
-before analysis. Checks in the same `just` invocation share those selections;
-they do not repeat snapshot or impact commands. Clean runs neither read nor
-modify dirty selections. The dirty directory is never an artifact input or a
-fallback for consume mode.
+Dirty local results use immutable generation directories under
+`target/anvil/impact-dirty/` with the same selection files and a fresh current
+snapshot. An `active` selector points to the latest completed generation.
+Checks in the same `just` invocation share those selections; they do not repeat
+snapshot or impact commands. Separate concurrent invocations do not delete or
+overwrite each other's generation. Clean runs remove the active selector
+without reading or modifying dirty generations. The dirty directory is never
+an artifact input or a fallback for consume mode.
 
 In consume mode, `ANVIL_IMPACT_INPUT_DIR` selects another read-only cache
 directory, using an absolute path or a path relative to the recipe's working

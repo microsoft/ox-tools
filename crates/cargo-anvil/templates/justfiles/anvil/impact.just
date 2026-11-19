@@ -48,16 +48,21 @@
 #     it under target/anvil/impact/snapshots/ and reuses it while fresh.
 #   * current.json   -- snapshot of the working tree. Cheap. Keyed on
 #     "<HEAD sha> <cargo-delta-version>" (current.key) for a clean tree.
-#     Dirty local runs always snapshot the files on disk into
-#     target/anvil/impact-dirty/snapshots/ and write no current key. Tool
-#     upgrades invalidate cached clean snapshots so incompatible formats are
-#     never reused. If .delta.toml itself is dirty, the baseline is also
-#     rebuilt in the dirty directory so snapshots always use one config.
+#     Dirty local runs always snapshot the files on disk into a unique
+#     target/anvil/impact-dirty/<generation>/snapshots/ directory and write no
+#     current key. The completed generation is published through the
+#     target/anvil/impact-dirty/active selector. Generations remain immutable
+#     so concurrent invocations cannot delete each other's producer or
+#     consumer inputs. Tool upgrades invalidate cached clean snapshots so
+#     incompatible formats are never reused. If .delta.toml itself is dirty,
+#     the baseline is also rebuilt in the dirty generation so snapshots always
+#     use one config.
 
 # Snapshot the base ref and working tree for impact analysis.
 [script("pwsh", "-NoProfile")]
-_anvil-impact-snapshot:
+_anvil-impact-snapshot impact_dir="":
     $ErrorActionPreference = 'Stop'
+    $impactDirArgument = '{{ impact_dir }}'
     # Exit 2 (not the generic 1 used for operational failures below) marks
     # *invalid caller configuration*: an unrecognized ANVIL_IMPACT value is a
     # mistake in how the recipe was invoked, not a runtime failure of the work
@@ -84,23 +89,17 @@ _anvil-impact-snapshot:
     }
 
     $cleanImpactDir = 'target/anvil/impact'
-    $dirtyImpactDir = 'target/anvil/impact-dirty'
-    $dirtyActiveMarker = Join-Path $dirtyImpactDir 'active'
-    $impactDir = if ($dirty) { $dirtyImpactDir } else { $cleanImpactDir }
-    if ($dirty) {
-        # Dirty filesystem contents are the cache identity, so every invocation
-        # starts from an empty isolated output instead of reusing stale data.
-        if (Test-Path -LiteralPath $dirtyImpactDir) {
-            Remove-Item -LiteralPath $dirtyImpactDir -Recurse -Force -ErrorAction Stop
-        }
-        [System.IO.Directory]::CreateDirectory($dirtyImpactDir) | Out-Null
-        New-Item -ItemType File -Path $dirtyActiveMarker -Force | Out-Null
-    } elseif (Test-Path -LiteralPath $dirtyActiveMarker) {
-        Remove-Item -LiteralPath $dirtyActiveMarker -Force -ErrorAction Stop
+    $impactDir = if (-not [string]::IsNullOrWhiteSpace($impactDirArgument)) {
+        $impactDirArgument
+    } elseif ($dirty) {
+        Join-Path 'target/anvil/impact-dirty' ([System.Guid]::NewGuid().ToString('N'))
+    } else {
+        $cleanImpactDir
     }
+    [System.IO.Directory]::CreateDirectory($impactDir) | Out-Null
     $deltaConfigDirty = $dirty -and (@(git status --porcelain -- .delta.toml | Where-Object { $_ }).Count -gt 0)
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    $baselineImpactDir = if ($deltaConfigDirty) { $dirtyImpactDir } else { $cleanImpactDir }
+    $baselineImpactDir = if ($deltaConfigDirty) { $impactDir } else { $cleanImpactDir }
     $baselineSnapDir = Join-Path $baselineImpactDir 'snapshots'
     $snapDir = Join-Path $impactDir 'snapshots'
     $baselineJson = Join-Path $baselineSnapDir 'baseline.json'
@@ -387,7 +386,7 @@ _anvil-impact-snapshot:
 # Compute the impact set and write its clean cache or dirty local output.
 [group("anvil")]
 [script("pwsh", "-NoProfile")]
-anvil-impact: _anvil-impact-snapshot
+anvil-impact:
     $ErrorActionPreference = 'Stop'
     # Exit 2 = invalid caller configuration (bad ANVIL_IMPACT), distinct from
     # the generic 1 used for operational failures -- see _anvil-impact-snapshot.
@@ -423,7 +422,26 @@ anvil-impact: _anvil-impact-snapshot
         exit 1
     }
     $cleanImpactDir = 'target/anvil/impact'
-    $impactDir = if ($dirty) { 'target/anvil/impact-dirty' } else { $cleanImpactDir }
+    $dirtyImpactRoot = 'target/anvil/impact-dirty'
+    $impactDir = if ($dirty) {
+        Join-Path $dirtyImpactRoot ([System.Guid]::NewGuid().ToString('N'))
+    } else {
+        $cleanImpactDir
+    }
+    $dirtyActiveMarker = Join-Path $dirtyImpactRoot 'active'
+    if (-not $dirty -and (Test-Path -LiteralPath $dirtyActiveMarker -PathType Leaf)) {
+        Remove-Item -LiteralPath $dirtyActiveMarker -Force -ErrorAction Stop
+    }
+    & "{{ just_executable() }}" _anvil-impact-snapshot $impactDir
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    if ($dirty) {
+        $publishDirty = {
+            [System.IO.Directory]::CreateDirectory($dirtyImpactRoot) | Out-Null
+            $pendingMarker = Join-Path $dirtyImpactRoot "active-$([System.Guid]::NewGuid().ToString('N'))"
+            Set-Content -LiteralPath $pendingMarker -Value $impactDir -Encoding UTF8 -NoNewline
+            [System.IO.File]::Move($pendingMarker, $dirtyActiveMarker, $true)
+        }
+    }
     $deltaConfigDirty = $dirty -and (@(git status --porcelain -- .delta.toml | Where-Object { $_ }).Count -gt 0)
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     $baselineImpactDir = if ($deltaConfigDirty) { $impactDir } else { $cleanImpactDir }
@@ -472,6 +490,7 @@ anvil-impact: _anvil-impact-snapshot
             Set-Content -LiteralPath $impactStateFile -Value $wantState -Encoding UTF8 -NoNewline
         }
         Remove-Item -LiteralPath $doctestPackages -ErrorAction SilentlyContinue
+        if ($dirty) { & $publishDirty }
         exit 0
     }
 
@@ -505,6 +524,8 @@ anvil-impact: _anvil-impact-snapshot
     }
     if (-not $dirty) {
         Set-Content -LiteralPath $impactStateFile -Value $wantState -Encoding UTF8 -NoNewline
+    } else {
+        & $publishDirty
     }
 
 # _anvil-impact-format: turns a cargo-delta impact report into the
@@ -628,8 +649,32 @@ _anvil-impact-doctest-packages:
     } elseif ($env:ANVIL_IMPACT -eq 'consume') {
         $inputDir = 'target/anvil/impact'
     } else {
-        $inputDir = if (Test-Path -LiteralPath 'target/anvil/impact-dirty/active' -PathType Leaf) {
-            'target/anvil/impact-dirty'
+        $activeMarker = 'target/anvil/impact-dirty/active'
+        $inputDir = if (Test-Path -LiteralPath $activeMarker -PathType Leaf) {
+            # Permit a concurrent publisher to replace the selector while the
+            # reader retains the generation path. The generation itself is
+            # immutable, so this file is the only shared object.
+            $markerStream = [System.IO.File]::Open(
+                $activeMarker,
+                [System.IO.FileMode]::Open,
+                [System.IO.FileAccess]::Read,
+                ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete)
+            )
+            try {
+                $markerReader = [System.IO.StreamReader]::new($markerStream)
+                try {
+                    $activeDir = $markerReader.ReadToEnd().Trim()
+                } finally {
+                    $markerReader.Dispose()
+                }
+            } finally {
+                $markerStream.Dispose()
+            }
+            if ([string]::IsNullOrWhiteSpace($activeDir)) {
+                Write-Error "anvil-impact: dirty impact selector is empty ($activeMarker)"
+                exit 1
+            }
+            $activeDir
         } else {
             'target/anvil/impact'
         }
@@ -692,8 +737,31 @@ _anvil-impact-include tier:
     if ($env:ANVIL_IMPACT -eq 'consume') {
         $inputDir = if ($env:ANVIL_IMPACT_INPUT_DIR) { $env:ANVIL_IMPACT_INPUT_DIR } else { 'target/anvil/impact' }
     } else {
-        $inputDir = if (Test-Path -LiteralPath 'target/anvil/impact-dirty/active' -PathType Leaf) {
-            'target/anvil/impact-dirty'
+        $activeMarker = 'target/anvil/impact-dirty/active'
+        $inputDir = if (Test-Path -LiteralPath $activeMarker -PathType Leaf) {
+            # Keep replacement of this selector compatible with concurrent
+            # readers on Windows; the selected generation is never modified.
+            $markerStream = [System.IO.File]::Open(
+                $activeMarker,
+                [System.IO.FileMode]::Open,
+                [System.IO.FileAccess]::Read,
+                ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete)
+            )
+            try {
+                $markerReader = [System.IO.StreamReader]::new($markerStream)
+                try {
+                    $activeDir = $markerReader.ReadToEnd().Trim()
+                } finally {
+                    $markerReader.Dispose()
+                }
+            } finally {
+                $markerStream.Dispose()
+            }
+            if ([string]::IsNullOrWhiteSpace($activeDir)) {
+                Write-Error "anvil-impact: dirty impact selector is empty ($activeMarker)"
+                exit 1
+            }
+            $activeDir
         } else {
             'target/anvil/impact'
         }

@@ -292,7 +292,7 @@ fn run_impact(root: &Path) -> String {
     assert!(out.status.success(), "just anvil-impact failed:\n{combined}");
     let dirty = !git_stdout(root, &["status", "--porcelain", "--", ".", ":(exclude)target/"]).is_empty();
     let impact_dir = if dirty {
-        root.join("target/anvil/impact-dirty")
+        active_dirty_dir(root)
     } else {
         root.join("target/anvil/impact")
     };
@@ -305,6 +305,14 @@ fn run_impact(root: &Path) -> String {
         );
     }
     combined
+}
+
+/// Resolve the immutable generation published by a completed dirty impact.
+fn active_dirty_dir(root: &Path) -> PathBuf {
+    let marker = root.join("target/anvil/impact-dirty/active");
+    let selected =
+        fs::read_to_string(&marker).unwrap_or_else(|error| panic!("failed to read dirty selector {}: {error}", marker.display()));
+    root.join(selected.trim())
 }
 
 /// Read one generated impact selection for all package tiers.
@@ -863,7 +871,7 @@ fn dirty_filesystem_changes_match_committed_impact_selections() {
             dirty.contains("using fresh impact") && dirty.contains("snapshotting dirty working tree"),
             "scenario {scenario} must use a fresh filesystem snapshot:\n{dirty}"
         );
-        let dirty_selections = impact_selections(&root.join("target/anvil/impact-dirty"));
+        let dirty_selections = impact_selections(&active_dirty_dir(root));
         for (tier, expected) in ["modified", "affected", "required"].into_iter().zip(&dirty_selections) {
             let include = just_cmd(root, &["_anvil-impact-include", tier]).output().unwrap();
             let combined = format!(
@@ -937,7 +945,7 @@ fn dirty_impact_preserves_clean_cache_until_tree_is_clean_again() {
             "dirty run must not modify clean cache file {file}"
         );
     }
-    let dirty_selections = impact_selections(&root.join("target/anvil/impact-dirty"));
+    let dirty_selections = impact_selections(&active_dirty_dir(root));
     assert!(
         dirty_selections[1].contains("--package beta@"),
         "dirty beta edit must reach the affected selection: {dirty_selections:?}"
@@ -980,7 +988,7 @@ fn impact_dirty_tree_fails_when_base_cannot_resolve() {
         "dirty failure must retain base-ref recovery guidance:\n{combined}"
     );
     assert!(
-        !root.join("target/anvil/impact-dirty/include_affected.txt").exists(),
+        !root.join("target/anvil/impact-dirty/active").exists(),
         "a failed dirty calculation must not publish a partial selection"
     );
 }
@@ -1028,6 +1036,63 @@ fn dirty_impact_is_computed_once_for_multiple_dependent_checks() {
         (snapshots, impacts),
         (1, 1),
         "one Just invocation must calculate one dirty snapshot and one impact report: {calls:?}"
+    );
+}
+
+#[test]
+#[serial]
+fn concurrent_dirty_invocations_publish_immutable_generations() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = workspace();
+    let root = tmp.path();
+    run_impact(root);
+    write(
+        &root.join("crates/beta/src/lib.rs"),
+        "pub fn b() {}\npub fn concurrent_dirty() {}\n",
+    );
+
+    let first = just_cmd(root, &["anvil-impact"]).spawn().unwrap();
+    let second = just_cmd(root, &["anvil-impact"]).spawn().unwrap();
+    let first = first.wait_with_output().unwrap();
+    let second = second.wait_with_output().unwrap();
+    for output in [&first, &second] {
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.status.success(), "concurrent dirty impact failed:\n{combined}");
+    }
+
+    let dirty_root = root.join("target/anvil/impact-dirty");
+    let generations: Vec<_> = fs::read_dir(&dirty_root)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.is_dir())
+        .collect();
+    assert_eq!(
+        generations.len(),
+        2,
+        "each concurrent producer must retain its own immutable generation: {generations:?}"
+    );
+    for generation in generations {
+        let selection = impact_selections(&generation);
+        assert_eq!(
+            selection,
+            [
+                "--package alpha@0.1.0 --package beta@0.1.0".to_owned(),
+                "--package alpha@0.1.0 --package beta@0.1.0".to_owned(),
+                "--package alpha@0.1.0 --package beta@0.1.0".to_owned(),
+            ],
+            "concurrent generation was incomplete at {}",
+            generation.display()
+        );
+    }
+    assert!(
+        active_dirty_dir(root).join("include_required.txt").is_file(),
+        "the active selector must point to a complete generation"
     );
 }
 
