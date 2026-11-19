@@ -515,7 +515,9 @@ function Write-BackfilledChangelogVersion {
         [string]$prBaseUrl
     )
 
-    $tags = Invoke-GitCommand -Command "tag --list `"$crateName-v*`"" -ErrorMessage "Failed to retrieve git tags"
+    $tags = @(
+        Invoke-GitCommand -Command "tag --list `"$crateName-v*`"" -ErrorMessage "Failed to retrieve git tags"
+    )
     $releaseTags = @(
         $tags |
             Where-Object { $_ -match "^${crateName}-v\d+\.\d+\.\d+$" } |
@@ -584,7 +586,9 @@ function Write-Changelog {
         [string]$prBaseUrl
     )
 
-    $tags = Invoke-GitCommand -Command "tag --list `"$crateName-v*`"" -ErrorMessage "Failed to retrieve git tags"
+    $tags = @(
+        Invoke-GitCommand -Command "tag --list `"$crateName-v*`"" -ErrorMessage "Failed to retrieve git tags"
+    )
     $latestTag = $null
     $initialCommit = $null
     $previousReleaseCommit = $null
@@ -633,11 +637,11 @@ function Write-Changelog {
     } else {
         "HEAD"
     }
-    $rawCommits = Invoke-GitCommand -Command "log $range --pretty=format:`"%s`" -- `"$crateFolder`"" -ErrorMessage "Failed to retrieve git log for unreleased commits"
+    $rawCommits = @(
+        Invoke-GitCommand -Command "log $range --pretty=format:`"%s`" -- `"$crateFolder`"" -ErrorMessage "Failed to retrieve git log for unreleased commits"
+    )
     if ($null -eq $rawCommits -or $rawCommits.Count -eq 0) {
         $rawCommits = @()
-    } else {
-        $rawCommits = @($rawCommits)
     }
 
     if (-not $rawCommits) {

@@ -1,9 +1,12 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
+#Requires -Version 7.6
+
 # Run from the repository root: pwsh -NoProfile -File .\scripts\test-release-crate.ps1
-$ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
 $releaseScript = Join-Path $PSScriptRoot 'release-crate.ps1'
 $fixture = Join-Path ([System.IO.Path]::GetTempPath()) "ox-release-test-$([guid]::NewGuid())"
 
@@ -80,6 +83,23 @@ try {
     if (Compare-Object $before $after) {
         throw 'Backfill changed a manifest or README.'
     }
+
+    $singleFolder = Join-Path $fixture 'crates/single'
+    $singleSrc = Join-Path $singleFolder 'src'
+    $null = New-Item -ItemType Directory -Path $singleSrc -Force
+    "[workspace]`nmembers = [`"crates/single`"]" | Set-Content Cargo.toml
+    "[package]`nname = `"single`"`nversion = `"0.1.0`"`nedition = `"2024`"" | Set-Content (Join-Path $singleFolder 'Cargo.toml')
+    'pub fn value() -> u8 { 1 }' | Set-Content (Join-Path $singleSrc 'lib.rs')
+    'Single release fixture' | Set-Content (Join-Path $singleFolder 'README.md')
+    Invoke-FixtureGit add .
+    Invoke-FixtureGit commit --quiet -m 'feat(single): initial release'
+    Invoke-FixtureGit tag single-v0.1.0
+    'pub fn value() -> u8 { 2 }' | Set-Content (Join-Path $singleSrc 'lib.rs')
+    Invoke-FixtureGit add .
+    Invoke-FixtureGit commit --quiet -m 'fix(single): sole unreleased change'
+    & $releaseScript single -Version 0.2.0
+    Assert-Contains (Get-Content (Join-Path $singleFolder 'CHANGELOG.md') -Raw) 'sole unreleased change'
+
     Write-Host 'Release backfill checks passed (first tag, semantic bounds, stability, unchanged manifests and README).'
 }
 finally {

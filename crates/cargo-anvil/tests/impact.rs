@@ -940,8 +940,7 @@ fn dirty_impact_preserves_clean_cache_until_tree_is_clean_again() {
     let dirty_selections = impact_selections(&root.join("target/anvil/impact-dirty"));
     assert!(
         dirty_selections[1].contains("--package beta@"),
-        "dirty beta edit must reach the affected selection: {:?}",
-        dirty_selections
+        "dirty beta edit must reach the affected selection: {dirty_selections:?}"
     );
 
     write(&root.join("crates/beta/src/lib.rs"), "pub fn b() {}\n");
