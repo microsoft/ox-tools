@@ -1,283 +1,317 @@
 # Local Recipe Surface
 
-This document describes the generated Just interface. Local and cloud runs
-invoke the same recipes; cloud backends only provide checkout, caching,
-artifacts, and service-specific reporting.
+Anvil generates `just` recipes used both locally and in CI. Start with
+`just anvil-pr` for PR checks, or select a group or individual check.
+See [checks.md](./checks.md) for the catalog and
+[updates.md](./updates.md) for generated-file ownership.
 
-See [checks.md](./checks.md) for the check catalog,
-[updates.md](./updates.md) for ownership, and
-[consolidation.md](./consolidation.md) for the layout rationale.
+## Requirements
 
-## 1. Layout and ownership
+The supported floor for repositories using the recipes is **Rust and Cargo
+1.95 or newer**. The selected compiler must also satisfy the repository and
+installed tools' own requirements. Building cargo-anvil from this source tree
+requires the workspace's declared Rust version, currently 1.97.
 
-```text
-repo/
-├── Justfile
-│   set unstable
-│   set windows-shell := ["pwsh.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command"]
-│   # >>> anvil-managed: anvil-imports
-│   import '.anvil/anvil.just'
-│   # <<< anvil-managed: anvil-imports
-│   …repository recipes and imports…
-└── .anvil/
-    ├── manifest.toml
-    ├── anvil.just                 small import hub and aliases
-    ├── checks.just                checks, developer utilities, and impact command
-    ├── groups.just                public groups and tiers
-    ├── helpers.just               private recipes and shared definitions
-    ├── setup.just                 pins and setup/validation recipes
-    ├── container.just             container recipes and private helpers
-    └── container/
-        ├── Dockerfile
-        ├── Dockerfile.dockerignore
-        └── hooks.ps1              optional and repository-owned
-```
+The recipe validators currently check toolchain availability and workspace MSRV
+compatibility, not a universal Rust/Cargo 1.95 minimum. Passing prerequisite
+validation with an older compiler does not make that configuration supported.
 
-The five generated responsibility files are fully owned physical files. Source
-templates remain split inside cargo-anvil for maintainability, and the catalog
-exposes every top-level recipe as an independently addressable delimiter-free
-section. A derived catalog can add, replace, or remove one recipe while the
-engine composes sections into the appropriate physical file.
+Local execution also requires rustup and **just 1.47.0+**. PowerShell 7+
+(`pwsh`) is needed only for container commands, spell-dictionary preparation,
+and the cargo-spellcheck source-build prerequisite probe. Setup installs
+catalog tools and Rust components; install the prerequisites needed by the
+selected recipes before invoking them.
 
-Repository-specific recipes belong outside the managed region in `Justfile` or
-in repository-owned imports. Editing a generated `.just` file is supported by
-the ordinary dirty-owned-file flow, but a later catalog change proposes that
-complete physical file.
+## 1. File layout
 
-The two root settings are a one-time scaffold only when `Justfile` is absent.
-Existing Justfiles keep their repository-owned settings; cargo-anvil adds only
-the managed import region.
+| Path | Purpose |
+|------|---------|
+| `Justfile` | Imports `.anvil/anvil.just` through a managed region; other content belongs to the repository. |
+| `.anvil/anvil.just` | Recipe entry point and `anvil` alias for `anvil-pr`. |
+| `.anvil/checks.just` | Individual checks, impact analysis, and developer commands. |
+| `.anvil/groups.just` | Check groups and PR/scheduled/full tiers. |
+| `.anvil/helpers.just` | Private recipes and shared definitions. |
+| `.anvil/setup.just` | Tool pins, setup recipes, and prerequisite validation. |
+| `.anvil/container.just` | Container commands and helpers; optional when a derived catalog removes container support. |
+| `.anvil/container/` | Container image definition. |
+
+Generated recipe files are tool-owned. The top-level `Justfile` and container
+`Dockerfile` have managed regions, leaving room for repository-specific content.
+See [containers.md](./containers.md) for container configuration.
 
 ## 2. Recipe layers
 
-### Checks
-
-Every check has:
-
-- `anvil-<check>` as its public execution entry point;
-- a private `anvil-<check>-setup` dependency that provisions prerequisites;
-- a private `anvil-<check>-validate-prereqs` dependency that validates without
-  installation.
-
-The common shape is a direct general-purpose tool invocation:
-
-```just
-anvil-clippy: anvil-clippy-validate-prereqs anvil-impact
-    cargo each {{ anvil_affected_selection }} --once -- \
-        cargo {{ anvil_stable_toolchain_arg }} clippy '{packages}' \
-        --all-targets --all-features --locked -- -D warnings
-```
-
-`cargo-each` owns package/target metadata, filtering, placeholders,
-concurrency, and timeouts. `cargo-coverage-gate run` owns collection and
-evaluation. `cargo-delta` owns Git analysis and impact artifacts. `cargo-aprz`
-owns GitHub credential discovery.
-
-Scripts remain only where the domain tool has no equivalent interface:
-spell dictionary generation and container orchestration. README generation is
-two cargo-each package passes with crate-root working directories. Mutation
-diff preparation is a direct Git command guarded by the affected package file.
-Miri profiles share a compile-once artifact runner with profile-specific
-environment. Cargo-careful uses an
-identity-keyed target directory; Bolero discovery uses a JSONL file consumed by
-cargo-each; PR-title policy is a Just regex; and the MSRV path uses cargo-each's
-optional workspace-version contract. The remaining scripts are not shared Anvil
-runners and do not own generic package iteration.
-
-Developer utilities such as `anvil-build` and `anvil-readme` live in
-`checks.just`: like checks, they directly perform work rather than orchestrating
-other generated recipes. The public `anvil-impact` command also lives there;
-its shared selection expressions remain in `helpers.just`.
-
-Recipe help is repository-neutral and focused on information useful at the
-command line. It may span multiple comment lines when that improves clarity, but
-does not use blank paragraphs that make `just --list` display only a trailing
-fragment. Detailed rationale belongs in the design documents. Private helper
-documentation identifies its consumers and the shared responsibility it owns.
-
-### Groups and tiers
-
-Groups are the cloud parallelism boundary:
-
-```text
-anvil-pr-fast
-anvil-pr-test
-anvil-pr-msrv
-anvil-pr-runtime-analysis
-anvil-pr-fuzzing
-anvil-pr-mutants
-anvil-scheduled-test
-anvil-scheduled-advisories
-anvil-scheduled-runtime-analysis
-anvil-scheduled-exhaustive
-```
-
-`anvil-pr-slow` is a local convenience umbrella. `anvil`, `anvil-pr`,
-`anvil-scheduled`, and `anvil-full` are the tier entry points. Scheduled groups
-execute through `_anvil-unscoped`, which starts a child Just process with the
-internal impact override set to `off` while its dependency graph is evaluated.
-Public group and tier entry points live in `groups.just`; their private
-implementations and shared impact/toolchain definitions live in `helpers.just`.
-
-## 3. Setup and toolchain policy
-
-Generated recipes require Just 1.47 or newer. `set lazy` ensures
-`cargo install --list` runs only when setup or validation uses the shared tool
-inventory.
-
-| Installed state | Result |
-| --- | --- |
-| Missing or below catalog minimum | Install exactly the catalog version. |
-| Equal or newer | Accept without reinstalling or downgrading. |
-
-`installer=install` builds from source with `cargo install --locked`.
-`installer=binstall` prefers a prebuilt artifact through `cargo binstall` and
-allows cargo-binstall's compile strategy when no binary source has the pinned
-release. This keeps newly published tools installable before binary indexes
-catch up. Cargo tools are independent applications, so their installation uses
-the Cargo available to the setup caller and does not provision or select the
-repository's workspace compiler. The selected installer is forwarded unchanged
-through group and tier setup.
-
-The public setup surface is intentionally narrow:
-
-- `anvil-setup` and `anvil-validate-prereqs` cover the complete catalog;
-- each group exposes `anvil-<group>-setup` and
-  `anvil-<group>-validate-prereqs`, matching the cloud parallelism boundary.
-
-Per-check, tier, tool, component, and toolchain setup/validation recipes are
-private implementation details. Checks still depend on their private validation
-recipes, so invoking one check directly remains fail-fast without exposing its
-prerequisite graph as a supported command surface.
-
-Setup does not install the manifest-selected workspace compiler. It installs
-Cargo tools with the caller's Cargo, pinned nightly toolchains directly through
-rustup, and default components for rustup's already-selected toolchain.
-`RUSTUP_TOOLCHAIN` or root `rust-toolchain[.toml]` takes precedence when checks
-run; otherwise cargo-each resolves `{workspace-rust-version}` for ordinary
-stable commands. An absent root declaration is an empty optional value:
-dedicated MSRV recipes are cargo-each `--none` no-ops, while ordinary stable
-commands use Cargo's default toolchain selection.
-
-`anvil-miri-setup` installs the Miri and rust-src components for the catalog
-nightly and runs `cargo +<nightly> miri setup`. Setup is complete only after the
-Miri sysroot is prepared successfully; repeated setup reuses Miri's cache. The
-test runner still requests `miri setup --print-sysroot` to locate the prepared
-sysroot when executing artifacts.
-
-## 4. Impact scoping
-
-`anvil-impact` asks cargo-delta to write:
-
-```text
-target/anvil/impact/modified.packages
-target/anvil/impact/affected.packages
-target/anvil/impact/required.packages
-```
-
-Each file contains one canonical `name@version` package spec per line. An empty
-file is an explicit successful no-op in cargo-each. cargo-delta owns merge-base
-resolution, snapshots, cache invalidation, and committed/staged/unstaged/
-deleted/non-ignored-untracked change detection.
-
-Base-ref precedence is `BASE_REF`, ADO target branch, GitHub base branch, then
-`origin/main`. Repositories whose default is not `main` set `BASE_REF`.
-
-`ANVIL_IMPACT` is strict:
-
-- unset: compute under `target/anvil/impact`;
-- `consume`: trust package files produced by another job;
-- `off`: select `--workspace` and do not invoke cargo-delta.
-
-In consume mode, `ANVIL_IMPACT_INPUT_DIR` selects an alternate package-file
-directory. Missing files fail closed through cargo-each. PR backends upload and
-consume this directory; scheduled jobs use `off` as the full-workspace
-backstop.
-
-## 5. Mutation testing with cargo-gamma
-
-Diff and full mutation recipes use cargo-gamma and its repository-native
-`gamma.toml` configuration. Pull-request runs write a normalized working-tree
-diff to a PID-scoped temporary file and pass it through `--in-diff`; scheduled
-exhaustive runs select the complete workspace. Both require a 100% killed score
-and zero unresolved flaky outcomes.
-
-`--update-hints` promotes scheduling knowledge from reportable campaigns into
-`gamma-hints.yaml`. A failed mutation gate remains failed even when promotion
-succeeds; promotion failure fails an otherwise successful campaign. GitHub runs
-also write reports and SARIF under `target/cargo-gamma`.
-
-## 6. Bolero handoff
-
-For each affected package the recipe runs
-`cargo bolero list --profile release --target <nightly-host> --package <name>` and redirects the
-combined stdout to `target/bolero-list-<just-pid>.jsonl`. The private
-`_ensure-target-dir` recipe runs after `anvil-impact` and creates `target/` only
-when it is still absent, so clean `ANVIL_IMPACT=off` checkouts work without
-shell-specific directory flags. The Just process ID isolates concurrent local
-runs. Pinned cargo-bolero 0.13.5 emits one
-`{"package":"…","test":"…"}` record per target on stdout; Cargo build output and
-diagnostics use stderr. A second direct invocation passes that file to
-`cargo each --json-lines-file`, which expands `{json:package}` and `{json:test}`
-into bounded `cargo bolero test --profile release --target <nightly-host>
---engine libfuzzer -T 60s`
-commands. `--keep-going` preserves aggregate failure behavior, and an empty file
-is cargo-each's successful no-op. A successful run removes the JSONL file.
-Failed discovery or execution leaves the PID-scoped file in place for
-diagnostics; the next Just process uses a different name.
-
-The PR campaign uses `--runs 30000 -S 2027`; the scheduled campaign uses
-`-T 90s`. Both the check and the `pr-fuzzing` setup wrappers are shell-free.
-
-### Spell dictionary preparation
-
-The recipe converts the repository-owned `.spelling` word list into Hunspell
-`.dic` format: sort lines, remove empty and numeric-only entries, prepend the
-word count, create the output directory, and write deterministic text. This is
-a good boundary for a small standalone tool with explicit input/output paths,
-atomic output, and tests for encoding, ordering, filtering, duplicates, and
-empty/missing inputs.
-
-### cargo-careful artifact isolation
-
-cargo-careful builds a custom standard library into a stable cache path. Cargo
-fingerprints the `--sysroot` path but not the contents behind that path. When
-the pinned nightly or cargo-careful executable changes, cargo-careful replaces
-the sysroot in place while workspace artifacts can remain apparently fresh;
-the next build may then fail with rustc metadata-version mismatches.
-
-For a nonempty affected selection, the recipe hashes the complete pinned-nightly
-`rustc -vV` output together with the SHA-256 of the resolved cargo-careful
-executable, using Just's `which`, `sha256_file`, and `sha256` functions. It forwards
-`--target-dir target/anvil/careful/<identity>` through cargo-careful to its final
-Cargo invocation. A compiler or tool change therefore gets a fresh artifact
-directory instead of reusing binaries built against the previous contents of
-the stable sysroot path. No marker file, conditional `cargo clean`, or
-PowerShell state machine is required. An empty affected package file comments
-out the direct cargo-each invocation and leaves the guarded identity expression
-unevaluated, so no tool lookup or cache path is touched. Old identity
-directories remain ordinary Cargo cache entries under `target/` and are removed
-by normal target cleanup.
-
-## 7. Daily use
-
-```text
+```console
+just --list
+just anvil-clippy
 just anvil-pr-fast
+just anvil-pr-slow
 just anvil-pr
 just anvil-scheduled
 just anvil-full
-just anvil-<check>
-just anvil-<check>-setup install
 ```
 
-Developer options such as `anvil-fmt --fix`, `anvil-readme --fix`,
-`anvil-doc-build --open`, and `anvil-examples --run` are declared with Just
-arguments and validated before execution.
+Individual checks compose into groups, then tiers. `anvil-pr-slow` runs the
+test, MSRV, runtime-analysis, fuzzing, and mutation groups sequentially.
+CI can run those groups in parallel. Scheduled groups and the scheduled/full
+tiers always cover the full workspace; PR checks use impact scoping.
 
-The no-tooling fallback remains ordinary Cargo:
+`just --list` shows checks, groups, tiers, development commands, setup, and
+container commands. Scoped setup and validation recipes are hidden from the
+listing but callable:
 
-```sh
+```console
+just anvil-clippy-setup
+just anvil-pr-fast-setup binstall
+just anvil-pr-validate-prereqs
+just --show anvil-clippy-setup
+```
+
+Checks validate prerequisites before execution. Groups and tiers validate their
+prerequisites up front. Validation is read-only and reports how to install
+missing tools; it does not run setup automatically.
+
+Tiers execute natively. To use the pinned Linux container explicitly:
+
+```console
+just anvil-container just anvil-pr
+```
+
+## 3. Tool versions, toolchains, and installation
+
+### Setup and version policy
+
+```console
+just anvil-setup
+just anvil-setup binstall
+just anvil-validate-prereqs
+```
+
+Setup can target a check, group, tier, or the whole catalog. The default
+`install` backend builds tools from source; `binstall` tries prebuilt binaries
+and falls back to source builds. Setup bootstraps cargo-binstall if needed.
+GitHub setup uses `binstall`; ADO uses source installation.
+
+Cargo tools are installed at their exact catalog versions. Already-installed
+versions at or above the catalog minimum are accepted and are not downgraded.
+Pins are recorded in `versions.just`. Bootstrap utilities such as cargo-binstall
+are not covered by the catalog's exact-version guarantee.
+
+### System prerequisites
+
+Building cargo-spellcheck from source requires discoverable libclang. On
+Windows, its directory must also be on `PATH`; `LIBCLANG_PATH` alone is
+insufficient. Missing prerequisites produce installation guidance rather than
+an automatic system-package installation. A successful prebuilt installation
+avoids this source dependency, but a source fallback still needs it.
+
+Repository-specific native libraries and services must be provisioned by the
+repository's own setup. Generated GitHub Linux spellcheck setup installs
+`libclang-dev`; local and self-hosted environments remain responsible for their
+system packages.
+
+### The stable Rust toolchain
+
+Checks without a dedicated nightly or MSRV select their compiler in this order:
+
+1. Caller-provided `RUSTUP_TOOLCHAIN`.
+2. A root `rust-toolchain` or `rust-toolchain.toml`, interpreted by rustup.
+3. Root `[workspace.package].rust-version`, or root `[package].rust-version`.
+
+No selection means Cargo uses its default toolchain. Toolchain files retain
+rustup's native behavior, including lookup from each command's working
+directory; nested toolchain files can therefore affect commands.
+
+With the root-MSRV fallback, every workspace member must declare or inherit a
+`rust-version` no higher than the root value. Correct inconsistent declarations
+or select the compiler explicitly. Cargo tools are independent applications
+and install with the Cargo available to the setup caller; workspace toolchain
+selection applies when checks compile or analyze workspace code.
+
+`anvil-msrv-test` separately tests the root MSRV even when a toolchain file
+selects a newer compiler. Without a root MSRV, setup, validation, and execution
+are successful no-ops. Environments substituting an internally built compiler
+must expose it through rustup under the declared public version.
+
+### Nightly pinning
+
+Nightly checks use catalog pins from `versions.just`. The general nightly
+supports formatting, coverage, unused-dependency checks, Miri, careful, and
+Bolero. External-types has a separate nightly matched to its rustdoc JSON schema.
+A newer installed external-types tool can pass version validation yet fail
+execution if its schema is incompatible with that pin.
+
+## 4. Impact scoping via the `anvil-impact` recipe
+
+`just anvil-impact` computes package impact from the committed diff against the
+base ref. Scoped checks invoke it automatically. CI publishes its results for
+group jobs to consume. [Check buckets](./checks.md#5-impact-scoping-check--include-mapping)
+determine which package set each check uses.
+
+### Scope controls
+
+| `ANVIL_IMPACT` | Behavior |
+|----------------|----------|
+| Unset | Compute or reuse impact for the current checkout. |
+| `off` | Run full-workspace checks without impact analysis. |
+| `consume` | Read a previously produced impact cache; missing required files fail. |
+
+Other nonempty values fail with exit code 2. Scheduled groups and the
+scheduled/full tiers set `off` automatically.
+
+Any tracked edit or non-ignored untracked file widens local checks to the full
+workspace. Commit changes to restore committed-diff scoping. An empty impact
+set skips scoped checks successfully; unscoped checks still run.
+
+### Base ref and failures
+
+The shared base resolver uses `BASE_REF`, then `SYSTEM_PULLREQUEST_TARGETBRANCH`
+(ADO), then `GITHUB_BASE_REF`, then `origin/main`.
+CI target branch names resolve to remote-tracking refs under `origin`.
+The ref must exist locally; recipes do not fetch it. Missing refs and shallow
+history fail with fetch guidance. A base commit without a root workspace
+manifest widens impact to the full workspace.
+
+Malformed impact data, unknown package names, and failed metadata or discovery
+commands are errors, not empty selections.
+
+### Cache
+
+Results live under `target/anvil/impact/`:
+
+| File | Meaning |
+|------|---------|
+| `modified.packages` | Modified workspace package specifications. |
+| `affected.packages` | Modified packages plus their workspace dependents. |
+| `required.packages` | Affected packages plus their workspace dependencies. |
+
+Each file is directly consumable by cargo-each. An empty file is an explicit
+successful no-op for scoped checks. Delete `target/anvil/impact/` to force
+recomputation.
+
+In consume mode, `ANVIL_IMPACT_INPUT_DIR` selects another read-only cache
+directory, using an absolute path or a path relative to the recipe's working
+directory. All three package files are required. The override is ignored
+outside consume mode. Container execution rejects a consume-mode directory
+override because it names a host path.
+
+## 5. Miri execution customization
+
+Miri setup installs its pinned nightly components and prepares the sysroot.
+Initial preparation can require registry access. A setup failure fails the
+calling check/group/tier setup as well.
+
+Miri runs all-features library and binary unit tests and integration tests.
+The selected package scope compiles together once, preserving workspace feature
+unification, and Cargo's JSON artifact stream is handed to cargo-each.
+Executables run from their owning package roots concurrently, with one worker
+per logical processor by default, limited by the executable count. Set
+`ANVIL_MIRI_JOBS` to a positive integer to limit memory use. Each executable's
+output is labelled and replayed in deterministic artifact order; failures are
+aggregated after all executables finish. Successful runs remove the PID-scoped
+artifact handoff; failed runs retain it under `target/` for diagnosis.
+
+Package-wide exclusions apply to all Miri profiles:
+
+```toml
+[package.metadata.anvil.miri]
+exclude = true
+```
+
+An excluded package can still compile as another package's dependency.
+Individual tests can use `#[cfg_attr(miri, ignore = "<reason>")]` or the
+[profile-specific cfgs](./checks.md#scheduled-runtime-analysis).
+
+## 6. Daily driver
+
+```console
+just anvil
+just anvil-build
+just anvil-build --package my-crate
+just anvil-doc-build --open
+just anvil-examples --package my-crate --example basic
+just anvil-fmt --fix
+just anvil-miri --package my-crate --test test_name
+just anvil-miri --package my-crate --example basic
+just anvil-readme --fix
+```
+
+`anvil` aliases `anvil-pr`. `anvil-build` builds all workspace targets with all
+features and the lockfile; it is a development command, not a check-group member.
+`anvil-readme` checks by default and regenerates with `--fix`.
+
+### Examples
+
+`anvil-examples` builds and executes affected examples, or all examples in
+scheduled/full runs. `--package` overrides impact selection; `--example`
+requires `--package` and selects one example.
+
+Examples execute sequentially with all features, `ANVIL_EXAMPLE=1`, no
+application arguments, and live stdout/stderr. The per-example timeout defaults
+to 30 seconds; `--timeout <seconds>` accepts 1–3600. Failures and timeouts fail
+the check after the remaining selected examples run.
+
+Exclude examples needing interaction, credentials, or unprovisioned services:
+
+```toml
+[package.metadata.anvil.examples]
+no-run = ["interactive-demo", "needs-production-credentials"]
+```
+
+Excluded examples still compile. Explicit `--package` and `--example` selection
+runs an excluded example.
+
+### Targeted Miri
+
+For `anvil-miri`, `--package` overrides impact scope, `--test` filters libtest
+names, and `--example` selects one example instead of the test suite.
+`--example` requires `--package`.
+
+## 7. No-tooling fallback
+
+Basic checks remain available without Anvil's additional tooling:
+
+```console
 cargo test --workspace --tests --all-features --locked
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo fmt --check
 ```
+
+These are partial checks, not substitutes for the Anvil PR tier.
+
+## 8. Customization at the recipe level
+
+Add repository recipes to `Justfile` outside the managed import region, or import
+your own `.just` files there. Use distinct names, such as `my-clippy`, and compose
+custom groups around them.
+
+Editing an owned recipe file prevents automatic replacement: the next update
+writes a `.anvil-proposed` sibling for reconciliation. Empty owned files and
+managed import regions have different update behavior; see
+[updates.md](./updates.md).
+
+## 9. Mutation testing with cargo-gamma
+
+`anvil-mutants-diff` and `anvil-mutants-full` use cargo-gamma 0.6.0+ with a
+100% assertion-killed score requirement and zero unresolved flaky outcomes.
+Timeouts and out-of-memory outcomes do not count as assertion kills.
+
+The PR recipe selects mutation sites from changed lines against the resolved
+base, including uncommitted changes. The full recipe covers the workspace.
+An empty impact set skips the PR campaign. A diff campaign with no mutation
+sites succeeds; an empty full campaign or wholly ungradeable nonempty population
+fails its gates. Infrastructure and baseline failures still fail.
+
+Gamma reads native `gamma.toml` configuration. Mutators, Cargo features, build
+profile, tests, concurrency, and memory policy follow Gamma's settings and
+defaults. Anvil supplies workspace selection, diff scope, and strict gates.
+On GitHub Actions it also fixes the report directory to `target/cargo-gamma`;
+local and ADO runs honor Gamma's configured directory.
+
+The recipes pass `--update-hints`, so an invoked campaign promotes learned hints
+into `gamma-hints.yaml` even if the campaign fails. Campaign failures take
+precedence over promotion failures; a promotion failure fails an otherwise
+successful run. Skipped campaigns do not update hints.
+
+See [GitHub reports](./github.md#gamma-reports-and-code-scanning) for artifact
+and SARIF publication.
