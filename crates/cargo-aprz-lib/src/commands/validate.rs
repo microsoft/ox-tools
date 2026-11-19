@@ -53,15 +53,18 @@ pub fn validate_config<H: Host>(host: &mut H, args: &ValidateArgs) -> Result<()>
 /// Returns an error if the config file cannot be loaded, parsed, or if expressions fail to evaluate
 fn validate_config_inner(config_path: &Utf8Path) -> Result<()> {
     let config = Config::load(config_path, Some(&config_path.to_path_buf()))?;
+    validate_config_expressions(&config, &ZonedDateTime::now())
+}
 
+fn validate_config_expressions(config: &Config, now: &ZonedDateTime) -> Result<()> {
     // Validate that all expressions can be evaluated against default metrics (only if any are defined)
     // #[gamma::skip(cond.always_true, tag = "equivalent", reason = "evaluating an empty policy produces no expression outcomes, so the validation loop remains empty and returns the same success")]
-    if has_expressions(&config) {
+    if has_expressions(config) {
         let appraisal = evaluate(
             &config.high_risk,
             &config.eval,
             default_metrics(),
-            &ZonedDateTime::now(),
+            now,
             config.medium_risk_threshold,
             config.low_risk_threshold,
         )?;
@@ -92,6 +95,14 @@ mod tests {
     use super::*;
     use crate::commands::host::TestHost;
     use crate::commands::init::{InitArgs, init_config};
+
+    #[test]
+    fn validation_propagates_unrepresentable_local_offset() {
+        let offset = jiff::tz::Offset::from_seconds(86_400).unwrap();
+        let now = jiff::Timestamp::UNIX_EPOCH.to_zoned_datetime(jiff::tz::TimeZone::fixed(offset));
+        let error = validate_config_expressions(&Config::default(), &now).unwrap_err();
+        assert!(error.to_string().contains("CEL cannot represent the current time-zone offset"));
+    }
 
     #[test]
     #[cfg_attr(miri, ignore = "Miri cannot call GetTempPathW")]

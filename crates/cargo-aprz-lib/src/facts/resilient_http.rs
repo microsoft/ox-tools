@@ -568,6 +568,15 @@ mod tests {
     }
 
     #[test]
+    fn parses_legacy_date_spellings_outside_rfc_2822() {
+        let now = "1994-11-06T08:49:37Z".parse::<Timestamp>().unwrap();
+        assert_eq!(parse_retry_after_value("Sun, 06 Nov 1994 08:51:37 +000000", now), Some(120));
+
+        let now = TimeZone::UTC.to_timestamp(jiff::civil::date(-1, 1, 1).at(0, 0, 0, 0)).unwrap();
+        assert_eq!(parse_retry_after_value("Fri, 01 Jan -0001 00:02:00 GMT", now), Some(120));
+    }
+
+    #[test]
     fn past_dates_do_not_underflow() {
         let now = "1994-11-06T08:49:37Z".parse::<Timestamp>().unwrap();
         assert_eq!(parse_retry_after_value("Sun, 06 Nov 1994 08:00:00 GMT", now), Some(0));
