@@ -75,6 +75,8 @@ pub use crates_keywords_table::CratesKeywordsTable;
 pub use crates_table::{CratesTable, CratesTableIndex};
 pub use dependencies_table::DependenciesTable;
 pub use ids::{CategoryId, CrateId, KeywordId, TeamId, UserId, VersionId};
+use jiff::Span;
+use jiff::civil::Date;
 pub use keywords_table::{KeywordsTable, KeywordsTableIndex};
 pub use row_iter::RowIter;
 use row_reader::RowReader;
@@ -87,3 +89,13 @@ pub use users_table::{UsersTable, UsersTableIndex};
 pub(super) use version_downloads_table::VersionDownloadRow;
 pub use version_downloads_table::VersionDownloadsTable;
 pub use versions_table::{VersionsTable, VersionsTableIndex};
+
+pub(super) fn encode_epoch_day(date: Date) -> u64 {
+    u64::from((date - Date::constant(1970, 1, 1)).get_days().max(0).cast_unsigned())
+}
+
+fn decode_epoch_day(days: u64) -> Option<Date> {
+    let days = i64::try_from(days).ok()?;
+    let span = Span::new().try_days(days).ok()?;
+    Date::constant(1970, 1, 1).checked_add(span).ok()
+}

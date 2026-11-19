@@ -281,16 +281,23 @@ fn temporal_operator_results_match_compiled_counterparts() {
             "{item}: {selector}"
         );
     }
-    let instant = chrono::DateTime::<chrono::Utc>::from_timestamp(100, 0).unwrap();
-    let delta = chrono::TimeDelta::seconds(4);
-    assert_eq!(compiled_shift(instant, delta).timestamp(), 96);
+    let instant = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(100);
+    let delta = std::time::Duration::from_secs(4);
     assert_eq!(
-        compiled_naive_shift(instant.naive_utc(), std::time::Duration::from_secs(4))
-            .and_utc()
-            .timestamp(),
+        compiled_shift(instant, delta)
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
         96
     );
-    assert_eq!(compiled_scale(delta, 3).num_seconds(), 12);
+    assert_eq!(
+        compiled_naive_shift(instant, std::time::Duration::from_secs(4))
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        96
+    );
+    assert_eq!(compiled_scale(delta, 3).as_secs(), 12);
 }
 
 #[test]

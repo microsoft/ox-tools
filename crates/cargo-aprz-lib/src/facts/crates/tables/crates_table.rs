@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use url::Url;
 
 use super::{CrateId, define_rows, define_table};
@@ -13,8 +13,8 @@ define_rows! {
     CrateRow<'a> {
         pub id: CrateId,
         pub name: &'a str,
-        pub created_at: DateTime<Utc>,
-        pub updated_at: DateTime<Utc>,
+        pub created_at: Timestamp,
+        pub updated_at: Timestamp,
         repository: &'a str,
     }
 }

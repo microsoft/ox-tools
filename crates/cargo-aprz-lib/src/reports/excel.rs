@@ -220,7 +220,8 @@ fn write_metric_value(
             }
         }
         MetricValue::DateTime(dt) => {
-            worksheet.write_string_with_format(row, col, dt.format("%Y-%m-%d").to_string(), format)?;
+            let date = dt.to_zoned_datetime(jiff::tz::TimeZone::UTC).date();
+            worksheet.write_string_with_format(row, col, date.to_string(), format)?;
         }
         MetricValue::List(_) => {
             // Format list as comma-separated string
@@ -811,7 +812,7 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore = "Miri cannot call GetSystemTimePreciseAsFileTime (rust_xlsxwriter)")]
     fn metric_value_kinds_are_written_to_the_requested_cells() {
-        let created_at = chrono::DateTime::parse_from_rfc3339("2024-02-03T10:30:00Z").unwrap().to_utc();
+        let created_at = "2024-02-03T10:30:00Z".parse::<jiff::Timestamp>().unwrap();
         let values = [
             ("A1", "uint", MetricValue::UInt(7), "7"),
             ("B2", "float", MetricValue::Float(12.5), "12.5"),
@@ -903,7 +904,7 @@ mod tests {
         let mut workbook = Workbook::new();
         let worksheet = workbook.add_worksheet();
         let format = Format::new();
-        let created_at = chrono::DateTime::parse_from_rfc3339("2024-02-03T10:30:00Z").unwrap().to_utc();
+        let created_at = "2024-02-03T10:30:00Z".parse::<jiff::Timestamp>().unwrap();
         let values = [
             MetricValue::UInt(1),
             MetricValue::Float(1.5),
