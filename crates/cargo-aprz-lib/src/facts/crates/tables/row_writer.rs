@@ -9,6 +9,7 @@ use ohno::{IntoAppError, bail};
 use semver::Version;
 use url::Url;
 
+use super::encode_epoch_day;
 use crate::Result;
 
 #[derive(Debug)]
@@ -151,7 +152,7 @@ fn parse_pg_timestamp(s: &str) -> Result<u64> {
 
 fn parse_pg_date(s: &str) -> Result<u64> {
     let date = s.parse::<Date>().into_app_err_with(|| format!("parsing date '{s}'"))?;
-    Ok(u64::from((date - Date::constant(1970, 1, 1)).get_days().max(0).cast_unsigned()))
+    Ok(encode_epoch_day(date))
 }
 
 #[cfg(test)]

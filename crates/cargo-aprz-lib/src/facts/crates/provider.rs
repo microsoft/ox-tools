@@ -21,7 +21,7 @@ use super::owner::Owner;
 use super::owner_kind::OwnerKind as PublicOwnerKind;
 use super::tables::{
     CategoriesTableIndex, CategoryId, CrateId, CratesTableIndex, KeywordId, KeywordsTableIndex, OwnerKind as TableOwnerKind, Table,
-    TableMgr, TeamId, TeamsTableIndex, UserId, UsersTableIndex, VersionDownloadRow, VersionId, VersionsTableIndex,
+    TableMgr, TeamId, TeamsTableIndex, UserId, UsersTableIndex, VersionDownloadRow, VersionId, VersionsTableIndex, encode_epoch_day,
 };
 use crate::facts::crate_spec::CrateSpec;
 use crate::facts::progress::Progress;
@@ -899,7 +899,7 @@ impl Provider {
         // for a crate that has stopped being downloaded.
         let cutoff = now - (RECENT_DOWNLOADS_DAYS * 24).hours();
         let cutoff_date = cutoff.to_zoned_datetime(jiff::tz::TimeZone::UTC).date();
-        let cutoff_days = u64::from((cutoff_date - Date::constant(1970, 1, 1)).get_days().max(0).cast_unsigned());
+        let cutoff_days = encode_epoch_day(cutoff_date);
 
         // Rows keep their date encoded so the two rejection tests below are plain integer and
         // hash comparisons. Only rows that pass both pay for the date conversion.
@@ -1178,7 +1178,10 @@ mod tests {
     }
 
     fn timestamp(value: Timestamp) -> String {
-        value.to_string()
+        value
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+            .strftime("%Y-%m-%d %H:%M:%S%.6f+00")
+            .to_string()
     }
 
     fn csv(headers: &[&str], rows: Vec<Vec<String>>) -> String {

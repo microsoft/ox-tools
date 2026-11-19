@@ -150,9 +150,10 @@ Counts outside Jiff's representable date range cannot be emitted by the table
 writer and are treated as malformed cache rows. Such rows are ignored rather
 than being reinterpreted as epoch-dated download activity. APRZ represents
 instants with Jiff timestamps; calendar dates are interpreted in UTC for
-download-table encoding and report date-only values. Local time is used only
-for user-facing rate-limit display. The CEL timestamp feature still requires a
-Chrono conversion at the expression-evaluation boundary.
+download-table encoding and date-only metric values. The HTML report header
+and rate-limit display use local time; the CEL `now` value retains the local
+offset. The CEL timestamp feature still requires a Chrono conversion at the
+expression-evaluation boundary.
 
 The process takes an advisory lock on the cache root before collection so two
 instances do not concurrently mutate shared cache state.

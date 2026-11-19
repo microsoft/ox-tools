@@ -1,10 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use jiff::Span;
 use jiff::civil::Date;
 
-use super::{VersionId, define_rows, define_table};
+use super::{VersionId, decode_epoch_day, define_rows, define_table};
 
 define_rows! {
     VersionDownloadRow {
@@ -27,9 +26,7 @@ impl VersionDownloadRow {
     /// Returns `None` when cached data contains a day count the table writer cannot produce.
     #[must_use]
     pub fn date(&self) -> Option<Date> {
-        let days = i64::try_from(self.date).ok()?;
-        let span = Span::new().try_days(days).ok()?;
-        Date::constant(1970, 1, 1).checked_add(span).ok()
+        decode_epoch_day(self.date)
     }
 }
 

@@ -659,7 +659,10 @@ pub fn tar_gz(files: &[(String, String)]) -> Vec<u8> {
 
 /// Formats a timestamp the way `PostgreSQL` renders `timestamptz` in the dump.
 fn timestamp(value: Timestamp) -> String {
-    value.to_string()
+    value
+        .to_zoned_datetime(TimeZone::UTC)
+        .strftime("%Y-%m-%d %H:%M:%S%.6f+00")
+        .to_string()
 }
 
 /// Formats a boolean the way `PostgreSQL` renders it in the dump.

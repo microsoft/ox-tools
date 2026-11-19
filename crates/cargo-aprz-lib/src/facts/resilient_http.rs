@@ -18,6 +18,7 @@ use fetch::{HeaderMap, HeaderValue, HttpClient, HttpResponse, StatusCode};
 use futures_util::{Stream, StreamExt};
 use http_body_util::BodyExt;
 use jiff::Timestamp;
+use jiff::fmt::rfc2822::DateTimeParser;
 use jiff::fmt::strtime::BrokenDownTime;
 use jiff::tz::TimeZone;
 use layered::{Execute, Service, Stack};
@@ -161,7 +162,10 @@ pub fn parse_retry_after_value(value: &str, now: Timestamp) -> Option<u64> {
             .and_then(|tm| tm.to_datetime().ok())
             .and_then(|dt| TimeZone::UTC.to_timestamp(dt).ok())
     };
-    let when = parse_with_offset("%a, %d %b %Y %H:%M:%S %z")
+    let when = DateTimeParser::new()
+        .parse_timestamp(value)
+        .ok()
+        .or_else(|| parse_with_offset("%a, %d %b %Y %H:%M:%S %z"))
         .or_else(|| parse_as_utc("%a, %d %b %Y %H:%M:%S GMT"))
         .or_else(|| parse_as_utc("%A, %d-%b-%y %H:%M:%S GMT"))
         .or_else(|| parse_as_utc("%a %b %e %H:%M:%S %Y"))?;
@@ -560,6 +564,7 @@ mod tests {
     fn parses_rfc_2822_date_with_non_utc_offset() {
         let now = "1994-11-06T08:49:37Z".parse::<Timestamp>().unwrap();
         assert_eq!(parse_retry_after_value("Sun, 06 Nov 1994 09:51:37 +0100", now), Some(120));
+        assert_eq!(parse_retry_after_value("6 Nov 1994 03:51:37 EST", now), Some(120));
     }
 
     #[test]
