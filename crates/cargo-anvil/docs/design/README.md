@@ -127,6 +127,5 @@ Agent guidance and the adoption skill are emitted for every backend selection.
 - [Containers](containers.md): image inputs, credentials, execution, and restrictions.
 - [Extensibility](extensibility.md): downstream catalogs and in-process updates.
 - [Shared arrays](array-regions.md): required TOML and JSON string entries.
-- [Verification boundaries](../verification.md): what the repository's checks establish.
 
 Contributor instructions live in the crate's [AGENTS.md](../../AGENTS.md).

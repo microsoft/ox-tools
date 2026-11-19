@@ -19,9 +19,6 @@
 //! If the validator isn't installed, the test is skipped — never failed.
 //! in cloud workflows we enforce installation via the `anvil-tools-install` recipe;
 //! locally the test suite degrades gracefully.
-//!
-//! See `crates/cargo-anvil/docs/verification.md` for the
-//! schema-validation strategy.
 
 #![expect(
     clippy::unwrap_used,
