@@ -127,8 +127,8 @@ pub struct Guard {
     ///
     /// Nested guards go exclusively in the `else` branch, so these ranges never overlap between
     /// mutants, not even for two mutants of the same site. A compiler diagnostic landing inside
-    /// one therefore names its cause exactly. A deletion mutant has no replacement text at all,
-    /// and so has nothing here.
+    /// one identifies that replacement, but an inference consequence need not identify its cause.
+    /// A deletion mutant has no replacement text at all, and so has nothing here.
     pub mutated: Option<Range<Position>>,
 }
 
@@ -356,7 +356,6 @@ pub fn instrument_with_guards(text: &str, mutants: &[AssignedMutant<'_>]) -> Res
 
     for root in &roots {
         out.push_str(copy(text, cursor..root.span.start));
-        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
         render(text, root, &mut out, &mut spans, None);
         cursor = root.span.end;
     }
@@ -414,7 +413,6 @@ fn build_tree<'a>(sites: &[&'a AssignedMutant<'a>]) -> Result<Vec<Node<'a>>> {
             // #[gamma::skip(loop.break_to_continue, reason = "the while condition observed a nonempty stack and no intervening operation changes it, so pop cannot enter this else branch")]
             let Some(finished) = stack.pop() else { break };
 
-            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
             attach(finished, &mut stack, &mut roots);
         }
 
@@ -446,7 +444,6 @@ fn build_tree<'a>(sites: &[&'a AssignedMutant<'a>]) -> Result<Vec<Node<'a>>> {
     }
 
     while let Some(finished) = stack.pop() {
-        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
         attach(finished, &mut stack, &mut roots);
     }
 
@@ -495,9 +492,8 @@ fn block_leading_expression(source: &str) -> bool {
             .iter()
             .any(|prefix| source.starts_with(prefix))
     {
-        return
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "This return has inferred bool type and is already false, exactly bool::default().")]
-        false;
+        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+        return false;
     }
     syn::parse_str::<syn::Expr>(source)
         .is_ok_and(|expression| matches!(expression, syn::Expr::Binary(_) | syn::Expr::Cast(_)) && leading(&expression))
@@ -538,7 +534,6 @@ fn render(
 
                 let from = out.len();
 
-                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                 render_replacement(replacement, node, own_returns.as_ref(), returns, out);
                 mutated.push((*ordinal, from..out.len()));
 
@@ -546,7 +541,6 @@ fn render(
                     out.push(')');
                 } else if let Shape::IterWrappedBlock { depth } = node.shape {
                     out.push(')');
-                    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                     iterator_maps(out, depth, "L");
                 }
 
@@ -588,14 +582,11 @@ fn render(
     let mut cursor = node.span.start;
 
     for child in &node.children {
-        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
         write_return_text(text, cursor..child.span.start, out, returns);
-        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
         render(text, child, out, spans, returns);
         cursor = child.span.end;
     }
 
-    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
     write_return_text(text, cursor..node.span.end, out, returns);
     if own_returns.is_some() {
         out.push_str(" }");
@@ -624,7 +615,6 @@ fn render(
         Shape::IterBlock => ") } }",
         Shape::IterWrappedBlock { depth } => {
             let mut closing = String::from(")");
-            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
             iterator_maps(&mut closing, depth, "R");
             closing.push_str(" } }");
             wrapped_close = closing;
@@ -681,7 +671,6 @@ fn render_replacement(replacement: &str, node: &Node<'_>, own: Option<&Returns>,
     {
         let _ = write!(out, "'{}: {{ ", returns.label);
     }
-    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
     write_return_text(replacement, 0..replacement.len(), out, returns.as_ref());
     if own.is_some() && returns.is_some() {
         out.push_str(" }");
@@ -695,9 +684,8 @@ struct Returns {
 
 fn iterator_returns(text: &str, node: &Node<'_>) -> Option<Returns> {
     if !matches!(node.shape, Shape::IterBlock | Shape::IterWrappedBlock { .. }) {
-        return
-        // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-        None;
+        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+        return None;
     }
     let sites = return_sites(copy(text, node.span.clone()));
     (!sites.is_empty()).then(|| Returns {

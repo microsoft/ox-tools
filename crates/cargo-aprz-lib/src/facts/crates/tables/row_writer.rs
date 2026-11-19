@@ -279,6 +279,17 @@ mod tests {
     }
 
     #[test]
+    fn postgres_fractional_timestamp_is_encoded_as_whole_seconds() {
+        let mut buffer = Vec::new();
+        let mut writer = RowWriter::new(&mut buffer);
+        writer
+            .write_str_as_datetime("2026-07-12 10:11:12.123456+00")
+            .expect("the timestamp is valid PostgreSQL dump input");
+        writer.row_done().expect("writing to a Vec cannot fail");
+        assert_eq!(buffer, encoded(1_783_851_072));
+    }
+
+    #[test]
     fn invalid_date_is_returned_as_an_error() {
         let error = parse_pg_date("not-a-date").expect_err("invalid dates must be rejected");
 

@@ -154,8 +154,8 @@ impl<'ast> Visit<'ast> for PhaseOne<'_> {
     fn visit_stmt(&mut self, node: &'ast Stmt) {
         if !self.cfg.skip_gate(stmt_attrs(node)) {
             self.walk.on_local_attributes(stmt_attrs(node));
-            if matches!(node, Stmt::Expr(Expr::Macro(_), _)) {
-                self.walk.on_opaque_macro();
+            if let Stmt::Expr(Expr::Macro(expression), _) = node {
+                self.walk.on_macro(&expression.mac);
             }
             visit::visit_stmt(self, node);
         }
@@ -183,7 +183,7 @@ impl<'ast> Visit<'ast> for PhaseOne<'_> {
     }
 
     fn visit_item_macro(&mut self, node: &'ast syn::ItemMacro) {
-        self.walk.on_opaque_macro();
+        self.walk.on_item_macro(node);
         visit::visit_item_macro(self, node);
     }
 
@@ -193,7 +193,7 @@ impl<'ast> Visit<'ast> for PhaseOne<'_> {
     }
 
     fn visit_stmt_macro(&mut self, node: &'ast syn::StmtMacro) {
-        self.walk.on_opaque_macro();
+        self.walk.on_macro(&node.mac);
         visit::visit_stmt_macro(self, node);
     }
 
@@ -473,7 +473,11 @@ mod tests {
             assert_eq!(indexes.root_imports.get("*"), Some(&None));
             assert_eq!(
                 indexes.root_imports.get("imported"),
-                Some(&Some(vec![ABSOLUTE_ROOT.into(), "external".into()]))
+                Some(&Some(vec![
+                    ABSOLUTE_ROOT.into(),
+                    super::super::indexes::EXTERNAL_ROOT.into(),
+                    "external".into()
+                ]))
             );
             assert_eq!(indexes.fields.get("kept"), Some(&false));
             assert!(!indexes.fields.contains_key("absent"));

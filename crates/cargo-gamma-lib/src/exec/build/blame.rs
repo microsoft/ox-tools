@@ -19,6 +19,10 @@ use super::messages::{CompilerMessage, Span, cargo_message};
 use crate::schema::{Guard, Position};
 use crate::{HashMap, HashSet};
 
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod compiler_tests;
+
 /// A bounded, host-independent account of why rustc rejected a mutant.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum AttributionEvidence {
@@ -116,6 +120,12 @@ pub fn blame(stdout: &str, root: &Utf8Path, guards: &Guards) -> HashMap<u32, Com
         };
 
         if diagnostic.level != "error" {
+            continue;
+        }
+
+        // Inference recovery can turn a downstream receiver into `!`. Even an exact
+        // replacement span then identifies a consequence, not the edit that broke inference.
+        if diagnostic.code.as_ref().is_some_and(|code| code.code == "E0599") && diagnostic.message.contains("for type `!`") {
             continue;
         }
 
@@ -575,6 +585,25 @@ mod final_survivor_tests {
         assert_eq!(blamed.len(), 2);
         assert_eq!(blamed[&1].code, "E0308");
         assert_eq!(blamed[&2].code, "E0277");
+    }
+
+    #[test]
+    fn never_receiver_cascades_do_not_hide_later_errors_or_other_diagnostic_codes() {
+        let guard = Guard {
+            site: range(NonZeroU32::new(5).unwrap(), NonZeroU32::new(10).unwrap()),
+            mutated: Some(range(NonZeroU32::new(6).unwrap(), NonZeroU32::new(8).unwrap())),
+        };
+        let guards = Guards::from_iter([(1, ("a.rs".into(), guard.clone())), (2, ("b.rs".into(), guard))]);
+        let mut cascade: serde_json::Value =
+            serde_json::from_str(&diagnostic("error", "E0599", &[span(Some("a.rs"), 6, 7, true)])).unwrap();
+        cascade["message"]["message"] = "no method named `read` found for type `!`".into();
+        let later = diagnostic("error", "E0308", &[span(Some("b.rs"), 6, 7, true)]);
+        let blamed = blame(&format!("{cascade}\n{later}"), Utf8Path::new("workspace"), &guards);
+        assert_eq!(blamed.len(), 1);
+        assert_eq!(blamed[&2].code, "E0308");
+
+        cascade["message"]["code"]["code"] = "E0308".into();
+        assert_eq!(blame(&cascade.to_string(), Utf8Path::new("workspace"), &guards)[&1].code, "E0308");
     }
 
     #[test]

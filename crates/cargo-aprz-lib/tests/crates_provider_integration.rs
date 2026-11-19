@@ -61,8 +61,8 @@ fn found(results: &HashMap<String, ProviderResult<CratesData>>, name: &str) -> C
     }
 }
 
-#[tokio::test]
-async fn reads_postgres_fractional_timestamps_from_dump() {
+#[test]
+fn dump_formats_fractional_timestamps_as_postgres() {
     let now = "2026-08-11T04:13:36Z".parse::<Timestamp>().unwrap();
     let created = "2026-07-12T10:11:12.123456Z".parse::<Timestamp>().unwrap();
     let mut dump = Dump::sample(now);
@@ -80,15 +80,6 @@ async fn reads_postgres_fractional_timestamps_from_dump() {
             assert!(csv.contains("2026-07-12 10:11:12.123456+00"), "{name}");
         }
     }
-
-    let server = dump_server(dump.to_tar_gz(), Some(1)).await;
-    let cache = tempfile::tempdir().unwrap();
-    let provider = make_provider(cache.path(), &server, now).await;
-    let results = query(&provider, &[crate_ref("serde", Some("1.0.200"))]).await;
-    let data = found(&results, "serde");
-    let truncated = "2026-07-12T10:11:12Z".parse::<Timestamp>().unwrap();
-    assert_eq!(data.overall_data.created_at, truncated);
-    assert_eq!(data.version_data.created_at, truncated);
 }
 
 #[tokio::test]

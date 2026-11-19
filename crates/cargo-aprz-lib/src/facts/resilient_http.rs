@@ -1048,7 +1048,7 @@ mod tests {
         assert_eq!(attempts.load(Ordering::Relaxed), 2);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     #[cfg_attr(miri, ignore = "requires tokio timers")]
     async fn download_honors_a_custom_timeout() {
         let error = resilient_download("test_download", (), Some(Duration::from_millis(1)), delayed_success)
