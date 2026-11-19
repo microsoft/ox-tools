@@ -390,28 +390,41 @@ mod tests {
     #[test]
     fn rejects_invalid_crate_names_before_checking_paths_or_reading_git() {
         for crate_name in ["..", "sample/other", "sample\\other"] {
-            read_git_log(
+            let error = read_git_log(
                 "sample-v1.0.0",
                 crate_name,
                 |_| panic!("invalid crate names must fail before checking the filesystem"),
                 |_| panic!("invalid crate names must fail before reading Git history"),
             )
             .expect_err("crate names must not escape the crates directory");
+            let message = error.to_string();
+            assert_eq!(
+                message.lines().next().expect("AppError should include an error message"),
+                format!("Invalid crate name: '{crate_name}'")
+            );
         }
     }
 
     #[test]
     fn rejects_missing_crate_directory_before_reading_git() {
-        read_git_log(
+        let mut directory_checked = false;
+        let error = read_git_log(
             "sample-v1.0.0",
             "sample",
             |path| {
                 assert_eq!(path, Path::new("crates").join("sample"));
+                directory_checked = true;
                 false
             },
             |_| panic!("a missing crate directory must fail before reading Git history"),
         )
         .expect_err("the crate directory must exist");
+        assert!(directory_checked);
+        let message = error.to_string();
+        assert_eq!(
+            message.lines().next().expect("AppError should include an error message"),
+            format!("Crate directory not found: '{}'", Path::new("crates").join("sample").display())
+        );
     }
 
     #[test]
