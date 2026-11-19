@@ -339,7 +339,12 @@ mod tests {
             let offset = jiff::tz::Offset::from_seconds(seconds).unwrap();
             let now = Timestamp::UNIX_EPOCH.to_zoned_datetime(jiff::tz::TimeZone::fixed(offset));
             let error = super::evaluate(&[], &[], empty::<Metric>(), &now, MEDIUM_THRESHOLD, LOW_THRESHOLD).unwrap_err();
-            assert!(error.to_string().contains(&format!("{seconds} seconds")));
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "CEL cannot represent the current time-zone offset of {seconds} seconds; use a time zone with an offset between -23:59:59 and +23:59:59"
+                )
+            );
         }
         for seconds in [-86_399, 86_399] {
             let offset = jiff::tz::Offset::from_seconds(seconds).unwrap();
