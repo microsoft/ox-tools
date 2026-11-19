@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-19
+
+- 🐛 Bug Fixes
+
+  - cargo-gamma: strengthen admission proofs and compiler isolation ([#367](https://github.com/microsoft/ox-tools/pull/367))
+
 ## [0.6.0] - 2026-11-06
 
 - 🐛 Bug Fixes
