@@ -11,6 +11,7 @@
 
 - 🐛 Bug Fixes
 
+  - cargo-anvil: bind dirty impact to invocation
   - cargo-anvil: bound dirty impact generations
   - cargo-anvil: isolate concurrent impact generations
   - cargo-anvil: address release and lint feedback

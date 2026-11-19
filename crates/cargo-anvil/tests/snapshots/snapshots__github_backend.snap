@@ -6699,6 +6699,9 @@ _anvil-impact-snapshot impact_dir="":
         $cleanImpactDir
     }
     [System.IO.Directory]::CreateDirectory($impactDir) | Out-Null
+    if ($dirty) {
+        Set-Content -LiteralPath (Join-Path $impactDir 'producer.pid') -Value $env:ANVIL_IMPACT_INVOCATION_ID -Encoding UTF8 -NoNewline
+    }
     $deltaConfigDirty = $dirty -and (@(git status --porcelain -- .delta.toml | Where-Object { $_ }).Count -gt 0)
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     $baselineImpactDir = if ($deltaConfigDirty) { $impactDir } else { $cleanImpactDir }
@@ -7104,9 +7107,13 @@ anvil-impact:
     if (-not $dirty) {
         try {
             [void]$publicationMutex.WaitOne()
-            if (Test-Path -LiteralPath $dirtyImpactRoot -PathType Container) {
-                Get-ChildItem -LiteralPath $dirtyImpactRoot -File -Filter 'active*' -ErrorAction SilentlyContinue |
-                    Remove-Item -Force -ErrorAction Stop
+            foreach ($marker in @(
+                (Join-Path $dirtyImpactRoot "active-$env:ANVIL_IMPACT_INVOCATION_ID"),
+                (Join-Path $dirtyImpactRoot 'active')
+            )) {
+                if (Test-Path -LiteralPath $marker -PathType Leaf) {
+                    Remove-Item -LiteralPath $marker -Force -ErrorAction Stop
+                }
             }
         } finally {
             $publicationMutex.ReleaseMutex()
@@ -7147,7 +7154,16 @@ anvil-impact:
                 $completedGenerations = @(Get-ChildItem -LiteralPath $dirtyImpactRoot -Directory -ErrorAction SilentlyContinue |
                     Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'complete') -PathType Leaf } |
                     Sort-Object -Property LastWriteTimeUtc -Descending)
-                foreach ($oldGeneration in @($completedGenerations | Select-Object -Skip 8)) {
+                $retiredGenerations = @($completedGenerations | Select-Object -Skip 8)
+                $abandonedGenerations = @(Get-ChildItem -LiteralPath $dirtyImpactRoot -Directory -ErrorAction SilentlyContinue |
+                    Where-Object {
+                        $producerFile = Join-Path $_.FullName 'producer.pid'
+                        if (-not (Test-Path -LiteralPath $producerFile -PathType Leaf)) { return $false }
+                        $producerId = 0
+                        [void][int]::TryParse("$(Get-Content -Raw -LiteralPath $producerFile)".Trim(), [ref]$producerId)
+                        $producerId -gt 0 -and -not (Get-Process -Id $producerId -ErrorAction SilentlyContinue)
+                    })
+                foreach ($oldGeneration in @($retiredGenerations + $abandonedGenerations | Sort-Object -Unique FullName)) {
                     if ($activeGenerations.Contains($oldGeneration.FullName)) { continue }
                     $generationMutex = [System.Threading.Mutex]::new($false, "anvil-impact-generation-$($oldGeneration.Name)")
                     $locked = $false

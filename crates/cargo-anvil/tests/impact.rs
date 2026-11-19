@@ -276,6 +276,7 @@ fn just_cmd(root: &Path, args: &[&str]) -> Command {
         .args(args)
         .env_remove("ANVIL_IMPACT")
         .env_remove("ANVIL_IMPACT_INPUT_DIR")
+        .env_remove("ANVIL_IMPACT_INVOCATION_ID")
         .env_remove("GITHUB_ACTIONS")
         .env_remove("TF_BUILD")
         .env_remove("BASE_REF")
@@ -1164,6 +1165,9 @@ fn dirty_generations_have_bounded_retention() {
     }
     let stale_marker = dirty_root.join("active-2147483647");
     write(&stale_marker, dirty_root.join("retention-test-00").to_string_lossy().as_ref());
+    let abandoned = dirty_root.join("abandoned-incomplete");
+    write(&abandoned.join("producer.pid"), "2147483647");
+    write(&abandoned.join("snapshots/current.json"), "{}");
     write(&root.join("crates/beta/src/lib.rs"), "pub fn b() {}\npub fn retention_dirty() {}\n");
     run_impact(root);
 
@@ -1179,6 +1183,42 @@ fn dirty_generations_have_bounded_retention() {
     assert!(
         !stale_marker.exists(),
         "cleanup must remove selectors whose Just process is no longer alive"
+    );
+    assert!(
+        !abandoned.exists(),
+        "cleanup must remove incomplete generations whose producer exited"
+    );
+}
+
+#[test]
+#[serial]
+fn clean_run_preserves_other_live_invocation_selectors() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = workspace();
+    let root = tmp.path();
+    run_impact(root);
+    let dirty_root = root.join("target/anvil/impact-dirty");
+    fs::create_dir_all(&dirty_root).unwrap();
+    let other_marker = dirty_root.join(format!("active-{}", std::process::id()));
+    let other_generation = dirty_root.join("other-live-generation");
+    fs::create_dir_all(&other_generation).unwrap();
+    write(&other_marker, other_generation.to_string_lossy().as_ref());
+    write(&dirty_root.join("active"), other_generation.to_string_lossy().as_ref());
+
+    let clean = run_impact(root);
+    assert!(
+        clean.contains("snapshots up to date"),
+        "clean rerun should use the clean cache:\n{clean}"
+    );
+    assert!(
+        other_marker.is_file(),
+        "clean impact must preserve selectors for other live Just processes"
+    );
+    assert!(
+        !dirty_root.join("active").is_file(),
+        "clean impact removes only the inspection marker"
     );
 }
 
