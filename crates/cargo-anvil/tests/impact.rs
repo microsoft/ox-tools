@@ -337,6 +337,8 @@ fn baseline_creation_and_partial_cleanup_share_the_same_finally_scope() {
         creation,
         concat!(
             "        $baselineFailed = $false\n",
+            "        $baselineNoWorkspace = $false\n",
+            "        $baseSnap = $null\n",
             "        try {\n",
             "            $worktreeOutput = @(git worktree add --detach $wt $baseSha 2>&1)\n",
             "            if ($LASTEXITCODE -ne 0) {\n",
@@ -348,7 +350,7 @@ fn baseline_creation_and_partial_cleanup_share_the_same_finally_scope() {
         .split_once("\n        } finally {\n")
         .unwrap()
         .1
-        .split_once("\n    }\n\n    # --- Current snapshot:")
+        .split_once("\n        # Publish baseline cache files")
         .unwrap()
         .0;
     insta::assert_snapshot!("baseline_worktree_cleanup", cleanup);
@@ -358,7 +360,7 @@ fn baseline_creation_and_partial_cleanup_share_the_same_finally_scope() {
 fn baseline_cleanup_emits_the_error_precedence_contract() {
     let recipe = include_str!("../templates/justfiles/anvil/impact.just");
     let boundary = recipe
-        .split_once("                Set-Content -LiteralPath $baselineJson -Value $baseSnap -Encoding UTF8\n")
+        .split_once("                    Pop-Location\n")
         .unwrap()
         .1
         .split_once("            $cleanupFailures = ")
@@ -367,7 +369,7 @@ fn baseline_cleanup_emits_the_error_precedence_contract() {
     assert_eq!(
         boundary,
         concat!(
-            "                Set-Content -LiteralPath $baselineKeyFile -Value $baselineKey -Encoding UTF8 -NoNewline\n",
+            "                }\n",
             "            }\n",
             "        } catch {\n",
             "            $baselineFailed = $true\n",
@@ -379,7 +381,7 @@ fn baseline_cleanup_emits_the_error_precedence_contract() {
         .split_once("            if ($cleanupFailures.Count -gt 0) {\n")
         .unwrap()
         .1
-        .split_once("\n    }\n\n    # --- Current snapshot:")
+        .split_once("\n        # Publish baseline cache files")
         .unwrap()
         .0;
     assert_eq!(
@@ -392,7 +394,7 @@ fn baseline_cleanup_emits_the_error_precedence_contract() {
             "                    throw $cleanupMessage\n",
             "                }\n",
             "            }\n",
-            "        }",
+            "        }\n",
         )
     );
 }
@@ -1047,7 +1049,6 @@ fn concurrent_dirty_invocations_publish_immutable_generations() {
     }
     let tmp = workspace();
     let root = tmp.path();
-    run_impact(root);
     write(
         &root.join("crates/beta/src/lib.rs"),
         "pub fn b() {}\npub fn concurrent_dirty() {}\n",
@@ -1093,6 +1094,74 @@ fn concurrent_dirty_invocations_publish_immutable_generations() {
     assert!(
         active_dirty_dir(root).join("include_required.txt").is_file(),
         "the active selector must point to a complete generation"
+    );
+}
+
+#[test]
+#[serial]
+fn dirty_readers_select_the_generation_matching_their_base() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = workspace();
+    let root = tmp.path();
+    write(
+        &root.join("crates/beta/src/lib.rs"),
+        "pub fn b() {}\npub fn concurrent_dirty() {}\n",
+    );
+    run_impact(root);
+
+    let head_only = just_cmd(root, &["anvil-impact"]).env("BASE_REF", "HEAD").output().unwrap();
+    let head_combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&head_only.stdout),
+        String::from_utf8_lossy(&head_only.stderr)
+    );
+    assert!(head_only.status.success(), "HEAD-based dirty impact failed:\n{head_combined}");
+
+    let read = |base: &str| {
+        just_cmd(root, &["_anvil-impact-include", "affected"])
+            .env("BASE_REF", base)
+            .output()
+            .unwrap()
+    };
+    let origin = read("origin/master");
+    assert!(origin.status.success(), "origin-based dirty selection failed");
+    assert_eq!(
+        String::from_utf8_lossy(&origin.stdout).trim(),
+        "--package alpha@0.1.0 --package beta@0.1.0"
+    );
+    let head = read("HEAD");
+    assert!(head.status.success(), "HEAD-based dirty selection failed");
+    assert_eq!(String::from_utf8_lossy(&head.stdout).trim(), "--package beta@0.1.0");
+}
+
+#[test]
+#[serial]
+fn dirty_generations_have_bounded_retention() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = workspace();
+    let root = tmp.path();
+    let dirty_root = root.join("target/anvil/impact-dirty");
+    fs::create_dir_all(&dirty_root).unwrap();
+    for index in 0..12 {
+        let generation = dirty_root.join(format!("retention-test-{index:02}"));
+        fs::create_dir(&generation).unwrap();
+        write(&generation.join("complete"), "");
+    }
+    write(&root.join("crates/beta/src/lib.rs"), "pub fn b() {}\npub fn retention_dirty() {}\n");
+    run_impact(root);
+
+    let retained = fs::read_dir(&dirty_root)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.is_dir())
+        .count();
+    assert!(
+        retained <= 8,
+        "dirty generation retention must stay bounded; found {retained} directories"
     );
 }
 

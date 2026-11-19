@@ -6706,6 +6706,17 @@ _anvil-impact-snapshot impact_dir="":
     $currentJson = Join-Path $snapDir 'current.json'
     $currentKeyFile = Join-Path $snapDir 'current.key'
     $noWorkspaceMarker = Join-Path $baselineSnapDir 'baseline-no-workspace'
+    $generationSnapDir = Join-Path $impactDir 'snapshots'
+    $generationBaselineJson = Join-Path $generationSnapDir 'baseline.json'
+    $generationBaselineKey = Join-Path $generationSnapDir 'baseline.key'
+    $generationNoWorkspaceMarker = Join-Path $generationSnapDir 'baseline-no-workspace'
+    $workspacePath = (Get-Location).Path
+    $workspaceHash = [Convert]::ToHexString(
+        [System.Security.Cryptography.SHA256]::HashData(
+            [System.Text.Encoding]::UTF8.GetBytes($workspacePath)
+        )
+    )
+    $baselineMutex = [System.Threading.Mutex]::new($false, "anvil-impact-baseline-$workspaceHash")
 
     # Effective cargo-delta config identity -- part of the baseline cache key.
     # Resolve the repo's `.delta.toml` ONCE here, at the repo root, before the
@@ -6833,6 +6844,9 @@ _anvil-impact-snapshot impact_dir="":
         Write-Error 'anvil-impact: shallow clone detected; cargo-delta needs full history for the base ref. Run ``git fetch --unshallow`` and retry.'
         exit 1
     }
+    if ($dirty) {
+        Set-Content -LiteralPath (Join-Path $impactDir 'base.sha') -Value $baseSha -Encoding UTF8 -NoNewline
+    }
 
     # --- Baseline snapshot: only when the base sha, config, or tool changed. ---
     # Re-derive the composite key now that `$baseSha` is authoritatively
@@ -6845,8 +6859,6 @@ _anvil-impact-snapshot impact_dir="":
         Write-Host "anvil-impact: baseline snapshot up to date (base $baseSha)"
     } else {
         Write-Host "anvil-impact: snapshotting baseline at $base ($baseSha)"
-        Remove-Item -LiteralPath $noWorkspaceMarker -ErrorAction SilentlyContinue
-        Remove-Item -LiteralPath $baselineJson -ErrorAction SilentlyContinue
         # The baseline worktree is checked out at the merge target, whose
         # rust-toolchain.toml may pin a toolchain that is NOT installed on this
         # machine (any PR that bumps rust-toolchain.toml hits this). The
@@ -6885,6 +6897,8 @@ _anvil-impact-snapshot impact_dir="":
         # needs file content hashes; LFS pointer files hash consistently.
         $env:GIT_LFS_SKIP_SMUDGE = '1'
         $baselineFailed = $false
+        $baselineNoWorkspace = $false
+        $baseSnap = $null
         try {
             $worktreeOutput = @(git worktree add --detach $wt $baseSha 2>&1)
             if ($LASTEXITCODE -ne 0) {
@@ -6896,8 +6910,7 @@ _anvil-impact-snapshot impact_dir="":
                 # cargo-delta to snapshot. Record a marker; anvil-impact falls
                 # back to full-workspace validation rather than failing.
                 Write-Host "anvil-impact: base '$base' has no root Cargo.toml (first-time adoption?); falling back to full-workspace"
-                New-Item -ItemType File -Path $noWorkspaceMarker -Force | Out-Null
-                Set-Content -LiteralPath $baselineKeyFile -Value $baselineKey -Encoding UTF8 -NoNewline
+                $baselineNoWorkspace = $true
             } else {
                 Push-Location $wt
                 # Override only this baseline subprocess scope, then restore the
@@ -6916,8 +6929,6 @@ _anvil-impact-snapshot impact_dir="":
                     }
                     Pop-Location
                 }
-                Set-Content -LiteralPath $baselineJson -Value $baseSnap -Encoding UTF8
-                Set-Content -LiteralPath $baselineKeyFile -Value $baselineKey -Encoding UTF8 -NoNewline
             }
         } catch {
             $baselineFailed = $true
@@ -6952,6 +6963,56 @@ _anvil-impact-snapshot impact_dir="":
                     throw $cleanupMessage
                 }
             }
+        }
+
+        # Publish baseline cache files only after the snapshot succeeds. A
+        # workspace-wide mutex serializes replacement for concurrent local
+        # invocations, while dirty runs copy their selected baseline into the
+        # immutable generation before releasing it.
+        if (-not $baselineNoWorkspace -and -not $baseSnap) {
+            throw 'cargo-delta did not produce a baseline snapshot'
+        }
+        try {
+            [void]$baselineMutex.WaitOne()
+            if ($baselineNoWorkspace) {
+                Remove-Item -LiteralPath $baselineJson -ErrorAction SilentlyContinue
+                New-Item -ItemType File -Path $noWorkspaceMarker -Force | Out-Null
+                if ($dirty) {
+                    New-Item -ItemType File -Path $generationNoWorkspaceMarker -Force | Out-Null
+                    Remove-Item -LiteralPath $generationBaselineJson -ErrorAction SilentlyContinue
+                }
+            } else {
+                Set-Content -LiteralPath $baselineJson -Value $baseSnap -Encoding UTF8
+                Remove-Item -LiteralPath $noWorkspaceMarker -ErrorAction SilentlyContinue
+                if ($dirty) {
+                    Set-Content -LiteralPath $generationBaselineJson -Value $baseSnap -Encoding UTF8
+                    Remove-Item -LiteralPath $generationNoWorkspaceMarker -ErrorAction SilentlyContinue
+                }
+            }
+            Set-Content -LiteralPath $baselineKeyFile -Value $baselineKey -Encoding UTF8 -NoNewline
+            if ($dirty) {
+                Set-Content -LiteralPath $generationBaselineKey -Value $baselineKey -Encoding UTF8 -NoNewline
+            }
+        } finally {
+            $baselineMutex.ReleaseMutex()
+        }
+    }
+    if ($dirty -and $haveBaseline) {
+        try {
+            [void]$baselineMutex.WaitOne()
+            $actualKey = "$(Get-Content -Raw -LiteralPath $baselineKeyFile)".Trim()
+            if ($actualKey -ne $baselineKey) {
+                Write-Error "anvil-impact: baseline '$base' changed while publishing dirty impact; rerun the command."
+                exit 1
+            }
+            if (Test-Path -LiteralPath $noWorkspaceMarker -PathType Leaf) {
+                New-Item -ItemType File -Path $generationNoWorkspaceMarker -Force | Out-Null
+            } else {
+                Copy-Item -LiteralPath $baselineJson -Destination $generationBaselineJson -Force
+            }
+            Set-Content -LiteralPath $generationBaselineKey -Value $baselineKey -Encoding UTF8 -NoNewline
+        } finally {
+            $baselineMutex.ReleaseMutex()
         }
     }
 
@@ -7039,11 +7100,40 @@ anvil-impact:
             $pendingMarker = Join-Path $dirtyImpactRoot "active-$([System.Guid]::NewGuid().ToString('N'))"
             Set-Content -LiteralPath $pendingMarker -Value $impactDir -Encoding UTF8 -NoNewline
             [System.IO.File]::Move($pendingMarker, $dirtyActiveMarker, $true)
+
+            # Retain enough completed generations for readers that selected an
+            # older base before another invocation published. Eight is
+            # intentionally generous relative to the tiny local cache cost:
+            # it avoids thrashing active concurrent checks while bounding
+            # unbounded local disk growth. Per-generation mutexes let cleanup
+            # skip any directory a reader is currently consuming.
+            $completedGenerations = @(Get-ChildItem -LiteralPath $dirtyImpactRoot -Directory -ErrorAction SilentlyContinue |
+                Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'complete') -PathType Leaf } |
+                Sort-Object -Property LastWriteTimeUtc -Descending)
+            foreach ($oldGeneration in @($completedGenerations | Select-Object -Skip 8)) {
+                $generationMutex = [System.Threading.Mutex]::new($false, "anvil-impact-generation-$($oldGeneration.Name)")
+                $locked = $false
+                try {
+                    $locked = $generationMutex.WaitOne(0)
+                    if ($locked -and (Test-Path -LiteralPath $oldGeneration.FullName -PathType Container)) {
+                        Remove-Item -LiteralPath $oldGeneration.FullName -Recurse -Force -ErrorAction Stop
+                    }
+                } catch [System.UnauthorizedAccessException] {
+                    # A platform may deny deletion after a reader opened a
+                    # descendant; leave the generation for the next cleanup.
+                } catch [System.IO.IOException] {
+                    # A concurrent reader may own a platform file handle.
+                    # Retaining the extra generation is cheaper than disrupting it.
+                } finally {
+                    if ($locked) { $generationMutex.ReleaseMutex() }
+                    $generationMutex.Dispose()
+                }
+            }
         }
     }
     $deltaConfigDirty = $dirty -and (@(git status --porcelain -- .delta.toml | Where-Object { $_ }).Count -gt 0)
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    $baselineImpactDir = if ($deltaConfigDirty) { $impactDir } else { $cleanImpactDir }
+    $baselineImpactDir = if ($dirty) { $impactDir } else { $cleanImpactDir }
     $snapDir = Join-Path $impactDir 'snapshots'
     $baselineSnapDir = Join-Path $baselineImpactDir 'snapshots'
     $baselineJson = Join-Path $baselineSnapDir 'baseline.json'
@@ -7089,7 +7179,10 @@ anvil-impact:
             Set-Content -LiteralPath $impactStateFile -Value $wantState -Encoding UTF8 -NoNewline
         }
         Remove-Item -LiteralPath $doctestPackages -ErrorAction SilentlyContinue
-        if ($dirty) { & $publishDirty }
+        if ($dirty) {
+            New-Item -ItemType File -Path (Join-Path $impactDir 'complete') -Force | Out-Null
+            & $publishDirty
+        }
         exit 0
     }
 
@@ -7124,6 +7217,7 @@ anvil-impact:
     if (-not $dirty) {
         Set-Content -LiteralPath $impactStateFile -Value $wantState -Encoding UTF8 -NoNewline
     } else {
+        New-Item -ItemType File -Path (Join-Path $impactDir 'complete') -Force | Out-Null
         & $publishDirty
     }
 
@@ -7237,6 +7331,8 @@ _anvil-impact-format tier impactJson:
 [script("pwsh", "-NoProfile")]
 _anvil-impact-doctest-packages:
     $ErrorActionPreference = 'Stop'
+    $selectedContent = $null
+    $selectedDir = $null
     if ($env:ANVIL_IMPACT -and $env:ANVIL_IMPACT -notin @('off', 'consume')) {
         [Console]::Error.WriteLine("anvil: ANVIL_IMPACT='$($env:ANVIL_IMPACT)' is not recognized (expected 'off', 'consume', or unset).")
         exit 2
@@ -7250,35 +7346,48 @@ _anvil-impact-doctest-packages:
     } else {
         $activeMarker = 'target/anvil/impact-dirty/active'
         $inputDir = if (Test-Path -LiteralPath $activeMarker -PathType Leaf) {
-            # Permit a concurrent publisher to replace the selector while the
-            # reader retains the generation path. The generation itself is
-            # immutable, so this file is the only shared object.
-            $markerStream = [System.IO.File]::Open(
-                $activeMarker,
-                [System.IO.FileMode]::Open,
-                [System.IO.FileAccess]::Read,
-                ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete)
-            )
-            try {
-                $markerReader = [System.IO.StreamReader]::new($markerStream)
+            $base = (& "{{ just_executable() }}" _anvil-base-ref)
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $baseSha = (git rev-parse $base.Trim()).Trim()
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $selectedDir = $null
+            $selectedContent = $null
+            $generations = @(Get-ChildItem -LiteralPath 'target/anvil/impact-dirty' -Directory -ErrorAction SilentlyContinue |
+                Where-Object {
+                    (Test-Path -LiteralPath (Join-Path $_.FullName 'complete') -PathType Leaf) -and
+                    (Test-Path -LiteralPath (Join-Path $_.FullName 'base.sha') -PathType Leaf) -and
+                    ("$(Get-Content -Raw -LiteralPath (Join-Path $_.FullName 'base.sha'))".Trim() -eq $baseSha)
+                } |
+                Sort-Object -Property LastWriteTimeUtc -Descending)
+            foreach ($generation in $generations) {
+                $generationMutex = [System.Threading.Mutex]::new($false, "anvil-impact-generation-$($generation.Name)")
                 try {
-                    $activeDir = $markerReader.ReadToEnd().Trim()
+                    [void]$generationMutex.WaitOne()
+                    $candidateFile = Join-Path $generation.FullName 'doctest_packages.txt'
+                    if (Test-Path -LiteralPath $candidateFile -PathType Leaf) {
+                        $selectedDir = $generation.FullName
+                        $selectedContent = Get-Content -Raw -LiteralPath $candidateFile
+                        break
+                    }
                 } finally {
-                    $markerReader.Dispose()
+                    $generationMutex.ReleaseMutex()
                 }
-            } finally {
-                $markerStream.Dispose()
             }
-            if ([string]::IsNullOrWhiteSpace($activeDir)) {
-                Write-Error "anvil-impact: dirty impact selector is empty ($activeMarker)"
+            if (-not $selectedDir) {
+                Write-Error "anvil-impact: no completed dirty impact generation matches base $baseSha"
                 exit 1
             }
-            $activeDir
+            $selectedDir
         } else {
             'target/anvil/impact'
         }
     }
     $file = Join-Path $inputDir 'doctest_packages.txt'
+    if ($selectedContent -ne $null) {
+        $specs = @($selectedContent -split "`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        Write-Output ($specs -join ' ')
+        exit 0
+    }
     if ($env:ANVIL_IMPACT -ne 'off' -and (Test-Path -LiteralPath $file -PathType Leaf)) {
         $specs = @(Get-Content -LiteralPath $file | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
         Write-Output ($specs -join ' ')
@@ -7325,6 +7434,8 @@ _anvil-impact-doctest-packages:
 _anvil-impact-include tier:
     $ErrorActionPreference = 'Stop'
     $tier = '{{ tier }}'
+    $selectedContent = $null
+    $selectedDir = $null
     $default = if ($tier -eq 'modified') { '' } else { '--workspace' }
     # Exit 2 = invalid caller configuration (bad ANVIL_IMPACT), distinct from
     # the generic 1 used for operational failures -- see _anvil-impact-snapshot.
@@ -7338,34 +7449,47 @@ _anvil-impact-include tier:
     } else {
         $activeMarker = 'target/anvil/impact-dirty/active'
         $inputDir = if (Test-Path -LiteralPath $activeMarker -PathType Leaf) {
-            # Keep replacement of this selector compatible with concurrent
-            # readers on Windows; the selected generation is never modified.
-            $markerStream = [System.IO.File]::Open(
-                $activeMarker,
-                [System.IO.FileMode]::Open,
-                [System.IO.FileAccess]::Read,
-                ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete)
-            )
-            try {
-                $markerReader = [System.IO.StreamReader]::new($markerStream)
+            $base = (& "{{ just_executable() }}" _anvil-base-ref)
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $baseSha = (git rev-parse $base.Trim()).Trim()
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $selectedDir = $null
+            $selectedContent = $null
+            $generations = @(Get-ChildItem -LiteralPath 'target/anvil/impact-dirty' -Directory -ErrorAction SilentlyContinue |
+                Where-Object {
+                    (Test-Path -LiteralPath (Join-Path $_.FullName 'complete') -PathType Leaf) -and
+                    (Test-Path -LiteralPath (Join-Path $_.FullName 'base.sha') -PathType Leaf) -and
+                    ("$(Get-Content -Raw -LiteralPath (Join-Path $_.FullName 'base.sha'))".Trim() -eq $baseSha)
+                } |
+                Sort-Object -Property LastWriteTimeUtc -Descending)
+            foreach ($generation in $generations) {
+                $generationMutex = [System.Threading.Mutex]::new($false, "anvil-impact-generation-$($generation.Name)")
                 try {
-                    $activeDir = $markerReader.ReadToEnd().Trim()
+                    [void]$generationMutex.WaitOne()
+                    $candidateFile = Join-Path $generation.FullName "include_$tier.txt"
+                    if (Test-Path -LiteralPath $candidateFile -PathType Leaf) {
+                        $selectedDir = $generation.FullName
+                        $selectedContent = Get-Content -Raw -LiteralPath $candidateFile
+                        break
+                    }
                 } finally {
-                    $markerReader.Dispose()
+                    $generationMutex.ReleaseMutex()
                 }
-            } finally {
-                $markerStream.Dispose()
             }
-            if ([string]::IsNullOrWhiteSpace($activeDir)) {
-                Write-Error "anvil-impact: dirty impact selector is empty ($activeMarker)"
+            if (-not $selectedDir) {
+                Write-Error "anvil-impact: no completed dirty impact generation matches base $baseSha"
                 exit 1
             }
-            $activeDir
+            $selectedDir
         } else {
             'target/anvil/impact'
         }
     }
     $file = Join-Path $inputDir "include_$tier.txt"
+    if ($selectedContent -ne $null) {
+        Write-Output ("$selectedContent".Trim())
+        exit 0
+    }
     if (Test-Path -LiteralPath $file -PathType Leaf) {
         Write-Output ("$(Get-Content -Raw -LiteralPath $file)".Trim())
     } elseif ($env:ANVIL_IMPACT -eq 'consume') {

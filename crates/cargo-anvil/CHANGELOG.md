@@ -11,6 +11,7 @@
 
 - 🐛 Bug Fixes
 
+  - cargo-anvil: isolate concurrent impact generations
   - cargo-anvil: address release and lint feedback
 
 ## [0.25.3] - 2026-11-18
