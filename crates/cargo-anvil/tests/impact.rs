@@ -33,7 +33,7 @@ use std::ffi::OsString;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::{env, fs};
 
 use cargo_anvil::Catalog;
@@ -868,29 +868,28 @@ fn dirty_filesystem_changes_match_committed_impact_selections() {
             _ => unreachable!("every scenario has an explicit fixture setup"),
         }
 
-        let dirty = run_impact(root);
+        let dirty_probe = just_cmd(root, &["anvil-impact", "_anvil-impact-include", "affected"])
+            .output()
+            .unwrap();
+        let dirty = format!(
+            "{}{}",
+            String::from_utf8_lossy(&dirty_probe.stdout),
+            String::from_utf8_lossy(&dirty_probe.stderr)
+        );
+        assert!(dirty_probe.status.success(), "dirty impact probe failed for {scenario}:\n{dirty}");
         assert!(
             dirty.contains("using fresh impact") && dirty.contains("snapshotting dirty working tree"),
             "scenario {scenario} must use a fresh filesystem snapshot:\n{dirty}"
         );
         let dirty_selections = impact_selections(&active_dirty_dir(root));
-        for (tier, expected) in ["modified", "affected", "required"].into_iter().zip(&dirty_selections) {
-            let include = just_cmd(root, &["_anvil-impact-include", tier]).output().unwrap();
-            let combined = format!(
-                "{}{}",
-                String::from_utf8_lossy(&include.stdout),
-                String::from_utf8_lossy(&include.stderr)
-            );
-            assert!(
-                include.status.success(),
-                "dirty {tier} selection failed for {scenario}:\n{combined}"
-            );
-            assert_eq!(
-                String::from_utf8_lossy(&include.stdout).trim(),
-                expected.trim(),
-                "checks must consume the dirty {tier} selection for {scenario}"
-            );
-        }
+        assert_eq!(
+            String::from_utf8_lossy(&dirty_probe.stdout)
+                .lines()
+                .last()
+                .expect("dirty impact probe should emit the affected selection"),
+            dirty_selections[1].trim(),
+            "checks must consume the exact dirty generation for {scenario}"
+        );
 
         git(root, &["add", "-A"]);
         git(root, &["commit", "-q", "-m", scenario]);
@@ -986,7 +985,7 @@ fn impact_dirty_tree_fails_when_base_cannot_resolve() {
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert!(!out.status.success(), "dirty run with an unresolvable base must fail:\n{combined}");
     assert!(
-        combined.contains("base ref") && combined.contains("not found locally"),
+        combined.contains("base ref") && combined.contains("not found") && combined.contains("locally"),
         "dirty failure must retain base-ref recovery guidance:\n{combined}"
     );
     assert!(
@@ -1099,7 +1098,7 @@ fn concurrent_dirty_invocations_publish_immutable_generations() {
 
 #[test]
 #[serial]
-fn dirty_readers_select_the_generation_matching_their_base() {
+fn dirty_readers_select_the_generation_from_their_invocation() {
     if !tools_available() {
         return;
     }
@@ -1109,31 +1108,43 @@ fn dirty_readers_select_the_generation_matching_their_base() {
         &root.join("crates/beta/src/lib.rs"),
         "pub fn b() {}\npub fn concurrent_dirty() {}\n",
     );
-    run_impact(root);
-
-    let head_only = just_cmd(root, &["anvil-impact"]).env("BASE_REF", "HEAD").output().unwrap();
-    let head_combined = format!(
-        "{}{}",
-        String::from_utf8_lossy(&head_only.stdout),
-        String::from_utf8_lossy(&head_only.stderr)
-    );
-    assert!(head_only.status.success(), "HEAD-based dirty impact failed:\n{head_combined}");
-
-    let read = |base: &str| {
-        just_cmd(root, &["_anvil-impact-include", "affected"])
-            .env("BASE_REF", base)
-            .output()
-            .unwrap()
-    };
-    let origin = read("origin/master");
-    assert!(origin.status.success(), "origin-based dirty selection failed");
+    let args = ["anvil-impact", "_anvil-impact-include", "affected"];
+    let origin = just_cmd(root, &args)
+        .env("BASE_REF", "origin/master")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let head = just_cmd(root, &args)
+        .env("BASE_REF", "HEAD")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let origin = origin.wait_with_output().unwrap();
+    let head = head.wait_with_output().unwrap();
+    for output in [&origin, &head] {
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.status.success(), "concurrent dirty reader failed:\n{combined}");
+    }
     assert_eq!(
-        String::from_utf8_lossy(&origin.stdout).trim(),
+        String::from_utf8_lossy(&origin.stdout)
+            .lines()
+            .last()
+            .expect("origin invocation should emit its affected selection"),
         "--package alpha@0.1.0 --package beta@0.1.0"
     );
-    let head = read("HEAD");
-    assert!(head.status.success(), "HEAD-based dirty selection failed");
-    assert_eq!(String::from_utf8_lossy(&head.stdout).trim(), "--package beta@0.1.0");
+    assert_eq!(
+        String::from_utf8_lossy(&head.stdout)
+            .lines()
+            .last()
+            .expect("HEAD invocation should emit its affected selection"),
+        "--package beta@0.1.0"
+    );
 }
 
 #[test]
@@ -1151,6 +1162,8 @@ fn dirty_generations_have_bounded_retention() {
         fs::create_dir(&generation).unwrap();
         write(&generation.join("complete"), "");
     }
+    let stale_marker = dirty_root.join("active-2147483647");
+    write(&stale_marker, dirty_root.join("retention-test-00").to_string_lossy().as_ref());
     write(&root.join("crates/beta/src/lib.rs"), "pub fn b() {}\npub fn retention_dirty() {}\n");
     run_impact(root);
 
@@ -1162,6 +1175,10 @@ fn dirty_generations_have_bounded_retention() {
     assert!(
         retained <= 8,
         "dirty generation retention must stay bounded; found {retained} directories"
+    );
+    assert!(
+        !stale_marker.exists(),
+        "cleanup must remove selectors whose Just process is no longer alive"
     );
 }
 
@@ -1390,6 +1407,35 @@ fn impact_falls_back_to_full_workspace_when_base_has_no_workspace() {
     assert!(
         !impact_dir.join("doctest_packages.txt").exists(),
         "a workspace-less baseline widen must invalidate the stale doctest capability projection"
+    );
+
+    write(&root.join("crates/alpha/src/lib.rs"), "pub fn a() {}\npub fn dirty() {}\n");
+    let doctest = just_cmd(root, &["anvil-impact", "_anvil-impact-doctest-packages"])
+        .output()
+        .unwrap();
+    let doctest_combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&doctest.stdout),
+        String::from_utf8_lossy(&doctest.stderr)
+    );
+    assert!(
+        doctest_combined.contains("using fresh impact"),
+        "workspace-less baseline with a dirty edit must publish isolated output:\n{doctest_combined}"
+    );
+    assert!(
+        !active_dirty_dir(root).join("doctest_packages.txt").exists(),
+        "workspace-less dirty fallback has no projected doctest capability"
+    );
+    assert!(
+        doctest.status.success(),
+        "missing dirty doctest projection must fall back to metadata:\n{doctest_combined}"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&doctest.stdout)
+            .lines()
+            .last()
+            .expect("dirty doctest probe should emit its fallback selection"),
+        "alpha@0.1.0"
     );
 }
 

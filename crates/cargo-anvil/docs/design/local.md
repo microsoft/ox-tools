@@ -204,17 +204,20 @@ scope. Delete `target/anvil/impact/` to force clean recomputation.
 
 Dirty local results use immutable generation directories under
 `target/anvil/impact-dirty/` with the same selection files and a fresh current
-snapshot. An `active` selector points to the latest completed generation.
+snapshot. A base-specific atomic selector points to the exact completed
+generation produced for that invocation; `active` records the latest generation
+for local inspection.
 Checks in the same `just` invocation share those selections; they do not repeat
 snapshot or impact commands. Separate concurrent invocations do not delete or
-overwrite each other's generation. Readers select a completed generation that
-matches their resolved base commit, and a per-generation mutex keeps cleanup
-from deleting a generation while a reader consumes it. After publication,
-Anvil retains the newest completed generations and removes older unused
-generations on a best-effort basis, so repeated dirty runs have bounded local
-storage growth. Clean runs remove the active selector without reading or
-modifying dirty generations. The dirty directory is never an artifact input or
-a fallback for consume mode.
+overwrite each other's generation. Readers resolve that invocation's base
+commit and follow its selector, then hold the per-generation mutex while
+copying the required selection. Cleanup uses the same mutex, so it cannot
+delete a generation while a reader consumes it. After publication, Anvil
+retains the newest completed generations and removes older unused generations
+on a best-effort basis, so repeated dirty runs have bounded local storage
+growth. Clean runs remove the active selectors without reading or modifying
+dirty generations. The dirty directory is never an artifact input or a
+fallback for consume mode.
 
 In consume mode, `ANVIL_IMPACT_INPUT_DIR` selects another read-only cache
 directory, using an absolute path or a path relative to the recipe's working

@@ -5025,6 +5025,8 @@ _anvil-unscoped name:
 # consume mode, for example a checked-in fixture. Unset/empty uses the default
 # target/anvil/impact directory. Computing impact never writes to this override.
 
+export ANVIL_IMPACT_INVOCATION_ID := env_var_or_default('ANVIL_IMPACT_INVOCATION_ID', just_pid())
+
 # Private. Produces cargo-delta snapshots with two independent cache keys:
 #   * baseline.json  -- snapshot of the base ref. EXPENSIVE (needs a throwaway
 #     git worktree). Keyed on the base commit sha, effective .delta.toml
@@ -5035,11 +5037,12 @@ _anvil-unscoped name:
 #     "<HEAD sha> <cargo-delta-version>" (current.key) for a clean tree.
 #     Dirty local runs always snapshot the files on disk into a unique
 #     target/anvil/impact-dirty/<generation>/snapshots/ directory and write no
-#     current key. The completed generation is published through the
-#     target/anvil/impact-dirty/active selector. Generations remain immutable
-#     so concurrent invocations cannot delete each other's producer or
-#     consumer inputs. Tool upgrades invalidate cached clean snapshots so
-#     incompatible formats are never reused. If .delta.toml itself is dirty,
+#     current key. The completed generation is published through a selector
+#     keyed by the Just invocation process id, plus an `active` inspection
+#     selector. Generations remain immutable so concurrent invocations cannot
+#     delete each other's producer or consumer inputs. Tool upgrades invalidate
+#     cached clean snapshots so incompatible formats are never reused. If
+#     .delta.toml itself is dirty,
 #     the baseline is also rebuilt in the dirty generation so snapshots always
 #     use one config.
 
@@ -5434,6 +5437,10 @@ _anvil-impact-snapshot impact_dir="":
 [script("pwsh", "-NoProfile")]
 anvil-impact:
     $ErrorActionPreference = 'Stop'
+    if ($env:ANVIL_IMPACT_INVOCATION_ID -notmatch '^\d+$') {
+        Write-Error "anvil-impact: ANVIL_IMPACT_INVOCATION_ID must be a numeric Just process id"
+        exit 2
+    }
     # Exit 2 = invalid caller configuration (bad ANVIL_IMPACT), distinct from
     # the generic 1 used for operational failures -- see _anvil-impact-snapshot.
     if ($env:ANVIL_IMPACT -and $env:ANVIL_IMPACT -notin @('off', 'consume')) {
@@ -5474,46 +5481,78 @@ anvil-impact:
     } else {
         $cleanImpactDir
     }
-    $dirtyActiveMarker = Join-Path $dirtyImpactRoot 'active'
-    if (-not $dirty -and (Test-Path -LiteralPath $dirtyActiveMarker -PathType Leaf)) {
-        Remove-Item -LiteralPath $dirtyActiveMarker -Force -ErrorAction Stop
+    $workspaceHash = [Convert]::ToHexString(
+        [System.Security.Cryptography.SHA256]::HashData(
+            [System.Text.Encoding]::UTF8.GetBytes((Get-Location).Path)
+        )
+    )
+    $publicationMutex = [System.Threading.Mutex]::new($false, "anvil-impact-publication-$workspaceHash")
+    if (-not $dirty) {
+        try {
+            [void]$publicationMutex.WaitOne()
+            if (Test-Path -LiteralPath $dirtyImpactRoot -PathType Container) {
+                Get-ChildItem -LiteralPath $dirtyImpactRoot -File -Filter 'active*' -ErrorAction SilentlyContinue |
+                    Remove-Item -Force -ErrorAction Stop
+            }
+        } finally {
+            $publicationMutex.ReleaseMutex()
+        }
+    } else {
+        $invocationMarker = Join-Path $dirtyImpactRoot "active-$env:ANVIL_IMPACT_INVOCATION_ID"
     }
     & "{{ just_executable() }}" _anvil-impact-snapshot $impactDir
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     if ($dirty) {
         $publishDirty = {
-            [System.IO.Directory]::CreateDirectory($dirtyImpactRoot) | Out-Null
-            $pendingMarker = Join-Path $dirtyImpactRoot "active-$([System.Guid]::NewGuid().ToString('N'))"
-            Set-Content -LiteralPath $pendingMarker -Value $impactDir -Encoding UTF8 -NoNewline
-            [System.IO.File]::Move($pendingMarker, $dirtyActiveMarker, $true)
-
-            # Retain enough completed generations for readers that selected an
-            # older base before another invocation published. Eight is
-            # intentionally generous relative to the tiny local cache cost:
-            # it avoids thrashing active concurrent checks while bounding
-            # unbounded local disk growth. Per-generation mutexes let cleanup
-            # skip any directory a reader is currently consuming.
-            $completedGenerations = @(Get-ChildItem -LiteralPath $dirtyImpactRoot -Directory -ErrorAction SilentlyContinue |
-                Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'complete') -PathType Leaf } |
-                Sort-Object -Property LastWriteTimeUtc -Descending)
-            foreach ($oldGeneration in @($completedGenerations | Select-Object -Skip 8)) {
-                $generationMutex = [System.Threading.Mutex]::new($false, "anvil-impact-generation-$($oldGeneration.Name)")
-                $locked = $false
-                try {
-                    $locked = $generationMutex.WaitOne(0)
-                    if ($locked -and (Test-Path -LiteralPath $oldGeneration.FullName -PathType Container)) {
-                        Remove-Item -LiteralPath $oldGeneration.FullName -Recurse -Force -ErrorAction Stop
-                    }
-                } catch [System.UnauthorizedAccessException] {
-                    # A platform may deny deletion after a reader opened a
-                    # descendant; leave the generation for the next cleanup.
-                } catch [System.IO.IOException] {
-                    # A concurrent reader may own a platform file handle.
-                    # Retaining the extra generation is cheaper than disrupting it.
-                } finally {
-                    if ($locked) { $generationMutex.ReleaseMutex() }
-                    $generationMutex.Dispose()
+            try {
+                [void]$publicationMutex.WaitOne()
+                [System.IO.Directory]::CreateDirectory($dirtyImpactRoot) | Out-Null
+                foreach ($marker in @($invocationMarker, (Join-Path $dirtyImpactRoot 'active'))) {
+                    $pendingMarker = Join-Path $dirtyImpactRoot "pending-$([System.Guid]::NewGuid().ToString('N'))"
+                    Set-Content -LiteralPath $pendingMarker -Value $impactDir -Encoding UTF8 -NoNewline
+                    [System.IO.File]::Move($pendingMarker, $marker, $true)
                 }
+
+                $activeGenerations = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+                foreach ($marker in @(Get-ChildItem -LiteralPath $dirtyImpactRoot -File -Filter 'active*' -ErrorAction SilentlyContinue)) {
+                    if ($marker.Name -match '^active-(\d+)$') {
+                        $invocationProcess = Get-Process -Id ([int]$Matches[1]) -ErrorAction SilentlyContinue
+                        if (-not $invocationProcess) {
+                            Remove-Item -LiteralPath $marker.FullName -Force -ErrorAction Stop
+                            continue
+                        }
+                    }
+                    $markerGeneration = "$(Get-Content -Raw -LiteralPath $marker.FullName)".Trim()
+                    if ($markerGeneration) {
+                        [void]$activeGenerations.Add((Resolve-Path -LiteralPath $markerGeneration).Path)
+                    }
+                }
+
+                # Eight is intentionally generous relative to the tiny local
+                # cache cost and keeps cleanup bounded without thrashing.
+                $completedGenerations = @(Get-ChildItem -LiteralPath $dirtyImpactRoot -Directory -ErrorAction SilentlyContinue |
+                    Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'complete') -PathType Leaf } |
+                    Sort-Object -Property LastWriteTimeUtc -Descending)
+                foreach ($oldGeneration in @($completedGenerations | Select-Object -Skip 8)) {
+                    if ($activeGenerations.Contains($oldGeneration.FullName)) { continue }
+                    $generationMutex = [System.Threading.Mutex]::new($false, "anvil-impact-generation-$($oldGeneration.Name)")
+                    $locked = $false
+                    try {
+                        $locked = $generationMutex.WaitOne(0)
+                        if ($locked -and (Test-Path -LiteralPath $oldGeneration.FullName -PathType Container)) {
+                            Remove-Item -LiteralPath $oldGeneration.FullName -Recurse -Force -ErrorAction Stop
+                        }
+                    } catch [System.UnauthorizedAccessException] {
+                        # Leave the generation for a later cleanup pass.
+                    } catch [System.IO.IOException] {
+                        # Leave the generation for a later cleanup pass.
+                    } finally {
+                        if ($locked) { $generationMutex.ReleaseMutex() }
+                        $generationMutex.Dispose()
+                    }
+                }
+            } finally {
+                $publicationMutex.ReleaseMutex()
             }
         }
     }
@@ -5717,8 +5756,13 @@ _anvil-impact-format tier impactJson:
 [script("pwsh", "-NoProfile")]
 _anvil-impact-doctest-packages:
     $ErrorActionPreference = 'Stop'
+    if ($env:ANVIL_IMPACT_INVOCATION_ID -notmatch '^\d+$') {
+        Write-Error "anvil-impact: ANVIL_IMPACT_INVOCATION_ID must be a numeric Just process id"
+        exit 2
+    }
     $selectedContent = $null
-    $selectedDir = $null
+    $selectedFileFound = $false
+    $dirtyGenerationSelected = $false
     if ($env:ANVIL_IMPACT -and $env:ANVIL_IMPACT -notin @('off', 'consume')) {
         [Console]::Error.WriteLine("anvil: ANVIL_IMPACT='$($env:ANVIL_IMPACT)' is not recognized (expected 'off', 'consume', or unset).")
         exit 2
@@ -5730,51 +5774,59 @@ _anvil-impact-doctest-packages:
     } elseif ($env:ANVIL_IMPACT -eq 'consume') {
         $inputDir = 'target/anvil/impact'
     } else {
-        $activeMarker = 'target/anvil/impact-dirty/active'
-        $inputDir = if (Test-Path -LiteralPath $activeMarker -PathType Leaf) {
-            $base = (& "{{ just_executable() }}" _anvil-base-ref)
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            $baseSha = (git rev-parse $base.Trim()).Trim()
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            $selectedDir = $null
-            $selectedContent = $null
-            $generations = @(Get-ChildItem -LiteralPath 'target/anvil/impact-dirty' -Directory -ErrorAction SilentlyContinue |
-                Where-Object {
-                    (Test-Path -LiteralPath (Join-Path $_.FullName 'complete') -PathType Leaf) -and
-                    (Test-Path -LiteralPath (Join-Path $_.FullName 'base.sha') -PathType Leaf) -and
-                    ("$(Get-Content -Raw -LiteralPath (Join-Path $_.FullName 'base.sha'))".Trim() -eq $baseSha)
-                } |
-                Sort-Object -Property LastWriteTimeUtc -Descending)
-            foreach ($generation in $generations) {
-                $generationMutex = [System.Threading.Mutex]::new($false, "anvil-impact-generation-$($generation.Name)")
-                try {
-                    [void]$generationMutex.WaitOne()
-                    $candidateFile = Join-Path $generation.FullName 'doctest_packages.txt'
-                    if (Test-Path -LiteralPath $candidateFile -PathType Leaf) {
-                        $selectedDir = $generation.FullName
-                        $selectedContent = Get-Content -Raw -LiteralPath $candidateFile
-                        break
+        $activeMarker = Join-Path 'target/anvil/impact-dirty' "active-$env:ANVIL_IMPACT_INVOCATION_ID"
+        if (Test-Path -LiteralPath $activeMarker -PathType Leaf) {
+            $workspaceHash = [Convert]::ToHexString(
+                [System.Security.Cryptography.SHA256]::HashData(
+                    [System.Text.Encoding]::UTF8.GetBytes((Get-Location).Path)
+                )
+            )
+            $publicationMutex = [System.Threading.Mutex]::new($false, "anvil-impact-publication-$workspaceHash")
+            try {
+                [void]$publicationMutex.WaitOne()
+                if (Test-Path -LiteralPath $activeMarker -PathType Leaf) {
+                    $selectedDir = "$(Get-Content -Raw -LiteralPath $activeMarker)".Trim()
+                    $dirtyGenerationSelected = $true
+                    $generationMutex = [System.Threading.Mutex]::new($false, "anvil-impact-generation-$(Split-Path $selectedDir -Leaf)")
+                    try {
+                        [void]$generationMutex.WaitOne()
+                        $completeFile = Join-Path $selectedDir 'complete'
+                        $baseFile = Join-Path $selectedDir 'base.sha'
+                        if (-not (Test-Path -LiteralPath $completeFile -PathType Leaf) -or
+                            -not (Test-Path -LiteralPath $baseFile -PathType Leaf)) {
+                            Write-Error "anvil-impact: dirty impact selector is stale ($activeMarker)"
+                            exit 1
+                        }
+                        $candidateFile = Join-Path $selectedDir 'doctest_packages.txt'
+                        if (Test-Path -LiteralPath $candidateFile -PathType Leaf) {
+                            $selectedFileFound = $true
+                            $selectedContent = "$(Get-Content -Raw -LiteralPath $candidateFile)"
+                        }
+                    } finally {
+                        $generationMutex.ReleaseMutex()
+                        $generationMutex.Dispose()
                     }
-                } finally {
-                    $generationMutex.ReleaseMutex()
                 }
+            } finally {
+                $publicationMutex.ReleaseMutex()
+                $publicationMutex.Dispose()
             }
-            if (-not $selectedDir) {
-                Write-Error "anvil-impact: no completed dirty impact generation matches base $baseSha"
+            if (-not $dirtyGenerationSelected) {
+                Write-Error "anvil-impact: no dirty impact generation selector for this Just invocation ($activeMarker)"
                 exit 1
             }
-            $selectedDir
+            $inputDir = $selectedDir
         } else {
-            'target/anvil/impact'
+            $inputDir = 'target/anvil/impact'
         }
     }
     $file = Join-Path $inputDir 'doctest_packages.txt'
-    if ($selectedContent -ne $null) {
+    if ($selectedFileFound) {
         $specs = @($selectedContent -split "`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
         Write-Output ($specs -join ' ')
         exit 0
     }
-    if ($env:ANVIL_IMPACT -ne 'off' -and (Test-Path -LiteralPath $file -PathType Leaf)) {
+    if (-not $dirtyGenerationSelected -and $env:ANVIL_IMPACT -ne 'off' -and (Test-Path -LiteralPath $file -PathType Leaf)) {
         $specs = @(Get-Content -LiteralPath $file | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
         Write-Output ($specs -join ' ')
         exit 0
@@ -5819,9 +5871,14 @@ _anvil-impact-doctest-packages:
 [script("pwsh", "-NoProfile")]
 _anvil-impact-include tier:
     $ErrorActionPreference = 'Stop'
+    if ($env:ANVIL_IMPACT_INVOCATION_ID -notmatch '^\d+$') {
+        Write-Error "anvil-impact: ANVIL_IMPACT_INVOCATION_ID must be a numeric Just process id"
+        exit 2
+    }
     $tier = '{{ tier }}'
     $selectedContent = $null
-    $selectedDir = $null
+    $selectedFileFound = $false
+    $dirtyGenerationSelected = $false
     $default = if ($tier -eq 'modified') { '' } else { '--workspace' }
     # Exit 2 = invalid caller configuration (bad ANVIL_IMPACT), distinct from
     # the generic 1 used for operational failures -- see _anvil-impact-snapshot.
@@ -5833,48 +5890,60 @@ _anvil-impact-include tier:
     if ($env:ANVIL_IMPACT -eq 'consume') {
         $inputDir = if ($env:ANVIL_IMPACT_INPUT_DIR) { $env:ANVIL_IMPACT_INPUT_DIR } else { 'target/anvil/impact' }
     } else {
-        $activeMarker = 'target/anvil/impact-dirty/active'
-        $inputDir = if (Test-Path -LiteralPath $activeMarker -PathType Leaf) {
-            $base = (& "{{ just_executable() }}" _anvil-base-ref)
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            $baseSha = (git rev-parse $base.Trim()).Trim()
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            $selectedDir = $null
-            $selectedContent = $null
-            $generations = @(Get-ChildItem -LiteralPath 'target/anvil/impact-dirty' -Directory -ErrorAction SilentlyContinue |
-                Where-Object {
-                    (Test-Path -LiteralPath (Join-Path $_.FullName 'complete') -PathType Leaf) -and
-                    (Test-Path -LiteralPath (Join-Path $_.FullName 'base.sha') -PathType Leaf) -and
-                    ("$(Get-Content -Raw -LiteralPath (Join-Path $_.FullName 'base.sha'))".Trim() -eq $baseSha)
-                } |
-                Sort-Object -Property LastWriteTimeUtc -Descending)
-            foreach ($generation in $generations) {
-                $generationMutex = [System.Threading.Mutex]::new($false, "anvil-impact-generation-$($generation.Name)")
-                try {
-                    [void]$generationMutex.WaitOne()
-                    $candidateFile = Join-Path $generation.FullName "include_$tier.txt"
-                    if (Test-Path -LiteralPath $candidateFile -PathType Leaf) {
-                        $selectedDir = $generation.FullName
-                        $selectedContent = Get-Content -Raw -LiteralPath $candidateFile
-                        break
+        $activeMarker = Join-Path 'target/anvil/impact-dirty' "active-$env:ANVIL_IMPACT_INVOCATION_ID"
+        if (Test-Path -LiteralPath $activeMarker -PathType Leaf) {
+            $workspaceHash = [Convert]::ToHexString(
+                [System.Security.Cryptography.SHA256]::HashData(
+                    [System.Text.Encoding]::UTF8.GetBytes((Get-Location).Path)
+                )
+            )
+            $publicationMutex = [System.Threading.Mutex]::new($false, "anvil-impact-publication-$workspaceHash")
+            try {
+                [void]$publicationMutex.WaitOne()
+                if (Test-Path -LiteralPath $activeMarker -PathType Leaf) {
+                    $selectedDir = "$(Get-Content -Raw -LiteralPath $activeMarker)".Trim()
+                    $dirtyGenerationSelected = $true
+                    $generationMutex = [System.Threading.Mutex]::new($false, "anvil-impact-generation-$(Split-Path $selectedDir -Leaf)")
+                    try {
+                        [void]$generationMutex.WaitOne()
+                        $completeFile = Join-Path $selectedDir 'complete'
+                        $baseFile = Join-Path $selectedDir 'base.sha'
+                        if (-not (Test-Path -LiteralPath $completeFile -PathType Leaf) -or
+                            -not (Test-Path -LiteralPath $baseFile -PathType Leaf)) {
+                            Write-Error "anvil-impact: dirty impact selector is stale ($activeMarker)"
+                            exit 1
+                        }
+                        $candidateFile = Join-Path $selectedDir "include_$tier.txt"
+                        if (Test-Path -LiteralPath $candidateFile -PathType Leaf) {
+                            $selectedFileFound = $true
+                            $selectedContent = "$(Get-Content -Raw -LiteralPath $candidateFile)"
+                        }
+                    } finally {
+                        $generationMutex.ReleaseMutex()
+                        $generationMutex.Dispose()
                     }
-                } finally {
-                    $generationMutex.ReleaseMutex()
                 }
+            } finally {
+                $publicationMutex.ReleaseMutex()
+                $publicationMutex.Dispose()
             }
-            if (-not $selectedDir) {
-                Write-Error "anvil-impact: no completed dirty impact generation matches base $baseSha"
+            if (-not $dirtyGenerationSelected) {
+                Write-Error "anvil-impact: no dirty impact generation selector for this Just invocation ($activeMarker)"
                 exit 1
             }
-            $selectedDir
+            $inputDir = $selectedDir
         } else {
-            'target/anvil/impact'
+            $inputDir = 'target/anvil/impact'
         }
     }
     $file = Join-Path $inputDir "include_$tier.txt"
-    if ($selectedContent -ne $null) {
-        Write-Output ("$selectedContent".Trim())
+    if ($selectedFileFound) {
+        Write-Output ($selectedContent.Trim())
         exit 0
+    }
+    if ($dirtyGenerationSelected) {
+        Write-Error "anvil-impact: completed dirty impact generation is missing include_$tier.txt ($selectedDir)"
+        exit 1
     }
     if (Test-Path -LiteralPath $file -PathType Leaf) {
         Write-Output ("$(Get-Content -Raw -LiteralPath $file)".Trim())
