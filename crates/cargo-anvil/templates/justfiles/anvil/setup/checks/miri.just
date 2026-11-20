@@ -8,9 +8,9 @@
 
 # Install prerequisites and prepare the sysroot for the `anvil-miri` recipe.
 [private]
-anvil-miri-setup installer="install": anvil-component-nightly-miri-install anvil-component-nightly-rust-src-install
+anvil-miri-setup installer="install": anvil-component-nightly-miri-install anvil-component-nightly-rust-src-install (anvil-tool-cargo-each-install installer)
     cargo +{{ rust_nightly }} miri setup
 
 # Validate prerequisites for the `anvil-miri` recipe.
 [private]
-anvil-miri-validate-prereqs: anvil-component-nightly-miri-validate-prereqs anvil-component-nightly-rust-src-validate-prereqs
+anvil-miri-validate-prereqs: anvil-component-nightly-miri-validate-prereqs anvil-component-nightly-rust-src-validate-prereqs anvil-tool-cargo-each-validate-prereqs

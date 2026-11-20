@@ -7,15 +7,11 @@
 # Install the declared public MSRV.
 [group("anvil-setup")]
 [private]
-anvil-msrv-test-setup installer="install": (anvil-tool-cargo-each-install installer)
-    {{ just_executable() }} --justfile {{ quote(justfile()) }} _anvil-msrv-test-setup
-
-[private]
-_anvil-msrv-test-setup:
-    cargo each {{ anvil_msrv_workspace_selection }} --once -- rustup toolchain install '{workspace-rust-version}' --profile minimal
+anvil-msrv-test-setup installer="install":
+    {{ if workspace_rust_version == "" { "# no declared root MSRV" } else { "rustup toolchain install " + quote(workspace_rust_version) + " --profile minimal" } }}
 
 # Validate the MSRV prerequisite without rustup auto-install behavior.
 [group("anvil-setup")]
 [private]
-anvil-msrv-test-validate-prereqs: anvil-tool-cargo-each-validate-prereqs
-    cargo each {{ anvil_msrv_workspace_selection }} --once -- rustup run '{workspace-rust-version}' rustc --version
+anvil-msrv-test-validate-prereqs:
+    {{ if workspace_rust_version == "" { "# no declared root MSRV" } else { "rustup run " + quote(workspace_rust_version) + " rustc --version" } }}
