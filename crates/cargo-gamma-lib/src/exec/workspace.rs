@@ -64,20 +64,6 @@ pub(super) fn with_journal_arm_hook<T>(hook: impl FnOnce(&Utf8Path) + 'static, o
     tests::with_journal_arm_hook(hook, operation)
 }
 
-#[cfg(all(test, not(miri)))]
-pub(super) fn with_successful_capture<T>(mut capture: impl FnMut(&Command, &str) -> String + 'static, operation: impl FnOnce() -> T) -> T {
-    tests::with_capture_script(
-        move |command, what| {
-            Ok(Captured {
-                succeeded: true,
-                stdout: capture(command, what).into_bytes(),
-                stderr: Vec::new(),
-            })
-        },
-        operation,
-    )
-}
-
 /// Identifies one claimed lock pair across the adoption-to-preparation handoff.
 #[cfg(any(test, feature = "internals"))]
 pub(crate) const fn cache_lock_identity(locks: &CacheLocks) -> usize {
@@ -1208,10 +1194,10 @@ impl Workspace {
         let path = self.target.join(name);
 
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent.as_std_path()).map_err(|cause| error!("could not create `{parent}`").caused_by(cause))?;
+            replay_fs::create_dir_all(parent.as_std_path()).map_err(|cause| error!("could not create `{parent}`").caused_by(cause))?;
         }
 
-        fs::write(path.as_std_path(), contents).map_err(|cause| error!("could not write `{path}`").caused_by(cause))?;
+        replay_fs::write(path.as_std_path(), contents).map_err(|cause| error!("could not write `{path}`").caused_by(cause))?;
 
         Ok(path)
     }
@@ -4397,57 +4383,103 @@ mod tests {
         use std::rc::Rc;
 
         use super::super::measure::arm_selected_runner_for_test;
+        use super::super::rustc_replay::snapshot_io::{self, Script};
         use super::super::test_environment::with_native_queries;
 
-        let directory = tempfile::tempdir().unwrap();
-        let root = Utf8Path::from_path(directory.path()).unwrap().to_owned();
-        let mut work = Workspace::adopt(root.clone(), root.join("target"));
-        let selected = vec!["selected-package".to_owned()];
+        let root = Utf8PathBuf::from(if cfg!(windows) {
+            r"C:\nextest-measurement"
+        } else {
+            "/nextest-measurement"
+        });
+        let target = root.join("target");
+        let executable = target.join("debug").join("deps").join("selected-test");
+        let mut work = Workspace::adopt(root, target.clone());
+        work.cargo.features = vec!["--all-features".to_owned()];
+        let package_id = "selected-package";
+        let mut binary = crate::testing::test_binary(executable.as_str());
+        binary.package = package_id.to_owned();
+        binary.package_id = package_id.to_owned();
+        let metadata =
+            r#"{"packages":[{"id":"selected-package","name":"selected-package","version":"0.1.0","manifest_path":"fixture/Cargo.toml"}]}"#;
+        let artifacts = json!({
+            "reason": "compiler-artifact",
+            "package_id": package_id,
+            "target": {"kind": ["lib"]},
+            "executable": executable,
+        })
+        .to_string();
+        let listing = json!({
+            "rust-binaries": {
+                "selected-package": {"binary-path": executable, "binary-id": "selected-package"}
+            }
+        })
+        .to_string();
         let build = super::super::build::Build {
-            packages: Some(selected.clone()),
+            binaries: vec![binary],
+            packages: Some(vec![package_id.to_owned()]),
+            artifacts,
             ..Default::default()
         };
-        let observed = Rc::new(RefCell::new(None::<Vec<String>>));
+        let config = Config {
+            nextest: true,
+            test_lib: true,
+            ..Config::default()
+        };
+        let script = Script {
+            environment: BTreeMap::from([("CARGO".into(), "fixture-cargo".into())]),
+            ..Script::default()
+        };
+        let observed = Rc::new(RefCell::new(Vec::<Vec<String>>::new()));
         let capture_observed = Rc::clone(&observed);
+        let captured_listing = listing.clone();
 
-        with_native_queries(
-            BTreeMap::from([(String::from("CARGO"), OsString::from("fixture-cargo"))]),
-            |command| {
-                Err(io::Error::other(format!(
-                    "unexpected native query: {}",
-                    command.get_program().to_string_lossy()
-                )))
-            },
-            || {
-                with_capture_script(
-                    move |command, label| {
-                        if label == "cargo metadata" {
-                            return Ok(capture_success(r#"{"packages":[]}"#));
-                        }
-                        assert_eq!(label, "cargo nextest list");
-                        *capture_observed.borrow_mut() =
-                            Some(command.get_args().map(|argument| argument.to_string_lossy().into_owned()).collect());
-                        Ok(capture_success(r#"{"rust-binaries":{}}"#))
-                    },
-                    || arm_selected_runner_for_test(&mut work, &build, true, true),
-                )
-            },
-        )
-        .unwrap();
+        snapshot_io::with(script, || {
+            with_native_queries(
+                BTreeMap::from([(String::from("CARGO"), OsString::from("fixture-cargo"))]),
+                |command| {
+                    assert_eq!(command.get_program(), OsStr::new("rustup"));
+                    assert_eq!(
+                        command.get_args().collect::<Vec<_>>(),
+                        [OsStr::new("show"), OsStr::new("active-toolchain")]
+                    );
+                    Ok((false, Vec::new()))
+                },
+                || {
+                    with_capture_script(
+                        move |command, label| {
+                            assert_eq!(command.get_program(), OsStr::new("fixture-cargo"));
+                            capture_observed
+                                .borrow_mut()
+                                .push(command.get_args().map(|argument| argument.to_string_lossy().into_owned()).collect());
+                            let output = match label {
+                                "cargo metadata" => metadata,
+                                "cargo nextest list" => &captured_listing,
+                                _ => panic!("unexpected capture: {label}"),
+                            };
+                            Ok(capture_success(output))
+                        },
+                        || arm_selected_runner_for_test(&mut work, &build, &config),
+                    )
+                },
+            )
+            .expect("the scripted nextest listing contains the built test binary");
 
-        let arguments = observed.borrow().clone().expect("nextest listing command was captured");
-        let packages = arguments
-            .windows(2)
-            .filter(|pair| pair[0] == "--package")
-            .map(|pair| pair[1].clone())
-            .collect::<Vec<_>>();
+            assert!(work.runner().is_some());
+            assert_eq!(snapshot_io::read(target.join("nextest-binaries.json")).unwrap(), listing.as_bytes());
+            assert_eq!(
+                snapshot_io::read(target.join("nextest-metadata.json")).unwrap(),
+                metadata.as_bytes()
+            );
+        });
+
+        let commands = observed.borrow();
+        assert_eq!(commands.len(), 2);
+        assert_eq!(commands[0], ["metadata", "--format-version", "1"]);
         assert_eq!(
-            (
-                packages,
-                arguments.iter().any(|argument| argument == "--workspace"),
-                arguments.iter().any(|argument| argument == "--lib"),
-            ),
-            (selected, false, true)
+            commands[1],
+            "nextest list --list-type binaries-only --message-format json --package selected-package --lib --all-features"
+                .split_whitespace()
+                .collect::<Vec<_>>()
         );
     }
 

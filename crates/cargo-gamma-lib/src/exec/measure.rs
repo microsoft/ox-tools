@@ -807,7 +807,7 @@ fn measure_with_locks(
     // binaries that do not exist until the build has run, and the baseline has to be measured
     // through the same runner that will judge every mutant — a baseline taken one way and compared
     // against verdicts reached the other measures nothing.
-    if let Err(error) = arm_selected_runner(&mut work, &build, config.nextest, config.test_lib) {
+    if let Err(error) = arm_selected_runner(&mut work, &build, config) {
         failed.plan = Some(plan);
 
         return Err(error);
@@ -936,8 +936,12 @@ fn restrict_binaries(binaries: &mut Vec<TestBinary>, plan: &Plan, scope: &TestSc
     Ok(filtered)
 }
 
+fn arm_selected_runner(work: &mut Workspace, build: &Build, config: &Config) -> Result<()> {
+    arm_runner_with_selection(work, build, config.nextest, config.test_lib)
+}
+
 // #[gamma::skip(all, reason = "the mutation affects internal orchestration state with no safely deterministic observation at this layer")]
-fn arm_selected_runner(work: &mut Workspace, build: &Build, nextest: bool, test_lib: bool) -> Result<()> {
+fn arm_runner_with_selection(work: &mut Workspace, build: &Build, nextest: bool, test_lib: bool) -> Result<()> {
     work.arm_test_environment(&build.binaries, &build.artifacts)?;
 
     // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
@@ -948,8 +952,8 @@ fn arm_selected_runner(work: &mut Workspace, build: &Build, nextest: bool, test_
 }
 
 #[cfg(test)]
-pub(super) fn arm_selected_runner_for_test(work: &mut Workspace, build: &Build, nextest: bool, test_lib: bool) -> Result<()> {
-    arm_selected_runner(work, build, nextest, test_lib)
+pub(super) fn arm_selected_runner_for_test(work: &mut Workspace, build: &Build, config: &Config) -> Result<()> {
+    arm_selected_runner(work, build, config)
 }
 
 fn warn_if_oracle_is_empty(
@@ -2078,85 +2082,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[cfg(not(miri))]
-    #[test]
-    fn nextest_measurement_lists_only_library_targets_when_requested() {
-        use std::collections::BTreeMap;
-        use std::ffi::OsString;
-
-        use crate::exec::test_environment::with_native_queries;
-        use crate::exec::test_listing::with_listing_runner;
-        use crate::exec::workspace::with_successful_capture;
-
-        let (_directory, survey, selection, config) = orchestration_fixture("pub fn subject() -> bool { true }\n");
-        let config = Config {
-            nextest: true,
-            test_lib: true,
-            baseline: false,
-            ..config
-        };
-        let executable = crate::testing::helper().path;
-        let listing = json!({
-            "rust-binaries": {
-                "subject": {"binary-path": &executable, "binary-id": "subject"}
-            }
-        })
-        .to_string();
-        let commands = Rc::new(RefCell::new(Vec::new()));
-        let observed = Rc::clone(&commands);
-
-        let measured = with_native_queries(
-            BTreeMap::from([("CARGO".to_owned(), OsString::from("fixture-cargo"))]),
-            |command| {
-                Err(std::io::Error::other(format!(
-                    "unexpected native query: {}",
-                    command.get_program().to_string_lossy()
-                )))
-            },
-            || {
-                with_successful_capture(
-                    move |command, what| match what {
-                        "cargo metadata" => json!({"packages": []}).to_string(),
-                        "cargo nextest list" => {
-                            observed.borrow_mut().push(
-                                command
-                                    .get_args()
-                                    .map(|argument| argument.to_string_lossy().into_owned())
-                                    .collect::<Vec<_>>(),
-                            );
-                            listing.clone()
-                        }
-                        _ => panic!("unexpected capture: {what}"),
-                    },
-                    || {
-                        with_listing_runner(
-                            |_command, _budget, _request| Some(Vec::new()),
-                            || {
-                                super::super::build::with_compiler(
-                                    move |work, _arguments, _timeout, _events| {
-                                        Ok(Some(successful_compiler_output(work, &executable, true)))
-                                    },
-                                    || measure(&survey, &selection, &config, &mut Recorder::default()),
-                                )
-                            },
-                        )
-                    },
-                )
-            },
-        )
-        .expect("nextest must accept the test binary built for this measurement");
-
-        let built = measured.built.expect("the viable mutation must retain its prepared workspace");
-        assert!(built.work.runner().is_some());
-        let commands = commands.borrow();
-        assert_eq!(commands.len(), 1, "nextest must list the built tree once");
-        assert!(
-            commands[0].iter().any(|argument| argument == "--lib"),
-            "nextest must list the same library-only targets as the test build: {:?}",
-            commands[0]
-        );
     }
 
     #[test]
