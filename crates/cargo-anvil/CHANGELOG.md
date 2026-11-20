@@ -11,6 +11,7 @@
 
 - ✨ Features
 
+  - cargo-anvil: expose per-check artifacts
   - cargo-anvil: run Miri artifacts with cargo-each
   - cargo-anvil: split generated recipe roles
   - cargo-anvil: release v0.20.0

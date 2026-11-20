@@ -414,9 +414,11 @@ use std::process::ExitCode;
 use cargo_anvil::{Artifact, Catalog, artifacts};
 
 fn catalog() -> Catalog {
+    let clippy = artifacts::justfile::checks::clippy();
     Catalog::anvil()
         .into_builder()
         .subcommand("myforge")
+        .replace_artifact(clippy.execution.with_body("# custom clippy recipe\n"))
         .with_artifact(Artifact::owned_file_section(
             ".anvil/checks.just",
             "source:myforge/checks/extra.just",
@@ -466,7 +468,7 @@ More detailed design and operational guidance is available in the
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbTw5WNBdFrFAb9L7a_Shep9MbEeZYpzLDtbEbeFLCQqYbjKBhZIGDa2NhcmdvLWFudmlsZjAuMjYuMGtjYXJnb19hbnZpbA
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbxCk1hseA1fMbHfMsFH5SmBgbPVM1O6QgDyAbV_8Pjyw2cldhZIGDa2NhcmdvLWFudmlsZjAuMjYuMGtjYXJnb19hbnZpbA
  [__link0]: https://github.com/casey/just
  [__link1]: https://rust-lang.github.io/rustfmt/
  [__link10]: https://www.conventionalcommits.org/
