@@ -947,6 +947,11 @@ fn arm_selected_runner(work: &mut Workspace, build: &Build, nextest: bool, test_
     Ok(())
 }
 
+#[cfg(test)]
+pub(super) fn arm_selected_runner_for_test(work: &mut Workspace, build: &Build, nextest: bool, test_lib: bool) -> Result<()> {
+    arm_selected_runner(work, build, nextest, test_lib)
+}
+
 fn warn_if_oracle_is_empty(
     plan: &Plan,
     binaries: &[TestBinary],

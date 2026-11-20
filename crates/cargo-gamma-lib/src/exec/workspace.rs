@@ -4374,6 +4374,66 @@ mod tests {
     }
 
     #[test]
+    fn selected_nextest_runner_preserves_built_package_and_library_selection() {
+        use super::super::measure::arm_selected_runner_for_test;
+        use super::super::test_environment::with_native_queries;
+        use std::cell::RefCell;
+        use std::ffi::OsString;
+        use std::rc::Rc;
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = Utf8Path::from_path(directory.path()).unwrap().to_owned();
+        let mut work = Workspace::adopt(root.clone(), root.join("target"));
+        let selected = vec!["selected-package".to_owned()];
+        let build = super::super::build::Build {
+            packages: Some(selected.clone()),
+            ..Default::default()
+        };
+        let observed = Rc::new(RefCell::new(None::<Vec<String>>));
+        let capture_observed = Rc::clone(&observed);
+
+        with_native_queries(
+            BTreeMap::from([(String::from("CARGO"), OsString::from("fixture-cargo"))]),
+            |command| {
+                Err(io::Error::other(format!(
+                    "unexpected native query: {}",
+                    command.get_program().to_string_lossy()
+                )))
+            },
+            || {
+                with_capture_script(
+                    move |command, label| {
+                        if label == "cargo metadata" {
+                            return Ok(capture_success(r#"{"packages":[]}"#));
+                        }
+                        assert_eq!(label, "cargo nextest list");
+                        *capture_observed.borrow_mut() =
+                            Some(command.get_args().map(|argument| argument.to_string_lossy().into_owned()).collect());
+                        Ok(capture_success(r#"{"rust-binaries":{}}"#))
+                    },
+                    || arm_selected_runner_for_test(&mut work, &build, true, true),
+                )
+            },
+        )
+        .unwrap();
+
+        let arguments = observed.borrow().clone().expect("nextest listing command was captured");
+        let packages = arguments
+            .windows(2)
+            .filter(|pair| pair[0] == "--package")
+            .map(|pair| pair[1].clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            (
+                packages,
+                arguments.iter().any(|argument| argument == "--workspace"),
+                arguments.iter().any(|argument| argument == "--lib"),
+            ),
+            (selected, false, true)
+        );
+    }
+
+    #[test]
     fn native_cache_readers_and_workspace_claims_return_nondirectory_errors() {
         let directory = crate::testing::workdir("workspace-parent-native-errors-");
         let root = Utf8Path::from_path(directory.path()).unwrap();
