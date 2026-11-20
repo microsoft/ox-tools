@@ -43,6 +43,7 @@
 
 - ♻️ Code Refactoring
 
+  - cargo-anvil: compose whole source sections
   - cargo-anvil: align recipe source layout
   - cargo-anvil: name mutation skip prefix clearly
   - cargo-anvil: streamline generated guidance
