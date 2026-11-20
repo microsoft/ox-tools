@@ -68,12 +68,13 @@ same catalog operations; see
 [container customization](containers.md#8-customization).
 
 Section contents are text, not a structured check-editing API. Changing a
-check's behavior means replacing its relevant source section. Public
-`artifacts::justfile::checks::<check>()` functions return a typed group with
-`execution`, optional `helper`, and `setup` artifacts, so a derived catalog can
-replace one role without searching the built-in catalog or depending on section
-identity strings. The update algorithm, preservation rules, and on-disk format
-are shared by all catalogs.
+check's behavior means replacing its relevant source section. Public modules
+mirror the source responsibilities: for example, `checks::clippy()`,
+`setup::checks::clippy()`, and `helpers::checks::miri()` each return one
+`Artifact`. A derived catalog can replace or remove exactly the section it
+chooses without searching the built-in catalog or depending on section identity
+strings. The update algorithm, preservation rules, and on-disk format are
+shared by all catalogs.
 
 ## Running the catalog
 

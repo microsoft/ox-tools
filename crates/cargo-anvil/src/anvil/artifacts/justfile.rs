@@ -69,35 +69,108 @@ macro_rules! paired_recipe_files {
     };
 }
 
-macro_rules! check_recipe_files {
-    ([$(($function:ident, $name:literal)),* $(,)?]) => {
-        const CHECK_FILES: &[(&str, &str)] = split_recipe_files!("checks", [$($name),*]);
-        const CHECK_SETUP_FILES: &[(&str, &str)] = split_recipe_files!("setup/checks", [$($name),*]);
+macro_rules! check_functions {
+    ($resolver:path) => {
+        artifact_functions!(
+            $resolver,
+            [
+                (aprz, "aprz"),
+                (audit, "audit"),
+                (bench, "bench"),
+                (bolero, "bolero"),
+                (careful, "careful"),
+                (cargo_hack, "cargo-hack"),
+                (cargo_sort, "cargo-sort"),
+                (check_all_targets, "check-all-targets"),
+                (clippy, "clippy"),
+                (deny, "deny"),
+                (doc_build, "doc-build"),
+                (doc_test, "doc-test"),
+                (ensure_no_cyclic_deps, "ensure-no-cyclic-deps"),
+                (ensure_no_default_features, "ensure-no-default-features"),
+                (examples, "examples"),
+                (external_types, "external-types"),
+                (fmt, "fmt"),
+                (license_headers, "license-headers"),
+                (llvm_cov, "llvm-cov"),
+                (loom, "loom"),
+                (miri, "miri"),
+                (miri_race_coverage, "miri-race-coverage"),
+                (miri_strict_provenance, "miri-strict-provenance"),
+                (miri_tree_borrows, "miri-tree-borrows"),
+                (msrv_test, "msrv-test"),
+                (mutants_diff, "mutants-diff"),
+                (mutants_full, "mutants-full"),
+                (pr_title, "pr-title"),
+                (readme_check, "readme-check"),
+                (spellcheck, "spellcheck"),
+                (udeps, "udeps"),
+            ]
+        );
+    };
+}
 
-        /// Built-in check artifacts, grouped by check.
-        pub mod checks {
-            use super::check_artifacts;
-            use crate::catalog::Artifact;
+macro_rules! group_functions {
+    ($resolver:path) => {
+        artifact_functions!(
+            $resolver,
+            [
+                (pr_fast, "pr-fast"),
+                (pr_msrv, "pr-msrv"),
+                (pr_slow, "pr-slow"),
+                (pr_test, "pr-test"),
+                (pr_runtime_analysis, "pr-runtime-analysis"),
+                (pr_fuzzing, "pr-fuzzing"),
+                (pr_mutants, "pr-mutants"),
+                (scheduled_test, "scheduled-test"),
+                (scheduled_advisories, "scheduled-advisories"),
+                (scheduled_runtime_analysis, "scheduled-runtime-analysis"),
+                (scheduled_exhaustive, "scheduled-exhaustive"),
+            ]
+        );
+    };
+}
 
-            /// The source sections that implement one built-in check.
-            #[derive(Debug, Clone, PartialEq, Eq)]
-            pub struct CheckArtifacts {
-                /// The public check recipe emitted to `.anvil/checks.just`.
-                pub execution: Artifact,
-                /// Optional private definitions emitted to `.anvil/helpers.just`.
-                pub helper: Option<Artifact>,
-                /// Setup and prerequisite recipes emitted to `.anvil/setup.just`.
-                pub setup: Artifact,
+macro_rules! check_helper_functions {
+    ($resolver:path) => {
+        artifact_functions!(
+            $resolver,
+            [
+                (bolero, "bolero"),
+                (careful, "careful"),
+                (llvm_cov, "llvm-cov"),
+                (miri, "miri"),
+                (mutants_diff, "mutants-diff"),
+                (pr_title, "pr-title"),
+                (readme_check, "readme-check"),
+            ]
+        );
+    };
+}
+
+macro_rules! group_helper_functions {
+    ($resolver:path) => {
+        artifact_functions!(
+            $resolver,
+            [
+                (scheduled_test, "scheduled-test"),
+                (scheduled_advisories, "scheduled-advisories"),
+                (scheduled_runtime_analysis, "scheduled-runtime-analysis"),
+                (scheduled_exhaustive, "scheduled-exhaustive"),
+            ]
+        );
+    };
+}
+
+macro_rules! artifact_functions {
+    ($resolver:path, [$(($function:ident, $name:literal)),* $(,)?]) => {
+        $(
+            #[doc = concat!("The `anvil-", $name, "` source section.")]
+            #[must_use]
+            pub fn $function() -> Artifact {
+                $resolver($name)
             }
-
-            $(
-                #[doc = concat!("Artifacts for the `anvil-", $name, "` check.")]
-                #[must_use]
-                pub fn $function() -> CheckArtifacts {
-                    check_artifacts($name)
-                }
-            )*
-        }
+        )*
     };
 }
 
@@ -105,40 +178,78 @@ macro_rules! check_recipe_files {
 paired_recipe_files!(DEV_CHECK_FILES, "checks/dev", DEV_SETUP_FILES, "setup/dev", ["build"]);
 
 // One `justfiles/anvil/checks/<check>.just` execution template per catalog check.
-check_recipe_files!([
-    (aprz, "aprz"),
-    (audit, "audit"),
-    (bench, "bench"),
-    (bolero, "bolero"),
-    (careful, "careful"),
-    (cargo_hack, "cargo-hack"),
-    (cargo_sort, "cargo-sort"),
-    (check_all_targets, "check-all-targets"),
-    (clippy, "clippy"),
-    (deny, "deny"),
-    (doc_build, "doc-build"),
-    (doc_test, "doc-test"),
-    (ensure_no_cyclic_deps, "ensure-no-cyclic-deps"),
-    (ensure_no_default_features, "ensure-no-default-features"),
-    (examples, "examples"),
-    (external_types, "external-types"),
-    (fmt, "fmt"),
-    (license_headers, "license-headers"),
-    (llvm_cov, "llvm-cov"),
-    (loom, "loom"),
-    (miri, "miri"),
-    (miri_race_coverage, "miri-race-coverage"),
-    (miri_strict_provenance, "miri-strict-provenance"),
-    (miri_tree_borrows, "miri-tree-borrows"),
-    (msrv_test, "msrv-test"),
-    (mutants_diff, "mutants-diff"),
-    (mutants_full, "mutants-full"),
-    (pr_title, "pr-title"),
-    (readme_check, "readme-check"),
-    (spellcheck, "spellcheck"),
-    (udeps, "udeps"),
-]);
-
+const CHECK_FILES: &[(&str, &str)] = split_recipe_files!(
+    "checks",
+    [
+        "aprz",
+        "audit",
+        "bench",
+        "bolero",
+        "careful",
+        "cargo-hack",
+        "cargo-sort",
+        "check-all-targets",
+        "clippy",
+        "deny",
+        "doc-build",
+        "doc-test",
+        "ensure-no-cyclic-deps",
+        "ensure-no-default-features",
+        "examples",
+        "external-types",
+        "fmt",
+        "license-headers",
+        "llvm-cov",
+        "loom",
+        "miri",
+        "miri-race-coverage",
+        "miri-strict-provenance",
+        "miri-tree-borrows",
+        "msrv-test",
+        "mutants-diff",
+        "mutants-full",
+        "pr-title",
+        "readme-check",
+        "spellcheck",
+        "udeps",
+    ]
+);
+const CHECK_SETUP_FILES: &[(&str, &str)] = split_recipe_files!(
+    "setup/checks",
+    [
+        "aprz",
+        "audit",
+        "bench",
+        "bolero",
+        "careful",
+        "cargo-hack",
+        "cargo-sort",
+        "check-all-targets",
+        "clippy",
+        "deny",
+        "doc-build",
+        "doc-test",
+        "ensure-no-cyclic-deps",
+        "ensure-no-default-features",
+        "examples",
+        "external-types",
+        "fmt",
+        "license-headers",
+        "llvm-cov",
+        "loom",
+        "miri",
+        "miri-race-coverage",
+        "miri-strict-provenance",
+        "miri-tree-borrows",
+        "msrv-test",
+        "mutants-diff",
+        "mutants-full",
+        "pr-title",
+        "readme-check",
+        "spellcheck",
+        "udeps",
+    ]
+);
 /// Check-specific private helpers.
 const CHECK_HELPER_FILES: &[(&str, &str)] = split_recipe_files!(
     "helpers/checks",
@@ -223,20 +334,70 @@ fn file_sections(output_path: &'static str, files: &[(&str, &str)]) -> Vec<Artif
         .collect()
 }
 
-fn check_artifacts(name: &str) -> checks::CheckArtifacts {
+fn named_artifact(name: &str, output_path: &'static str, files: &[(&str, &str)]) -> Artifact {
     let file_name = format!("/{name}.just");
-    let execution = CHECK_FILES
+    files
         .iter()
-        .find_map(|&(path, body)| path.ends_with(&file_name).then(|| template_section(CHECKS_JUST_PATH, path, body)))
-        .expect("every public check function names a registered execution template");
-    let helper = CHECK_HELPER_FILES
-        .iter()
-        .find_map(|&(path, body)| path.ends_with(&file_name).then(|| template_section(HELPERS_JUST_PATH, path, body)));
-    let setup = CHECK_SETUP_FILES
-        .iter()
-        .find_map(|&(path, body)| path.ends_with(&file_name).then(|| template_section(SETUP_JUST_PATH, path, body)))
-        .expect("every public check function names a registered setup template");
-    checks::CheckArtifacts { execution, helper, setup }
+        .find_map(|&(path, body)| path.ends_with(&file_name).then(|| template_section(output_path, path, body)))
+        .expect("every public artifact function names a registered source template")
+}
+
+fn check_artifact(name: &str) -> Artifact {
+    named_artifact(name, CHECKS_JUST_PATH, CHECK_FILES)
+}
+
+fn check_setup_artifact(name: &str) -> Artifact {
+    named_artifact(name, SETUP_JUST_PATH, CHECK_SETUP_FILES)
+}
+
+fn check_helper_artifact(name: &str) -> Artifact {
+    named_artifact(name, HELPERS_JUST_PATH, CHECK_HELPER_FILES)
+}
+
+fn group_artifact(name: &str) -> Artifact {
+    named_artifact(name, GROUPS_JUST_PATH, GROUP_FILES)
+}
+
+fn group_setup_artifact(name: &str) -> Artifact {
+    named_artifact(name, SETUP_JUST_PATH, GROUP_SETUP_FILES)
+}
+
+fn group_helper_artifact(name: &str) -> Artifact {
+    named_artifact(name, HELPERS_JUST_PATH, GROUP_HELPER_FILES)
+}
+
+/// Built-in check execution sections.
+pub mod checks {
+    use super::{Artifact, check_artifact};
+
+    check_functions!(check_artifact);
+
+    /// The public impact-computation section.
+    #[must_use]
+    pub fn impact() -> Artifact {
+        super::template_section(
+            super::CHECKS_JUST_PATH,
+            "justfiles/anvil/checks/impact.just",
+            super::IMPACT_CHECK_JUST,
+        )
+    }
+}
+
+/// Built-in group and tier execution sections.
+pub mod groups {
+    use super::{Artifact, group_artifact};
+
+    group_functions!(group_artifact);
+
+    /// The PR, scheduled, and full tier section.
+    #[must_use]
+    pub fn tiers() -> Artifact {
+        super::template_section(
+            super::GROUPS_JUST_PATH,
+            "justfiles/anvil/groups/tiers.just",
+            super::TIERS_GROUPS_JUST,
+        )
+    }
 }
 
 /// Header and `anvil` alias for the composed recipe file.
@@ -247,7 +408,7 @@ pub fn entry() -> Artifact {
 
 /// Generated-content headers for the non-container composed recipe files.
 #[must_use]
-pub fn headers() -> Vec<Artifact> {
+pub(crate) fn headers() -> Vec<Artifact> {
     vec![
         generated_header(CHECKS_JUST_PATH, "header:checks"),
         generated_header(GROUPS_JUST_PATH, "header:groups"),
@@ -262,48 +423,100 @@ pub(crate) const fn scaffold() -> &'static str {
     JUSTFILE_SCAFFOLD
 }
 
-/// Pinned toolchain and cargo-subcommand version declarations.
-#[must_use]
-pub fn versions() -> Vec<Artifact> {
-    vec![template_section(
-        SETUP_JUST_PATH,
-        "justfiles/anvil/setup/versions.just",
-        VERSIONS_JUST,
-    )]
+/// Shared setup artifacts.
+pub mod setup {
+    use super::{Artifact, SETUP_JUST_PATH, TOOLS_JUST, VERSIONS_JUST, template_section};
+
+    /// Pinned toolchain and cargo-subcommand version declarations.
+    #[must_use]
+    pub fn versions() -> Artifact {
+        template_section(SETUP_JUST_PATH, "justfiles/anvil/setup/versions.just", VERSIONS_JUST)
+    }
+
+    /// Tool install and prerequisite recipes.
+    #[must_use]
+    pub fn tools() -> Artifact {
+        template_section(SETUP_JUST_PATH, "justfiles/anvil/setup/tools.just", TOOLS_JUST)
+    }
+
+    /// Check setup and prerequisite sections.
+    pub mod checks {
+        use super::super::{Artifact, check_setup_artifact};
+
+        check_functions!(check_setup_artifact);
+    }
+
+    /// Group setup and prerequisite sections.
+    pub mod groups {
+        use super::super::{Artifact, group_setup_artifact};
+
+        group_functions!(group_setup_artifact);
+    }
+
+    /// Developer-command setup sections.
+    pub mod dev {
+        use super::super::{Artifact, DEV_SETUP_FILES, SETUP_JUST_PATH, named_artifact};
+
+        /// Setup and prerequisites for `anvil-build`.
+        #[must_use]
+        pub fn build() -> Artifact {
+            named_artifact("build", SETUP_JUST_PATH, DEV_SETUP_FILES)
+        }
+    }
+
+    /// Setup for PR, scheduled, and full tiers.
+    #[must_use]
+    pub fn tiers() -> Artifact {
+        template_section(SETUP_JUST_PATH, "justfiles/anvil/setup/tiers.just", super::TIERS_SETUP_JUST)
+    }
 }
 
-/// Tool install and prerequisite recipes.
-#[must_use]
-pub fn tools() -> Vec<Artifact> {
-    vec![template_section(SETUP_JUST_PATH, "justfiles/anvil/setup/tools.just", TOOLS_JUST)]
+/// Shared helper artifacts.
+pub mod helpers {
+    use super::{Artifact, HELPERS_JUST, HELPERS_JUST_PATH, IMPACT_HELPERS_JUST, template_section};
+
+    /// Common private definitions shared across generated recipes.
+    #[must_use]
+    pub fn common() -> Artifact {
+        template_section(HELPERS_JUST_PATH, "justfiles/anvil/helpers/common.just", HELPERS_JUST)
+    }
+
+    /// Shared impact definitions.
+    #[must_use]
+    pub fn impact() -> Artifact {
+        template_section(HELPERS_JUST_PATH, "justfiles/anvil/helpers/impact.just", IMPACT_HELPERS_JUST)
+    }
+
+    /// Check-specific private helper sections.
+    pub mod checks {
+        use super::super::{Artifact, check_helper_artifact};
+
+        check_helper_functions!(check_helper_artifact);
+    }
+
+    /// Group-specific private helper sections.
+    pub mod groups {
+        use super::super::{Artifact, group_helper_artifact};
+
+        group_helper_functions!(group_helper_artifact);
+    }
+
+    /// Private PR, scheduled, and full tier helpers.
+    #[must_use]
+    pub fn tiers() -> Artifact {
+        template_section(HELPERS_JUST_PATH, "justfiles/anvil/helpers/tiers.just", super::TIERS_HELPERS_JUST)
+    }
 }
 
-/// Shared private helper recipes and definitions.
-#[must_use]
-pub fn helpers() -> Vec<Artifact> {
-    vec![template_section(
-        HELPERS_JUST_PATH,
-        "justfiles/anvil/helpers/common.just",
-        HELPERS_JUST,
-    )]
-}
+/// Local developer-command execution sections.
+pub mod dev {
+    use super::{Artifact, CHECKS_JUST_PATH, DEV_CHECK_FILES, named_artifact};
 
-/// Public impact command plus its shared selection definitions.
-#[must_use]
-pub fn impact() -> Vec<Artifact> {
-    vec![
-        template_section(HELPERS_JUST_PATH, "justfiles/anvil/helpers/impact.just", IMPACT_HELPERS_JUST),
-        template_section(CHECKS_JUST_PATH, "justfiles/anvil/checks/impact.just", IMPACT_CHECK_JUST),
-    ]
-}
-
-/// Generic local-development recipe files.
-#[must_use]
-pub fn dev_files() -> Vec<Artifact> {
-    file_sections(CHECKS_JUST_PATH, DEV_CHECK_FILES)
-        .into_iter()
-        .chain(file_sections(SETUP_JUST_PATH, DEV_SETUP_FILES))
-        .collect()
+    /// The `anvil-build` execution section.
+    #[must_use]
+    pub fn build() -> Artifact {
+        named_artifact("build", CHECKS_JUST_PATH, DEV_CHECK_FILES)
+    }
 }
 
 /// All check artifacts in catalog emission order.
@@ -316,10 +529,14 @@ pub(crate) fn check_files() -> Vec<Artifact> {
         .collect()
 }
 
-/// Group execution, helper, and setup templates, each mapped directly to its
-/// generated responsibility file.
 #[must_use]
-pub fn group_files() -> Vec<Artifact> {
+pub(crate) fn dev_files() -> Vec<Artifact> {
+    vec![dev::build(), setup::dev::build()]
+}
+
+/// All group artifacts in catalog emission order.
+#[must_use]
+pub(crate) fn group_files() -> Vec<Artifact> {
     file_sections(GROUPS_JUST_PATH, GROUP_FILES)
         .into_iter()
         .chain(file_sections(HELPERS_JUST_PATH, GROUP_HELPER_FILES))
@@ -327,41 +544,10 @@ pub fn group_files() -> Vec<Artifact> {
         .collect()
 }
 
-/// Tier aggregators, private fan-out helpers, and setup recipes.
-#[must_use]
-pub fn tiers() -> Vec<Artifact> {
-    vec![
-        template_section(GROUPS_JUST_PATH, "justfiles/anvil/groups/tiers.just", TIERS_GROUPS_JUST),
-        template_section(HELPERS_JUST_PATH, "justfiles/anvil/helpers/tiers.just", TIERS_HELPERS_JUST),
-        template_section(SETUP_JUST_PATH, "justfiles/anvil/setup/tiers.just", TIERS_SETUP_JUST),
-    ]
-}
-
-/// Look up one built-in Just source section by its template path.
-#[must_use]
-pub fn source(path: &str) -> Option<Artifact> {
-    let id = format!("source:{path}");
-    tools()
-        .into_iter()
-        .chain(versions())
-        .chain(helpers())
-        .chain(impact())
-        .chain(tiers())
-        .chain(dev_files())
-        .chain(check_files())
-        .chain(group_files())
-        .find(|artifact| {
-            matches!(
-                artifact,
-                Artifact::OwnedFileSection(section) if section.id == id
-            )
-        })
-}
-
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeMap;
     use std::process::Command;
 
     use tempfile::TempDir;
@@ -429,7 +615,7 @@ mod tests {
 
     #[test]
     fn source_templates_are_independently_addressable_catalog_sections() {
-        let artifact = source("justfiles/anvil/checks/clippy.just").expect("the clippy source section must be addressable");
+        let artifact = checks::clippy();
         let Artifact::OwnedFileSection(section) = artifact else {
             panic!("a Just source must be an owned-file section");
         };
@@ -440,27 +626,40 @@ mod tests {
     }
 
     #[test]
-    fn per_check_api_separates_execution_helpers_and_setup() {
-        let clippy = checks::clippy();
+    fn public_section_apis_return_their_generated_roles() {
         assert!(matches!(
-            clippy.execution,
+            checks::clippy(),
             Artifact::OwnedFileSection(section) if section.path == CHECKS_JUST_PATH
         ));
-        assert!(clippy.helper.is_none());
         assert!(matches!(
-            clippy.setup,
+            setup::checks::clippy(),
             Artifact::OwnedFileSection(section) if section.path == SETUP_JUST_PATH
         ));
-
         assert!(matches!(
-            checks::miri().helper,
-            Some(Artifact::OwnedFileSection(section)) if section.path == HELPERS_JUST_PATH
+            helpers::checks::miri(),
+            Artifact::OwnedFileSection(section) if section.path == HELPERS_JUST_PATH
+        ));
+        assert!(matches!(
+            dev::build(),
+            Artifact::OwnedFileSection(section) if section.path == CHECKS_JUST_PATH
+        ));
+        assert!(matches!(
+            setup::dev::build(),
+            Artifact::OwnedFileSection(section) if section.path == SETUP_JUST_PATH
+        ));
+        assert!(matches!(
+            groups::scheduled_test(),
+            Artifact::OwnedFileSection(section) if section.path == GROUPS_JUST_PATH
+        ));
+        assert!(matches!(
+            helpers::groups::scheduled_test(),
+            Artifact::OwnedFileSection(section) if section.path == HELPERS_JUST_PATH
         ));
     }
 
     #[test]
     fn source_sections_are_replaceable_without_affecting_neighbors() {
-        let tools = source("justfiles/anvil/setup/tools.just").expect("the tools source section must be addressable");
+        let tools = setup::tools();
         let Artifact::OwnedFileSection(section) = &tools else {
             panic!("a Just source must be an owned-file section");
         };
@@ -468,7 +667,7 @@ mod tests {
         assert_eq!(section.id, "source:justfiles/anvil/setup/tools.just");
         assert!(section.body.contains("_install-component toolchain component:"));
 
-        let neighbor = source("justfiles/anvil/setup/checks/clippy.just").expect("the neighboring clippy setup source must be addressable");
+        let neighbor = setup::checks::clippy();
         let replacement = tools.with_body("_install-component toolchain component:\n    echo replaced\n");
         let catalog = Catalog::anvil().into_builder().replace_artifact(replacement).build().unwrap();
         let replaced = catalog
@@ -500,59 +699,18 @@ mod tests {
     }
 
     #[test]
-    fn source_section_ids_are_unique() {
-        let mut ids = BTreeSet::new();
-        for artifact in tools()
-            .into_iter()
-            .chain(versions())
-            .chain(helpers())
-            .chain(impact())
-            .chain(tiers())
-            .chain(dev_files())
-            .chain(check_files())
-            .chain(group_files())
-        {
-            let Artifact::OwnedFileSection(section) = artifact else {
-                continue;
-            };
-            assert!(ids.insert(section.id.clone()), "duplicate Just section id: {}", section.id);
-        }
-    }
-
-    #[test]
     fn source_layout_determines_generated_responsibility() {
-        for (source_path, expected_path) in [
-            ("justfiles/anvil/checks/aprz.just", CHECKS_JUST_PATH),
-            ("justfiles/anvil/setup/checks/aprz.just", SETUP_JUST_PATH),
-            ("justfiles/anvil/helpers/checks/miri.just", HELPERS_JUST_PATH),
-            ("justfiles/anvil/groups/pr-fast.just", GROUPS_JUST_PATH),
-            ("justfiles/anvil/setup/groups/pr-fast.just", SETUP_JUST_PATH),
-            ("justfiles/anvil/helpers/groups/scheduled-test.just", HELPERS_JUST_PATH),
+        for (artifact, expected_path) in [
+            (checks::aprz(), CHECKS_JUST_PATH),
+            (setup::checks::aprz(), SETUP_JUST_PATH),
+            (helpers::checks::miri(), HELPERS_JUST_PATH),
+            (groups::pr_fast(), GROUPS_JUST_PATH),
+            (setup::groups::pr_fast(), SETUP_JUST_PATH),
+            (helpers::groups::scheduled_test(), HELPERS_JUST_PATH),
         ] {
-            let artifact = source(source_path).unwrap_or_else(|| panic!("{source_path} must be independently addressable"));
             assert!(
                 matches!(artifact, Artifact::OwnedFileSection(section) if section.path == expected_path),
-                "{source_path} must be emitted to {expected_path}"
-            );
-        }
-    }
-
-    #[test]
-    fn every_registered_source_maps_to_one_section() {
-        for (source_path, _) in CHECK_FILES
-            .iter()
-            .chain(CHECK_HELPER_FILES)
-            .chain(CHECK_SETUP_FILES)
-            .chain(DEV_CHECK_FILES)
-            .chain(DEV_SETUP_FILES)
-            .chain(GROUP_FILES)
-            .chain(GROUP_HELPER_FILES)
-            .chain(GROUP_SETUP_FILES)
-        {
-            let artifact = source(source_path).unwrap_or_else(|| panic!("{source_path} must be registered"));
-            assert!(
-                matches!(artifact, Artifact::OwnedFileSection(section) if section.id == format!("source:{source_path}")),
-                "{source_path} must map to exactly one source section"
+                "artifact must be emitted to {expected_path}"
             );
         }
     }

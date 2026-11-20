@@ -3,15 +3,14 @@
 
 //! The built-in (`anvil`) artifacts, exposed as a registry of functions.
 //!
-//! Functions return one [`Artifact`] for a built-in catalog entry, or a typed
-//! group of related artifacts when one user-visible feature spans multiple
-//! generated files. A fork overrides a built-in by deriving from the
-//! corresponding function via [`Artifact::with_body`], so the artifact's
-//! identity and gate are preserved by construction:
+//! Each function returns one [`Artifact`] for one built-in catalog section.
+//! A fork overrides a built-in by deriving from the corresponding function via
+//! [`Artifact::with_body`], so the artifact's identity and gate are preserved
+//! by construction:
 //!
 //! ```ignore
 //! catalog.replace_artifact(artifacts::region::rustfmt().with_body(my_body));
-//! catalog.replace_artifact(artifacts::justfile::checks::clippy().execution.with_body(my_recipe));
+//! catalog.replace_artifact(artifacts::justfile::checks::clippy().with_body(my_recipe));
 //! ```
 //!
 //! This is the single source of truth for the base catalog: both
@@ -84,11 +83,14 @@ pub(crate) fn anvil_artifacts() -> Vec<Artifact> {
     ];
 
     out.extend(justfile::headers());
-    out.extend(justfile::tools());
-    out.extend(justfile::versions());
-    out.extend(justfile::helpers());
-    out.extend(justfile::impact());
-    out.extend(justfile::tiers());
+    out.push(justfile::setup::tools());
+    out.push(justfile::setup::versions());
+    out.push(justfile::helpers::common());
+    out.push(justfile::helpers::impact());
+    out.push(justfile::checks::impact());
+    out.push(justfile::groups::tiers());
+    out.push(justfile::helpers::tiers());
+    out.push(justfile::setup::tiers());
 
     // Independently addressable source-template sections for every developer
     // utility, check, and group.
@@ -286,16 +288,20 @@ mod tests {
             assert!(present(artifact), "backend artifact is not in Catalog::anvil(): {artifact:?}");
         }
 
-        for artifact in justfile::tools()
-            .iter()
-            .chain(justfile::versions().iter())
-            .chain(justfile::helpers().iter())
-            .chain(justfile::impact().iter())
-            .chain(justfile::tiers().iter())
-            .chain(justfile::dev_files().iter())
-            .chain(justfile::check_files().iter())
-            .chain(justfile::group_files().iter())
-        {
+        let mut recipe_artifacts = vec![
+            justfile::setup::tools(),
+            justfile::setup::versions(),
+            justfile::helpers::common(),
+            justfile::helpers::impact(),
+            justfile::checks::impact(),
+            justfile::groups::tiers(),
+            justfile::helpers::tiers(),
+            justfile::setup::tiers(),
+        ];
+        recipe_artifacts.extend(justfile::dev_files());
+        recipe_artifacts.extend(justfile::check_files());
+        recipe_artifacts.extend(justfile::group_files());
+        for artifact in &recipe_artifacts {
             assert!(present(artifact), "split recipe file is not in Catalog::anvil(): {artifact:?}");
         }
         for artifact in container::all() {

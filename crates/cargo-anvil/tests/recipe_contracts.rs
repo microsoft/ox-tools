@@ -526,14 +526,10 @@ fn mutants_diff_includes_committed_and_uncommitted_changes() {
 
     let catalog = Catalog::anvil()
         .into_builder()
-        .replace_artifact(
-            cargo_anvil::artifacts::justfile::source("justfiles/anvil/setup/checks/mutants-diff.just")
-                .unwrap()
-                .with_body(
-                    "anvil-mutants-diff-setup installer=\"install\":\n\
+        .replace_artifact(cargo_anvil::artifacts::justfile::setup::checks::mutants_diff().with_body(
+            "anvil-mutants-diff-setup installer=\"install\":\n\
                      anvil-mutants-diff-validate-prereqs:\n",
-                ),
-        )
+        ))
         .build()
         .unwrap();
     let generated = generated_with_catalog(&catalog);
