@@ -64,6 +64,20 @@ pub(super) fn with_journal_arm_hook<T>(hook: impl FnOnce(&Utf8Path) + 'static, o
     tests::with_journal_arm_hook(hook, operation)
 }
 
+#[cfg(all(test, not(miri)))]
+pub(super) fn with_successful_capture<T>(mut capture: impl FnMut(&Command, &str) -> String + 'static, operation: impl FnOnce() -> T) -> T {
+    tests::with_capture_script(
+        move |command, what| {
+            Ok(Captured {
+                succeeded: true,
+                stdout: capture(command, what).into_bytes(),
+                stderr: Vec::new(),
+            })
+        },
+        operation,
+    )
+}
+
 /// Identifies one claimed lock pair across the adoption-to-preparation handoff.
 #[cfg(any(test, feature = "internals"))]
 pub(crate) const fn cache_lock_identity(locks: &CacheLocks) -> usize {
@@ -3817,7 +3831,10 @@ mod tests {
         CAPTURE_SCRIPT.with_borrow_mut(|slot| slot.as_mut().map(|script| script(command, what)))
     }
 
-    fn with_capture_script<T>(script: impl FnMut(&Command, &str) -> io::Result<Captured> + 'static, body: impl FnOnce() -> T) -> T {
+    pub(super) fn with_capture_script<T>(
+        script: impl FnMut(&Command, &str) -> io::Result<Captured> + 'static,
+        body: impl FnOnce() -> T,
+    ) -> T {
         struct Reset;
         impl Drop for Reset {
             fn drop(&mut self) {

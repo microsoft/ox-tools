@@ -2080,6 +2080,85 @@ mod tests {
         }
     }
 
+    #[cfg(not(miri))]
+    #[test]
+    fn nextest_measurement_lists_only_library_targets_when_requested() {
+        use std::collections::BTreeMap;
+        use std::ffi::OsString;
+
+        use crate::exec::test_environment::with_native_queries;
+        use crate::exec::test_listing::with_listing_runner;
+        use crate::exec::workspace::with_successful_capture;
+
+        let (_directory, survey, selection, config) = orchestration_fixture("pub fn subject() -> bool { true }\n");
+        let config = Config {
+            nextest: true,
+            test_lib: true,
+            baseline: false,
+            ..config
+        };
+        let executable = crate::testing::helper().path;
+        let listing = json!({
+            "rust-binaries": {
+                "subject": {"binary-path": &executable, "binary-id": "subject"}
+            }
+        })
+        .to_string();
+        let commands = Rc::new(RefCell::new(Vec::new()));
+        let observed = Rc::clone(&commands);
+
+        let measured = with_native_queries(
+            BTreeMap::from([("CARGO".to_owned(), OsString::from("fixture-cargo"))]),
+            |command| {
+                Err(std::io::Error::other(format!(
+                    "unexpected native query: {}",
+                    command.get_program().to_string_lossy()
+                )))
+            },
+            || {
+                with_successful_capture(
+                    move |command, what| match what {
+                        "cargo metadata" => json!({"packages": []}).to_string(),
+                        "cargo nextest list" => {
+                            observed.borrow_mut().push(
+                                command
+                                    .get_args()
+                                    .map(|argument| argument.to_string_lossy().into_owned())
+                                    .collect::<Vec<_>>(),
+                            );
+                            listing.clone()
+                        }
+                        _ => panic!("unexpected capture: {what}"),
+                    },
+                    || {
+                        with_listing_runner(
+                            |_command, _budget, _request| Some(Vec::new()),
+                            || {
+                                super::super::build::with_compiler(
+                                    move |work, _arguments, _timeout, _events| {
+                                        Ok(Some(successful_compiler_output(work, &executable, true)))
+                                    },
+                                    || measure(&survey, &selection, &config, &mut Recorder::default()),
+                                )
+                            },
+                        )
+                    },
+                )
+            },
+        )
+        .expect("nextest must accept the test binary built for this measurement");
+
+        let built = measured.built.expect("the viable mutation must retain its prepared workspace");
+        assert!(built.work.runner().is_some());
+        let commands = commands.borrow();
+        assert_eq!(commands.len(), 1, "nextest must list the built tree once");
+        assert!(
+            commands[0].iter().any(|argument| argument == "--lib"),
+            "nextest must list the same library-only targets as the test build: {:?}",
+            commands[0]
+        );
+    }
+
     #[test]
     fn empty_populations_do_not_build_or_invent_learning_or_a_prepared_session() {
         let (_directory, survey, selection, config) = orchestration_fixture("pub fn subject() -> u8 { 7 }\n");
