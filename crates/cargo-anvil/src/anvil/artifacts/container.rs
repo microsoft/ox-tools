@@ -280,25 +280,6 @@ mod tests {
             .collect()
     }
 
-    /// Every region body, in the order the engine enforces.
-    const REGION_BODIES: [&str; 5] = [
-        DOCKERFILE_BASE_IMAGE,
-        DOCKERFILE_BASE,
-        DOCKERFILE_TOOLS,
-        DOCKERFILE_SETUP,
-        DOCKERFILE_ENTRY,
-    ];
-
-    /// The Dockerfile as a fresh repository first receives it: the seeded
-    /// directive followed by every region body in order.
-    fn composed_dockerfile() -> String {
-        let mut out = DOCKERFILE_HEADER.to_owned();
-        for body in REGION_BODIES {
-            out.push_str(body);
-        }
-        out
-    }
-
     #[test]
     fn group_is_one_owned_file_one_just_section_and_five_dockerfile_regions() {
         let all = all();

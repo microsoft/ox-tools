@@ -155,14 +155,6 @@ mod tests {
 
     use super::*;
 
-    const PR_GROUPS: &[&str] = &["pr-fast", "pr-test", "pr-msrv", "pr-runtime-analysis", "pr-fuzzing", "pr-mutants"];
-    const SCHEDULED_GROUPS: &[&str] = &[
-        "scheduled-test",
-        "scheduled-advisories",
-        "scheduled-runtime-analysis",
-        "scheduled-exhaustive",
-    ];
-
     #[test]
     fn artifacts_keep_their_emission_order() {
         let paths: Vec<_> = all()
