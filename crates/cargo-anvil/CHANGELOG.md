@@ -18,6 +18,7 @@
 
 - 🐛 Bug Fixes
 
+  - cargo-anvil: avoid macro doc warnings
   - cargo-anvil: consolidate release version
   - cargo-anvil: validate nightly component artifacts
   - cargo-anvil: align generated edit guidance
