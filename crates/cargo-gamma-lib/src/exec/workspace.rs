@@ -1161,12 +1161,12 @@ impl Workspace {
     /// # Errors
     ///
     /// Returns an error if nextest is not installed or does not recognise the built tree.
-    pub(super) fn arm_nextest(&mut self, binaries: &[TestBinary], packages: Option<&[String]>) -> Result<()> {
+    pub(super) fn arm_nextest(&mut self, binaries: &[TestBinary], packages: Option<&[String]>, test_lib: bool) -> Result<()> {
         let metadata = self
             .cargo_metadata
             .as_deref()
             .ok_or_else(|| error!("the Cargo test environment was not prepared before nextest"))?;
-        self.nextest = Some(Harness::prepare(self, binaries, packages, metadata)?);
+        self.nextest = Some(Harness::prepare(self, binaries, packages, test_lib, metadata)?);
 
         Ok(())
     }
@@ -1204,24 +1204,24 @@ impl Workspace {
 
     /// Asks nextest to enumerate the test binaries this tree has already built.
     ///
-    /// `packages` is the build's own selection — the `--package` specs it passed, or `None` for
-    /// `--workspace`.
+    /// `packages` and `test_lib` are the build's own target selection: its `--package` specs or
+    /// `--workspace`, and whether it selected only library targets.
     ///
     /// # Errors
     ///
     /// Returns an error if nextest is not installed or cannot read the tree.
-    pub(super) fn capture_nextest_list(&self, packages: Option<&[String]>) -> Result<String> {
-        let command = self.nextest_list_command(packages);
+    pub(super) fn capture_nextest_list(&self, packages: Option<&[String]>, test_lib: bool) -> Result<String> {
+        let command = self.nextest_list_command(packages, test_lib);
 
         self.capture(command, "cargo nextest list")
     }
 
     /// Builds the command that inventories the binaries nextest may run.
     ///
-    /// Selects exactly the packages the test build did, not just those owning the binaries gamma
-    /// kept: under `--all-features` a narrower selection unifies features differently, so nextest
-    /// would compile and list binaries whose hashes the build never produced.
-    fn nextest_list_command(&self, packages: Option<&[String]>) -> Command {
+    /// Selects exactly the packages and targets the test build did, not just those owning the
+    /// binaries gamma kept: under `--all-features` a narrower selection unifies features
+    /// differently, so nextest would compile and list binaries whose hashes the build never produced.
+    fn nextest_list_command(&self, packages: Option<&[String]>, test_lib: bool) -> Command {
         let mut command = self.cargo();
         let mut args = vec![
             "nextest".to_owned(),
@@ -1240,6 +1240,10 @@ impl Workspace {
                 }
             }
             None => args.push("--workspace".to_owned()),
+        }
+
+        if test_lib {
+            args.push("--lib".to_owned());
         }
 
         self.cargo.extend_nextest_args(&mut args);
@@ -4338,14 +4342,14 @@ mod tests {
     }
 
     #[test]
-    fn nextest_lists_the_packages_the_build_selected_rather_than_those_owning_binaries() {
+    fn nextest_lists_the_packages_the_build_selected_and_preserves_library_only_selection() {
         let mut work = unsettled_default();
         work.cargo.features = vec!["--all-features".to_owned()];
         let selected = [
             "path+file:///tmp/app#app@0.1.0".to_owned(),
             "path+file:///tmp/lib#lib@0.1.0".to_owned(),
         ];
-        let packages_of = |command: Command| {
+        let selection_of = |command: Command| {
             let arguments = command
                 .get_args()
                 .map(|argument| argument.to_string_lossy().into_owned())
@@ -4355,11 +4359,18 @@ mod tests {
                 .filter(|pair| pair[0] == "--package")
                 .map(|pair| pair[1].clone())
                 .collect::<Vec<_>>();
-            (packages, arguments.iter().any(|argument| argument == "--workspace"))
+            (
+                packages,
+                arguments.iter().any(|argument| argument == "--workspace"),
+                arguments.iter().any(|argument| argument == "--lib"),
+            )
         };
 
-        assert_eq!(packages_of(work.nextest_list_command(Some(&selected))), (selected.to_vec(), false));
-        assert_eq!(packages_of(work.nextest_list_command(None)), (Vec::new(), true));
+        assert_eq!(
+            selection_of(work.nextest_list_command(Some(&selected), true)),
+            (selected.to_vec(), false, true)
+        );
+        assert_eq!(selection_of(work.nextest_list_command(None, false)), (Vec::new(), true, false));
     }
 
     #[test]
@@ -4652,9 +4663,11 @@ mod tests {
     fn cargo_capture_callers_preserve_command_identity_labels_output_and_each_independent_failure() {
         let work = unsettled_default();
         let root = work.root.clone();
+        let selected = ["app".to_owned(), "lib".to_owned()];
         for metadata in [true, false] {
             for mode in 0..4 {
                 let expected_root = root.clone();
+                let expected_packages = selected.clone();
                 let observed = std::rc::Rc::new(std::cell::Cell::new(0));
                 let calls = std::rc::Rc::clone(&observed);
                 let label = if metadata { "cargo metadata" } else { "cargo nextest list" };
@@ -4663,20 +4676,27 @@ mod tests {
                         calls.set(calls.get() + 1);
                         assert_eq!(command.get_current_dir(), Some(expected_root.as_std_path()));
                         assert_eq!(what, label);
-                        let args = command.get_args().map(OsStr::to_string_lossy).collect::<Vec<_>>();
+                        let args = command
+                            .get_args()
+                            .map(|argument| argument.to_string_lossy().into_owned())
+                            .collect::<Vec<_>>();
                         if metadata {
                             assert_eq!(args, ["metadata", "--format-version", "1"]);
                         } else {
                             assert_eq!(
                                 args,
-                                [
-                                    "nextest",
-                                    "list",
-                                    "--list-type",
-                                    "binaries-only",
-                                    "--message-format",
-                                    "json",
-                                    "--workspace"
+                                vec![
+                                    "nextest".to_owned(),
+                                    "list".to_owned(),
+                                    "--list-type".to_owned(),
+                                    "binaries-only".to_owned(),
+                                    "--message-format".to_owned(),
+                                    "json".to_owned(),
+                                    "--package".to_owned(),
+                                    expected_packages[0].clone(),
+                                    "--package".to_owned(),
+                                    expected_packages[1].clone(),
+                                    "--lib".to_owned(),
                                 ]
                             );
                         }
@@ -4699,7 +4719,7 @@ mod tests {
                         if metadata {
                             work.capture_cargo_metadata()
                         } else {
-                            work.capture_nextest_list(None)
+                            work.capture_nextest_list(Some(&selected), true)
                         }
                     },
                 );
@@ -4829,7 +4849,7 @@ mod tests {
                 assert_eq!(label, "cargo nextest list");
                 Ok(capture_success("{\"rust-suites\":{}}"))
             },
-            || work.arm_nextest(&[], None),
+            || work.arm_nextest(&[], None, false),
         )
         .unwrap();
         assert!(work.runner().is_some());
@@ -4842,7 +4862,7 @@ mod tests {
         );
         let failure = with_capture_script(
             |_, _| Err(io::Error::other("late nextest listing refusal")),
-            || work.arm_nextest(&[], None),
+            || work.arm_nextest(&[], None, false),
         )
         .expect_err("an armed runner does not authorize suppressing a later failed listing");
         assert_eq!(failure.message(), format!("could not run `cargo nextest list` in {root}"));
@@ -4872,7 +4892,7 @@ mod tests {
                     assert_eq!(label, "cargo nextest list");
                     Ok(capture_success("{\"rust-binaries\":{}}"))
                 },
-                || work.arm_nextest(&binaries, None),
+                || work.arm_nextest(&binaries, None, false),
             )
             .expect_err("the exact scratch/identity failure must escape nextest preparation");
             if failure_at < 2 {
@@ -4898,7 +4918,7 @@ mod tests {
         let mut work = unsettled_default();
         let failure = with_capture_script(
             |_, _| panic!("an adopted but unarmed workspace must not ask Cargo or nextest anything"),
-            || work.arm_nextest(&[], None),
+            || work.arm_nextest(&[], None, false),
         )
         .expect_err("adoption does not imply a prepared Cargo test environment");
         assert_eq!(failure.message(), "the Cargo test environment was not prepared before nextest");
@@ -7404,7 +7424,12 @@ mod tests {
         assert_eq!(work.testing_roots().unwrap(), [root.clone(), root.join("runtime")]);
         work.runtime = root.clone();
         assert_eq!(work.testing_roots().unwrap(), [root]);
-        assert!(work.arm_nextest(&[], None).unwrap_err().message().contains("was not prepared"));
+        assert!(
+            work.arm_nextest(&[], None, false)
+                .unwrap_err()
+                .message()
+                .contains("was not prepared")
+        );
     }
 
     #[test]
@@ -8170,7 +8195,7 @@ mod tests {
         work.cargo.features = vec!["--all-features".to_owned()];
         work.cargo.profile = Some("mutants".to_owned());
 
-        let command = work.nextest_list_command(Some(&["path+file:///tmp/subject#subject@0.1.0".to_owned()]));
+        let command = work.nextest_list_command(Some(&["path+file:///tmp/subject#subject@0.1.0".to_owned()]), true);
         let args: Vec<_> = command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect();
 
         assert_eq!(
@@ -8184,6 +8209,7 @@ mod tests {
                 "json",
                 "--package",
                 "path+file:///tmp/subject#subject@0.1.0",
+                "--lib",
                 "--all-features",
                 "--cargo-profile",
                 "mutants",

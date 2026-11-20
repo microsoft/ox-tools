@@ -807,7 +807,7 @@ fn measure_with_locks(
     // binaries that do not exist until the build has run, and the baseline has to be measured
     // through the same runner that will judge every mutant — a baseline taken one way and compared
     // against verdicts reached the other measures nothing.
-    if let Err(error) = arm_selected_runner(&mut work, &build, config.nextest) {
+    if let Err(error) = arm_selected_runner(&mut work, &build, config.nextest, config.test_lib) {
         failed.plan = Some(plan);
 
         return Err(error);
@@ -937,12 +937,12 @@ fn restrict_binaries(binaries: &mut Vec<TestBinary>, plan: &Plan, scope: &TestSc
 }
 
 // #[gamma::skip(all, reason = "the mutation affects internal orchestration state with no safely deterministic observation at this layer")]
-fn arm_selected_runner(work: &mut Workspace, build: &Build, nextest: bool) -> Result<()> {
+fn arm_selected_runner(work: &mut Workspace, build: &Build, nextest: bool, test_lib: bool) -> Result<()> {
     work.arm_test_environment(&build.binaries, &build.artifacts)?;
 
     // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
     if nextest {
-        work.arm_nextest(&build.binaries, build.packages.as_deref())?;
+        work.arm_nextest(&build.binaries, build.packages.as_deref(), test_lib)?;
     }
     Ok(())
 }
