@@ -3866,8 +3866,10 @@ mod tests {
 
         let error = result.expect_err("incomplete declaration evidence cannot justify ignoring a Rust path");
         assert!(error.is_usage(), "{error}");
-        assert!(error.to_string().contains("src/lib.rs"), "{error}");
-        assert!(error.to_string().contains("declaration analysis was incomplete"), "{error}");
+        assert_eq!(
+            error.to_string(),
+            "cannot prove that a standalone Rust diff path is unowned because declaration analysis was incomplete (src/lib.rs: too deeply nested)"
+        );
     }
 
     #[test]

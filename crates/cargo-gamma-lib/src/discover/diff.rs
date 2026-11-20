@@ -221,6 +221,7 @@ impl Diff {
         let mut resolved: HashMap<Utf8PathBuf, Vec<u32>> = HashMap::default();
         let mut unresolved: Vec<Utf8PathBuf> = Vec::new();
         let mut module_targets = None;
+        let mut skipped_standalone = false;
 
         // Built once, because every exact and every peeled candidate is looked up in it and the
         // peeling makes that several lookups per path. Scanning the workspace file list instead
@@ -248,6 +249,8 @@ impl Diff {
                     };
                     if targets.contains(&super::modules::identity(&root.join(&path))) {
                         unresolved.push(raw);
+                    } else {
+                        skipped_standalone = true;
                     }
 
                     // This exact file is either unowned or unresolved; neither outcome should
@@ -291,7 +294,7 @@ impl Diff {
             .usage());
         }
 
-        if resolved.is_empty() && !unresolved.is_empty() {
+        if resolved.is_empty() && !skipped_standalone && !unresolved.is_empty() {
             let listed = unresolved.iter().map(|path| path.as_str()).collect::<Vec<&str>>().join(", ");
 
             return Err(error!(
@@ -1182,6 +1185,34 @@ diff --git before/old.rs next/a.rs
     }
 
     #[test]
+    fn a_standalone_script_makes_a_diff_with_an_unmatched_non_rust_path_understood() {
+        let root = Utf8Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Utf8Path::parent)
+            .expect("the crate is two levels below the workspace root");
+        let mut diff = Diff::parse(concat!(
+            "--- scripts/publish-gh-release.rs\n+++ scripts/publish-gh-release.rs\n@@ -0,0 +1 @@\n+new\n",
+            "--- deleted-doc-for-diff-test.md\n+++ deleted-doc-for-diff-test.md\n@@ -0,0 +1 @@\n+new\n",
+        ));
+
+        diff.resolve_for_workspace(root, &[], &[Utf8PathBuf::from("crates/cargo-gamma-lib")], || Ok(HashSet::default()))
+            .expect("the script makes this diff understood without selecting any file");
+        assert_eq!(diff.touched, HashMap::default());
+    }
+
+    fn assert_unresolved_rust_path(error: &crate::internals::error::Error, path: &str) {
+        assert!(error.is_usage(), "{error}");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "the diff names 1 path of Rust source that this workspace does not contain ({path}); \
+                 continuing would silently generate no mutants for them and report a score for a \
+                 population that never included them"
+            )
+        );
+    }
+
+    #[test]
     fn an_exact_module_target_does_not_fall_through_to_a_suffix_match() {
         let root = Utf8Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -1201,8 +1232,7 @@ diff --git before/old.rs next/a.rs
             )
             .expect_err("a direct module target is mutation source");
 
-        assert!(error.is_usage(), "{error}");
-        assert!(error.to_string().contains(script.as_str()), "{error}");
+        assert_unresolved_rust_path(&error, "b/scripts/publish-gh-release.rs");
     }
 
     #[test]
@@ -1244,8 +1274,7 @@ diff --git before/old.rs next/a.rs
                 })
                 .expect_err("only an exact safe standalone path can use the exemption");
 
-            assert!(error.is_usage(), "{path}: {error}");
-            assert!(error.to_string().contains(path.as_str()), "{path}: {error}");
+            assert_unresolved_rust_path(&error, path.as_str());
         }
 
         let text = "--- scripts/publish-gh-release.rs\n+++ scripts/publish-gh-release.rs\n@@ -1 +1,2 @@\n old\n+new\n";
@@ -1253,7 +1282,7 @@ diff --git before/old.rs next/a.rs
         let error = diff
             .resolve_for_workspace(root, &[], &[Utf8PathBuf::new()], || panic!("a root package owns every path"))
             .expect_err("a package whose directory is the workspace root owns every path below it");
-        assert!(error.is_usage(), "{error}");
+        assert_unresolved_rust_path(&error, "scripts/publish-gh-release.rs");
     }
 
     #[test]

@@ -108,6 +108,8 @@ production code. A passing diff campaign makes no claim about those other sites.
 An exact, existing, workspace-relative Rust file outside every workspace package
 directory is understood but contributes no mutation sites when no package
 in the selected declaration inventory declares it with `mod` or `#[path]`.
+A diff with such a file still counts as understood if its only other paths
+are unmatched non-Rust files.
 An exact mutation candidate takes precedence, but an exact external file
 checked for module ownership is never redirected to another file by fuzzy
 matching. The exception does not apply to unsafe or absolute paths, missing
