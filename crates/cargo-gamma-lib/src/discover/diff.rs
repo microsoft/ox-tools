@@ -196,7 +196,7 @@ impl Diff {
     /// # Errors
     ///
     /// Returns the same errors as [`Self::resolve`], except that an exact existing Rust path outside
-    /// every package directory is treated as understood but unowned when it is not a module target.
+    /// every package directory is skipped if it is not a module target.
     /// Propagates an error if module ownership evidence is needed but cannot be loaded.
     pub(super) fn resolve_for_workspace(
         &mut self,
