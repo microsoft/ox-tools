@@ -1,0 +1,25 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+name = "cargo-spellcheck-helper"
+description = "Portable dictionary preparation and source prerequisite checks for cargo-spellcheck"
+version = "0.1.0"
+readme = "README.md"
+keywords = ["oxidizer", "hunspell", "dictionary", "spellcheck", "cargo"]
+categories = ["command-line-utilities", "development-tools"]
+
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-spellcheck-helper"
+
+[dependencies]
+clap = { workspace = true, features = ["derive", "std", "help", "usage", "error-context"] }
+hunspell-dictgen = { workspace = true }
+ohno = { workspace = true, features = ["app-err"] }
+
+[lints]
+workspace = true

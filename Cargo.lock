@@ -743,6 +743,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cargo-spellcheck-helper"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "hunspell-dictgen",
+ "ohno",
+]
+
+[[package]]
 name = "cargo-unique-target-names"
 version = "0.1.0"
 dependencies = [
