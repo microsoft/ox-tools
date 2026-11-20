@@ -182,6 +182,14 @@ if ($env:FAKE_RUSTUP_LOG) {
     )
 }
 if ($env:FAKE_RUSTUP_EXIT) { exit [int]$env:FAKE_RUSTUP_EXIT }
+if (($args -join ' ') -match 'rustc --print sysroot') {
+    Write-Output $env:FAKE_RUSTUP_SYSROOT
+    exit 0
+}
+if (($args -join ' ') -match 'rustc --print host-tuple') {
+    Write-Output $env:FAKE_RUSTUP_HOST
+    exit 0
+}
 "#,
     );
 
@@ -374,6 +382,56 @@ fn validation_disables_rustup_auto_install_and_preserves_tool_failures() {
     );
     assert!(diagnostic.contains("backtick failed with exit code"), "{diagnostic}");
     assert!(!diagnostic.contains("cargo install --locked --version"), "{diagnostic}");
+}
+
+#[test]
+fn component_validation_checks_installed_artifacts() {
+    if !Command::new("pwsh")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        return;
+    }
+
+    let generated = generated();
+    let root = generated.temp.path();
+    let fake_bin = install_fake_cargo(root);
+    install_fake_rustup(&fake_bin);
+    let sysroot = root.join("fake-nightly");
+    let host = "test-host";
+    let run = |recipe: &str| {
+        Command::new("just")
+            .arg(recipe)
+            .current_dir(root)
+            .env("PATH", prepend_path(&fake_bin))
+            .env("FAKE_RUSTUP_SYSROOT", &sysroot)
+            .env("FAKE_RUSTUP_HOST", host)
+            .output()
+            .unwrap()
+    };
+
+    let missing_rust_src = run("anvil-component-nightly-rust-src-validate-prereqs");
+    assert!(!missing_rust_src.status.success());
+    let diagnostic = String::from_utf8_lossy(&missing_rust_src.stderr);
+    assert!(diagnostic.contains("anvil-component-nightly-rust-src-install"), "{diagnostic}");
+
+    std::fs::create_dir_all(sysroot.join("lib/rustlib/src/rust/library")).unwrap();
+    assert!(run("anvil-component-nightly-rust-src-validate-prereqs").status.success());
+
+    let missing_llvm_tools = run("anvil-component-nightly-llvm-tools-validate-prereqs");
+    assert!(!missing_llvm_tools.status.success());
+    let diagnostic = String::from_utf8_lossy(&missing_llvm_tools.stderr);
+    assert!(diagnostic.contains("anvil-component-nightly-llvm-tools-install"), "{diagnostic}");
+
+    let llvm_profdata =
+        sysroot
+            .join("lib/rustlib")
+            .join(host)
+            .join("bin")
+            .join(if cfg!(windows) { "llvm-profdata.exe" } else { "llvm-profdata" });
+    write(&llvm_profdata, "");
+    assert!(run("anvil-component-nightly-llvm-tools-validate-prereqs").status.success());
 }
 
 #[test]

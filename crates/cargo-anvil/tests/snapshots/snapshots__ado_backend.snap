@@ -2640,6 +2640,10 @@ installed_cargo_tools := `cargo install --list`
 cargo_binstall_version := replace_regex(installed_cargo_tools, '(?ms)\A.*^cargo-binstall v([^:\r\n]+):\r?$.*\z', '$1')
 cargo_binstall_found := if cargo_binstall_version == installed_cargo_tools { "false" } else { "true" }
 bolero_command_prefix := if os() == "linux" { "" } else { "# " }
+anvil_nightly_sysroot := `rustup run {{ rust_nightly }} rustc --print sysroot`
+anvil_nightly_host := `rustup run {{ rust_nightly }} rustc --print host-tuple`
+anvil_nightly_rust_src_dir := anvil_nightly_sysroot / "lib/rustlib/src/rust/library"
+anvil_nightly_llvm_profdata := anvil_nightly_sysroot / "lib/rustlib" / anvil_nightly_host / "bin" / (if os() == "windows" { "llvm-profdata.exe" } else { "llvm-profdata" })
 
 # Check cargo-spellcheck source-build prerequisites.
 [script("pwsh", "-NoProfile")]
@@ -2713,20 +2717,13 @@ anvil-tool-cargo-spellcheck-source-deps-check:
 # lets cargo-binstall compile when no binary strategy succeeds; installer mode
 # is caller policy.
 [arg("installer", pattern="^(install|binstall)$")]
-_install-tool name minimum installer="install" \
-    extracted=(replace_regex(installed_cargo_tools, ('(?ms)\A.*^' + name + ' v([^:\r\n]+):\r?$.*\z'), '$1')) \
-    found=(if extracted == installed_cargo_tools { "false" } else { "true" }) \
-    installed=(if found == "true" { extracted } else { "" }) \
-    satisfied=(if found == "true" { semver_matches(installed, ">=" + minimum) } else { "false" }) \
-    source_command=("cargo install --locked --version =" + minimum + " " + name) \
-    binary_command=("cargo binstall --no-confirm --locked --version =" + minimum + " " + name):
+[private]
+_install-tool name minimum installer="install" extracted=(replace_regex(installed_cargo_tools, ('(?ms)\A.*^' + name + ' v([^:\r\n]+):\r?$.*\z'), '$1')) found=(if extracted == installed_cargo_tools { "false" } else { "true" }) installed=(if found == "true" { extracted } else { "" }) satisfied=(if found == "true" { semver_matches(installed, ">=" + minimum) } else { "false" }) source_command=("cargo install --locked --version =" + minimum + " " + name) binary_command=("cargo binstall --no-confirm --locked --version =" + minimum + " " + name):
     {{ if satisfied == "true" { "# cargo-binstall not needed" } else if installer == "binstall" { if cargo_binstall_found == "true" { "# cargo-binstall already available" } else { "cargo install --locked cargo-binstall" } } else { "# cargo-binstall not needed" } }}
     {{ if satisfied == "true" { "# " + name + " " + installed + " satisfies >= " + minimum } else if installer == "install" { source_command } else { binary_command } }}
 
-_install-source-tool name minimum prerequisite \
-    extracted=(replace_regex(installed_cargo_tools, ('(?ms)\A.*^' + name + ' v([^:\r\n]+):\r?$.*\z'), '$1')) \
-    found=(if extracted == installed_cargo_tools { "false" } else { "true" }) \
-    satisfied=(if found == "true" { semver_matches(extracted, ">=" + minimum) } else { "false" }):
+[private]
+_install-source-tool name minimum prerequisite extracted=(replace_regex(installed_cargo_tools, ('(?ms)\A.*^' + name + ' v([^:\r\n]+):\r?$.*\z'), '$1')) found=(if extracted == installed_cargo_tools { "false" } else { "true" }) satisfied=(if found == "true" { semver_matches(extracted, ">=" + minimum) } else { "false" }):
     {{ if satisfied == "true" { "# binary install satisfied the requirement" } else { just_executable() + " " + prerequisite } }}
     {{ if satisfied == "true" { "# source fallback not needed" } else { "cargo install --locked --version =" + minimum + " " + name } }}
 
@@ -2736,11 +2733,8 @@ _binstall-with-source-fallback name minimum prerequisite:
     {{ just_executable() }} _install-source-tool {{ name }} {{ minimum }} {{ prerequisite }}
 
 # Fail before a check starts when a required Cargo tool is missing or too old.
-_check-tool name minimum \
-    extracted=(replace_regex(installed_cargo_tools, ('(?ms)\A.*^' + name + ' v([^:\r\n]+):\r?$.*\z'), '$1')) \
-    found=(if extracted == installed_cargo_tools { "false" } else { "true" }) \
-    installed=(if found == "true" { extracted } else { "" }) \
-    satisfied=(if found == "true" { semver_matches(installed, ">=" + minimum) } else { "false" }):
+[private]
+_check-tool name minimum extracted=(replace_regex(installed_cargo_tools, ('(?ms)\A.*^' + name + ' v([^:\r\n]+):\r?$.*\z'), '$1')) found=(if extracted == installed_cargo_tools { "false" } else { "true" }) installed=(if found == "true" { extracted } else { "" }) satisfied=(if found == "true" { semver_matches(installed, ">=" + minimum) } else { "false" }):
     {{ if satisfied == "true" { "# " + name + " " + installed + " satisfies >= " + minimum } else { error(name + " >= " + minimum + " is required; run its setup recipe") } }}
 
 # Install cargo-each with the Cargo available to the setup caller.
@@ -2826,7 +2820,7 @@ anvil-component-nightly-rust-src-install: anvil-toolchain-nightly-install (_inst
 [group("anvil-setup")]
 [private]
 anvil-component-nightly-rust-src-validate-prereqs: anvil-toolchain-nightly-validate-prereqs
-    rustup run {{ rust_nightly }} rustc --print sysroot
+    {{ if path_exists(anvil_nightly_rust_src_dir) { "# rust-src component available" } else { error("rust-src is missing from " + rust_nightly + "; run `just anvil-component-nightly-rust-src-install`") } }}
 
 [group("anvil-setup")]
 [private]
@@ -2835,7 +2829,7 @@ anvil-component-nightly-llvm-tools-install: anvil-toolchain-nightly-install (_in
 [group("anvil-setup")]
 [private]
 anvil-component-nightly-llvm-tools-validate-prereqs: anvil-toolchain-nightly-validate-prereqs
-    rustup run {{ rust_nightly }} rustc --print sysroot
+    {{ if path_exists(anvil_nightly_llvm_profdata) { "# llvm-tools component available" } else { error("llvm-tools is missing from " + rust_nightly + "; run `just anvil-component-nightly-llvm-tools-install`") } }}
 
 # Cargo subcommands.
 [group("anvil-setup")]
