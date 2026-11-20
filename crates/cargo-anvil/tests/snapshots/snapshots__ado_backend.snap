@@ -6466,8 +6466,23 @@ _anvil-impact-snapshot impact_dir="":
     # `just anvil-<group>` still fails fast if it is missing; keeping it off
     # anvil-impact's dependency line is what lets the no-op paths stay
     # tool-agnostic.
-    & "{{ just_executable() }}" anvil-tool-cargo-delta-validate-prereqs
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    # PowerShell on Linux ARM can abort while multiple fresh pwsh processes
+    # initialize concurrently during this nested tool probe. Serialize only
+    # this probe with the existing workspace mutex; snapshot and impact work
+    # remains concurrent under immutable generations.
+    $prerequisiteLockHeld = $false
+    try {
+        try {
+            [void]$baselineMutex.WaitOne()
+            $prerequisiteLockHeld = $true
+        } catch [System.Threading.AbandonedMutexException] {
+            $prerequisiteLockHeld = $true
+        }
+        & "{{ just_executable() }}" anvil-tool-cargo-delta-validate-prereqs
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    } finally {
+        if ($prerequisiteLockHeld) { $baselineMutex.ReleaseMutex() }
+    }
     [System.IO.Directory]::CreateDirectory($baselineSnapDir) | Out-Null
     [System.IO.Directory]::CreateDirectory($snapDir) | Out-Null
 

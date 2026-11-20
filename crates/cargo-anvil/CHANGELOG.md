@@ -11,12 +11,17 @@
 
 - 🐛 Bug Fixes
 
+  - cargo-anvil: atomize dirty generation publication
   - cargo-anvil: preserve completed impact generations
   - cargo-anvil: preserve concurrent impact selectors
   - cargo-anvil: bind dirty impact to invocation
   - cargo-anvil: bound dirty impact generations
   - cargo-anvil: isolate concurrent impact generations
   - cargo-anvil: address release and lint feedback
+
+- 📚 Documentation
+
+  - cargo-anvil: clarify dirty impact selectors
 
 ## [0.25.3] - 2026-11-18
 
