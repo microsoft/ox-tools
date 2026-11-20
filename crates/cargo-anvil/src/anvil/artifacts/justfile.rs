@@ -69,7 +69,7 @@ macro_rules! paired_recipe_files {
     };
 }
 
-/// Generic local-development checks and their setup recipes.
+// Generic local-development checks and their setup recipes.
 paired_recipe_files!(DEV_CHECK_FILES, "checks/dev", DEV_SETUP_FILES, "setup/dev", ["build"]);
 
 #[test]
@@ -82,7 +82,7 @@ fn aprz_delegates_github_cli_token_discovery_to_the_tool() {
     assert!(!aprz.contains("gh auth token"));
 }
 
-/// One `justfiles/anvil/checks/<check>.just` execution template per catalog check.
+// One `justfiles/anvil/checks/<check>.just` execution template per catalog check.
 paired_recipe_files!(
     CHECK_FILES,
     "checks",
@@ -129,7 +129,7 @@ const CHECK_HELPER_FILES: &[(&str, &str)] = split_recipe_files!(
     ["bolero", "careful", "llvm-cov", "miri", "mutants-diff", "pr-title", "readme-check"]
 );
 
-/// One `justfiles/anvil/groups/<group>.just` file per group.
+// One `justfiles/anvil/groups/<group>.just` file per group.
 paired_recipe_files!(
     GROUP_FILES,
     "groups",

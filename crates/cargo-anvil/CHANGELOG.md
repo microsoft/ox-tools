@@ -18,6 +18,7 @@
 
 - 🐛 Bug Fixes
 
+  - cargo-anvil: consolidate release version
   - cargo-anvil: validate nightly component artifacts
   - cargo-anvil: align generated edit guidance
   - cargo-anvil: avoid nested Just in scheduled CI
@@ -41,6 +42,7 @@
 
 - ♻️ Code Refactoring
 
+  - cargo-anvil: align recipe source layout
   - cargo-anvil: name mutation skip prefix clearly
   - cargo-anvil: streamline generated guidance
   - cargo-anvil: simplify Miri recipe flow
