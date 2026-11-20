@@ -178,16 +178,6 @@ anvil_miri_rustflags(profile) := trim(if profile == "tree-borrows" { "--cfg miri
 
 anvil_toml_basic_string(value) := '"' + replace(replace(replace(replace(value, '\', '\\'), '"', '\"'), "\r", '\r'), "\n", '\n') + '"'
 anvil_cargo_env_config(name, value) := "--config " + quote("env." + name + ".value=" + anvil_toml_basic_string(value)) + " --config " + quote("env." + name + ".force=true")
-anvil_miri_validate_profile(profile) := if profile == "standard" || profile == "tree-borrows" || profile == "strict-provenance" || profile == "race-coverage" { "# valid Miri profile" } else { error("anvil miri: unknown profile '" + profile + "'") }
-anvil_miri_validate_selection(package, test_filter, example) := if test_filter != "" && example != "" { error("anvil-miri: choose exactly one of --test or --example") } else if example != "" && package == "" { error("anvil-miri: --example requires --package to avoid workspace ambiguity") } else { "# valid test/example selection" }
-anvil_miri_example_prefix(example) := if example == "" { "# " } else { "" }
-anvil_miri_test_prefix(example) := if example != "" { "# " } else { "" }
-anvil_miri_cargo(profile, include_rustflags, windows_layout) := "cargo +" + rust_nightly + " " + anvil_cargo_env_config("MIRIFLAGS", anvil_miri_flags(profile)) + (if include_rustflags == "true" { " " + anvil_cargo_env_config("RUSTFLAGS", anvil_miri_rustflags(profile)) } else { "" }) + (if windows_layout == "true" && os() == "windows" { " " + anvil_cargo_env_config("__CARGO_TEMPORARY_BUILD_DIR_NEW_LAYOUT_OPT_OUT", "1") } else { "" })
-anvil_miri_selected_each(profile, package, windows_layout) := anvil_miri_cargo(profile, "true", windows_layout) + " each " + anvil_miri_selection(package) + " --filter " + quote("not metadata:anvil.miri.exclude=true")
-anvil_miri_example_command(profile, package, example) := anvil_miri_selected_each(profile, package, "false") + " --once -- cargo +" + rust_nightly + " miri run '{packages}' --all-features --locked --example " + quote(example)
-anvil_miri_compile_command(profile, package) := anvil_miri_selected_each(profile, package, "true") + " --once -- cargo +" + rust_nightly + " miri test '{packages}' --all-features --tests --no-run --locked --message-format=json,json-render-diagnostics > " + quote(anvil_miri_artifacts_file)
-anvil_miri_run_command(profile, test_filter) := anvil_miri_cargo(profile, "false", "false") + " each --json-lines-file " + quote(anvil_miri_artifacts_file) + " --json-filter " + quote("reason=compiler-artifact and profile.test=true and executable") + " --json-work-dir-parent manifest_path --jobs " + quote(env("ANVIL_MIRI_JOBS", "auto")) + " --keep-going -- rustup run " + rust_nightly + " cargo-miri runner '{json:executable}'" + if test_filter == "" { "" } else { " " + quote(test_filter) }
-anvil_miri_cleanup_command := "rm " + quote(anvil_miri_artifacts_file)
 
 # The shared helper compiles with `cargo miri test --no-run`, then invokes each
 # resulting libtest executable directly. It intentionally does not use nextest:
@@ -209,12 +199,13 @@ anvil_miri_cleanup_command := "rm " + quote(anvil_miri_artifacts_file)
 [env(anvil_miri_library_path_name, anvil_miri_library_path)]
 [private]
 _anvil-miri-test profile package="" test_filter="" example="": anvil-impact _ensure-target-dir
-    {{ anvil_miri_validate_profile(profile) }}
-    {{ anvil_miri_validate_selection(package, test_filter, example) }}
-    {{ anvil_miri_example_prefix(example) }}{{ anvil_miri_example_command(profile, package, example) }}
-    {{ anvil_miri_test_prefix(example) }}{{ anvil_miri_compile_command(profile, package) }}
-    {{ anvil_miri_test_prefix(example) }}{{ anvil_miri_run_command(profile, test_filter) }}
-    {{ anvil_miri_test_prefix(example) }}{{ anvil_miri_cleanup_command }}
+    {{ if profile == "standard" || profile == "tree-borrows" || profile == "strict-provenance" || profile == "race-coverage" { "# valid Miri profile" } else { error("anvil miri: unknown profile '" + profile + "'") } }}
+    {{ if test_filter != "" && example != "" { error("anvil-miri: choose exactly one of --test or --example") } else { "# valid test/example selection" } }}
+    {{ if example != "" && package == "" { error("anvil-miri: --example requires --package to avoid workspace ambiguity") } else { "# valid example package selection" } }}
+    {{ if example == "" { "# " } else { "" } }}cargo +{{ rust_nightly }} {{ anvil_cargo_env_config("MIRIFLAGS", anvil_miri_flags(profile)) }} {{ anvil_cargo_env_config("RUSTFLAGS", anvil_miri_rustflags(profile)) }} each {{ anvil_miri_selection(package) }} --filter {{ quote("not metadata:anvil.miri.exclude=true") }} --once -- cargo +{{ rust_nightly }} miri run '{packages}' --all-features --locked --example {{ quote(example) }}
+    {{ if example != "" { "# " } else { "" } }}cargo +{{ rust_nightly }} {{ anvil_cargo_env_config("MIRIFLAGS", anvil_miri_flags(profile)) }} {{ anvil_cargo_env_config("RUSTFLAGS", anvil_miri_rustflags(profile)) }} {{ if os() == "windows" { anvil_cargo_env_config("__CARGO_TEMPORARY_BUILD_DIR_NEW_LAYOUT_OPT_OUT", "1") } else { "" } }} each {{ anvil_miri_selection(package) }} --filter {{ quote("not metadata:anvil.miri.exclude=true") }} --once -- cargo +{{ rust_nightly }} miri test '{packages}' --all-features --tests --no-run --locked --message-format=json,json-render-diagnostics > {{ quote(anvil_miri_artifacts_file) }}
+    {{ if example != "" { "# " } else { "" } }}cargo +{{ rust_nightly }} {{ anvil_cargo_env_config("MIRIFLAGS", anvil_miri_flags(profile)) }} each --json-lines-file {{ quote(anvil_miri_artifacts_file) }} --json-filter {{ quote("reason=compiler-artifact and profile.test=true and executable") }} --json-work-dir-parent manifest_path --jobs {{ quote(env("ANVIL_MIRI_JOBS", "auto")) }} --keep-going -- rustup run {{ rust_nightly }} cargo-miri runner '{json:executable}' {{ if test_filter == "" { "" } else { quote(test_filter) } }}
+    {{ if example != "" { "# " } else { "" } }}rm {{ quote(anvil_miri_artifacts_file) }}
 
 anvil_mutants_diff_dir := env("RUNNER_TEMP", env("AGENT_TEMPDIRECTORY", env("TEMP", env("TMPDIR", "."))))
 anvil_mutants_diff_file := anvil_mutants_diff_dir / ("anvil-mutants-diff-" + just_pid() + ".diff")
