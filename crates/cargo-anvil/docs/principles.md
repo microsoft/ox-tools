@@ -9,3 +9,6 @@
   additional anvil-specific configuration file
 * It makes updates simple - if the user didn't make modifications, anvil updates the files as needed. If
   the user did make modifications, they only get pestered when the upstream files changed.
+* The generated justfiles should be platform-agnostic (i.e. no powershell or bash dependency). There
+  are currently some recipes that violate this principle, but no new platform-specific recipes should
+  be added.
