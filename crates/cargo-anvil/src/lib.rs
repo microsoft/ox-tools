@@ -414,9 +414,11 @@
 //! use cargo_anvil::{Artifact, Catalog, artifacts};
 //!
 //! fn catalog() -> Catalog {
+//!     let clippy = artifacts::justfile::checks::clippy();
 //!     Catalog::anvil()
 //!         .into_builder()
 //!         .subcommand("myforge")
+//!         .replace_artifact(clippy.execution.with_body("# custom clippy recipe\n"))
 //!         .with_artifact(Artifact::owned_file_section(
 //!             ".anvil/checks.just",
 //!             "source:myforge/checks/extra.just",

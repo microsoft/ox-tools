@@ -69,49 +69,75 @@ macro_rules! paired_recipe_files {
     };
 }
 
+macro_rules! check_recipe_files {
+    ([$(($function:ident, $name:literal)),* $(,)?]) => {
+        const CHECK_FILES: &[(&str, &str)] = split_recipe_files!("checks", [$($name),*]);
+        const CHECK_SETUP_FILES: &[(&str, &str)] = split_recipe_files!("setup/checks", [$($name),*]);
+
+        /// Built-in check artifacts, grouped by check.
+        pub mod checks {
+            use super::check_artifacts;
+            use crate::catalog::Artifact;
+
+            /// The source sections that implement one built-in check.
+            #[derive(Debug, Clone, PartialEq, Eq)]
+            pub struct CheckArtifacts {
+                /// The public check recipe emitted to `.anvil/checks.just`.
+                pub execution: Artifact,
+                /// Optional private definitions emitted to `.anvil/helpers.just`.
+                pub helper: Option<Artifact>,
+                /// Setup and prerequisite recipes emitted to `.anvil/setup.just`.
+                pub setup: Artifact,
+            }
+
+            $(
+                #[doc = concat!("Artifacts for the `anvil-", $name, "` check.")]
+                #[must_use]
+                pub fn $function() -> CheckArtifacts {
+                    check_artifacts($name)
+                }
+            )*
+        }
+    };
+}
+
 // Generic local-development checks and their setup recipes.
 paired_recipe_files!(DEV_CHECK_FILES, "checks/dev", DEV_SETUP_FILES, "setup/dev", ["build"]);
 
 // One `justfiles/anvil/checks/<check>.just` execution template per catalog check.
-paired_recipe_files!(
-    CHECK_FILES,
-    "checks",
-    CHECK_SETUP_FILES,
-    "setup/checks",
-    [
-        "aprz",
-        "audit",
-        "bench",
-        "bolero",
-        "careful",
-        "cargo-hack",
-        "cargo-sort",
-        "check-all-targets",
-        "clippy",
-        "deny",
-        "doc-build",
-        "doc-test",
-        "ensure-no-cyclic-deps",
-        "ensure-no-default-features",
-        "examples",
-        "external-types",
-        "fmt",
-        "license-headers",
-        "llvm-cov",
-        "loom",
-        "miri",
-        "miri-race-coverage",
-        "miri-strict-provenance",
-        "miri-tree-borrows",
-        "msrv-test",
-        "mutants-diff",
-        "mutants-full",
-        "pr-title",
-        "readme-check",
-        "spellcheck",
-        "udeps",
-    ]
-);
+check_recipe_files!([
+    (aprz, "aprz"),
+    (audit, "audit"),
+    (bench, "bench"),
+    (bolero, "bolero"),
+    (careful, "careful"),
+    (cargo_hack, "cargo-hack"),
+    (cargo_sort, "cargo-sort"),
+    (check_all_targets, "check-all-targets"),
+    (clippy, "clippy"),
+    (deny, "deny"),
+    (doc_build, "doc-build"),
+    (doc_test, "doc-test"),
+    (ensure_no_cyclic_deps, "ensure-no-cyclic-deps"),
+    (ensure_no_default_features, "ensure-no-default-features"),
+    (examples, "examples"),
+    (external_types, "external-types"),
+    (fmt, "fmt"),
+    (license_headers, "license-headers"),
+    (llvm_cov, "llvm-cov"),
+    (loom, "loom"),
+    (miri, "miri"),
+    (miri_race_coverage, "miri-race-coverage"),
+    (miri_strict_provenance, "miri-strict-provenance"),
+    (miri_tree_borrows, "miri-tree-borrows"),
+    (msrv_test, "msrv-test"),
+    (mutants_diff, "mutants-diff"),
+    (mutants_full, "mutants-full"),
+    (pr_title, "pr-title"),
+    (readme_check, "readme-check"),
+    (spellcheck, "spellcheck"),
+    (udeps, "udeps"),
+]);
 
 /// Check-specific private helpers.
 const CHECK_HELPER_FILES: &[(&str, &str)] = split_recipe_files!(
@@ -197,6 +223,22 @@ fn file_sections(output_path: &'static str, files: &[(&str, &str)]) -> Vec<Artif
         .collect()
 }
 
+fn check_artifacts(name: &str) -> checks::CheckArtifacts {
+    let file_name = format!("/{name}.just");
+    let execution = CHECK_FILES
+        .iter()
+        .find_map(|&(path, body)| path.ends_with(&file_name).then(|| template_section(CHECKS_JUST_PATH, path, body)))
+        .expect("every public check function names a registered execution template");
+    let helper = CHECK_HELPER_FILES
+        .iter()
+        .find_map(|&(path, body)| path.ends_with(&file_name).then(|| template_section(HELPERS_JUST_PATH, path, body)));
+    let setup = CHECK_SETUP_FILES
+        .iter()
+        .find_map(|&(path, body)| path.ends_with(&file_name).then(|| template_section(SETUP_JUST_PATH, path, body)))
+        .expect("every public check function names a registered setup template");
+    checks::CheckArtifacts { execution, helper, setup }
+}
+
 /// Header and `anvil` alias for the composed recipe file.
 #[must_use]
 pub fn entry() -> Artifact {
@@ -264,10 +306,9 @@ pub fn dev_files() -> Vec<Artifact> {
         .collect()
 }
 
-/// Check execution, helper, and setup templates, each mapped directly to its
-/// generated responsibility file.
+/// All check artifacts in catalog emission order.
 #[must_use]
-pub fn check_files() -> Vec<Artifact> {
+pub(crate) fn check_files() -> Vec<Artifact> {
     file_sections(CHECKS_JUST_PATH, CHECK_FILES)
         .into_iter()
         .chain(file_sections(HELPERS_JUST_PATH, CHECK_HELPER_FILES))
@@ -396,6 +437,25 @@ mod tests {
         assert_eq!(section.id, "source:justfiles/anvil/checks/clippy.just");
         assert!(section.body.contains("anvil-clippy:"));
         assert!(!section.body.contains("anvil-clippy-setup"));
+    }
+
+    #[test]
+    fn per_check_api_separates_execution_helpers_and_setup() {
+        let clippy = checks::clippy();
+        assert!(matches!(
+            clippy.execution,
+            Artifact::OwnedFileSection(section) if section.path == CHECKS_JUST_PATH
+        ));
+        assert!(clippy.helper.is_none());
+        assert!(matches!(
+            clippy.setup,
+            Artifact::OwnedFileSection(section) if section.path == SETUP_JUST_PATH
+        ));
+
+        assert!(matches!(
+            checks::miri().helper,
+            Some(Artifact::OwnedFileSection(section)) if section.path == HELPERS_JUST_PATH
+        ));
     }
 
     #[test]

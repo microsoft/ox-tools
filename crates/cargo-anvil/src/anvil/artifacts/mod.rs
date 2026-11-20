@@ -3,14 +3,15 @@
 
 //! The built-in (`anvil`) artifacts, exposed as a registry of functions.
 //!
-//! Each function returns the [`Artifact`] for one built-in catalog entry —
-//! a `justfiles/anvil/` recipe file, a managed region, or a backend file.
-//! A fork overrides a built-in by deriving from the corresponding function
-//! via [`Artifact::with_body`], so the artifact's identity and gate are
-//! preserved by construction:
+//! Functions return one [`Artifact`] for a built-in catalog entry, or a typed
+//! group of related artifacts when one user-visible feature spans multiple
+//! generated files. A fork overrides a built-in by deriving from the
+//! corresponding function via [`Artifact::with_body`], so the artifact's
+//! identity and gate are preserved by construction:
 //!
 //! ```ignore
 //! catalog.replace_artifact(artifacts::region::rustfmt().with_body(my_body));
+//! catalog.replace_artifact(artifacts::justfile::checks::clippy().execution.with_body(my_recipe));
 //! ```
 //!
 //! This is the single source of truth for the base catalog: both
