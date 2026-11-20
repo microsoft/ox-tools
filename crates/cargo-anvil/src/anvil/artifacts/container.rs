@@ -134,31 +134,13 @@ pub fn all() -> Vec<Artifact> {
     artifacts
 }
 
-/// Every top-level container recipe and helper as its own catalog section.
+/// The container recipe template as one catalog section.
 #[must_use]
 pub fn recipes() -> Vec<Artifact> {
-    let mut sections = vec![super::justfile::generated_header(CONTAINER_JUST_PATH, "header:container")];
-    sections.extend(super::justfile::template_sections(CONTAINER_JUST_PATH, "container", RECIPE));
-    sections
-}
-
-/// The public `anvil-container` recipe.
-///
-/// # Panics
-///
-/// Panics when the embedded container template no longer defines the
-/// `anvil-container` recipe, which is a catalog construction bug.
-#[must_use]
-pub fn recipe() -> Artifact {
-    recipes()
-        .into_iter()
-        .find(|artifact| {
-            matches!(
-                artifact,
-                Artifact::OwnedFileSection(section) if section.id == "recipe:anvil-container"
-            )
-        })
-        .expect("the embedded container template defines anvil-container")
+    vec![
+        super::justfile::generated_header(CONTAINER_JUST_PATH, "header:container"),
+        super::justfile::template_section(CONTAINER_JUST_PATH, "justfiles/anvil/container.just", RECIPE),
+    ]
 }
 
 fn dockerfile_region(id: &'static str, body: &'static str) -> Artifact {
@@ -347,12 +329,22 @@ mod tests {
             .cloned()
             .collect();
         assert_eq!(paths(&owned), [DOCKERIGNORE_PATH]);
+        let recipe_source = recipes()
+            .into_iter()
+            .find(|artifact| {
+                matches!(
+                    artifact,
+                    Artifact::OwnedFileSection(section)
+                        if section.id == "source:justfiles/anvil/container.just"
+                )
+            })
+            .expect("the container source section must be registered");
         assert!(
             matches!(
-                recipe(),
+                recipe_source,
                 Artifact::OwnedFileSection(section)
                     if section.path == CONTAINER_JUST_PATH
-                        && section.id == "recipe:anvil-container"
+                        && section.id == "source:justfiles/anvil/container.just"
                         && section.body.contains("anvil-container *command:")
             ),
             "the container recipe must be a section of the composed Justfile"

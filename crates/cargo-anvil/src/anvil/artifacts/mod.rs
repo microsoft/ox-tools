@@ -89,8 +89,8 @@ pub(crate) fn anvil_artifacts() -> Vec<Artifact> {
     out.extend(justfile::impact());
     out.extend(justfile::tiers());
 
-    // Independently addressable recipe sections for every developer utility,
-    // check, and group.
+    // Independently addressable source-template sections for every developer
+    // utility, check, and group.
     out.extend(justfile::dev_files());
     out.extend(justfile::check_files());
     out.extend(justfile::group_files());

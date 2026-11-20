@@ -376,12 +376,12 @@ mod tests {
 
     #[test]
     fn owned_file_section_constructor_sets_identity_without_a_gate() {
-        let artifact = Artifact::owned_file_section(".anvil/checks.just", "recipe:check", "body");
+        let artifact = Artifact::owned_file_section(".anvil/checks.just", "source:checks/check.just", "body");
         let Artifact::OwnedFileSection(section) = artifact else {
             panic!("expected owned-file section");
         };
         assert_eq!(section.path, ".anvil/checks.just");
-        assert_eq!(section.id, "recipe:check");
+        assert_eq!(section.id, "source:checks/check.just");
         assert_eq!(section.body, "body");
         assert_eq!(section.gate, None);
     }

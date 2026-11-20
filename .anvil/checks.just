@@ -147,7 +147,6 @@ anvil-pr-title: anvil-pr-title-validate-prereqs
 # Check crate READMEs or regenerate them with --fix.
 [arg("fix", long, value="true")]
 anvil-readme fix="false": (_anvil-readme if fix == "true" { "generate" } else { "check" })
-
 # Verify generated crate READMEs are current.
 anvil-readme-check: (_anvil-readme "check")
 

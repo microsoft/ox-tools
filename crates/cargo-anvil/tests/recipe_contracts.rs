@@ -132,6 +132,10 @@ if (($args -contains '--dry-run') -and ($args | Where-Object { $_ -like 'workspa
     Write-Output 'workspace-rust-version=1.95'
     exit 0
 }
+if (($args -join ' ') -eq 'install --list' -and $env:FAKE_CARGO_INSTALL_LIST) {
+    Write-Output $env:FAKE_CARGO_INSTALL_LIST
+    exit 0
+}
 if ($env:FAKE_CARGO_LOG) {
     Add-Content -LiteralPath $env:FAKE_CARGO_LOG -Value (
         "MIRIFLAGS=$($env:MIRIFLAGS) RUSTFLAGS=$($env:RUSTFLAGS) " +
@@ -322,16 +326,7 @@ fn validation_disables_rustup_auto_install_and_preserves_tool_failures() {
         return;
     }
 
-    let catalog = Catalog::anvil()
-        .into_builder()
-        .replace_artifact(
-            cargo_anvil::artifacts::justfile::recipe("anvil-tool-cargo-each-validate-prereqs")
-                .unwrap()
-                .with_body("anvil-tool-cargo-each-validate-prereqs:\n"),
-        )
-        .build()
-        .unwrap();
-    let generated = generated_with_catalog(&catalog);
+    let generated = generated_with_catalog(&Catalog::anvil());
     let root = generated.temp.path();
     let fake_bin = install_fake_cargo(root);
     install_fake_rustup(&fake_bin);
@@ -343,6 +338,7 @@ fn validation_disables_rustup_auto_install_and_preserves_tool_failures() {
         .env("PATH", prepend_path(&fake_bin))
         .env("RUSTUP_TOOLCHAIN", "selected")
         .env("FAKE_CARGO_LOG", &cargo_log)
+        .env("FAKE_CARGO_INSTALL_LIST", "cargo-each v0.8.0:")
         .env("FAKE_CARGO_EXIT", "23")
         .output()
         .unwrap();
@@ -357,6 +353,7 @@ fn validation_disables_rustup_auto_install_and_preserves_tool_failures() {
         .arg("anvil-msrv-test-validate-prereqs")
         .current_dir(root)
         .env("PATH", prepend_path(&fake_bin))
+        .env("FAKE_CARGO_INSTALL_LIST", "cargo-each v0.8.0:")
         .env("FAKE_RUSTUP_LOG", &rustup_log)
         .env("FAKE_RUSTUP_EXIT", "19")
         .output()
@@ -530,9 +527,12 @@ fn mutants_diff_includes_committed_and_uncommitted_changes() {
     let catalog = Catalog::anvil()
         .into_builder()
         .replace_artifact(
-            cargo_anvil::artifacts::justfile::recipe("anvil-mutants-diff-validate-prereqs")
+            cargo_anvil::artifacts::justfile::source("justfiles/anvil/setup/checks/mutants-diff.just")
                 .unwrap()
-                .with_body("anvil-mutants-diff-validate-prereqs:\n"),
+                .with_body(
+                    "anvil-mutants-diff-setup installer=\"install\":\n\
+                     anvil-mutants-diff-validate-prereqs:\n",
+                ),
         )
         .build()
         .unwrap();

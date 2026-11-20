@@ -26,7 +26,7 @@ use cargo_anvil::{Artifact, Catalog, RegionId, artifacts};
 use tempfile::TempDir;
 
 const EXTRA_FILE: &str = ".anvil/checks.just";
-const EXTRA_ID: &str = "recipe:anvil-demo";
+const EXTRA_ID: &str = "source:demoforge/checks/demo.just";
 const METADATA_REGION: &str = "demoforge-metadata";
 const CONTAINER_JUST: &str = ".anvil/container.just";
 const DOCKERFILE: &str = ".anvil/container/Dockerfile";

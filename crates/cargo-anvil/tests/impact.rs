@@ -292,24 +292,28 @@ fn base_ref_precedence_is_evaluated_without_shell_logic() {
 fn examples_catalog() -> Catalog {
     Catalog::anvil()
         .into_builder()
-        .replace_artifact(artifacts::justfile::recipe("anvil-examples").unwrap().with_body(
-            "anvil-examples: anvil-examples-validate-prereqs anvil-impact\n    \
+        .replace_artifact(
+            artifacts::justfile::source("justfiles/anvil/checks/examples.just")
+                .unwrap()
+                .with_body(
+                    "anvil-examples: anvil-examples-validate-prereqs anvil-impact\n    \
                      cargo each {{ anvil_affected_selection }} --once -- pwsh -NoProfile -File \
                      {{ quote(env(\"FAKE_CHECK_SCRIPT\")) }} '{packages}'\n",
-        ))
+                ),
+        )
         .replace_artifact(
-            artifacts::justfile::recipe("anvil-examples-validate-prereqs")
+            artifacts::justfile::source("justfiles/anvil/setup/checks/examples.just")
                 .unwrap()
-                .with_body("anvil-examples-validate-prereqs:\n"),
+                .with_body("anvil-examples-setup installer=\"install\":\nanvil-examples-validate-prereqs:\n"),
         )
         .build()
         .unwrap()
 }
 
-fn catalog_with_noop_validations(names: &[&str]) -> Catalog {
+fn catalog_with_noop_setup_sources(sources: &[(&str, &str)]) -> Catalog {
     let mut builder = Catalog::anvil().into_builder();
-    for name in names {
-        builder = builder.replace_artifact(artifacts::justfile::recipe(name).unwrap().with_body(format!("{name}:\n")));
+    for (source, body) in sources {
+        builder = builder.replace_artifact(artifacts::justfile::source(source).unwrap().with_body(*body));
     }
     builder.build().unwrap()
 }
@@ -367,7 +371,16 @@ fn consumed_package_files_drive_skip_selection_and_missing_input_failure() {
 
 #[test]
 fn empty_affected_selection_skips_careful_and_mutants_before_side_effects() {
-    let catalog = catalog_with_noop_validations(&["anvil-careful-validate-prereqs", "anvil-mutants-diff-validate-prereqs"]);
+    let catalog = catalog_with_noop_setup_sources(&[
+        (
+            "justfiles/anvil/setup/checks/careful.just",
+            "anvil-careful-setup installer=\"install\":\nanvil-careful-validate-prereqs:\n",
+        ),
+        (
+            "justfiles/anvil/setup/checks/mutants-diff.just",
+            "anvil-mutants-diff-setup installer=\"install\":\nanvil-mutants-diff-validate-prereqs:\n",
+        ),
+    ]);
     let temp = generated_workspace_with(&catalog);
     let impact = temp.path().join("impact");
     std::fs::create_dir_all(&impact).unwrap();
@@ -402,21 +415,7 @@ fn empty_affected_selection_skips_careful_and_mutants_before_side_effects() {
 
 #[test]
 fn msrv_recipes_are_noops_without_a_root_msrv() {
-    let catalog = Catalog::anvil()
-        .into_builder()
-        .replace_artifact(
-            artifacts::justfile::recipe("anvil-tool-cargo-each-install")
-                .unwrap()
-                .with_body("anvil-tool-cargo-each-install installer=\"install\":\n"),
-        )
-        .replace_artifact(
-            artifacts::justfile::recipe("anvil-tool-cargo-each-validate-prereqs")
-                .unwrap()
-                .with_body("anvil-tool-cargo-each-validate-prereqs:\n"),
-        )
-        .build()
-        .unwrap();
-    let temp = generated_workspace_with(&catalog);
+    let temp = generated_workspace();
     let manifest_path = temp.path().join("Cargo.toml");
     let manifest = std::fs::read_to_string(&manifest_path).unwrap();
     write(

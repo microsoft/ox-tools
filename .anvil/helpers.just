@@ -93,7 +93,6 @@ _anvil-scheduled: anvil-scheduled-validate-prereqs \
     anvil-scheduled-advisories \
     anvil-scheduled-runtime-analysis \
     anvil-scheduled-exhaustive
-
 # Used by anvil-full to run pull-request and scheduled tiers in one unscoped child.
 [private]
 _anvil-full: anvil-full-validate-prereqs \
@@ -198,7 +197,6 @@ anvil_readme_template_arg := if anvil_readme_template == "" {
 } else {
     "--template " + quote(anvil_readme_template)
 }
-
 # Used by anvil-readme and anvil-readme-check to share crate selection and mode handling.
 [private]
 _anvil-readme mode: anvil-readme-check-validate-prereqs

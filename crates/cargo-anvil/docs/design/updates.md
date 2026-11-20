@@ -57,8 +57,9 @@ Deleting a live owned file instead requests regeneration.
 
 The generated `.anvil/*.just` files are physical owned files composed from
 independently addressable catalog sections. Catalogs can add, replace, or remove
-one recipe or source block by section identity; enabled sections for one path
-render in catalog order with canonical blank-line separation.
+one source-template block by section identity; enabled sections for one path
+render in catalog order with canonical blank-line separation. A source template
+is the smallest built-in section; cargo-anvil does not parse recipes within it.
 
 Repository ownership remains whole-file: editing one composed section dirties
 the physical file, and a later catalog change proposes the complete file.

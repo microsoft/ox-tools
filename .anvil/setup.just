@@ -208,7 +208,6 @@ anvil-component-nightly-llvm-tools-validate-prereqs: anvil-toolchain-nightly-val
 [group("anvil-setup")]
 [private]
 anvil-tool-cargo-aprz-install installer="install": (_install-tool "cargo-aprz" cargo_aprz_version installer)
-
 [group("anvil-setup")]
 [private]
 anvil-tool-cargo-aprz-validate-prereqs: (_check-tool "cargo-aprz" cargo_aprz_version)
@@ -216,7 +215,6 @@ anvil-tool-cargo-aprz-validate-prereqs: (_check-tool "cargo-aprz" cargo_aprz_ver
 [group("anvil-setup")]
 [private]
 anvil-tool-cargo-audit-install installer="install": (_install-tool "cargo-audit" cargo_audit_version installer)
-
 [group("anvil-setup")]
 [private]
 anvil-tool-cargo-audit-validate-prereqs: (_check-tool "cargo-audit" cargo_audit_version)
@@ -225,7 +223,6 @@ anvil-tool-cargo-audit-validate-prereqs: (_check-tool "cargo-audit" cargo_audit_
 [private]
 anvil-tool-cargo-bolero-install installer="install":
     {{ bolero_command_prefix }}{{ just_executable() }} _install-tool cargo-bolero {{ cargo_bolero_version }} {{ installer }}
-
 [group("anvil-setup")]
 [private]
 anvil-tool-cargo-bolero-validate-prereqs:
@@ -234,7 +231,6 @@ anvil-tool-cargo-bolero-validate-prereqs:
 [group("anvil-setup")]
 [private]
 anvil-tool-cargo-careful-install installer="install": (_install-tool "cargo-careful" cargo_careful_version installer)
-
 [group("anvil-setup")]
 [private]
 anvil-tool-cargo-careful-validate-prereqs: (_check-tool "cargo-careful" cargo_careful_version)
@@ -242,7 +238,6 @@ anvil-tool-cargo-careful-validate-prereqs: (_check-tool "cargo-careful" cargo_ca
 [group("anvil-setup")]
 [private]
 anvil-tool-cargo-check-external-types-install installer="install": (_install-tool "cargo-check-external-types" cargo_check_external_types_version installer)
-
 [group("anvil-setup")]
 [private]
 anvil-tool-cargo-check-external-types-validate-prereqs: (_check-tool "cargo-check-external-types" cargo_check_external_types_version)
@@ -250,7 +245,6 @@ anvil-tool-cargo-check-external-types-validate-prereqs: (_check-tool "cargo-chec
 [group("anvil-setup")]
 [private]
 anvil-tool-cargo-coverage-gate-install installer="install": (_install-tool "cargo-coverage-gate" cargo_coverage_gate_version installer)
-
 [group("anvil-setup")]
 [private]
 anvil-tool-cargo-coverage-gate-validate-prereqs: (_check-tool "cargo-coverage-gate" cargo_coverage_gate_version)
@@ -258,7 +252,6 @@ anvil-tool-cargo-coverage-gate-validate-prereqs: (_check-tool "cargo-coverage-ga
 [group("anvil-setup")]
 [private]
 anvil-tool-cargo-delta-install installer="install": (_install-tool "cargo-delta" cargo_delta_version installer)
-
 [group("anvil-setup")]
 [private]
 anvil-tool-cargo-delta-validate-prereqs: (_check-tool "cargo-delta" cargo_delta_version)
@@ -266,7 +259,6 @@ anvil-tool-cargo-delta-validate-prereqs: (_check-tool "cargo-delta" cargo_delta_
 [group("anvil-setup")]
 [private]
 anvil-tool-cargo-deny-install installer="install": (_install-tool "cargo-deny" cargo_deny_version installer)
-
 [group("anvil-setup")]
 [private]
 anvil-tool-cargo-deny-validate-prereqs: (_check-tool "cargo-deny" cargo_deny_version)
@@ -274,7 +266,6 @@ anvil-tool-cargo-deny-validate-prereqs: (_check-tool "cargo-deny" cargo_deny_ver
 [group("anvil-setup")]
 [private]
 anvil-tool-cargo-doc2readme-install installer="install": (_install-tool "cargo-doc2readme" cargo_doc2readme_version installer)
-
 [group("anvil-setup")]
 [private]
 anvil-tool-cargo-doc2readme-validate-prereqs: (_check-tool "cargo-doc2readme" cargo_doc2readme_version)
@@ -282,7 +273,6 @@ anvil-tool-cargo-doc2readme-validate-prereqs: (_check-tool "cargo-doc2readme" ca
 [group("anvil-setup")]
 [private]
 anvil-tool-cargo-ensure-no-cyclic-deps-install installer="install": (_install-tool "cargo-ensure-no-cyclic-deps" cargo_ensure_no_cyclic_deps_version installer)
-
 [group("anvil-setup")]
 [private]
 anvil-tool-cargo-ensure-no-cyclic-deps-validate-prereqs: (_check-tool "cargo-ensure-no-cyclic-deps" cargo_ensure_no_cyclic_deps_version)
@@ -290,7 +280,6 @@ anvil-tool-cargo-ensure-no-cyclic-deps-validate-prereqs: (_check-tool "cargo-ens
 [group("anvil-setup")]
 [private]
 anvil-tool-cargo-ensure-no-default-features-install installer="install": (_install-tool "cargo-ensure-no-default-features" cargo_ensure_no_default_features_version installer)
-
 [group("anvil-setup")]
 [private]
 anvil-tool-cargo-ensure-no-default-features-validate-prereqs: (_check-tool "cargo-ensure-no-default-features" cargo_ensure_no_default_features_version)
@@ -298,7 +287,6 @@ anvil-tool-cargo-ensure-no-default-features-validate-prereqs: (_check-tool "carg
 [group("anvil-setup")]
 [private]
 anvil-tool-cargo-hack-install installer="install": (_install-tool "cargo-hack" cargo_hack_version installer)
-
 [group("anvil-setup")]
 [private]
 anvil-tool-cargo-hack-validate-prereqs: (_check-tool "cargo-hack" cargo_hack_version)
@@ -306,7 +294,6 @@ anvil-tool-cargo-hack-validate-prereqs: (_check-tool "cargo-hack" cargo_hack_ver
 [group("anvil-setup")]
 [private]
 anvil-tool-cargo-heather-install installer="install": (_install-tool "cargo-heather" cargo_heather_version installer)
-
 [group("anvil-setup")]
 [private]
 anvil-tool-cargo-heather-validate-prereqs: (_check-tool "cargo-heather" cargo_heather_version)
@@ -314,7 +301,6 @@ anvil-tool-cargo-heather-validate-prereqs: (_check-tool "cargo-heather" cargo_he
 [group("anvil-setup")]
 [private]
 anvil-tool-cargo-llvm-cov-install installer="install": (_install-tool "cargo-llvm-cov" cargo_llvm_cov_version installer)
-
 [group("anvil-setup")]
 [private]
 anvil-tool-cargo-llvm-cov-validate-prereqs: (_check-tool "cargo-llvm-cov" cargo_llvm_cov_version)
@@ -322,7 +308,6 @@ anvil-tool-cargo-llvm-cov-validate-prereqs: (_check-tool "cargo-llvm-cov" cargo_
 [group("anvil-setup")]
 [private]
 anvil-tool-cargo-gamma-install installer="install": (_install-tool "cargo-gamma" cargo_gamma_version installer)
-
 [group("anvil-setup")]
 [private]
 anvil-tool-cargo-gamma-validate-prereqs: (_check-tool "cargo-gamma" cargo_gamma_version)
@@ -330,7 +315,6 @@ anvil-tool-cargo-gamma-validate-prereqs: (_check-tool "cargo-gamma" cargo_gamma_
 [group("anvil-setup")]
 [private]
 anvil-tool-cargo-nextest-install installer="install": (_install-tool "cargo-nextest" cargo_nextest_version installer)
-
 [group("anvil-setup")]
 [private]
 anvil-tool-cargo-nextest-validate-prereqs: (_check-tool "cargo-nextest" cargo_nextest_version)
@@ -338,7 +322,6 @@ anvil-tool-cargo-nextest-validate-prereqs: (_check-tool "cargo-nextest" cargo_ne
 [group("anvil-setup")]
 [private]
 anvil-tool-cargo-sort-install installer="install": (_install-tool "cargo-sort" cargo_sort_version installer)
-
 [group("anvil-setup")]
 [private]
 anvil-tool-cargo-sort-validate-prereqs: (_check-tool "cargo-sort" cargo_sort_version)
@@ -347,7 +330,6 @@ anvil-tool-cargo-sort-validate-prereqs: (_check-tool "cargo-sort" cargo_sort_ver
 [private]
 anvil-tool-cargo-spellcheck-install installer="install":
     {{ if installer == "install" { just_executable() + " _install-source-tool cargo-spellcheck " + cargo_spellcheck_version + " anvil-tool-cargo-spellcheck-source-deps-check" } else if installer == "binstall" { just_executable() + " _binstall-with-source-fallback cargo-spellcheck " + cargo_spellcheck_version + " anvil-tool-cargo-spellcheck-source-deps-check" } else { error("invalid installer '" + installer + "'; expected install or binstall") } }}
-
 [group("anvil-setup")]
 [private]
 anvil-tool-cargo-spellcheck-validate-prereqs: (_check-tool "cargo-spellcheck" cargo_spellcheck_version)
@@ -355,7 +337,6 @@ anvil-tool-cargo-spellcheck-validate-prereqs: (_check-tool "cargo-spellcheck" ca
 [group("anvil-setup")]
 [private]
 anvil-tool-cargo-udeps-install installer="install": (_install-tool "cargo-udeps" cargo_udeps_version installer)
-
 [group("anvil-setup")]
 [private]
 anvil-tool-cargo-udeps-validate-prereqs: (_check-tool "cargo-udeps" cargo_udeps_version)

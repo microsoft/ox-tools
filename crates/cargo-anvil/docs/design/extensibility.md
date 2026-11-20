@@ -57,16 +57,18 @@ The backend set is closed: GitHub and ADO. Catalogs can add, replace, or remove
 files gated on either backend, but cannot introduce another backend name.
 Ungated artifacts apply to every selection, including local-only generation.
 
-The built-in Just catalog composes recipe artifacts into `.anvil/checks.just`,
+The built-in Just catalog composes source-template sections into `.anvil/checks.just`,
 `groups.just`, `helpers.just`, `setup.just`, and `container.just`, imported by
-`.anvil/anvil.just`. Derived catalogs add, replace, or remove recipe artifacts
+`.anvil/anvil.just`. Each input template is one section; cargo-anvil does not
+parse Just syntax or expose individual recipes as catalog artifacts. Derived
+catalogs add, replace, or remove source sections
 through the artifact registry rather than creating another generated recipe
 tree. Other assets remain ordinary owned files. Container artifacts use the
 same catalog operations; see
 [container customization](containers.md#8-customization).
 
-Recipe contents are text, not a structured check-editing API. Changing a
-check's behavior means replacing the relevant artifact. The update algorithm,
+Section contents are text, not a structured check-editing API. Changing a
+check's behavior means replacing its relevant source section. The update algorithm,
 preservation rules, and on-disk format are shared by all catalogs.
 
 ## Running the catalog

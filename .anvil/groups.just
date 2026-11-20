@@ -9,11 +9,9 @@
 anvil-pr: anvil-pr-validate-prereqs \
     anvil-pr-fast \
     anvil-pr-slow
-
 # Run every scheduled check group across the full workspace.
 [group("anvil")]
 anvil-scheduled: (_anvil-unscoped "scheduled")
-
 # Run both pull-request and scheduled tiers across the full workspace.
 [group("anvil")]
 anvil-full: (_anvil-unscoped "full")

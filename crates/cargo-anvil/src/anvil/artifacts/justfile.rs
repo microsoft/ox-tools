@@ -191,63 +191,19 @@ pub(crate) fn generated_header(path: &'static str, id: &'static str) -> Artifact
     section(path, id, REPEATED_TEMPLATE_HEADER)
 }
 
-fn recipe_name(line: &str) -> Option<&str> {
-    if line.len() != line.trim_start().len() || line.contains(":=") {
-        return None;
-    }
-    let (head, _) = line.split_once(':')?;
-    let name = head.split_whitespace().next()?;
-    let generated_recipe_name =
-        name.starts_with("anvil-") || name.starts_with("_anvil-") || name.starts_with("_install-") || name.starts_with("_check-");
-    (generated_recipe_name && name.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))).then_some(name)
-}
-
 fn without_generated_header(body: &str) -> String {
     let normalized = body.replace("\r\n", "\n");
     normalized.strip_prefix(REPEATED_TEMPLATE_HEADER).unwrap_or(&normalized).to_owned()
 }
 
-pub(crate) fn template_sections(output_path: &'static str, source: &str, body: &str) -> Vec<Artifact> {
-    let normalized = without_generated_header(body);
-    let body = normalized.as_str();
-    let lines = body.split_inclusive('\n').collect::<Vec<_>>();
-    let recipe_headers = lines
-        .iter()
-        .enumerate()
-        .filter_map(|(index, line)| recipe_name(line.trim_end_matches(['\r', '\n'])).map(|name| (index, name.to_owned())))
-        .collect::<Vec<_>>();
-
-    if recipe_headers.is_empty() {
-        return vec![section(output_path, format!("source:{source}"), body)];
-    }
-
-    let mut starts = Vec::with_capacity(recipe_headers.len());
-    for (header, name) in recipe_headers {
-        let start = lines[..header]
-            .iter()
-            .rposition(|line| {
-                let preceding = line.trim_end_matches(['\r', '\n']);
-                !(preceding.is_empty() || preceding.starts_with('#') || preceding.starts_with('['))
-            })
-            .map_or(0, |index| index + 1);
-        starts.push((start, name));
-    }
-
-    let mut out = Vec::with_capacity(starts.len() + 1);
-    if starts[0].0 > 0 {
-        out.push(section(output_path, format!("source:{source}"), lines[..starts[0].0].concat()));
-    }
-    for (index, (start, name)) in starts.iter().enumerate() {
-        let end = starts.get(index + 1).map_or(lines.len(), |(next, _)| *next);
-        out.push(section(output_path, format!("recipe:{name}"), lines[*start..end].concat()));
-    }
-    out
+pub(crate) fn template_section(output_path: &'static str, source: &str, body: &str) -> Artifact {
+    section(output_path, format!("source:{source}"), without_generated_header(body))
 }
 
 fn file_sections(output_path: &'static str, files: &[(&str, &str)]) -> Vec<Artifact> {
     files
         .iter()
-        .flat_map(|&(source, body)| template_sections(output_path, source, body))
+        .map(|&(source, body)| template_section(output_path, source, body))
         .collect()
 }
 
@@ -277,28 +233,36 @@ pub(crate) const fn scaffold() -> &'static str {
 /// Pinned toolchain and cargo-subcommand version declarations.
 #[must_use]
 pub fn versions() -> Vec<Artifact> {
-    template_sections(SETUP_JUST_PATH, "versions", VERSIONS_JUST)
+    vec![template_section(
+        SETUP_JUST_PATH,
+        "justfiles/anvil/setup/versions.just",
+        VERSIONS_JUST,
+    )]
 }
 
 /// Tool install and prerequisite recipes.
 #[must_use]
 pub fn tools() -> Vec<Artifact> {
-    template_sections(SETUP_JUST_PATH, "tools", TOOLS_JUST)
+    vec![template_section(SETUP_JUST_PATH, "justfiles/anvil/setup/tools.just", TOOLS_JUST)]
 }
 
 /// Shared private helper recipes and definitions.
 #[must_use]
 pub fn helpers() -> Vec<Artifact> {
-    template_sections(HELPERS_JUST_PATH, "helpers", HELPERS_JUST)
+    vec![template_section(
+        HELPERS_JUST_PATH,
+        "justfiles/anvil/helpers/common.just",
+        HELPERS_JUST,
+    )]
 }
 
 /// Public impact command plus its shared selection definitions.
 #[must_use]
 pub fn impact() -> Vec<Artifact> {
-    template_sections(HELPERS_JUST_PATH, "impact-helpers", IMPACT_HELPERS_JUST)
-        .into_iter()
-        .chain(template_sections(CHECKS_JUST_PATH, "impact", IMPACT_CHECK_JUST))
-        .collect()
+    vec![
+        template_section(HELPERS_JUST_PATH, "justfiles/anvil/helpers/impact.just", IMPACT_HELPERS_JUST),
+        template_section(CHECKS_JUST_PATH, "justfiles/anvil/checks/impact.just", IMPACT_CHECK_JUST),
+    ]
 }
 
 /// Generic local-development recipe files.
@@ -335,21 +299,17 @@ pub fn group_files() -> Vec<Artifact> {
 /// Tier aggregators, private fan-out helpers, and setup recipes.
 #[must_use]
 pub fn tiers() -> Vec<Artifact> {
-    template_sections(GROUPS_JUST_PATH, "tiers", TIERS_GROUPS_JUST)
-        .into_iter()
-        .chain(template_sections(HELPERS_JUST_PATH, "tiers-helpers", TIERS_HELPERS_JUST))
-        .chain(template_sections(SETUP_JUST_PATH, "tiers-setup", TIERS_SETUP_JUST))
-        .collect()
+    vec![
+        template_section(GROUPS_JUST_PATH, "justfiles/anvil/groups/tiers.just", TIERS_GROUPS_JUST),
+        template_section(HELPERS_JUST_PATH, "justfiles/anvil/helpers/tiers.just", TIERS_HELPERS_JUST),
+        template_section(SETUP_JUST_PATH, "justfiles/anvil/setup/tiers.just", TIERS_SETUP_JUST),
+    ]
 }
 
-/// Look up one built-in Just recipe by its top-level name.
-///
-/// This is the preferred entry point for a derived catalog that wants to
-/// replace or remove one recipe without taking ownership of neighboring
-/// declarations in the source template.
+/// Look up one built-in Just source section by its template path.
 #[must_use]
-pub fn recipe(name: &str) -> Option<Artifact> {
-    let id = format!("recipe:{name}");
+pub fn source(path: &str) -> Option<Artifact> {
+    let id = format!("source:{path}");
     tools()
         .into_iter()
         .chain(versions())
@@ -514,30 +474,29 @@ mod tests {
     }
 
     #[test]
-    fn recipes_are_independently_addressable_catalog_sections() {
-        let recipe = recipe("anvil-clippy").expect("the built-in clippy recipe must be addressable");
-        let Artifact::OwnedFileSection(section) = recipe else {
-            panic!("a Just recipe must be an owned-file section");
+    fn source_templates_are_independently_addressable_catalog_sections() {
+        let artifact = source("justfiles/anvil/checks/clippy.just").expect("the clippy source section must be addressable");
+        let Artifact::OwnedFileSection(section) = artifact else {
+            panic!("a Just source must be an owned-file section");
         };
         assert_eq!(section.path, CHECKS_JUST_PATH);
-        assert_eq!(section.id, "recipe:anvil-clippy");
+        assert_eq!(section.id, "source:justfiles/anvil/checks/clippy.just");
         assert!(section.body.contains("anvil-clippy:"));
         assert!(!section.body.contains("anvil-clippy-setup"));
     }
 
     #[test]
-    fn setup_helpers_are_independently_addressable_and_replaceable() {
-        let helper = recipe("_install-component").expect("the component installer must be addressable");
-        let Artifact::OwnedFileSection(section) = &helper else {
-            panic!("a Just helper must be an owned-file section");
+    fn source_sections_are_replaceable_without_affecting_neighbors() {
+        let tools = source("justfiles/anvil/setup/tools.just").expect("the tools source section must be addressable");
+        let Artifact::OwnedFileSection(section) = &tools else {
+            panic!("a Just source must be an owned-file section");
         };
         assert_eq!(section.path, SETUP_JUST_PATH);
-        assert_eq!(section.id, "recipe:_install-component");
+        assert_eq!(section.id, "source:justfiles/anvil/setup/tools.just");
         assert!(section.body.contains("_install-component toolchain component:"));
-        assert!(!section.body.contains("anvil-component-default-clippy-install"));
 
-        let neighbor = recipe("anvil-component-default-clippy-install").expect("the neighboring component setup must be addressable");
-        let replacement = helper.with_body("_install-component toolchain component:\n    echo replaced\n");
+        let neighbor = source("justfiles/anvil/setup/checks/clippy.just").expect("the neighboring clippy setup source must be addressable");
+        let replacement = tools.with_body("_install-component toolchain component:\n    echo replaced\n");
         let catalog = Catalog::anvil().into_builder().replace_artifact(replacement).build().unwrap();
         let replaced = catalog
             .artifacts()
@@ -546,10 +505,11 @@ mod tests {
                 matches!(
                     artifact,
                     Artifact::OwnedFileSection(section)
-                        if section.path == SETUP_JUST_PATH && section.id == "recipe:_install-component"
+                        if section.path == SETUP_JUST_PATH
+                            && section.id == "source:justfiles/anvil/setup/tools.just"
                 )
             })
-            .expect("the replacement must retain the helper identity");
+            .expect("the replacement must retain the source identity");
         let unchanged_neighbor = catalog
             .artifacts()
             .iter()
@@ -558,16 +518,16 @@ mod tests {
                     artifact,
                     Artifact::OwnedFileSection(section)
                         if section.path == SETUP_JUST_PATH
-                            && section.id == "recipe:anvil-component-default-clippy-install"
+                            && section.id == "source:justfiles/anvil/setup/checks/clippy.just"
                 )
             })
-            .expect("the neighboring helper must remain present");
+            .expect("the neighboring source must remain present");
         assert!(replaced.body().contains("echo replaced"));
         assert_eq!(unchanged_neighbor.body(), neighbor.body());
     }
 
     #[test]
-    fn recipe_section_ids_are_unique() {
+    fn source_section_ids_are_unique() {
         let mut ids = BTreeSet::new();
         for artifact in tools()
             .into_iter()
@@ -587,90 +547,18 @@ mod tests {
     }
 
     #[test]
-    fn hidden_recipes_are_explicitly_private() {
-        for artifact in Catalog::anvil().artifacts() {
-            let Artifact::OwnedFileSection(section) = artifact else {
-                continue;
-            };
-            let Some(name) = section.id.strip_prefix("recipe:_") else {
-                continue;
-            };
-            assert!(
-                section.body.lines().any(|line| line == "[private]"),
-                "hidden recipe _{name} must declare [private] explicitly"
-            );
-        }
-    }
-
-    #[test]
-    fn only_global_and_group_setup_recipes_are_public() {
-        let expected = [
-            "anvil-setup",
-            "anvil-validate-prereqs",
-            "anvil-pr-fast-setup",
-            "anvil-pr-fast-validate-prereqs",
-            "anvil-pr-msrv-setup",
-            "anvil-pr-msrv-validate-prereqs",
-            "anvil-pr-slow-setup",
-            "anvil-pr-slow-validate-prereqs",
-            "anvil-pr-test-setup",
-            "anvil-pr-test-validate-prereqs",
-            "anvil-pr-runtime-analysis-setup",
-            "anvil-pr-runtime-analysis-validate-prereqs",
-            "anvil-pr-fuzzing-setup",
-            "anvil-pr-fuzzing-validate-prereqs",
-            "anvil-pr-mutants-setup",
-            "anvil-pr-mutants-validate-prereqs",
-            "anvil-scheduled-test-setup",
-            "anvil-scheduled-test-validate-prereqs",
-            "anvil-scheduled-advisories-setup",
-            "anvil-scheduled-advisories-validate-prereqs",
-            "anvil-scheduled-runtime-analysis-setup",
-            "anvil-scheduled-runtime-analysis-validate-prereqs",
-            "anvil-scheduled-exhaustive-setup",
-            "anvil-scheduled-exhaustive-validate-prereqs",
-        ]
-        .into_iter()
-        .collect::<BTreeSet<_>>();
-        let catalog = Catalog::anvil();
-        let actual = catalog
-            .artifacts()
-            .iter()
-            .filter_map(|artifact| {
-                let Artifact::OwnedFileSection(section) = artifact else {
-                    return None;
-                };
-                if section.path != SETUP_JUST_PATH || section.body.lines().any(|line| line == "[private]") {
-                    return None;
-                }
-                section.id.strip_prefix("recipe:")
-            })
-            .collect::<BTreeSet<_>>();
-
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn shared_assignments_live_in_the_tools_preamble() {
-        let preamble = tools()
-            .into_iter()
-            .find(|artifact| {
-                matches!(
-                    artifact,
-                    Artifact::OwnedFileSection(section) if section.id == "source:tools"
-                )
-            })
-            .expect("tools preamble must be independently addressable");
-        assert!(preamble.body().contains("bolero_command_prefix :="));
+    fn shared_assignments_live_in_the_tools_source() {
+        let tools = source("justfiles/anvil/setup/tools.just").expect("tools source must be independently addressable");
+        assert!(tools.body().contains("bolero_command_prefix :="));
         assert!(
-            !recipe("anvil-tool-cargo-audit-validate-prereqs")
-                .unwrap()
+            !source("justfiles/anvil/setup/checks/audit.just")
+                .expect("audit setup source must exist")
                 .body()
                 .contains("bolero_command_prefix :=")
         );
         assert!(
-            !recipe("anvil-tool-cargo-llvm-cov-validate-prereqs")
-                .unwrap()
+            !source("justfiles/anvil/setup/checks/llvm-cov.just")
+                .expect("coverage setup source must exist")
                 .body()
                 .contains("bolero_command_prefix :=")
         );
@@ -736,68 +624,41 @@ mod tests {
         })
     }
 
-    #[cfg_attr(
-        miri,
-        ignore = "native and cargo-careful retain exhaustive generated-recipe contract scans; focused recipe tests preserve Miri coverage"
-    )]
-    #[test]
-    fn recipe_names_accept_only_generated_top_level_declarations() {
-        for line in [
-            "anvil-check:",
-            "_anvil-helper argument:",
-            "_install-tool name:",
-            "_check-tool name:",
-            "anvil-check_with-mixed_bytes:",
-        ] {
-            assert!(recipe_name(line).is_some(), "{line:?} must be recognized");
-        }
-        for line in [
-            "",
-            " anvil-indented:",
-            "# anvil-comment:",
-            "[private]:",
-            "anvil-variable := \"value\"",
-            "ordinary-recipe:",
-            "anvil-invalid!:",
-        ] {
-            assert_eq!(recipe_name(line), None, "{line:?} must not be recognized");
-        }
-    }
-
     #[test]
     fn source_layout_determines_generated_responsibility() {
-        for (name, expected_path) in [
-            ("anvil-aprz", CHECKS_JUST_PATH),
-            ("anvil-aprz-setup", SETUP_JUST_PATH),
-            ("_anvil-miri-test", HELPERS_JUST_PATH),
-            ("anvil-pr-fast", GROUPS_JUST_PATH),
-            ("anvil-pr-fast-setup", SETUP_JUST_PATH),
-            ("_anvil-scheduled-test", HELPERS_JUST_PATH),
+        for (source_path, expected_path) in [
+            ("justfiles/anvil/checks/aprz.just", CHECKS_JUST_PATH),
+            ("justfiles/anvil/setup/checks/aprz.just", SETUP_JUST_PATH),
+            ("justfiles/anvil/helpers/checks/miri.just", HELPERS_JUST_PATH),
+            ("justfiles/anvil/groups/pr-fast.just", GROUPS_JUST_PATH),
+            ("justfiles/anvil/setup/groups/pr-fast.just", SETUP_JUST_PATH),
+            ("justfiles/anvil/helpers/groups/scheduled-test.just", HELPERS_JUST_PATH),
         ] {
-            let artifact = recipe(name).unwrap_or_else(|| panic!("{name} must be independently addressable"));
+            let artifact = source(source_path).unwrap_or_else(|| panic!("{source_path} must be independently addressable"));
             assert!(
                 matches!(artifact, Artifact::OwnedFileSection(section) if section.path == expected_path),
-                "{name} must be emitted to {expected_path}"
+                "{source_path} must be emitted to {expected_path}"
             );
         }
     }
 
     #[test]
-    fn check_and_group_sources_do_not_embed_setup_recipes() {
-        let public_sources = CHECK_FILES
+    fn every_registered_source_maps_to_one_section() {
+        for (source_path, _) in CHECK_FILES
             .iter()
+            .chain(CHECK_HELPER_FILES)
+            .chain(CHECK_SETUP_FILES)
             .chain(DEV_CHECK_FILES)
+            .chain(DEV_SETUP_FILES)
             .chain(GROUP_FILES)
-            .map(|(_, body)| *body)
-            .collect::<Vec<_>>()
-            .join("\n");
-        for (_, setup) in CHECK_SETUP_FILES.iter().chain(DEV_SETUP_FILES).chain(GROUP_SETUP_FILES) {
-            for line in setup.lines().filter_map(recipe_name) {
-                assert!(
-                    !defines_recipe(&public_sources, line),
-                    "{line} must live only in an explicit setup template"
-                );
-            }
+            .chain(GROUP_HELPER_FILES)
+            .chain(GROUP_SETUP_FILES)
+        {
+            let artifact = source(source_path).unwrap_or_else(|| panic!("{source_path} must be registered"));
+            assert!(
+                matches!(artifact, Artifact::OwnedFileSection(section) if section.id == format!("source:{source_path}")),
+                "{source_path} must map to exactly one source section"
+            );
         }
     }
 
