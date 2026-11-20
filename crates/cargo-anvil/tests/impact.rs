@@ -1168,9 +1168,6 @@ fn dirty_generations_have_bounded_retention() {
     let abandoned = dirty_root.join("abandoned-incomplete");
     write(&abandoned.join("producer.pid"), "2147483647");
     write(&abandoned.join("snapshots/current.json"), "{}");
-    let completed_dead = dirty_root.join("completed-dead-producer");
-    write(&completed_dead.join("producer.pid"), "2147483647");
-    write(&completed_dead.join("complete"), "");
     write(&root.join("crates/beta/src/lib.rs"), "pub fn b() {}\npub fn retention_dirty() {}\n");
     run_impact(root);
 
@@ -1191,9 +1188,26 @@ fn dirty_generations_have_bounded_retention() {
         !abandoned.exists(),
         "cleanup must remove incomplete generations whose producer exited"
     );
+}
+
+#[test]
+#[serial]
+fn completed_generations_are_not_treated_as_abandoned() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = workspace();
+    let root = tmp.path();
+    let dirty_root = root.join("target/anvil/impact-dirty");
+    let completed_dead = dirty_root.join("completed-dead-producer");
+    write(&completed_dead.join("producer.pid"), "2147483647");
+    write(&completed_dead.join("complete"), "");
+    write(&root.join("crates/beta/src/lib.rs"), "pub fn b() {}\npub fn retention_dirty() {}\n");
+    run_impact(root);
+
     assert!(
         completed_dead.exists(),
-        "cleanup must retain completed generations for the normal newest-eight policy"
+        "cleanup must leave completed generations to newest-generation retention"
     );
 }
 

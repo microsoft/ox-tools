@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-## [0.26.0] - 2026-11-19
+## [0.26.0] - 2026-11-20
 
 - ✨ Features
 
@@ -11,6 +11,7 @@
 
 - 🐛 Bug Fixes
 
+  - cargo-anvil: preserve completed impact generations
   - cargo-anvil: preserve concurrent impact selectors
   - cargo-anvil: bind dirty impact to invocation
   - cargo-anvil: bound dirty impact generations

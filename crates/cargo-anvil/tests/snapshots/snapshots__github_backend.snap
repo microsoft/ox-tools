@@ -7236,8 +7236,15 @@ anvil-impact:
         }
         Remove-Item -LiteralPath $doctestPackages -ErrorAction SilentlyContinue
         if ($dirty) {
-            New-Item -ItemType File -Path (Join-Path $impactDir 'complete') -Force | Out-Null
-            & $publishDirty
+            $generationMutex = [System.Threading.Mutex]::new($false, "anvil-impact-generation-$(Split-Path $impactDir -Leaf)")
+            try {
+                [void]$generationMutex.WaitOne()
+                New-Item -ItemType File -Path (Join-Path $impactDir 'complete') -Force | Out-Null
+                & $publishDirty
+            } finally {
+                $generationMutex.ReleaseMutex()
+                $generationMutex.Dispose()
+            }
         }
         exit 0
     }
@@ -7273,8 +7280,15 @@ anvil-impact:
     if (-not $dirty) {
         Set-Content -LiteralPath $impactStateFile -Value $wantState -Encoding UTF8 -NoNewline
     } else {
-        New-Item -ItemType File -Path (Join-Path $impactDir 'complete') -Force | Out-Null
-        & $publishDirty
+        $generationMutex = [System.Threading.Mutex]::new($false, "anvil-impact-generation-$(Split-Path $impactDir -Leaf)")
+        try {
+            [void]$generationMutex.WaitOne()
+            New-Item -ItemType File -Path (Join-Path $impactDir 'complete') -Force | Out-Null
+            & $publishDirty
+        } finally {
+            $generationMutex.ReleaseMutex()
+            $generationMutex.Dispose()
+        }
     }
 
 # _anvil-impact-format: turns a cargo-delta impact report into the
