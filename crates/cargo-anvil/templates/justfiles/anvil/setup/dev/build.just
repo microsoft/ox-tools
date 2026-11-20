@@ -4,16 +4,12 @@
 # Update cargo-anvil and regenerate; repository-specific edits stop automatic updates.
 # Regenerate with cargo-anvil to update this file.
 
-# Build all workspace targets and features, optionally for one package or profile.
-[arg("package", long, pattern='(?:[A-Za-z0-9_.-]+)?')]
-[arg("profile", long, pattern='(?:[A-Za-z0-9_.-]+)?')]
-anvil-build package="" profile="": anvil-build-validate-prereqs
-    cargo each {{ if package == "" { "--workspace" } else { "--package " + quote(package) } }} --once -- cargo {{ anvil_stable_toolchain_arg }} build '{packages}' {{ if profile == "" { "" } else { "--profile " + quote(profile) } }} --all-features --all-targets --locked
-
 # Install prerequisites for the `anvil-build` recipe.
 [group("anvil-setup")]
+[private]
 anvil-build-setup installer="install": (anvil-tool-cargo-each-install installer)
 
 # Validate prerequisites for the `anvil-build` recipe.
 [group("anvil-setup")]
+[private]
 anvil-build-validate-prereqs: anvil-tool-rustc-validate-prereqs anvil-tool-cargo-each-validate-prereqs

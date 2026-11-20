@@ -19,11 +19,3 @@ anvil-spellcheck: anvil-spellcheck-validate-prereqs
     @($line_count) + $filtered_lines | Set-Content $output_file
     & cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} spellcheck --cfg spellcheck.toml check --code 1
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-# Install prerequisites for the `anvil-spellcheck` recipe.
-[group("anvil-setup")]
-anvil-spellcheck-setup installer="install": (anvil-tool-cargo-spellcheck-install installer) (anvil-tool-cargo-each-install installer)
-
-# Validate prerequisites for the `anvil-spellcheck` recipe.
-[group("anvil-setup")]
-anvil-spellcheck-validate-prereqs: anvil-tool-cargo-spellcheck-validate-prereqs anvil-tool-cargo-each-validate-prereqs

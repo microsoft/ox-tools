@@ -8,11 +8,3 @@
 [arg("open", long, value="true")]
 anvil-doc-build open="false": anvil-doc-build-validate-prereqs anvil-impact
     cargo each {{ anvil_required_selection }} --once -- cargo {{ anvil_stable_toolchain_arg }} doc '{packages}' --config {{ quote('build.rustdocflags=["-D","warnings"]') }} --all-features --no-deps {{ if open == "true" { "--open" } else { "" } }}
-
-# Install prerequisites for the `anvil-doc-build` recipe.
-[group("anvil-setup")]
-anvil-doc-build-setup installer="install": (anvil-tool-cargo-each-install installer)
-
-# Validate prerequisites for the `anvil-doc-build` recipe.
-[group("anvil-setup")]
-anvil-doc-build-validate-prereqs: anvil-tool-rustc-validate-prereqs anvil-tool-cargo-each-validate-prereqs

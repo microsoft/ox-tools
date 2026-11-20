@@ -4,30 +4,6 @@
 # Update cargo-anvil and regenerate; repository-specific edits stop automatic updates.
 # Regenerate with cargo-anvil to update this file.
 
-# Run every pull-request check group.
-[group("anvil")]
-anvil-pr: anvil-pr-validate-prereqs \
-    anvil-pr-fast \
-    anvil-pr-slow
-# Run every scheduled check group across the full workspace.
-[group("anvil")]
-anvil-scheduled: (_anvil-unscoped "scheduled")
-# Used by anvil-scheduled and _anvil-full to fan out all scheduled groups.
-[private]
-_anvil-scheduled: anvil-scheduled-validate-prereqs \
-    anvil-scheduled-test \
-    anvil-scheduled-advisories \
-    anvil-scheduled-runtime-analysis \
-    anvil-scheduled-exhaustive
-# Run both pull-request and scheduled tiers across the full workspace.
-[group("anvil")]
-anvil-full: (_anvil-unscoped "full")
-# Used by anvil-full to run pull-request and scheduled tiers in one unscoped child.
-[private]
-_anvil-full: anvil-full-validate-prereqs \
-    anvil-pr \
-    _anvil-scheduled
-
 # Install prerequisites for the `anvil-pr` recipe.
 [private]
 anvil-pr-setup installer="install": \

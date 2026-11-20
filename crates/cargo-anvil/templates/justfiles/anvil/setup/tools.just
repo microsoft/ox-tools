@@ -19,8 +19,8 @@ anvil_nightly_rust_src_dir := anvil_nightly_sysroot / "lib/rustlib/src/rust/libr
 anvil_nightly_llvm_profdata := anvil_nightly_sysroot / "lib/rustlib" / anvil_nightly_host / "bin" / (if os() == "windows" { "llvm-profdata.exe" } else { "llvm-profdata" })
 
 # Check cargo-spellcheck source-build prerequisites.
-[private]
 [script("pwsh", "-NoProfile")]
+[private]
 anvil-tool-cargo-spellcheck-source-deps-check:
     $ErrorActionPreference = 'Stop'
     $missing = @()
@@ -100,7 +100,6 @@ _install-source-tool name minimum prerequisite extracted=(replace_regex(installe
     {{ if satisfied == "true" { "# binary install satisfied the requirement" } else { just_executable() + " " + prerequisite } }}
     {{ if satisfied == "true" { "# source fallback not needed" } else { "cargo install --locked --version =" + minimum + " " + name } }}
 
-[private]
 _binstall-with-source-fallback name minimum prerequisite:
     {{ if cargo_binstall_found == "true" { "# cargo-binstall already available" } else { "cargo install --locked cargo-binstall" } }}
     -cargo binstall --no-confirm --locked --disable-strategies compile --version ={{ minimum }} {{ name }}
@@ -113,29 +112,36 @@ _check-tool name minimum extracted=(replace_regex(installed_cargo_tools, ('(?ms)
 
 # Install cargo-each with the Cargo available to the setup caller.
 [group("anvil-setup")]
+[private]
 anvil-tool-cargo-each-install installer="install": (_install-tool "cargo-each" cargo_each_version installer)
 
 [group("anvil-setup")]
+[private]
 anvil-tool-cargo-each-validate-prereqs: (_check-tool "cargo-each" cargo_each_version)
 
 [group("anvil-setup")]
+[private]
 anvil-tool-rustc-validate-prereqs: anvil-tool-cargo-each-validate-prereqs
     cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} --version
 
 # Pinned nightly toolchains.
 [group("anvil-setup")]
+[private]
 anvil-toolchain-nightly-install:
     rustup toolchain install {{ rust_nightly }} --profile minimal
 
 [group("anvil-setup")]
+[private]
 anvil-toolchain-nightly-validate-prereqs:
     rustup run {{ rust_nightly }} rustc --version
 
 [group("anvil-setup")]
+[private]
 anvil-toolchain-nightly-external-types-install:
     rustup toolchain install {{ rust_nightly_external_types }} --profile minimal
 
 [group("anvil-setup")]
+[private]
 anvil-toolchain-nightly-external-types-validate-prereqs:
     rustup run {{ rust_nightly_external_types }} rustc --version
 
@@ -145,142 +151,192 @@ _install-component toolchain component:
     {{ if toolchain == "default" { "rustup component add " + component } else { "rustup component add --toolchain " + toolchain + " " + component } }}
 
 [group("anvil-setup")]
+[private]
 anvil-component-default-clippy-install installer="install": (anvil-tool-cargo-each-install installer) (_install-component "default" "clippy")
 
 [group("anvil-setup")]
+[private]
 anvil-component-default-clippy-validate-prereqs: anvil-tool-cargo-each-validate-prereqs
     cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} clippy --version
 
 [group("anvil-setup")]
+[private]
 anvil-component-default-rustfmt-install installer="install": (anvil-tool-cargo-each-install installer) (_install-component "default" "rustfmt")
 
 [group("anvil-setup")]
+[private]
 anvil-component-default-rustfmt-validate-prereqs: anvil-tool-cargo-each-validate-prereqs
     cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} fmt --version
 
 [group("anvil-setup")]
+[private]
 anvil-component-nightly-rustfmt-install: anvil-toolchain-nightly-install (_install-component rust_nightly "rustfmt")
 
 [group("anvil-setup")]
+[private]
 anvil-component-nightly-rustfmt-validate-prereqs: anvil-toolchain-nightly-validate-prereqs
     cargo +{{ rust_nightly }} fmt --version
 
 [group("anvil-setup")]
+[private]
 anvil-component-nightly-miri-install: anvil-toolchain-nightly-install (_install-component rust_nightly "miri")
 
 [group("anvil-setup")]
+[private]
 anvil-component-nightly-miri-validate-prereqs: anvil-toolchain-nightly-validate-prereqs
     cargo +{{ rust_nightly }} miri --version
 
 [group("anvil-setup")]
+[private]
 anvil-component-nightly-rust-src-install: anvil-toolchain-nightly-install (_install-component rust_nightly "rust-src")
 
 [group("anvil-setup")]
+[private]
 anvil-component-nightly-rust-src-validate-prereqs: anvil-toolchain-nightly-validate-prereqs
     {{ if path_exists(anvil_nightly_rust_src_dir) { "# rust-src component available" } else { error("rust-src is missing from " + rust_nightly + "; run `just anvil-component-nightly-rust-src-install`") } }}
 
 [group("anvil-setup")]
+[private]
 anvil-component-nightly-llvm-tools-install: anvil-toolchain-nightly-install (_install-component rust_nightly "llvm-tools")
 
 [group("anvil-setup")]
+[private]
 anvil-component-nightly-llvm-tools-validate-prereqs: anvil-toolchain-nightly-validate-prereqs
     {{ if path_exists(anvil_nightly_llvm_profdata) { "# llvm-tools component available" } else { error("llvm-tools is missing from " + rust_nightly + "; run `just anvil-component-nightly-llvm-tools-install`") } }}
 
 # Cargo subcommands.
 [group("anvil-setup")]
+[private]
 anvil-tool-cargo-aprz-install installer="install": (_install-tool "cargo-aprz" cargo_aprz_version installer)
 [group("anvil-setup")]
+[private]
 anvil-tool-cargo-aprz-validate-prereqs: (_check-tool "cargo-aprz" cargo_aprz_version)
 
 [group("anvil-setup")]
+[private]
 anvil-tool-cargo-audit-install installer="install": (_install-tool "cargo-audit" cargo_audit_version installer)
 [group("anvil-setup")]
+[private]
 anvil-tool-cargo-audit-validate-prereqs: (_check-tool "cargo-audit" cargo_audit_version)
 
 [group("anvil-setup")]
+[private]
 anvil-tool-cargo-bolero-install installer="install":
     {{ bolero_command_prefix }}{{ just_executable() }} _install-tool cargo-bolero {{ cargo_bolero_version }} {{ installer }}
 [group("anvil-setup")]
+[private]
 anvil-tool-cargo-bolero-validate-prereqs:
     {{ bolero_command_prefix }}{{ just_executable() }} _check-tool cargo-bolero {{ cargo_bolero_version }}
 
 [group("anvil-setup")]
+[private]
 anvil-tool-cargo-careful-install installer="install": (_install-tool "cargo-careful" cargo_careful_version installer)
 [group("anvil-setup")]
+[private]
 anvil-tool-cargo-careful-validate-prereqs: (_check-tool "cargo-careful" cargo_careful_version)
 
 [group("anvil-setup")]
+[private]
 anvil-tool-cargo-check-external-types-install installer="install": (_install-tool "cargo-check-external-types" cargo_check_external_types_version installer)
 [group("anvil-setup")]
+[private]
 anvil-tool-cargo-check-external-types-validate-prereqs: (_check-tool "cargo-check-external-types" cargo_check_external_types_version)
 
 [group("anvil-setup")]
+[private]
 anvil-tool-cargo-coverage-gate-install installer="install": (_install-tool "cargo-coverage-gate" cargo_coverage_gate_version installer)
 [group("anvil-setup")]
+[private]
 anvil-tool-cargo-coverage-gate-validate-prereqs: (_check-tool "cargo-coverage-gate" cargo_coverage_gate_version)
 
 [group("anvil-setup")]
+[private]
 anvil-tool-cargo-delta-install installer="install": (_install-tool "cargo-delta" cargo_delta_version installer)
 [group("anvil-setup")]
+[private]
 anvil-tool-cargo-delta-validate-prereqs: (_check-tool "cargo-delta" cargo_delta_version)
 
 [group("anvil-setup")]
+[private]
 anvil-tool-cargo-deny-install installer="install": (_install-tool "cargo-deny" cargo_deny_version installer)
 [group("anvil-setup")]
+[private]
 anvil-tool-cargo-deny-validate-prereqs: (_check-tool "cargo-deny" cargo_deny_version)
 
 [group("anvil-setup")]
+[private]
 anvil-tool-cargo-doc2readme-install installer="install": (_install-tool "cargo-doc2readme" cargo_doc2readme_version installer)
 [group("anvil-setup")]
+[private]
 anvil-tool-cargo-doc2readme-validate-prereqs: (_check-tool "cargo-doc2readme" cargo_doc2readme_version)
 
 [group("anvil-setup")]
+[private]
 anvil-tool-cargo-ensure-no-cyclic-deps-install installer="install": (_install-tool "cargo-ensure-no-cyclic-deps" cargo_ensure_no_cyclic_deps_version installer)
 [group("anvil-setup")]
+[private]
 anvil-tool-cargo-ensure-no-cyclic-deps-validate-prereqs: (_check-tool "cargo-ensure-no-cyclic-deps" cargo_ensure_no_cyclic_deps_version)
 
 [group("anvil-setup")]
+[private]
 anvil-tool-cargo-ensure-no-default-features-install installer="install": (_install-tool "cargo-ensure-no-default-features" cargo_ensure_no_default_features_version installer)
 [group("anvil-setup")]
+[private]
 anvil-tool-cargo-ensure-no-default-features-validate-prereqs: (_check-tool "cargo-ensure-no-default-features" cargo_ensure_no_default_features_version)
 
 [group("anvil-setup")]
+[private]
 anvil-tool-cargo-hack-install installer="install": (_install-tool "cargo-hack" cargo_hack_version installer)
 [group("anvil-setup")]
+[private]
 anvil-tool-cargo-hack-validate-prereqs: (_check-tool "cargo-hack" cargo_hack_version)
 
 [group("anvil-setup")]
+[private]
 anvil-tool-cargo-heather-install installer="install": (_install-tool "cargo-heather" cargo_heather_version installer)
 [group("anvil-setup")]
+[private]
 anvil-tool-cargo-heather-validate-prereqs: (_check-tool "cargo-heather" cargo_heather_version)
 
 [group("anvil-setup")]
+[private]
 anvil-tool-cargo-llvm-cov-install installer="install": (_install-tool "cargo-llvm-cov" cargo_llvm_cov_version installer)
 [group("anvil-setup")]
+[private]
 anvil-tool-cargo-llvm-cov-validate-prereqs: (_check-tool "cargo-llvm-cov" cargo_llvm_cov_version)
 
 [group("anvil-setup")]
+[private]
 anvil-tool-cargo-gamma-install installer="install": (_install-tool "cargo-gamma" cargo_gamma_version installer)
 [group("anvil-setup")]
+[private]
 anvil-tool-cargo-gamma-validate-prereqs: (_check-tool "cargo-gamma" cargo_gamma_version)
 
 [group("anvil-setup")]
+[private]
 anvil-tool-cargo-nextest-install installer="install": (_install-tool "cargo-nextest" cargo_nextest_version installer)
 [group("anvil-setup")]
+[private]
 anvil-tool-cargo-nextest-validate-prereqs: (_check-tool "cargo-nextest" cargo_nextest_version)
 
 [group("anvil-setup")]
+[private]
 anvil-tool-cargo-sort-install installer="install": (_install-tool "cargo-sort" cargo_sort_version installer)
 [group("anvil-setup")]
+[private]
 anvil-tool-cargo-sort-validate-prereqs: (_check-tool "cargo-sort" cargo_sort_version)
 
 [group("anvil-setup")]
+[private]
 anvil-tool-cargo-spellcheck-install installer="install":
     {{ if installer == "install" { just_executable() + " _install-source-tool cargo-spellcheck " + cargo_spellcheck_version + " anvil-tool-cargo-spellcheck-source-deps-check" } else if installer == "binstall" { just_executable() + " _binstall-with-source-fallback cargo-spellcheck " + cargo_spellcheck_version + " anvil-tool-cargo-spellcheck-source-deps-check" } else { error("invalid installer '" + installer + "'; expected install or binstall") } }}
 [group("anvil-setup")]
+[private]
 anvil-tool-cargo-spellcheck-validate-prereqs: (_check-tool "cargo-spellcheck" cargo_spellcheck_version)
 
 [group("anvil-setup")]
+[private]
 anvil-tool-cargo-udeps-install installer="install": (_install-tool "cargo-udeps" cargo_udeps_version installer)
 [group("anvil-setup")]
+[private]
 anvil-tool-cargo-udeps-validate-prereqs: (_check-tool "cargo-udeps" cargo_udeps_version)

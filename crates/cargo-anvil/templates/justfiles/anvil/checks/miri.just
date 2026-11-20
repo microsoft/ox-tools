@@ -4,59 +4,9 @@
 # Update cargo-anvil and regenerate; repository-specific edits stop automatic updates.
 # Regenerate with cargo-anvil to update this file.
 
-# Compile selected packages together once, then run emitted Miri test artifacts
-# concurrently. `metadata.anvil.miri.exclude = true` omits a package's own
-# tests; `ANVIL_MIRI_JOBS` limits artifact workers.
-
-anvil_miri_artifacts_file := "target" / ("anvil-miri-artifacts-" + just_pid() + ".jsonl")
-anvil_miri_sysroot := shell("cargo +" + rust_nightly + " miri setup --print-sysroot")
-anvil_miri_target_libdir := shell("rustup run " + rust_nightly + " rustc --print target-libdir")
-anvil_miri_library_path_name := if os() == "windows" { "PATH" } else if os() == "macos" { "DYLD_FALLBACK_LIBRARY_PATH" } else { "LD_LIBRARY_PATH" }
-anvil_miri_library_path_separator := if os() == "windows" { ";" } else { ":" }
-anvil_miri_default_library_path := if os() == "macos" { home_directory() / "lib" + ":/usr/local/lib:/usr/lib" } else { "" }
-anvil_miri_inherited_library_path := env(anvil_miri_library_path_name, anvil_miri_default_library_path)
-anvil_miri_library_path := anvil_miri_target_libdir + if anvil_miri_inherited_library_path == "" { "" } else { anvil_miri_library_path_separator + anvil_miri_inherited_library_path }
-anvil_miri_race_seed_windows := "01=1..3 02=3..5 03=5..7 04=7..9 05=9..11 06=11..13 07=13..15 08=15..17 09=17..19 10=19..21 11=21..23 12=23..25 13=25..27 14=27..29 15=29..31 16=31..33 17=33..35 18=35..37 19=37..39 20=39..41 21=41..43 22=43..45 23=45..47 24=47..49 25=49..51 26=51..53 27=53..55 28=55..57 29=57..59 30=59..61 31=61..63"
-anvil_miri_race_seed_window := replace_regex(anvil_miri_race_seed_windows, ".*(?:^| )" + datetime("%d") + "=([^ ]+)(?: |$).*", "$1")
-
-anvil_miri_selection(package) := if package == "" { anvil_affected_selection } else { "--package " + quote(package) }
-
-anvil_miri_flags(profile) := trim(if profile == "tree-borrows" { "-Zmiri-tree-borrows " + env("MIRIFLAGS", "") } else if profile == "strict-provenance" { "-Zmiri-strict-provenance " + env("MIRIFLAGS", "") } else if profile == "race-coverage" { "-Zmiri-many-seeds=" + anvil_miri_race_seed_window + " " + env("MIRIFLAGS", "") } else { env("MIRIFLAGS", "") })
-
-anvil_miri_rustflags(profile) := trim(if profile == "tree-borrows" { "--cfg miri_tree_borrows " + env("RUSTFLAGS", "") } else if profile == "strict-provenance" { "--cfg miri_strict_provenance " + env("RUSTFLAGS", "") } else if profile == "race-coverage" { "--cfg miri_race_coverage " + env("RUSTFLAGS", "") } else { env("RUSTFLAGS", "") })
-
-anvil_toml_basic_string(value) := '"' + replace(replace(replace(replace(value, '\', '\\'), '"', '\"'), "\r", '\r'), "\n", '\n') + '"'
-anvil_cargo_env_config(name, value) := "--config " + quote("env." + name + ".value=" + anvil_toml_basic_string(value)) + " --config " + quote("env." + name + ".force=true")
-
 # Run Miri tests for affected workspace packages.
 [arg("example", long, pattern='(?:[A-Za-z0-9_.-]+)?')]
 [arg("package", long, pattern='(?:[A-Za-z0-9_.-]+)?')]
 [arg("test", long, pattern='(?:[A-Za-z0-9_.:-]+)?')]
 [group("anvil")]
 anvil-miri package="" test="" example="": anvil-miri-validate-prereqs (_anvil-miri-test "standard" package test example)
-
-# Test mode compiles once and lets cargo-each run Cargo's executable test
-# artifacts from their package roots. Example mode runs directly through Miri.
-[env("MIRI_BE_RUSTC", "host")]
-[env("MIRI_SYSROOT", anvil_miri_sysroot)]
-[env(anvil_miri_library_path_name, anvil_miri_library_path)]
-[private]
-_anvil-miri-test profile package="" test_filter="" example="": anvil-impact _ensure-target-dir
-    {{ if profile == "standard" || profile == "tree-borrows" || profile == "strict-provenance" || profile == "race-coverage" { "# valid Miri profile" } else { error("anvil miri: unknown profile '" + profile + "'") } }}
-    {{ if test_filter != "" && example != "" { error("anvil-miri: choose exactly one of --test or --example") } else { "# valid test/example selection" } }}
-    {{ if example != "" && package == "" { error("anvil-miri: --example requires --package to avoid workspace ambiguity") } else { "# valid example package selection" } }}
-    {{ if example == "" { "# " } else { "" } }}cargo +{{ rust_nightly }} {{ anvil_cargo_env_config("MIRIFLAGS", anvil_miri_flags(profile)) }} {{ anvil_cargo_env_config("RUSTFLAGS", anvil_miri_rustflags(profile)) }} each {{ anvil_miri_selection(package) }} --filter {{ quote("not metadata:anvil.miri.exclude=true") }} --once -- cargo +{{ rust_nightly }} miri run '{packages}' --all-features --locked --example {{ quote(example) }}
-    {{ if example != "" { "# " } else { "" } }}cargo +{{ rust_nightly }} {{ anvil_cargo_env_config("MIRIFLAGS", anvil_miri_flags(profile)) }} {{ anvil_cargo_env_config("RUSTFLAGS", anvil_miri_rustflags(profile)) }} {{ if os() == "windows" { anvil_cargo_env_config("__CARGO_TEMPORARY_BUILD_DIR_NEW_LAYOUT_OPT_OUT", "1") } else { "" } }} each {{ anvil_miri_selection(package) }} --filter {{ quote("not metadata:anvil.miri.exclude=true") }} --once -- cargo +{{ rust_nightly }} miri test '{packages}' --all-features --tests --no-run --locked --message-format=json,json-render-diagnostics > {{ quote(anvil_miri_artifacts_file) }}
-    {{ if example != "" { "# " } else { "" } }}cargo +{{ rust_nightly }} {{ anvil_cargo_env_config("MIRIFLAGS", anvil_miri_flags(profile)) }} each --json-lines-file {{ quote(anvil_miri_artifacts_file) }} --json-filter {{ quote("reason=compiler-artifact and profile.test=true and executable") }} --json-work-dir-parent manifest_path --jobs {{ quote(env("ANVIL_MIRI_JOBS", "auto")) }} --keep-going -- rustup run {{ rust_nightly }} cargo-miri runner '{json:executable}' {{ if test_filter == "" { "" } else { quote(test_filter) } }}
-    {{ if example != "" { "# " } else { "" } }}rm {{ quote(anvil_miri_artifacts_file) }}
-
-# --- pr-runtime-analysis members ---
-
-# Install prerequisites and prepare the sysroot for the `anvil-miri` recipe.
-[private]
-anvil-miri-setup installer="install": anvil-component-nightly-miri-install anvil-component-nightly-rust-src-install
-    cargo +{{ rust_nightly }} miri setup
-
-# Validate prerequisites for the `anvil-miri` recipe.
-[private]
-anvil-miri-validate-prereqs: anvil-component-nightly-miri-validate-prereqs anvil-component-nightly-rust-src-validate-prereqs

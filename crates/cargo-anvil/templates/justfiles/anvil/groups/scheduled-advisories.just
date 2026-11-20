@@ -7,26 +7,3 @@
 # Recheck external advisories, dependency risk, and evolving lints.
 [group("anvil")]
 anvil-scheduled-advisories: (_anvil-unscoped "scheduled-advisories")
-# Used by anvil-scheduled-advisories to run its full-workspace check fan-out.
-[private]
-_anvil-scheduled-advisories: anvil-scheduled-advisories-validate-prereqs \
-    anvil-deny \
-    anvil-audit \
-    anvil-aprz \
-    anvil-clippy
-
-# Install prerequisites for the `anvil-scheduled-advisories` recipe.
-[private]
-anvil-scheduled-advisories-setup installer="install": \
-    (anvil-deny-setup installer) \
-    (anvil-audit-setup installer) \
-    (anvil-aprz-setup installer) \
-    (anvil-clippy-setup installer)
-
-# Validate prerequisites for the `anvil-scheduled-advisories` recipe.
-[private]
-anvil-scheduled-advisories-validate-prereqs: \
-    anvil-deny-validate-prereqs \
-    anvil-audit-validate-prereqs \
-    anvil-aprz-validate-prereqs \
-    anvil-clippy-validate-prereqs

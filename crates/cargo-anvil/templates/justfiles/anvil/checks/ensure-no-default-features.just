@@ -7,11 +7,3 @@
 # Verify workspace dependencies disable default features.
 anvil-ensure-no-default-features: anvil-ensure-no-default-features-validate-prereqs anvil-impact
     cargo each {{ anvil_modified_selection }} --once -- cargo {{ anvil_stable_toolchain_arg }} ensure-no-default-features
-
-# Install prerequisites for the `anvil-ensure-no-default-features` recipe.
-[group("anvil-setup")]
-anvil-ensure-no-default-features-setup installer="install": (anvil-tool-cargo-ensure-no-default-features-install installer) (anvil-tool-cargo-each-install installer)
-
-# Validate prerequisites for the `anvil-ensure-no-default-features` recipe.
-[group("anvil-setup")]
-anvil-ensure-no-default-features-validate-prereqs: anvil-tool-cargo-ensure-no-default-features-validate-prereqs anvil-tool-cargo-each-validate-prereqs

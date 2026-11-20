@@ -7,11 +7,3 @@
 # Audit locked dependencies against the RustSec advisory database.
 anvil-audit: anvil-audit-validate-prereqs
     cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} audit
-
-# Install prerequisites for the `anvil-audit` recipe.
-[group("anvil-setup")]
-anvil-audit-setup installer="install": (anvil-tool-cargo-audit-install installer) (anvil-tool-cargo-each-install installer)
-
-# Validate prerequisites for the `anvil-audit` recipe.
-[group("anvil-setup")]
-anvil-audit-validate-prereqs: anvil-tool-cargo-audit-validate-prereqs anvil-tool-cargo-each-validate-prereqs

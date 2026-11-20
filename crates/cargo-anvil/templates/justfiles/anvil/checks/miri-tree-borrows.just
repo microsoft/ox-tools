@@ -6,11 +6,3 @@
 
 # Run affected Miri tests with the Tree Borrows model.
 anvil-miri-tree-borrows: anvil-miri-tree-borrows-validate-prereqs (_anvil-miri-test "tree-borrows" "" "" "")
-
-# Install prerequisites for the `anvil-miri-tree-borrows` recipe.
-[group("anvil-setup")]
-anvil-miri-tree-borrows-setup installer="install": anvil-component-nightly-miri-install anvil-component-nightly-rust-src-install (anvil-tool-cargo-each-install installer)
-
-# Validate prerequisites for the `anvil-miri-tree-borrows` recipe.
-[group("anvil-setup")]
-anvil-miri-tree-borrows-validate-prereqs: anvil-component-nightly-miri-validate-prereqs anvil-component-nightly-rust-src-validate-prereqs anvil-tool-cargo-each-validate-prereqs

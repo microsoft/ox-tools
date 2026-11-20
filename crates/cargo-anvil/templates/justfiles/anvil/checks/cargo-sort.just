@@ -7,11 +7,3 @@
 # Verify Cargo manifests are sorted and formatted consistently.
 anvil-cargo-sort: anvil-cargo-sort-validate-prereqs anvil-impact
     cargo each {{ anvil_modified_selection }} --once -- cargo {{ anvil_stable_toolchain_arg }} sort --workspace --grouped --check --check-format
-
-# Install prerequisites for the `anvil-cargo-sort` recipe.
-[group("anvil-setup")]
-anvil-cargo-sort-setup installer="install": (anvil-tool-cargo-sort-install installer) (anvil-tool-cargo-each-install installer)
-
-# Validate prerequisites for the `anvil-cargo-sort` recipe.
-[group("anvil-setup")]
-anvil-cargo-sort-validate-prereqs: anvil-tool-cargo-sort-validate-prereqs anvil-tool-cargo-each-validate-prereqs

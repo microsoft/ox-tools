@@ -7,11 +7,3 @@
 # Check required packages across bounded feature combinations.
 anvil-cargo-hack: anvil-cargo-hack-validate-prereqs anvil-impact
     cargo each {{ anvil_required_selection }} --once -- cargo {{ anvil_stable_toolchain_arg }} hack '{packages}' --feature-powerset --depth 2 check
-
-# Install prerequisites for the `anvil-cargo-hack` recipe.
-[group("anvil-setup")]
-anvil-cargo-hack-setup installer="install": (anvil-tool-cargo-hack-install installer) (anvil-tool-cargo-each-install installer)
-
-# Validate prerequisites for the `anvil-cargo-hack` recipe.
-[group("anvil-setup")]
-anvil-cargo-hack-validate-prereqs: anvil-tool-cargo-hack-validate-prereqs anvil-tool-cargo-each-validate-prereqs

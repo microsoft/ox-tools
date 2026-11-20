@@ -8,11 +8,3 @@
 anvil-doc-test: anvil-doc-test-validate-prereqs anvil-impact
     cargo each {{ anvil_affected_selection }} --filter doctest -- cargo {{ anvil_stable_toolchain_arg }} test --doc --package '{cargo-spec}' --all-features --locked
     cargo each {{ anvil_affected_selection }} --filter doctest -- cargo {{ anvil_stable_toolchain_arg }} test --doc --package '{cargo-spec}' --locked
-
-# Install prerequisites for the `anvil-doc-test` recipe.
-[group("anvil-setup")]
-anvil-doc-test-setup installer="install": (anvil-tool-cargo-each-install installer)
-
-# Validate prerequisites for the `anvil-doc-test` recipe.
-[group("anvil-setup")]
-anvil-doc-test-validate-prereqs: anvil-tool-rustc-validate-prereqs anvil-tool-cargo-each-validate-prereqs

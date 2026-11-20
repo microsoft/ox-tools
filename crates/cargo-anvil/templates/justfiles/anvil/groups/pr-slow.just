@@ -7,21 +7,3 @@
 # Run all slow pull-request groups sequentially.
 [group("anvil")]
 anvil-pr-slow: anvil-pr-slow-validate-prereqs anvil-pr-test anvil-pr-msrv anvil-pr-runtime-analysis anvil-pr-fuzzing anvil-pr-mutants
-
-# Install prerequisites for the `anvil-pr-slow` recipe.
-[private]
-anvil-pr-slow-setup installer="install": \
-    (anvil-pr-test-setup installer) \
-    (anvil-pr-msrv-setup installer) \
-    (anvil-pr-runtime-analysis-setup installer) \
-    (anvil-pr-fuzzing-setup installer) \
-    (anvil-pr-mutants-setup installer)
-
-# Validate prerequisites for the `anvil-pr-slow` recipe.
-[private]
-anvil-pr-slow-validate-prereqs: \
-    anvil-pr-test-validate-prereqs \
-    anvil-pr-msrv-validate-prereqs \
-    anvil-pr-runtime-analysis-validate-prereqs \
-    anvil-pr-fuzzing-validate-prereqs \
-    anvil-pr-mutants-validate-prereqs

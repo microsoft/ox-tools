@@ -79,9 +79,3 @@ anvil_stable_toolchain_arg := if env("RUSTUP_TOOLCHAIN", "") == "" {
 
 anvil_msrv_selection := if workspace_rust_version == "" { "--none" } else { anvil_affected_selection }
 anvil_msrv_workspace_selection := if workspace_rust_version == "" { "--none" } else { "--workspace" }
-# Compute modified, affected, and required package files with cargo-delta.
-[group("anvil")]
-anvil-impact:
-    {{ anvil_impact_compute_prefix }}cargo each --workspace --once -- cargo {{ anvil_impact_toolchain_arg }} delta --config .delta.toml impact --base-ref {{ quote(anvil_base_ref) }} --modified --format packages --output target/anvil/impact/modified.packages
-    {{ anvil_impact_compute_prefix }}cargo each --workspace --once -- cargo {{ anvil_impact_toolchain_arg }} delta --config .delta.toml impact --base-ref {{ quote(anvil_base_ref) }} --affected --format packages --output target/anvil/impact/affected.packages
-    {{ anvil_impact_compute_prefix }}cargo each --workspace --once -- cargo {{ anvil_impact_toolchain_arg }} delta --config .delta.toml impact --base-ref {{ quote(anvil_base_ref) }} --required --format packages --output target/anvil/impact/required.packages

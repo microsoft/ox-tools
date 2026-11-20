@@ -7,11 +7,3 @@
 # Assess dependency feature and version risk with cargo-aprz.
 anvil-aprz: anvil-aprz-validate-prereqs
     cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} aprz deps --github-token-from-gh --error-if-high-risk --console appraisal
-
-# Install prerequisites for the `anvil-aprz` recipe.
-[group("anvil-setup")]
-anvil-aprz-setup installer="install": (anvil-tool-cargo-aprz-install installer) (anvil-tool-cargo-each-install installer)
-
-# Validate prerequisites for the `anvil-aprz` recipe.
-[group("anvil-setup")]
-anvil-aprz-validate-prereqs: anvil-tool-cargo-aprz-validate-prereqs anvil-tool-cargo-each-validate-prereqs

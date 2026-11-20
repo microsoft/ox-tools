@@ -3,11 +3,11 @@
 
 //! The generated `.anvil/*.just` recipe files and the `Justfile` import region.
 //!
-//! Source templates remain split by concern for maintainability. Their
-//! top-level recipes become independently addressable delimiter-free catalog
-//! sections; the engine composes them in catalog order into a small import hub,
-//! checks, groups, helpers, and setup files. Container recipes compose
-//! separately.
+//! Source templates mirror the generated checks, groups, helpers, and setup
+//! files. Their top-level recipes become independently addressable
+//! delimiter-free catalog sections, and the engine composes each source
+//! directory directly into its matching generated file. Container recipes
+//! compose separately.
 //!
 //! See [`local.md`](../../../docs/design/local.md) for the recipe surface.
 
@@ -33,20 +33,19 @@ pub(crate) const HELPERS_JUST_PATH: &str = ".anvil/helpers.just";
 /// Repo-root-relative path of tool pins and setup/validation recipes.
 pub(crate) const SETUP_JUST_PATH: &str = ".anvil/setup.just";
 
-/// Contents of `justfiles/anvil/versions.just` baked into the binary.
-const VERSIONS_JUST: &str = include_str!("../../../templates/justfiles/anvil/versions.just");
+/// Contents of `justfiles/anvil/setup/versions.just` baked into the binary.
+const VERSIONS_JUST: &str = include_str!("../../../templates/justfiles/anvil/setup/versions.just");
 
-/// Contents of `justfiles/anvil/tools.just` baked into the binary.
-const TOOLS_JUST: &str = include_str!("../../../templates/justfiles/anvil/tools.just");
+/// Contents of `justfiles/anvil/setup/tools.just` baked into the binary.
+const TOOLS_JUST: &str = include_str!("../../../templates/justfiles/anvil/setup/tools.just");
 
-/// Contents of `justfiles/anvil/helpers.just` baked into the binary.
+/// Contents of `justfiles/anvil/helpers/common.just` baked into the binary.
 /// Holds shared MSRV and unscoped-tier helpers.
-const HELPERS_JUST: &str = include_str!("../../../templates/justfiles/anvil/helpers.just");
+const HELPERS_JUST: &str = include_str!("../../../templates/justfiles/anvil/helpers/common.just");
 
-/// Contents of `justfiles/anvil/impact.just` baked into the binary.
-///
-/// The single `anvil-impact` recipe and package-file selection expressions.
-const IMPACT_JUST: &str = include_str!("../../../templates/justfiles/anvil/impact.just");
+/// Impact selection definitions and the public impact recipe.
+const IMPACT_HELPERS_JUST: &str = include_str!("../../../templates/justfiles/anvil/helpers/impact.just");
+const IMPACT_CHECK_JUST: &str = include_str!("../../../templates/justfiles/anvil/checks/impact.just");
 
 /// Emits `(path, include_str!)` pairs for a set of split recipe files that
 /// live under a subdirectory of `justfiles/anvil/`. Each file is one owned
@@ -63,8 +62,15 @@ macro_rules! split_recipe_files {
     };
 }
 
-/// Generic local-development recipes that are not cloud check-group members.
-const DEV_FILES: &[(&str, &str)] = split_recipe_files!("dev", ["build"]);
+macro_rules! paired_recipe_files {
+    ($public:ident, $public_dir:literal, $setup:ident, $setup_dir:literal, [$($name:literal),* $(,)?]) => {
+        const $public: &[(&str, &str)] = split_recipe_files!($public_dir, [$($name),*]);
+        const $setup: &[(&str, &str)] = split_recipe_files!($setup_dir, [$($name),*]);
+    };
+}
+
+/// Generic local-development checks and their setup recipes.
+paired_recipe_files!(DEV_CHECK_FILES, "checks/dev", DEV_SETUP_FILES, "setup/dev", ["build"]);
 
 #[test]
 fn aprz_delegates_github_cli_token_discovery_to_the_tool() {
@@ -76,10 +82,12 @@ fn aprz_delegates_github_cli_token_discovery_to_the_tool() {
     assert!(!aprz.contains("gh auth token"));
 }
 
-/// One `justfiles/anvil/checks/<check>.just` file per catalog check
-/// (the check recipe plus its paired `*-setup` / `*-validate-prereqs`).
-const CHECK_FILES: &[(&str, &str)] = split_recipe_files!(
+/// One `justfiles/anvil/checks/<check>.just` execution template per catalog check.
+paired_recipe_files!(
+    CHECK_FILES,
     "checks",
+    CHECK_SETUP_FILES,
+    "setup/checks",
     [
         "aprz",
         "audit",
@@ -115,10 +123,18 @@ const CHECK_FILES: &[(&str, &str)] = split_recipe_files!(
     ]
 );
 
-/// One `justfiles/anvil/groups/<group>.just` file per group (the group
-/// recipe plus its paired `*-setup` / `*-validate-prereqs`).
-const GROUP_FILES: &[(&str, &str)] = split_recipe_files!(
+/// Check-specific private helpers.
+const CHECK_HELPER_FILES: &[(&str, &str)] = split_recipe_files!(
+    "helpers/checks",
+    ["bolero", "careful", "llvm-cov", "miri", "mutants-diff", "pr-title", "readme-check"]
+);
+
+/// One `justfiles/anvil/groups/<group>.just` file per group.
+paired_recipe_files!(
+    GROUP_FILES,
     "groups",
+    GROUP_SETUP_FILES,
+    "setup/groups",
     [
         "pr-fast",
         "pr-msrv",
@@ -134,8 +150,21 @@ const GROUP_FILES: &[(&str, &str)] = split_recipe_files!(
     ]
 );
 
-/// Contents of `justfiles/anvil/tiers.just` baked into the binary.
-const TIERS_JUST: &str = include_str!("../../../templates/justfiles/anvil/tiers.just");
+/// Group-specific private helpers.
+const GROUP_HELPER_FILES: &[(&str, &str)] = split_recipe_files!(
+    "helpers/groups",
+    [
+        "scheduled-test",
+        "scheduled-advisories",
+        "scheduled-runtime-analysis",
+        "scheduled-exhaustive"
+    ]
+);
+
+/// Tier recipes split by generated responsibility.
+const TIERS_GROUPS_JUST: &str = include_str!("../../../templates/justfiles/anvil/groups/tiers.just");
+const TIERS_HELPERS_JUST: &str = include_str!("../../../templates/justfiles/anvil/helpers/tiers.just");
+const TIERS_SETUP_JUST: &str = include_str!("../../../templates/justfiles/anvil/setup/tiers.just");
 
 /// Embedded body of the `anvil-imports` region in the user's Justfile.
 pub(crate) const JUSTFILE_IMPORTS_BODY: &str = include_str!("../../../templates/regions/justfile-imports.just");
@@ -215,94 +244,11 @@ pub(crate) fn template_sections(output_path: &'static str, source: &str, body: &
     out
 }
 
-fn is_setup_recipe(id: &str) -> bool {
-    let Some(name) = id.strip_prefix("recipe:") else {
-        return false;
-    };
-    name.ends_with("-setup")
-        || name.ends_with("-validate-prereqs")
-        || name.starts_with("anvil-tool-")
-        || name.starts_with("anvil-component-")
-        || name.starts_with("anvil-toolchain-")
-        || name.starts_with("_install-")
-        || name.starts_with("_check-")
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum SetupExposure {
-    Private,
-    Group,
-}
-
-fn is_global_setup_recipe(name: &str) -> bool {
-    matches!(name, "anvil-setup" | "anvil-validate-prereqs")
-}
-
-fn with_private_attribute(body: &str, name: &str, private: bool) -> String {
-    let body = body
-        .split_inclusive('\n')
-        .filter(|line| line.trim_end_matches(['\r', '\n']) != "[private]")
-        .collect::<String>();
-    if !private {
-        return body;
-    }
-
-    let mut offset = 0;
-    for line in body.split_inclusive('\n') {
-        if recipe_name(line.trim_end_matches(['\r', '\n'])) == Some(name) {
-            let mut out = String::with_capacity(body.len() + "[private]\n".len());
-            out.push_str(&body[..offset]);
-            out.push_str("[private]\n");
-            out.push_str(&body[offset..]);
-            return out;
-        }
-        offset += line.len();
-    }
-    panic!("setup recipe section {name} must contain its declaration");
-}
-
-fn normalize_setup_visibility(sections: &mut [Artifact], exposure: SetupExposure) {
-    for artifact in sections {
-        let Artifact::OwnedFileSection(spec) = artifact else {
-            continue;
-        };
-        let Some(name) = spec.id.strip_prefix("recipe:") else {
-            continue;
-        };
-        if !is_setup_recipe(&spec.id) {
-            continue;
-        }
-        let public = is_global_setup_recipe(name) || exposure == SetupExposure::Group;
-        spec.body = with_private_attribute(&spec.body, name, !public);
-    }
-}
-
-fn route_sections(sections: &mut [Artifact], public_path: &'static str, setup_exposure: SetupExposure) {
-    normalize_setup_visibility(sections, setup_exposure);
-    for artifact in sections {
-        let Artifact::OwnedFileSection(spec) = artifact else {
-            continue;
-        };
-        if is_setup_recipe(&spec.id) {
-            spec.path = SETUP_JUST_PATH;
-        } else if spec.id.starts_with("source:") || spec.id.starts_with("recipe:_") {
-            spec.path = HELPERS_JUST_PATH;
-        } else {
-            spec.path = public_path;
-        }
-    }
-}
-
-fn routed_template_sections(source: &str, body: &str, public_path: &'static str, setup_exposure: SetupExposure) -> Vec<Artifact> {
-    let mut sections = template_sections(HELPERS_JUST_PATH, source, body);
-    route_sections(&mut sections, public_path, setup_exposure);
-    sections
-}
-
-fn setup_template_sections(source: &str, body: &str) -> Vec<Artifact> {
-    let mut sections = template_sections(SETUP_JUST_PATH, source, body);
-    normalize_setup_visibility(&mut sections, SetupExposure::Private);
-    sections
+fn file_sections(output_path: &'static str, files: &[(&str, &str)]) -> Vec<Artifact> {
+    files
+        .iter()
+        .flat_map(|&(source, body)| template_sections(output_path, source, body))
+        .collect()
 }
 
 /// Header and `anvil` alias for the composed recipe file.
@@ -331,60 +277,69 @@ pub(crate) const fn scaffold() -> &'static str {
 /// Pinned toolchain and cargo-subcommand version declarations.
 #[must_use]
 pub fn versions() -> Vec<Artifact> {
-    setup_template_sections("versions", VERSIONS_JUST)
+    template_sections(SETUP_JUST_PATH, "versions", VERSIONS_JUST)
 }
 
 /// Tool install and prerequisite recipes.
 #[must_use]
 pub fn tools() -> Vec<Artifact> {
-    setup_template_sections("tools", TOOLS_JUST)
+    template_sections(SETUP_JUST_PATH, "tools", TOOLS_JUST)
 }
 
 /// Shared private helper recipes and definitions.
 #[must_use]
 pub fn helpers() -> Vec<Artifact> {
-    routed_template_sections("helpers", HELPERS_JUST, HELPERS_JUST_PATH, SetupExposure::Private)
+    template_sections(HELPERS_JUST_PATH, "helpers", HELPERS_JUST)
 }
 
 /// Public impact command plus its shared selection definitions.
 #[must_use]
 pub fn impact() -> Vec<Artifact> {
-    routed_template_sections("impact", IMPACT_JUST, CHECKS_JUST_PATH, SetupExposure::Private)
+    template_sections(HELPERS_JUST_PATH, "impact-helpers", IMPACT_HELPERS_JUST)
+        .into_iter()
+        .chain(template_sections(CHECKS_JUST_PATH, "impact", IMPACT_CHECK_JUST))
+        .collect()
 }
 
 /// Generic local-development recipe files.
 #[must_use]
 pub fn dev_files() -> Vec<Artifact> {
-    DEV_FILES
-        .iter()
-        .flat_map(|&(path, body)| routed_template_sections(path, body, CHECKS_JUST_PATH, SetupExposure::Private))
+    file_sections(CHECKS_JUST_PATH, DEV_CHECK_FILES)
+        .into_iter()
+        .chain(file_sections(SETUP_JUST_PATH, DEV_SETUP_FILES))
         .collect()
 }
 
-/// The `justfiles/anvil/checks/<check>.just` files — one owned artifact
-/// per catalog check.
+/// Check execution, helper, and setup templates, each mapped directly to its
+/// generated responsibility file.
 #[must_use]
 pub fn check_files() -> Vec<Artifact> {
-    CHECK_FILES
-        .iter()
-        .flat_map(|&(path, body)| routed_template_sections(path, body, CHECKS_JUST_PATH, SetupExposure::Private))
+    file_sections(CHECKS_JUST_PATH, CHECK_FILES)
+        .into_iter()
+        .chain(file_sections(HELPERS_JUST_PATH, CHECK_HELPER_FILES))
+        .chain(file_sections(SETUP_JUST_PATH, CHECK_SETUP_FILES))
         .collect()
 }
 
-/// The `justfiles/anvil/groups/<group>.just` files — one owned artifact
-/// per group.
+/// Group execution, helper, and setup templates, each mapped directly to its
+/// generated responsibility file.
 #[must_use]
 pub fn group_files() -> Vec<Artifact> {
-    GROUP_FILES
-        .iter()
-        .flat_map(|&(path, body)| routed_template_sections(path, body, GROUPS_JUST_PATH, SetupExposure::Group))
+    file_sections(GROUPS_JUST_PATH, GROUP_FILES)
+        .into_iter()
+        .chain(file_sections(HELPERS_JUST_PATH, GROUP_HELPER_FILES))
+        .chain(file_sections(SETUP_JUST_PATH, GROUP_SETUP_FILES))
         .collect()
 }
 
-/// `justfiles/anvil/tiers.just` — the tier aggregators.
+/// Tier aggregators, private fan-out helpers, and setup recipes.
 #[must_use]
 pub fn tiers() -> Vec<Artifact> {
-    routed_template_sections("tiers", TIERS_JUST, GROUPS_JUST_PATH, SetupExposure::Private)
+    template_sections(GROUPS_JUST_PATH, "tiers", TIERS_GROUPS_JUST)
+        .into_iter()
+        .chain(template_sections(HELPERS_JUST_PATH, "tiers-helpers", TIERS_HELPERS_JUST))
+        .chain(template_sections(SETUP_JUST_PATH, "tiers-setup", TIERS_SETUP_JUST))
+        .collect()
 }
 
 /// Look up one built-in Just recipe by its top-level name.
@@ -723,12 +678,55 @@ mod tests {
 
     /// All `checks/*.just` bodies concatenated, for content assertions.
     fn all_check_bodies() -> String {
-        CHECK_FILES.iter().map(|(_, b)| *b).collect::<Vec<_>>().join("\n")
+        CHECK_FILES
+            .iter()
+            .chain(CHECK_HELPER_FILES)
+            .map(|(_, body)| *body)
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// All `groups/*.just` bodies concatenated, for content assertions.
     fn all_group_bodies() -> String {
-        GROUP_FILES.iter().map(|(_, b)| *b).collect::<Vec<_>>().join("\n")
+        GROUP_FILES
+            .iter()
+            .chain(GROUP_HELPER_FILES)
+            .map(|(_, body)| *body)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn all_check_setup_bodies() -> String {
+        CHECK_SETUP_FILES
+            .iter()
+            .chain(DEV_SETUP_FILES)
+            .map(|(_, body)| *body)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn all_group_setup_bodies() -> String {
+        GROUP_SETUP_FILES.iter().map(|(_, body)| *body).collect::<Vec<_>>().join("\n")
+    }
+
+    fn impact_bodies() -> String {
+        format!("{IMPACT_HELPERS_JUST}\n{IMPACT_CHECK_JUST}")
+    }
+
+    fn tier_bodies() -> String {
+        format!("{TIERS_GROUPS_JUST}\n{TIERS_HELPERS_JUST}\n{TIERS_SETUP_JUST}")
+    }
+
+    fn check_body(path: &str, body: &str) -> String {
+        let file_name = std::path::Path::new(path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("check template path must have a UTF-8 file name");
+        let helper = CHECK_HELPER_FILES
+            .iter()
+            .find_map(|(helper_path, helper_body)| helper_path.ends_with(file_name).then_some(*helper_body))
+            .unwrap_or_default();
+        format!("{helper}\n{body}")
     }
 
     fn defines_recipe(body: &str, recipe: &str) -> bool {
@@ -767,59 +765,40 @@ mod tests {
     }
 
     #[test]
-    fn setup_routing_classifies_every_supported_recipe_family() {
-        for name in [
-            "anvil-check-setup",
-            "anvil-check-validate-prereqs",
-            "anvil-tool-example",
-            "anvil-component-example",
-            "anvil-toolchain-example",
-            "_install-example",
-            "_check-example",
+    fn source_layout_determines_generated_responsibility() {
+        for (name, expected_path) in [
+            ("anvil-aprz", CHECKS_JUST_PATH),
+            ("anvil-aprz-setup", SETUP_JUST_PATH),
+            ("_anvil-miri-test", HELPERS_JUST_PATH),
+            ("anvil-pr-fast", GROUPS_JUST_PATH),
+            ("anvil-pr-fast-setup", SETUP_JUST_PATH),
+            ("_anvil-scheduled-test", HELPERS_JUST_PATH),
         ] {
-            assert!(is_setup_recipe(&format!("recipe:{name}")), "{name} must route to setup.just");
+            let artifact = recipe(name).unwrap_or_else(|| panic!("{name} must be independently addressable"));
+            assert!(
+                matches!(artifact, Artifact::OwnedFileSection(section) if section.path == expected_path),
+                "{name} must be emitted to {expected_path}"
+            );
         }
-        for id in [
-            "source:tools",
-            "recipe:anvil-check",
-            "recipe:_anvil-helper",
-            "recipe:anvil-setup-helper",
-        ] {
-            assert!(!is_setup_recipe(id), "{id} must remain outside setup.just");
-        }
-
-        let mut sections = vec![
-            Artifact::owned_file("unrelated", "body"),
-            section(CHECKS_JUST_PATH, "recipe:anvil-check-setup", "anvil-check-setup:\n    echo setup\n"),
-            section(CHECKS_JUST_PATH, "recipe:anvil-check", "anvil-check:\n    echo check\n"),
-        ];
-        route_sections(&mut sections, CHECKS_JUST_PATH, SetupExposure::Private);
-        assert!(matches!(&sections[0], Artifact::OwnedFile(spec) if spec.path == "unrelated"));
-        assert!(
-            matches!(&sections[1], Artifact::OwnedFileSection(spec) if spec.path == SETUP_JUST_PATH && spec.body.contains("[private]"))
-        );
-        assert!(matches!(&sections[2], Artifact::OwnedFileSection(spec) if spec.path == CHECKS_JUST_PATH));
     }
 
     #[test]
-    fn responsibility_routing_separates_public_and_private_recipes() {
-        let body = "shared := \"value\"\n\nanvil-public:\n    echo public\n\n_anvil-private:\n    echo private\n";
-
-        let checks = routed_template_sections("fixture-check", body, CHECKS_JUST_PATH, SetupExposure::Private);
-        assert!(checks.iter().any(
-            |artifact| matches!(artifact, Artifact::OwnedFileSection(spec) if spec.id == "source:fixture-check" && spec.path == HELPERS_JUST_PATH)
-        ));
-        assert!(checks.iter().any(
-            |artifact| matches!(artifact, Artifact::OwnedFileSection(spec) if spec.id == "recipe:anvil-public" && spec.path == CHECKS_JUST_PATH)
-        ));
-        assert!(checks.iter().any(
-            |artifact| matches!(artifact, Artifact::OwnedFileSection(spec) if spec.id == "recipe:_anvil-private" && spec.path == HELPERS_JUST_PATH)
-        ));
-
-        let groups = routed_template_sections("fixture-group", body, GROUPS_JUST_PATH, SetupExposure::Group);
-        assert!(groups.iter().any(
-            |artifact| matches!(artifact, Artifact::OwnedFileSection(spec) if spec.id == "recipe:anvil-public" && spec.path == GROUPS_JUST_PATH)
-        ));
+    fn check_and_group_sources_do_not_embed_setup_recipes() {
+        let public_sources = CHECK_FILES
+            .iter()
+            .chain(DEV_CHECK_FILES)
+            .chain(GROUP_FILES)
+            .map(|(_, body)| *body)
+            .collect::<Vec<_>>()
+            .join("\n");
+        for (_, setup) in CHECK_SETUP_FILES.iter().chain(DEV_SETUP_FILES).chain(GROUP_SETUP_FILES) {
+            for line in setup.lines().filter_map(recipe_name) {
+                assert!(
+                    !defines_recipe(&public_sources, line),
+                    "{line} must live only in an explicit setup template"
+                );
+            }
+        }
     }
 
     #[test]
@@ -985,6 +964,7 @@ mod tests {
     fn impact_scoped_checks_consume_package_files_through_cargo_each() {
         let mut scoped = 0;
         for (path, body) in CHECK_FILES {
+            let body = check_body(path, body);
             for category in ["modified", "affected", "required"] {
                 let uses_selection = body.contains(&format!("anvil_{category}_selection"))
                     || (category == "affected" && body.contains("anvil_msrv_selection"));
@@ -1003,10 +983,10 @@ mod tests {
 
     #[test]
     fn miri_profiles_share_the_compile_once_runner() {
-        let miri = CHECK_FILES
+        let miri = CHECK_HELPER_FILES
             .iter()
             .find_map(|(path, body)| path.ends_with("/miri.just").then_some(*body))
-            .expect("miri.just is registered in CHECK_FILES");
+            .expect("miri.just is registered in CHECK_HELPER_FILES");
         for needle in [
             "_anvil-miri-test profile package=\"\" test_filter=\"\" example=\"\": anvil-impact _ensure-target-dir",
             "miri test '{packages}' --all-features --tests --no-run --locked --message-format=json,json-render-diagnostics",
@@ -1050,10 +1030,10 @@ mod tests {
 
     #[test]
     fn miri_setup_prepares_the_pinned_sysroot() {
-        let miri = CHECK_FILES
+        let miri = CHECK_SETUP_FILES
             .iter()
             .find_map(|(path, body)| path.ends_with("/miri.just").then_some(*body))
-            .expect("miri.just is registered in CHECK_FILES");
+            .expect("miri.just is registered in CHECK_SETUP_FILES");
         assert!(miri.contains(
             "anvil-miri-setup installer=\"install\": anvil-component-nightly-miri-install anvil-component-nightly-rust-src-install"
         ));
@@ -1063,14 +1043,15 @@ mod tests {
 
     #[test]
     fn impact_recipe_writes_direct_package_file_artifacts() {
-        assert!(IMPACT_JUST.contains("anvil-impact:"));
+        let impact = impact_bodies();
+        assert!(impact.contains("anvil-impact:"));
         for tier in ["modified", "affected", "required"] {
-            assert!(IMPACT_JUST.contains(&format!("--{tier} --format packages")));
-            assert!(IMPACT_JUST.contains(&format!("target/anvil/impact/{tier}.packages")));
-            assert!(IMPACT_JUST.contains(&format!("anvil_{tier}_selection")));
+            assert!(impact.contains(&format!("--{tier} --format packages")));
+            assert!(impact.contains(&format!("target/anvil/impact/{tier}.packages")));
+            assert!(impact.contains(&format!("anvil_{tier}_selection")));
         }
-        assert!(!IMPACT_JUST.contains("ConvertFrom-Json"));
-        assert!(!IMPACT_JUST.contains("_anvil-impact-format"));
+        assert!(!impact.contains("ConvertFrom-Json"));
+        assert!(!impact.contains("_anvil-impact-format"));
     }
 
     #[cfg_attr(
@@ -1091,13 +1072,14 @@ mod tests {
             EXPECTED_CHECK_POLICY.len(),
             "EXPECTED_CHECK_POLICY contains a duplicate check entry"
         );
-        let miri_runner = CHECK_FILES
+        let miri_runner = CHECK_HELPER_FILES
             .iter()
             .find_map(|(path, body)| path.ends_with("/miri.just").then_some(*body))
-            .expect("miri.just is registered in CHECK_FILES");
+            .expect("miri.just is registered in CHECK_HELPER_FILES");
 
         let mut seen = BTreeSet::new();
         for (path, body) in CHECK_FILES {
+            let combined_body = check_body(path, body);
             let stem = path
                 .strip_prefix("justfiles/anvil/checks/")
                 .and_then(|p| p.strip_suffix(".just"))
@@ -1107,7 +1089,7 @@ mod tests {
                 .get(stem)
                 .unwrap_or_else(|| panic!("check '{stem}' is missing from EXPECTED_CHECK_POLICY; classify it explicitly"));
             let is_miri_profile = body.contains("(_anvil-miri-test \"");
-            let execution_body = if is_miri_profile { miri_runner } else { body };
+            let execution_body = if is_miri_profile { miri_runner } else { combined_body.as_str() };
 
             // Parse the package-file selector used by the recipe.
             let calls: Vec<&str> = ["modified", "affected", "required"]
@@ -1250,7 +1232,7 @@ mod tests {
         // ANVIL_IMPACT=off and never
         // recompute the impact set, so they deliberately do NOT depend on
         // cargo-delta.
-        let groups = all_group_bodies();
+        let groups = all_group_setup_bodies();
         for g in ["pr-fast", "pr-test", "pr-msrv", "pr-runtime-analysis", "pr-mutants"] {
             assert!(
                 groups.contains(&format!(
@@ -1292,8 +1274,9 @@ mod tests {
 
     #[test]
     fn tiers_just_template_has_three_tiers() {
+        let tiers = tier_bodies();
         for needle in ["anvil-pr:", "anvil-scheduled:", "anvil-full:", "_anvil-scheduled:", "_anvil-full:"] {
-            assert!(TIERS_JUST.contains(needle), "tiers.just missing '{needle}'");
+            assert!(tiers.contains(needle), "tier templates missing '{needle}'");
         }
         // Containerized execution is reached only through the explicit
         // `anvil-container` recipe, so no tier routes through a native/container
@@ -1302,7 +1285,7 @@ mod tests {
         // they wrap a private `_anvil-<tier>` recipe that carries the
         // validate-prereqs aggregate (run first, so a missing tool fails up
         // front) and inherits ANVIL_IMPACT=off from the wrapper.
-        assert!(!TIERS_JUST.contains("_anvil-run"), "tiers must not route through an execution seam");
+        assert!(!tiers.contains("_anvil-run"), "tiers must not route through an execution seam");
         for needle in [
             "anvil-pr: anvil-pr-validate-prereqs",
             "anvil-scheduled: (_anvil-unscoped \"scheduled\")",
@@ -1310,7 +1293,7 @@ mod tests {
             "anvil-full: (_anvil-unscoped \"full\")",
             "_anvil-full: anvil-full-validate-prereqs",
         ] {
-            assert!(TIERS_JUST.contains(needle), "tier wrapper missing '{needle}'");
+            assert!(tiers.contains(needle), "tier wrapper missing '{needle}'");
         }
         // Scoping is disabled in the child process before its dependency graph
         // is evaluated.
@@ -1330,19 +1313,18 @@ mod tests {
             "anvil-scheduled-runtime-analysis",
             "anvil-scheduled-exhaustive",
         ] {
-            assert!(TIERS_JUST.contains(needle), "scheduled tier must reference group '{needle}'");
+            assert!(tiers.contains(needle), "scheduled tier must reference group '{needle}'");
         }
         // The catch-all `anvil-setup` / `anvil-validate-prereqs` must also
         // install / verify cargo-delta (the impact tool), so a local
         // `just anvil-setup` provisions a complete environment even though
         // cargo-delta isn't wired into any per-group setup.
         assert!(
-            TIERS_JUST
-                .contains("anvil-setup installer=\"install\": (anvil-full-setup installer) (anvil-tool-cargo-delta-install installer)"),
+            tiers.contains("anvil-setup installer=\"install\": (anvil-full-setup installer) (anvil-tool-cargo-delta-install installer)"),
             "anvil-setup must install cargo-delta"
         );
         assert!(
-            TIERS_JUST.contains("anvil-validate-prereqs: anvil-full-validate-prereqs anvil-tool-cargo-delta-validate-prereqs"),
+            tiers.contains("anvil-validate-prereqs: anvil-full-validate-prereqs anvil-tool-cargo-delta-validate-prereqs"),
             "anvil-validate-prereqs must verify cargo-delta"
         );
     }
@@ -1362,10 +1344,11 @@ mod tests {
 
     #[test]
     fn stable_toolchain_selection_is_scoped_to_each_command() {
+        let impact = impact_bodies();
         assert!(!VERSIONS_JUST.contains("export RUSTUP_TOOLCHAIN"));
-        assert!(IMPACT_JUST.contains("anvil_stable_toolchain_arg :="));
-        assert!(IMPACT_JUST.contains("workspace_rust_version_line := `cargo each"));
-        assert!(IMPACT_JUST.contains("quote(\"+\" + workspace_rust_version)"));
+        assert!(impact.contains("anvil_stable_toolchain_arg :="));
+        assert!(impact.contains("workspace_rust_version_line := `cargo each"));
+        assert!(impact.contains("quote(\"+\" + workspace_rust_version)"));
         assert!(!TOOLS_JUST.contains("_anvil-resolve-stable"));
         assert_eq!(
             TOOLS_JUST.matches("[script(\"pwsh\", \"-NoProfile\")]").count(),
@@ -1398,7 +1381,7 @@ mod tests {
                 "default component '{component}' setup must install cargo-each without selecting a workspace compiler"
             );
         }
-        let checks = all_check_bodies();
+        let checks = all_check_setup_bodies();
         for check in ["bench", "doc-build", "doc-test", "examples", "loom"] {
             let setup = format!("anvil-{check}-setup installer=\"install\": (anvil-tool-cargo-each-install installer)");
             let validation = format!("anvil-{check}-validate-prereqs: anvil-tool-rustc-validate-prereqs");
@@ -1413,15 +1396,15 @@ mod tests {
         }
         assert!(TOOLS_JUST.contains("semver_matches(installed, \">=\" + minimum)"));
 
-        let groups = all_group_bodies();
+        let groups = all_group_setup_bodies();
         assert!(
             groups.contains("(anvil-tool-cargo-delta-install installer)") && groups.contains("(anvil-bench-setup installer)"),
             "representative group setup paths must retain tool installation"
         );
         assert!(
-            TIERS_JUST.contains("anvil-full-setup installer=\"install\":")
-                && TIERS_JUST.contains("(anvil-pr-setup installer)")
-                && TIERS_JUST.contains("anvil-setup installer=\"install\": (anvil-full-setup installer)"),
+            TIERS_SETUP_JUST.contains("anvil-full-setup installer=\"install\":")
+                && TIERS_SETUP_JUST.contains("(anvil-pr-setup installer)")
+                && TIERS_SETUP_JUST.contains("anvil-setup installer=\"install\": (anvil-full-setup installer)"),
             "full and global setup must retain their transitive tool setup"
         );
     }

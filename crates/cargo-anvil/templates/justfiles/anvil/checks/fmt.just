@@ -9,11 +9,3 @@
 [arg("fix", long, value="true")]
 anvil-fmt fix="false": anvil-fmt-validate-prereqs anvil-impact
     cargo +{{ rust_nightly }} each {{ anvil_modified_selection }} --keep-going -- cargo +{{ rust_nightly }} fmt --manifest-path '{manifest}' {{ if fix == "true" { "" } else { "--check" } }}
-
-# Install prerequisites for the `anvil-fmt` recipe.
-[private]
-anvil-fmt-setup installer="install": anvil-component-nightly-rustfmt-install (anvil-tool-cargo-each-install installer)
-
-# Validate prerequisites for the `anvil-fmt` recipe.
-[private]
-anvil-fmt-validate-prereqs: anvil-component-nightly-rustfmt-validate-prereqs anvil-tool-cargo-each-validate-prereqs

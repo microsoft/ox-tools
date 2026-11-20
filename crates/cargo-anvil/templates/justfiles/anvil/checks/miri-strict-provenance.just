@@ -6,11 +6,3 @@
 
 # Run affected Miri tests with strict provenance checks.
 anvil-miri-strict-provenance: anvil-miri-strict-provenance-validate-prereqs (_anvil-miri-test "strict-provenance" "" "" "")
-
-# Install prerequisites for the `anvil-miri-strict-provenance` recipe.
-[group("anvil-setup")]
-anvil-miri-strict-provenance-setup installer="install": anvil-component-nightly-miri-install anvil-component-nightly-rust-src-install (anvil-tool-cargo-each-install installer)
-
-# Validate prerequisites for the `anvil-miri-strict-provenance` recipe.
-[group("anvil-setup")]
-anvil-miri-strict-provenance-validate-prereqs: anvil-component-nightly-miri-validate-prereqs anvil-component-nightly-rust-src-validate-prereqs anvil-tool-cargo-each-validate-prereqs

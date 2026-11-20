@@ -10,19 +10,3 @@ anvil-pr-runtime-analysis: anvil-pr-runtime-analysis-validate-prereqs \
     anvil-miri \
     anvil-careful \
     anvil-loom
-
-# Install prerequisites for the `anvil-pr-runtime-analysis` recipe.
-[private]
-anvil-pr-runtime-analysis-setup installer="install": \
-    (anvil-tool-cargo-delta-install installer) \
-    (anvil-miri-setup installer) \
-    (anvil-careful-setup installer) \
-    (anvil-loom-setup installer)
-
-# Validate prerequisites for the `anvil-pr-runtime-analysis` recipe.
-[private]
-anvil-pr-runtime-analysis-validate-prereqs: \
-    anvil-tool-cargo-delta-validate-prereqs \
-    anvil-miri-validate-prereqs \
-    anvil-careful-validate-prereqs \
-    anvil-loom-validate-prereqs

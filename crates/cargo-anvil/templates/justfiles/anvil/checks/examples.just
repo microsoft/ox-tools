@@ -11,11 +11,3 @@
 anvil-examples package="" example="" timeout="30": anvil-examples-validate-prereqs anvil-impact
     cargo each {{ if example == "" { if package == "" { anvil_affected_selection } else { "--package " + quote(package) } } else if package == "" { error("--example requires --package") } else { "--package " + quote(package) } }} --once -- cargo {{ anvil_stable_toolchain_arg }} build '{packages}' {{ if example == "" { "--examples" } else { "--example " + quote(example) } }} --all-features --locked
     cargo each {{ if package == "" { anvil_affected_selection } else { "--package " + quote(package) } }} --each-target example --target-filter {{ quote(if example == "" { "not name-in-metadata:anvil.examples.no-run" } else { "name:" + example }) }} {{ if example == "" { "" } else { "--require-target-per-package" } }} --timeout {{ timeout }}s --keep-going -- cargo {{ anvil_stable_toolchain_arg }} run --config {{ quote('env.ANVIL_EXAMPLE="1"') }} --package '{cargo-spec}' --example '{target}' --all-features --locked
-
-# Install prerequisites for the `anvil-examples` recipe.
-[group("anvil-setup")]
-anvil-examples-setup installer="install": (anvil-tool-cargo-each-install installer)
-
-# Validate prerequisites for the `anvil-examples` recipe.
-[group("anvil-setup")]
-anvil-examples-validate-prereqs: anvil-tool-rustc-validate-prereqs anvil-tool-cargo-each-validate-prereqs

@@ -7,11 +7,3 @@
 # Run affected Loom test targets with the Loom configuration.
 anvil-loom: anvil-loom-validate-prereqs anvil-impact
     cargo each {{ anvil_affected_selection }} --filter feature:loom --each-target test --target-filter required-feature:loom --require-target-per-package -- cargo {{ anvil_stable_toolchain_arg }} test --config {{ quote('build.rustflags=["--cfg","loom"]') }} --package '{cargo-spec}' --release --all-features --locked --test '{target}' -- --test-threads=1
-
-# Install prerequisites for the `anvil-loom` recipe.
-[group("anvil-setup")]
-anvil-loom-setup installer="install": (anvil-tool-cargo-each-install installer)
-
-# Validate prerequisites for the `anvil-loom` recipe.
-[group("anvil-setup")]
-anvil-loom-validate-prereqs: anvil-tool-rustc-validate-prereqs anvil-tool-cargo-each-validate-prereqs

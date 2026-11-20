@@ -7,11 +7,3 @@
 # Reject unapproved external types in affected public APIs.
 anvil-external-types: anvil-external-types-validate-prereqs anvil-impact
     cargo +{{ rust_nightly_external_types }} each {{ anvil_affected_selection }} --filter target-kind:lib --keep-going -- cargo +{{ rust_nightly_external_types }} check-external-types --manifest-path '{manifest}'
-
-# Install prerequisites for the `anvil-external-types` recipe.
-[group("anvil-setup")]
-anvil-external-types-setup installer="install": anvil-toolchain-nightly-external-types-install (anvil-tool-cargo-check-external-types-install installer) (anvil-tool-cargo-each-install installer)
-
-# Validate prerequisites for the `anvil-external-types` recipe.
-[group("anvil-setup")]
-anvil-external-types-validate-prereqs: anvil-toolchain-nightly-external-types-validate-prereqs anvil-tool-cargo-check-external-types-validate-prereqs anvil-tool-cargo-each-validate-prereqs

@@ -7,15 +7,3 @@
 # Run pull-request compatibility tests under the declared MSRV.
 [group("anvil")]
 anvil-pr-msrv: anvil-pr-msrv-validate-prereqs anvil-msrv-test
-
-# Install prerequisites for the `anvil-pr-msrv` recipe.
-[private]
-anvil-pr-msrv-setup installer="install": \
-    (anvil-tool-cargo-delta-install installer) \
-    (anvil-msrv-test-setup installer)
-
-# Validate prerequisites for the `anvil-pr-msrv` recipe.
-[private]
-anvil-pr-msrv-validate-prereqs: \
-    anvil-tool-cargo-delta-validate-prereqs \
-    anvil-msrv-test-validate-prereqs

@@ -7,11 +7,3 @@
 # Validate dependency licenses, bans, sources, and advisories.
 anvil-deny: anvil-deny-validate-prereqs
     cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} deny check
-
-# Install prerequisites for the `anvil-deny` recipe.
-[group("anvil-setup")]
-anvil-deny-setup installer="install": (anvil-tool-cargo-deny-install installer) (anvil-tool-cargo-each-install installer)
-
-# Validate prerequisites for the `anvil-deny` recipe.
-[group("anvil-setup")]
-anvil-deny-validate-prereqs: anvil-tool-cargo-deny-validate-prereqs anvil-tool-cargo-each-validate-prereqs

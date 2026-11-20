@@ -7,11 +7,3 @@
 # Compile affected benchmarks without running them.
 anvil-bench: anvil-bench-validate-prereqs anvil-impact
     cargo each {{ anvil_affected_selection }} --once -- cargo {{ anvil_stable_toolchain_arg }} bench '{packages}' --all-features --no-run
-
-# Install prerequisites for the `anvil-bench` recipe.
-[group("anvil-setup")]
-anvil-bench-setup installer="install": (anvil-tool-cargo-each-install installer)
-
-# Validate prerequisites for the `anvil-bench` recipe.
-[group("anvil-setup")]
-anvil-bench-validate-prereqs: anvil-tool-rustc-validate-prereqs anvil-tool-cargo-each-validate-prereqs

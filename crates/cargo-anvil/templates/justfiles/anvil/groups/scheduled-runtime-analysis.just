@@ -7,26 +7,3 @@
 # Run full-workspace Miri profiles on the schedule.
 [group("anvil")]
 anvil-scheduled-runtime-analysis: (_anvil-unscoped "scheduled-runtime-analysis")
-# Used by anvil-scheduled-runtime-analysis to run all scheduled Miri profiles.
-[private]
-_anvil-scheduled-runtime-analysis: anvil-scheduled-runtime-analysis-validate-prereqs \
-    anvil-miri \
-    anvil-miri-tree-borrows \
-    anvil-miri-strict-provenance \
-    anvil-miri-race-coverage
-
-# Install prerequisites for the `anvil-scheduled-runtime-analysis` recipe.
-[private]
-anvil-scheduled-runtime-analysis-setup installer="install": \
-    (anvil-miri-setup installer) \
-    (anvil-miri-tree-borrows-setup installer) \
-    (anvil-miri-strict-provenance-setup installer) \
-    (anvil-miri-race-coverage-setup installer)
-
-# Validate prerequisites for the `anvil-scheduled-runtime-analysis` recipe.
-[private]
-anvil-scheduled-runtime-analysis-validate-prereqs: \
-    anvil-miri-validate-prereqs \
-    anvil-miri-tree-borrows-validate-prereqs \
-    anvil-miri-strict-provenance-validate-prereqs \
-    anvil-miri-race-coverage-validate-prereqs

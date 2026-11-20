@@ -8,11 +8,3 @@
 anvil-udeps: anvil-udeps-validate-prereqs anvil-impact
     cargo +{{ rust_nightly }} each {{ anvil_required_selection }} --once -- cargo +{{ rust_nightly }} udeps '{packages}' --all-features
     cargo +{{ rust_nightly }} each {{ anvil_required_selection }} --once -- cargo +{{ rust_nightly }} udeps '{packages}' --all-features --all-targets
-
-# Install prerequisites for the `anvil-udeps` recipe.
-[group("anvil-setup")]
-anvil-udeps-setup installer="install": anvil-toolchain-nightly-install (anvil-tool-cargo-udeps-install installer) (anvil-tool-cargo-each-install installer)
-
-# Validate prerequisites for the `anvil-udeps` recipe.
-[group("anvil-setup")]
-anvil-udeps-validate-prereqs: anvil-toolchain-nightly-validate-prereqs anvil-tool-cargo-udeps-validate-prereqs anvil-tool-cargo-each-validate-prereqs

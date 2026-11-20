@@ -7,23 +7,3 @@
 # Run full mutation, feature-combination, and benchmark checks.
 [group("anvil")]
 anvil-scheduled-exhaustive: (_anvil-unscoped "scheduled-exhaustive")
-# Used by anvil-scheduled-exhaustive to run exhaustive workspace checks.
-[private]
-_anvil-scheduled-exhaustive: anvil-scheduled-exhaustive-validate-prereqs \
-    anvil-mutants-full \
-    anvil-cargo-hack \
-    anvil-bench
-
-# Install prerequisites for the `anvil-scheduled-exhaustive` recipe.
-[private]
-anvil-scheduled-exhaustive-setup installer="install": \
-    (anvil-mutants-full-setup installer) \
-    (anvil-cargo-hack-setup installer) \
-    (anvil-bench-setup installer)
-
-# Validate prerequisites for the `anvil-scheduled-exhaustive` recipe.
-[private]
-anvil-scheduled-exhaustive-validate-prereqs: \
-    anvil-mutants-full-validate-prereqs \
-    anvil-cargo-hack-validate-prereqs \
-    anvil-bench-validate-prereqs

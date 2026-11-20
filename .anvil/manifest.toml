@@ -1,7 +1,7 @@
 version = 2
 tool = "anvil"
 tool_version = "0.26.0"
-catalog_checksum = "sha256:49c90ef7c5bd28100a23514092eff9a612d5566598566015069b2ea020587179"
+catalog_checksum = "sha256:c78848b7096eb1b6a1c6bca68517f7fff45d2a4fdea24861499a671e602a2e13"
 
 [[file]]
 path = ".anvil/anvil.just"

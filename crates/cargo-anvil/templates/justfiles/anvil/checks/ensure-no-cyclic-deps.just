@@ -7,11 +7,3 @@
 # Reject dependency cycles between workspace packages.
 anvil-ensure-no-cyclic-deps: anvil-ensure-no-cyclic-deps-validate-prereqs anvil-impact
     cargo each {{ anvil_modified_selection }} --once -- cargo {{ anvil_stable_toolchain_arg }} ensure-no-cyclic-deps
-
-# Install prerequisites for the `anvil-ensure-no-cyclic-deps` recipe.
-[group("anvil-setup")]
-anvil-ensure-no-cyclic-deps-setup installer="install": (anvil-tool-cargo-ensure-no-cyclic-deps-install installer) (anvil-tool-cargo-each-install installer)
-
-# Validate prerequisites for the `anvil-ensure-no-cyclic-deps` recipe.
-[group("anvil-setup")]
-anvil-ensure-no-cyclic-deps-validate-prereqs: anvil-tool-cargo-ensure-no-cyclic-deps-validate-prereqs anvil-tool-cargo-each-validate-prereqs

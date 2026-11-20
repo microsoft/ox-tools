@@ -202,12 +202,13 @@ the synchronization boundaries that keep those promises true across the three ba
 
 The subsystem is deliberately split so each fact has exactly one owner:
 
-- **The recipe is the algorithm.** `templates/justfiles/anvil/impact.just` owns *all* impact
-  logic — base-ref resolution, the two snapshots, cache-key composition, the throwaway
-  worktree, dirty-tree widening, tier projection, and the cargo-delta-identifier → Cargo
-  package-selector mapping. The emitted `justfiles/anvil/impact.just` is a generated copy; it
-  is never hand-edited, and the snapshot tests (`tests/snapshots/`) pin the emitted text so a
-  template change that isn't regenerated fails CI.
+- **The recipe is the algorithm.** `templates/justfiles/anvil/helpers/impact.just` owns the
+  shared impact definitions, while `templates/justfiles/anvil/checks/impact.just` owns the
+  public command. Together they define base-ref resolution, the two snapshots, cache-key
+  composition, the throwaway worktree, dirty-tree widening, tier projection, and the
+  cargo-delta-identifier → Cargo package-selector mapping. They compose directly into
+  `.anvil/helpers.just` and `.anvil/checks.just`; snapshot tests (`tests/snapshots/`) pin the
+  emitted text so a template change that isn't regenerated fails CI.
 - **The catalog registers the file.** `src/anvil/artifacts/justfile.rs::impact()` registers
   the recipe as an owned artifact; `src/anvil/artifacts/mod.rs` wires it into the built-in
   registry and holds the shared tier→mode policy (`impact_mode`). The ADO renderer (`ado.rs`)

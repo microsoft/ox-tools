@@ -7,11 +7,3 @@
 # Verify source files carry the required license header.
 anvil-license-headers: anvil-license-headers-validate-prereqs anvil-impact
     cargo each {{ anvil_modified_selection }} --once -- cargo {{ anvil_stable_toolchain_arg }} heather
-
-# Install prerequisites for the `anvil-license-headers` recipe.
-[group("anvil-setup")]
-anvil-license-headers-setup installer="install": (anvil-tool-cargo-heather-install installer) (anvil-tool-cargo-each-install installer)
-
-# Validate prerequisites for the `anvil-license-headers` recipe.
-[group("anvil-setup")]
-anvil-license-headers-validate-prereqs: anvil-tool-cargo-heather-validate-prereqs anvil-tool-cargo-each-validate-prereqs
