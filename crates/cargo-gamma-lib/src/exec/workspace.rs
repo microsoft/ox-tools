@@ -4375,11 +4375,12 @@ mod tests {
 
     #[test]
     fn selected_nextest_runner_preserves_built_package_and_library_selection() {
-        use super::super::measure::arm_selected_runner_for_test;
-        use super::super::test_environment::with_native_queries;
         use std::cell::RefCell;
         use std::ffi::OsString;
         use std::rc::Rc;
+
+        use super::super::measure::arm_selected_runner_for_test;
+        use super::super::test_environment::with_native_queries;
 
         let directory = tempfile::tempdir().unwrap();
         let root = Utf8Path::from_path(directory.path()).unwrap().to_owned();
