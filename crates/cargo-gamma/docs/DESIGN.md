@@ -112,7 +112,10 @@ A diff with such a file still counts as understood if its only other paths
 are unmatched non-Rust files.
 An exact mutation candidate takes precedence, but an exact external file
 checked for module ownership is never redirected to another file by fuzzy
-matching. The exception does not apply to unsafe or absolute paths, missing
+matching. For a Git rename, the `rename to` header gives the destination
+without a diff prefix. A guessed prefix can help find a mutation candidate
+but cannot justify skipping an unresolved Rust file.
+The exception does not apply to unsafe or absolute paths, missing
 files, or files under a package directory. If declaration analysis is
 incomplete or finds a module with a conditional `#[path]` it cannot resolve,
 Gamma refuses the exception rather than assuming the file is unowned.
