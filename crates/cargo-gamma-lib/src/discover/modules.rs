@@ -22,7 +22,8 @@
 //! declaration cannot contribute production mutants, no matter what it contains.
 
 use camino::{Utf8Path, Utf8PathBuf};
-use syn::{Attribute, Item, Meta};
+use syn::visit::{self, Visit};
+use syn::{Attribute, Block, Ident, Item, ItemMod, Meta};
 
 use crate::cfg::{CfgSet, test_gated_for};
 use crate::{HashMap, HashSet};
@@ -149,6 +150,35 @@ pub(super) fn has_conditional_path(items: &[Item]) -> bool {
         module.attrs.iter().any(|attr| cfg_attr_has_path(&attr.meta))
             || module.content.as_ref().is_some_and(|(_brace, items)| has_conditional_path(items))
     })
+}
+
+/// Finds a file-backed module inside a statement block, which the declaration walker does not enter.
+pub(super) fn block_local_module(ast: &syn::File) -> Option<&Ident> {
+    #[derive(Default)]
+    struct Finder<'ast> {
+        inside_block: bool,
+        found: Option<&'ast Ident>,
+    }
+
+    impl<'ast> Visit<'ast> for Finder<'ast> {
+        fn visit_block(&mut self, i: &'ast Block) {
+            let previous = core::mem::replace(&mut self.inside_block, true);
+            visit::visit_block(self, i);
+            self.inside_block = previous;
+        }
+
+        fn visit_item_mod(&mut self, i: &'ast ItemMod) {
+            if self.inside_block && i.content.is_none() {
+                let _ = self.found.get_or_insert(&i.ident);
+            } else {
+                visit::visit_item_mod(self, i);
+            }
+        }
+    }
+
+    let mut finder = Finder::default();
+    finder.visit_file(ast);
+    finder.found
 }
 
 fn cfg_attr_has_path(meta: &Meta) -> bool {
@@ -360,6 +390,15 @@ mod tests {
 
         let ast = parse(r#"#[cfg_attr(windows, allow(dead_code))] mod normal; #[path = "known.rs"] mod known;"#);
         assert!(!has_conditional_path(&ast.items));
+    }
+
+    #[test]
+    fn only_file_backed_modules_inside_blocks_need_the_ownership_safeguard() {
+        let ast = parse("mod top; mod outer { fn run() { mod inline {} } mod sibling; }");
+        assert!(block_local_module(&ast).is_none());
+
+        let ast = parse(r#"mod outer { fn run() { #[path = "alt"] mod inner { mod shared; } } }"#);
+        assert_eq!(block_local_module(&ast).map(ToString::to_string).as_deref(), Some("shared"));
     }
 
     #[test]

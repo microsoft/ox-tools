@@ -115,10 +115,19 @@ checked for module ownership is never redirected to another file by fuzzy
 matching. For a Git rename, the `rename to` header gives the destination
 without a diff prefix. A guessed prefix can help find a mutation candidate
 but cannot justify skipping an unresolved Rust file.
-The exception does not apply to unsafe or absolute paths, missing
-files, or files under a package directory. If declaration analysis is
-incomplete or finds a module with a conditional `#[path]` it cannot resolve,
-Gamma refuses the exception rather than assuming the file is unowned.
+The standalone skip does not apply to unsafe or absolute paths, missing files,
+or files under a package directory.
+
+Gamma checks module ownership only when a changed file otherwise qualifies for
+the standalone skip. It resolves ordinary module declarations by path, but a
+conditional `#[path]` can select a different file or change the lookup
+directory for an entire inline module. The path of a `mod name;` inside a
+function body or other statement block can also depend on its enclosing
+modules. Rather than untangle those paths, Gamma currently reports an error
+instead of skipping the changed file if it finds either kind of declaration
+in the scanned sources, even if the changed file is unrelated. Incomplete
+declaration analysis also prevents the skip.
+
 Declaration evidence is limited to the parsed workspace inventory: it does
 not resolve `include!` arguments or recursively follow declarations from files
 outside that inventory.
