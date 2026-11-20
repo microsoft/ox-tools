@@ -200,15 +200,34 @@ fn msrv_recipes_use_only_the_declared_root_version() {
     assert!(
         generated
             .setup
-            .contains("rustup toolchain install '{workspace-rust-version}' --profile minimal")
+            .contains("rustup toolchain install \" + quote(workspace_rust_version) + \" --profile minimal")
     );
-    assert!(generated.setup.contains("rustup run '{workspace-rust-version}' rustc --version"));
+    assert!(
+        generated
+            .setup
+            .contains("rustup run \" + quote(workspace_rust_version) + \" rustc --version")
+    );
+    assert!(!generated.setup.contains("cargo each {{ anvil_msrv_workspace_selection }}"));
     assert!(
         generated
             .helpers
             .contains("anvil_msrv_selection := if workspace_rust_version == \"\"")
     );
     assert!(!generated.all_recipes().contains("ANVIL_MSRV_TOOLCHAIN"));
+}
+
+#[test]
+fn miri_setup_includes_the_cargo_each_driver() {
+    let setup = generated().setup;
+    assert!(setup.contains(
+        "anvil-miri-setup installer=\"install\": anvil-component-nightly-miri-install \
+         anvil-component-nightly-rust-src-install (anvil-tool-cargo-each-install installer)"
+    ));
+    assert!(setup.contains(
+        "anvil-miri-validate-prereqs: anvil-component-nightly-miri-validate-prereqs \
+         anvil-component-nightly-rust-src-validate-prereqs \
+         anvil-tool-cargo-each-validate-prereqs"
+    ));
 }
 
 #[test]
