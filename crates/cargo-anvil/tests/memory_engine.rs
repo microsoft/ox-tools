@@ -155,6 +155,30 @@ fn dry_run_has_identical_planning_without_mutations() {
 }
 
 #[test]
+fn dry_run_reports_identical_legacy_manifest_retirement() {
+    let mut io = repository();
+    update(&upgraded_catalog(), &UpdateOptions::default(), &mut io).unwrap();
+    let current = io.files[".anvil/manifest.toml"].clone();
+    io.insert(".anvil.lock", &current);
+    io.mutations.clear();
+
+    let before = io.files.clone();
+    let mut options = UpdateOptions::default();
+    options.dry_run = true;
+    let dry = update(&upgraded_catalog(), &options, &mut io).unwrap();
+    assert!(dry.has_changes, "legacy manifest retirement must be planned");
+    assert!(!dry.in_sync);
+    assert_eq!(io.files, before);
+    assert!(io.mutations.is_empty(), "unexpected mutations: {:?}", io.mutations);
+
+    options.dry_run = false;
+    let applied = update(&upgraded_catalog(), &options, &mut io).unwrap();
+    assert_eq!(dry.summary, applied.summary);
+    assert!(!io.files.contains_key(".anvil.lock"));
+    assert!(update(&upgraded_catalog(), &UpdateOptions::default(), &mut io).unwrap().in_sync);
+}
+
+#[test]
 fn dry_run_reports_refusals_without_publishing_even_safe_changes() {
     let mut io = historical();
     io.insert(".gitattributes", &HISTORICAL_HOST.replace("*.sh text eol=lf", "*.sh -text"));

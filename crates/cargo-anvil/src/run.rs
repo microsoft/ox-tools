@@ -120,13 +120,14 @@ fn update_with_backend_resolution(
         |_| {
             let current = shared.borrow().read_file(Path::new(crate::manifest::MANIFEST_FILE_NAME))?;
             let legacy = shared.borrow().read_file(Path::new(crate::manifest::LEGACY_MANIFEST_FILE_NAME))?;
+            let legacy_present = legacy.is_some();
             let manifest = Manifest::from_sources(
                 current,
                 legacy,
                 crate::manifest::MANIFEST_FILE_NAME,
                 crate::manifest::LEGACY_MANIFEST_FILE_NAME,
             )?;
-            Ok((root.clone(), manifest))
+            Ok((root.clone(), manifest, legacy_present))
         },
         |root, manifest| {
             let io = shared.borrow();
@@ -172,12 +173,12 @@ fn run_update_with(
     catalog: &Catalog,
     args: &Cli,
     start_dir: &Path,
-    discover: impl FnOnce(&Path) -> Result<(PathBuf, Manifest), AppError>,
+    discover: impl FnOnce(&Path) -> Result<(PathBuf, Manifest, bool), AppError>,
     plan_update: impl FnOnce(&Path, &Manifest) -> Result<(Plan, Vec<Backend>), AppError>,
     read_manifest: impl FnOnce(&Path) -> Result<Option<String>, AppError>,
     publish: impl FnOnce(&Path, &Plan, &Manifest) -> Result<(), AppError>,
 ) -> Result<RunOutcome, AppError> {
-    let (repo_root, manifest) = discover(start_dir)?;
+    let (repo_root, manifest, legacy_manifest_present) = discover(start_dir)?;
 
     // The single-tool guard: a repository is managed by exactly one
     // anvil-family tool. If the lock records a *different* tool, refuse
@@ -200,7 +201,7 @@ fn run_update_with(
 
     let expected_manifest = next.to_toml();
     let manifest_is_current = manifest_matches(read_manifest(&Manifest::path_for(&repo_root)), &expected_manifest)?;
-    plan.set_manifest_update_required(!manifest_is_current);
+    plan.set_manifest_update_required(!manifest_is_current || legacy_manifest_present);
 
     let applied = !args.dry_run;
     if applied {
@@ -3203,7 +3204,7 @@ mod tests {
             root,
             |start| {
                 assert_eq!(start, root);
-                Ok((root.to_owned(), Manifest::default()))
+                Ok((root.to_owned(), Manifest::default(), false))
             },
             |path, _| {
                 assert_eq!(path, root);
