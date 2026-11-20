@@ -7,9 +7,9 @@
 # Install prerequisites for the `anvil-mutants-diff` recipe.
 [group("anvil-setup")]
 [private]
-anvil-mutants-diff-setup installer="install": (anvil-tool-cargo-gamma-install installer)
+anvil-mutants-diff-setup installer="install": (anvil-tool-cargo-gamma-install installer) (anvil-tool-cargo-each-install installer)
 
 # Validate prerequisites for the `anvil-mutants-diff` recipe.
 [group("anvil-setup")]
 [private]
-anvil-mutants-diff-validate-prereqs: anvil-tool-cargo-gamma-validate-prereqs
+anvil-mutants-diff-validate-prereqs: anvil-tool-cargo-gamma-validate-prereqs anvil-tool-cargo-each-validate-prereqs

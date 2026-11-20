@@ -231,6 +231,19 @@ fn miri_setup_includes_the_cargo_each_driver() {
 }
 
 #[test]
+fn mutation_diff_setup_includes_the_impact_driver() {
+    let setup = generated().setup;
+    assert!(setup.contains(
+        "anvil-mutants-diff-setup installer=\"install\": (anvil-tool-cargo-gamma-install installer) \
+         (anvil-tool-cargo-each-install installer)"
+    ));
+    assert!(setup.contains(
+        "anvil-mutants-diff-validate-prereqs: anvil-tool-cargo-gamma-validate-prereqs \
+         anvil-tool-cargo-each-validate-prereqs"
+    ));
+}
+
+#[test]
 fn shell_scripts_are_limited_to_domain_exceptions() {
     let recipes = generated().all_recipes();
     let recipe_names = recipes
