@@ -179,13 +179,8 @@ _anvil-miri-test profile package="" test_filter="" example="": anvil-impact _ens
 
 anvil_mutants_diff_dir := env("RUNNER_TEMP", env("AGENT_TEMPDIRECTORY", env("TEMP", env("TMPDIR", "."))))
 anvil_mutants_diff_file := anvil_mutants_diff_dir / ("anvil-mutants-diff-" + just_pid() + ".diff")
-anvil_mutants_diff_prefix := if anvil_impact_mode == "off" {
-    ""
-} else if trim(read(anvil_impact_input_dir + "/affected.packages")) == "" {
-    "# "
-} else {
-    ""
-}
+# Comment out campaign commands when impact selected no packages.
+anvil_mutants_diff_skip_prefix := if anvil_impact_mode == "off" { "" } else if trim(read(anvil_impact_input_dir + "/affected.packages")) == "" { "# " } else { "" }
 
 anvil_pr_title := env("PR_TITLE", "")
 anvil_pr_title_pattern := '^(?i:feat|fix|chore|docs|refactor|test|build|ci|perf|revert)(?:\([^)]+\))?!?: .+$'

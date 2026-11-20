@@ -6,18 +6,13 @@
 
 anvil_mutants_diff_dir := env("RUNNER_TEMP", env("AGENT_TEMPDIRECTORY", env("TEMP", env("TMPDIR", "."))))
 anvil_mutants_diff_file := anvil_mutants_diff_dir / ("anvil-mutants-diff-" + just_pid() + ".diff")
-anvil_mutants_diff_prefix := if anvil_impact_mode == "off" {
-    ""
-} else if trim(read(anvil_impact_input_dir + "/affected.packages")) == "" {
-    "# "
-} else {
-    ""
-}
+# Comment out campaign commands when impact selected no packages.
+anvil_mutants_diff_skip_prefix := if anvil_impact_mode == "off" { "" } else if trim(read(anvil_impact_input_dir + "/affected.packages")) == "" { "# " } else { "" }
 # Mutation-test code changed from the selected base branch.
 anvil-mutants-diff: anvil-mutants-diff-validate-prereqs anvil-impact
-    {{ anvil_mutants_diff_prefix }}git diff --src-prefix=a/ --dst-prefix=b/ {{ quote(anvil_base_ref) }} --output={{ quote(anvil_mutants_diff_file) }}
-    {{ anvil_mutants_diff_prefix }}cargo {{ anvil_stable_toolchain_arg }} gamma run --workspace --in-diff {{ quote(anvil_mutants_diff_file) }} --min-score 100 --max-flaky 0 --update-hints {{ if env("GITHUB_ACTIONS", "") == "true" { "--artifact-dir target/cargo-gamma" } else { "" } }}
-    {{ anvil_mutants_diff_prefix }}rm {{ quote(anvil_mutants_diff_file) }}
+    {{ anvil_mutants_diff_skip_prefix }}git diff --src-prefix=a/ --dst-prefix=b/ {{ quote(anvil_base_ref) }} --output={{ quote(anvil_mutants_diff_file) }}
+    {{ anvil_mutants_diff_skip_prefix }}cargo {{ anvil_stable_toolchain_arg }} gamma run --workspace --in-diff {{ quote(anvil_mutants_diff_file) }} --min-score 100 --max-flaky 0 --update-hints {{ if env("GITHUB_ACTIONS", "") == "true" { "--artifact-dir target/cargo-gamma" } else { "" } }}
+    {{ anvil_mutants_diff_skip_prefix }}rm {{ quote(anvil_mutants_diff_file) }}
 
 # Install prerequisites for the `anvil-mutants-diff` recipe.
 [group("anvil-setup")]
