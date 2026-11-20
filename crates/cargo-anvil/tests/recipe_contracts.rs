@@ -207,6 +207,14 @@ fn msrv_recipes_use_only_the_declared_root_version() {
             .setup
             .contains("rustup run \" + quote(workspace_rust_version) + \" rustc --version")
     );
+    assert!(generated.setup.contains(
+        "anvil-msrv-test-setup installer=\"install\": (anvil-tool-cargo-each-install installer)\n    \
+         {{ just_executable() }} --justfile {{ quote(justfile()) }} _anvil-msrv-test-setup"
+    ));
+    assert!(generated.setup.contains(
+        "anvil-msrv-test-validate-prereqs: anvil-tool-cargo-each-validate-prereqs\n    \
+         {{ just_executable() }} --justfile {{ quote(justfile()) }} _anvil-msrv-test-validate-prereqs"
+    ));
     assert!(!generated.setup.contains("cargo each {{ anvil_msrv_workspace_selection }}"));
     assert!(
         generated
