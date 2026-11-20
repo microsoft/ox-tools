@@ -4,27 +4,9 @@
 # Update cargo-anvil and regenerate; repository-specific edits stop automatic updates.
 # Regenerate with cargo-anvil to update this file.
 
-# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
-
-# Scope: a clean direct or PR invocation is impact-scoped -- anvil-impact
-# computes the cache and _anvil-impact-include returns the affected set, so
-# unaffected packages are skipped. Full-workspace runs come from the
-# scheduled/full tiers (which force ANVIL_IMPACT=off) or a dirty local tree
-# (which widens for safety).
-
-# Compile all selected packages together, then run their Miri test executables in
-# parallel. The single Cargo invocation preserves workspace feature unification,
-# while executable-level parallelism uses host logical processors that
-# `cargo miri test` otherwise leaves idle.
-#
-# Packages can opt their own test targets out through:
-#
-# [package.metadata.anvil.miri]
-# exclude = true
-#
-# They can still compile as dependencies of selected consumers.
-#
-# ANVIL_MIRI_JOBS overrides cargo-each's automatic artifact worker count.
+# Compile selected packages together once, then run emitted Miri test artifacts
+# concurrently. `metadata.anvil.miri.exclude = true` omits a package's own
+# tests; `ANVIL_MIRI_JOBS` limits artifact workers.
 
 anvil_miri_artifacts_file := "target" / ("anvil-miri-artifacts-" + just_pid() + ".jsonl")
 anvil_miri_sysroot := shell("cargo +" + rust_nightly + " miri setup --print-sysroot")
@@ -53,21 +35,8 @@ anvil_cargo_env_config(name, value) := "--config " + quote("env." + name + ".val
 [group("anvil")]
 anvil-miri package="" test="" example="": anvil-miri-validate-prereqs (_anvil-miri-test "standard" package test example)
 
-# The shared helper compiles with `cargo miri test --no-run`, then invokes each
-# resulting libtest executable directly. It intentionally does not use nextest:
-# nextest's process-per-test model makes every test pay the cost of
-# re-interpreting std initialization. One libtest process runs all tests in an
-# executable, matching upstream Miri.
-#
-# `--tests` selects library/binary unit tests and integration tests while
-# excluding doctests, benches, and examples. `--all-features` exercises
-# feature-gated code so UB hidden behind an optional feature is caught.
-#
-# Cargo renders diagnostics to stderr while stdout carries the JSON Lines
-# artifact handoff. cargo-each filters that mixed stream to runnable test
-# executables, restores each package root from manifest_path, and owns bounded
-# execution, deterministic output replay, process cleanup, and failure
-# aggregation.
+# Test mode compiles once and lets cargo-each run Cargo's executable test
+# artifacts from their package roots. Example mode runs directly through Miri.
 [env("MIRI_BE_RUSTC", "host")]
 [env("MIRI_SYSROOT", anvil_miri_sysroot)]
 [env(anvil_miri_library_path_name, anvil_miri_library_path)]

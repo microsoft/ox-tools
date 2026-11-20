@@ -1,7 +1,7 @@
 version = 2
 tool = "anvil"
-tool_version = "0.29.2"
-catalog_checksum = "sha256:5c8289ac176750392c142fb46cb8d290d658645468fe8d9569bb97176312b287"
+tool_version = "0.29.3"
+catalog_checksum = "sha256:beb5a316a7e27bcc2ba7c17f8d6e786664a5e938dafd9084f7a5836bca367fdd"
 
 [[file]]
 path = ".anvil/anvil.just"
@@ -13,27 +13,27 @@ checksum = "sha256:ff1e72c74f42fb08de8c89b60899e9acf1e659ec9811af190db371f9cb9b7
 
 [[file]]
 path = ".anvil/container.just"
-checksum = "sha256:420722873ceda87933e0514055575dcc7cc33c892c26154ba36d29c3646058af"
+checksum = "sha256:eba3d0d5024c02d78ad7f7f667dd90d40010b988c0e1232c473d8f34339be6c2"
 
 [[file]]
 path = ".anvil/container/Dockerfile.dockerignore"
-checksum = "sha256:78e7fddd886dca3834aed9fa1636fca37e3b14d29afe3447d144715d1aba2597"
+checksum = "sha256:8a10eb4f813bd3d004d4299f5bf5f5fed61e09219bc6d6d95cd01891b51c7ad1"
 
 [[file]]
 path = ".anvil/github/actions/impact/action.yml"
-checksum = "sha256:4ff5942ebf8b160d0478dd056e6b5a5414b6f077b4e6718e275490fef54b50f7"
+checksum = "sha256:a063af57d06a3bd37292acd44e1b3b78feb1c2c22a572a9cc97b0126a2432e0b"
 
 [[file]]
 path = ".anvil/github/actions/report-status/action.yml"
-checksum = "sha256:eef931fadde132d3771cef8a11737236f75bcce7170ea460b33525577f0831e1"
+checksum = "sha256:386a9ab6f4cc64ad009e4f3ac487dcdf69dac2f577a3e1673cad18f470e94da8"
 
 [[file]]
 path = ".anvil/github/actions/run-group/action.yml"
-checksum = "sha256:c64d7a8329fc35c242f6ccc1111b2435c22723f0bc1e404328fd9a913353a0e9"
+checksum = "sha256:5293217b8a1093acdf429b8a3855ef42f0de59739a85077c0d8eee7870305685"
 
 [[file]]
 path = ".anvil/github/actions/setup/action.yml"
-checksum = "sha256:4fa076aad01f12833a3ed0712f69a8c8b615b8d9e8d7b52954848892ed87706c"
+checksum = "sha256:28749fdee6ed4f351b73178d9538dead3bd05a2c1da86dbd4289a9c7fb297c07"
 
 [[file]]
 path = ".anvil/github/actions/setup/just-problem-matcher.json"
@@ -41,15 +41,15 @@ checksum = "sha256:ea44d5e1a2cb1471cf2cef05eceab846d8afa45cf691be800f21fec1218da
 
 [[file]]
 path = ".anvil/groups.just"
-checksum = "sha256:330b1e28c7513b599260e3dc2e7438945d034186f4e598c9c240439c39872c56"
+checksum = "sha256:14ee90365b13a1aae43454f001bc79de44169ab7bed6524b5cc366ad5f552ab5"
 
 [[file]]
 path = ".anvil/helpers.just"
-checksum = "sha256:369372ec193be7b5fd4d4b65333285212cc8a0b48e2fe75abfe02801f1f8f148"
+checksum = "sha256:f61b04bcdb0e089fee5516cb5c34ed4f8146f4a6f3ef6c153ccf07c18947bc54"
 
 [[file]]
 path = ".anvil/setup.just"
-checksum = "sha256:25e3415dc30e5536b54baca9b90b7044a859aed929abaeb29b15222a4bb0e38f"
+checksum = "sha256:c9fc2e6bdccaa6651e0a5342171afada67d046a49725687119c25d1eceadff2c"
 
 [[file]]
 path = ".github/instructions/cargo-anvil.instructions.md"
@@ -69,19 +69,19 @@ checksum = "sha256:f187469a214df5d6394ccc8caf4b15eaac91fec912addddf1fc357f90735e
 
 [[file]]
 path = ".github/workflows/anvil-pr-impl.yml"
-checksum = "sha256:2fd6587835b97aa4b66b16ec5d8f2f278c6809c685008c8909c92e148e51267b"
+checksum = "sha256:d978f1764082d82f8afcd98f13e83107beab91a56f233195e3aafe537cebf1f7"
 
 [[file]]
 path = ".github/workflows/anvil-pr.yml"
-checksum = "sha256:69e41c1fca523dd8f90cdde25dfb40e2c22797528a124b39e4fb5333aeb013a6"
+checksum = "sha256:96ff339f6d3cd14815fcd10739533425736efe14716eeac7a9fcc67e2ca6fd97"
 
 [[file]]
 path = ".github/workflows/anvil-scheduled-impl.yml"
-checksum = "sha256:a18cdec774a65d866e26e369552dc707010a7126b292b99059b4b7636f5c68c4"
+checksum = "sha256:3b06c869697eb26f822aa88cb7cf49afbbd537bd5e2c8fb0d96acff8843e8a15"
 
 [[file]]
 path = ".github/workflows/anvil-scheduled.yml"
-checksum = "sha256:fbc598317330d2bb5d15cc7f728e99fbd430f1ae69cca9be4481196003f7dc83"
+checksum = "sha256:53e0f9b30ccae11da55dd3f954ee2f5ea5d650a5304a1e4813c107c8c0b5bf9a"
 
 [[region]]
 host = ".anvil/container/Dockerfile"
@@ -266,12 +266,12 @@ checksum = "sha256:920e1e1fed8cf6ac2173cb489d19153d167e806d26fdb73c8b91b7ddf44d0
 [[region]]
 host = "rustfmt.toml"
 id = "anvil-rustfmt"
-checksum = "sha256:9bdbb356fe159fdaac5e45c584efe52f67e51520add0f7c0729d4cec3180823e"
+checksum = "sha256:a5fa17aad0a3fa7876bff7f22265ad5611f5727aa46243bb5f39e63c9139dff4"
 
 [[region]]
 host = "spellcheck.toml"
 id = "anvil-spellcheck-hunspell"
-checksum = "sha256:f6d87358d49ded017ed4a9c8d04af32226d0dc40f0edcfdfc82903bb7f183bb7"
+checksum = "sha256:7adc3dda03a0ea2f5d34c826e6f8f8940b7659d3ade4a939d7c83aaff698418f"
 
 [[region]]
 host = "spellcheck.toml"

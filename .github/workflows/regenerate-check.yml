@@ -6,7 +6,7 @@
 #
 # 1. Builds cargo-anvil from the PR branch.
 # 2. Runs `cargo anvil --dry-run` against the repo root.
-# 3. Fails iff the binary would change generated content or `.anvil.lock`.
+# 3. Fails iff the binary would change generated content or the manifest.
 #
 # This is cargo-anvil's primary generated-output dogfooding mechanism.
 #
