@@ -60,7 +60,12 @@ anvil_required_selection := if anvil_impact_mode == "off" {
 
 anvil_explicit_package_args := if anvil_impact_mode == "off" { "" } else { "'{packages}'" }
 
-workspace_rust_version_line := `cargo each --workspace --once --dry-run -- "workspace-rust-version={workspace-rust-version}"`
+anvil_root_msrv := env("ANVIL_ROOT_MSRV", "")
+workspace_rust_version_line := if anvil_root_msrv == "" {
+    shell("cargo each --workspace --once --dry-run -- " + quote("workspace-rust-version={workspace-rust-version}"))
+} else {
+    "workspace-rust-version=" + if anvil_root_msrv == "none" { "" } else { anvil_root_msrv }
+}
 workspace_rust_version := replace(workspace_rust_version_line, "workspace-rust-version=", "")
 
 anvil_stable_toolchain_arg := if env("RUSTUP_TOOLCHAIN", "") == "" {

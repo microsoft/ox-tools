@@ -149,10 +149,7 @@ fn just_lists_emitted_recipes() {
         ("anvil-pr-fast", "# Run pull-request static analysis and repository policy checks."),
         ("anvil-pr-msrv", "# Run pull-request compatibility tests under the declared MSRV."),
         ("anvil-pr-mutants", "# Run pull-request mutation testing for changed code."),
-        (
-            "anvil-pr-runtime-analysis",
-            "# Run pull-request Miri, Careful, Loom, and Bolero checks.",
-        ),
+        ("anvil-pr-runtime-analysis", "# Run pull-request Miri, Careful, and Loom checks."),
         ("anvil-pr-slow", "# Run all slow pull-request groups sequentially."),
         ("anvil-pr-test", "# Run pull-request tests, coverage, doctests, and examples."),
         ("anvil-scheduled", "# Run every scheduled check group across the full workspace."),

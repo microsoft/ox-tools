@@ -4,7 +4,7 @@
 # Update cargo-anvil and regenerate; repository-specific edits stop automatic updates.
 # Regenerate with cargo-anvil to update this file.
 
-# Run pull-request Miri, Careful, Loom, and Bolero checks.
+# Run pull-request Miri, Careful, and Loom checks.
 [group("anvil")]
 anvil-pr-runtime-analysis: anvil-pr-runtime-analysis-validate-prereqs \
     anvil-miri \

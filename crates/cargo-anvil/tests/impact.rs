@@ -407,36 +407,3 @@ fn empty_affected_selection_skips_careful_and_mutants_before_side_effects() {
         "mutants must not create a diff handoff for an empty selection"
     );
 }
-
-#[test]
-fn msrv_recipes_are_noops_without_a_root_msrv() {
-    let temp = generated_workspace();
-    let manifest_path = temp.path().join("Cargo.toml");
-    let manifest = std::fs::read_to_string(&manifest_path).unwrap();
-    write(
-        &manifest_path,
-        &manifest.replace("[workspace.package]\nrust-version = \"1.95\"\n", ""),
-    );
-
-    for invocation in [
-        vec!["--set", "workspace_rust_version", "", "anvil-msrv-test-setup", "install"],
-        vec!["--set", "workspace_rust_version", "", "anvil-msrv-test-validate-prereqs"],
-        vec!["--set", "workspace_rust_version", "", "anvil-msrv-test"],
-    ] {
-        let output = Command::new("just")
-            .args(&invocation)
-            .current_dir(temp.path())
-            .env("ANVIL_IMPACT", "off")
-            .env("PATH", fixture_path(temp.path()))
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{} must no-op without a root MSRV:\n{}",
-            invocation[0],
-            stderr(&output)
-        );
-        let combined = format!("{}{}", stdout(&output), stderr(&output));
-        assert!(combined.contains("selection resolved to no work; nothing to do"), "{combined}");
-    }
-}

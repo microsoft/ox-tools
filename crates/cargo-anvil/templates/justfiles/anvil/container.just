@@ -21,12 +21,12 @@ anvil_container_name := trim_end_matches("anvil-" + replace_regex(lowercase(file
 
 # Read the root MSRV without rustup or cargo-each resolution. Container image
 # identity can be needed before cargo-each is installed, while image setup can
-# supply ANVIL_RUST_VERSION without copying the repository manifest.
+# supply ANVIL_ROOT_MSRV without copying the repository manifest.
 [private]
 [script("pwsh", "-NoProfile")]
 _anvil-root-msrv:
-    if ($env:ANVIL_RUST_VERSION) {
-        Write-Output $env:ANVIL_RUST_VERSION
+    if ($env:ANVIL_ROOT_MSRV) {
+        Write-Output $env:ANVIL_ROOT_MSRV
         exit 0
     }
     $manifest = Join-Path '{{ replace(justfile_directory(), "'", "''") }}' 'Cargo.toml'
@@ -639,7 +639,7 @@ _anvil-container-image:
             'build', '--platform', 'linux/amd64',
             '--file', "$engineRoot/$dockerfile",
             '--tag', $image,
-            '--build-arg', "ANVIL_RUST_VERSION=$rootMsrv"
+            '--build-arg', "ANVIL_ROOT_MSRV=$rootMsrv"
         )
         # BuildKit reads `<dockerfile>.dockerignore` on its own; buildah reads
         # only a context-root ignore file and needs to be pointed at ours. Named

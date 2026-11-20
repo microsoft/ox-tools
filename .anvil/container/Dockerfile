@@ -100,7 +100,7 @@ RUN curl -fsSLo /tmp/cargo-binstall.tgz \
 # volume over each, and an engine seeds a new volume from the image path it
 # covers; a path that does not exist seeds as root-owned 0755, which the
 # `--user` mapping cannot write, so the first cargo fetch fails with EACCES.
-# The driver passes the declared root MSRV as ANVIL_RUST_VERSION. Installing
+# The driver passes the declared root MSRV as ANVIL_ROOT_MSRV. Installing
 # and selecting it before setup gives Cargo a deterministic bootstrap without
 # copying workspace member manifests into the narrowed build context. When the
 # repository declares no MSRV, a copied root toolchain file remains responsible
@@ -109,9 +109,9 @@ RUN curl -fsSLo /tmp/cargo-binstall.tgz \
 # that are intentionally absent from the narrowed context.
 WORKDIR /opt/anvil
 COPY . ./
-ARG ANVIL_RUST_VERSION
-RUN : "${ANVIL_RUST_VERSION:?pass --build-arg ANVIL_RUST_VERSION=<declared-rust-version>}" \
-    && setup_toolchain="${ANVIL_RUST_VERSION}" \
+ARG ANVIL_ROOT_MSRV
+RUN : "${ANVIL_ROOT_MSRV:?pass --build-arg ANVIL_ROOT_MSRV=<declared-rust-version>}" \
+    && setup_toolchain="${ANVIL_ROOT_MSRV}" \
     && if [ "${setup_toolchain}" = "none" ] \
         && [ ! -f rust-toolchain.toml ] \
         && [ ! -f rust-toolchain ]; then \

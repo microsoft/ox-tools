@@ -26,6 +26,7 @@ jobs:
     permissions:
       contents: read
       actions: read
+      pull-requests: read
       security-events: write
       # Publish supplemental failure commit statuses so the PR checks rollup identifies the
       # concrete failed Just recipe before the aggregate workflow job.
