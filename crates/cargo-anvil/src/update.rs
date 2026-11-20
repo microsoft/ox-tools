@@ -114,7 +114,7 @@ pub struct UpdateResult {
 
 /// Update the Cargo repository represented by `io` using the real engine.
 ///
-/// `Cargo.toml`, workspace members, and `.anvil.lock` are parsed from `io`.
+/// `Cargo.toml`, workspace members, and `.anvil/manifest.toml` are parsed from `io`.
 /// All artifact inspection and application also use `io`. This function does
 /// not initialize tracing, print output, launch processes, or access the host
 /// filesystem, environment, arguments, or working directory.

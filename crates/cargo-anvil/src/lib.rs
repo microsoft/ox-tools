@@ -450,7 +450,7 @@
 //! Implement `UpdateIo` over an in-memory repository to test a downstream
 //! catalog's actual generation and upgrade behavior, not a mocked result.
 //! [`UpdateResult`] reports drift, refusals, diagnostics, and the plan summary;
-//! inspect generated files and `.anvil.lock` in the supplied repository.
+//! inspect generated files and `.anvil/manifest.toml` in the supplied repository.
 //! Use `dry_run` to perform the same planning without writes or deletions.
 //! An empty backend set explicitly selects local-only generation.
 //!

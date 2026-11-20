@@ -450,7 +450,7 @@ accessing the host environment or current directory.
 Implement `UpdateIo` over an in-memory repository to test a downstream
 catalog’s actual generation and upgrade behavior, not a mocked result.
 [`UpdateResult`][__link31] reports drift, refusals, diagnostics, and the plan summary;
-inspect generated files and `.anvil.lock` in the supplied repository.
+inspect generated files and `.anvil/manifest.toml` in the supplied repository.
 Use `dry_run` to perform the same planning without writes or deletions.
 An empty backend set explicitly selects local-only generation.
 
@@ -469,7 +469,7 @@ More detailed design and operational guidance is available in the
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQb9_shbvmgkpwbK_uhWYY_8cAb06AU6sbltw0bJeaqCdwFlTthZIGDa2NhcmdvLWFudmlsZjAuMjYuMGtjYXJnb19hbnZpbA
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQb6_YoDxLi3Q8bp5KpFNSPT8cbi5v0Kg0x66Ybzf9tpp0ITVNhZIGDa2NhcmdvLWFudmlsZjAuMjYuMGtjYXJnb19hbnZpbA
  [__link0]: https://github.com/casey/just
  [__link1]: https://rust-lang.github.io/rustfmt/
  [__link10]: https://www.conventionalcommits.org/

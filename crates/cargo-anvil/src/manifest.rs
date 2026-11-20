@@ -397,7 +397,7 @@ impl Manifest {
         out
     }
 
-    /// Save the manifest to `<repo_root>/.anvil.lock` atomically (write
+    /// Save the manifest to `<repo_root>/.anvil/manifest.toml` atomically (write
     /// to a temp file, then rename).
     ///
     /// # Errors
