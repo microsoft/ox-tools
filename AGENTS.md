@@ -49,11 +49,14 @@ when substantially changed — not in a single sweep.
   `docs/design/` landing page on GitHub and ADO. For larger crates, split
   detail into companion docs (e.g. `docs/design/<topic>.md`) linked from
   it.
-
-Optionally, a crate may keep implementation plans under
-`docs/implementation-plans/NNNN.md` (rolling, zero-padded) to sequence
-large multi-commit efforts. They are never required — skip them for small
-crates or self-contained changes.
+- Optional `docs/principles.md` - basic principles of the crate, should not be
+  edited by agents, unless specifically directed by the user, and even
+  in those cases, intent should be verified with the user to change the
+  principle.
+- Optionally, a crate may keep implementation plans under
+  `docs/implementation-plans/NNNN.md` (rolling, zero-padded) to sequence
+  large multi-commit efforts. They are never required — skip them for small
+  crates or self-contained changes.
 
 ### Why they exist
 
@@ -73,6 +76,8 @@ When you implement a change in a crate:
 - **If the change is purely internal** (refactor with no contract delta,
   dependency bump, test-only), no doc update is required — but fix any
   design drift you notice opportunistically.
+- Make sure that the change does not go against the crate's principles
+  if they exist (`docs/principles.md`)
 
 ### Don't reference design docs from code
 
