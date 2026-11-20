@@ -3597,24 +3597,62 @@ fn a_loop_that_can_break_with_a_value_is_still_perturbed() {
     assert!(found.contains(&"expr.decrement"), "{found:?}");
 }
 
+/// The source text of every expression that `bool_expr.negate` wraps whole.
+fn negated(source: &str) -> Vec<&str> {
+    candidates(source, "bool_expr.negate")
+        .iter()
+        .map(|candidate| &source[candidate.span.clone()])
+        .collect()
+}
+
 #[test]
-fn statically_divergent_boolean_values_are_not_negated() {
-    // `!` coerces to `bool`, so a divergent tail passes the expected-type check that admits a
-    // boolean value, yet `!(loop { .. })` never reaches its negation: control leaves, or spins
-    // forever, before a value exists to invert. A value that a `return` hands to the caller is
-    // still a boolean someone observes, so it keeps its own negation.
-    let cases = [
-        ("fn f(n: u32) -> bool { loop { if n > 3 { return true; } } }", vec![]),
-        ("fn f(c: bool) -> bool { return c }", vec!["c"]),
-    ];
+fn boolean_negation_skips_values_that_are_never_produced() {
+    // `!` coerces to `bool`, so these pass the boolean type check, yet control leaves each one
+    // before it yields a value for the negation to invert. A standard value macro such as
+    // `println!` adds no exit of its own, so calling one keeps a loop breakless.
+    for source in [
+        "fn f(n: u32) -> bool { loop { if n > 3 { return true; } } }",
+        "fn f(n: u32) -> bool { loop { println!(\"{}\", n); if n > 3 { return true; } } }",
+        "fn f() -> bool { { return true; } }",
+    ] {
+        assert_eq!(negated(source), Vec::<&str>::new(), "{source}");
+    }
+}
 
-    for (source, expected) in cases {
-        let negated: Vec<&str> = candidates(source, "bool_expr.negate")
-            .iter()
-            .map(|candidate| &source[candidate.span.clone()])
-            .collect();
+#[test]
+fn boolean_negation_keeps_the_operand_of_a_divergent_return() {
+    // The `return` yields nothing itself, but its operand is the boolean the caller receives.
+    assert_eq!(negated("fn f(c: bool) -> bool { return c }"), ["c"]);
+}
 
-        assert_eq!(negated, expected, "{source}");
+#[test]
+fn boolean_negation_keeps_labeled_blocks_that_break_with_a_value() {
+    // A `break` to a block's label hands the block its operand, so this block yields `true` and
+    // its negation returns `false`.
+    let source = "fn f() -> bool { 'result: { break 'result true; } }";
+
+    assert_eq!(negated(source), ["'result: { break 'result true; }"]);
+}
+
+#[test]
+fn boolean_negation_keeps_loops_that_a_macro_may_break() {
+    // The collector never sees expansions, so a macro can supply the loop's exit: a non-standard
+    // macro itself, or a `break` or another macro passed to a standard one such as `println!`.
+    for (source, looped) in [
+        (
+            "macro_rules! done { () => { break true } } fn f() -> bool { loop { done!(); } }",
+            "loop { done!(); }",
+        ),
+        (
+            "fn f(n: u32) -> bool { loop { println!(\"{}\", if n > 3 { break true } else { n }); } }",
+            "loop { println!(\"{}\", if n > 3 { break true } else { n }); }",
+        ),
+        (
+            "fn f(n: u32) -> bool { loop { println!(\"{}\", step!(n)); } }",
+            "loop { println!(\"{}\", step!(n)); }",
+        ),
+    ] {
+        assert_eq!(negated(source), [looped], "{source}");
     }
 }
 

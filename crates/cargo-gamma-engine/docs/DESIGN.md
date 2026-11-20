@@ -500,12 +500,20 @@ in a disabled trailing platform branch.
   side effects and remains eligible.
   Value wrappers selected by expected type are also proven no-ops around
   syntactically divergent expressions: `return`, `break`, `continue`, the
-  standard never-returning macros, a `loop` without any `break`, and an `if`
-  or `match` whose branches all diverge. Their type `!` satisfies a numeric or
-  boolean expectation, but control leaves before `expr.increment`,
-  `expr.decrement`, or `bool_expr.negate` can change the value. Values that
-  such an expression carries keep their own candidates. The site's own syntax
-  decides divergence, so every same-text site is withheld alike and no
+  standard never-returning macros, a `loop` that cannot break, an unlabeled
+  block whose final statement diverges, and an `if` or `match` whose branches
+  all diverge. Their type `!` satisfies a numeric or boolean expectation, but
+  control leaves before `expr.increment`, `expr.decrement`, or
+  `bool_expr.negate` can change the value. Values that such an expression
+  carries keep their own candidates. A loop may break through a `break`
+  anywhere in its body, including one that belongs to a nested loop, or
+  through a macro expansion, which the collector never sees: any macro other
+  than a standard value macro counts, and so does a standard one whose
+  arguments contain `break` or `!`. Macros are matched by name, so a local
+  macro that reuses a standard name is trusted to behave like the standard
+  one. A labeled block receives the operand of a `break` to its label before
+  its final statement runs, so it never counts as divergent. The site's own
+  syntax decides divergence, so every same-text site is withheld alike and no
   identity occurrence is reserved.
 - Early-return defaulting additionally recognizes zero-argument standard
   `new` and `default` constructors for `Vec`, `String`, `VecDeque`,

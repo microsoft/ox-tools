@@ -3,13 +3,14 @@
 
 //! Syntactic questions the collector asks about one node.
 
+use proc_macro2::{TokenStream, TokenTree};
 use syn::visit::Visit;
 use syn::{
     Attribute, BinOp, Block, Expr, ExprBlock, ExprBreak, ExprForLoop, ExprGroup, ExprLit, ExprLoop, ExprParen, ExprUnsafe, ExprWhile,
     GenericArgument, Label, Lit, Macro, Pat, Path, PathArguments, ReturnType, Stmt, Type, UnOp,
 };
 
-use super::super::defaults::{DefaultPaths, item_attrs};
+use super::super::defaults::{DefaultPaths, item_attrs, value_macro_name};
 use super::values::{Kind, resolve_type, strip};
 
 /// Returns whether borrowing an expression relies on it being promoted to static storage.
@@ -527,12 +528,14 @@ pub(super) fn diverges(expression: &Expr) -> bool {
         // `unimplemented!` in tail position is the body's value only in the type system's bookkeeping.
         Expr::Macro(node) => is_diverging_macro(&node.mac),
 
-        // A `loop` with no `break` runs forever; one with a `break` may yield a value.
-        Expr::Loop(node) => !has_break(&node.body),
+        // A `loop` that cannot `break` runs forever; one that may break may yield a value.
+        Expr::Loop(node) => !may_break(&node.body),
 
-        // Wrappers that add no control flow carry the divergence of what they hold.
+        // Wrappers that add no control flow carry the divergence of what they hold. A `break` to a
+        // block's label hands that block a value before its last statement runs, so only an
+        // unlabeled block qualifies.
         Expr::Paren(ExprParen { expr, .. }) | Expr::Group(ExprGroup { expr, .. }) => diverges(expr),
-        Expr::Block(ExprBlock { block, .. }) | Expr::Unsafe(ExprUnsafe { block, .. }) => block_diverges(block),
+        Expr::Block(ExprBlock { label: None, block, .. }) | Expr::Unsafe(ExprUnsafe { block, .. }) => block_diverges(block),
 
         // An `if` diverges only when it cannot fall through: it needs an `else`, and both the `then`
         // block and the `else` branch must diverge in turn.
@@ -568,27 +571,67 @@ fn is_diverging_macro(mac: &Macro) -> bool {
     })
 }
 
-/// Returns whether a loop body contains any `break`, anywhere within it.
+/// Returns whether a loop body may contain a `break`, anywhere within it.
 ///
-/// Deliberately conservative: a `break` that belongs to a nested loop still counts, so a loop is
-/// only called breakless when it truly has none. Erring this way keeps the divergence test from
-/// ever rejecting a loop that might produce a value.
-fn has_break(block: &Block) -> bool {
+/// Deliberately conservative: a `break` that belongs to a nested loop still counts, and so does a
+/// macro that might expand to one, so a loop is only called breakless when it truly has none.
+/// Erring this way keeps the divergence test from ever rejecting a loop that might produce a value.
+fn may_break(block: &Block) -> bool {
     let mut finder = BreakFinder { found: false };
 
     finder.visit_block(block);
     finder.found
 }
 
-/// Records whether any `break` was seen while walking a loop body.
+/// Records whether a `break`, or a macro that might expand to one, was seen while walking a loop body.
 struct BreakFinder {
     found: bool,
 }
 
+#[expect(
+    clippy::renamed_function_params,
+    reason = "syn names every visitor parameter `i`, which says nothing about what it is"
+)]
 impl<'ast> Visit<'ast> for BreakFinder {
     fn visit_expr_break(&mut self, _node: &'ast ExprBreak) {
         self.found = true;
     }
+
+    // Macro expansions are not available here, so only a standard value macro is known to add no
+    // `break` of its own. Its arguments are still code that can hold a `break` or another macro
+    // call. A macro that reuses a standard name is trusted to be the standard one, as the
+    // never-returning macros are.
+    fn visit_macro(&mut self, node: &'ast Macro) {
+        if !node
+            .path
+            .segments
+            .last()
+            .is_some_and(|segment| value_macro_name(&segment.ident.to_string()))
+            || tokens_may_break(node.tokens.clone())
+        {
+            self.found = true;
+        }
+    }
+}
+
+/// Returns whether macro arguments hold a `break` or a call to another macro, at any depth.
+///
+/// Every `!` counts: telling a nested macro call apart from a negation needs a parse, and a false
+/// alarm here only keeps a mutant.
+fn tokens_may_break(tokens: TokenStream) -> bool {
+    let mut pending = vec![tokens];
+
+    while let Some(stream) = pending.pop() {
+        for token in stream {
+            match token {
+                TokenTree::Ident(name) if name == "break" => return true,
+                TokenTree::Punct(punct) if punct.as_char() == '!' => return true,
+                TokenTree::Group(group) => pending.push(group.stream()),
+                _ => {}
+            }
+        }
+    }
+    false
 }
 
 /// Returns a type's `index`th generic argument, so `Result<T, E>` can be asked for either side.
