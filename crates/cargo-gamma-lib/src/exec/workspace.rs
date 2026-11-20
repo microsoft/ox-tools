@@ -1161,12 +1161,12 @@ impl Workspace {
     /// # Errors
     ///
     /// Returns an error if nextest is not installed or does not recognise the built tree.
-    pub(super) fn arm_nextest(&mut self, binaries: &[TestBinary]) -> Result<()> {
+    pub(super) fn arm_nextest(&mut self, binaries: &[TestBinary], packages: Option<&[String]>) -> Result<()> {
         let metadata = self
             .cargo_metadata
             .as_deref()
             .ok_or_else(|| error!("the Cargo test environment was not prepared before nextest"))?;
-        self.nextest = Some(Harness::prepare(self, binaries, metadata)?);
+        self.nextest = Some(Harness::prepare(self, binaries, packages, metadata)?);
 
         Ok(())
     }
@@ -1204,17 +1204,24 @@ impl Workspace {
 
     /// Asks nextest to enumerate the test binaries this tree has already built.
     ///
+    /// `packages` is the build's own selection — the `--package` specs it passed, or `None` for
+    /// `--workspace`.
+    ///
     /// # Errors
     ///
     /// Returns an error if nextest is not installed or cannot read the tree.
-    pub(super) fn capture_nextest_list(&self, binaries: &[TestBinary]) -> Result<String> {
-        let command = self.nextest_list_command(binaries);
+    pub(super) fn capture_nextest_list(&self, packages: Option<&[String]>) -> Result<String> {
+        let command = self.nextest_list_command(packages);
 
         self.capture(command, "cargo nextest list")
     }
 
     /// Builds the command that inventories the binaries nextest may run.
-    fn nextest_list_command(&self, binaries: &[TestBinary]) -> Command {
+    ///
+    /// Selects exactly the packages the test build did, not just those owning the binaries gamma
+    /// kept: under `--all-features` a narrower selection unifies features differently, so nextest
+    /// would compile and list binaries whose hashes the build never produced.
+    fn nextest_list_command(&self, packages: Option<&[String]>) -> Command {
         let mut command = self.cargo();
         let mut args = vec![
             "nextest".to_owned(),
@@ -1225,22 +1232,14 @@ impl Workspace {
             "json".to_owned(),
         ];
 
-        let mut packages: Vec<&str> = binaries
-            .iter()
-            .map(|binary| {
-                if binary.package_id.is_empty() {
-                    binary.package.as_str()
-                } else {
-                    binary.package_id.as_str()
+        match packages {
+            Some(packages) => {
+                for package in packages {
+                    args.push("--package".to_owned());
+                    args.push(package.clone());
                 }
-            })
-            .collect();
-        packages.sort_unstable();
-        packages.dedup();
-
-        for package in packages {
-            args.push("--package".to_owned());
-            args.push(package.to_owned());
+            }
+            None => args.push("--workspace".to_owned()),
         }
 
         self.cargo.extend_nextest_args(&mut args);
@@ -4339,20 +4338,28 @@ mod tests {
     }
 
     #[test]
-    fn nextest_packages_are_sorted_before_nonadjacent_duplicates_are_removed() {
-        let work = unsettled_default();
-        let binaries = ["z-last", "a-first", "z-last"].map(|package| TestBinary {
-            package_id: package.to_owned(),
-            ..crate::testing::test_binary("unused")
-        });
-        let command = work.nextest_list_command(&binaries);
-        let arguments = command.get_args().map(|argument| argument.to_str().unwrap()).collect::<Vec<_>>();
-        let packages = arguments
-            .windows(2)
-            .filter(|pair| pair[0] == "--package")
-            .map(|pair| pair[1])
-            .collect::<Vec<_>>();
-        assert_eq!(packages, ["a-first", "z-last"]);
+    fn nextest_lists_the_packages_the_build_selected_rather_than_those_owning_binaries() {
+        let mut work = unsettled_default();
+        work.cargo.features = vec!["--all-features".to_owned()];
+        let selected = [
+            "path+file:///tmp/app#app@0.1.0".to_owned(),
+            "path+file:///tmp/lib#lib@0.1.0".to_owned(),
+        ];
+        let packages_of = |command: Command| {
+            let arguments = command
+                .get_args()
+                .map(|argument| argument.to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            let packages = arguments
+                .windows(2)
+                .filter(|pair| pair[0] == "--package")
+                .map(|pair| pair[1].clone())
+                .collect::<Vec<_>>();
+            (packages, arguments.iter().any(|argument| argument == "--workspace"))
+        };
+
+        assert_eq!(packages_of(work.nextest_list_command(Some(&selected))), (selected.to_vec(), false));
+        assert_eq!(packages_of(work.nextest_list_command(None)), (Vec::new(), true));
     }
 
     #[test]
@@ -4662,7 +4669,15 @@ mod tests {
                         } else {
                             assert_eq!(
                                 args,
-                                ["nextest", "list", "--list-type", "binaries-only", "--message-format", "json"]
+                                [
+                                    "nextest",
+                                    "list",
+                                    "--list-type",
+                                    "binaries-only",
+                                    "--message-format",
+                                    "json",
+                                    "--workspace"
+                                ]
                             );
                         }
                         match mode {
@@ -4684,7 +4699,7 @@ mod tests {
                         if metadata {
                             work.capture_cargo_metadata()
                         } else {
-                            work.capture_nextest_list(&[])
+                            work.capture_nextest_list(None)
                         }
                     },
                 );
@@ -4814,7 +4829,7 @@ mod tests {
                 assert_eq!(label, "cargo nextest list");
                 Ok(capture_success("{\"rust-suites\":{}}"))
             },
-            || work.arm_nextest(&[]),
+            || work.arm_nextest(&[], None),
         )
         .unwrap();
         assert!(work.runner().is_some());
@@ -4827,7 +4842,7 @@ mod tests {
         );
         let failure = with_capture_script(
             |_, _| Err(io::Error::other("late nextest listing refusal")),
-            || work.arm_nextest(&[]),
+            || work.arm_nextest(&[], None),
         )
         .expect_err("an armed runner does not authorize suppressing a later failed listing");
         assert_eq!(failure.message(), format!("could not run `cargo nextest list` in {root}"));
@@ -4857,7 +4872,7 @@ mod tests {
                     assert_eq!(label, "cargo nextest list");
                     Ok(capture_success("{\"rust-binaries\":{}}"))
                 },
-                || work.arm_nextest(&binaries),
+                || work.arm_nextest(&binaries, None),
             )
             .expect_err("the exact scratch/identity failure must escape nextest preparation");
             if failure_at < 2 {
@@ -4883,7 +4898,7 @@ mod tests {
         let mut work = unsettled_default();
         let failure = with_capture_script(
             |_, _| panic!("an adopted but unarmed workspace must not ask Cargo or nextest anything"),
-            || work.arm_nextest(&[]),
+            || work.arm_nextest(&[], None),
         )
         .expect_err("adoption does not imply a prepared Cargo test environment");
         assert_eq!(failure.message(), "the Cargo test environment was not prepared before nextest");
@@ -5130,7 +5145,7 @@ mod tests {
     }
 
     #[test]
-    fn scratch_files_create_parents_and_nextest_deduplicates_packages() {
+    fn scratch_files_create_parents() {
         let directory = crate::testing::workdir("workspace-scratch-write-");
         let root = Utf8PathBuf::from_path_buf(directory.path().join("tree")).expect("UTF-8 root");
         let target = Utf8PathBuf::from_path_buf(directory.path().join("target")).expect("UTF-8 target");
@@ -5140,29 +5155,6 @@ mod tests {
         let written = work.write_scratch("nested/data.json", "{}").expect("scratch file");
         assert_eq!(written, target.join("nested/data.json"));
         assert_eq!(fs::read_to_string(&written).expect("scratch contents"), "{}");
-
-        let binaries = [
-            TestBinary {
-                package: "fallback".to_owned(),
-                package_id: String::new(),
-                ..crate::testing::test_binary("/first")
-            },
-            TestBinary {
-                package: "fallback".to_owned(),
-                package_id: String::new(),
-                ..crate::testing::test_binary("/second")
-            },
-            TestBinary {
-                package: "ignored".to_owned(),
-                package_id: "precise-id".to_owned(),
-                ..crate::testing::test_binary("/third")
-            },
-        ];
-        let command = work.nextest_list_command(&binaries);
-        let args: Vec<_> = command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect();
-
-        assert_eq!(args.iter().filter(|arg| *arg == "fallback").count(), 1);
-        assert_eq!(args.iter().filter(|arg| *arg == "precise-id").count(), 1);
     }
 
     #[test]
@@ -7412,7 +7404,7 @@ mod tests {
         assert_eq!(work.testing_roots().unwrap(), [root.clone(), root.join("runtime")]);
         work.runtime = root.clone();
         assert_eq!(work.testing_roots().unwrap(), [root]);
-        assert!(work.arm_nextest(&[]).unwrap_err().message().contains("was not prepared"));
+        assert!(work.arm_nextest(&[], None).unwrap_err().message().contains("was not prepared"));
     }
 
     #[test]
@@ -8177,13 +8169,8 @@ mod tests {
         let mut work = unsettled_default();
         work.cargo.features = vec!["--all-features".to_owned()];
         work.cargo.profile = Some("mutants".to_owned());
-        let binaries = [TestBinary {
-            package: "subject".to_owned(),
-            package_id: "path+file:///tmp/subject#subject@0.1.0".to_owned(),
-            ..crate::testing::test_binary("/tmp/subject")
-        }];
 
-        let command = work.nextest_list_command(&binaries);
+        let command = work.nextest_list_command(Some(&["path+file:///tmp/subject#subject@0.1.0".to_owned()]));
         let args: Vec<_> = command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect();
 
         assert_eq!(

@@ -807,7 +807,7 @@ fn measure_with_locks(
     // binaries that do not exist until the build has run, and the baseline has to be measured
     // through the same runner that will judge every mutant — a baseline taken one way and compared
     // against verdicts reached the other measures nothing.
-    if let Err(error) = arm_selected_runner(&mut work, &build.binaries, &build.artifacts, config.nextest) {
+    if let Err(error) = arm_selected_runner(&mut work, &build, config.nextest) {
         failed.plan = Some(plan);
 
         return Err(error);
@@ -937,12 +937,12 @@ fn restrict_binaries(binaries: &mut Vec<TestBinary>, plan: &Plan, scope: &TestSc
 }
 
 // #[gamma::skip(all, reason = "the mutation affects internal orchestration state with no safely deterministic observation at this layer")]
-fn arm_selected_runner(work: &mut Workspace, binaries: &[TestBinary], artifacts: &str, nextest: bool) -> Result<()> {
-    work.arm_test_environment(binaries, artifacts)?;
+fn arm_selected_runner(work: &mut Workspace, build: &Build, nextest: bool) -> Result<()> {
+    work.arm_test_environment(&build.binaries, &build.artifacts)?;
 
     // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
     if nextest {
-        work.arm_nextest(binaries)?;
+        work.arm_nextest(&build.binaries, build.packages.as_deref())?;
     }
     Ok(())
 }
@@ -2903,6 +2903,7 @@ mod tests {
                 let build = Build {
                     history: Vec::new(),
                     binaries: vec![crate::testing::test_binary("subject")],
+                    packages: None,
                     artifacts: String::new(),
                     withdrawn: 7,
                     rounds: 8,

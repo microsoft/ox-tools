@@ -104,11 +104,13 @@ mod final_survivor_tests {
 impl Harness {
     /// Describes the built tree to nextest, so that no later run of it needs cargo.
     ///
+    /// `packages` is the test build's package selection, which the listing must repeat.
+    ///
     /// # Errors
     ///
     /// Returns an error if nextest is not installed or cannot enumerate the built tree.
-    pub(super) fn prepare(work: &Workspace, binaries: &[TestBinary], metadata: &str) -> Result<Self> {
-        let listing = work.capture_nextest_list(binaries)?;
+    pub(super) fn prepare(work: &Workspace, binaries: &[TestBinary], packages: Option<&[String]>, metadata: &str) -> Result<Self> {
+        let listing = work.capture_nextest_list(packages)?;
         let ids = binary_ids(&listing);
 
         let paths = work.write_scratch(BINARIES_METADATA_FILE, &listing)?;
