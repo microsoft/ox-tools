@@ -6,6 +6,7 @@
 
 # Used by scheduled and full wrappers to disable impact scoping before dependencies run.
 [private]
+[no-exit-message]
 _anvil-unscoped name:
     {{ just_executable() }} --justfile {{ quote(justfile()) }} --set anvil_impact_override off _anvil-{{ name }}
 

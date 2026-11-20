@@ -1316,6 +1316,10 @@ mod tests {
             HELPERS_JUST.contains("--set anvil_impact_override off"),
             "the wrapper must force the internal impact override off for scheduled/full tiers"
         );
+        assert!(
+            HELPERS_JUST.contains("[no-exit-message]\n_anvil-unscoped"),
+            "the local wrapper must preserve the child's concrete failure diagnostic"
+        );
         // The scheduled tier must fan out to every scheduled group, including
         // runtime-analysis (a separate group from exhaustive).
         for needle in [

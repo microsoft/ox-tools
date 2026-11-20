@@ -672,7 +672,7 @@ steps:
     parameters:
       group: scheduled-advisories
 
-  - pwsh: just anvil-scheduled-advisories
+  - pwsh: just _anvil-scheduled-advisories
     displayName: anvil-scheduled-advisories
     env:
 
@@ -700,7 +700,7 @@ steps:
     parameters:
       group: scheduled-exhaustive
 
-  - pwsh: just anvil-scheduled-exhaustive
+  - pwsh: just _anvil-scheduled-exhaustive
     displayName: anvil-scheduled-exhaustive
     env:
 
@@ -728,7 +728,7 @@ steps:
     parameters:
       group: scheduled-runtime-analysis
 
-  - pwsh: just anvil-scheduled-runtime-analysis
+  - pwsh: just _anvil-scheduled-runtime-analysis
     displayName: anvil-scheduled-runtime-analysis
     env:
 
@@ -756,7 +756,7 @@ steps:
     parameters:
       group: scheduled-test
 
-  - pwsh: just anvil-scheduled-test
+  - pwsh: just _anvil-scheduled-test
     displayName: anvil-scheduled-test
     env:
 
@@ -2401,6 +2401,7 @@ anvil-scheduled-exhaustive: (_anvil-unscoped "scheduled-exhaustive")
 
 # Used by scheduled and full wrappers to disable impact scoping before dependencies run.
 [private]
+[no-exit-message]
 _anvil-unscoped name:
     {{ just_executable() }} --justfile {{ quote(justfile()) }} --set anvil_impact_override off _anvil-{{ name }}
 

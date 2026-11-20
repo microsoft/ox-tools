@@ -309,6 +309,9 @@ mod tests {
             !RUN_GROUP_ACTION.contains("Failed Just recipe:"),
             "failure propagation must stay in the step containing the recipe output"
         );
+        assert!(RUN_GROUP_ACTION.contains(r#"if [[ "$ANVIL_GROUP" == scheduled-* ]]"#));
+        assert!(RUN_GROUP_ACTION.contains(r#"recipe="_anvil-$ANVIL_GROUP""#));
+        assert!(RUN_GROUP_ACTION.contains(r#"just "$recipe""#));
         let reporter = RUN_GROUP_ACTION
             .split_once("- name: Publish supplemental Anvil commit status")
             .expect("run-group action should contain the supplemental reporter step")
@@ -370,11 +373,12 @@ mod tests {
         );
     }
 
-    fn run_group_step(fake_output: &str, fake_status: i32) -> (ExitStatus, String) {
+    fn run_group_step_for_group(group: &str, fake_output: &str, fake_status: i32) -> (ExitStatus, String) {
         let temp = tempdir().expect("the test must be able to create a temporary action workspace");
         let output_path = temp.path().join("github-output");
         let harness = r#"
 just() {
+  printf 'invoked_recipe=%s\n' "$1" >> "$GITHUB_OUTPUT"
   if [[ -n "$FAKE_JUST_OUTPUT" ]]; then
     printf '%s\n' "$FAKE_JUST_OUTPUT"
   fi
@@ -412,7 +416,7 @@ export -f just
         let status = Command::new(bash)
             .args(["-c", &program])
             .current_dir(temp.path())
-            .env("ANVIL_GROUP", "pr-fast")
+            .env("ANVIL_GROUP", group)
             .env("FAKE_JUST_OUTPUT", fake_output)
             .env("FAKE_JUST_STATUS", fake_status.to_string())
             .env("GITHUB_OUTPUT", "github-output")
@@ -421,6 +425,10 @@ export -f just
             .expect("bash must be available because generated GitHub group actions require it");
         let outputs = fs::read_to_string(output_path).expect("the group script must write GitHub step outputs");
         (status, outputs)
+    }
+
+    fn run_group_step(fake_output: &str, fake_status: i32) -> (ExitStatus, String) {
+        run_group_step_for_group("pr-fast", fake_output, fake_status)
     }
 
     #[test]
@@ -432,8 +440,19 @@ export -f just
             status.success(),
             "a successful group must return success after exporting its result"
         );
+        assert!(outputs.contains("invoked_recipe=anvil-pr-fast"));
         assert!(outputs.contains("failed_recipe=anvil-pr-fast"));
         assert!(outputs.contains("exit_code=0"));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "uses filesystem and subprocesses; miri isolation forbids them")]
+    fn run_group_step_invokes_scheduled_fanout_without_nested_wrapper() {
+        let (status, outputs) = run_group_step_for_group("scheduled-test", "all checks passed", 0);
+
+        assert!(status.success());
+        assert!(outputs.contains("invoked_recipe=_anvil-scheduled-test"));
+        assert!(outputs.contains("failed_recipe=anvil-scheduled-test"));
     }
 
     #[test]

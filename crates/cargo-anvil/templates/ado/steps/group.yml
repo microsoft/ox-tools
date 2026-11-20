@@ -9,7 +9,7 @@ steps:
     parameters:
       group: __GROUP__
 __PR_TITLE_STEP__
-  - pwsh: just anvil-__GROUP__
+  - pwsh: just __RECIPE__
     displayName: anvil-__GROUP__
     env:
 __PR_TITLE_ENV__

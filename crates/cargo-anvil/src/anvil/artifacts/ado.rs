@@ -87,6 +87,9 @@ const GROUP_PLACEHOLDER: &str = "__GROUP__";
 /// Placeholder token the per-group template uses for the impact-mode selection.
 const IMPACT_MODE_PLACEHOLDER: &str = "__IMPACT_MODE__";
 
+/// Placeholder token for the recipe invoked after setup.
+const RECIPE_PLACEHOLDER: &str = "__RECIPE__";
+
 /// Placeholder token for the optional PR-title lookup step.
 const PR_TITLE_STEP_PLACEHOLDER: &str = "__PR_TITLE_STEP__";
 
@@ -98,6 +101,12 @@ const PR_TITLE_ENV_PLACEHOLDER: &str = "__PR_TITLE_ENV__";
 fn render_group_step(group: &str) -> String {
     let mut rendered = GROUP_STEP_TEMPLATE.replace(GROUP_PLACEHOLDER, group);
     rendered = rendered.replace(IMPACT_MODE_PLACEHOLDER, impact_mode(group));
+    let recipe = if group.starts_with("scheduled-") {
+        format!("_anvil-{group}")
+    } else {
+        format!("anvil-{group}")
+    };
+    rendered = rendered.replace(RECIPE_PLACEHOLDER, &recipe);
     let (title_step, title_env) = if group == "pr-fast" {
         (PR_TITLE_STEP_TEMPLATE.trim_end(), PR_TITLE_ENV_TEMPLATE.trim_end())
     } else {
@@ -538,6 +547,8 @@ mod tests {
         // can wrongly enable scoping and skip the full-workspace backstop.
         let body = render_group_step("scheduled-test");
         assert!(body.contains(r#"ANVIL_IMPACT: "off""#));
+        assert!(body.contains("just _anvil-scheduled-test"));
+        assert!(!body.contains("just anvil-scheduled-test"));
         assert!(
             !body.contains(r#"ANVIL_IMPACT: "consume""#),
             "scheduled group must never consume the impact cache"

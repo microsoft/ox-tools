@@ -57,8 +57,14 @@ runs:
         # Capture the group result before propagating failure so the
         # best-effort reporter can consume both outputs.
         log="$RUNNER_TEMP/anvil-$ANVIL_GROUP.log"
+        recipe="anvil-$ANVIL_GROUP"
+        if [[ "$ANVIL_GROUP" == scheduled-* ]]; then
+          # Scheduled CI already sets ANVIL_IMPACT=off before Just starts, so
+          # invoke the private fan-out directly instead of nesting Just.
+          recipe="_anvil-$ANVIL_GROUP"
+        fi
         set +e
-        just "anvil-$ANVIL_GROUP" 2>&1 | tee "$log"
+        just "$recipe" 2>&1 | tee "$log"
         # Preserve Just's status rather than tee's pipeline status.
         status=${PIPESTATUS[0]}
         set -e
