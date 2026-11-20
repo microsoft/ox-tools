@@ -142,6 +142,29 @@ pub(super) fn path_attribute(attrs: &[Attribute]) -> Option<String> {
     })
 }
 
+/// Whether a conditional attribute can redirect a module path this walker cannot resolve.
+pub(super) fn has_conditional_path(items: &[Item]) -> bool {
+    items.iter().any(|item| {
+        let Item::Mod(module) = item else { return false };
+        module.attrs.iter().any(|attr| cfg_attr_has_path(&attr.meta))
+            || module.content.as_ref().is_some_and(|(_brace, items)| has_conditional_path(items))
+    })
+}
+
+fn cfg_attr_has_path(meta: &Meta) -> bool {
+    let Meta::List(list) = meta else { return false };
+    if !list.path.is_ident("cfg_attr") {
+        return false;
+    }
+
+    list.parse_args_with(syn::punctuated::Punctuated::<Meta, syn::Token![,]>::parse_terminated)
+        .map_or(true, |args| {
+            args.iter()
+                .skip(1)
+                .any(|attr| attr.path().is_ident("path") || cfg_attr_has_path(attr))
+        })
+}
+
 /// Works out which files have no live module path under the selected configuration.
 ///
 /// `roots` are the crate roots — a package's lib and bin entry points — which are never test code.
@@ -300,6 +323,43 @@ mod tests {
         );
         assert_eq!(owned_directory(Utf8Path::new(".")), None);
         assert_eq!(owned_directory(Utf8Path::new("")), None);
+    }
+
+    #[test]
+    fn a_direct_path_attribute_can_own_a_file_outside_the_package_directory() {
+        let source = Utf8Path::new("workspace/crates/app/src/lib.rs");
+        let target = Utf8Path::new("workspace/crates/app/src/../../../scripts/shared.rs");
+        let ast = parse("#[path = \"../../../scripts/shared.rs\"] mod shared;");
+        let found = declarations_with(source, &ast, &CfgSet::unconditional(), |path| {
+            assert_eq!(path, target);
+            true
+        });
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].target, target);
+    }
+
+    #[test]
+    fn include_macros_are_not_treated_as_module_declarations() {
+        let source = Utf8Path::new("workspace/crates/app/src/lib.rs");
+        let ast = parse("include!(\"../../../scripts/shared.rs\");");
+        let found = declarations_with(source, &ast, &CfgSet::unconditional(), |_path| {
+            panic!("include! does not declare a module path")
+        });
+
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    fn conditional_module_path_prevents_proving_standalone_ownership() {
+        let ast = parse(r#"mod outer { #[cfg_attr(windows, path = "../../scripts/shared.rs")] mod shared; }"#);
+        assert!(has_conditional_path(&ast.items));
+
+        let ast = parse(r#"#[cfg_attr(windows, cfg_attr(test, path = "../scripts/shared.rs"))] mod shared;"#);
+        assert!(has_conditional_path(&ast.items));
+
+        let ast = parse(r#"#[cfg_attr(windows, allow(dead_code))] mod normal; #[path = "known.rs"] mod known;"#);
+        assert!(!has_conditional_path(&ast.items));
     }
 
     #[test]

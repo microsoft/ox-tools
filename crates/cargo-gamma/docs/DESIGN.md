@@ -105,6 +105,18 @@ Statement deletion uses concrete names such as `stmt.delete_call` and
 `--in-diff` selects changed mutation sites, not tests affected by a change.
 A test-only edit can select nothing even if it removes protection for unchanged
 production code. A passing diff campaign makes no claim about those other sites.
+An exact, existing, workspace-relative Rust file outside every workspace package
+directory is understood but contributes no mutation sites when no package
+in the selected declaration inventory declares it with `mod` or `#[path]`.
+An exact mutation candidate takes precedence, but an exact external file
+checked for module ownership is never redirected to another file by fuzzy
+matching. The exception does not apply to unsafe or absolute paths, missing
+files, or files under a package directory. If declaration analysis is
+incomplete or finds a module with a conditional `#[path]` it cannot resolve,
+Gamma refuses the exception rather than assuming the file is unowned.
+Declaration evidence is limited to the parsed workspace inventory: it does
+not resolve `include!` arguments or recursively follow declarations from files
+outside that inventory.
 
 ### Source policy
 

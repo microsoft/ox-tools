@@ -590,7 +590,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-gamma"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "cargo-gamma-attrs",
  "cargo-gamma-lib",
@@ -641,7 +641,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-gamma-lib"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "blake3",
  "bolero",

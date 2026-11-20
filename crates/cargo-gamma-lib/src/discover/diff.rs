@@ -187,10 +187,40 @@ impl Diff {
     /// change names nothing. Both mean the diff was not understood, and continuing would run fewer
     /// mutants than the change deserves while reporting a score as though it had run them all.
     pub fn resolve(&mut self, root: &Utf8Path, candidates: &[Utf8PathBuf]) -> Result<()> {
+        self.resolve_with(root, candidates, None)
+    }
+
+    /// Resolves paths with enough workspace context to distinguish standalone Rust scripts from
+    /// source owned by a package.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::resolve`], except that an exact existing Rust path outside
+    /// every package directory is treated as understood but unowned when it is not a module target.
+    /// Propagates an error if module ownership evidence is needed but cannot be loaded.
+    pub(super) fn resolve_for_workspace(
+        &mut self,
+        root: &Utf8Path,
+        candidates: &[Utf8PathBuf],
+        package_directories: &[Utf8PathBuf],
+        mut load_module_targets: impl FnMut() -> Result<HashSet<Utf8PathBuf>>,
+    ) -> Result<()> {
+        self.resolve_with(
+            root,
+            candidates,
+            Some(WorkspacePaths {
+                package_directories,
+                load_module_targets: &mut load_module_targets,
+            }),
+        )
+    }
+
+    fn resolve_with(&mut self, root: &Utf8Path, candidates: &[Utf8PathBuf], mut workspace: Option<WorkspacePaths<'_>>) -> Result<()> {
         let named = core::mem::take(&mut self.touched);
         let sources = core::mem::take(&mut self.sources);
         let mut resolved: HashMap<Utf8PathBuf, Vec<u32>> = HashMap::default();
         let mut unresolved: Vec<Utf8PathBuf> = Vec::new();
+        let mut module_targets = None;
 
         // Built once, because every exact and every peeled candidate is looked up in it and the
         // peeling makes that several lookups per path. Scanning the workspace file list instead
@@ -198,8 +228,33 @@ impl Diff {
         // request — where time to first output is the whole point.
         let known: HashSet<&Utf8Path> = candidates.iter().map(Utf8PathBuf::as_path).collect();
 
-        for (path, lines) in named {
+        for (mut path, lines) in named {
             let raw = sources.get(&path).unwrap_or(&path).clone();
+
+            if let Some(workspace) = workspace.as_mut() {
+                if let Ok(relative) = path.strip_prefix(".") {
+                    path = relative.to_owned();
+                }
+
+                if known.contains(path.as_path()) {
+                    resolved.entry(path).or_default().extend(lines);
+                    continue;
+                }
+
+                if is_standalone_rust_path(root, &path, workspace.package_directories) {
+                    let targets = match &mut module_targets {
+                        Some(targets) => targets,
+                        empty => empty.insert((workspace.load_module_targets)()?),
+                    };
+                    if targets.contains(&super::modules::identity(&root.join(&path))) {
+                        unresolved.push(raw);
+                    }
+
+                    // This exact file is either unowned or unresolved; neither outcome should
+                    // redirect its line numbers to a different file via fuzzy matching.
+                    continue;
+                }
+            }
 
             if let Some(found) = locate(&path, &raw, root, &known, candidates) {
                 resolved.entry(found).or_default().extend(lines);
@@ -455,6 +510,24 @@ fn locate_with(
             .find(|candidate| safe_relative(candidate) && candidate.extension() != Some("rs") && is_file(&root.join(candidate)))
             .map(ToOwned::to_owned),
     }
+}
+
+/// Workspace ownership evidence used only for exact Rust files outside package directories.
+struct WorkspacePaths<'a> {
+    package_directories: &'a [Utf8PathBuf],
+    load_module_targets: &'a mut dyn FnMut() -> Result<HashSet<Utf8PathBuf>>,
+}
+
+fn is_standalone_rust_path(root: &Utf8Path, path: &Utf8Path, package_directories: &[Utf8PathBuf]) -> bool {
+    if path.extension() != Some("rs") || !safe_relative(path) {
+        return false;
+    }
+
+    if package_directories.iter().any(|directory| path.starts_with(directory)) {
+        return false;
+    }
+
+    root.join(path).is_file()
 }
 
 /// Whether a path can be interpreted relative to the workspace without escaping it.
@@ -1068,6 +1141,119 @@ diff --git before/old.rs next/a.rs
 
         assert!(diff.touches(Utf8Path::new("src/lib.rs"), 2, 2));
         assert!(!diff.touches_file(&source), "the absolute spelling must not survive resolution");
+    }
+
+    #[test]
+    fn an_exact_standalone_script_does_not_select_a_source_with_the_same_suffix() {
+        let root = Utf8Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Utf8Path::parent)
+            .expect("the crate is two levels below the workspace root");
+        let script = Utf8Path::new("scripts/publish-gh-release.rs");
+        assert!(root.join(script).is_file(), "the checked-in standalone script exists");
+        let text = concat!(
+            "diff --git a/scripts/publish-gh-release.rs b/scripts/publish-gh-release.rs\n",
+            "--- a/scripts/publish-gh-release.rs\n",
+            "+++ b/scripts/publish-gh-release.rs\n",
+            "@@ -1 +1,2 @@\n",
+            " old\n",
+            "+new\n",
+            "diff --git a/README.md b/README.md\n",
+            "--- a/README.md\n",
+            "+++ b/README.md\n",
+            "@@ -1 +1,2 @@\n",
+            " old\n",
+            "+new\n",
+        );
+        let mut diff = Diff::parse(text);
+        let suffix = Utf8PathBuf::from("publish-gh-release.rs");
+
+        diff.resolve_for_workspace(
+            root,
+            core::slice::from_ref(&suffix),
+            &[Utf8PathBuf::from("crates/cargo-gamma-lib")],
+            || Ok(HashSet::default()),
+        )
+        .expect("a standalone script is understood without becoming a mutation candidate");
+
+        assert!(!diff.touches_file(script));
+        assert!(!diff.touches_file(&suffix));
+        assert!(diff.touches_file(Utf8Path::new("README.md")));
+    }
+
+    #[test]
+    fn an_exact_module_target_does_not_fall_through_to_a_suffix_match() {
+        let root = Utf8Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Utf8Path::parent)
+            .expect("the crate is two levels below the workspace root");
+        let script = Utf8Path::new("scripts/publish-gh-release.rs");
+        let module_targets = HashSet::from_iter([crate::discover::modules::identity(&root.join(script))]);
+        let text = "--- a/scripts/publish-gh-release.rs\n+++ b/scripts/publish-gh-release.rs\n@@ -1 +1,2 @@\n old\n+new\n";
+        let mut diff = Diff::parse(text);
+
+        let error = diff
+            .resolve_for_workspace(
+                root,
+                &[Utf8PathBuf::from("publish-gh-release.rs")],
+                &[Utf8PathBuf::from("crates/cargo-gamma-lib")],
+                || Ok(module_targets.clone()),
+            )
+            .expect_err("a direct module target is mutation source");
+
+        assert!(error.is_usage(), "{error}");
+        assert!(error.to_string().contains(script.as_str()), "{error}");
+    }
+
+    #[test]
+    fn an_exact_inventoried_target_does_not_require_module_evidence() {
+        let text = "--- a/./scripts/target.rs\n+++ b/./scripts/target.rs\n@@ -1 +1,2 @@\n old\n+new\n";
+        let mut diff = Diff::parse(text);
+        let target = Utf8PathBuf::from("scripts/target.rs");
+
+        diff.resolve_for_workspace(Utf8Path::new("unused"), core::slice::from_ref(&target), &[], || {
+            panic!("an inventoried target needs no standalone ownership check")
+        })
+        .unwrap();
+
+        assert!(diff.touches(&target, 2, 2));
+    }
+
+    #[test]
+    fn standalone_exemption_requires_an_exact_safe_file_outside_every_package() {
+        let root = Utf8Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Utf8Path::parent)
+            .expect("the crate is two levels below the workspace root");
+        let absolute = root.join("scripts/publish-gh-release.rs");
+        let package_directories = [Utf8PathBuf::from("crates/cargo-gamma-lib")];
+        for path in [
+            Utf8PathBuf::from("crates/cargo-gamma-lib/src/discover/diff.rs"),
+            Utf8PathBuf::from("./crates/cargo-gamma-lib/src/discover/diff.rs"),
+            Utf8PathBuf::from("scripts/missing.rs"),
+            Utf8PathBuf::from("prefix/scripts/publish-gh-release.rs"),
+            Utf8PathBuf::from("../ox-tools-gamma-script/scripts/publish-gh-release.rs"),
+            absolute,
+        ] {
+            let text = format!("--- {path}\n+++ {path}\n@@ -1 +1,2 @@\n old\n+new\n");
+            let mut diff = Diff::parse(&text);
+
+            let error = diff
+                .resolve_for_workspace(root, &[], &package_directories, || {
+                    panic!("this path does not qualify for an ownership check")
+                })
+                .expect_err("only an exact safe standalone path can use the exemption");
+
+            assert!(error.is_usage(), "{path}: {error}");
+            assert!(error.to_string().contains(path.as_str()), "{path}: {error}");
+        }
+
+        let text = "--- scripts/publish-gh-release.rs\n+++ scripts/publish-gh-release.rs\n@@ -1 +1,2 @@\n old\n+new\n";
+        let mut diff = Diff::parse(text);
+        let error = diff
+            .resolve_for_workspace(root, &[], &[Utf8PathBuf::new()], || panic!("a root package owns every path"))
+            .expect_err("a package whose directory is the workspace root owns every path below it");
+        assert!(error.is_usage(), "{error}");
     }
 
     #[test]

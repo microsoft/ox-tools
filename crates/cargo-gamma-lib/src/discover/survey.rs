@@ -613,7 +613,10 @@ impl Survey {
         if let Some(diff) = diff.as_mut() {
             walked.sort();
             walked.dedup();
-            diff.resolve(&root, &walked)?;
+            let package_directories: Vec<Utf8PathBuf> = specs.values().map(|(directory, _version)| directory.clone()).collect();
+            diff.resolve_for_workspace(&root, &walked, &package_directories, || {
+                declared_module_targets(&declaration_files, &cfgs)
+            })?;
 
             // A file the diff does not mention cannot contain a changed line, so it is dropped
             // before it is parsed rather than after, which is most of what makes `--in-diff` fast
@@ -2252,6 +2255,60 @@ fn placed_under(root: &Utf8Path, absolute: &Utf8Path, package: &str) -> Result<U
     Ok(Utf8PathBuf::from(normalize_separators(inside.as_str())))
 }
 
+/// Module targets owned by the declaration inventory, including direct paths outside a source
+/// directory. `include!` is deliberately not part of this proof.
+fn declared_module_targets(declaration_files: &HashMap<String, Vec<Utf8PathBuf>>, cfgs: &Cfgs) -> Result<HashSet<Utf8PathBuf>> {
+    let files: Vec<(&Utf8Path, &CfgSet, &str)> = declaration_files
+        .iter()
+        .flat_map(|(package, paths)| {
+            let cfg = cfgs.for_package(package);
+            paths.iter().map(move |path| (path.as_path(), cfg, package.as_str()))
+        })
+        .collect();
+
+    module_targets_from(parse_declarations_with_parser(
+        &files,
+        thread::available_parallelism,
+        parse_declarations_for_ownership,
+    )?)
+}
+
+fn parse_declarations_for_ownership(path: &Utf8Path, cfg: &CfgSet) -> Result<DeclarationOutcome> {
+    parse_declarations_with(path, cfg, |path, ast, cfg| {
+        if modules::has_conditional_path(&ast.items) {
+            return Err(error!(
+                "cannot prove that a standalone Rust diff path is unowned: `{path}` has a module with a conditional `#[path]` that gamma cannot resolve"
+            )
+            .usage());
+        }
+
+        module_identities::declarations(path, ast, cfg)
+    })
+}
+
+fn module_targets_from(declarations: Declarations) -> Result<HashSet<Utf8PathBuf>> {
+    if !declarations.skipped.is_empty() {
+        let skipped = declarations
+            .skipped
+            .iter()
+            .map(|(path, reason)| format!("{path}: {reason}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        return Err(error!(
+            "cannot prove that a standalone Rust diff path is unowned because declaration analysis was incomplete ({skipped})"
+        )
+        .usage());
+    }
+
+    Ok(declarations
+        .declared
+        .into_iter()
+        .flat_map(|(_path, declarations)| declarations)
+        .map(|declaration| modules::identity(&declaration.target))
+        .collect())
+}
+
 /// Loads cargo metadata for the tree at `dir`.
 ///
 /// The feature selection has to match the one the build will use. Metadata decides which targets
@@ -3794,6 +3851,23 @@ mod tests {
         assert!(failure.to_string().contains("missing.rs"));
         let result = parse_declarations_of(&missing, &cfg);
         assert_eq!(result.unwrap_err().to_string(), failure.to_string());
+    }
+
+    #[test]
+    fn incomplete_declaration_evidence_cannot_prove_a_standalone_rust_path_is_unowned() {
+        let result = module_targets_from(Declarations {
+            digests: HashMap::default(),
+            named: Vec::new(),
+            declared: Vec::new(),
+            skipped: vec![(Utf8PathBuf::from("src/lib.rs"), "too deeply nested".into())],
+            defaults: HashMap::default(),
+            incomplete_packages: HashSet::default(),
+        });
+
+        let error = result.expect_err("incomplete declaration evidence cannot justify ignoring a Rust path");
+        assert!(error.is_usage(), "{error}");
+        assert!(error.to_string().contains("src/lib.rs"), "{error}");
+        assert!(error.to_string().contains("declaration analysis was incomplete"), "{error}");
     }
 
     #[test]
