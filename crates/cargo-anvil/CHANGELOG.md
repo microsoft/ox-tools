@@ -20,6 +20,7 @@
 
 - 🐛 Bug Fixes
 
+  - cargo-anvil: align generated contracts
   - cargo-anvil: avoid macro doc warnings
   - cargo-anvil: consolidate release version
   - cargo-anvil: validate nightly component artifacts
@@ -62,6 +63,8 @@
 
 - 🧩 Miscellaneous
 
+  - Add one more principle
+  - Remove implementation plans
   - Add cargo-anvil principles
   - Merge latest main into cargo-anvil consolidation
   - Merge current main into cargo-anvil consolidation
