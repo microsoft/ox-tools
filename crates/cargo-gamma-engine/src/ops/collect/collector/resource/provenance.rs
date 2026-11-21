@@ -36,11 +36,14 @@ impl<'ast> Visit<'ast> for Calls {
 }
 
 fn vector_length(expression: &Expr, bindings: &HashMap<String, Binding>) -> bool {
-    let Expr::MethodCall(length) = expression else { return false }; // #[gamma::skip(return_value.default, reason = "false is the bool default.", tag = "equivalent")]
+    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+    let Expr::MethodCall(length) = expression else { return false };
     if !length.attrs.is_empty() || length.method != "len" || !length.args.is_empty() || length.turbofish.is_some() {
-        return false; // #[gamma::skip(return_value.default, reason = "false is the bool default.", tag = "equivalent")]
+        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+        return false;
     }
-    let Expr::Path(receiver) = &*length.receiver else { return false }; // #[gamma::skip(return_value.default, reason = "false is the bool default.", tag = "equivalent")]
+    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+    let Expr::Path(receiver) = &*length.receiver else { return false };
     receiver.path.get_ident().is_some_and(|name| {
         matches!(
             bindings.get(&name.to_string()),
@@ -215,6 +218,7 @@ impl Collector<'_> {
                 && let Some(kind @ (Binding::Vec | Binding::VecChar)) = self.resource_binding(&ty, &self.scope_path)
             {
                 let _prior = bindings.insert(name, kind);
+                // #[gamma::skip(loop.continue_to_break, reason = "standard_constructor_type recognizes String, Result, wrapper, I/O, and time owners, never Vec. Aliases resolve before owner matching, so none of its returned types can satisfy this Vec/VecChar resource_binding pattern.", tag = "equivalent")]
                 continue;
             }
             let Some(signature) = self.call_signature(&call.func) else {

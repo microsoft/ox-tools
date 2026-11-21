@@ -1,7 +1,7 @@
 version = 2
 tool = "anvil"
-tool_version = "0.25.1"
-catalog_checksum = "sha256:8aa682e5e6f988d7435c30343bf422e5d5d1f2da67b0f1d968c329e6771d83de"
+tool_version = "0.25.3"
+catalog_checksum = "sha256:9d88a04520c6c768df8e4e35fad88f7eccd51dcafa63d7d32ae673eb9e16301e"
 
 [[file]]
 path = ".anvil/container/Dockerfile.dockerignore"
@@ -133,7 +133,7 @@ checksum = "sha256:48485bbdcde7b5994c5f4ae76bcf54dab91672be75b52fc205662e004e5fb
 
 [[file]]
 path = "justfiles/anvil/checks/llvm-cov.just"
-checksum = "sha256:8f9823d938072ee3d16e7489279bb3f221ce65557ea9557e7dc366746a3d764b"
+checksum = "sha256:7e771b38f383c132228b8257582711b1642351fc09f1edd4741a20304ceffd21"
 
 [[file]]
 path = "justfiles/anvil/checks/loom.just"
@@ -261,7 +261,7 @@ checksum = "sha256:b186593e6bec7f3aa3ed56358e4e75ceacdab7a835b7dabb9128f60b94523
 
 [[file]]
 path = "justfiles/anvil/versions.just"
-checksum = "sha256:2e3e981e71ec7e2a84b6f1688e9a9eaaecae89724d87b05ea6f24a4029f805f5"
+checksum = "sha256:2a11f678638b53fd9e043212e05ac6111193034fecbe211ccf2fd394d878caaa"
 
 [[region]]
 host = ".anvil/container/Dockerfile"

@@ -4,7 +4,7 @@
 [package]
 name = "cargo-gamma-lib"
 description = "Internal library for cargo-gamma"
-version = "0.6.0"
+version = "0.7.0"
 readme = "README.md"
 keywords = ["cargo", "mutation-testing", "testing"]
 categories = ["development-tools::testing"]
@@ -88,7 +88,6 @@ bolero-engine = { workspace = true, features = ["any"] }
 # cross-crate agreement tests available without adding a registry or release-order dependency.
 cargo-gamma-attrs-impl = { path = "../cargo-gamma-attrs-impl", features = ["agreement"] }
 cargo-gamma-process = { workspace = true, features = ["fault-injection"] }
-chrono = { workspace = true, features = ["std"] }
 quote = { workspace = true }
 tempfile = { workspace = true }
 tick = { workspace = true, features = ["test-util"] }

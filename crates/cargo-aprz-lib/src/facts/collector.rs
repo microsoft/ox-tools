@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::ptr::addr_of;
 use std::sync::Arc;
 
-use chrono::Utc;
+use jiff::Timestamp;
 use ohno::IntoAppError;
 
 use super::cache::Cache;
@@ -88,7 +88,7 @@ impl Collector {
                 &crates_cache_dir,
                 crates_cache_ttl,
                 Arc::clone(&progress),
-                Utc::now(),
+                Timestamp::now(),
                 ignore_cached,
                 // #[gamma::skip(option.some_to_none, tag = "timeout", reason = "dropping the configured dump endpoint sends tests to the production crates.io download")]
                 Some(endpoints.dump_url()),
@@ -236,7 +236,6 @@ fn create_cache_dir(base_path: impl AsRef<Path>, name: impl AsRef<str>) -> Resul
             #[cfg(not(windows))]
             {
                 let _ = path;
-                // #[gamma::skip(literal.bool_flip, reason = "This non-Windows adapter delegates creation to native create_dir_all instead of the Windows existence probe; observing omission requires native cache fixtures or the deferred complete filesystem backend.", tag = "native-boundary")]
                 false
             }
         },
@@ -649,9 +648,9 @@ mod portable_tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
-    use chrono::Utc;
     use flate2::Compression;
     use flate2::write::GzEncoder;
+    use jiff::Timestamp;
     use semver::Version;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -933,7 +932,7 @@ mod portable_tests {
     }
 
     fn found_crates_data() -> CratesData {
-        let now = Utc::now();
+        let now = Timestamp::now();
         CratesData::new(
             CrateVersionData {
                 description: "fixture".into(),

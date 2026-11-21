@@ -127,7 +127,7 @@ mod tests {
     use std::panic::catch_unwind;
     use std::sync::Arc;
 
-    use chrono::{DateTime, Utc};
+    use jiff::Timestamp;
 
     use super::*;
     use crate::expr::{Appraisal, ExpressionOutcome};
@@ -180,9 +180,7 @@ mod tests {
 
     #[test]
     fn test_metric_value_to_json_datetime() {
-        let dt = DateTime::parse_from_rfc3339("2024-01-15T10:30:00Z").unwrap();
-        let dt_utc: DateTime<Utc> = dt.into();
-        let value = MetricValue::DateTime(dt_utc);
+        let value = MetricValue::DateTime("2024-01-15T10:30:00Z".parse::<Timestamp>().unwrap());
         let json = metric_value_to_json(&value, &mut String::new());
         assert!(json.as_str().unwrap().contains("2024-01-15"));
     }

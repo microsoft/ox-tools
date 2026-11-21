@@ -837,6 +837,14 @@ mod tests {
     }
 
     #[test]
+    fn wrap_text_resets_display_width_when_starting_a_shorter_continuation() {
+        assert_eq!(
+            wrap_text("something a bb ccc dd eee", 12, 2),
+            ["something", "  a bb ccc", "  dd eee"]
+        );
+    }
+
+    #[test]
     fn wrap_text_indents_every_continuation_after_the_first_line() {
         assert_eq!(
             wrap_text("aaaaa bbbbb ccccc ddddd", 11, 2),

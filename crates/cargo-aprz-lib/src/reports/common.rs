@@ -34,7 +34,8 @@ pub fn write_metric_value(buf: &mut String, value: &MetricValue) {
         }
         MetricValue::String(s) => buf.push_str(s),
         MetricValue::DateTime(dt) => {
-            let _ = write!(buf, "{}", dt.format("%Y-%m-%d"));
+            let date = dt.to_zoned_datetime(jiff::tz::TimeZone::UTC).date();
+            let _ = write!(buf, "{date}");
         }
         MetricValue::List(values) => {
             for (i, value) in values.iter().enumerate() {
@@ -293,7 +294,7 @@ pub fn build_metric_lookup_maps(crates: &[super::ReportableCrate]) -> Vec<HashMa
 mod tests {
     use core::fmt::Write as _;
 
-    use chrono::{DateTime, Utc};
+    use jiff::Timestamp;
 
     use super::*;
     use crate::metrics::MetricDef;
@@ -357,11 +358,8 @@ mod tests {
 
     #[test]
     fn test_format_metric_value_datetime() {
-        let dt = DateTime::parse_from_rfc3339("2024-01-15T10:30:00Z").unwrap();
-        let dt_utc: DateTime<Utc> = dt.into();
-
         // All datetime values show only the date
-        let formatted = format_metric_value(&MetricValue::DateTime(dt_utc));
+        let formatted = format_metric_value(&MetricValue::DateTime("2024-01-15T10:30:00Z".parse::<Timestamp>().unwrap()));
         assert_eq!(formatted, "2024-01-15");
     }
 

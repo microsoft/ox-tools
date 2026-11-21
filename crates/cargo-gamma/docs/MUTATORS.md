@@ -992,6 +992,11 @@ mind is about reading a report rather than about the catalog: a file full of `co
 few mutants or none, and that is a statement about where this tool can reach, not evidence that the
 code is well tested.
 
+**Already-default return values are omitted.** `None` in an `Option` return and `false` in a
+boolean return are omitted when `Default::default()` is proven to resolve to the standard trait.
+An unrelated same-named type elsewhere in the package does not invalidate lexical proof;
+actual shadows, unresolved imports, and opaque expansion still prevent it.
+
 ### How return values are synthesized
 
 `fn_value` recurses through the return type rather than reaching straight for `Default::default()`.
@@ -1126,8 +1131,9 @@ expected. Control leaves such an expression before it produces a value, so `expr
 `return !(ready)` is offered.
 
 A macro can expand to a `break`, so a `loop` that calls a macro other than a standard one such as
-`println!` or `assert!`, or passes a `break` or a `!` to one, is still mutated. A labeled block is
-still mutated too, because a `break` to its label produces a value before its last statement runs.
+`println!` or `assert!`, or passes a `break` or a `!` to one, is still mutated. A labeled block that
+may break is still mutated too, because a `break` to its label produces a value before its last
+statement runs.
 
 `Default::default()` is not offered for the `default` method of an `impl Default`, because there it
 names the very function being replaced and the mutant is unbounded recursion rather than a different

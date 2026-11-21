@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -22,6 +22,6 @@ pub struct CodebaseData {
     pub commits_last_180_days: u64,
     pub commits_last_365_days: u64,
     pub commit_count: u64,
-    pub first_commit_at: DateTime<Utc>,
-    pub last_commit_at: DateTime<Utc>,
+    pub first_commit_at: Timestamp,
+    pub last_commit_at: Timestamp,
 }

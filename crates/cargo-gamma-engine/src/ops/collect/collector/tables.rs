@@ -41,9 +41,8 @@ pub(super) fn method_renames(method: &str, arity: usize) -> Option<&'static [(&'
         ("trim_end", 0) => &[("string.trim_end_to_trim_start", "trim_start")],
 
         _ => {
-            return
-        // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-        None;
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+            return None;
         }
     };
 
@@ -58,9 +57,8 @@ pub(super) fn method_renames(method: &str, arity: usize) -> Option<&'static [(&'
 /// into generic statement deletion.
 pub(super) fn in_place_reorder(expression: &Expr) -> Option<&'static str> {
     let Expr::MethodCall(call) = expression else {
-        return
-        // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-        None;
+        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+        return None;
     };
 
     match call.method.to_string().as_str() {

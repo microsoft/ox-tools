@@ -168,7 +168,6 @@ impl Diff {
         }
 
         sources.retain(|path, _raw| touched.contains_key(path));
-        // #[gamma::skip(call_result.default, reason = "normalize_lines returns unit and this mutator still sorts and deduplicates the same lines before replacing unit with unit")]
         normalize_lines(&mut touched);
 
         Self { touched, sources }
@@ -248,7 +247,6 @@ impl Diff {
             .usage());
         }
 
-        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
         normalize_lines(&mut resolved);
         self.touched = resolved;
 

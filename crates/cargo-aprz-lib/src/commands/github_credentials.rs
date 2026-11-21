@@ -399,7 +399,6 @@ fn executable_names(program: &OsStr, _: Option<&OsStr>) -> Vec<OsString> {
 }
 
 #[cfg(unix)]
-// #[gamma::skip(fn_value.bool_true, reason = "This wrapper reads native executable Metadata; is_executable_with retains the regular-file, execute-bit and inspection-error policy under supplied observations.", tag = "native-boundary")]
 fn is_executable(candidate: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt as _;
 
@@ -892,32 +891,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn successful_child_process_sets_success() {
-        let executable = std::env::current_exe().expect("the test harness executable has an absolute path");
-        let module = module_path!().split_once("::").map_or(module_path!(), |(_, module)| module);
-        let fixture = format!("{module}::successful_child_fixture");
-        let output = run_gh_command(GhCommandRequest {
-            executable,
-            args: ["--ignored", "--exact"]
-                .into_iter()
-                .map(OsString::from)
-                .chain(std::iter::once(OsString::from(fixture)))
-                .collect(),
-            stdin: GhStdio::Null,
-            stdout: GhStdio::Capture,
-            stderr: GhStdio::Null,
-            timeout: Duration::from_secs(5),
-        })
-        .await
-        .expect("the fixture process exits successfully");
+    async fn command_output_preserves_exit_success_and_stdout() {
+        #[cfg(unix)]
+        use std::os::unix::process::ExitStatusExt as _;
+        #[cfg(windows)]
+        use std::os::windows::process::ExitStatusExt as _;
 
-        assert!(output.success);
+        for (status, success) in [(0, true), (1, false)] {
+            let output = run_gh_command_with_output(
+                GhCommandRequest {
+                    executable: PathBuf::from("scripted-gh"),
+                    args: vec!["auth".into(), "token".into()],
+                    stdin: GhStdio::Null,
+                    stdout: GhStdio::Capture,
+                    stderr: GhStdio::Null,
+                    timeout: GH_COMMAND_TIMEOUT,
+                },
+                |request, kill_on_drop| {
+                    assert_eq!(request.executable, Path::new("scripted-gh"));
+                    assert!(kill_on_drop);
+                    Ok(())
+                },
+                |()| {
+                    std::future::ready(Ok(std::process::Output {
+                        status: std::process::ExitStatus::from_raw(status),
+                        stdout: b"fixture-token\n".to_vec(),
+                        stderr: b"ignored diagnostic".to_vec(),
+                    }))
+                },
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(output.success, success);
+            assert_eq!(output.stdout, b"fixture-token\n");
+        }
     }
-
-    #[test]
-    #[ignore = "subprocess fixture for successful_child_process_sets_success"]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn successful_child_fixture() {}
 
     #[tokio::test]
     async fn command_timeout_is_reported_and_does_not_wait_for_the_child() {

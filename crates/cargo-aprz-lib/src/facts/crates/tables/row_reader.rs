@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use chrono::{DateTime, TimeZone, Utc};
+use jiff::Timestamp;
 use semver::{BuildMetadata, Prerelease, Version};
 
 #[derive(Debug)]
@@ -52,10 +52,10 @@ impl<'a> RowReader<'a> {
         (self.read_byte() != 0).then(|| self.read_u64())
     }
 
-    pub fn read_datetime(&mut self) -> DateTime<Utc> {
+    pub fn read_datetime(&mut self) -> Timestamp {
         let timestamp = self.read_u64();
         let timestamp = i64::try_from(timestamp).expect("timestamp in range");
-        Utc.timestamp_opt(timestamp, 0).single().expect("valid timestamp")
+        Timestamp::from_second(timestamp).expect("timestamp was in range when the table was written")
     }
 
     pub fn read_version(&mut self) -> Version {
@@ -170,7 +170,7 @@ mod tests {
 
         assert_eq!(
             RowReader::new(&buffer).read_datetime(),
-            Utc.timestamp_opt(1, 0).single().expect("one second after the epoch is valid")
+            Timestamp::from_second(1).expect("one second after the epoch is valid")
         );
     }
 }

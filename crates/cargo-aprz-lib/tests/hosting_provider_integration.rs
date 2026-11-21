@@ -18,7 +18,7 @@ use std::sync::Arc;
 use cargo_aprz_lib::internals::facts::cache::Cache;
 use cargo_aprz_lib::internals::facts::hosting::{HostingData, Provider};
 use cargo_aprz_lib::internals::facts::{BugLabelMatcher, CrateSpec, Endpoints, Progress, ProviderResult, RepoSpec, RequestTracker};
-use chrono::{DateTime, SecondsFormat, Utc};
+use jiff::{Timestamp, ToSpan};
 use semver::Version;
 use serde_json::json;
 use url::Url;
@@ -57,12 +57,14 @@ fn repo_body(stars: i64, forks: i64, subscribers: i64) -> serde_json::Value {
     })
 }
 
-fn days_ago(days: i64) -> DateTime<Utc> {
-    Utc::now() - chrono::Duration::days(days)
+fn days_ago(days: i64) -> Timestamp {
+    Timestamp::now() - (days * 24).hours()
 }
 
-fn ts(when: DateTime<Utc>) -> String {
-    when.to_rfc3339_opts(SecondsFormat::Secs, true)
+fn ts(when: Timestamp) -> String {
+    Timestamp::from_second(when.as_second())
+        .expect("truncating a timestamp to whole seconds remains in range")
+        .to_string()
 }
 
 /// A GitHub-shaped issue payload.
@@ -411,7 +413,7 @@ async fn retries_after_a_primary_rate_limit() {
 
     // The first repository request is rate-limited, with a reset a few seconds out so the
     // provider pauses its throttler before retrying.
-    let reset_at = (Utc::now() + chrono::Duration::seconds(3)).timestamp();
+    let reset_at = (Timestamp::now() + 3.seconds()).as_second();
     Mock::given(method("GET"))
         .and(path("/repos/o/r"))
         .respond_with(
@@ -455,7 +457,7 @@ async fn retries_immediately_when_the_rate_limit_has_already_reset() {
 
     // A reset time in the past means there is nothing to wait for, so the provider
     // retries without pausing.
-    let reset_at = (Utc::now() - chrono::Duration::seconds(30)).timestamp();
+    let reset_at = (Timestamp::now() - 30.seconds()).as_second();
     Mock::given(method("GET"))
         .and(path("/repos/o/r"))
         .respond_with(
@@ -502,7 +504,7 @@ async fn rate_limited_issue_page_is_retried() {
         .mount(&server)
         .await;
 
-    let reset_at = Utc::now().timestamp();
+    let reset_at = Timestamp::now().as_second();
     Mock::given(method("GET"))
         .and(path("/repos/o/r/issues"))
         .respond_with(
@@ -543,7 +545,7 @@ async fn forbidden_with_quota_remaining_is_a_failure() {
         .respond_with(
             ResponseTemplate::new(403)
                 .insert_header("x-ratelimit-remaining", "4999")
-                .insert_header("x-ratelimit-reset", Utc::now().timestamp().to_string().as_str()),
+                .insert_header("x-ratelimit-reset", Timestamp::now().as_second().to_string().as_str()),
         )
         .expect(1)
         .mount(&server)
@@ -870,7 +872,7 @@ async fn a_rate_limit_in_one_repository_pauses_the_others() {
     // One repository is rate-limited straight away, with a reset far enough out that the
     // other two repositories observe the paused throttler mid-fetch: one while waiting
     // for its repository record, the other between issue pages.
-    let reset_at = (Utc::now() + chrono::Duration::seconds(2)).timestamp();
+    let reset_at = (Timestamp::now() + 2.seconds()).as_second();
     Mock::given(method("GET"))
         .and(path("/repos/o/limited"))
         .respond_with(

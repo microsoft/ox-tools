@@ -8,6 +8,17 @@ The minimum supported Rust version is 1.97. The development toolchain remains
 newer. The parser dependency stays on `ra_ap_syntax` 0.0.349 because later
 releases require Rust 1.98, beyond the supported Azure publishing compiler.
 
+APRZ represents instants as Jiff timestamps and calendar dates as Jiff civil
+dates. Date-only metric values and crates.io download-table day counts use UTC
+calendar days. The HTML report header and rate-limit display use local time;
+the CEL `now` value retains the local offset. Expression evaluation converts
+timestamps to Chrono at the CEL boundary because CEL's
+timestamp feature still requires Chrono. Negative fractional Jiff timestamps
+are normalized to Chrono's floor-second and nonnegative-nanosecond representation
+so the conversion preserves the instant.
+CEL cannot represent UTC offsets of 24 hours or more; APRZ reports an
+evaluation error for such local offsets rather than changing the offset.
+
 ## Policy string sizes
 
 For string metrics in custom policies, both `size(crate.description)` and
@@ -59,6 +70,9 @@ three retries for transport errors,
 body failures through a separate whole-transfer Seatbelt wrapper. Transport errors
 and unsuccessful HTTP responses that exhaust request resilience are returned
 without restarting documentation or crates.io dump downloads.
+Hosting-provider rate-limit pauses are capped at one hour, and `Retry-After`
+delays are capped before calculating the provider's reset timestamp. Request
+retry middleware separately honors the full explicit `Retry-After` delay.
 Request timeouts apply to each attempt at each redirect hop. Responses remain streamed for large database and documentation
 downloads.
 Small response bodies (coverage badges, hosting API JSON, and documentation error

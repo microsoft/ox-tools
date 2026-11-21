@@ -19,6 +19,9 @@ use crate::{HashMap, HashSet};
 mod cache;
 mod paths;
 mod ranges;
+pub(in super::super) mod retry;
+#[path = "retry.rs"]
+pub(super) mod source_retry;
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -47,13 +50,15 @@ impl Primitive {
             "f32" => Self::Float(32),
             "f64" => Self::Float(64),
             // Target pointer width is not a host property.
-            _ => return None, // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+            _ => return None,
         })
     }
 
     fn mask(self) -> Option<u128> {
         let (Self::Unsigned(width) | Self::Signed(width)) = self else {
-            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+            return None;
         };
         Some(u128::MAX >> (128 - width))
     }
@@ -70,6 +75,12 @@ enum Value {
     CharReference(char),
     MaybeChar(char),
     BoolCache(Vec<(u32, bool)>),
+    Population(Vec<u32>),
+    PopulationCache(Vec<(Vec<u32>, Option<bool>)>),
+    MaybeBool(Option<bool>),
+    Count(u16),
+    Partitions(Vec<Vec<u32>>),
+    Ordinals(Vec<u32>),
     Int(u128, Primitive),
     Float(u64, Primitive),
     UnsignedRange(u128, u128, Primitive, String),
@@ -87,10 +98,13 @@ impl Value {
     fn kind(&self) -> Binding {
         match self {
             Self::Bool(_) => Binding::Bool,
-            Self::IntegerZero | Self::IntegerSmall(_) => Binding::Integer,
+            Self::IntegerZero | Self::IntegerSmall(_) | Self::Count(_) => Binding::Integer,
             Self::CharReference(_) => Binding::CharReference,
             Self::MaybeChar(_) => Binding::MaybeChar,
             Self::BoolCache(_) => Binding::BoolCache,
+            Self::Population(_) | Self::PopulationCache(_) | Self::MaybeBool(_) | Self::Partitions(_) | Self::Ordinals(_) => {
+                Binding::Opaque
+            }
             Self::Char(_) => Binding::Char,
             Self::Int(_, primitive)
             | Self::Float(_, primitive)
@@ -404,10 +418,6 @@ pub(super) fn proves(
 /// Checks entry feasibility, loop recurrence, and replayed path assumptions under certified effects.
 ///
 /// Unknown evaluation or exhausted work withholds the proof; helper evidence is immutable.
-#[expect(
-    clippy::too_many_lines,
-    reason = "entry, recurrence, and bounded replay obligations form one proof"
-)]
 pub(super) fn proves_with_effects(
     original: &Expr,
     mutated: &Expr,
@@ -417,15 +427,38 @@ pub(super) fn proves_with_effects(
     numeric_names: bool,
     stable_calls: &HashMap<String, super::StableCall>,
 ) -> bool {
+    proves_with_retry_effects(original, mutated, bindings, seeds, helpers, numeric_names, stable_calls, None)
+}
+
+/// Extends the scalar recurrence proof only with supplied resolved, exact entry-cache evidence.
+///
+/// No snapshot is inferred from a historical timeout or the spelling of a helper or binding.
+#[expect(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "entry, recurrence, and bounded replay obligations share optional resolved cache evidence"
+)]
+pub(super) fn proves_with_retry_effects(
+    original: &Expr,
+    mutated: &Expr,
+    bindings: &HashMap<String, Binding>,
+    seeds: &HashMap<String, Expr>,
+    helpers: &HashMap<String, syn::ItemFn>,
+    numeric_names: bool,
+    stable_calls: &HashMap<String, super::StableCall>,
+    retry: Option<&retry::Effects<'_>>,
+) -> bool {
     let (Expr::While(original), Expr::While(mutated)) = (original, mutated) else {
-        return false; // #[gamma::skip(return_value.default, reason = "false is the bool default.", tag = "equivalent")]
+        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+        return false;
     };
     // Condition changes can introduce finite wrong-result paths, even when another input spins.
     if original.cond.to_token_stream().to_string() != mutated.cond.to_token_stream().to_string()
         || !mutated.attrs.is_empty()
         || mutated.label.is_some()
     {
-        return false; // #[gamma::skip(return_value.default, reason = "false is the bool default.", tag = "equivalent")]
+        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+        return false;
     }
     let mut machine = Machine {
         values: bindings
@@ -439,7 +472,7 @@ pub(super) fn proves_with_effects(
                 (name.clone(), Value::Symbol(name.clone(), kind))
             })
             .collect(),
-        budget: 256,
+        budget: if retry.is_some() { 4096 } else { 256 },
         writes: HashSet::default(),
         locals: HashSet::default(),
         facts: HashMap::default(),
@@ -449,6 +482,8 @@ pub(super) fn proves_with_effects(
         stable_calls: Some(stable_calls),
         paths: HashMap::default(),
         assumptions: Vec::new(),
+        retry,
+        breaks: false,
     };
     for (name, expression) in seeds {
         if let Some(kind) = machine.values.get(name).map(Value::kind)
@@ -456,23 +491,30 @@ pub(super) fn proves_with_effects(
         {
             let _prior = machine.values.insert(name.clone(), value);
         }
+        if retry.is_some_and(|retry| retry.install(&mut machine).is_none()) {
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+            return false; // #[gamma::skip(literal.bool_flip, reason = "Retry compares original and mutant with identical snapshots; changing this shared installation-failure result makes both proofs true and still rejects the mutation.", tag = "equivalent")]
+        }
     }
     let Some(before) = machine.eval(
         &mutated.cond,
         // #[gamma::skip(option.some_to_none, reason = "This nonprimitive expected-kind hint enables no additional evaluator form; successful values determine their own kind.", tag = "equivalent")]
         Some(Binding::Bool),
     ) else {
-        return false; // #[gamma::skip(return_value.default, reason = "false is the bool default.", tag = "equivalent")]
+        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+        return false;
     };
     if before == Value::Bool(false) || before.kind() != Binding::Bool {
-        return false; // #[gamma::skip(return_value.default, reason = "false is the bool default.", tag = "equivalent")]
+        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+        return false;
     }
     let initial = machine.values.clone();
     let mut selector = None;
     let mut pattern_binding = None;
     let (original_body, body) = if let Some((scrutinee, pattern, original_body, body)) = changed_arm(&original.body, &mutated.body) {
         let Some(value @ Value::Symbol(_, Binding::Char)) = machine.eval(scrutinee, None) else {
-            return false; // #[gamma::skip(return_value.default, reason = "false is the bool default.", tag = "equivalent")]
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+            return false;
         };
         let Some(fact) = identity(format_args!("{value:?}")) else {
             return false; // #[gamma::skip(literal.bool_flip, return_value.default, reason = "The Char selector was already evaluated with the same bounded identity before this check. false is the bool default.", tag = "equivalent")]
@@ -495,10 +537,18 @@ pub(super) fn proves_with_effects(
     } else {
         (&original.body, &mutated.body)
     };
-    machine.paths = paths::conditions(original_body, body);
+    machine.paths = if retry.is_some() {
+        HashMap::default()
+    } else {
+        paths::conditions(original_body, body)
+    };
+    if retry.is_some() && selector.is_none() {
+        return retry::population::repeats(&mut machine, &mutated.cond, body);
+    }
     let branch_facts = machine.facts.clone();
-    if machine.block(body).is_none() {
-        return false; // #[gamma::skip(return_value.default, reason = "false is the bool default.", tag = "equivalent")]
+    if machine.block(body).is_none() || machine.breaks {
+        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+        return false;
     }
     if let Some((name, previous)) = pattern_binding {
         if let Some(previous) = previous {
@@ -511,7 +561,8 @@ pub(super) fn proves_with_effects(
     if let Some((expression, expected)) = selector {
         machine.facts.clear();
         if machine.eval(expression, None).as_ref() != Some(&expected) {
-            return false; // #[gamma::skip(return_value.default, reason = "false is the bool default.", tag = "equivalent")]
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+            return false;
         }
     }
     machine.facts.clear();
@@ -524,7 +575,8 @@ pub(super) fn proves_with_effects(
         .as_ref()
         != Some(&before)
     {
-        return false; // #[gamma::skip(return_value.default, reason = "false is the bool default.", tag = "equivalent")]
+        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+        return false;
     }
     // Every outer scalar write must itself be a fixed point, not merely leave the current
     // condition unchanged. A hidden advancing state must not be mistaken for a recurrence.
@@ -541,8 +593,13 @@ pub(super) fn proves_with_effects(
             machine.facts = branch_facts;
             machine.restarts = false;
             let before_values = machine.values.clone();
-            if machine.block(body).is_none() || machine.assumptions != assumptions {
-                return false; // #[gamma::skip(return_value.default, reason = "false is the bool default.", tag = "equivalent")]
+            if (
+                // #[gamma::skip(logical.or_remove_right, reason = "Retry without a selector returns through population replay, and selected retry has no assumptions; this replay is non-retry and cannot set breaks.", tag = "equivalent")]
+                machine.block(body).is_none() || machine.breaks
+            ) || machine.assumptions != assumptions
+            {
+                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+                return false;
             }
             machine.facts.clear();
             return machine
@@ -564,23 +621,27 @@ pub(super) fn proves_with_effects(
         return true;
     }
     if focused {
-        return false; // #[gamma::skip(return_value.default, reason = "false is the bool default.", tag = "equivalent")]
+        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+        return false;
     }
     // One bounded warm-up may establish an inductive scalar invariant. Interval identities
     // remain distinct in predicates, so changing a ranged guard cannot masquerade as stable.
     let invariant = machine.values.clone();
     machine.restarts = false;
-    if machine.block(body).is_none()
-        || machine
-            .eval(
-                &mutated.cond,
-                // #[gamma::skip(option.some_to_none, reason = "This nonprimitive expected-kind hint enables no additional evaluator form; successful values determine their own kind.", tag = "equivalent")]
-                Some(Binding::Bool),
-            )
-            .as_ref()
-            != Some(&before)
+    if (
+        // #[gamma::skip(logical.or_remove_right, reason = "Retry without a selector already returned, and a selected proof cannot reach warm-up; this non-retry machine cannot set breaks.", tag = "equivalent")]
+        machine.block(body).is_none() || machine.breaks
+    ) || machine
+        .eval(
+            &mutated.cond,
+            // #[gamma::skip(option.some_to_none, reason = "This nonprimitive expected-kind hint enables no additional evaluator form; successful values determine their own kind.", tag = "equivalent")]
+            Some(Binding::Bool),
+        )
+        .as_ref()
+        != Some(&before)
     {
-        return false; // #[gamma::skip(return_value.default, reason = "false is the bool default.", tag = "equivalent")]
+        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+        return false;
     }
     machine.writes.iter().all(|name| {
         match (invariant.get(name), machine.values.get(name)) {
@@ -596,32 +657,40 @@ fn changed_arm<'a>(original: &'a Block, mutated: &'a Block) -> Option<(&'a Expr,
     let ([Stmt::Expr(Expr::Match(original), _)], [Stmt::Expr(Expr::Match(mutated), _)]) =
         (original.stmts.as_slice(), mutated.stmts.as_slice())
     else {
-        return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+        return None;
     };
     if !mutated.attrs.is_empty() || original.expr != mutated.expr || original.arms.len() != mutated.arms.len() {
-        return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+        return None;
     }
     let mut changed = None;
     for (left, right) in original.arms.iter().zip(&mutated.arms) {
         if left.pat != right.pat || !right.attrs.is_empty() {
-            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+            return None;
         }
         if !matches!(&right.pat, Pat::Lit(pattern) if pattern.attrs.is_empty() && matches!(pattern.lit, Lit::Char(_)))
             && !matches!(&right.pat, Pat::Ident(pattern) if pattern.attrs.is_empty() && pattern.subpat.is_none() && pattern.by_ref.is_none())
             && !matches!(&right.pat, Pat::Wild(pattern) if pattern.attrs.is_empty())
         {
-            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+            return None;
         }
         if left.body == right.body {
             continue;
         }
         if changed.is_some() {
-            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+            return None;
         }
-        let Expr::Block(body) = &*right.body else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
-        let Expr::Block(original_body) = &*left.body else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+        let Expr::Block(body) = &*right.body else { return None };
+        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+        let Expr::Block(original_body) = &*left.body else { return None };
         if !body.attrs.is_empty() || body.label.is_some() {
-            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+            return None;
         }
         changed = Some((&*mutated.expr, &right.pat, &original_body.block, &body.block));
     }
@@ -645,6 +714,8 @@ struct Machine<'a> {
     stable_calls: Option<&'a HashMap<String, super::StableCall>>,
     paths: HashMap<String, bool>,
     assumptions: Vec<(String, Value, bool)>,
+    retry: Option<&'a retry::Effects<'a>>,
+    breaks: bool,
 }
 
 impl Machine<'_> {
@@ -665,13 +736,16 @@ impl Machine<'_> {
                         Pat::Type(pat) if self.numeric_names => (&*pat.pat, primitive_type(&pat.ty).map(Binding::Primitive)),
                         pattern => (pattern, None),
                     };
-                    let Pat::Ident(pat) = pattern else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                    let Pat::Ident(pat) = pattern else { return None };
                     if pat.by_ref.is_some() || pat.subpat.is_some() {
-                        return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                        return None;
                     }
                     let init = local.init.as_ref()?;
                     if init.diverge.is_some() {
-                        return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                        return None;
                     }
                     let value = self.eval(&init.expr, kind)?;
                     let name = pat.ident.to_string();
@@ -693,13 +767,20 @@ impl Machine<'_> {
                     self.restarts = true;
                     break;
                 }
+                Stmt::Expr(Expr::Break(node), _)
+                    if self.retry.is_some() && node.attrs.is_empty() && node.label.is_none() && node.expr.is_none() =>
+                {
+                    self.breaks = true;
+                    break;
+                }
                 Stmt::Expr(expression, _) => {
                     self.effect(expression)?;
-                    if self.restarts {
+                    if self.restarts || self.breaks {
                         break;
                     }
                 }
-                _ => return None, // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                _ => return None,
             }
         }
         for (name, previous, projections) in declared.into_iter().rev() {
@@ -723,8 +804,11 @@ impl Machine<'_> {
             Expr::Assign(node) if node.attrs.is_empty() => {
                 let name = place_name(&node.left)?;
                 let kind = self.values.get(&name)?.kind();
-                if !matches!(kind, Binding::Bool | Binding::Integer | Binding::Primitive(_)) {
-                    return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                if !(matches!(kind, Binding::Bool | Binding::Integer | Binding::Primitive(_))
+                    || self.retry.is_some() && matches!(self.values.get(&name), Some(Value::Population(_))))
+                {
+                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                    return None;
                 }
                 let value = self.eval(&node.right, Some(kind))?;
                 let _prior = self.values.insert(name.clone(), value);
@@ -747,6 +831,10 @@ impl Machine<'_> {
                 Some(())
             }
             Expr::Block(node) if inert_attributes(&node.attrs) && node.label.is_none() => self.block(&node.block),
+            Expr::ForLoop(node)
+                // #[gamma::skip(match_guard.always_true, reason = "for_loop requires modeled Partitions, which only retry-backed population evaluation can create.", tag = "equivalent")]
+                if self.retry.is_some() => retry::population::for_loop(self, node),
+            Expr::MethodCall(node) if self.retry.is_some() && node.method == "clone_from" => retry::population::clone_from(self, node),
             Expr::If(node) if node.attrs.is_empty() => match self.guard(&node.cond)? {
                 Value::Bool(true) => self.block(&node.then_branch),
                 Value::Bool(false) => {
@@ -763,15 +851,18 @@ impl Machine<'_> {
                     let then_values = self.values.clone();
                     let then_writes = self.writes.clone();
                     let then_restarts = self.restarts;
+                    let then_breaks = self.breaks;
                     self.values = before;
                     // #[gamma::skip(stmt.delete_assign, reason = "The final union restores both branch write sets; writes does not affect branch evaluation.", tag = "equivalent")]
                     self.writes = writes;
                     self.restarts = false;
+                    self.breaks = false;
                     if let Some((_, otherwise)) = &node.else_branch {
                         self.effect(otherwise)?;
                     }
-                    if self.values != then_values || self.restarts != then_restarts {
-                        return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                    if self.values != then_values || self.restarts != then_restarts || self.breaks != then_breaks {
+                        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                        return None;
                     }
                     self.writes.extend(then_writes);
                     Some(())
@@ -792,7 +883,8 @@ impl Machine<'_> {
                 let name = bare_name(&node.receiver)?;
                 let kind = self.values.get(&name)?.kind();
                 if !matches!(kind, Binding::Vec | Binding::VecChar | Binding::VecString | Binding::String) {
-                    return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                    return None;
                 }
                 if !matches!(&node.args[0], Expr::Path(path) if path.attrs.is_empty() && path.qself.is_none() && path.path.segments.len() > 1)
                 {
@@ -828,7 +920,8 @@ impl Machine<'_> {
             return Some(value);
         };
         if value.kind() != Binding::Bool || matches!(&value, Value::Bool(value) if *value != expected) {
-            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+            return None;
         }
         self.assumptions.push((key, value.clone(), expected));
         let _old = self.facts.insert(
@@ -843,7 +936,56 @@ impl Machine<'_> {
     #[expect(clippy::too_many_lines, reason = "the closed expression grammar shares one evaluation budget")]
     fn eval_inner(&mut self, expression: &Expr, expected: Option<Binding>) -> Option<Value> {
         self.spend()?;
+        if self.retry.is_some()
+            && let Some(value) = retry::population::eval(self, expression)
+        {
+            return Some(value);
+        }
         match expression {
+            Expr::Try(node) if node.attrs.is_empty() => {
+                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                let Expr::MethodCall(call) = &*node.expr else { return None };
+                self.retry?.hit(self, call)
+            }
+            Expr::Call(node)
+                if node.attrs.is_empty()
+                    && bare_name(&node.func).as_deref() == Some("Some")
+                    && !self.values.contains_key("Some")
+                    && !self.helpers.is_some_and(|helpers| helpers.contains_key("Some"))
+                    && self
+                        .retry
+                        .is_some_and(|effects| effects.some_constructor.as_deref() == Some("Some"))
+                    && node.args.len() == 1 =>
+            {
+                let Value::Bool(value) = self.eval(
+                    &node.args[0],
+                    // #[gamma::skip(option.some_to_none, reason = "Every Bool-producing form determines its kind without this hint, and the result is still required to be Bool.", tag = "equivalent")]
+                    Some(Binding::Bool),
+                )?
+                else {
+                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                    return None;
+                };
+                Some(Value::MaybeBool(Some(value)))
+            }
+            Expr::Binary(node)
+                if {
+                    let comparison = node.attrs.is_empty() && matches!(node.op, BinOp::Eq(_) | BinOp::Ne(_));
+                    // #[gamma::skip(logical.and_remove_right, reason = "Without retry this Eq/Ne arm duplicates the general Binary evaluation, while retained operands use the same binary dispatcher.", tag = "equivalent")]
+                    comparison && self.retry.is_some()
+                } =>
+            {
+                let left = self.eval(&node.left, expected)?;
+                let right = self.eval(&node.right, Some(left.kind()))?;
+                if let (Value::MaybeBool(left), Value::MaybeBool(right)) = (&left, &right) {
+                    return Some(Value::Bool(if matches!(node.op, BinOp::Eq(_)) {
+                        left == right
+                    } else {
+                        left != right
+                    }));
+                }
+                binary(&node.op, left, right)
+            }
             Expr::Path(_) => self.values.get(&bare_name(expression)?).cloned(),
             Expr::Field(_) => self.values.get(&place_name(expression)?).cloned(),
             Expr::Paren(node) if node.attrs.is_empty() => self.eval(&node.expr, expected),
@@ -858,7 +1000,8 @@ impl Machine<'_> {
                         let value = literal.base10_parse::<u8>().ok()?;
                         return Value::integer(value);
                     }
-                    let Binding::Primitive(primitive) = kind else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                    let Binding::Primitive(primitive) = kind else { return None };
                     let value = literal.base10_parse::<u128>().ok()?;
                     (value <= primitive.mask()?).then_some(Value::Int(value, primitive))
                 }
@@ -892,7 +1035,8 @@ impl Machine<'_> {
                         let signed = (value << (128 - width)).cast_signed() >> (128 - width);
                         let negated = signed.checked_neg()?;
                         if negated > (i128::MAX >> (128 - width)) {
-                            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                            return None;
                         }
                         Some(Value::Int(
                             negated.cast_unsigned() &
@@ -927,7 +1071,8 @@ impl Machine<'_> {
                     value.kind(),
                     Binding::Vec | Binding::VecChar | Binding::VecString | Binding::StrReference | Binding::String
                 ) {
-                    return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                    return None;
                 }
                 Some(Value::Symbol(identity(format_args!("{value:?}.len"))?, Binding::Integer))
             }
@@ -935,10 +1080,13 @@ impl Machine<'_> {
                 if node.attrs.is_empty() && node.turbofish.is_none() && node.method == "expect" && node.args.len() == 1 =>
             {
                 if !matches!(&node.args[0], Expr::Lit(literal) if literal.attrs.is_empty() && matches!(literal.lit, Lit::Str(_))) {
-                    return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                    return None;
                 }
-                let Expr::MethodCall(next) = &*node.receiver else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
-                let Expr::MethodCall(chars) = &*next.receiver else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                let Expr::MethodCall(next) = &*node.receiver else { return None };
+                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                let Expr::MethodCall(chars) = &*next.receiver else { return None };
                 if next.method != "next"
                     || !next.attrs.is_empty()
                     || next.turbofish.is_some()
@@ -948,7 +1096,8 @@ impl Machine<'_> {
                     || chars.turbofish.is_some()
                     || !chars.args.is_empty()
                 {
-                    return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                    return None;
                 }
                 let source = self.eval(
                     &chars.receiver,
@@ -956,7 +1105,8 @@ impl Machine<'_> {
                     Some(Binding::StrReference),
                 )?;
                 if source.kind() != Binding::StrReference {
-                    return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                    return None;
                 }
                 Some(Value::Symbol(identity(format_args!("{source:?}.first"))?, Binding::Char))
             }
@@ -967,14 +1117,16 @@ impl Machine<'_> {
                     && node.args.len() == 1
                     && self.stable_calls.is_some_and(|calls| calls.contains_key(super::CHAR_WIDTH)) =>
             {
-                let Expr::MethodCall(width) = &*node.receiver else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                let Expr::MethodCall(width) = &*node.receiver else { return None };
                 if width.method != "width"
                     || !width.attrs.is_empty()
                     || width.turbofish.is_some()
                     || !width.args.is_empty()
                     || self.eval(&node.args[0], Some(Binding::Integer))? != Value::IntegerZero
                 {
-                    return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                    return None;
                 }
                 let character = self.eval(
                     &width.receiver,
@@ -982,7 +1134,8 @@ impl Machine<'_> {
                     Some(Binding::Char),
                 )?;
                 if character.kind() != Binding::Char {
-                    return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                    return None;
                 }
                 Some(Value::Symbol(
                     identity(format_args!("{character:?}.width_or_zero"))?,
@@ -994,12 +1147,14 @@ impl Machine<'_> {
                 if
                 // #[gamma::skip(cond.always_false, reason = "Reachable Char facts cannot match non-VecChar indexing identities; the following fact lookup still fails.", tag = "equivalent")]
                 receiver.kind() != Binding::VecChar {
-                    return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                    return None;
                 }
                 let index = self.eval(&node.args[0], Some(Binding::Primitive(Primitive::Unsigned(64))))?;
                 let value = Value::Symbol(identity(format_args!("{receiver:?}[{index:?}]"))?, Binding::Char);
                 let Value::Char(character) = self.facts.get(&identity(format_args!("{value:?}"))?)?.clone() else {
-                    return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                    return None;
                 };
                 Some(Value::MaybeChar(character))
             }
@@ -1009,20 +1164,23 @@ impl Machine<'_> {
                 if let Some(value) = ranges::wrapping(&node.method.to_string(), &left, &right) {
                     return Some(value);
                 }
-                let Value::Int(b, primitive) = right else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                let Value::Int(b, primitive) = right else { return None };
                 let mask =
                     // #[gamma::skip(try.propagate_to_unwrap, reason = "The established named integer widths 8, 16, 32, 64, and 128 always have a mask.", tag = "equivalent")]
                     primitive.mask()?;
                 let method = node.method.to_string();
                 if let Value::Int(a, same) = left {
                     if same != primitive {
-                        return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                        return None;
                     }
                     let value = match method.as_str() {
                         "wrapping_add" => a.wrapping_add(b),
                         "wrapping_sub" => a.wrapping_sub(b),
                         "wrapping_mul" => a.wrapping_mul(b),
-                        _ => return None, // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                        _ => return None,
                     };
                     Some(Value::Int(value & mask, primitive))
                 } else if b == 0 && left.kind() == Binding::Primitive(primitive) {
@@ -1038,9 +1196,11 @@ impl Machine<'_> {
             Expr::Index(node) if node.attrs.is_empty() => {
                 let receiver = self.eval(&node.expr, None)?;
                 if receiver.kind() == Binding::StrReference {
-                    let Expr::Range(range) = &*node.index else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                    let Expr::Range(range) = &*node.index else { return None };
                     if !range.attrs.is_empty() || range.end.is_some() {
-                        return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                        return None;
                     }
                     let start = self.eval(range.start.as_deref()?, Some(Binding::Integer))?;
                     return Some(Value::Symbol(
@@ -1053,7 +1213,8 @@ impl Machine<'_> {
                     return Some(Value::Symbol(identity(format_args!("{receiver:?}[{index:?}]"))?, Binding::String));
                 }
                 if receiver.kind() != Binding::VecChar {
-                    return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                    return None;
                 }
                 let index = self.eval(&node.index, Some(Binding::Primitive(Primitive::Unsigned(64))))?;
                 let value = Value::Symbol(identity(format_args!("{receiver:?}[{index:?}]"))?, Binding::Char);
@@ -1075,19 +1236,22 @@ impl Machine<'_> {
                     .and_then(|calls| calls.get(&node.func.to_token_stream().to_string()))
                 {
                     if call.parameters.len() != node.args.len() {
-                        return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                        return None;
                     }
                     let mut values = Vec::new();
                     for (argument, &expected) in node.args.iter().zip(&call.parameters) {
                         let value = self.eval(argument, Some(expected))?;
                         if value.kind() != expected {
-                            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                            return None;
                         }
                         values.push(value);
                     }
                     if call.char_option {
                         let [Value::CharReference(character)] = values.as_slice() else {
-                            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                            return None;
                         };
                         return Some(Value::MaybeChar(*character));
                     }
@@ -1097,7 +1261,8 @@ impl Machine<'_> {
                     ));
                 }
                 if !self.numeric_names {
-                    return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                    return None;
                 }
                 if let Some(value) = self.primitive_call(node, expected) {
                     return Some(value);
@@ -1107,21 +1272,26 @@ impl Machine<'_> {
                 }
                 let name = bare_name(&node.func)?;
                 if self.values.contains_key(&name) {
-                    return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                    return None;
                 }
                 let function = self.helpers?.get(&name)?;
                 if let Some(value) = cache::hit(self, function, node) {
                     return Some(value);
                 }
                 if function.sig.inputs.len() != node.args.len() {
-                    return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                    return None;
                 }
                 let mut values = HashMap::default();
                 for (parameter, argument) in function.sig.inputs.iter().zip(&node.args) {
-                    let syn::FnArg::Typed(parameter) = parameter else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
-                    let Pat::Ident(pattern) = &*parameter.pat else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                    let syn::FnArg::Typed(parameter) = parameter else { return None };
+                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                    let Pat::Ident(pattern) = &*parameter.pat else { return None };
                     if pattern.by_ref.is_some() || pattern.subpat.is_some() {
-                        return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                        return None;
                     }
                     let kind = if matches!(&*parameter.ty, Type::Path(path) if path.path.is_ident("bool")) {
                         Binding::Bool
@@ -1130,12 +1300,14 @@ impl Machine<'_> {
                     };
                     let value = self.eval(argument, Some(kind))?;
                     if value.kind() != kind {
-                        return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                        return None;
                     }
                     let _prior = values.insert(pattern.ident.to_string(), value);
                 }
                 let syn::ReturnType::Type(_, result) = &function.sig.output else {
-                    return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                    return None;
                 };
                 let result = if matches!(&**result, Type::Path(path) if path.path.is_ident("bool")) {
                     Binding::Bool
@@ -1143,10 +1315,12 @@ impl Machine<'_> {
                     Binding::Primitive(primitive_type(result)?)
                 };
                 let (Stmt::Expr(tail, None), prefix) = function.block.stmts.split_last()? else {
-                    return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                    return None;
                 };
                 if !prefix.is_empty() {
-                    return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                    return None;
                 }
                 let mut nested = Machine {
                     values,
@@ -1160,6 +1334,8 @@ impl Machine<'_> {
                     stable_calls: None,
                     paths: HashMap::default(),
                     assumptions: Vec::new(),
+                    retry: None,
+                    breaks: false, // #[gamma::skip(literal.bool_flip, reason = "This nested machine evaluates only a scalar tail; it never executes statements or reads break state.", tag = "equivalent")]
                 };
                 let value = nested.eval(tail, Some(result))?;
                 self.budget = nested.budget;
@@ -1171,9 +1347,11 @@ impl Machine<'_> {
 
     /// Recognizes primitive conversions only after their names and operand kinds are established.
     fn primitive_call(&mut self, node: &syn::ExprCall, expected: Option<Binding>) -> Option<Value> {
-        let Expr::Path(path) = &*node.func else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+        let Expr::Path(path) = &*node.func else { return None };
         if path.qself.is_some() || path.path.leading_colon.is_some() || path.path.segments.len() != 2 {
-            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+            return None;
         }
         let mut segments = path.path.segments.iter();
         let owner =
@@ -1183,17 +1361,20 @@ impl Machine<'_> {
             // #[gamma::skip(try.propagate_to_unwrap, reason = "The preceding exact two-segment path check guarantees both iterator elements exist.", tag = "equivalent")]
             segments.next()?;
         if !matches!(owner.arguments, syn::PathArguments::None) || !matches!(method.arguments, syn::PathArguments::None) {
-            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+            return None;
         }
         if owner.ident == "Default" && method.ident == "default" && node.args.is_empty() {
-            let Binding::Primitive(primitive) = expected? else { return None }; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+            let Binding::Primitive(primitive) = expected? else { return None };
             return match primitive {
                 Primitive::Unsigned(_) | Primitive::Signed(_) => Some(Value::Int(0, primitive)),
                 Primitive::Float(_) => float(0.0, primitive),
             };
         }
         if method.ident != "from" || node.args.len() != 1 {
-            return None; // #[gamma::skip(return_value.default, reason = "None is the Option default.", tag = "equivalent")]
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+            return None;
         }
         let target = Primitive::named(&owner.ident.to_string())?;
         let value = self.eval(&node.args[0], Some(Binding::Primitive(Primitive::Signed(32))))?;
@@ -1701,6 +1882,8 @@ mod tests {
                 stable_calls: None,
                 paths: HashMap::default(),
                 assumptions: Vec::new(),
+                retry: None,
+                breaks: false,
             };
             let value = machine.eval(&syn::parse_str(expression).unwrap(), None).unwrap();
             assert!(
@@ -1840,6 +2023,8 @@ mod tests {
             stable_calls: None,
             paths: HashMap::default(),
             assumptions: Vec::new(),
+            retry: None,
+            breaks: false,
         };
         assert!(machine.eval(&syn::parse_quote!((i)), None).is_none());
         machine.budget = 256;

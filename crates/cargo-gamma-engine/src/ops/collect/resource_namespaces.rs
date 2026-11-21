@@ -129,22 +129,19 @@ impl Namespaces {
 
     pub(super) fn transparent(&self, source: &str, inline: &[String]) -> bool {
         if self.exhausted {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+            return false;
         }
         if !self.bound {
             return self.local.transparent(inline, |namespace| self.opaque("", namespace));
         }
         let Some(Some((root, prefix))) = self.contexts.get(&source.replace('\\', "/")) else {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+            return false;
         };
         let Some(modules) = self.roots.get(root) else {
             return
         // #[gamma::skip(literal.bool_flip, reason = "A bound context is installed only after its root is inserted, and external_target returns a root borrowed from roots.get_key_value. Roots are not removed without exhaustion, which prevents reaching these lookups. Successful import_path similarly requires modules(root) to have just succeeded. The later immutable root/module lookup cannot be absent.", tag = "equivalent")]
-        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
         false;
         };
         let module = prefix.iter().chain(inline).cloned().collect::<Vec<_>>();
@@ -166,11 +163,15 @@ impl Namespaces {
             return self.closed_methods("", inline);
         }
         let Some(Some((root, prefix))) = self.contexts.get(&source.replace('\\', "/")) else {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+            return false;
         };
         self.closed_methods(root, &prefix.iter().chain(inline).cloned().collect::<Vec<_>>())
+    }
+
+    pub(super) fn syn_contract_for(&self, source: &str, inline: &[String]) -> bool {
+        self.scope_for(source, inline)
+            .is_some_and(|(root, namespace)| direct_alias(namespace, "syn") && self.dependency(root, "syn", "syn", "3.0.9"))
     }
 
     pub(super) fn method_imports_closed_for<'a>(
@@ -181,18 +182,16 @@ impl Namespaces {
     ) -> bool {
         let (root, module) = if self.bound {
             let Some(Some((root, prefix))) = self.contexts.get(&source.replace('\\', "/")) else {
-                return
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "The inferred bool default is already false.")]
-                false;
+                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+                return false;
             };
             (root.as_str(), prefix.iter().chain(inline).cloned().collect::<Vec<_>>())
         } else {
             ("", inline.to_vec())
         };
         let Some(Some(namespace)) = self.modules(root).and_then(|modules| modules.scopes.get(&module)) else {
-            return
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "The inferred bool default is already false.")]
-            false;
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+            return false;
         };
         imports.all(|path| path.is_some_and(|path| self.closed_method_import(root, &module, namespace, path)))
     }
@@ -202,11 +201,25 @@ impl Namespaces {
             return self.primitive_scope("", inline);
         }
         let Some(Some((root, prefix))) = self.contexts.get(&source.replace('\\', "/")) else {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+            return false;
         };
         self.primitive_scope(root, &prefix.iter().chain(inline).cloned().collect::<Vec<_>>())
+    }
+
+    pub(super) fn numeric_scope_for(&self, source: &str, inline: &[String]) -> bool {
+        self.primitive_scope_for(source, inline)
+            && self.scope_for(source, inline).is_some_and(|(_, namespace)| {
+                // #[gamma::skip(collection.reverse_array, reason = "Every primitive is checked by an immutable all predicate; iteration order does not affect the result.", tag = "equivalent")]
+                ["u8", "u16", "u32", "u64", "u128", "i8", "i16", "i32", "i64", "i128", "isize"]
+                    .iter()
+                    .all(|name| {
+                        !namespace.nominal.contains(*name)
+                            && !namespace.values.contains(*name)
+                            && !namespace.imports.contains_key(*name)
+                            && !namespace.functions.contains_key(&vec![(*name).to_owned()])
+                    })
+            })
     }
 
     pub(super) fn width_contract_for(&self, source: &str, inline: &[String]) -> bool {
@@ -214,9 +227,8 @@ impl Namespaces {
             return self.width_contract("", inline, true);
         }
         let Some(Some((root, prefix))) = self.contexts.get(&source.replace('\\', "/")) else {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+            return false;
         };
         self.width_contract(root, &prefix.iter().chain(inline).cloned().collect::<Vec<_>>(), true)
     }
@@ -230,9 +242,8 @@ impl Namespaces {
             if
             // #[gamma::skip(logical.or_remove_left, reason = "A repeated (root,path) deterministically repeats the same immutable alias lookup and cannot later resolve. The unchanged finite iteration budget still returns None/false without the visited guard. Continuing an unchanged path after no alias was followed instead hits that visited guard and returns the same None/false.", tag = "equivalent")]
             !visited.insert((root, path.clone())) || path.len() > 64 {
-                return
-                // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-                None;
+                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                return None;
             }
             let mut followed =
             // #[gamma::skip(literal.bool_flip, reason = "A repeated (root,path) deterministically repeats the same immutable alias lookup and cannot later resolve. The unchanged finite iteration budget still returns None/false without the visited guard. Continuing an unchanged path after no alias was followed instead hits that visited guard and returns the same None/false.", tag = "equivalent")]
@@ -242,9 +253,8 @@ impl Namespaces {
                     continue;
                 };
                 if self.opaque(root, namespace) || namespace.wildcard || namespace.functions_exhausted {
-                    return
-                    // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-                    None;
+                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                    return None;
                 }
                 let suffix = &path[length..];
                 if let Some(function) = namespace.functions.get(suffix) {
@@ -275,9 +285,8 @@ impl Namespaces {
             if
             // #[gamma::skip(cond.always_false, reason = "A repeated (root,path) deterministically repeats the same immutable alias lookup and cannot later resolve. The unchanged finite iteration budget still returns None/false without the visited guard. Continuing an unchanged path after no alias was followed instead hits that visited guard and returns the same None/false.", tag = "equivalent")]
             !followed {
-                return
-                // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-                None;
+                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                return None;
             }
         }
         None
@@ -334,8 +343,11 @@ impl Namespaces {
                 .values()
                 .flatten()
                 .all(|namespace| !namespace.nominal.contains(alias))
-        }) && self
-            .dependencies
+        }) && self.dependency_edge(root, alias, package, version)
+    }
+
+    pub(super) fn dependency_edge(&self, root: &str, alias: &str, package: &str, version: &str) -> bool {
+        self.dependencies
             .get(&(root.to_owned(), alias.to_owned()))
             .is_some_and(|dependency| {
                 matches!(dependency, Some(dependency) if dependency.package_name == package && dependency.version == version
@@ -346,14 +358,12 @@ impl Namespaces {
 
     pub(super) fn primitive_scope(&self, root: &str, module: &[String]) -> bool {
         let Some(modules) = self.modules(root) else {
-            return
-        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-        false;
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+            return false;
         };
         let Some(Some(namespace)) = modules.scopes.get(module) else {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+            return false;
         };
         !namespace.functions_exhausted
             && modules.transparent(module, |namespace| self.opaque(root, namespace))
@@ -371,9 +381,8 @@ impl Namespaces {
 
     fn modules(&self, root: &str) -> Option<&Modules> {
         if self.exhausted {
-            return
-            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-            None;
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+            return None;
         }
         if root.is_empty() && !self.bound {
             Some(&self.local)
@@ -388,9 +397,8 @@ impl Namespaces {
     /// dependency contracts before they can preserve method-resolution evidence.
     pub(super) fn closed_methods(&self, root: &str, module: &[String]) -> bool {
         let Some(Some(namespace)) = self.modules(root).and_then(|modules| modules.scopes.get(module)) else {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+            return false;
         };
         (
             // #[gamma::skip(logical.and_remove_right, reason = "Modules::transparent first rejects the current namespace wildcard and then tests opaque for every prefix including the current namespace. Thus each separately removed opaque/wildcard disjunct is implied by !transparent, and the removed closed-method !wildcard conjunct is implied by transparent. Conjoining the two redundant disjuncts also leaves the dominating !transparent disjunct unchanged.", tag = "equivalent")]
@@ -407,6 +415,9 @@ impl Namespaces {
 
     fn closed_method_import(&self, root: &str, module: &[String], namespace: &Namespace, path: &[String]) -> bool {
         matches!(path.first().map(String::as_str), Some("std" | "core" | "alloc"))
+            || matches!(path, [alias, name] if alias == "syn" && direct_alias(namespace, alias)
+                && matches!(name.as_str(), "PathArguments" | "Path" | "PathSegment" | "Type" | "TypePath" | "Expr" | "ExprPath")
+                && self.dependency(root, alias, "syn", "3.0.9"))
             || matches!(path, [alias, name] if direct_alias(namespace, alias) && matches!(name.as_str(), "UnicodeWidthChar" | "UnicodeWidthStr")
                 && self.dependency(root, alias, "unicode-width", "0.2.2"))
             || matches!(path, [alias, name] if direct_alias(namespace, alias) && name == "Style" && self.dependency(root, alias, "owo-colors", "4.4.0"))
@@ -447,24 +458,20 @@ impl Namespaces {
 
     pub(super) fn stable_path_for(&self, source: &str, inline: &[String], ty: &syn::Type) -> bool {
         let Some((root, namespace)) = self.scope_for(source, inline) else {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+            return false;
         };
         if !self.primitive_scope_for(source, inline) {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+            return false;
         }
         let syn::Type::Path(ty) = ty else {
-            return
-        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-        false;
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+            return false;
         };
         if ty.qself.is_some() || ty.path.leading_colon.is_some() {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+            return false;
         }
         let path = ty.path.segments.iter().map(|segment| segment.ident.to_string()).collect::<Vec<_>>();
         if path.as_slice() == ["String"] {
@@ -472,9 +479,8 @@ impl Namespaces {
         }
         let path = if let [name] = path.as_slice() {
             if namespace.nominal.contains(name) {
-                return
-                // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-                false;
+                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+                return false;
             }
             namespace.imports.get(name).map_or(path.as_slice(), Vec::as_slice)
         } else {
@@ -490,14 +496,12 @@ impl Namespaces {
         } else if let Some(target) = self.external_target(root, module, import) {
             target
         } else {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+            return false;
         };
         let Some(mut modules) = self.modules(root) else {
             return
         // #[gamma::skip(literal.bool_flip, reason = "A bound context is installed only after its root is inserted, and external_target returns a root borrowed from roots.get_key_value. Roots are not removed without exhaustion, which prevents reaching these lookups. Successful import_path similarly requires modules(root) to have just succeeded. The later immutable root/module lookup cannot be absent.", tag = "equivalent")]
-        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
         false;
         };
         let mut visited = HashSet::default();
@@ -509,9 +513,8 @@ impl Namespaces {
             if
             // #[gamma::skip(logical.or_remove_right, reason = "A repeated (root,path) deterministically repeats the same immutable alias lookup and cannot later resolve. The unchanged finite iteration budget still returns None/false without the visited guard. Continuing an unchanged path after no alias was followed instead hits that visited guard and returns the same None/false.", tag = "equivalent")]
             path.len() > 64 || !visited.insert((root, path.clone())) {
-                return
-                // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-                false;
+                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+                return false;
             }
             let mut followed =
             // #[gamma::skip(literal.bool_flip, reason = "A repeated (root,path) deterministically repeats the same immutable alias lookup and cannot later resolve. The unchanged finite iteration budget still returns None/false without the visited guard. Continuing an unchanged path after no alias was followed instead hits that visited guard and returns the same None/false.", tag = "equivalent")]
@@ -532,9 +535,8 @@ impl Namespaces {
                     self.opaque(root, namespace) || namespace.wildcard
                 ) || !modules.transparent(&path[..length], |namespace| self.opaque(root, namespace))
                 {
-                    return
-                    // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-                    false;
+                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+                    return false;
                 }
                 let suffix = &path[length..];
                 if suffix.len() == 1 && namespace.nominal.contains(&suffix[0]) {
@@ -557,15 +559,13 @@ impl Namespaces {
                         let Some(external_modules) = self.modules(root) else {
                             return
                         // #[gamma::skip(literal.bool_flip, reason = "A bound context is installed only after its root is inserted, and external_target returns a root borrowed from roots.get_key_value. Roots are not removed without exhaustion, which prevents reaching these lookups. Successful import_path similarly requires modules(root) to have just succeeded. The later immutable root/module lookup cannot be absent.", tag = "equivalent")]
-                        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
                         false;
                         };
                         modules = external_modules;
                         path
                     } else {
-                        return
-                        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-                        false;
+                        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+                        return false;
                     };
                     target.extend_from_slice(&suffix[1..]);
                     path = target;
@@ -576,9 +576,8 @@ impl Namespaces {
             if
             // #[gamma::skip(cond.always_false, reason = "A repeated (root,path) deterministically repeats the same immutable alias lookup and cannot later resolve. The unchanged finite iteration budget still returns None/false without the visited guard. Continuing an unchanged path after no alias was followed instead hits that visited guard and returns the same None/false.", tag = "equivalent")]
             !followed {
-                return
-                // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-                false;
+                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+                return false;
             }
         }
         false
@@ -593,15 +592,13 @@ impl Namespaces {
                 .get(alias)
                 .is_some_and(|target| target.as_slice() != [alias.clone()])
         {
-            return
-            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-            None;
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+            return None;
         }
         let dependency = self.dependencies.get(&(root.to_owned(), alias.clone()))?.as_ref()?;
         if dependency.package_id.is_empty() {
-            return
-            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-            None;
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+            return None;
         }
         let library = dependency.library_root.as_ref()?.replace('\\', "/");
         let (root, _) = self.roots.get_key_value(&library)?;
@@ -642,9 +639,8 @@ impl Namespaces {
 
     pub(super) fn width_contract(&self, root: &str, module: &[String], character: bool) -> bool {
         let Some(Some(namespace)) = self.modules(root).and_then(|modules| modules.scopes.get(module)) else {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+            return false;
         };
         let expected = if character { "UnicodeWidthChar" } else { "UnicodeWidthStr" };
         namespace.imports.values().chain(&namespace.anonymous).any(|path| {
@@ -654,9 +650,8 @@ impl Namespaces {
 
     pub(super) fn standard_macro(&self, root: &str, module: &[String], name: &str) -> bool {
         let Some(modules) = self.modules(root) else {
-            return
-        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-        false;
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+            return false;
         };
         modules.transparent(module, |namespace| self.opaque(root, namespace))
             && (0..=module.len()).all(|length| {
@@ -954,27 +949,23 @@ impl Modules {
 
     fn transparent(&self, module: &[String], opaque: impl Fn(&Namespace) -> bool) -> bool {
         let Some(Some(current)) = self.scopes.get(module) else {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+            return false;
         };
         if current.wildcard {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+            return false;
         }
         let mut names = HashSet::default();
         let mut harmless = HashSet::default();
         for length in 0..=module.len() {
             let Some(Some(namespace)) = self.scopes.get(&module[..length]) else {
-                return
-                // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-                false;
+                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+                return false;
             };
             if opaque(namespace) || namespace.std_shadow {
-                return
-                // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-                false;
+                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+                return false;
             }
             names.extend(namespace.macro_names.iter().cloned());
             for name in &namespace.macro_names {
@@ -992,9 +983,8 @@ impl Modules {
                             .get("thread_local")
                             .is_none_or(|path| path.as_slice() == ["std", "thread_local"]);
                 if !local && !standard {
-                    return
-                    // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-                    false;
+                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+                    return false;
                 }
             }
         }
@@ -1068,9 +1058,8 @@ fn item_attributes(item: &Item) -> Option<&[Attribute]> {
         Item::Union(item) => &item.attrs,
         Item::Use(item) => &item.attrs,
         _ => {
-            return
-        // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-        None;
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+            return None;
         }
     })
 }
@@ -1150,9 +1139,8 @@ fn inert_attributes(attributes: &[Attribute]) -> bool {
 
 fn inert_meta(meta: &Meta) -> bool {
     let Some(name) = meta.path().get_ident() else {
-        return
-    // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-    false;
+        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+        return false;
     };
     match name.to_string().as_str() {
         "cfg" | "doc" | "allow" | "warn" | "deny" | "forbid" | "expect" | "coverage" => true,
@@ -1165,11 +1153,10 @@ fn inert_meta(meta: &Meta) -> bool {
     }
 }
 
-fn thread_local_body(mac: &Macro) -> bool {
+pub(super) fn thread_local_body(mac: &Macro) -> bool {
     if mac.tokens.to_string().len() > 8192 {
-        return
-        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-        false;
+        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+        return false;
     }
     syn::parse2::<File>(mac.tokens.clone()).is_ok_and(|file| {
         !file.items.is_empty()
@@ -1224,9 +1211,8 @@ fn harmless_definition(mac: &Macro) -> bool {
         )
         .collect::<Vec<_>>();
     if tokens.len() > 256 {
-        return
-        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-        false;
+        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+        return false;
     }
     let mut cursor = 0;
     let mut arms = 0;
@@ -1237,25 +1223,21 @@ fn harmless_definition(mac: &Macro) -> bool {
                 || !matches!(tokens.get(cursor + 1), Some(TokenTree::Punct(p)) if p.as_char() == '=')
         ) || !matches!(tokens.get(cursor + 2), Some(TokenTree::Punct(p)) if p.as_char() == '>')
         {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+            return false;
         }
         let Some(TokenTree::Group(body)) = tokens.get(cursor + 3) else {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+            return false;
         };
         let Some(TokenTree::Group(matcher)) = tokens.get(cursor) else {
             return
             // #[gamma::skip(literal.bool_flip, reason = "The matcher token was already required to be a Group by the preceding exact-shape guard. The changed second Group let-else fallback is unreachable. Malformed matchers fail the earlier guard.", tag = "equivalent")]
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
             false;
         };
         if !identifier_captures(matcher.stream()) || !only_modules(body.stream()) {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+            return false;
         }
 
         // #[gamma::skip(assign.add_to_sub, reason = "arms is an unconstrained integer local, hence defaults to i32, not usize. The 256-token cap allows at most 64 complete arms. Decrementing produces -1..-64 without overflow rather than +1..+64; the only observation arms!=0 is identical.", tag = "equivalent")]
@@ -1286,30 +1268,26 @@ fn identifier_captures(stream: proc_macro2::TokenStream) -> bool {
         if
         // #[gamma::skip(cond.always_false, reason = "identifier_captures exposes only its boolean result. Removing the eager length guard still rejects over-budget input at its unchanged per-token zero guard (or a recursive failure propagated immediately). Its consumed private remaining counter is never observed after rejection.", tag = "equivalent")]
         tokens.len() > *remaining {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+            return false;
         }
         for (index, token) in tokens.iter().enumerate() {
             if *remaining == 0 {
-                return
-                // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-                false;
+                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+                return false;
             }
             *remaining -= 1;
             match token {
                 TokenTree::Group(group) if !bounded(group.stream(), remaining) => {
-                    return
-                // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-                false;
+                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+                    return false;
                 }
                 TokenTree::Punct(punctuation)
                     if punctuation.as_char() == ':'
                         && !matches!(tokens.get(index + 1), Some(TokenTree::Ident(name)) if name == "ident") =>
                 {
-                    return
-                    // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-                    false;
+                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+                    return false;
                 }
                 _ => {}
             }
@@ -1325,14 +1303,12 @@ fn only_modules(stream: proc_macro2::TokenStream) -> bool {
     while cursor < tokens.len() {
         while matches!(tokens.get(cursor), Some(TokenTree::Punct(p)) if p.as_char() == '#') {
             let Some(TokenTree::Group(attribute)) = tokens.get(cursor + 1) else {
-                return
-                // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-                false;
+                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+                return false;
             };
             if attribute.delimiter() != Delimiter::Bracket || !syn::parse2::<Meta>(attribute.stream()).is_ok_and(|meta| inert_meta(&meta)) {
-                return
-                // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-                false;
+                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+                return false;
             }
             // #[gamma::skip(all, reason = "the attribute cursor must advance past each accepted attribute")]
             cursor += 2;
@@ -1341,14 +1317,12 @@ fn only_modules(stream: proc_macro2::TokenStream) -> bool {
             cursor += 1;
         }
         if !matches!(tokens.get(cursor), Some(TokenTree::Ident(name)) if name == "mod") {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+            return false;
         }
         let Some(TokenTree::Ident(name)) = tokens.get(cursor + 1) else {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+            return false;
         };
         if matches!(
             name.to_string().as_str(),
@@ -1378,19 +1352,16 @@ fn only_modules(stream: proc_macro2::TokenStream) -> bool {
                 | "f32"
                 | "f64"
         ) {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+            return false;
         }
         let Some(TokenTree::Group(body)) = tokens.get(cursor + 2) else {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+            return false;
         };
         if body.delimiter() != Delimiter::Brace || !safe_module_body(body.stream(), &mut 256) {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+            return false;
         }
         // #[gamma::skip(all, reason = "the module cursor must advance past each accepted module declaration")]
         cursor += 3;
@@ -1410,46 +1381,39 @@ fn safe_module_body(stream: proc_macro2::TokenStream, remaining: &mut usize) -> 
         )
         .collect::<Vec<_>>();
     if tokens.len() > *remaining {
-        return
-        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-        false;
+        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+        return false;
     }
     for (index, token) in tokens.iter().enumerate() {
         if *remaining == 0 {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+            return false;
         }
         *remaining -= 1;
         match token {
             TokenTree::Punct(punctuation) if punctuation.as_char() == '!' => {
-                return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+                return false;
             }
             TokenTree::Punct(punctuation) if punctuation.as_char() == '#' => {
                 let Some(TokenTree::Group(attribute)) = tokens.get(index + 1) else {
-                    return
-                    // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-                    false;
+                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+                    return false;
                 };
                 if attribute.delimiter() != Delimiter::Bracket
                     || !syn::parse2::<Meta>(attribute.stream()).is_ok_and(|meta| inert_meta(&meta))
                 {
-                    return
-                    // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-                    false;
+                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+                    return false;
                 }
             }
             TokenTree::Ident(name) if name == "macro_export" || name == "macro_use" => {
-                return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+                return false;
             }
             TokenTree::Group(group) if !safe_module_body(group.stream(), remaining) => {
-                return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+                return false;
             }
             _ => {}
         }
@@ -1495,9 +1459,8 @@ fn generated_modules(mac: &Macro) -> Option<HashSet<String>> {
         if
         // #[gamma::skip(cond.always_false, reason = "generated_modules still spends each token through remaining.checked_sub(1)? after the removed eager length check. Any over-budget token stream returns None; private partially collected names are discarded. The old 1025-token case fails later in both versions.", tag = "equivalent")]
         tokens.len() > *remaining {
-            return
-            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-            None;
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+            return None;
         }
         for (index, token) in tokens.iter().enumerate() {
             *remaining = remaining.checked_sub(1)?;
@@ -1601,9 +1564,8 @@ fn serde_input(item: &Item) -> bool {
         }
     }
     if item.span().byte_range().len() > 16384 {
-        return
-        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-        false;
+        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
+        return false;
     }
     let mut input = Input {
         valid: true,
@@ -1635,9 +1597,8 @@ fn serde_attributes(attributes: &[Attribute]) -> Option<Vec<Vec<String>>> {
                     || !matches!(path.segments.last()?.ident.to_string().as_str(), "Serialize" | "Deserialize")
                     || path.leading_colon.is_some()
                 {
-                    return
-                    // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-                    None;
+                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                    return None;
                 }
                 derives.push(path.segments.iter().map(|part| part.ident.to_string()).collect());
             }
@@ -1649,14 +1610,12 @@ fn serde_attributes(attributes: &[Attribute]) -> Option<Vec<Vec<String>>> {
                     ['!', '$', '#', '{', '}', '<', '>'],
                 )
             {
-                return
-                // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-                None;
+                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+                return None;
             }
         } else if !declaration_attributes(core::slice::from_ref(attribute)) {
-            return
-            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-            None;
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
+            return None;
         }
     }
     (!derives.is_empty()).then_some(derives)
@@ -1802,6 +1761,64 @@ mod tests {
             registry_closure: true,
             library_root: None,
         }
+    }
+
+    #[test]
+    fn numeric_contract_rejects_each_shadowing_namespace_without_poisoning_sibling_scopes() {
+        for name in ["u8", "u16", "u32", "u64", "u128", "i8", "i16", "i32", "i64", "i128", "isize"] {
+            for declaration in [
+                format!("struct {name};"),
+                format!("const {name}: usize = 0;"),
+                format!("fn {name}() {{}}"),
+                format!("use foreign::Value as {name};"),
+            ] {
+                let source = format!("mod shadowed {{ {declaration} }} mod clean {{}}");
+                let mut ns = namespaces(&source);
+                assert!(ns.numeric_scope_for("", &path(&["clean"])));
+                assert!(ns.primitive_scope_for("", &path(&["shadowed"])), "{declaration}");
+                assert!(!ns.numeric_scope_for("", &path(&["shadowed"])), "{declaration}");
+                ns.label("crate\\lib.rs");
+                ns.bind(&[("crate\\lib.rs".into(), "crate\\lib.rs".into(), Vec::new())]);
+                assert!(ns.numeric_scope_for("crate\\lib.rs", &path(&["clean"])));
+                assert!(!ns.numeric_scope_for("crate\\lib.rs", &path(&["shadowed"])), "{declaration}");
+                assert!(!ns.numeric_scope_for("missing.rs", &[]));
+            }
+        }
+        let ns = namespaces("struct unrelated; fn unrelated_function() {}");
+        assert!(ns.numeric_scope_for("", &[]));
+        assert!(!namespaces("struct usize;").numeric_scope_for("", &[]));
+        assert!(!namespaces("use unknown::*;").numeric_scope_for("", &[]));
+    }
+
+    #[test]
+    fn syn_contract_requires_the_direct_alias_as_well_as_the_exact_dependency_identity() {
+        for (declaration, accepted) in [
+            ("", true),
+            ("use syn;", true),
+            ("use foreign as syn;", false),
+            ("mod other {} use other as syn;", false),
+            ("struct syn;", false),
+        ] {
+            let mut ns = namespaces(declaration);
+            ns.label("crate\\lib.rs");
+            ns.bind(&[("crate\\lib.rs".into(), "crate\\lib.rs".into(), Vec::new())]);
+            assert!(!ns.syn_contract_for("crate\\lib.rs", &[]));
+            let mut edge = dependency("syn", "syn", "3.0.9");
+            edge.crate_root = "crate\\lib.rs".into();
+            ns.dependencies(&[edge]);
+            assert_eq!(ns.syn_contract_for("crate\\lib.rs", &[]), accepted, "{declaration}");
+            assert!(!ns.syn_contract_for("missing.rs", &[]));
+            assert!(!ns.syn_contract_for("crate\\lib.rs", &path(&["missing"])));
+        }
+        for (alias, package, version) in [("renamed", "syn", "3.0.9"), ("syn", "other", "3.0.9"), ("syn", "syn", "3.0.8")] {
+            let mut ns = namespaces("");
+            ns.dependencies(&[dependency(alias, package, version)]);
+            assert!(!ns.syn_contract_for("", &[]), "{alias}/{package}/{version}");
+        }
+        let mut ns = namespaces("mod inner { use other as syn; } mod clean {}");
+        ns.dependencies(&[dependency("syn", "syn", "3.0.9")]);
+        assert!(ns.syn_contract_for("", &path(&["clean"])));
+        assert!(!ns.syn_contract_for("", &path(&["inner"])));
     }
 
     #[test]
@@ -2520,6 +2537,19 @@ mod tests {
         let mut shadow = namespaces("mod nested { struct width; }");
         shadow.dependencies(&[dependency("width", "unicode-width", "0.2.2")]);
         assert!(!shadow.dependency("", "width", "unicode-width", "0.2.2"));
+    }
+
+    #[test]
+    fn registry_edge_identity_survives_resource_namespace_exhaustion() {
+        let mut ns = namespaces("");
+        ns.exhausted = true;
+        ns.limit();
+        let logging = dependency("logging", "log", "0.4.35");
+        ns.dependencies(core::slice::from_ref(&logging));
+        assert!(ns.dependency_edge("", "logging", "log", "0.4.35"));
+        assert!(!ns.dependency("", "logging", "log", "0.4.35"));
+        ns.dependencies(&[logging]);
+        assert!(!ns.dependency_edge("", "logging", "log", "0.4.35"));
     }
 
     #[test]

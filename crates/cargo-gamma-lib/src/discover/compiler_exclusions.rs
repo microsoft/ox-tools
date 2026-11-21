@@ -18,7 +18,7 @@ use crate::{HashSet, Result};
 
 const FILE: &str = "compiler-exclusions.json";
 const VERSION: u32 = 1;
-const EVIDENCE_REVISION: u32 = 2;
+const EVIDENCE_REVISION: u32 = 4;
 const HISTORICAL_REASON: &str = "historical compiler exclusion imported from earlier campaign evidence";
 
 /// Authoritative cumulative exclusion policy, not context-validated compiler-cache evidence.
@@ -181,6 +181,18 @@ fn legacy_isolated(reason: &str) -> bool {
 }
 
 fn repaired_schema(mutant: &Mutant, reason: &str) -> bool {
+    // Historical normalization erased the receiver type, including `!`. Reprove this
+    // diagnostic cohort rather than treating an old inference consequence as permanent blame.
+    if reason.starts_with("rustc E0599: no method named <value> found for type <value> in the current scope;") {
+        return true;
+    }
+    // Non-body block guards may previously have used expression-only wrapping before cfg removal.
+    if matches!(mutant.shape, Shape::Block | Shape::IterBlock)
+        && !mutant.mutator.starts_with("fn_value.")
+        && mutant.mutator.as_ref() != "parameter.default_shadow"
+    {
+        return true;
+    }
     match mutant.mutator.as_ref() {
         "parameter.default_shadow" if mutant.replacement.contains("::gamma_rt::default_like") => return true,
         "fn_value.one_element" if mutant.replacement.contains("core::iter::once::<") => return true,
@@ -224,6 +236,36 @@ fn block_leading_binary_or_cast(original: &str) -> bool {
 mod tests {
     use super::*;
     use crate::testing::ci_fixture::mutant;
+
+    #[test]
+    fn inference_cascade_migration_reproves_erased_receivers_but_keeps_independent_method_errors() {
+        let population = (1..=3).map(candidate).collect::<Vec<_>>();
+        let cascade = "rustc E0599: no method named <value> found for type <value> in the current scope; primary span identified the replacement site";
+        let root = "rustc E0599: <value> is not an iterator; primary span identified the replacement site";
+        let isolated = "rustc: isolated compiler failure; isolated by proof builds without diagnostic-span attribution";
+        let mut inventory: CompilerExclusions = serde_json::from_value(serde_json::json!({
+            "version": 1,
+            "evidence_revision": 2,
+            "mutants": {
+                population[0].id.to_string(): cascade,
+                population[1].id.to_string(): root,
+                population[2].id.to_string(): isolated
+            }
+        }))
+        .unwrap();
+        assert_eq!(inventory.reason(&population[0]), None);
+        assert_eq!(inventory.reason(&population[1]), Some(root));
+        assert_eq!(inventory.reason(&population[2]), Some(isolated));
+        assert!(inventory.migrate_evidence());
+        assert_eq!(inventory.reason(&population[0]), None);
+        assert!(inventory.remember(&population, &HashSet::from_iter([1]), |_| panic!(
+            "original reasons must be preserved"
+        )));
+        assert_eq!(inventory.reason(&population[0]), Some(cascade));
+        let restored: CompilerExclusions = serde_json::from_str(&serde_json::to_string(&inventory).unwrap()).unwrap();
+        assert_eq!(restored.reason(&population[0]), Some(cascade));
+        assert_eq!(restored.reason(&population[1]), Some(root));
+    }
 
     #[test]
     fn recovered_imported_exclusions_preserve_the_exact_historical_reason_for_each_identity() {
@@ -496,6 +538,25 @@ mod tests {
             ),
             ("stmt.delete_assign", "{ 1 } + 2", "", Shape::Stmt, "E0308", false),
             ("literal.bool_flip", "not an expression", "replacement", Shape::Expr, "E0308", false),
+            ("bool_expr.negate", "{ check() }", "!({ check() })", Shape::Block, "E0308", true),
+            ("expr.increment", "{ count }", "({ count }) + 1", Shape::Block, "E0308", true),
+            ("bool_expr.negate", "{ check() }", "!({ check() })", Shape::Expr, "E0308", false),
+            (
+                "fn_value.default",
+                "{ check() }",
+                "Default::default()",
+                Shape::Block,
+                "E0308",
+                false,
+            ),
+            (
+                "parameter.default_shadow",
+                "{ value }",
+                "Default::default()",
+                Shape::Block,
+                "E0308",
+                false,
+            ),
         ]
         .into_iter()
         .enumerate()
@@ -525,7 +586,7 @@ mod tests {
     #[test]
     fn cor2_schema_repair_migration_precisely_revalidates_legacy_direct_diagnostics_before_and_after_serialization() {
         let population = schema_repair_population();
-        for revision in [0, 1] {
+        for revision in [0, 1, 2, 3] {
             let mut inventory = schema_inventory(&population, revision);
             for (mutant, reason, affected) in &population {
                 assert_eq!(

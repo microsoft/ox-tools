@@ -206,7 +206,6 @@ fn inspect_artifact(path: &Utf8Path, follow: bool) -> std::io::Result<(ArtifactK
     #[cfg(unix)]
     let executable = {
         use std::os::unix::fs::PermissionsExt as _;
-        // #[gamma::skip(call.replace_with_default, call_result.default, reason = "This adapter obtains execute permissions from native Metadata; executable_permission_bits retains deterministic mask coverage, while observing this wiring needs the deferred metadata backend.", tag = "native-boundary")]
         executable_permission_bits(metadata.permissions().mode())
     };
     #[cfg(not(unix))]
@@ -1066,7 +1065,6 @@ fn resolve_prepared_directory_with<T: PreparedFileType>(
     canonical(path).map(Some)
 }
 
-// #[gamma::skip(fn_value.ok_default, reason = "This adapter supplies native canonicalization to canonical_artifact_path_with; its result and error policy have scripted tests, while exercising this exact forwarding boundary requires native filesystem input.", tag = "native-boundary")]
 fn canonical_artifact_path(path: &Utf8Path) -> Result<Utf8PathBuf> {
     canonical_artifact_path_with(path, |path| fs::canonicalize(path))
 }

@@ -14,6 +14,7 @@ use std::io::Write as _;
 use std::time::Instant;
 
 use owo_colors::Style;
+use tick::SimpleClock;
 
 use super::Host;
 use crate::discover::Plan;
@@ -151,8 +152,7 @@ pub(super) struct Dashboard {
     styler: Styler,
     drawn_frame: Option<DrawnFrame>,
     last_draw: Option<Instant>,
-    #[cfg(test)]
-    redraw_time: Option<Instant>,
+    clock: SimpleClock,
     testing_started: Option<Instant>,
     phase: Phase,
     status: String,
@@ -174,7 +174,7 @@ pub(super) struct Dashboard {
 }
 
 impl Dashboard {
-    pub(super) fn new(enabled: bool, width: Option<u16>, styler: Styler) -> Self {
+    pub(super) fn new(enabled: bool, width: Option<u16>, styler: Styler, clock: SimpleClock) -> Self {
         Self {
             enabled,
             active: false,
@@ -183,8 +183,7 @@ impl Dashboard {
             styler,
             drawn_frame: None,
             last_draw: None,
-            #[cfg(test)]
-            redraw_time: None,
+            clock,
             testing_started: None,
             phase: Phase::default(),
             status: String::new(),
@@ -213,11 +212,6 @@ impl Dashboard {
     #[cfg(test)]
     pub(super) fn testing_status_for_test(&self) -> &str {
         &self.status
-    }
-
-    #[cfg(test)]
-    pub(super) fn set_redraw_time_for_test(&mut self, now: Instant) {
-        self.redraw_time = Some(now);
     }
 
     pub(super) const fn enabled(&self) -> bool {
@@ -258,7 +252,7 @@ impl Dashboard {
     }
 
     pub(super) fn start_testing<H: Host>(&mut self, host: &mut H, jobs: usize, status: String) {
-        self.start_testing_at(host, jobs, status, Instant::now());
+        self.start_testing_at(host, jobs, status, self.clock.instant());
     }
 
     fn start_testing_at<H: Host>(&mut self, host: &mut H, jobs: usize, status: String, now: Instant) {
@@ -365,7 +359,7 @@ impl Dashboard {
     }
 
     pub(super) fn record(&mut self, mutant: &Mutant) {
-        self.record_at(mutant, Instant::now());
+        self.record_at(mutant, self.clock.instant());
     }
 
     fn record_at(&mut self, mutant: &Mutant, now: Instant) {
@@ -418,11 +412,7 @@ impl Dashboard {
     }
 
     pub(super) fn tick<H: Host>(&mut self, host: &mut H) {
-        #[cfg(test)]
-        let now = self.redraw_time.unwrap_or_else(Instant::now);
-        #[cfg(not(test))]
-        let now = Instant::now();
-        self.tick_at(host, now);
+        self.tick_at(host, self.clock.instant());
     }
 
     fn tick_at<H: Host>(&mut self, host: &mut H, now: Instant) {
@@ -498,7 +488,7 @@ impl Dashboard {
 
     #[cfg(test)]
     fn render(&self) -> Vec<String> {
-        self.render_at(Instant::now())
+        self.render_at(self.clock.instant())
     }
 
     fn render_at(&self, now: Instant) -> Vec<String> {
@@ -761,7 +751,7 @@ impl Dashboard {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[cfg(test)]
     fn recent_throughput(&self) -> f64 {
-        self.recent_throughput_at(Instant::now())
+        self.recent_throughput_at(self.clock.instant())
     }
 
     fn viable(&self) -> usize {
@@ -983,7 +973,7 @@ mod tests {
     use crate::testing::{Sink, ci_fixture};
 
     fn populated(width: u16) -> Dashboard {
-        let mut dashboard = Dashboard::new(true, Some(width), Styler::new(false));
+        let mut dashboard = Dashboard::new(true, Some(width), Styler::new(false), tick::ClockControl::new().to_simple_clock());
         dashboard.active = true;
         dashboard.binaries = 12;
         dashboard.jobs = 4;
@@ -1112,7 +1102,7 @@ mod tests {
 
     #[test]
     fn recovered_empty_chart_padding_and_clipped_labels_keep_their_exact_columns() {
-        let dashboard = Dashboard::new(true, Some(160), Styler::new(false));
+        let dashboard = Dashboard::new(true, Some(160), Styler::new(false), tick::ClockControl::new().to_simple_clock());
         let rows = dashboard.mutants_panel();
         assert_eq!(rows[1].chars().skip(24).take(3).collect::<String>(), " UU");
         let mut narrow = dashboard;
@@ -1176,7 +1166,7 @@ mod tests {
     #[test]
     fn survivor_waffle_population_matrix_retains_classification_and_blank_rows() {
         for (killed, survived, columns, rows) in [(0, 0, 1, 0), (1, 0, 1, 1), (2, 1, 2, 2), (9, 0, 3, 3), (99, 1, 10, 10)] {
-            let mut dashboard = Dashboard::new(true, Some(160), Styler::new(false));
+            let mut dashboard = Dashboard::new(true, Some(160), Styler::new(false), tick::ClockControl::new().to_simple_clock());
             dashboard.summary.killed = killed;
             dashboard.summary.survived = survived;
             let (cells, actual_columns, actual_rows) = dashboard.waffle();
@@ -1229,7 +1219,7 @@ mod tests {
             ),
             [50, 33, 17]
         );
-        let mut capped = Dashboard::new(true, None, Styler::new(false));
+        let mut capped = Dashboard::new(true, None, Styler::new(false), tick::ClockControl::new().to_simple_clock());
         capped.summary.killed = 101;
         let (cells, columns, rows) = capped.waffle();
         assert_eq!((cells.len(), columns, rows), (100, 10, 10));
@@ -1239,7 +1229,7 @@ mod tests {
     fn survivor_throughput_includes_the_five_minute_boundary_and_excludes_older_completions() {
         let started = Instant::now();
         let now = started + Duration::from_mins(10);
-        let mut dashboard = Dashboard::new(true, None, Styler::new(false));
+        let mut dashboard = Dashboard::new(true, None, Styler::new(false), tick::ClockControl::new().to_simple_clock());
         assert!(dashboard.recent_throughput_at(now).abs() < f64::EPSILON);
         dashboard.testing_started = Some(started);
         dashboard.completions = [
@@ -1414,25 +1404,73 @@ mod tests {
 
     #[test]
     fn dashboard_redraws_at_the_exact_interval_boundary() {
-        let mut dashboard = populated(160);
+        let control = tick::ClockControl::new();
+        let mut dashboard = Dashboard::new(true, Some(160), Styler::new(false), control.to_simple_clock());
+        dashboard.active = true;
         dashboard.dirty = true;
         let mut host = Sink::default().terminal(160);
-        let started = Instant::now();
 
-        dashboard.tick_at(&mut host, started);
+        dashboard.tick(&mut host);
         let first_draw = host.err.len();
         dashboard.dirty = true;
-        let before_boundary = (started + REDRAW_INTERVAL)
+        let before_boundary = REDRAW_INTERVAL
             .checked_sub(Duration::from_nanos(1))
             .expect("one nanosecond is shorter than the redraw interval");
-        dashboard.tick_at(&mut host, before_boundary);
+        control.advance(before_boundary);
+        dashboard.tick(&mut host);
 
         assert!(first_draw > 0);
         assert_eq!(host.err.len(), first_draw, "drawing before the boundary must be deferred");
 
-        dashboard.tick_at(&mut host, started + REDRAW_INTERVAL);
+        control.advance(Duration::from_nanos(1));
+        dashboard.tick(&mut host);
 
         assert!(host.err.len() > first_draw, "drawing at the boundary must repaint");
+    }
+
+    #[test]
+    fn dashboard_lifecycle_and_rendering_share_the_injected_clock() {
+        let throughput_cell = |output: &str| {
+            output
+                .lines()
+                .find(|line| line.contains("Recent throughput"))
+                .expect("the wide dashboard includes the throughput row")
+                .rsplit('│')
+                .nth(1)
+                .expect("the throughput row is enclosed by panel borders")
+                .trim()
+                .to_owned()
+        };
+        let control = tick::ClockControl::new();
+        let mut dashboard = Dashboard::new(true, Some(160), Styler::new(false), control.to_simple_clock());
+        let mut host = Sink::default().terminal(160);
+        control.advance(Duration::from_secs(10));
+        dashboard.start_testing(&mut host, 1, "Testing".into());
+        control.advance(Duration::from_mins(1));
+        let mut mutant = crate::fixtures::mutant();
+        mutant.outcome = Outcome::Killed;
+
+        dashboard.record(&mutant);
+
+        assert!((dashboard.recent_throughput() - 1.0).abs() < f64::EPSILON);
+        assert_eq!(
+            throughput_cell(&dashboard.render().join("\n")),
+            "Recent throughput                1.0 mutants/min"
+        );
+        host.err.clear();
+        dashboard.tick(&mut host);
+        assert_eq!(throughput_cell(&host.err()), "Recent throughput                1.0 mutants/min");
+
+        control.advance(THROUGHPUT_WINDOW + Duration::from_nanos(1));
+        assert!(dashboard.recent_throughput().abs() < f64::EPSILON);
+        assert_eq!(
+            throughput_cell(&dashboard.render().join("\n")),
+            "Recent throughput                0.0 mutants/min"
+        );
+        dashboard.testing_status("Testing".into());
+        host.err.clear();
+        dashboard.tick(&mut host);
+        assert_eq!(throughput_cell(&host.err()), "Recent throughput                0.0 mutants/min");
     }
 
     #[test]
@@ -1528,7 +1566,7 @@ mod tests {
 
     #[test]
     fn recording_a_completion_prunes_entries_outside_the_throughput_window() {
-        let mut dashboard = Dashboard::new(true, Some(160), Styler::new(false));
+        let mut dashboard = Dashboard::new(true, Some(160), Styler::new(false), tick::ClockControl::new().to_simple_clock());
         let started = Instant::now();
         let boundary = started + Duration::from_secs(1);
         let now = boundary + THROUGHPUT_WINDOW;
@@ -1546,7 +1584,7 @@ mod tests {
         let started = Instant::now();
         let boundary = started + Duration::from_nanos(1);
         let now = boundary + THROUGHPUT_WINDOW;
-        let mut dashboard = Dashboard::new(true, Some(160), Styler::new(false));
+        let mut dashboard = Dashboard::new(true, Some(160), Styler::new(false), tick::ClockControl::new().to_simple_clock());
         dashboard.testing_started = Some(started);
         dashboard.completions.extend([started, boundary, now]);
 
@@ -1584,7 +1622,7 @@ mod tests {
 
     #[test]
     fn selection_telemetry_keeps_only_the_agreed_hint_and_process_metrics() {
-        let mut dashboard = Dashboard::new(true, Some(160), Styler::new(false));
+        let mut dashboard = Dashboard::new(true, Some(160), Styler::new(false), tick::ClockControl::new().to_simple_clock());
         dashboard.record_selection(&selection(SelectionTier::Exact, SelectionResult::Hit, false, 100, 1_000));
         dashboard.record_selection(&selection(SelectionTier::Item, SelectionResult::Miss, true, 300, 2_000));
         dashboard.record_selection(&selection(SelectionTier::Whole, SelectionResult::Miss, true, 700, 4_000));
@@ -1600,7 +1638,7 @@ mod tests {
 
     #[test]
     fn hint_savings_include_failed_attempts_before_the_hit() {
-        let mut dashboard = Dashboard::new(true, Some(160), Styler::new(false));
+        let mut dashboard = Dashboard::new(true, Some(160), Styler::new(false), tick::ClockControl::new().to_simple_clock());
         let mut miss = selection(SelectionTier::Exact, SelectionResult::Miss, false, 300, 2_000);
         miss.ordinal = 7;
         let mut hit = selection(SelectionTier::Item, SelectionResult::Hit, false, 500, 2_000);
@@ -1615,7 +1653,7 @@ mod tests {
 
     #[test]
     fn disabled_dashboard_updates_are_inert() {
-        let mut dashboard = Dashboard::new(false, None, Styler::new(false));
+        let mut dashboard = Dashboard::new(false, None, Styler::new(false), tick::ClockControl::new().to_simple_clock());
         let mut host = Sink::default();
 
         dashboard.start_testing(&mut host, 4, "testing".to_owned());
@@ -1635,7 +1673,7 @@ mod tests {
 
     #[test]
     fn recording_each_outcome_updates_the_matching_counter() {
-        let mut dashboard = Dashboard::new(true, None, Styler::new(false));
+        let mut dashboard = Dashboard::new(true, None, Styler::new(false), tick::ClockControl::new().to_simple_clock());
         dashboard.summary.pending = 9;
         for _ in 0..9 {
             dashboard.mutant_started();
@@ -1673,7 +1711,7 @@ mod tests {
 
     #[test]
     fn dashboard_empty_and_boundary_helpers_are_stable() {
-        let mut dashboard = Dashboard::new(true, None, Styler::new(false));
+        let mut dashboard = Dashboard::new(true, None, Styler::new(false), tick::ClockControl::new().to_simple_clock());
         assert_eq!(dashboard.waffle(), (Vec::new(), 1, 0));
         assert!(dashboard.recent_throughput().abs() < f64::EPSILON);
         assert_eq!(duration(60_000), "1m00s");
@@ -1708,7 +1746,7 @@ mod tests {
                     (Some(135), 135),
                     (Some(136), 136),
                 ] {
-                    let dashboard = Dashboard::new(enabled, width, Styler::new(colored));
+                    let dashboard = Dashboard::new(enabled, width, Styler::new(colored), tick::ClockControl::new().to_simple_clock());
                     assert_eq!(dashboard.enabled(), enabled);
                     assert!(!dashboard.is_active());
                     assert!(!dashboard.active);
@@ -1915,7 +1953,7 @@ mod tests {
                 assert_eq!(dashboard.last_draw, Some(now));
             }
         }
-        let mut dashboard = Dashboard::new(true, None, Styler::new(false));
+        let mut dashboard = Dashboard::new(true, None, Styler::new(false), tick::ClockControl::new().to_simple_clock());
         dashboard.start_testing(&mut Sink::default(), 13, "immediate".to_owned());
         assert_eq!(dashboard.jobs, 13);
         assert!(dashboard.testing_started.is_some());
@@ -1934,7 +1972,7 @@ mod tests {
             ] {
                 for result in [SelectionResult::Hit, SelectionResult::Miss, SelectionResult::Inconclusive] {
                     for all_tests in [false, true] {
-                        let mut dashboard = Dashboard::new(enabled, None, Styler::new(false));
+                        let mut dashboard = Dashboard::new(enabled, None, Styler::new(false), tick::ClockControl::new().to_simple_clock());
                         dashboard.selection_cost_ms.insert(1, 13);
                         dashboard.record_selection(&selection(tier, result, all_tests, 17, 100));
                         let hit = result == SelectionResult::Hit;
@@ -1980,7 +2018,7 @@ mod tests {
                 }
             }
         }
-        let mut dashboard = Dashboard::new(true, None, Styler::new(false));
+        let mut dashboard = Dashboard::new(true, None, Styler::new(false), tick::ClockControl::new().to_simple_clock());
         dashboard.selection_cost_ms.insert(1, 200);
         dashboard.record_selection(&selection(SelectionTier::Exact, SelectionResult::Hit, false, 17, 100));
         assert_eq!(dashboard.saved_ms, 0);
@@ -2050,7 +2088,7 @@ mod tests {
     fn active_status_updates_encode_controls_and_zero_total_does_not_dirty_or_redraw() {
         for enabled in [false, true] {
             for active in [false, true] {
-                let mut dashboard = Dashboard::new(enabled, Some(100), Styler::new(false));
+                let mut dashboard = Dashboard::new(enabled, Some(100), Styler::new(false), tick::ClockControl::new().to_simple_clock());
                 dashboard.active = active;
                 let mut host = Sink::default();
                 dashboard.status(&mut host, "\nBuild", "\x1b[31m\r");
@@ -2088,7 +2126,7 @@ mod tests {
         let now = Instant::now();
         for active in [false, true] {
             for dirty in [false, true] {
-                let mut dashboard = Dashboard::new(true, Some(40), Styler::new(false));
+                let mut dashboard = Dashboard::new(true, Some(40), Styler::new(false), tick::ClockControl::new().to_simple_clock());
                 dashboard.active = active;
                 dashboard.dirty = dirty;
                 let mut host = Sink::default();
@@ -2108,7 +2146,7 @@ mod tests {
                 }
             }
         }
-        let mut dashboard = Dashboard::new(true, Some(80), Styler::new(false));
+        let mut dashboard = Dashboard::new(true, Some(80), Styler::new(false), tick::ClockControl::new().to_simple_clock());
         assert_eq!(dashboard.begin_frame(), format!("{BEGIN_SYNCHRONIZED_UPDATE}\r"));
         for (widths, expected) in [
             (vec![1], format!("{BEGIN_SYNCHRONIZED_UPDATE}\r{ERASE_TO_END}")),
@@ -2231,7 +2269,7 @@ mod tests {
         for (row, (label, value)) in execution[1..11].iter().zip(expected_metrics) {
             assert_eq!(row, &format!("│ {label}{}{value} │", " ".repeat(48 - label.len() - value.len())));
         }
-        let mut dashboard = Dashboard::new(true, None, Styler::new(false));
+        let mut dashboard = Dashboard::new(true, None, Styler::new(false), tick::ClockControl::new().to_simple_clock());
         dashboard.maximum_memory = None;
         assert!(dashboard.test_execution_panel_at(now)[9].contains("not measured"));
         dashboard.summary.pending = 1;

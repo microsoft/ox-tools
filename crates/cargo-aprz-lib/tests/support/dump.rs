@@ -13,9 +13,11 @@
 //! `YYYY-MM-DD HH:MM:SS.ffffff+00` for timestamps, `YYYY-MM-DD` for dates, and JSON objects for
 //! feature maps.
 
-use chrono::{DateTime, Duration, NaiveDate, Utc};
 use flate2::Compression;
 use flate2::write::GzEncoder;
+use jiff::civil::Date;
+use jiff::tz::TimeZone;
+use jiff::{Timestamp, ToSpan};
 
 /// Top-level directory the real dump nests its files under.
 const DUMP_DIR: &str = "2026-01-15-020017";
@@ -58,8 +60,8 @@ pub struct Version {
     pub num: String,
     pub downloads: u64,
     pub edition: Option<u32>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
     pub description: String,
     pub features: String,
     pub license: String,
@@ -69,15 +71,15 @@ pub struct Version {
     pub documentation: String,
     pub homepage: String,
     /// Daily download counts, as `(day, downloads)` pairs.
-    pub daily_downloads: Vec<(NaiveDate, u64)>,
+    pub daily_downloads: Vec<(Date, u64)>,
     /// Ids of the crates this version depends on.
     pub dependencies: Vec<u64>,
 }
 
 impl Version {
     /// A version with plausible defaults, published `age_days` before `now`.
-    pub fn new(id: u64, num: &str, now: DateTime<Utc>, age_days: i64) -> Self {
-        let created_at = now - Duration::days(age_days);
+    pub fn new(id: u64, num: &str, now: Timestamp, age_days: i64) -> Self {
+        let created_at = now - (age_days * 24).hours();
         Self {
             id,
             num: num.to_owned(),
@@ -102,8 +104,8 @@ impl Version {
 pub struct Crate {
     pub id: u64,
     pub name: String,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
     pub repository: String,
     pub downloads: u64,
     pub owners: Vec<Owner>,
@@ -114,13 +116,13 @@ pub struct Crate {
 
 impl Crate {
     /// A crate with plausible defaults, first published `age_days` before `now`.
-    pub fn new(id: u64, name: &str, now: DateTime<Utc>, age_days: i64) -> Self {
-        let created_at = now - Duration::days(age_days);
+    pub fn new(id: u64, name: &str, now: Timestamp, age_days: i64) -> Self {
+        let created_at = now - (age_days * 24).hours();
         Self {
             id,
             name: name.to_owned(),
             created_at,
-            updated_at: now - Duration::days(1),
+            updated_at: now - 24.hours(),
             repository: String::new(),
             downloads: 0,
             owners: Vec::new(),
@@ -155,8 +157,8 @@ pub mod ids {
 
 /// The `serde` crate of [`Dump::sample`]: several versions, both kinds of owner, categories,
 /// keywords, and a daily download series that straddles the 90-day window.
-fn serde_crate(now: DateTime<Utc>) -> Crate {
-    let today = now.date_naive();
+fn serde_crate(now: Timestamp) -> Crate {
+    let today = now.to_zoned_datetime(TimeZone::UTC).date();
 
     let serde_current = Version {
         downloads: 900_000,
@@ -168,11 +170,11 @@ fn serde_crate(now: DateTime<Utc>) -> Crate {
         homepage: "https://serde.rs".to_owned(),
         features: r#"{"default":["std"],"derive":["serde_derive"],"std":[]}"#.to_owned(),
         daily_downloads: vec![
-            (today - Duration::days(1), 5000),
-            (today - Duration::days(2), 4000),
-            (today - Duration::days(45), 3000),
+            (today - 1.days(), 5000),
+            (today - 2.days(), 4000),
+            (today - 45.days(), 3000),
             // Outside the 90-day window: must not appear in the monthly series.
-            (today - Duration::days(200), 999_999),
+            (today - 200.days(), 999_999),
         ],
         dependencies: vec![ids::ITOA],
         ..Version::new(1001, "1.0.200", now, 40)
@@ -180,7 +182,7 @@ fn serde_crate(now: DateTime<Utc>) -> Crate {
 
     let serde_old = Version {
         downloads: 100_000,
-        daily_downloads: vec![(today - Duration::days(3), 100)],
+        daily_downloads: vec![(today - 3.days(), 100)],
         ..Version::new(1002, "1.0.100", now, 400)
     };
 
@@ -206,14 +208,14 @@ fn serde_crate(now: DateTime<Utc>) -> Crate {
 }
 
 /// Every crate in [`Dump::sample`].
-fn sample_crates(now: DateTime<Utc>) -> Vec<Crate> {
-    let today = now.date_naive();
+fn sample_crates(now: Timestamp) -> Vec<Crate> {
+    let today = now.to_zoned_datetime(TimeZone::UTC).date();
 
     let itoa_version = Version {
         downloads: 400_000,
         edition: None,
         msrv: String::new(),
-        daily_downloads: vec![(today - Duration::days(5), 250)],
+        daily_downloads: vec![(today - 5.days(), 250)],
         ..Version::new(2001, "1.0.17", now, 70)
     };
     let itoa = Crate {
@@ -298,7 +300,7 @@ impl Dump {
     ///
     /// Everything is dated relative to `now` so the recency-sensitive facts (downloads over the
     /// last 90 days, versions published in the last 90/180/365 days) are stable.
-    pub fn sample(now: DateTime<Utc>) -> Self {
+    pub fn sample(now: Timestamp) -> Self {
         Self {
             crates: sample_crates(now),
             users: vec![
@@ -464,14 +466,7 @@ impl Dump {
         for krate in &self.crates {
             for version in &krate.versions {
                 for (date, downloads) in &version.daily_downloads {
-                    write_record(
-                        &mut writer,
-                        &[
-                            &version.id.to_string(),
-                            &downloads.to_string(),
-                            &date.format("%Y-%m-%d").to_string(),
-                        ],
-                    );
+                    write_record(&mut writer, &[&version.id.to_string(), &downloads.to_string(), &date.to_string()]);
                 }
             }
         }
@@ -663,8 +658,11 @@ pub fn tar_gz(files: &[(String, String)]) -> Vec<u8> {
 }
 
 /// Formats a timestamp the way `PostgreSQL` renders `timestamptz` in the dump.
-fn timestamp(value: DateTime<Utc>) -> String {
-    value.format("%Y-%m-%d %H:%M:%S%.6f+00").to_string()
+fn timestamp(value: Timestamp) -> String {
+    value
+        .to_zoned_datetime(TimeZone::UTC)
+        .strftime("%Y-%m-%d %H:%M:%S%.6f+00")
+        .to_string()
 }
 
 /// Formats a boolean the way `PostgreSQL` renders it in the dump.

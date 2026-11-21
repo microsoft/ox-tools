@@ -78,6 +78,9 @@ pub trait Events {
     /// Reports progress within the phase opened by [`begin`](Self::begin).
     fn phase_progress(&mut self, _completed: usize, _total: usize, _unit: &str) {}
 
+    /// Distinct packages contributing selected mutants to the population discovered so far.
+    fn population_progress(&mut self, _packages: usize) {}
+
     /// A phase that has already announced itself is reporting what it found.
     ///
     /// Rendered under the phase it belongs to rather than repeating the verb, since a phase and

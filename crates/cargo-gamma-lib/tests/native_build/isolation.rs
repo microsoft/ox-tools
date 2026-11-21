@@ -159,6 +159,7 @@ type MinimizationCase = (usize, u8, Vec<Vec<u32>>, Vec<u32>);
 struct ProofEvents {
     observations: Vec<(usize, usize, Vec<std::path::PathBuf>)>,
     warnings: Vec<String>,
+    progress: Vec<usize>,
 }
 
 impl Events for ProofEvents {
@@ -168,6 +169,10 @@ impl Events for ProofEvents {
 
     fn warn(&mut self, warning: &str) {
         self.warnings.push(warning.to_owned());
+    }
+
+    fn convergence_progress(&mut self, excluded: usize) {
+        self.progress.push(excluded);
     }
 
     fn wants_isolation_evidence(&self) -> bool {
@@ -187,6 +192,242 @@ impl Events for ProofEvents {
             .push((active, population, written.iter().map(|path| path.to_path_buf()).collect()));
     }
 }
+
+#[test]
+fn proof_diagnostics_batch_independent_failures_using_the_actual_subset_guards() {
+    for shrink_first in [false, true] {
+        let (_directory, work) = trivial_workspace("native-proof-diagnostic-batch");
+        let plan = marked_native_plan(&work, 6);
+        let mut converger = Converger {
+            compiler_exclusions: Some(serde_json::from_value(serde_json::json!({"version": 1, "mutants": {}})).unwrap()),
+            ..Converger::default()
+        };
+        let mut events = ProofEvents::default();
+        let attempted = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let isolated = with_compiler(
+            {
+                let attempted = std::rc::Rc::clone(&attempted);
+                move |work, _, _, _| {
+                    let source = fs::read_to_string(work.test_root().join("src/lib.rs")).unwrap();
+                    let active = (1..=6)
+                        .filter(|ordinal| source.contains(&format!("regression_marker_{ordinal}_end")))
+                        .collect::<Vec<_>>();
+                    let failed = active.contains(&2) || active.contains(&6);
+                    let messages = [2, 6]
+                        .into_iter()
+                        .filter(|ordinal| active.contains(ordinal) && (!shrink_first || active.len() < 6))
+                        .map(|ordinal| native_marker_diagnostic(work, ordinal))
+                        .collect::<Vec<_>>();
+                    attempted.borrow_mut().push(active);
+                    Ok(Some(scripted_output(!failed, &messages.join("\n"), "")))
+                }
+            },
+            || {
+                converger.isolate_scoped(
+                    &work,
+                    &plan,
+                    &error_stream().replace("subject", "trivial"),
+                    &["check"],
+                    None,
+                    proof_limits(),
+                    &mut events,
+                )
+            },
+        )
+        .unwrap();
+        let blamed = isolated
+            .iter()
+            .flat_map(|result| match result {
+                Isolation::Blamed(ordinals) => ordinals.clone(),
+                other => panic!("expected direct proof diagnostics, got {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(blamed, [2, 6]);
+        let expected = if shrink_first {
+            vec![vec![1, 2, 3, 4, 5, 6], vec![1, 2, 3], vec![1, 3, 4, 5, 6], vec![1, 3, 4, 5]]
+        } else {
+            vec![vec![1, 2, 3, 4, 5, 6], vec![1, 3, 4, 5]]
+        };
+        assert_eq!(*attempted.borrow(), expected);
+        assert_eq!(converger.isolation_budget.proofs, expected.len());
+        assert_eq!(events.progress, if shrink_first { vec![1, 2] } else { vec![2] });
+        assert_eq!(converger.withdrawn, HashSet::from_iter([2, 6]));
+        for ordinal in [2, 6] {
+            assert_eq!(converger.census[&ordinal].code, "E0425");
+            assert_eq!(converger.census[&ordinal].evidence, AttributionEvidence::ReplacementPrimary);
+            assert!(
+                converger
+                    .compiler_exclusions
+                    .as_ref()
+                    .unwrap()
+                    .reason(&plan.mutants[usize::try_from(ordinal - 1).unwrap()])
+                    .unwrap()
+                    .contains("E0425")
+            );
+        }
+    }
+}
+
+#[test]
+fn proof_diagnostics_do_not_promote_flow_cascades_deletion_suspicions_or_background_errors() {
+    for (code, message, deletion) in [
+        ("E0382", "use of moved value", false),
+        ("E0599", "no method named `size` found for type `!`", false),
+        ("E0308", "mismatched types", true),
+    ] {
+        let (_directory, work) = trivial_workspace("native-proof-diagnostic-safeguards");
+        let mut plan = marked_native_plan(&work, 2);
+        if deletion {
+            plan.mutants[0].replacement = "".into();
+            plan.mutants[0].shape = Shape::Stmt;
+        }
+        let mut converger = Converger {
+            proof_background: HashSet::from_iter([2]),
+            ..Converger::default()
+        };
+        let (guards, _) = converger.instrument_schema(&work, &plan, &HashSet::default()).unwrap();
+        let location = guards[&1].1.site.start;
+        let mut attributed = HashMap::default();
+        let result = with_compiler(
+            move |work, _, _, _| {
+                let mut diagnostic: Value = if deletion {
+                    serde_json::from_str(&reason_message(
+                        Some(code),
+                        message,
+                        &[span(
+                            "src/lib.rs",
+                            location.line(),
+                            location.column(),
+                            location.line(),
+                            location.column() + 1,
+                            true,
+                        )],
+                        &[],
+                    ))
+                    .unwrap()
+                } else {
+                    serde_json::from_str(&native_marker_diagnostic(work, 1)).unwrap()
+                };
+                diagnostic["message"]["code"]["code"] = code.into();
+                diagnostic["message"]["message"] = message.into();
+                let background = native_marker_diagnostic(work, 2);
+                let mut unrelated: Value = serde_json::from_str(&background).unwrap();
+                unrelated["message"]["spans"][0]["file_name"] = "unrelated.rs".into();
+                Ok(Some(scripted_output(
+                    false,
+                    &format!("{diagnostic}\n{background}\n{unrelated}"),
+                    "",
+                )))
+            },
+            || {
+                converger.run_proof(
+                    &work,
+                    &plan,
+                    proof_scope(),
+                    &["check"],
+                    proof_limits(),
+                    &mut ProofEvents::default(),
+                    1,
+                    &HashSet::from_iter([1]),
+                    &mut attributed,
+                )
+            },
+        )
+        .unwrap();
+        assert_eq!(result, Some(true));
+        assert!(attributed.is_empty(), "{code}: {attributed:?}");
+        assert!(converger.withdrawn.is_empty());
+        assert!(converger.census.is_empty());
+    }
+}
+fn dependency_order_plan(work: &Workspace) -> Plan {
+    let mut plan = marked_native_plan(work, 4);
+    let original = plan.files.pop().expect("marked_native_plan provides the original source file");
+    for (path, package) in [("src/leaf.rs", "a-leaf"), ("src/shared.rs", "z-shared")] {
+        fs::copy(work.test_root().join("src/lib.rs"), work.test_root().join(path))
+            .expect("trivial_workspace owns writable source paths for this fixture");
+        plan.files.push(TargetFile {
+            path: path.into(),
+            package: package.into(),
+            ..original.clone()
+        });
+    }
+    for (index, mutant) in plan.mutants.iter_mut().enumerate() {
+        let file = &plan.files[usize::from(index >= 2)];
+        mutant.file = file.path.as_path().into();
+        mutant.package = file.package.as_str().into();
+        mutant.item_path = format!("item_{}", mutant.ordinal).into();
+    }
+    plan.reach = [
+        ("trivial", vec!["trivial", "a-leaf", "z-shared"]),
+        ("a-leaf", vec!["a-leaf"]),
+        ("z-shared", vec!["z-shared"]),
+        ("dependent-one", vec!["dependent-one", "z-shared"]),
+        ("dependent-two", vec!["dependent-two", "z-shared"]),
+    ]
+    .into_iter()
+    .map(|(package, dependencies)| (package.to_owned(), dependencies.into_iter().map(str::to_owned).collect()))
+    .collect();
+    plan
+}
+
+#[test]
+fn proof_order_preserves_shared_dependencies_and_frozen_cargo_context() {
+    for reverse_plan in [false, true] {
+        let (_directory, work) = trivial_workspace("native-proof-dependency-order");
+        let mut plan = dependency_order_plan(&work);
+        for mutant in &mut plan.mutants {
+            if mutant.ordinal <= 2 {
+                mutant.mutator = "stmt.delete_assign".into();
+            }
+        }
+        if reverse_plan {
+            plan.files.reverse();
+            plan.mutants.reverse();
+        }
+        let mut converger = Converger::default();
+        converger.freeze_context(None);
+        let mut events = ProofEvents::default();
+        let attempted = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let isolated = with_compiler(
+            {
+                let attempted = std::rc::Rc::clone(&attempted);
+                move |work, arguments, _, _| {
+                    assert_eq!(
+                        arguments,
+                        ["check", "--tests", "--keep-going", "--message-format=json", "--workspace"]
+                    );
+                    let source = ["src/leaf.rs", "src/shared.rs"]
+                        .map(|path| fs::read_to_string(work.test_root().join(path)).unwrap())
+                        .join("\n");
+                    let active = (1..=4)
+                        .filter(|ordinal| source.contains(&format!("regression_marker_{ordinal}_end")))
+                        .collect::<Vec<_>>();
+                    let failed = active.contains(&3);
+                    attempted.borrow_mut().push(active);
+                    Ok(Some(scripted_output(!failed, "", "")))
+                }
+            },
+            || {
+                converger.isolate_scoped(
+                    &work,
+                    &plan,
+                    &error_stream().replace("subject", "trivial"),
+                    &["check", "--tests", "--keep-going"],
+                    None,
+                    proof_limits(),
+                    &mut events,
+                )
+            },
+        )
+        .unwrap();
+        assert!(matches!(isolated.as_slice(), [Isolation::Blamed(ordinals)] if ordinals == &[3]));
+        assert_eq!(*attempted.borrow(), [vec![1, 2, 3, 4], vec![3, 4], vec![3], vec![1, 2, 4]]);
+        assert_eq!(events.observations[1].2, [std::path::PathBuf::from("src/leaf.rs")]);
+        assert_eq!(converger.withdrawn, HashSet::from_iter([3]));
+    }
+}
+
 #[test]
 fn later_contexts_keep_the_failed_schemas_item_coordinates_after_proofs_replace_guards() {
     let (_directory, work) = trivial_workspace("native-isolation-coordinate-snapshot");
@@ -673,6 +914,7 @@ fn native_proof_adapter_preserves_limits_population_written_files_and_all_termin
                     &mut events,
                     3,
                     &HashSet::from_iter([2]),
+                    &mut HashMap::default(),
                 )
             },
         )
@@ -711,6 +953,7 @@ fn native_proof_adapter_propagates_instrumentation_and_compiler_failures_without
                 &mut events,
                 2,
                 &HashSet::from_iter([1]),
+                &mut HashMap::default(),
             )
         },
     )
@@ -731,6 +974,7 @@ fn native_proof_adapter_propagates_instrumentation_and_compiler_failures_without
                 &mut events,
                 2,
                 &HashSet::from_iter([1]),
+                &mut HashMap::default(),
             )
         },
     )

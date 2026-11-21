@@ -292,7 +292,7 @@ managed import regions have different update behavior; see
 
 ## 9. Mutation testing with cargo-gamma
 
-`anvil-mutants-diff` and `anvil-mutants-full` use cargo-gamma 0.4.0+ with a
+`anvil-mutants-diff` and `anvil-mutants-full` use cargo-gamma 0.6.0+ with a
 100% assertion-killed score requirement and zero unresolved flaky outcomes.
 Timeouts and out-of-memory outcomes do not count as assertion kills.
 
