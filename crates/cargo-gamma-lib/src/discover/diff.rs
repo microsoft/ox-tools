@@ -1174,6 +1174,84 @@ diff --git before/old.rs next/a.rs
         }
     }
 
+    #[test]
+    fn a_renamed_standalone_script_requires_reliable_destination_evidence() {
+        let root = Utf8Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+        let script = "scripts/publish-gh-release.rs";
+        assert!(root.join(script).is_file());
+
+        for (old, new, metadata) in [
+            (
+                "a/old.rs",
+                "b/scripts/publish-gh-release.rs",
+                "rename to scripts/publish-gh-release.rs\n",
+            ),
+            ("old.rs", script, ""),
+        ] {
+            let patch = format!("diff --git {old} {new}\n{metadata}--- {old}\n+++ {new}\n@@ -0,0 +1 @@\n+new\n");
+            let mut diff = Diff::parse(&patch);
+            diff.resolve_for_workspace(&root, &[], &[], || Ok(HashSet::default())).unwrap();
+            assert!(diff.touched.is_empty(), "{patch}");
+        }
+
+        // Contradictory metadata cannot redirect an unresolved path to the existing script.
+        let patch = format!(
+            "diff --git a/elsewhere.rs b/elsewhere.rs\nrename to {script}\n--- a/elsewhere.rs\n+++ b/elsewhere.rs\n@@ -0,0 +1 @@\n+new\n"
+        );
+        let error = Diff::parse(&patch)
+            .resolve_for_workspace(&root, &[], &[], || panic!("conflicting metadata is not ownership evidence"))
+            .unwrap_err();
+        assert_unresolved_rust_path(&error, "b/elsewhere.rs");
+    }
+
+    #[test]
+    fn unsupported_rename_destinations_do_not_establish_an_exact_path() {
+        assert!(new_file_path("b/", None, None, Some("")).is_none());
+
+        for (raw, destination) in [
+            (r#""scripts/shared\tfile.rs""#, r#""scripts/shared\tfile.rs""#),
+            (r#""scripts/shared.rs"#, r#""scripts/shared.rs"#),
+            ("b/../scripts/shared.rs", "../scripts/shared.rs"),
+        ] {
+            let (_, source) = new_file_path(raw, None, None, Some(destination)).unwrap();
+            assert!(!source.exact, "{destination}");
+        }
+    }
+
+    #[test]
+    fn a_pure_rename_does_not_change_the_next_files_path() {
+        let patch = "\
+diff --git old.rs scripts/publish-gh-release.rs
+similarity index 100%
+rename from old.rs
+rename to scripts/publish-gh-release.rs
+diff --git b/scripts/publish-gh-release.rs b/scripts/publish-gh-release.rs
+--- b/scripts/publish-gh-release.rs
++++ b/scripts/publish-gh-release.rs
+@@ -0,0 +1 @@
++new
+";
+
+        let diff = Diff::parse(patch);
+        assert!(diff.touches(Utf8Path::new("b/scripts/publish-gh-release.rs"), 1, 1));
+        assert!(!diff.touches_file(Utf8Path::new("scripts/publish-gh-release.rs")));
+    }
+
+    #[test]
+    fn a_guessed_path_is_not_confirmed_by_another_hunk_with_the_same_spelling() {
+        let root = Utf8Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+        let exact = "--- a/scripts/publish-gh-release.rs\n+++ b/scripts/publish-gh-release.rs\n@@ -0,0 +1 @@\n+new\n";
+        let guessed =
+            "diff --git old.rs b/scripts/publish-gh-release.rs\n--- old.rs\n+++ b/scripts/publish-gh-release.rs\n@@ -1,0 +2 @@\n+new\n";
+
+        for patch in [format!("{exact}{guessed}"), format!("{guessed}{exact}")] {
+            let error = Diff::parse(&patch)
+                .resolve_for_workspace(&root, &[], &[], || panic!("one hunk still relies on a guessed prefix"))
+                .unwrap_err();
+            assert_unresolved_rust_path(&error, "b/scripts/publish-gh-release.rs");
+        }
+    }
+
     // A path that is already a workspace file is kept exactly as it is.
     #[test]
     fn a_path_that_names_a_workspace_file_resolves_to_it() {
@@ -1313,16 +1391,43 @@ diff --git before/old.rs next/a.rs
 
     #[test]
     fn an_exact_inventoried_target_does_not_require_module_evidence() {
-        let text = "--- a/./scripts/target.rs\n+++ b/./scripts/target.rs\n@@ -1 +1,2 @@\n old\n+new\n";
+        let root = Utf8Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+        let text = "--- a/./scripts/publish-gh-release.rs\n+++ b/./scripts/publish-gh-release.rs\n@@ -1 +1,2 @@\n old\n+new\n";
         let mut diff = Diff::parse(text);
-        let target = Utf8PathBuf::from("scripts/target.rs");
+        let target = Utf8PathBuf::from("scripts/publish-gh-release.rs");
+        assert!(root.join(&target).is_file());
 
-        diff.resolve_for_workspace(Utf8Path::new("unused"), core::slice::from_ref(&target), &[], || {
+        diff.resolve_for_workspace(&root, core::slice::from_ref(&target), &[], || {
             panic!("an inventoried target needs no standalone ownership check")
         })
         .unwrap();
 
         assert!(diff.touches(&target, 2, 2));
+    }
+
+    #[test]
+    fn standalone_scripts_share_ownership_evidence_and_propagate_lookup_errors() {
+        let root = Utf8Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+        let scripts = ["scripts/publish-gh-release.rs", "scripts/crate-template/src/lib.rs"];
+        assert!(scripts.iter().all(|script| root.join(script).is_file()));
+        let patch = scripts
+            .map(|script| format!("--- a/{script}\n+++ b/{script}\n@@ -0,0 +1 @@\n+new\n"))
+            .concat();
+        let mut diff = Diff::parse(&patch);
+        let mut calls = 0;
+        diff.resolve_for_workspace(&root, &[], &[], || {
+            calls += 1;
+            Ok(HashSet::default())
+        })
+        .unwrap();
+        assert_eq!(calls, 1, "the same declaration inventory covers both paths");
+        assert!(diff.touched.is_empty());
+
+        let error = Diff::parse(&patch)
+            .resolve_for_workspace(&root, &[], &[], || Err(error!("ownership inventory could not be read").usage()))
+            .unwrap_err();
+        assert!(error.is_usage(), "{error}");
+        assert_eq!(error.to_string(), "ownership inventory could not be read");
     }
 
     #[test]
@@ -1332,7 +1437,7 @@ diff --git before/old.rs next/a.rs
             .and_then(Utf8Path::parent)
             .expect("the crate is two levels below the workspace root");
         let absolute = root.join("scripts/publish-gh-release.rs");
-        let package_directories = [Utf8PathBuf::from("crates/cargo-gamma-lib")];
+        let package_directories = [Utf8PathBuf::from("crates/cargo-gamma"), Utf8PathBuf::from("crates/cargo-gamma-lib")];
         for path in [
             Utf8PathBuf::from("crates/cargo-gamma-lib/src/discover/diff.rs"),
             Utf8PathBuf::from("./crates/cargo-gamma-lib/src/discover/diff.rs"),

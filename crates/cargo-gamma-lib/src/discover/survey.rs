@@ -3869,7 +3869,10 @@ mod tests {
             digests: HashMap::default(),
             named: Vec::new(),
             declared: Vec::new(),
-            skipped: vec![(Utf8PathBuf::from("src/lib.rs"), "too deeply nested".into())],
+            skipped: vec![
+                (Utf8PathBuf::from("src/lib.rs"), "too deeply nested".into()),
+                (Utf8PathBuf::from("src/main.rs"), "could not parse source".into()),
+            ],
             defaults: HashMap::default(),
             incomplete_packages: HashSet::default(),
         });
@@ -3878,7 +3881,37 @@ mod tests {
         assert!(error.is_usage(), "{error}");
         assert_eq!(
             error.to_string(),
-            "cannot prove that a standalone Rust diff path is unowned because declaration analysis was incomplete (src/lib.rs: too deeply nested)"
+            "cannot prove that a standalone Rust diff path is unowned because declaration analysis was incomplete \
+             (src/lib.rs: too deeply nested, src/main.rs: could not parse source)"
+        );
+    }
+
+    #[test]
+    fn complete_ownership_inventory_accepts_known_declarations_and_reports_missing_source() {
+        let root = Utf8Path::new(env!("CARGO_MANIFEST_DIR"));
+        let source = root.join("src/discover/mod.rs");
+        let module = root.join("src/discover/diff.rs");
+        let cfgs = Cfgs::default();
+        let targets = declared_module_targets(&HashMap::from_iter([("cargo-gamma-lib".to_owned(), vec![source])]), &cfgs).unwrap();
+        assert!(targets.contains(&modules::identity(&module)));
+
+        let missing = root.join("src/discover/missing-ownership-source.rs");
+        assert!(!missing.exists());
+        let error = declared_module_targets(&HashMap::from_iter([("cargo-gamma-lib".to_owned(), vec![missing.clone()])]), &cfgs)
+            .expect_err("missing declaration source cannot prove ownership");
+        assert!(error.to_string().contains(missing.as_str()), "{error}");
+    }
+
+    #[test]
+    fn conditional_module_paths_are_reported_as_incomplete_ownership_evidence() {
+        let ast = syn::parse_file(r#"#[cfg_attr(windows, path = "../../../scripts/shared.rs")] mod shared;"#).unwrap();
+        let error = ownership_edges(Utf8Path::new("src/lib.rs"), &ast, &CfgSet::default())
+            .expect_err("an unevaluated path attribute can redirect ownership");
+        assert!(error.is_usage(), "{error}");
+        assert_eq!(
+            error.to_string(),
+            "cannot prove that a standalone Rust diff path is unowned: `src/lib.rs` has a module with a conditional \
+             `#[path]` that gamma cannot resolve"
         );
     }
 

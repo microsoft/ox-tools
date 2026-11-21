@@ -382,14 +382,22 @@ mod tests {
 
     #[test]
     fn conditional_module_path_prevents_proving_standalone_ownership() {
-        let ast = parse(r#"mod outer { #[cfg_attr(windows, path = "../../scripts/shared.rs")] mod shared; }"#);
-        assert!(has_conditional_path(&ast.items));
+        for source in [
+            r#"mod unrelated; mod outer { #[allow(dead_code)] #[cfg_attr(windows, allow(dead_code), path = "../../scripts/shared.rs")] mod shared; }"#,
+            r#"#[cfg_attr(windows, cfg_attr(test, path = "../scripts/shared.rs"))] mod shared;"#,
+            "#[cfg_attr(windows, 0)] mod malformed;",
+        ] {
+            assert!(has_conditional_path(&parse(source).items), "{source}");
+        }
 
-        let ast = parse(r#"#[cfg_attr(windows, cfg_attr(test, path = "../scripts/shared.rs"))] mod shared;"#);
-        assert!(has_conditional_path(&ast.items));
-
-        let ast = parse(r#"#[cfg_attr(windows, allow(dead_code))] mod normal; #[path = "known.rs"] mod known;"#);
-        assert!(!has_conditional_path(&ast.items));
+        for source in [
+            r#"#[cfg_attr(path, allow(dead_code))] mod normal; #[path = "known.rs"] mod known;"#,
+            r#"#[cfg_attr(windows, other_attr(flag, path = "known.rs"))] mod normal;"#,
+            "#[cfg(windows)] mod normal;",
+            "fn normal() {}",
+        ] {
+            assert!(!has_conditional_path(&parse(source).items), "{source}");
+        }
     }
 
     #[test]
