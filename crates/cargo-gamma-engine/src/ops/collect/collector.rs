@@ -2231,6 +2231,14 @@ impl<'a> Collector<'a> {
             return;
         }
 
+        // `!` coerces to `bool`, so a divergent expression -- `return`, a never-returning macro, a
+        // breakless `loop`, an all-diverging `if` or `match` -- passes the type check above, but its
+        // value is never reached: `!(return x)` returns before the negation runs, so the mutant
+        // behaves exactly like the original and survives every test. See `diverges`.
+        if diverges(self.cfg, expression) {
+            return;
+        }
+
         let whole = expression.span().byte_range();
         let range = self.expression_contents.get(&whole).unwrap_or(&whole);
         let text = self.file.slice(range).to_owned();

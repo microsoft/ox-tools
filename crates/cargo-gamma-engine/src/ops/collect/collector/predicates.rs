@@ -3,13 +3,14 @@
 
 //! Syntactic questions the collector asks about one node.
 
+use proc_macro2::{TokenStream, TokenTree};
 use syn::visit::Visit;
 use syn::{
     Attribute, BinOp, Block, Expr, ExprBlock, ExprBreak, ExprForLoop, ExprGroup, ExprLit, ExprLoop, ExprParen, ExprUnsafe, ExprWhile,
     GenericArgument, Label, Lit, Macro, Pat, Path, PathArguments, ReturnType, Stmt, Type, UnOp,
 };
 
-use super::super::defaults::{DefaultPaths, item_attrs};
+use super::super::defaults::{DefaultPaths, item_attrs, value_macro_name};
 use super::calls::Calls;
 use super::indexes::{ScopePath, block_id};
 use super::values::{Kind, resolve_type, strip};
@@ -513,11 +514,12 @@ pub(super) fn is_numeric_return(output: &ReturnType) -> bool {
 
 /// Returns whether an expression's value is unreachable because control leaves before it is used.
 ///
-/// A divergent expression has type `!`, which coerces to the numeric return type and so slips past
-/// the signature-only proof that a tail is a number. Perturbing it is pointless: `(return 5) + 1`
-/// returns before the `+ 1` ever runs, so the mutant behaves exactly like the original and survives
-/// every test. Only the cases the source states outright are reported. This never tries to prove a
-/// value *is* reachable, so anything it is unsure about answers `false` and is perturbed as before.
+/// A divergent expression has type `!`, which coerces to any expected type and so slips past the
+/// proof that a position holds a number or a boolean. Wrapping it is pointless: `(return 5) + 1`
+/// returns before the `+ 1` ever runs, and `!(return true)` before the `!` does, so the mutant
+/// behaves exactly like the original and survives every test. Only the cases the source states
+/// outright are reported. This never tries to prove a value *is* reachable, so anything it is
+/// unsure about answers `false` and is mutated as before.
 pub(super) fn diverges(cfg: &CfgSet, expression: &Expr) -> bool {
     match expression {
         // Control leaves the function, or the enclosing loop, outright.
@@ -527,14 +529,14 @@ pub(super) fn diverges(cfg: &CfgSet, expression: &Expr) -> bool {
         // `unimplemented!` in tail position is the body's value only in the type system's bookkeeping.
         Expr::Macro(node) => is_diverging_macro(&node.mac),
 
-        // A `loop` with no `break` runs forever; one with a `break` may yield a value.
-        Expr::Loop(node) => !has_break(cfg, &node.body),
+        // A `loop` that cannot `break` runs forever; one that may break may yield a value.
+        Expr::Loop(node) => !may_break(cfg, &node.body),
 
         // Wrappers that add no control flow carry the divergence of what they hold.
         Expr::Paren(ExprParen { expr, .. }) | Expr::Group(ExprGroup { expr, .. }) => diverges(cfg, expr),
         // A labeled block can consume a break and yield its value instead of diverging.
         Expr::Block(ExprBlock { block, label: None, .. }) | Expr::Unsafe(ExprUnsafe { block, .. }) => block_diverges(cfg, block),
-        Expr::Block(ExprBlock { block, label: Some(_), .. }) => !has_break(cfg, block) && block_diverges(cfg, block),
+        Expr::Block(ExprBlock { block, label: Some(_), .. }) => !may_break(cfg, block) && block_diverges(cfg, block),
 
         // An `if` diverges only when it cannot fall through: it needs an `else`, and both the `then`
         // block and the `else` branch must diverge in turn.
@@ -544,7 +546,7 @@ pub(super) fn diverges(cfg: &CfgSet, expression: &Expr) -> bool {
             .is_some_and(|(_else, otherwise)| block_diverges(cfg, &node.then_branch) && diverges(cfg, otherwise)),
 
         // A `match` diverges when it has active arms and every one of them does. A match on an empty type
-        // has no arm to reach here as a numeric tail, so the emptiness check only guards the logic.
+        // has no arm to reach here as a value, so the emptiness check only guards the logic.
         Expr::Match(node) => {
             let mut active = node.arms.iter().filter(|arm| !cfg.skip_gate(&arm.attrs)).peekable();
             active.peek().is_some() && active.all(|arm| diverges(cfg, &arm.body))
@@ -573,24 +575,29 @@ fn is_diverging_macro(mac: &Macro) -> bool {
     })
 }
 
-/// Returns whether a block contains any active `break`, anywhere within it.
+/// Returns whether a block may contain an active `break`, anywhere within it.
 ///
-/// Deliberately conservative: a `break` that belongs to a nested loop still counts, so a loop or
-/// labeled block is only called breakless when it truly has none. Erring this way keeps the
-/// divergence test from ever rejecting a construct that might produce a value.
-fn has_break(cfg: &CfgSet, block: &Block) -> bool {
+/// Deliberately conservative: a `break` that belongs to a nested loop still counts, and so does a
+/// macro that might expand to one, so a loop or labeled block is only called breakless when it
+/// truly has none. Erring this way keeps the divergence test from ever rejecting a construct that
+/// might produce a value.
+fn may_break(cfg: &CfgSet, block: &Block) -> bool {
     let mut finder = BreakFinder { cfg, found: false };
 
     finder.visit_block(block);
     finder.found
 }
 
-/// Records whether any `break` was seen while walking a loop body.
+/// Records whether a `break`, or a macro that might expand to one, was seen while walking a block.
 struct BreakFinder<'a> {
     cfg: &'a CfgSet,
     found: bool,
 }
 
+#[expect(
+    clippy::renamed_function_params,
+    reason = "syn names every visitor parameter `i`, which says nothing about what it is"
+)]
 impl<'ast> Visit<'ast> for BreakFinder<'_> {
     fn visit_expr(&mut self, i: &'ast Expr) {
         if !self.cfg.skip_gate(expr_attrs(i)) {
@@ -619,6 +626,42 @@ impl<'ast> Visit<'ast> for BreakFinder<'_> {
     fn visit_expr_break(&mut self, _node: &'ast ExprBreak) {
         self.found = true;
     }
+
+    // Macro expansions are not available here, so only a standard value macro is known to add no
+    // `break` of its own. Its arguments are still code that can hold a `break` or another macro
+    // call. A macro that reuses a standard name is trusted to be the standard one, as the
+    // never-returning macros are.
+    fn visit_macro(&mut self, node: &'ast Macro) {
+        if !node
+            .path
+            .segments
+            .last()
+            .is_some_and(|segment| value_macro_name(&segment.ident.to_string()))
+            || tokens_may_break(node.tokens.clone())
+        {
+            self.found = true;
+        }
+    }
+}
+
+/// Returns whether macro arguments hold a `break` or a call to another macro, at any depth.
+///
+/// Every `!` counts: telling a nested macro call apart from a negation needs a parse, and a false
+/// alarm here only keeps a mutant.
+fn tokens_may_break(tokens: TokenStream) -> bool {
+    let mut pending = vec![tokens];
+
+    while let Some(stream) = pending.pop() {
+        for token in stream {
+            match token {
+                TokenTree::Ident(name) if name == "break" => return true,
+                TokenTree::Punct(punct) if punct.as_char() == '!' => return true,
+                TokenTree::Group(group) => pending.push(group.stream()),
+                _ => {}
+            }
+        }
+    }
+    false
 }
 
 /// Returns a type's `index`th generic argument, so `Result<T, E>` can be asked for either side.

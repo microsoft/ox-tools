@@ -173,6 +173,22 @@ construction. Replacing a unit-valued call's result does not justify deleting
 the call's side effects. An empty collection does not prove equal capacity or
 hasher state. Explicit selection does not restore a proven no-op.
 
+A value wrapper selected by expected type is a no-op around a syntactically
+divergent expression: `return`, `break`, `continue`, a standard never-returning
+macro, a `loop` that cannot break, a block whose last active statement
+diverges, or an `if` or `match` whose active branches all diverge. Type `!`
+satisfies a numeric or boolean expectation, but control leaves before
+`expr.increment`, `expr.decrement`, or `bool_expr.negate` can change the
+value. Values that such an expression carries keep their own candidates.
+
+A possible exit retains the candidate. A labeled block can yield the operand
+of a `break` to its label, so it diverges only when it also cannot break.
+Discovery never sees macro expansions, so a macro that might expand to a
+`break` counts as a possible exit. Macros are recognized by name: a local
+macro that reuses a standard name is trusted to behave like the standard one.
+Divergence depends only on the site's syntax and the active configuration, so
+identical sites are withheld alike and no occurrence is reserved.
+
 ### Resource hazards
 
 Resource analysis compares a proposed loop with the original. It can certify
