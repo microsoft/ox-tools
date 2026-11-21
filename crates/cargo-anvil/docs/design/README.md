@@ -13,11 +13,13 @@ credentials, runner pools, and additional checks.
 - **Building this checkout of cargo-anvil requires Rust 1.97 or newer**, as
   declared in the workspace `Cargo.toml`. This is separate from the minimum
   supported toolchain in an adopting repository.
-- Generated recipes require **Just 1.46.0 or newer**, PowerShell Core (`pwsh`),
-  Git, rustup, and the prerequisites of the selected checks. `just anvil-setup`
-  installs catalog tools and public toolchains; it does not provision private
-  toolchains, credentials, compliance infrastructure, or arbitrary native
-  libraries.
+- Generated recipes require **Just 1.47.0 or newer**, Git, rustup, and the
+  prerequisites of the selected checks. PowerShell Core (`pwsh`) is required
+  for container orchestration, spell-dictionary preparation, and the
+  cargo-spellcheck source-build prerequisite probe, but not for ordinary
+  portable checks. `just anvil-setup` installs catalog tools and pinned public
+  toolchains; it does not provision private toolchains, credentials,
+  compliance infrastructure, or arbitrary native libraries.
 - The generated recipes target one Cargo workspace or single-crate package at
   the repository root. They do not orchestrate multiple independent workspaces.
 - Supported CI backends are GitHub Actions and Azure DevOps Pipelines.
@@ -51,7 +53,8 @@ cargo anvil --no-backends
 ```
 
 The same command performs initial adoption and subsequent updates; there is no
-`init` or `update` subcommand. Commit the generated files and `.anvil.lock`.
+`init` or `update` subcommand. Commit the generated files and
+`.anvil/manifest.toml`.
 
 `--dry-run` plans without writing. Exit 0 means no pending changes or refusals;
 exit 1 means drift, a refusal, or an error. `--version` reports the binary
@@ -74,8 +77,8 @@ The [check catalog](checks.md) defines each group's scope and verdict.
 
 Ordinary checks select the caller's `RUSTUP_TOOLCHAIN`, then either root
 toolchain-file spelling, then the root manifest's `rust-version`. Without any
-selection they fail rather than use an ambient compiler. Nightly checks use
-catalog pins; the MSRV group separately tests the declared minimum.
+selection they use Cargo's default toolchain. Nightly checks use catalog pins;
+the MSRV group separately tests the declared minimum.
 
 PR checks use committed-change impact analysis. A dirty local tree widens to
 the whole workspace; scheduled checks run unscoped. CI computes impact per OS
@@ -87,7 +90,8 @@ They do not reproduce the full Anvil policy.
 
 ## Ownership and customization
 
-`.anvil.lock` records generated content checksums. There are two update models:
+`.anvil/manifest.toml` records generated content checksums. There are two update
+models:
 
 - **Owned files:** clean files update automatically. Edited files are preserved;
   changed catalog content is offered in a `.anvil-proposed` sibling.
@@ -105,8 +109,11 @@ compose additional recipes and workflows. Add lint keys immediately after the
 matching namespace's closing marker, without repeating its table header or
 managed keys. Anvil does not own `.cargo/config.toml` or root toolchain files.
 
-Generated files live under `justfiles/anvil/`, `.anvil/container/`, and the
-selected backend directories. Shared files such as `Justfile`, `Cargo.toml`,
+Generated implementation files live under `.anvil/`, except for conventional
+discovery locations such as GitHub workflow roots, ADO root pipeline stubs,
+Copilot guidance, and repository configuration hosts. The root `Justfile`
+imports `.anvil/anvil.just`, which composes checks, groups, helpers, setup, and
+optional container recipes. Shared files such as `Justfile`, `Cargo.toml`,
 `deny.toml`, and formatting/spelling configuration contain managed regions.
 Agent guidance and the adoption skill are emitted for every backend selection.
 
@@ -120,6 +127,5 @@ Agent guidance and the adoption skill are emitted for every backend selection.
 - [Containers](containers.md): image inputs, credentials, execution, and restrictions.
 - [Extensibility](extensibility.md): downstream catalogs and in-process updates.
 - [Shared arrays](array-regions.md): required TOML and JSON string entries.
-- [Verification boundaries](../verification.md): what the repository's checks establish.
 
 Contributor instructions live in the crate's [AGENTS.md](../../AGENTS.md).

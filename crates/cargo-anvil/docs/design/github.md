@@ -11,7 +11,8 @@ siblings.
 The root workflows, `.github/workflows/anvil-pr.yml` and
 `anvil-scheduled.yml`, control triggers, permissions, secrets, and runner
 overrides. They call `anvil-pr-impl.yml` and `anvil-scheduled-impl.yml`,
-which arrange the jobs and invoke shared actions under `.github/actions/anvil-*`.
+which arrange the jobs and invoke shared actions under
+`.anvil/github/actions/`.
 Customize the roots for repository policy; changing the job graph requires
 editing the implementation workflows.
 
@@ -85,12 +86,12 @@ payload. Lookup failures fail the leg; merge-group runs skip title validation.
 
 ## Toolchains, setup, and caches
 
-The generated configuration requires Rust/Cargo 1.95 or newer and Just 1.46.0
+The generated configuration requires Rust/Cargo 1.95 or newer and Just 1.47.0
 or newer. Individual tools can impose higher requirements. Stable-toolchain
 selection follows the [local contract](./local.md): caller
 `RUSTUP_TOOLCHAIN`, then native rustup toolchain-file selection, then the root
-manifest's MSRV. There is no runner-default fallback. The dedicated MSRV group
-uses the root MSRV and skips when none is declared.
+manifest's MSRV, then Cargo's default toolchain when none is declared. The
+dedicated MSRV group uses the root MSRV and skips when none is declared.
 
 Setup expects rustup proxies on `PATH`, bootstraps cargo-binstall and Just, and
 installs the selected group's tools and public toolchains. Custom/path
@@ -200,14 +201,6 @@ one, a later failure creates a new issue.
 
 Issues must be enabled and the caller must retain `issues: write`; publication
 errors fail the publishing job rather than silently dropping the notification.
-
-### Advisory PR comments
-
-The canonical Linux `pr-fast` leg maintains the `anvil-semver` sticky comment
-from `target/anvil/comments/semver.md`, even after another check fails.
-Presence upserts the comment; absence deletes it. Fork and merge-group runs
-do not publish. Advisory findings do not themselves fail the recipe; see
-[checks](./checks.md) for the advisory convention.
 
 ## Dependabot ownership
 

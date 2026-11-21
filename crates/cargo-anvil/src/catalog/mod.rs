@@ -17,6 +17,9 @@ pub mod artifact;
 pub mod builder;
 pub mod meta;
 
-pub use artifact::{Artifact, ComposedHost, HostSelector, JsonArrayRegionSpec, OwnedFileSpec, RegionId, RegionSpec, TomlArrayRegionSpec};
+pub use artifact::{
+    Artifact, ComposedHost, HostSelector, JsonArrayRegionSpec, OwnedFileSectionSpec, OwnedFileSpec, RegionId, RegionSpec,
+    TomlArrayRegionSpec,
+};
 pub use builder::{Catalog, CatalogBuilder};
 pub use meta::CliMeta;

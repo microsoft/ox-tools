@@ -52,7 +52,7 @@ pub struct Cli {
     /// Override the single-tool guard and switch this repository to this tool.
     ///
     /// A repository is managed by exactly one anvil-family tool, recorded as
-    /// `tool` in `.anvil.lock`. If that field names a *different* tool, the
+    /// `tool` in `.anvil/manifest.toml`. If that field names a *different* tool, the
     /// run refuses (writing nothing, even under `--dry-run`). `--force` lifts
     /// that guard and proceeds as a normal update, rewriting the lock's
     /// provenance to this tool on save.
