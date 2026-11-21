@@ -23,6 +23,7 @@ use std::path::Path;
 use cargo_aprz_lib::Host;
 use cargo_aprz_lib::internals::facts::Progress;
 use cargo_aprz_lib::internals::facts::cache::Cache;
+use jiff::Timestamp;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -136,7 +137,7 @@ pub struct MockWorld {
 impl MockWorld {
     /// Builds a world serving the standard synthetic dump.
     pub async fn new() -> Self {
-        Self::with_dump(dump::Dump::sample(chrono::Utc::now()).to_tar_gz()).await
+        Self::with_dump(dump::Dump::sample(Timestamp::now()).to_tar_gz()).await
     }
 
     /// Builds a world serving the given dump bytes.

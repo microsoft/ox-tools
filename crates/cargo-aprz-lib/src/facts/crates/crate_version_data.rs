@@ -3,8 +3,9 @@
 
 use std::collections::BTreeMap;
 
-use chrono::{DateTime, NaiveDate, Utc};
 use compact_str::CompactString;
+use jiff::Timestamp;
+use jiff::civil::Date;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
@@ -64,13 +65,13 @@ pub struct CrateVersionData {
     /// When this specific version was first published to crates.io.
     ///
     /// **Source**: `versions.csv` from the `versions` table, `created_at` field
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 
     /// When this version's metadata was last updated.
     /// May differ from `created_at` if republished or metadata was modified.
     ///
     /// **Source**: `versions.csv` from the `versions` table, `updated_at` field
-    pub updated_at: DateTime<Utc>,
+    pub updated_at: Timestamp,
 
     /// Whether this version has been yanked from crates.io.
     /// Yanked versions are hidden from resolution but remain downloadable by exact version.
@@ -92,5 +93,5 @@ pub struct CrateVersionData {
     /// - Filtered by `version_id` (for this specific version)
     /// - Aggregated by (year, month) to produce monthly totals
     /// - Sorted chronologically
-    pub monthly_downloads: Vec<(NaiveDate, u64)>,
+    pub monthly_downloads: Vec<(Date, u64)>,
 }

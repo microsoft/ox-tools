@@ -1,8 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use chrono::DateTime;
 use compact_str::format_compact;
+use jiff::Timestamp;
 
 use super::{MetricCategory, MetricValue};
 use crate::facts::CrateFacts;
@@ -31,7 +31,7 @@ macro_rules! metric_def {
 /// Sum the monthly download series, which the crates provider already restricts to the
 /// last 90 days. Taking a fixed number of trailing months here instead would report
 /// years-old traffic for a crate whose most recent downloads are long past.
-fn calculate_recent_downloads(monthly_downloads: &[(chrono::NaiveDate, u64)]) -> u64 {
+fn calculate_recent_downloads(monthly_downloads: &[(jiff::civil::Date, u64)]) -> u64 {
     monthly_downloads.iter().map(|(_, count)| count).sum()
 }
 
@@ -295,9 +295,7 @@ pub const METRIC_DEFINITIONS: &[MetricDef] = &[
             .crates_data
             .as_ref()
             .map(|data| MetricValue::DateTime(data.overall_data.created_at)),
-        || Some(MetricValue::DateTime(
-            DateTime::from_timestamp(0, 0).expect("epoch timestamp is always valid")
-        ))
+        || Some(MetricValue::DateTime(Timestamp::UNIX_EPOCH))
     ),
     metric_def!(
         "stability.crate_updated_at",
@@ -307,9 +305,7 @@ pub const METRIC_DEFINITIONS: &[MetricDef] = &[
             .crates_data
             .as_ref()
             .map(|data| MetricValue::DateTime(data.overall_data.updated_at)),
-        || Some(MetricValue::DateTime(
-            DateTime::from_timestamp(0, 0).expect("epoch timestamp is always valid")
-        ))
+        || Some(MetricValue::DateTime(Timestamp::UNIX_EPOCH))
     ),
     metric_def!(
         "stability.version_created_at",
@@ -319,9 +315,7 @@ pub const METRIC_DEFINITIONS: &[MetricDef] = &[
             .crates_data
             .as_ref()
             .map(|data| MetricValue::DateTime(data.version_data.created_at)),
-        || Some(MetricValue::DateTime(
-            DateTime::from_timestamp(0, 0).expect("epoch timestamp is always valid")
-        ))
+        || Some(MetricValue::DateTime(Timestamp::UNIX_EPOCH))
     ),
     metric_def!(
         "stability.version_updated_at",
@@ -331,9 +325,7 @@ pub const METRIC_DEFINITIONS: &[MetricDef] = &[
             .crates_data
             .as_ref()
             .map(|data| MetricValue::DateTime(data.version_data.updated_at)),
-        || Some(MetricValue::DateTime(
-            DateTime::from_timestamp(0, 0).expect("epoch timestamp is always valid")
-        ))
+        || Some(MetricValue::DateTime(Timestamp::UNIX_EPOCH))
     ),
     metric_def!(
         "stability.yanked",
@@ -458,14 +450,14 @@ pub const METRIC_DEFINITIONS: &[MetricDef] = &[
         "Timestamp of the first commit in the repository",
         Activity,
         |facts| facts.codebase_data.as_ref().map(|data| MetricValue::DateTime(data.first_commit_at)),
-        || Some(MetricValue::DateTime(DateTime::UNIX_EPOCH))
+        || Some(MetricValue::DateTime(Timestamp::UNIX_EPOCH))
     ),
     metric_def!(
         "activity.last_commit_at",
         "Timestamp of the most recent commit in the repository",
         Activity,
         |facts| facts.codebase_data.as_ref().map(|data| MetricValue::DateTime(data.last_commit_at)),
-        || Some(MetricValue::DateTime(DateTime::UNIX_EPOCH))
+        || Some(MetricValue::DateTime(Timestamp::UNIX_EPOCH))
     ),
     // Issues
     metric_def!(
@@ -1757,9 +1749,9 @@ mod tests {
     #[test]
     fn recent_downloads_sum_all_available_months() {
         let monthly_downloads = [
-            (chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(), 7),
-            (chrono::NaiveDate::from_ymd_opt(2026, 2, 1).unwrap(), 11),
-            (chrono::NaiveDate::from_ymd_opt(2026, 3, 1).unwrap(), 29),
+            (jiff::civil::Date::constant(2026, 1, 1), 7),
+            (jiff::civil::Date::constant(2026, 2, 1), 11),
+            (jiff::civil::Date::constant(2026, 3, 1), 29),
         ];
 
         assert_eq!(calculate_recent_downloads(&monthly_downloads), 47);

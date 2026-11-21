@@ -57,7 +57,7 @@ bytes = { workspace = true }
 camino = { workspace = true }
 cargo_metadata = { workspace = true }
 cel = { workspace = true, features = ["chrono"] }
-chrono = { workspace = true, features = ["serde", "clock", "std", "now"] }
+chrono = { workspace = true, features = ["std"] }
 clap = { workspace = true, features = [
     "std",
     "derive",
@@ -78,6 +78,15 @@ futures = { workspace = true }
 futures-util = { workspace = true }
 http-body-util = { workspace = true }
 indicatif = { workspace = true }
+jiff = { workspace = true, features = [
+    "serde",
+    "std",
+    "tz-system",
+    "tz-fat",
+    "tzdb-bundle-platform",
+    "tzdb-zoneinfo",
+    "tzdb-concatenated",
+] }
 layered = { workspace = true }
 log = { workspace = true }
 mmap-rs = { workspace = true }

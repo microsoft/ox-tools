@@ -51,15 +51,17 @@ mod snapshot_tests {
     use std::io::Cursor;
     use std::sync::Arc;
 
-    use chrono::{DateTime, Local, TimeZone, Utc};
+    use jiff::ZonedDateTime;
     use semver::Version;
 
     use super::*;
     use crate::expr::{Appraisal, ExpressionDisposition, ExpressionOutcome, Risk};
     use crate::metrics::{Metric, MetricCategory, MetricDef, MetricValue};
 
-    fn test_timestamp() -> DateTime<Local> {
-        Local.with_ymd_and_hms(2024, 1, 15, 10, 30, 0).unwrap()
+    fn test_timestamp() -> ZonedDateTime {
+        jiff::tz::TimeZone::system()
+            .to_zoned_datetime(jiff::civil::date(2024, 1, 15).at(10, 30, 0, 0))
+            .expect("the test date is valid in the system time zone")
     }
 
     // Define test metric definitions
@@ -132,7 +134,7 @@ mod snapshot_tests {
         reason = "The shared fixture intentionally covers the complete appraisal-state matrix"
     )]
     fn create_test_crates() -> Vec<ReportableCrate> {
-        let created_at = Utc.with_ymd_and_hms(2023, 1, 15, 10, 30, 0).unwrap();
+        let created_at = "2023-01-15T10:30:00Z".parse::<jiff::Timestamp>().unwrap();
 
         vec![
             ReportableCrate::new(
@@ -280,7 +282,7 @@ mod snapshot_tests {
     fn test_html_report() {
         let crates = create_test_crates();
         let mut output = String::new();
-        generate_html(&crates, test_timestamp(), &mut output).unwrap();
+        generate_html(&crates, &test_timestamp(), &mut output).unwrap();
         insta::assert_snapshot!(output);
     }
 
@@ -340,7 +342,7 @@ mod snapshot_tests {
     #[test]
     #[cfg_attr(miri, ignore = "Miri cannot call GetModuleFileNameW")]
     fn test_single_crate_all_metrics() {
-        let created_at = Utc.with_ymd_and_hms(2023, 6, 1, 12, 0, 0).unwrap();
+        let created_at = "2023-06-01T12:00:00Z".parse::<jiff::Timestamp>().unwrap();
 
         let crate_with_all_metrics = ReportableCrate::new(
             "comprehensive-crate".into(),

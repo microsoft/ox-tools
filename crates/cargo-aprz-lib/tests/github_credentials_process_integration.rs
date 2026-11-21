@@ -20,7 +20,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use chrono::Utc;
+use jiff::Timestamp;
 use serde_json::json;
 use support::dump::Dump;
 use support::{TestHost, dump_server, dump_url, failing_server, seed_advisory_db_at};
@@ -125,7 +125,7 @@ fn helper_run_discovers_an_enterprise_token_through_the_production_process_path(
 }
 
 async fn run_credential_scenario() {
-    let dump = dump_server(Dump::sample(Utc::now()).to_tar_gz(), Some(1)).await;
+    let dump = dump_server(Dump::sample(Timestamp::now()).to_tar_gz(), Some(1)).await;
     let github = MockServer::start().await;
     let services = failing_server(404).await;
     let temp = tempfile::tempdir().expect("creating test directory");

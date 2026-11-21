@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use cargo_metadata::{Metadata, MetadataCommand, PackageId, TargetKind};
-use chrono::{DateTime, Utc};
 use futures_util::future::join_all;
+use jiff::Timestamp;
 use ohno::{EnrichableExt, IntoAppError, app_err};
 use tokio::task::{JoinHandle, spawn_blocking};
 
@@ -72,8 +72,8 @@ struct RepoData {
     commits_last_180_days: u64,
     commits_last_365_days: u64,
     commit_count: u64,
-    first_commit_at: DateTime<Utc>,
-    last_commit_at: DateTime<Utc>,
+    first_commit_at: Timestamp,
+    last_commit_at: Timestamp,
 }
 
 impl Provider {
@@ -339,8 +339,8 @@ impl Provider {
                 log::warn!(target: LOG_TARGET, "Could not get commit statistics for '{repo_spec}': {e:#}");
                 git::CommitStats {
                     commit_count: 0,
-                    first_commit_at: DateTime::UNIX_EPOCH,
-                    last_commit_at: DateTime::UNIX_EPOCH,
+                    first_commit_at: Timestamp::UNIX_EPOCH,
+                    last_commit_at: Timestamp::UNIX_EPOCH,
                     commits_per_window: vec![0, 0, 0],
                 }
             }
@@ -716,6 +716,7 @@ mod tests {
     use std::process::Command;
     use std::sync::Mutex;
 
+    use jiff::ToSpan;
     use semver::Version;
     use tempfile::TempDir;
     use url::Url;
@@ -972,7 +973,7 @@ jobs:
     /// A git timestamp `days` days in the past, used to spread the fixture's
     /// commit history across the provider's 90/180/365 day windows.
     fn days_ago(days: i64) -> String {
-        (Utc::now() - chrono::Duration::days(days)).to_rfc3339()
+        (Timestamp::now() - (days * 24).hours()).to_string()
     }
 
     fn write_file(path: &Path, contents: &str) {
@@ -1548,7 +1549,7 @@ jobs:
         assert_eq!(repo_data.commit_count, 0);
         assert_eq!(repo_data.commits_last_90_days, 0);
         assert_eq!(repo_data.commits_last_365_days, 0);
-        assert_eq!(repo_data.first_commit_at, DateTime::UNIX_EPOCH);
+        assert_eq!(repo_data.first_commit_at, Timestamp::UNIX_EPOCH);
         assert!(!repo_data.workflows.workflows_detected);
     }
 
@@ -2010,8 +2011,8 @@ jobs:
                     Ok(2),
                     Ok(git::CommitStats {
                         commit_count: 3,
-                        first_commit_at: DateTime::UNIX_EPOCH,
-                        last_commit_at: DateTime::UNIX_EPOCH,
+                        first_commit_at: Timestamp::UNIX_EPOCH,
+                        last_commit_at: Timestamp::UNIX_EPOCH,
                         commits_per_window: vec![1, 2, 3],
                     }),
                 ))
@@ -2269,8 +2270,8 @@ jobs:
             commits_last_180_days: 0,
             commits_last_365_days: 0,
             commit_count: 0,
-            first_commit_at: DateTime::UNIX_EPOCH,
-            last_commit_at: DateTime::UNIX_EPOCH,
+            first_commit_at: Timestamp::UNIX_EPOCH,
+            last_commit_at: Timestamp::UNIX_EPOCH,
         });
 
         // Run it twice: once where the verdict can be memoized, and once where the
@@ -2308,8 +2309,8 @@ jobs:
             commits_last_180_days: 0,
             commits_last_365_days: 0,
             commit_count: 0,
-            first_commit_at: DateTime::UNIX_EPOCH,
-            last_commit_at: DateTime::UNIX_EPOCH,
+            first_commit_at: Timestamp::UNIX_EPOCH,
+            last_commit_at: Timestamp::UNIX_EPOCH,
         }
     }
 }
