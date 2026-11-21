@@ -688,7 +688,7 @@ mod tests {
         // The single impact building block: snapshot + compute + resolve.
         for needle in [
             "anvil-impact:",
-            "_anvil-impact-snapshot:",
+            "_anvil-impact-snapshot impact_dir=\"\":",
             "_anvil-impact-include tier:",
             "_anvil-impact-exclude tier:",
             "_anvil-workspace-exclude +specs:",
