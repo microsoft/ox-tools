@@ -624,7 +624,6 @@ version = "0.7.0"
 dependencies = [
  "blake3",
  "bolero",
- "bolero-engine",
  "camino",
  "compact_str",
  "proc-macro2",
@@ -645,7 +644,6 @@ version = "0.7.1"
 dependencies = [
  "blake3",
  "bolero",
- "bolero-engine",
  "camino",
  "cargo-gamma-attrs-impl",
  "cargo-gamma-engine",

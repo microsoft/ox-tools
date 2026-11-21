@@ -341,6 +341,13 @@ anvil-tool-cargo-udeps-install installer="install": (_install-tool "cargo-udeps"
 [private]
 anvil-tool-cargo-udeps-validate-prereqs: (_check-tool "cargo-udeps" cargo_udeps_version)
 
+[group("anvil-setup")]
+[private]
+anvil-tool-cargo-unused-deps-install installer="install": (_install-tool "cargo-unused-deps" cargo_unused_deps_version installer)
+[group("anvil-setup")]
+[private]
+anvil-tool-cargo-unused-deps-validate-prereqs: (_check-tool "cargo-unused-deps" cargo_unused_deps_version)
+
 # Setup installs exact catalog pins; validation accepts equal or newer tools.
 # Change pins in cargo-anvil's catalog and regenerate rather than editing this
 # generated file.
@@ -371,6 +378,7 @@ cargo_nextest_version := "0.9.150"
 cargo_sort_version := "2.1.4"
 cargo_spellcheck_version := "0.15.7"
 cargo_udeps_version := "0.1.61"
+cargo_unused_deps_version := "0.2.0"
 
 # Install prerequisites for the `anvil-pr` recipe.
 [private]
@@ -749,6 +757,16 @@ anvil-udeps-setup installer="install": anvil-toolchain-nightly-install (anvil-to
 [private]
 anvil-udeps-validate-prereqs: anvil-toolchain-nightly-validate-prereqs anvil-tool-cargo-udeps-validate-prereqs anvil-tool-cargo-each-validate-prereqs
 
+# Install prerequisites for the `anvil-unused-deps` recipe.
+[group("anvil-setup")]
+[private]
+anvil-unused-deps-setup installer="install": anvil-toolchain-nightly-install (anvil-tool-cargo-unused-deps-install installer)
+
+# Validate prerequisites for the `anvil-unused-deps` recipe.
+[group("anvil-setup")]
+[private]
+anvil-unused-deps-validate-prereqs: anvil-toolchain-nightly-validate-prereqs anvil-tool-cargo-unused-deps-validate-prereqs
+
 # Install prerequisites for the `anvil-pr-fast` recipe.
 [private]
 anvil-pr-fast-setup installer="install": \
@@ -765,6 +783,7 @@ anvil-pr-fast-setup installer="install": \
     (anvil-pr-title-setup installer) \
     (anvil-deny-setup installer) \
     (anvil-audit-setup installer) \
+    (anvil-unused-deps-setup installer) \
     (anvil-udeps-setup installer) \
     (anvil-external-types-setup installer)
 
@@ -784,6 +803,7 @@ anvil-pr-fast-validate-prereqs: \
     anvil-pr-title-validate-prereqs \
     anvil-deny-validate-prereqs \
     anvil-audit-validate-prereqs \
+    anvil-unused-deps-validate-prereqs \
     anvil-udeps-validate-prereqs \
     anvil-external-types-validate-prereqs
 

@@ -404,3 +404,16 @@ anvil-spellcheck: anvil-spellcheck-validate-prereqs
 anvil-udeps: anvil-udeps-validate-prereqs anvil-impact
     cargo +{{ rust_nightly }} each {{ anvil_required_selection }} --once -- cargo +{{ rust_nightly }} udeps '{packages}' --all-features
     cargo +{{ rust_nightly }} each {{ anvil_required_selection }} --once -- cargo +{{ rust_nightly }} udeps '{packages}' --all-features --all-targets
+
+# Check global catalog inheritance and required packages' unused/misplaced dependencies.
+[arg("fix", long, value="true")]
+[script("pwsh", "-NoProfile")]
+anvil-unused-deps fix="false": anvil-unused-deps-validate-prereqs anvil-impact
+    $ErrorActionPreference = 'Stop'
+    $include = (& "{{ just_executable() }}" _anvil-impact-exclude required)
+    $impactExit = $LASTEXITCODE
+    if ($impactExit -ne 0) { exit $impactExit }
+    # --skip leaves $pkg empty, so unused-deps runs only the workspace inheritance check.
+    $pkg = @(if ($include -ne '--skip') { -split $include })
+    & cargo "+{{ rust_nightly }}" unused-deps @pkg {{ if fix == 'true' { '--fix' } else { '' } }}
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

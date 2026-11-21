@@ -114,6 +114,16 @@ fn generated_recipes_are_split_by_responsibility() {
 }
 
 #[test]
+fn unused_deps_keeps_scope_and_fixes_explicit() {
+    let generated = generated();
+    assert!(generated.checks.contains(r#"[arg("fix", long, value="true")]"#));
+    assert!(generated.checks.contains(r#"anvil-unused-deps fix="false":"#));
+    assert!(generated.checks.contains("_anvil-impact-exclude required"));
+    assert!(generated.setup.contains("cargo_unused_deps_version"));
+    assert!(generated.setup.contains("anvil-tool-cargo-unused-deps-validate-prereqs"));
+}
+
+#[test]
 fn common_checks_are_direct_cargo_each_invocations() {
     let recipes = generated().checks;
     for command in [

@@ -47,6 +47,7 @@ anvil-scheduled-runtime-analysis
 anvil-scheduled-test
 anvil-spellcheck
 anvil-udeps
+anvil-unused-deps
 [group("anvil-container")]
 anvil-container
 anvil-container-down
