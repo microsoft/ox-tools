@@ -3899,7 +3899,10 @@ mod tests {
         assert!(!missing.exists());
         let error = declared_module_targets(&HashMap::from_iter([("cargo-gamma-lib".to_owned(), vec![missing.clone()])]), &cfgs)
             .expect_err("missing declaration source cannot prove ownership");
-        assert!(error.to_string().contains(missing.as_str()), "{error}");
+        assert_eq!(error.message(), format!("could not read `{missing}`"));
+        assert!(!error.is_usage() && !error.is_skippable(), "{error}");
+        let cause = std::error::Error::source(&error).and_then(|cause| cause.downcast_ref::<std::io::Error>());
+        assert_eq!(cause.map(std::io::Error::kind), Some(std::io::ErrorKind::NotFound));
     }
 
     #[test]
