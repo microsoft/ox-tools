@@ -41,7 +41,8 @@ anvil-mutants-diff: anvil-mutants-diff-validate-prereqs anvil-impact
     $reportArgs = @()
     if ($env:GITHUB_ACTIONS -eq 'true') { $reportArgs = @('--artifact-dir', 'target/cargo-gamma') }
     try {
-        git diff --src-prefix=a/ --dst-prefix=b/ "$base" --output=$diff_path
+        # Temporary local workaround: cargo-gamma does not support standalone Rust scripts.
+        git diff --src-prefix=a/ --dst-prefix=b/ "$base" --output=$diff_path -- . ':(exclude)scripts/publish-gh-release.rs'
         $exitCode = $LASTEXITCODE
         if ($exitCode -eq 0) {
             & cargo {{_anvil_stable_toolchain_args}} gamma run --workspace --in-diff $diff_path --min-score 100 --max-flaky 0 @reportArgs
