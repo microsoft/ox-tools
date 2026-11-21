@@ -87,6 +87,14 @@ Replaceable facade, cache, supervision, and test mechanics are recorded in the
 Mutation selection and declaration evidence have separate scopes. `--file`,
 `--exclude-file` (including configuration exclusions), and `--in-diff` restrict
 which sources produce mutants, not which package declarations can inform them.
+For a diff selection, a population containing only source- or configuration-excluded
+mutations has no applicable score or flaky gate. The command succeeds with an explicit
+diagnostic and retains every exclusion in its reports. This does not establish a
+passing score. A source expectation, an unexplained ignored outcome, a build failure,
+or any incomplete or failing eligible mutation prevents this exception.
+The GitHub Actions summary shows a not-applicable headline instead of a score for this case.
+Its outcome table retains the suppression counts.
+Full campaigns still reject an entirely ungradeable population when a gate requires a score.
 The survey reads excluded sources for module declarations and `Default`
 evidence before emitting candidates, preserving implementations in other files
 without losing negative evidence for unrelated local types. Evidence remains

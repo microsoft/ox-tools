@@ -338,7 +338,7 @@ fn emit_ci<H: Host>(host: &mut H, args: &RunArgs, plan: &Plan, advice: Option<&s
         // The diagnosis rides along with the score rather than in a file of its own: the summary
         // panel is the artifact a team reads every morning, and a score nobody knows what to do
         // about is the reason mutation testing gets run nightly and then ignored.
-        let mut summary = crate::ci::summary(&plan.mutants, &plan.root);
+        let mut summary = crate::ci::summary_for_run(&plan.mutants, &plan.root, policy_excluded_diff(args, &plan.mutants));
 
         if let Some(advice) = advice {
             summary.push('\n');
@@ -451,6 +451,14 @@ pub(super) fn run_session<H: Host>(host: &mut H, args: &RunArgs, progress_when: 
     Ok(finish_run(host, args, styler, executed))
 }
 
+fn policy_excluded_diff(args: &RunArgs, mutants: &[Mutant]) -> bool {
+    args.select.in_diff.is_some()
+        && !mutants.is_empty()
+        && mutants
+            .iter()
+            .all(|mutant| mutant.outcome == Outcome::Ignored && mutant.suppression.is_some() && mutant.expectation.is_none())
+}
+
 fn finish_run<H: Host>(host: &mut H, args: &RunArgs, styler: Styler, executed: Executed) -> i32 {
     let Executed { plan, stuck } = executed;
 
@@ -539,6 +547,16 @@ fn finish_run<H: Host>(host: &mut H, args: &RunArgs, styler: Styler, executed: E
         );
 
         return EXIT_GATE_FAILED;
+    }
+
+    if policy_excluded_diff(args, &plan.mutants) {
+        let _ = writeln!(
+            host.error(),
+            "no eligible mutants remain in the diff after source and configuration exclusions; mutation gates are not applicable"
+        );
+        return
+        // #[gamma::skip(return_value.default, reason = "EXIT_OK and i32::default() are both zero; this replacement changes neither exit status nor side effects.", tag = "equivalent")]
+        EXIT_OK;
     }
 
     // Every mutant was suppressed, unviable, or never built, so the score is a ratio with nothing
@@ -3083,6 +3101,212 @@ mod tests {
             assert_eq!(code, expected, "{}", host.err());
             assert_eq!(host.err(), diagnostic);
             assert_eq!(host.out(), "");
+        }
+    }
+
+    #[test]
+    fn diff_with_only_policy_exclusions_has_no_applicable_mutation_gate() {
+        use crate::model::{Channel, Suppression};
+
+        for in_diff in [false, true] {
+            for channel in [Channel::Config, Channel::Comment, Channel::Attribute] {
+                let mut args = RunArgs {
+                    min_score: Some(100.0),
+                    max_flaky: Some(0),
+                    ..RunArgs::default()
+                };
+                args.select.in_diff = in_diff.then(|| "changes.patch".into());
+                let mut excluded = mutant(0, Outcome::Ignored, 1);
+                excluded.suppression = Some(Suppression {
+                    channel,
+                    reason: Some("diagnostic formatting is excluded".into()),
+                    tag: None,
+                    line: None,
+                });
+                let mut host = Sink::default();
+                let code = finish_run(
+                    &mut host,
+                    &args,
+                    Styler::new(false),
+                    Executed {
+                        plan: Some(fixtures::plan(vec![excluded])),
+                        stuck: Vec::new(),
+                    },
+                );
+                assert_eq!(code, if in_diff { EXIT_OK } else { EXIT_GATE_FAILED });
+                assert_eq!(host.out(), "");
+                assert_eq!(
+                    host.err(),
+                    if in_diff {
+                        "no eligible mutants remain in the diff after source and configuration exclusions; mutation gates are not applicable\n"
+                    } else {
+                        "error: no mutant counted toward the `--min-score` and `--max-flaky` gates, so it was never evaluated; check that the selection — `--in-diff`, `--exclude-file`, `--re`, `--shard-count`/`--shard-index`, `--incremental` — leaves something to test\n"
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn diff_policy_exclusions_have_a_not_applicable_ci_summary() {
+        use crate::model::{Channel, Suppression};
+
+        let directory = crate::testing::workdir("ci-summary-policy-exclusions-");
+        let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).unwrap();
+        let mutants = [Channel::Config, Channel::Comment]
+            .into_iter()
+            .enumerate()
+            .map(|(index, channel)| {
+                let mut excluded = mutant(index, Outcome::Ignored, 1);
+                excluded.suppression = Some(Suppression {
+                    channel,
+                    reason: Some("diagnostic formatting is excluded".into()),
+                    tag: None,
+                    line: None,
+                });
+                excluded
+            })
+            .collect();
+        let mut plan = fixtures::plan(mutants);
+        plan.root = root.clone();
+        for in_diff in [false, true] {
+            let path = root.join(format!("summary-{in_diff}.md"));
+            let mut host = Sink::default().with_env("GITHUB_STEP_SUMMARY", path.as_str());
+            let mut args = RunArgs {
+                annotations: crate::ci::Annotations::Github,
+                ..RunArgs::default()
+            };
+            args.select.in_diff = in_diff.then(|| "changes.patch".into());
+            emit_ci(&mut host, &args, &plan, None, Styler::new(false)).unwrap();
+            let headline = if in_diff {
+                "**Not applicable**: no eligible mutants remain after source and configuration exclusions."
+            } else {
+                "**Score 100.0%** — 0 detected, 0 not detected of 0 mutants."
+            };
+            assert_eq!(
+                fs::read_to_string(path).unwrap(),
+                format!("## Mutation testing\n\n{headline}\n\n| Outcome | Count |\n|---|---:|\n| Suppressed | 2 |\n")
+            );
+        }
+    }
+
+    #[test]
+    fn empty_diff_ci_summaries_do_not_claim_policy_exclusions() {
+        let directory = crate::testing::workdir("ci-summary-empty-diff-");
+        let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).unwrap();
+        let path = root.join("summary.md");
+        let mut plan = fixtures::plan(Vec::new());
+        plan.root = root;
+        let mut args = RunArgs {
+            annotations: crate::ci::Annotations::Github,
+            ..RunArgs::default()
+        };
+        args.select.in_diff = Some("changes.patch".into());
+        let mut host = Sink::default().with_env("GITHUB_STEP_SUMMARY", path.as_str());
+
+        emit_ci(&mut host, &args, &plan, None, Styler::new(false)).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(path).unwrap(),
+            "## Mutation testing\n\n**Score 100.0%** — 0 detected, 0 not detected of 0 mutants.\n\n| Outcome | Count |\n|---|---:|\n"
+        );
+    }
+
+    #[test]
+    fn diff_policy_exclusions_do_not_hide_restored_survivors() {
+        use crate::model::{Channel, Suppression};
+
+        let mut restored = mutant(0, Outcome::Survived, 1);
+        restored.suppression = Some(Suppression {
+            channel: Channel::Config,
+            reason: Some("diagnostic formatting is excluded".into()),
+            tag: None,
+            line: None,
+        });
+        let mut args = RunArgs {
+            min_score: Some(100.0),
+            max_flaky: Some(0),
+            ..RunArgs::default()
+        };
+        args.select.in_diff = Some("changes.patch".into());
+        let mut host = Sink::default();
+        let code = finish_run(
+            &mut host,
+            &args,
+            Styler::new(false),
+            Executed {
+                plan: Some(fixtures::plan(vec![restored])),
+                stuck: Vec::new(),
+            },
+        );
+
+        assert_eq!(code, EXIT_GATE_FAILED);
+        assert_eq!(host.err(), "error: mutation score 0.0% is below the required 100.0%\n");
+        assert_eq!(host.out(), "");
+    }
+
+    #[test]
+    fn diff_policy_exclusions_do_not_hide_incomplete_or_failing_mutations() {
+        use crate::model::{Channel, Suppression};
+
+        let mut args = RunArgs {
+            min_score: Some(100.0),
+            max_flaky: Some(0),
+            ..RunArgs::default()
+        };
+        args.select.in_diff = Some("changes.patch".into());
+        let mut excluded = mutant(0, Outcome::Ignored, 1);
+        excluded.suppression = Some(Suppression {
+            channel: Channel::Config,
+            reason: Some("diagnostic formatting is excluded".into()),
+            tag: None,
+            line: None,
+        });
+        for outcome in [
+            Outcome::Survived,
+            Outcome::NoCoverage,
+            Outcome::Pending,
+            Outcome::Flaky,
+            Outcome::CompileError,
+            Outcome::NotBuilt,
+            Outcome::Ignored,
+        ] {
+            let mut host = Sink::default();
+            let code = finish_run(
+                &mut host,
+                &args,
+                Styler::new(false),
+                Executed {
+                    plan: Some(fixtures::plan(vec![excluded.clone(), mutant(1, outcome, 2)])),
+                    stuck: Vec::new(),
+                },
+            );
+            assert_eq!(code, EXIT_GATE_FAILED, "{outcome}: {}", host.err());
+            assert!(!host.err().contains("mutation gates are not applicable"));
+        }
+
+        for (expectation, stuck, expected) in [
+            (true, Vec::new(), EXIT_GATE_FAILED),
+            (false, vec!["instrumented build failed".into()], EXIT_CANNOT_PROCEED),
+        ] {
+            let mut excluded = excluded.clone();
+            if expectation {
+                excluded.expectation = expecting(Outcome::Ignored, true).expectation;
+            }
+            let mut host = Sink::default();
+            assert_eq!(
+                finish_run(
+                    &mut host,
+                    &args,
+                    Styler::new(false),
+                    Executed {
+                        plan: Some(fixtures::plan(vec![excluded])),
+                        stuck,
+                    },
+                ),
+                expected
+            );
+            assert!(!host.err().contains("mutation gates are not applicable"));
         }
     }
 
