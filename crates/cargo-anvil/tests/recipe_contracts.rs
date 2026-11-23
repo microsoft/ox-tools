@@ -298,6 +298,8 @@ fn miri_profiles_set_their_distinct_environment() {
         "{checks}"
     );
     assert!(checks.contains("--json-work-dir-parent manifest_path"), "{checks}");
+    assert!(checks.contains(r#"[env("__CARGO_TEMPORARY_BUILD_DIR_NEW_LAYOUT_OPT_OUT", anvil_miri_build_dir_layout_opt_out)]"#));
+    assert!(!checks.contains(r#"anvil_cargo_env_config("__CARGO_TEMPORARY_BUILD_DIR_NEW_LAYOUT_OPT_OUT""#));
     assert!(!checks.contains("ForEach-Object -Parallel"), "{checks}");
     assert!(!checks.contains("[script(\"pwsh\", \"-NoProfile\")]\n_anvil-miri-test"), "{checks}");
 }
