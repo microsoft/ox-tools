@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-11-23
+
+- ✨ Features
+
+  - cargo-anvil: add cargo-unused-deps check ([#378](https://github.com/microsoft/ox-tools/pull/378))
+
 ## [0.27.0] - 2026-11-23
 
 - ⚠️ Breaking
