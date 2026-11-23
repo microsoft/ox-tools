@@ -54,7 +54,7 @@ pub struct Cli {
     /// A repository is managed by exactly one anvil-family tool, recorded as
     /// `tool` in `.anvil/manifest.toml`. If that field names a *different* tool, the
     /// run refuses (writing nothing, even under `--dry-run`). `--force` lifts
-    /// that guard and proceeds as a normal update, rewriting the lock's
+    /// that guard and proceeds as a normal update, rewriting the manifest's
     /// provenance to this tool on save.
     #[arg(long)]
     pub force: bool,
