@@ -366,7 +366,7 @@ anvil-msrv-test: anvil-msrv-test-validate-prereqs anvil-impact
 
 # Mutation-test code changed from the selected base branch.
 anvil-mutants-diff: anvil-mutants-diff-validate-prereqs anvil-impact
-    {{ anvil_mutants_diff_skip_prefix }}git diff --src-prefix=a/ --dst-prefix=b/ {{ quote(anvil_base_ref) }} --output={{ quote(anvil_mutants_diff_file) }}
+    {{ anvil_mutants_diff_skip_prefix }}git diff --src-prefix=a/ --dst-prefix=b/ {{ quote(anvil_base_ref) }} --output={{ quote(anvil_mutants_diff_file) }} -- . ":(exclude)scripts/publish-gh-release.rs"
     {{ anvil_mutants_diff_skip_prefix }}cargo {{ anvil_stable_toolchain_arg }} gamma run --workspace --in-diff {{ quote(anvil_mutants_diff_file) }} --min-score 100 --max-flaky 0 --update-hints {{ if env("GITHUB_ACTIONS", "") == "true" { "--artifact-dir target/cargo-gamma" } else { "" } }}
     {{ anvil_mutants_diff_skip_prefix }}rm {{ quote(anvil_mutants_diff_file) }}
 

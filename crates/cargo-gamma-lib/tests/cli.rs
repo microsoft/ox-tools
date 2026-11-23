@@ -891,8 +891,6 @@ fn commit_workspace(dir: &TempDir) {
     };
 
     assert_git(&["init", "--quiet"]);
-    assert_git(&["config", "core.autocrlf", "false"]);
-    assert_git(&["config", "core.safecrlf", "false"]);
     assert_git(&["add", "Cargo.toml", "src"]);
     assert_git(&[
         "-c",

@@ -207,6 +207,14 @@ fn msrv_recipes_use_only_the_declared_root_version() {
             .setup
             .contains("rustup run \" + quote(workspace_rust_version) + \" rustc --version")
     );
+    assert!(generated.setup.contains(
+        "anvil-msrv-test-setup installer=\"install\": (anvil-tool-cargo-each-install installer)\n    \
+         {{ just_executable() }} --justfile {{ quote(justfile()) }} _anvil-msrv-test-setup"
+    ));
+    assert!(generated.setup.contains(
+        "anvil-msrv-test-validate-prereqs: anvil-tool-cargo-each-validate-prereqs\n    \
+         {{ just_executable() }} --justfile {{ quote(justfile()) }} _anvil-msrv-test-validate-prereqs"
+    ));
     assert!(!generated.setup.contains("cargo each {{ anvil_msrv_workspace_selection }}"));
     assert!(
         generated
@@ -226,6 +234,19 @@ fn miri_setup_includes_the_cargo_each_driver() {
     assert!(setup.contains(
         "anvil-miri-validate-prereqs: anvil-component-nightly-miri-validate-prereqs \
          anvil-component-nightly-rust-src-validate-prereqs \
+         anvil-tool-cargo-each-validate-prereqs"
+    ));
+}
+
+#[test]
+fn mutation_diff_setup_includes_the_impact_driver() {
+    let setup = generated().setup;
+    assert!(setup.contains(
+        "anvil-mutants-diff-setup installer=\"install\": (anvil-tool-cargo-gamma-install installer) \
+         (anvil-tool-cargo-each-install installer)"
+    ));
+    assert!(setup.contains(
+        "anvil-mutants-diff-validate-prereqs: anvil-tool-cargo-gamma-validate-prereqs \
          anvil-tool-cargo-each-validate-prereqs"
     ));
 }
