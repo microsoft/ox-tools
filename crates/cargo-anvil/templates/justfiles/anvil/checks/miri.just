@@ -6,11 +6,10 @@
 
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
-# Scope: a clean direct or PR invocation is impact-scoped -- anvil-impact
-# computes the cache and _anvil-impact-include returns the affected set, so
-# unaffected packages are skipped. Full-workspace runs come from the
-# scheduled/full tiers (which force ANVIL_IMPACT=off) or a dirty local tree
-# (which widens for safety).
+# Scope: a direct or PR invocation is impact-scoped -- anvil-impact computes
+# the clean cache or fresh dirty-local output, and _anvil-impact-include
+# returns the affected set, so unaffected packages are skipped. Full-workspace
+# runs come from the scheduled/full tiers, which force ANVIL_IMPACT=off.
 
 # Compile all selected packages together, then run their Miri test executables in
 # parallel. The single Cargo invocation preserves workspace feature unification,

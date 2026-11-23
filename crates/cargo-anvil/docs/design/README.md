@@ -77,10 +77,11 @@ toolchain-file spelling, then the root manifest's `rust-version`. Without any
 selection they fail rather than use an ambient compiler. Nightly checks use
 catalog pins; the MSRV group separately tests the declared minimum.
 
-PR checks use committed-change impact analysis. A dirty local tree widens to
-the whole workspace; scheduled checks run unscoped. CI computes impact per OS
-family, with ARM jobs sharing their OS family's result rather than computing
-an architecture-specific dependency graph.
+PR checks use committed-change impact analysis. A dirty local tree analyzes
+the files on disk and scopes each tier from that fresh result; scheduled checks
+run unscoped. Cloud impact jobs require a clean checkout. CI computes impact
+per OS family, with ARM jobs sharing their OS family's result rather than
+computing an architecture-specific dependency graph.
 
 Plain `cargo build`, `cargo test`, and other Cargo commands remain available.
 They do not reproduce the full Anvil policy.

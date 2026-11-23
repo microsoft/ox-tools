@@ -33,7 +33,7 @@ use std::ffi::OsString;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::{env, fs};
 
 use cargo_anvil::Catalog;
@@ -68,7 +68,7 @@ fn tools_available() -> bool {
 
 /// Returns true if the tools the *cargo-delta-free* recipe paths need are on
 /// PATH (git, just, pwsh). Deliberately omits cargo/cargo-delta: the paths this
-/// gates -- `ANVIL_IMPACT=off`, an invalid mode, a dirty-tree widen, and
+/// gates -- `ANVIL_IMPACT=off`, invalid modes, cloud dirty-tree rejection, and
 /// `consume` -- must reach their decision WITHOUT ever invoking cargo-delta.
 /// Requiring it here would both wrongly skip these tests on a machine that
 /// lacks it and mask a regression that starts shelling out to it on a path that
@@ -131,6 +131,24 @@ impl ShimBin {
         Self::new(&[("cargo.ps1", body), ("cargo-delta.ps1", body)])
     }
 
+    /// A `cargo` shim that records cargo-delta calls and forwards every call to
+    /// the real Cargo executable found outside this shim directory.
+    fn logging_cargo_delta() -> Self {
+        Self::new(&[(
+            "cargo.ps1",
+            r"if (($args -contains 'delta') -and $env:ANVIL_TEST_LOG) {
+    Add-Content -LiteralPath $env:ANVIL_TEST_LOG -Value ($args -join ' ')
+}
+$real = Get-Command cargo -All |
+    Where-Object { $_.Source -and $_.Source -notlike (Join-Path $PSScriptRoot '*') } |
+    Select-Object -First 1
+if (-not $real) { [Console]::Error.WriteLine('cargo shim: no real cargo on PATH'); exit 98 }
+& $real.Source @args
+exit $LASTEXITCODE
+",
+        )])
+    }
+
     /// The lines logged by the shims so far (empty when nothing was invoked).
     fn log_lines(&self) -> Vec<String> {
         fs::read_to_string(&self.log)
@@ -182,6 +200,7 @@ fn workspace_at_base() -> TempDir {
         "[package]\nname = \"alpha\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
     );
     write(&root.join("crates/alpha/src/lib.rs"), "pub fn a() {}\n");
+    write(&root.join("crates/alpha/src/helpers.rs"), "pub fn helper() {}\n");
     write(
         &root.join("crates/beta/Cargo.toml"),
         "[package]\nname = \"beta\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
@@ -257,6 +276,9 @@ fn just_cmd(root: &Path, args: &[&str]) -> Command {
         .args(args)
         .env_remove("ANVIL_IMPACT")
         .env_remove("ANVIL_IMPACT_INPUT_DIR")
+        .env_remove("ANVIL_IMPACT_INVOCATION_ID")
+        .env_remove("GITHUB_ACTIONS")
+        .env_remove("TF_BUILD")
         .env_remove("BASE_REF")
         .env_remove("GITHUB_BASE_REF")
         .env_remove("SYSTEM_PULLREQUEST_TARGETBRANCH")
@@ -269,8 +291,14 @@ fn run_impact(root: &Path) -> String {
     let out = just_cmd(root, &["anvil-impact"]).output().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert!(out.status.success(), "just anvil-impact failed:\n{combined}");
+    let dirty = !git_stdout(root, &["status", "--porcelain", "--", ".", ":(exclude)target/"]).is_empty();
+    let impact_dir = if dirty {
+        active_dirty_dir(root)
+    } else {
+        root.join("target/anvil/impact")
+    };
     for tier in ["modified", "affected", "required"] {
-        let path = root.join(format!("target/anvil/impact/include_{tier}.txt"));
+        let path = impact_dir.join(format!("include_{tier}.txt"));
         assert!(
             path.is_file(),
             "just anvil-impact succeeded without producing {}:\n{combined}",
@@ -278,6 +306,22 @@ fn run_impact(root: &Path) -> String {
         );
     }
     combined
+}
+
+/// Resolve the immutable generation published by a completed dirty impact.
+fn active_dirty_dir(root: &Path) -> PathBuf {
+    let marker = root.join("target/anvil/impact-dirty/active");
+    let selected =
+        fs::read_to_string(&marker).unwrap_or_else(|error| panic!("failed to read dirty selector {}: {error}", marker.display()));
+    root.join(selected.trim())
+}
+
+/// Read one generated impact selection for all package tiers.
+fn impact_selections(dir: &Path) -> [String; 3] {
+    ["modified", "affected", "required"].map(|tier| {
+        fs::read_to_string(dir.join(format!("include_{tier}.txt")))
+            .unwrap_or_else(|error| panic!("failed to read {tier} selection from {}: {error}", dir.display()))
+    })
 }
 
 #[test]
@@ -294,6 +338,8 @@ fn baseline_creation_and_partial_cleanup_share_the_same_finally_scope() {
         creation,
         concat!(
             "        $baselineFailed = $false\n",
+            "        $baselineNoWorkspace = $false\n",
+            "        $baseSnap = $null\n",
             "        try {\n",
             "            $worktreeOutput = @(git worktree add --detach $wt $baseSha 2>&1)\n",
             "            if ($LASTEXITCODE -ne 0) {\n",
@@ -305,7 +351,7 @@ fn baseline_creation_and_partial_cleanup_share_the_same_finally_scope() {
         .split_once("\n        } finally {\n")
         .unwrap()
         .1
-        .split_once("\n    }\n\n    # --- Current snapshot:")
+        .split_once("\n        # Publish baseline cache files")
         .unwrap()
         .0;
     insta::assert_snapshot!("baseline_worktree_cleanup", cleanup);
@@ -315,7 +361,7 @@ fn baseline_creation_and_partial_cleanup_share_the_same_finally_scope() {
 fn baseline_cleanup_emits_the_error_precedence_contract() {
     let recipe = include_str!("../templates/justfiles/anvil/impact.just");
     let boundary = recipe
-        .split_once("                Set-Content -LiteralPath $baselineJson -Value $baseSnap -Encoding UTF8\n")
+        .split_once("                    Pop-Location\n")
         .unwrap()
         .1
         .split_once("            $cleanupFailures = ")
@@ -324,7 +370,7 @@ fn baseline_cleanup_emits_the_error_precedence_contract() {
     assert_eq!(
         boundary,
         concat!(
-            "                Set-Content -LiteralPath $baselineKeyFile -Value $baselineKey -Encoding UTF8 -NoNewline\n",
+            "                }\n",
             "            }\n",
             "        } catch {\n",
             "            $baselineFailed = $true\n",
@@ -336,7 +382,7 @@ fn baseline_cleanup_emits_the_error_precedence_contract() {
         .split_once("            if ($cleanupFailures.Count -gt 0) {\n")
         .unwrap()
         .1
-        .split_once("\n    }\n\n    # --- Current snapshot:")
+        .split_once("\n        # Publish baseline cache files")
         .unwrap()
         .0;
     assert_eq!(
@@ -349,7 +395,7 @@ fn baseline_cleanup_emits_the_error_precedence_contract() {
             "                    throw $cleanupMessage\n",
             "                }\n",
             "            }\n",
-            "        }",
+            "        }\n",
         )
     );
 }
@@ -427,14 +473,14 @@ fn impact_cache_regenerates_per_key_and_reuses_when_unchanged() {
     // --- 3. HEAD moves (a new commit): only `current.json` is regenerated. ---
     // A committed change advances HEAD without moving the base ref
     // (origin/master), so current.key changes while the baseline key does
-    // not. The tree stays clean, so scoping is NOT widened.
+    // not. The tree stays clean, so the run uses the clean cache.
     write(&root.join("crates/alpha/src/lib.rs"), "pub fn a() {}\npub fn a2() {}\n");
     git(root, &["add", "crates/alpha/src/lib.rs"]);
     git(root, &["commit", "-q", "-m", "edit alpha"]);
     let edited = run_impact(root);
     assert!(
-        !edited.contains("widening"),
-        "a committed change keeps the tree clean, so scoping must not widen:\n{edited}"
+        !edited.contains("using fresh impact"),
+        "a committed change must not use dirty local output:\n{edited}"
     );
     assert!(
         edited.contains("baseline snapshot up to date"),
@@ -489,7 +535,7 @@ fn baseline_regenerates_when_delta_config_changes_without_moving_the_base() {
     let root = tmp.path();
 
     // Commit an initial `.delta.toml`. It must be committed (not left in the
-    // working tree) or the dirty-tree guard would widen and skip snapshotting.
+    // working tree) or the dirty path would produce an isolated baseline.
     let config = root.join(".delta.toml");
     write(&config, "file_exclude_patterns = [\"target\", \"*.md\"]\n");
     git(root, &["add", ".delta.toml"]);
@@ -541,8 +587,7 @@ fn current_snapshot_ignores_tracked_target_changes_without_moving_head() {
     // impact cache itself lives) can never perturb it. This pins that contract:
     // a tracked `target/` file modified WITHOUT moving HEAD must be a full cache
     // hit. A `git diff`-based key would regenerate the current snapshot here;
-    // the HEAD-and-version key must not. (The dirty-tree guard also excludes `target/`,
-    // so the modification does not widen either.)
+    // the HEAD-and-version key must not. The dirty probe also excludes `target/`.
     let tmp = workspace();
     let root = tmp.path();
 
@@ -573,8 +618,8 @@ fn current_snapshot_ignores_tracked_target_changes_without_moving_head() {
 
     let after = run_impact(root);
     assert!(
-        !after.contains("widening"),
-        "a tracked target/ change is excluded by the dirty guard, so scoping must not widen:\n{after}"
+        !after.contains("using fresh impact"),
+        "a tracked target/ change is excluded from dirty detection:\n{after}"
     );
     assert!(
         after.contains("snapshots up to date"),
@@ -604,8 +649,11 @@ fn impact_empty_output_when_head_equals_base() {
     let impact_dir = root.join("target/anvil/impact");
 
     let first = run_impact(root);
-    // HEAD == base with a clean tree scopes by impact (empty), never widens.
-    assert!(!first.contains("widening"), "a clean HEAD==base tree must not widen:\n{first}");
+    // HEAD == base with a clean tree scopes by impact (empty).
+    assert!(
+        !first.contains("using fresh impact"),
+        "a clean HEAD==base tree must use clean output:\n{first}"
+    );
     let report = fs::read_to_string(impact_dir.join("impact.json")).unwrap();
     // Accept either representation cargo-delta uses for an empty set, but
     // require a JSON *object*: a run that leaked warnings or log output into
@@ -683,7 +731,10 @@ exit $LASTEXITCODE
     };
 
     let first = run();
-    assert!(!first.contains("widening"), "a clean HEAD==base tree must not widen:\n{first}");
+    assert!(
+        !first.contains("using fresh impact"),
+        "a clean HEAD==base tree must use clean output:\n{first}"
+    );
     assert_eq!(
         shim.log_lines().len(),
         1,
@@ -725,6 +776,7 @@ fn impact_off_short_circuits_without_computing() {
     }
     let tmp = workspace();
     let root = tmp.path();
+    write(&root.join("crates/beta/src/lib.rs"), "pub fn b() {}\npub fn ignored_mode() {}\n");
 
     // ANVIL_IMPACT=off must reach its no-op WITHOUT cargo-delta: run under a
     // tripwire cargo shim so any invocation fails loudly and is logged.
@@ -744,6 +796,10 @@ fn impact_off_short_circuits_without_computing() {
         "off run must not write impact artifacts"
     );
     assert!(
+        !root.join("target/anvil/impact-dirty").exists(),
+        "off run must not write dirty local artifacts"
+    );
+    assert!(
         shim.log_lines().is_empty(),
         "off run must not invoke cargo-delta, but did: {:?}",
         shim.log_lines()
@@ -752,172 +808,488 @@ fn impact_off_short_circuits_without_computing() {
 
 #[test]
 #[serial]
-fn impact_widens_to_full_workspace_when_working_tree_is_dirty() {
+fn dirty_filesystem_changes_match_committed_impact_selections() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = workspace_at_base();
+    let root = tmp.path();
+    write(&root.join(".gitignore"), "target/\n");
+    git(root, &["add", ".gitignore"]);
+    git(root, &["commit", "-q", "-m", "ignore impact products"]);
+    git(root, &["update-ref", "refs/remotes/origin/master", "HEAD"]);
+
+    for scenario in [
+        "tracked-source-edit",
+        "staged-source-edit",
+        "deleted-file",
+        "renamed-file",
+        "untracked-source-file",
+        "new-workspace-package",
+        "workspace-trip-wire",
+    ] {
+        git(root, &["reset", "--hard", "origin/master"]);
+        git(root, &["clean", "-fd"]);
+        match scenario {
+            "tracked-source-edit" => {
+                write(&root.join("crates/alpha/src/lib.rs"), "pub fn a() {}\npub fn tracked() {}\n");
+            }
+            "staged-source-edit" => {
+                write(&root.join("crates/beta/src/lib.rs"), "pub fn b() {}\npub fn staged() {}\n");
+                git(root, &["add", "crates/beta/src/lib.rs"]);
+            }
+            "deleted-file" => {
+                fs::remove_file(root.join("crates/alpha/src/helpers.rs")).unwrap();
+            }
+            "renamed-file" => {
+                fs::rename(root.join("crates/alpha/src/helpers.rs"), root.join("crates/alpha/src/renamed.rs")).unwrap();
+            }
+            "untracked-source-file" => {
+                write(&root.join("crates/beta/src/untracked.rs"), "pub fn untracked() {}\n");
+            }
+            "new-workspace-package" => {
+                write(
+                    &root.join("crates/gamma/Cargo.toml"),
+                    "[package]\nname = \"gamma\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+                );
+                write(&root.join("crates/gamma/src/lib.rs"), "pub fn gamma() {}\n");
+                let lock = Command::new("cargo").arg("generate-lockfile").current_dir(root).output().unwrap();
+                assert!(
+                    lock.status.success(),
+                    "cargo generate-lockfile failed for {scenario}:\n{}",
+                    String::from_utf8_lossy(&lock.stderr)
+                );
+            }
+            "workspace-trip-wire" => {
+                let config = root.join(".delta.toml");
+                let mut contents = fs::read_to_string(&config).unwrap();
+                contents.push_str("\n# Dirty trip-wire fixture.\n");
+                fs::write(config, contents).unwrap();
+            }
+            _ => unreachable!("every scenario has an explicit fixture setup"),
+        }
+
+        let dirty_probe = just_cmd(root, &["anvil-impact", "_anvil-impact-include", "affected"])
+            .output()
+            .unwrap();
+        let dirty = format!(
+            "{}{}",
+            String::from_utf8_lossy(&dirty_probe.stdout),
+            String::from_utf8_lossy(&dirty_probe.stderr)
+        );
+        assert!(dirty_probe.status.success(), "dirty impact probe failed for {scenario}:\n{dirty}");
+        assert!(
+            dirty.contains("using fresh impact") && dirty.contains("snapshotting dirty working tree"),
+            "scenario {scenario} must use a fresh filesystem snapshot:\n{dirty}"
+        );
+        let dirty_selections = impact_selections(&active_dirty_dir(root));
+        assert_eq!(
+            String::from_utf8_lossy(&dirty_probe.stdout)
+                .lines()
+                .last()
+                .expect("dirty impact probe should emit the affected selection"),
+            dirty_selections[1].trim(),
+            "checks must consume the exact dirty generation for {scenario}"
+        );
+
+        git(root, &["add", "-A"]);
+        git(root, &["commit", "-q", "-m", scenario]);
+        let committed = run_impact(root);
+        assert!(
+            !committed.contains("using fresh impact"),
+            "committed {scenario} must use the clean cache path:\n{committed}"
+        );
+        let clean_selections = impact_selections(&root.join("target/anvil/impact"));
+        assert_eq!(
+            dirty_selections, clean_selections,
+            "dirty and committed filesystem states must select identical tiers for {scenario}"
+        );
+    }
+}
+
+#[test]
+#[serial]
+fn dirty_impact_preserves_clean_cache_until_tree_is_clean_again() {
     if !tools_available() {
         return;
     }
     let tmp = workspace();
     let root = tmp.path();
-    let impact_dir = root.join("target/anvil/impact");
+    let clean_dir = root.join("target/anvil/impact");
+    run_impact(root);
+    let clean_files = [
+        "snapshots/baseline.json",
+        "snapshots/baseline.key",
+        "snapshots/current.json",
+        "snapshots/current.key",
+        "impact.json",
+        "impact.state",
+        "include_modified.txt",
+        "include_affected.txt",
+        "include_required.txt",
+        "doctest_packages.txt",
+    ];
+    let clean_before: Vec<_> = clean_files
+        .iter()
+        .map(|file| (file, fs::read(clean_dir.join(file)).unwrap()))
+        .collect();
 
-    // workspace() leaves a clean tree whose only change vs the base is a
-    // committed feature on `alpha`. A clean run therefore scopes by impact
-    // (not the whole workspace) -- and anvil's own target/ artifacts must not
-    // be mistaken for a dirty tree.
-    let clean = run_impact(root);
-    assert!(!clean.contains("widening"), "a clean tree must not widen:\n{clean}");
-    let affected_clean = fs::read_to_string(impact_dir.join("include_affected.txt")).unwrap();
-    assert!(
-        affected_clean.contains("alpha") && !affected_clean.contains("--workspace"),
-        "clean run should scope the affected tier to the committed crate, got: {affected_clean}"
-    );
-    let doctest_packages = impact_dir.join("doctest_packages.txt");
-    assert!(
-        doctest_packages.is_file(),
-        "a clean impact run must produce the doctest capability projection"
-    );
-
-    // Dirty the tree with an *uncommitted* edit to a DIFFERENT crate (beta).
-    // cargo-delta only sees the committed alpha change, so without the safety
-    // net beta would be silently scoped out. The recipe must widen instead.
     write(&root.join("crates/beta/src/lib.rs"), "pub fn b() {}\npub fn wip() {}\n");
     let dirty = run_impact(root);
     assert!(
-        dirty.contains("widening all tiers to --workspace"),
-        "a dirty tree must widen every tier to the full workspace:\n{dirty}"
+        dirty.contains("using fresh impact"),
+        "dirty run must compute an isolated result:\n{dirty}"
     );
-    assert_eq!(
-        fs::read_to_string(impact_dir.join("include_affected.txt")).unwrap().trim(),
-        "--workspace"
-    );
-    assert_eq!(
-        fs::read_to_string(impact_dir.join("include_required.txt")).unwrap().trim(),
-        "--workspace"
-    );
-    // modified is empty (not --skip), so its workspace-wide tools still run.
-    assert_eq!(fs::read_to_string(impact_dir.join("include_modified.txt")).unwrap().trim(), "");
+    for (file, expected) in &clean_before {
+        assert_eq!(
+            &fs::read(clean_dir.join(file)).unwrap(),
+            expected,
+            "dirty run must not modify clean cache file {file}"
+        );
+    }
+    let dirty_selections = impact_selections(&active_dirty_dir(root));
     assert!(
-        !doctest_packages.exists(),
-        "a dirty-tree widen must invalidate the stale doctest capability projection"
+        dirty_selections[1].contains("--package beta@"),
+        "dirty beta edit must reach the affected selection: {dirty_selections:?}"
     );
 
-    // The warning must fire on EVERY dirty invocation, not just the first --
-    // running again with the same dirty tree still warns (the dirty check runs
-    // before the cache-freshness check).
-    let dirty_again = run_impact(root);
+    write(&root.join("crates/beta/src/lib.rs"), "pub fn b() {}\n");
+    let clean_again = run_impact(root);
     assert!(
-        dirty_again.contains("widening all tiers to --workspace"),
-        "a repeated dirty run must warn again, not silently reuse a cache:\n{dirty_again}"
+        clean_again.contains("snapshots up to date") && clean_again.contains("cache hit"),
+        "returning to the same clean tree must reuse the untouched cache:\n{clean_again}"
     );
-
-    // Committing the change restores impact scoping on the next run.
-    git(root, &["add", "-A"]);
-    git(root, &["commit", "-q", "-m", "commit beta wip"]);
-    let recommitted = run_impact(root);
-    assert!(
-        !recommitted.contains("widening"),
-        "committing the uncommitted change must restore scoping:\n{recommitted}"
-    );
-    // Scoping is not just un-widened -- the newly committed crate must actually
-    // land in the affected tier (guards against a regression that drops it or
-    // widens without printing the warning).
-    let affected_after = fs::read_to_string(impact_dir.join("include_affected.txt")).unwrap();
-    assert!(
-        affected_after.contains("--package beta@"),
-        "committing the uncommitted change must scope beta into the affected tier, got: {affected_after}"
-    );
+    let clean_after = impact_selections(&clean_dir);
+    for (actual, (_, expected)) in clean_after.iter().zip(&clean_before[6..9]) {
+        assert_eq!(
+            actual,
+            String::from_utf8_lossy(expected).as_ref(),
+            "clean run must read its original package selections"
+        );
+    }
 }
 
 #[test]
 #[serial]
-fn impact_include_reads_zero_byte_modified_file_without_throwing() {
+fn impact_dirty_tree_fails_when_base_cannot_resolve() {
     if !tools_available() {
         return;
     }
-    // The dirty-tree widen writes include_modified.txt as a 0-byte file
-    // (`-Value '' -NoNewline`). `Get-Content -Raw` returns $null for a 0-byte
-    // file, so `_anvil-impact-include` must read it null-safely rather than
-    // throwing on `$null.Trim()` -- which every modified-tier check hits on any
-    // dirty local run.
     let tmp = workspace();
     let root = tmp.path();
-    // Uncommitted edit -> anvil-impact widens and writes the 0-byte include.
     write(&root.join("crates/beta/src/lib.rs"), "pub fn b() {}\npub fn wip() {}\n");
-    run_impact(root);
-    let modified_file = root.join("target/anvil/impact/include_modified.txt");
-    assert_eq!(
-        fs::metadata(&modified_file).unwrap().len(),
-        0,
-        "the dirty widen must write a 0-byte include_modified.txt for this test to be meaningful"
-    );
 
-    let out = just_cmd(root, &["_anvil-impact-include", "modified"]).output().unwrap();
+    let out = just_cmd(root, &["anvil-impact"])
+        .env("BASE_REF", "refs/heads/anvil-does-not-exist")
+        .output()
+        .unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(!out.status.success(), "dirty run with an unresolvable base must fail:\n{combined}");
     assert!(
-        out.status.success(),
-        "_anvil-impact-include must not throw on a 0-byte include file:\n{combined}"
+        combined.contains("base ref") && combined.contains("not found") && combined.contains("locally"),
+        "dirty failure must retain base-ref recovery guidance:\n{combined}"
     );
-    assert_eq!(
-        String::from_utf8_lossy(&out.stdout).trim(),
-        "",
-        "an empty modified tier must resolve to '' (run), not crash"
+    assert!(
+        !root.join("target/anvil/impact-dirty/active").exists(),
+        "a failed dirty calculation must not publish a partial selection"
     );
 }
 
 #[test]
 #[serial]
-fn impact_dirty_tree_widens_without_needing_a_resolvable_base() {
-    if !core_tools_available() {
+fn dirty_impact_is_computed_once_for_multiple_dependent_checks() {
+    if !tools_available() {
         return;
     }
-    // Regression: the dirty-tree safety net must win even when the recompute
-    // path could NOT run. A first-time or local checkout can have a dirty
-    // working tree AND an unresolvable base ref (origin/<base> never fetched);
-    // _anvil-impact-snapshot must short-circuit on the dirty tree rather than
-    // fail base-ref resolution before anvil-impact's widen runs.
     let tmp = workspace();
     let root = tmp.path();
+    run_impact(root);
 
-    // Uncommitted edit -> dirty tree.
-    write(&root.join("crates/beta/src/lib.rs"), "pub fn b() {}\npub fn wip() {}\n");
+    let mut justfile = fs::read_to_string(root.join("Justfile")).unwrap();
+    justfile.push_str(
+        "\n[private]\nimpact-probe-one: anvil-impact\n\n[private]\nimpact-probe-two: anvil-impact\n\nimpact-probe: impact-probe-one impact-probe-two\n",
+    );
+    fs::write(root.join("Justfile"), justfile).unwrap();
+    write(&root.join("crates/beta/src/lib.rs"), "pub fn b() {}\npub fn dirty_probe() {}\n");
 
-    // BASE_REF points at a ref that does not exist, so the recompute path
-    // would hard-fail base-ref resolution. The dirty short-circuit must make
-    // that unreachable -- and reach the widen WITHOUT cargo-delta, which a
-    // first-time checkout with uncommitted changes may not even have installed.
-    // The tripwire cargo shim proves
-    // the widen path never shells out to it.
-    let shim = ShimBin::tripwire_cargo();
-    let out = just_cmd(root, &["anvil-impact"])
-        .env("BASE_REF", "refs/heads/anvil-does-not-exist")
+    let shim = ShimBin::logging_cargo_delta();
+    let out = just_cmd(root, &["impact-probe"])
         .env("PATH", &shim.path)
         .env("ANVIL_TEST_LOG", &shim.log)
         .output()
         .unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(out.status.success(), "multi-check impact probe failed:\n{combined}");
+    assert_eq!(
+        combined.matches("snapshotting dirty working tree").count(),
+        1,
+        "one Just invocation must snapshot the dirty tree once:\n{combined}"
+    );
+    let calls = shim.log_lines();
+    let snapshots = calls
+        .iter()
+        .filter(|call| call.contains("delta") && call.split_whitespace().any(|arg| arg == "snapshot"))
+        .count();
+    let impacts = calls
+        .iter()
+        .filter(|call| call.contains("delta") && call.contains("impact --baseline"))
+        .count();
+    assert_eq!(
+        (snapshots, impacts),
+        (1, 1),
+        "one Just invocation must calculate one dirty snapshot and one impact report: {calls:?}"
+    );
+}
+
+#[test]
+#[serial]
+fn concurrent_dirty_invocations_publish_immutable_generations() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = workspace();
+    let root = tmp.path();
+    write(
+        &root.join("crates/beta/src/lib.rs"),
+        "pub fn b() {}\npub fn concurrent_dirty() {}\n",
+    );
+
+    let first = just_cmd(root, &["anvil-impact"]).spawn().unwrap();
+    let second = just_cmd(root, &["anvil-impact"]).spawn().unwrap();
+    let first = first.wait_with_output().unwrap();
+    let second = second.wait_with_output().unwrap();
+    for output in [&first, &second] {
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.status.success(), "concurrent dirty impact failed:\n{combined}");
+    }
+
+    let dirty_root = root.join("target/anvil/impact-dirty");
+    let generations: Vec<_> = fs::read_dir(&dirty_root)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.is_dir())
+        .collect();
+    assert_eq!(
+        generations.len(),
+        2,
+        "each concurrent producer must retain its own immutable generation: {generations:?}"
+    );
+    for generation in generations {
+        let selection = impact_selections(&generation);
+        assert_eq!(
+            selection,
+            [
+                "--package alpha@0.1.0 --package beta@0.1.0".to_owned(),
+                "--package alpha@0.1.0 --package beta@0.1.0".to_owned(),
+                "--package alpha@0.1.0 --package beta@0.1.0".to_owned(),
+            ],
+            "concurrent generation was incomplete at {}",
+            generation.display()
+        );
+    }
     assert!(
-        out.status.success(),
-        "dirty run with an unresolvable base must still succeed:\n{combined}"
+        active_dirty_dir(root).join("include_required.txt").is_file(),
+        "the active selector must point to a complete generation"
+    );
+}
+
+#[test]
+#[serial]
+fn dirty_readers_select_the_generation_from_their_invocation() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = workspace();
+    let root = tmp.path();
+    write(
+        &root.join("crates/beta/src/lib.rs"),
+        "pub fn b() {}\npub fn concurrent_dirty() {}\n",
+    );
+    let args = ["anvil-impact", "_anvil-impact-include", "affected"];
+    let origin = just_cmd(root, &args)
+        .env("BASE_REF", "origin/master")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let head = just_cmd(root, &args)
+        .env("BASE_REF", "HEAD")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let origin = origin.wait_with_output().unwrap();
+    let head = head.wait_with_output().unwrap();
+    for output in [&origin, &head] {
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.status.success(), "concurrent dirty reader failed:\n{combined}");
+    }
+    assert_eq!(
+        String::from_utf8_lossy(&origin.stdout)
+            .lines()
+            .last()
+            .expect("origin invocation should emit its affected selection"),
+        "--package alpha@0.1.0 --package beta@0.1.0"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&head.stdout)
+            .lines()
+            .last()
+            .expect("HEAD invocation should emit its affected selection"),
+        "--package beta@0.1.0"
+    );
+}
+
+#[test]
+#[serial]
+fn dirty_generations_have_bounded_retention() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = workspace();
+    let root = tmp.path();
+    let dirty_root = root.join("target/anvil/impact-dirty");
+    fs::create_dir_all(&dirty_root).unwrap();
+    for index in 0..12 {
+        let generation = dirty_root.join(format!("retention-test-{index:02}"));
+        fs::create_dir(&generation).unwrap();
+        write(&generation.join("complete"), "");
+    }
+    let stale_marker = dirty_root.join("active-2147483647");
+    write(&stale_marker, dirty_root.join("retention-test-00").to_string_lossy().as_ref());
+    let abandoned = dirty_root.join("abandoned-incomplete");
+    write(&abandoned.join("producer.pid"), "2147483647");
+    write(&abandoned.join("snapshots/current.json"), "{}");
+    write(&root.join("crates/beta/src/lib.rs"), "pub fn b() {}\npub fn retention_dirty() {}\n");
+    run_impact(root);
+
+    let retained = fs::read_dir(&dirty_root)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.is_dir())
+        .count();
+    assert!(
+        retained <= 8,
+        "dirty generation retention must stay bounded; found {retained} directories"
     );
     assert!(
-        combined.contains("widening all tiers to --workspace"),
-        "a dirty tree must widen even when the base ref is unresolvable:\n{combined}"
+        !stale_marker.exists(),
+        "cleanup must remove selectors whose Just process is no longer alive"
     );
-    // The snapshot short-circuited -> cargo-delta / base ref were never needed.
     assert!(
-        !combined.contains("napshotting"),
-        "dirty tree must short-circuit the snapshot before recompute:\n{combined}"
+        !abandoned.exists(),
+        "cleanup must remove incomplete generations whose producer exited"
+    );
+}
+
+#[test]
+#[serial]
+fn completed_generations_are_not_treated_as_abandoned() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = workspace();
+    let root = tmp.path();
+    let dirty_root = root.join("target/anvil/impact-dirty");
+    let completed_dead = dirty_root.join("completed-dead-producer");
+    write(&completed_dead.join("producer.pid"), "2147483647");
+    write(&completed_dead.join("complete"), "");
+    write(&root.join("crates/beta/src/lib.rs"), "pub fn b() {}\npub fn retention_dirty() {}\n");
+    run_impact(root);
+
+    assert!(
+        completed_dead.exists(),
+        "cleanup must leave completed generations to newest-generation retention"
+    );
+}
+
+#[test]
+#[serial]
+fn clean_run_preserves_other_live_invocation_selectors() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = workspace();
+    let root = tmp.path();
+    run_impact(root);
+    let dirty_root = root.join("target/anvil/impact-dirty");
+    fs::create_dir_all(&dirty_root).unwrap();
+    let other_marker = dirty_root.join(format!("active-{}", std::process::id()));
+    let other_generation = dirty_root.join("other-live-generation");
+    fs::create_dir_all(&other_generation).unwrap();
+    write(&other_marker, other_generation.to_string_lossy().as_ref());
+    write(&dirty_root.join("active"), other_generation.to_string_lossy().as_ref());
+
+    let clean = run_impact(root);
+    assert!(
+        clean.contains("snapshots up to date"),
+        "clean rerun should use the clean cache:\n{clean}"
+    );
+    assert!(
+        other_marker.is_file(),
+        "clean impact must preserve selectors for other live Just processes"
+    );
+    assert!(
+        !dirty_root.join("active").is_file(),
+        "clean impact removes only the inspection marker"
+    );
+}
+
+#[test]
+#[serial]
+fn cloud_impact_jobs_require_a_clean_checkout() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = workspace();
+    let root = tmp.path();
+    let shim = ShimBin::tripwire_cargo();
+    write(&root.join("crates/beta/src/lib.rs"), "pub fn b() {}\npub fn cloud_dirty() {}\n");
+
+    let out = just_cmd(root, &["anvil-impact"])
+        .env("GITHUB_ACTIONS", "true")
+        .env("PATH", &shim.path)
+        .env("ANVIL_TEST_LOG", &shim.log)
+        .output()
+        .unwrap();
+    let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(!out.status.success(), "cloud impact must reject a dirty checkout:\n{combined}");
+    assert!(
+        combined.contains("cloud impact computation requires a clean working tree"),
+        "cloud failure must explain the clean-checkout requirement:\n{combined}"
     );
     assert!(
         shim.log_lines().is_empty(),
-        "a dirty-tree widen must not invoke cargo-delta, but did: {:?}",
+        "cloud dirty rejection must precede cargo-delta calls: {:?}",
         shim.log_lines()
     );
-    assert_eq!(
-        fs::read_to_string(root.join("target/anvil/impact/include_affected.txt"))
-            .unwrap()
-            .trim(),
-        "--workspace"
+
+    write(&root.join("crates/beta/src/lib.rs"), "pub fn b() {}\n");
+    let clean = just_cmd(root, &["anvil-impact"]).env("GITHUB_ACTIONS", "true").output().unwrap();
+    let clean_combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&clean.stdout),
+        String::from_utf8_lossy(&clean.stderr)
+    );
+    assert!(
+        clean.status.success(),
+        "clean cloud impact computation must retain the normal path:\n{clean_combined}"
+    );
+    assert!(
+        root.join("target/anvil/impact/include_affected.txt").is_file(),
+        "clean cloud impact must produce the uploaded cache path"
+    );
+    assert!(
+        !root.join("target/anvil/impact-dirty").exists(),
+        "clean cloud impact must not create a dirty output directory"
     );
 }
 
@@ -942,8 +1314,8 @@ fn impact_consume_mode_trusts_cache_without_recompute() {
         .to_owned();
 
     // Perturb the tree (uncommitted) so the cache no longer reflects the
-    // working tree. In normal mode this dirty tree would widen; consume must
-    // still trust the downloaded cache verbatim without re-snapshotting.
+    // working tree. Normal mode would isolate a fresh dirty selection; consume
+    // must still trust the downloaded cache verbatim without re-snapshotting.
     write(&root.join("crates/beta/src/lib.rs"), "pub fn b() {}\npub fn later() {}\n");
 
     let out = just_cmd(root, &["anvil-impact"])
@@ -1096,6 +1468,35 @@ fn impact_falls_back_to_full_workspace_when_base_has_no_workspace() {
     assert!(
         !impact_dir.join("doctest_packages.txt").exists(),
         "a workspace-less baseline widen must invalidate the stale doctest capability projection"
+    );
+
+    write(&root.join("crates/alpha/src/lib.rs"), "pub fn a() {}\npub fn dirty() {}\n");
+    let doctest = just_cmd(root, &["anvil-impact", "_anvil-impact-doctest-packages"])
+        .output()
+        .unwrap();
+    let doctest_combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&doctest.stdout),
+        String::from_utf8_lossy(&doctest.stderr)
+    );
+    assert!(
+        doctest_combined.contains("using fresh impact"),
+        "workspace-less baseline with a dirty edit must publish isolated output:\n{doctest_combined}"
+    );
+    assert!(
+        !active_dirty_dir(root).join("doctest_packages.txt").exists(),
+        "workspace-less dirty fallback has no projected doctest capability"
+    );
+    assert!(
+        doctest.status.success(),
+        "missing dirty doctest projection must fall back to metadata:\n{doctest_combined}"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&doctest.stdout)
+            .lines()
+            .last()
+            .expect("dirty doctest probe should emit its fallback selection"),
+        "alpha@0.1.0"
     );
 }
 
@@ -1388,8 +1789,8 @@ fn missing_base_ref_on_clean_tree_fails_with_fetch_guidance() {
     if !tools_available() {
         return;
     }
-    // A clean tree does NOT hit the dirty-tree widen short-circuit, so a first
-    // run must resolve the base ref. When it is unresolvable (origin/<base>
+    // A clean first run must resolve the base ref. When it is unresolvable
+    // (origin/<base>
     // never fetched), the recompute path must fail loudly with actionable
     // `git fetch` guidance rather than continue on an invalid baseline or
     // mutate git state.
@@ -1462,6 +1863,7 @@ fn consume_without_downloaded_cache_fails_loudly() {
     let consume = |args: &[&str]| {
         just_cmd(root, args)
             .env("ANVIL_IMPACT", "consume")
+            .env("GITHUB_ACTIONS", "true")
             .env("PATH", &shim.path)
             .env("ANVIL_TEST_LOG", &shim.log)
             .output()
