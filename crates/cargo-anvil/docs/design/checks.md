@@ -48,7 +48,7 @@ Locally, recipes run on the host OS. See [github.md](./github.md) and
 
 | Check | Contract |
 |-------|----------|
-| `fmt` | Checks every workspace member with pinned-nightly rustfmt. Non-member path dependencies are excluded. Local `--fix` applies formatting. |
+| `fmt` | Checks modified workspace packages with pinned-nightly rustfmt; `ANVIL_IMPACT=off` checks the full workspace. Non-member path dependencies are excluded. Local `--fix` applies the same scope. |
 | `clippy` | Checks selected packages with all targets and features, locked dependencies, and warnings as errors. |
 | `cargo-sort` | Checks dependency ordering and manifest formatting, preserving blank-line-separated dependency groups. |
 | `license-headers` | Checks workspace license headers with cargo-heather. |
