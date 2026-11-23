@@ -3304,6 +3304,14 @@ mod tests {
             Err(ohno::app_err!("injected section read failure"))
         }
 
+        #[expect(
+            clippy::unnecessary_wraps,
+            reason = "the injected resolver must match HostTextCache's fallible function-pointer seam"
+        )]
+        fn preserve_path(_: &Path, path: &str) -> Result<String, AppError> {
+            Ok(path.to_owned())
+        }
+
         let catalog = Catalog::builder(test_cli())
             .with_artifact(Artifact::owned_file_section("owned.just", "section", "body"))
             .build()
@@ -3329,6 +3337,7 @@ mod tests {
         assert_eq!(error.message(), "injected section resolution failure");
 
         let mut read_hosts = HostTextCache {
+            resolve: preserve_path,
             read: fail_read,
             ..HostTextCache::default()
         };
