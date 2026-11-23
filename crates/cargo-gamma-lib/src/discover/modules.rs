@@ -410,6 +410,7 @@ mod tests {
             r#"#[cfg_attr(path, allow(dead_code))] mod normal; #[path = "known.rs"] mod known;"#,
             r#"#[cfg_attr(windows, other_attr(flag, path = "known.rs"))] mod normal;"#,
             "#[cfg(windows)] mod normal;",
+            "mod normal;",
             "fn normal() {}",
         ] {
             assert!(!has_conditional_path(&parse(source).items), "{source}");
