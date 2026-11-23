@@ -126,7 +126,8 @@ function body or other statement block can also depend on its enclosing
 modules. Rather than untangle those paths, Gamma currently reports an error
 instead of skipping the changed file if it finds either kind of declaration
 in the scanned sources, even if the changed file is unrelated. Incomplete
-declaration analysis also prevents the skip.
+declaration analysis also prevents the skip. These diagnostics escape control
+characters in displayed source paths.
 
 Declaration evidence is limited to the parsed workspace inventory: it does
 not resolve `include!` arguments or recursively follow declarations from files

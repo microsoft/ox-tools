@@ -32,6 +32,7 @@ use crate::model::{Channel, Interner, Mutant, MutantId, Outcome, Suppression};
 use crate::ops::collect;
 use crate::ops::registry::Selection;
 use crate::parse::SourceFile;
+use crate::report::encode_controls;
 use crate::{HashMap, HashSet, Result, suppress};
 
 #[cfg(test)]
@@ -2280,15 +2281,17 @@ fn parse_declarations_for_ownership(path: &Utf8Path, cfg: &CfgSet) -> Result<Dec
 fn ownership_edges(path: &Utf8Path, ast: &syn::File, cfg: &CfgSet) -> Result<Vec<module_identities::Edge>> {
     if modules::has_conditional_path(&ast.items) {
         return Err(error!(
-            "cannot prove that a standalone Rust diff path is unowned: `{path}` has a module with a conditional `#[path]` that gamma cannot resolve"
+            "cannot prove that a standalone Rust diff path is unowned: `{}` has a module with a conditional `#[path]` that gamma cannot resolve",
+            encode_controls(path.as_str())
         )
         .usage());
     }
 
     if let Some(module) = modules::block_local_module(ast) {
         return Err(error!(
-            "cannot prove that a standalone Rust diff path is unowned: `{path}` declares `mod {module};` inside a block; \
-             gamma cannot resolve its source path there"
+            "cannot prove that a standalone Rust diff path is unowned: `{}` declares `mod {module};` inside a block; \
+             gamma cannot resolve its source path there",
+            encode_controls(path.as_str())
         )
         .usage());
     }
@@ -2301,7 +2304,7 @@ fn module_targets_from(declarations: Declarations) -> Result<HashSet<Utf8PathBuf
         let skipped = declarations
             .skipped
             .iter()
-            .map(|(path, reason)| format!("{path}: {reason}"))
+            .map(|(path, reason)| format!("{}: {reason}", encode_controls(path.as_str())))
             .collect::<Vec<_>>()
             .join(", ");
 
@@ -3870,7 +3873,7 @@ mod tests {
             named: Vec::new(),
             declared: Vec::new(),
             skipped: vec![
-                (Utf8PathBuf::from("src/lib.rs"), "too deeply nested".into()),
+                (Utf8PathBuf::from("src/lib\n.rs"), "too deeply nested".into()),
                 (Utf8PathBuf::from("src/main.rs"), "could not parse source".into()),
             ],
             defaults: HashMap::default(),
@@ -3882,7 +3885,7 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "cannot prove that a standalone Rust diff path is unowned because declaration analysis was incomplete \
-             (src/lib.rs: too deeply nested, src/main.rs: could not parse source)"
+             (src/lib\\n.rs: too deeply nested, src/main.rs: could not parse source)"
         );
     }
 
@@ -3908,12 +3911,12 @@ mod tests {
     #[test]
     fn conditional_module_paths_are_reported_as_incomplete_ownership_evidence() {
         let ast = syn::parse_file(r#"#[cfg_attr(windows, path = "../../../scripts/shared.rs")] mod shared;"#).unwrap();
-        let error = ownership_edges(Utf8Path::new("src/lib.rs"), &ast, &CfgSet::default())
+        let error = ownership_edges(Utf8Path::new("src/lib\n.rs"), &ast, &CfgSet::default())
             .expect_err("an unevaluated path attribute can redirect ownership");
         assert!(error.is_usage(), "{error}");
         assert_eq!(
             error.to_string(),
-            "cannot prove that a standalone Rust diff path is unowned: `src/lib.rs` has a module with a conditional \
+            "cannot prove that a standalone Rust diff path is unowned: `src/lib\\n.rs` has a module with a conditional \
              `#[path]` that gamma cannot resolve"
         );
     }
@@ -3921,12 +3924,12 @@ mod tests {
     #[test]
     fn block_local_module_prevents_proving_standalone_ownership() {
         let ast = syn::parse_file(r#"fn run() { #[path = "../../../scripts/shared.rs"] mod shared; }"#).unwrap();
-        let error = ownership_edges(Utf8Path::new("src/lib.rs"), &ast, &CfgSet::default())
+        let error = ownership_edges(Utf8Path::new("src/lib\x1b.rs"), &ast, &CfgSet::default())
             .expect_err("a block-local module can own a file outside the package");
         assert!(error.is_usage(), "{error}");
         assert_eq!(
             error.to_string(),
-            "cannot prove that a standalone Rust diff path is unowned: `src/lib.rs` declares `mod shared;` inside a block; \
+            "cannot prove that a standalone Rust diff path is unowned: `src/lib\\e.rs` declares `mod shared;` inside a block; \
              gamma cannot resolve its source path there"
         );
     }
