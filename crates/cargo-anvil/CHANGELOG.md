@@ -11,7 +11,7 @@
 
 - ✨ Features
 
-  - cargo-anvil: scope dirty workspace impact checks ([#372](https://github.com/microsoft/ox-tools/pull/372))
+  - cargo-anvil: release v0.27.0
   - cargo-anvil: expose individual recipe sections
   - cargo-anvil: expose per-check artifacts
   - cargo-anvil: run Miri artifacts with cargo-each
@@ -21,6 +21,10 @@
 
 - 🐛 Bug Fixes
 
+  - cargo-anvil: hide scoped group setup recipes
+  - cargo-anvil: narrow generated path visibility
+  - cargo-anvil: defer MSRV resolution until setup
+  - cargo-anvil: install mutation impact driver
   - cargo-anvil: plan legacy manifest retirement
   - cargo-anvil: update manifest references
   - cargo-anvil: repair setup prerequisites
@@ -44,6 +48,7 @@
 
 - 📚 Documentation
 
+  - cargo-anvil: clarify formatting impact scope
   - cargo-anvil: remove standalone verification guide
   - cargo-anvil: narrow design updates to changed contracts
   - cargo-anvil: simplify generated recipe help
@@ -67,7 +72,9 @@
 
 - 🧩 Miscellaneous
 
+  - Merge follower updates into cargo-anvil consolidation
   - Merge current main into cargo-anvil consolidation
+  - Merge main into consolidate-anvil-files
   - Merge branch 'consolidate-anvil-files' of https://github.com/microsoft/ox-tools into makolnek-microsoft-cargo-anvil-consolidation
   - Update principles
   - Add one more principle
