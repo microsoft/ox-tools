@@ -30,7 +30,7 @@ use support::{TestHost, dump_server, dump_url, failing_server, seed_advisory_db_
 #[tokio::test]
 #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
 async fn cli_uses_the_platform_cache_directory_and_installs_a_logger() {
-    let dump = dump_server(Dump::sample(chrono::Utc::now()).to_tar_gz(), None).await;
+    let dump = dump_server(Dump::sample(jiff::Timestamp::now()).to_tar_gz(), None).await;
     let services = failing_server(404).await;
     let home = tempfile::tempdir().expect("creating a temp dir");
     let cache_root = home.path().join("cache");

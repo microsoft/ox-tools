@@ -12,8 +12,8 @@ use std::sync::Arc;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use cargo_metadata::{Metadata, MetadataCommand};
-use chrono::Local;
 use clap::{Args, ValueEnum};
+use jiff::ZonedDateTime;
 use ohno::IntoAppError;
 
 use super::ProgressReporter;
@@ -449,12 +449,13 @@ struct Reporting<'a, H: Host> {
 
 impl<H: Host> Reporting<'_, H> {
     fn report(&mut self, processed_crates: impl IntoIterator<Item = CrateFacts>) -> Result<()> {
-        self.report_with_writers(processed_crates, write_text_report, write_excel_report)
+        self.report_with_writers(processed_crates, &ZonedDateTime::now(), write_text_report, write_excel_report)
     }
 
     fn report_with_writers(
         &mut self,
         processed_crates: impl IntoIterator<Item = CrateFacts>,
+        now: &ZonedDateTime,
         mut write_text: impl FnMut(&Utf8Path, String) -> Result<()>,
         mut write_excel: impl FnMut(&[ReportableCrate], &Utf8Path) -> Result<()>,
     ) -> Result<()> {
@@ -472,10 +473,6 @@ impl<H: Host> Reporting<'_, H> {
         let has_expressions = has_expressions(self.config);
         let should_eval = has_expressions || risk_error_requested(self.error_if_high_risk, self.error_if_medium_risk);
 
-        // A single instant is used for every crate: expressions such as `now - crate.updated_at`
-        // must compare each crate against the same baseline, and it avoids a clock lookup per crate.
-        let now = Local::now();
-
         let mut reportable_crates: Vec<ReportableCrate> = if should_eval {
             analyzable_crates
                 .into_iter()
@@ -488,16 +485,16 @@ impl<H: Host> Reporting<'_, H> {
                         now,
                         self.config.medium_risk_threshold,
                         self.config.low_risk_threshold,
-                    );
+                    )?;
 
-                    ReportableCrate::new(
+                    Ok(ReportableCrate::new(
                         Arc::clone(facts.crate_spec.name_arc()),
                         Arc::clone(facts.crate_spec.version_arc()),
                         metrics,
                         Some(evaluation),
-                    )
+                    ))
                 })
-                .collect()
+                .collect::<Result<Vec<_>>>()?
         } else {
             analyzable_crates
                 .into_iter()
@@ -541,7 +538,7 @@ impl<H: Host> Reporting<'_, H> {
 
         if let Some(filename) = &self.html {
             let mut html = String::new();
-            generate_html(&reportable_crates, Local::now(), &mut html)
+            generate_html(&reportable_crates, &ZonedDateTime::now(), &mut html)
                 .expect("writing HTML into a String cannot fail because fmt::Write for String is infallible");
             write_text(filename, html)?;
         }
@@ -958,6 +955,7 @@ mod tests {
             let error = reporting
                 .report_with_writers(
                     [],
+                    &ZonedDateTime::now(),
                     |path, contents| {
                         assert_ne!(extension, "xlsx", "Excel must use its binary writer");
                         assert_eq!(Some(path), filename.as_deref());
@@ -980,6 +978,24 @@ mod tests {
             assert_eq!(calls.get(), 1);
             assert_eq!(host.output_buf, [] as [u8; 0]);
         }
+    }
+
+    #[test]
+    fn report_propagates_unrepresentable_local_offset() {
+        let config = Config::default();
+        let mut host = TestHost::new();
+        let offset = jiff::tz::Offset::from_seconds(86_400).unwrap();
+        let now = jiff::Timestamp::UNIX_EPOCH.to_zoned_datetime(jiff::tz::TimeZone::fixed(offset));
+        let error = survivor_reporting(&config, &mut host)
+            .report_with_writers(
+                [survivor_found_crate("example", "1.0.0")],
+                &now,
+                |_, _| panic!("reporting must stop before writing"),
+                |_, _| panic!("reporting must stop before writing"),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("CEL cannot represent the current time-zone offset"));
+        assert_eq!(host.output_buf, [] as [u8; 0]);
     }
 
     #[tokio::test]

@@ -1,8 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use chrono::{DateTime, NaiveDate, Utc};
 use compact_str::CompactString;
+use jiff::Timestamp;
+use jiff::civil::Date;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
@@ -18,13 +19,13 @@ pub struct CrateOverallData {
     /// When the crate was first published to crates.io.
     ///
     /// **Source**: `crates.csv` from the `crates` table, `created_at` field
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 
     /// When the crate's metadata was last updated on crates.io.
     /// This updates when any version is published or crate metadata changes.
     ///
     /// **Source**: `crates.csv` from the `crates` table, `updated_at` field
-    pub updated_at: DateTime<Utc>,
+    pub updated_at: Timestamp,
 
     /// Optional URL to the crate's source codebase repository (typically GitHub).
     ///
@@ -66,7 +67,7 @@ pub struct CrateOverallData {
     /// - Aggregated across all versions of this crate
     /// - Aggregated by (year, month) to produce monthly totals
     /// - Sorted chronologically
-    pub monthly_downloads: Vec<(NaiveDate, u64)>,
+    pub monthly_downloads: Vec<(Date, u64)>,
 
     /// Total all-time download count for this crate (across all versions).
     ///

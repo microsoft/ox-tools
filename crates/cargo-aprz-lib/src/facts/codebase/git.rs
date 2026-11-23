@@ -5,7 +5,7 @@ use core::time::Duration;
 use std::fs;
 use std::path::Path;
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use ohno::{IntoAppError, bail};
 use tokio::process::Command;
 use url::Url;
@@ -204,9 +204,9 @@ pub struct CommitStats {
     /// Total number of commits.
     pub commit_count: u64,
     /// Timestamp of the first (oldest) commit.
-    pub first_commit_at: DateTime<Utc>,
+    pub first_commit_at: Timestamp,
     /// Timestamp of the most recent commit.
-    pub last_commit_at: DateTime<Utc>,
+    pub last_commit_at: Timestamp,
     /// Number of commits within each requested time window, in the same order as the input.
     pub commits_per_window: Vec<u64>,
 }
@@ -228,7 +228,7 @@ pub async fn get_commit_stats(repo_path: &Path, day_windows: &[i64], timeout: Du
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(summarize_commit_timestamps(&stdout, day_windows, Utc::now().timestamp()))
+    Ok(summarize_commit_timestamps(&stdout, day_windows, Timestamp::now().as_second()))
 }
 
 /// Turn the `git log --format=%at` output into [`CommitStats`].
@@ -263,12 +263,12 @@ fn summarize_commit_timestamps(stdout: &str, day_windows: &[i64], now: i64) -> C
     }
 
     let first_commit_at = first_timestamp
-        .and_then(|ts| DateTime::from_timestamp(ts, 0))
-        .unwrap_or(DateTime::UNIX_EPOCH);
+        .and_then(|ts| Timestamp::from_second(ts).ok())
+        .unwrap_or(Timestamp::UNIX_EPOCH);
 
     let last_commit_at = last_timestamp
-        .and_then(|ts| DateTime::from_timestamp(ts, 0))
-        .unwrap_or(DateTime::UNIX_EPOCH);
+        .and_then(|ts| Timestamp::from_second(ts).ok())
+        .unwrap_or(Timestamp::UNIX_EPOCH);
 
     CommitStats {
         commit_count,
@@ -346,6 +346,8 @@ mod tests {
     use std::os::unix::process::ExitStatusExt as _;
     #[cfg(windows)]
     use std::os::windows::process::ExitStatusExt as _;
+
+    use jiff::ToSpan;
 
     #[test]
     fn survivor_failed_clone_cleans_only_an_existing_partial_directory() {
@@ -873,7 +875,7 @@ mod tests {
         run(&["-c", "init.defaultBranch=main", "init", "--quiet"], None);
 
         let commit = |name: &str, email: &str, days: i64, message: &str| {
-            let date = (Utc::now() - chrono::Duration::days(days)).to_rfc3339();
+            let date = (Timestamp::now() - (days * 24).hours()).to_string();
             run(
                 &[
                     "-c",
@@ -914,9 +916,9 @@ mod tests {
         assert_eq!(stats.commit_count, 4);
         assert_eq!(stats.commits_per_window, vec![2, 2, 3]);
 
-        let now = Utc::now();
-        assert!((now - stats.first_commit_at).num_days() >= 399);
-        assert!((now - stats.last_commit_at).num_days() <= 2);
+        let now = Timestamp::now();
+        assert!((now - stats.first_commit_at).as_secs() / 86_400 >= 399);
+        assert!((now - stats.last_commit_at).as_secs() / 86_400 <= 2);
     }
 
     #[tokio::test]
@@ -1224,8 +1226,8 @@ mod tests {
 
         assert_eq!(stats.commit_count, 2);
         assert_eq!(stats.commits_per_window, vec![1, 1]);
-        assert_eq!(stats.first_commit_at.timestamp(), now - 400 * DAY);
-        assert_eq!(stats.last_commit_at.timestamp(), now - DAY);
+        assert_eq!(stats.first_commit_at.as_second(), now - 400 * DAY);
+        assert_eq!(stats.last_commit_at.as_second(), now - DAY);
     }
 
     #[test]
@@ -1250,17 +1252,17 @@ mod tests {
     fn test_summarize_commit_timestamps_without_any_commits() {
         let stats = summarize_commit_timestamps("", &[90], 1_000_000);
         assert_eq!(stats.commit_count, 0);
-        assert_eq!(stats.first_commit_at, DateTime::UNIX_EPOCH);
-        assert_eq!(stats.last_commit_at, DateTime::UNIX_EPOCH);
+        assert_eq!(stats.first_commit_at, Timestamp::UNIX_EPOCH);
+        assert_eq!(stats.last_commit_at, Timestamp::UNIX_EPOCH);
     }
 
     #[test]
     fn first_log_entry_is_the_latest_commit() {
         let stats = summarize_commit_timestamps("200\n100\n", &[], 300);
-        assert_eq!(stats.last_commit_at.timestamp(), 200);
-        assert_eq!(stats.first_commit_at.timestamp(), 100);
-        assert_eq!(stats.last_commit_at.timestamp_subsec_nanos(), 0);
-        assert_eq!(stats.first_commit_at.timestamp_subsec_nanos(), 0);
+        assert_eq!(stats.last_commit_at.as_second(), 200);
+        assert_eq!(stats.first_commit_at.as_second(), 100);
+        assert_eq!(stats.last_commit_at.subsec_nanosecond(), 0);
+        assert_eq!(stats.first_commit_at.subsec_nanosecond(), 0);
     }
 
     #[tokio::test]

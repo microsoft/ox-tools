@@ -42,7 +42,12 @@ mod custom_not_fixture;
 #[path = "fixtures/correctness/temporal_operators.rs"]
 mod temporal_operator_fixture;
 
-#[expect(dead_code, reason = "compiler-backed admission fixtures retain uncalled original operations")]
+#[expect(
+    dead_code,
+    clippy::duration_suboptimal_units,
+    clippy::unchecked_time_subtraction,
+    reason = "compiler-backed admission fixtures retain uncalled original operations"
+)]
 #[path = "fixtures/correctness/generation_admission.rs"]
 mod generation_admission_fixture;
 

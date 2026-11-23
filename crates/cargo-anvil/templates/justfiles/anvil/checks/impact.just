@@ -4,8 +4,242 @@
 # Update cargo-anvil and regenerate; repository-specific edits stop automatic updates.
 # Regenerate with cargo-anvil to update this file.
 # Compute modified, affected, and required package files with cargo-delta.
+# Compute the impact set and write its clean cache or dirty local output.
 [group("anvil")]
+[script("pwsh", "-NoProfile")]
 anvil-impact:
-    {{ anvil_impact_compute_prefix }}cargo each --workspace --once -- cargo {{ anvil_impact_toolchain_arg }} delta --config .delta.toml impact --base-ref {{ quote(anvil_base_ref) }} --modified --format packages --output target/anvil/impact/modified.packages
-    {{ anvil_impact_compute_prefix }}cargo each --workspace --once -- cargo {{ anvil_impact_toolchain_arg }} delta --config .delta.toml impact --base-ref {{ quote(anvil_base_ref) }} --affected --format packages --output target/anvil/impact/affected.packages
-    {{ anvil_impact_compute_prefix }}cargo each --workspace --once -- cargo {{ anvil_impact_toolchain_arg }} delta --config .delta.toml impact --base-ref {{ quote(anvil_base_ref) }} --required --format packages --output target/anvil/impact/required.packages
+    $ErrorActionPreference = 'Stop'
+    if ($env:ANVIL_IMPACT_INVOCATION_ID -notmatch '^\d+$') {
+        Write-Error "anvil-impact: ANVIL_IMPACT_INVOCATION_ID must be a numeric Just process id"
+        exit 2
+    }
+    # Exit 2 = invalid caller configuration (bad ANVIL_IMPACT), distinct from
+    # the generic 1 used for operational failures -- see _anvil-impact-snapshot.
+    if ($env:ANVIL_IMPACT -and $env:ANVIL_IMPACT -notin @('off', 'consume')) {
+        [Console]::Error.WriteLine("anvil: ANVIL_IMPACT='$($env:ANVIL_IMPACT)' is not recognized (expected 'off', 'consume', or unset).")
+        exit 2
+    }
+    if ($env:ANVIL_IMPACT -eq 'off') { exit 0 }
+    if ($env:ANVIL_IMPACT -eq 'consume') {
+        $inputDir = if ($env:ANVIL_IMPACT_INPUT_DIR) { $env:ANVIL_IMPACT_INPUT_DIR } else { 'target/anvil/impact' }
+        # consume = trust an already-downloaded cache verbatim, so assert the
+        # cache is actually present. If the CI download ever stops landing at
+        # target/anvil/impact/ (renamed artifact, a missing download step, or
+        # an adopter invoking the group action directly), every scoped check
+        # would otherwise silently widen to --workspace and the pipeline would
+        # stay green. Fail loudly instead. (Presence only -- freshness stays a
+        # deliberate non-goal in consume mode.)
+        $missing = @('modified', 'affected', 'required') |
+            Where-Object { -not (Test-Path -LiteralPath (Join-Path $inputDir "$_.packages") -PathType Leaf) }
+        if ($missing.Count -gt 0) {
+            Write-Error "anvil-impact: ANVIL_IMPACT=consume but the input impact cache is missing ($($missing -join ', ') package file(s) absent under $inputDir). A complete cache holds modified.packages, affected.packages and required.packages. The read directory is ANVIL_IMPACT_INPUT_DIR when set, otherwise target/anvil/impact -- check that variable if the path above is not where you expected. Supply a complete impact cache before scoped checks run."
+            exit 1
+        }
+        exit 0
+    }
+
+    $dirtyChanges = @(git status --porcelain -- . ':(exclude)target/' | Where-Object { $_ })
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $dirty = $dirtyChanges.Count -gt 0
+    $cloudCompute = ($env:GITHUB_ACTIONS -eq 'true') -or ($env:TF_BUILD -eq 'True')
+    if ($dirty -and $cloudCompute) {
+        Write-Error 'anvil-impact: cloud impact computation requires a clean working tree; restore or commit all checkout changes before running the impact job.'
+        exit 1
+    }
+    $cleanImpactDir = 'target/anvil/impact'
+    $dirtyImpactRoot = 'target/anvil/impact-dirty'
+    $impactDir = if ($dirty) {
+        Join-Path $dirtyImpactRoot ([System.Guid]::NewGuid().ToString('N'))
+    } else {
+        $cleanImpactDir
+    }
+    $workspaceHash = [Convert]::ToHexString(
+        [System.Security.Cryptography.SHA256]::HashData(
+            [System.Text.Encoding]::UTF8.GetBytes((Get-Location).Path)
+        )
+    )
+    $publicationMutex = [System.Threading.Mutex]::new($false, "anvil-impact-publication-$workspaceHash")
+    if (-not $dirty) {
+        try {
+            [void]$publicationMutex.WaitOne()
+            foreach ($marker in @(
+                (Join-Path $dirtyImpactRoot "active-$env:ANVIL_IMPACT_INVOCATION_ID"),
+                (Join-Path $dirtyImpactRoot 'active')
+            )) {
+                if (Test-Path -LiteralPath $marker -PathType Leaf) {
+                    Remove-Item -LiteralPath $marker -Force -ErrorAction Stop
+                }
+            }
+        } finally {
+            $publicationMutex.ReleaseMutex()
+        }
+    } else {
+        $invocationMarker = Join-Path $dirtyImpactRoot "active-$env:ANVIL_IMPACT_INVOCATION_ID"
+    }
+    & "{{ just_executable() }}" _anvil-impact-snapshot $impactDir
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    if ($dirty) {
+        $publishDirty = {
+            try {
+                [void]$publicationMutex.WaitOne()
+                [System.IO.Directory]::CreateDirectory($dirtyImpactRoot) | Out-Null
+                foreach ($marker in @($invocationMarker, (Join-Path $dirtyImpactRoot 'active'))) {
+                    $pendingMarker = Join-Path $dirtyImpactRoot "pending-$([System.Guid]::NewGuid().ToString('N'))"
+                    Set-Content -LiteralPath $pendingMarker -Value $impactDir -Encoding UTF8 -NoNewline
+                    [System.IO.File]::Move($pendingMarker, $marker, $true)
+                }
+
+                $activeGenerations = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+                foreach ($marker in @(Get-ChildItem -LiteralPath $dirtyImpactRoot -File -Filter 'active*' -ErrorAction SilentlyContinue)) {
+                    if ($marker.Name -match '^active-(\d+)$') {
+                        $invocationProcess = Get-Process -Id ([int]$Matches[1]) -ErrorAction SilentlyContinue
+                        if (-not $invocationProcess) {
+                            Remove-Item -LiteralPath $marker.FullName -Force -ErrorAction Stop
+                            continue
+                        }
+                    }
+                    $markerGeneration = "$(Get-Content -Raw -LiteralPath $marker.FullName)".Trim()
+                    if ($markerGeneration) {
+                        [void]$activeGenerations.Add((Resolve-Path -LiteralPath $markerGeneration).Path)
+                    }
+                }
+
+                # Eight is intentionally generous relative to the tiny local
+                # cache cost and keeps cleanup bounded without thrashing.
+                $completedGenerations = @(Get-ChildItem -LiteralPath $dirtyImpactRoot -Directory -ErrorAction SilentlyContinue |
+                    Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'complete') -PathType Leaf } |
+                    Sort-Object -Property LastWriteTimeUtc -Descending)
+                $retiredGenerations = @($completedGenerations | Select-Object -Skip 8)
+                $abandonedGenerations = @(Get-ChildItem -LiteralPath $dirtyImpactRoot -Directory -ErrorAction SilentlyContinue |
+                    Where-Object {
+                        if (Test-Path -LiteralPath (Join-Path $_.FullName 'complete') -PathType Leaf) { return $false }
+                        $producerFile = Join-Path $_.FullName 'producer.pid'
+                        if (-not (Test-Path -LiteralPath $producerFile -PathType Leaf)) { return $false }
+                        $producerId = 0
+                        [void][int]::TryParse("$(Get-Content -Raw -LiteralPath $producerFile)".Trim(), [ref]$producerId)
+                        $producerId -gt 0 -and -not (Get-Process -Id $producerId -ErrorAction SilentlyContinue)
+                    })
+                foreach ($oldGeneration in @($retiredGenerations + $abandonedGenerations | Sort-Object -Unique FullName)) {
+                    if ($activeGenerations.Contains($oldGeneration.FullName)) { continue }
+                    $generationMutex = [System.Threading.Mutex]::new($false, "anvil-impact-generation-$($oldGeneration.Name)")
+                    $locked = $false
+                    try {
+                        $locked = $generationMutex.WaitOne(0)
+                        if ($locked -and (Test-Path -LiteralPath $oldGeneration.FullName -PathType Container)) {
+                            Remove-Item -LiteralPath $oldGeneration.FullName -Recurse -Force -ErrorAction Stop
+                        }
+                    } catch [System.UnauthorizedAccessException] {
+                        # Leave the generation for a later cleanup pass.
+                    } catch [System.IO.IOException] {
+                        # Leave the generation for a later cleanup pass.
+                    } finally {
+                        if ($locked) { $generationMutex.ReleaseMutex() }
+                        $generationMutex.Dispose()
+                    }
+                }
+            } finally {
+                $publicationMutex.ReleaseMutex()
+            }
+        }
+    }
+    $deltaConfigDirty = $dirty -and (@(git status --porcelain -- .delta.toml | Where-Object { $_ }).Count -gt 0)
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $baselineImpactDir = if ($dirty) { $impactDir } else { $cleanImpactDir }
+    $snapDir = Join-Path $impactDir 'snapshots'
+    $baselineSnapDir = Join-Path $baselineImpactDir 'snapshots'
+    $baselineJson = Join-Path $baselineSnapDir 'baseline.json'
+    $currentJson = Join-Path $snapDir 'current.json'
+    $baselineKeyFile = Join-Path $baselineSnapDir 'baseline.key'
+    $currentKeyFile = Join-Path $snapDir 'current.key'
+    $packageFiles = @('modified', 'affected', 'required') | ForEach-Object { Join-Path $impactDir "$_.packages" }
+    $impactStateFile = Join-Path $impactDir 'impact.state'
+    $invocationRoot = 'target/anvil/impact-invocations'
+    $invocationDir = Join-Path $invocationRoot $env:ANVIL_IMPACT_INVOCATION_ID
+    $publishInvocation = {
+        try {
+            [void]$publicationMutex.WaitOne()
+            [System.IO.Directory]::CreateDirectory($invocationRoot) | Out-Null
+            $pending = Join-Path $invocationRoot "pending-$([System.Guid]::NewGuid().ToString('N'))"
+            [System.IO.Directory]::CreateDirectory($pending) | Out-Null
+            foreach ($packageFile in $packageFiles) {
+                Copy-Item -LiteralPath $packageFile -Destination (Join-Path $pending (Split-Path $packageFile -Leaf)) -Force
+            }
+            if (Test-Path -LiteralPath $invocationDir -PathType Container) {
+                Remove-Item -LiteralPath $invocationDir -Recurse -Force
+            }
+            [System.IO.Directory]::Move($pending, $invocationDir)
+            foreach ($oldInvocation in @(Get-ChildItem -LiteralPath $invocationRoot -Directory -ErrorAction SilentlyContinue)) {
+                $invocationId = 0
+                if (-not [int]::TryParse($oldInvocation.Name, [ref]$invocationId)) { continue }
+                if ($invocationId -eq [int]$env:ANVIL_IMPACT_INVOCATION_ID) { continue }
+                if (-not (Get-Process -Id $invocationId -ErrorAction SilentlyContinue)) {
+                    Remove-Item -LiteralPath $oldInvocation.FullName -Recurse -Force -ErrorAction SilentlyContinue
+                }
+            }
+        } finally {
+            $publicationMutex.ReleaseMutex()
+        }
+    }
+
+    if ($dirty) {
+        Write-Host "anvil-impact: using fresh impact for $($dirtyChanges.Count) uncommitted change(s) in the local working tree" -ForegroundColor Yellow
+    }
+
+    $wantState = $null
+    if (-not $dirty) {
+        $wantState = ("$(Get-Content -Raw $baselineKeyFile)".Trim()) + ' ' + ("$(Get-Content -Raw $currentKeyFile)".Trim())
+        $fresh = (Test-Path $impactStateFile) -and `
+            ("$(Get-Content -Raw $impactStateFile)".Trim() -eq $wantState) -and `
+            (@($packageFiles | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) }).Count -eq 0)
+        if ($fresh) {
+            Write-Host 'anvil-impact: package selections up to date (cache hit)'
+            & $publishInvocation
+            exit 0
+        }
+    }
+
+    if (Test-Path (Join-Path $baselineSnapDir 'baseline-no-workspace')) {
+        Write-Host 'anvil-impact: baseline has no workspace; selecting the current workspace'
+        $metadata = (& cargo metadata --no-deps --format-version 1 | Out-String) | ConvertFrom-Json
+        if ($LASTEXITCODE -ne 0) { Write-Error 'anvil-impact: cargo metadata failed'; exit 1 }
+        $members = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+        foreach ($id in $metadata.workspace_members) { [void]$members.Add([string]$id) }
+        $specs = @($metadata.packages | Where-Object { $members.Contains([string]$_.id) } | ForEach-Object { "$($_.name)@$($_.version)" } | Sort-Object)
+        Set-Content -LiteralPath (Join-Path $impactDir 'modified.packages') -Value '' -Encoding UTF8 -NoNewline
+        foreach ($tier in @('affected', 'required')) {
+            Set-Content -LiteralPath (Join-Path $impactDir "$tier.packages") -Value ($specs -join "`n") -Encoding UTF8 -NoNewline
+        }
+    } else {
+        $deltaArgs = @()
+        if (Test-Path '.delta.toml') { $deltaArgs = @('--config', (Resolve-Path '.delta.toml').Path) }
+        $stableArgs = @({{ anvil_stable_toolchain_arg }})
+        foreach ($tier in @('modified', 'affected', 'required')) {
+            $output = Join-Path $impactDir "$tier.packages"
+            $args = @('delta') + $deltaArgs + @(
+                'impact', '--baseline', $baselineJson, '--current', $currentJson,
+                "--$tier", '--format', 'packages', '--output', $output
+            )
+            & cargo @stableArgs @args
+            if ($LASTEXITCODE -ne 0) { Write-Error "anvil-impact: cargo delta impact --$tier failed"; exit 1 }
+            if (-not (Test-Path -LiteralPath $output -PathType Leaf)) {
+                Set-Content -LiteralPath $output -Value '' -Encoding UTF8 -NoNewline
+            }
+            Write-Host "anvil-impact: $tier -> $output"
+        }
+    }
+
+    if (-not $dirty) {
+        Set-Content -LiteralPath $impactStateFile -Value $wantState -Encoding UTF8 -NoNewline
+    }
+    & $publishInvocation
+    if ($dirty) {
+        $generationMutex = [System.Threading.Mutex]::new($false, "anvil-impact-generation-$(Split-Path $impactDir -Leaf)")
+        try {
+            [void]$generationMutex.WaitOne()
+            New-Item -ItemType File -Path (Join-Path $impactDir 'complete') -Force | Out-Null
+            & $publishDirty
+        } finally {
+            $generationMutex.ReleaseMutex()
+            $generationMutex.Dispose()
+        }
+    }

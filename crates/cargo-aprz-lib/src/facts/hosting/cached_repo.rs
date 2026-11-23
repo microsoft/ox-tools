@@ -9,7 +9,7 @@
 //! serve stale statistics after a configuration change. Computing statistics on load keeps
 //! configuration changes free of network cost.
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 use super::bug_labels::BugLabelMatcher;
@@ -18,11 +18,11 @@ use super::client::{Issue, IssueState};
 /// A single issue or pull request, retaining only the fields needed to compute statistics.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CachedIssue {
-    pub created_at: DateTime<Utc>,
-    pub closed_at: Option<DateTime<Utc>>,
+    pub created_at: Timestamp,
+    pub closed_at: Option<Timestamp>,
     pub is_open: bool,
     pub is_pr: bool,
-    pub merged_at: Option<DateTime<Utc>>,
+    pub merged_at: Option<Timestamp>,
     pub labels: Vec<String>,
 }
 
@@ -64,6 +64,8 @@ pub struct CachedRepo {
 #[cfg(not(miri))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use jiff::ToSpan;
+
     use super::super::client::{Label, PullRequestMarker};
     use super::*;
 
@@ -79,7 +81,7 @@ mod tests {
 
     fn issue_with_labels(labels: &[&str]) -> CachedIssue {
         CachedIssue {
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
             closed_at: None,
             is_open: true,
             is_pr: false,
@@ -149,7 +151,7 @@ mod tests {
 
     #[test]
     fn converts_open_issue_from_api_type() {
-        let created = Utc::now();
+        let created = Timestamp::now();
         let issue = Issue {
             created_at: created,
             closed_at: None,
@@ -167,8 +169,8 @@ mod tests {
 
     #[test]
     fn converts_merged_pr_from_api_type() {
-        let created = Utc::now();
-        let merged = created + chrono::Duration::days(1);
+        let created = Timestamp::now();
+        let merged = created + 24_i32.hours();
         let issue = Issue {
             created_at: created,
             closed_at: Some(merged),

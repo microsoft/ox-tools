@@ -4,10 +4,11 @@
 use core::time::Duration;
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
 use compact_str::CompactString;
 use fetch::http::header::LINK;
 use futures_util::future::join_all;
+use jiff::tz::TimeZone;
+use jiff::{Timestamp, ToSpan};
 use ohno::EnrichableExt;
 
 use super::cached_repo::{CachedIssue, CachedRepo};
@@ -26,7 +27,7 @@ const SECONDS_PER_DAY: f64 = 86400.0;
 const ISSUE_LOOKBACK_DAYS: i64 = 365 * 10;
 const ISSUE_PAGE_SIZE: u8 = 100;
 const MAX_ISSUE_PAGES: u32 = 10;
-const MAX_RATE_LIMIT_WAIT_SECS: u64 = 3600;
+pub(super) const MAX_RATE_LIMIT_WAIT_SECS: u64 = 3600;
 const MAX_CONCURRENT_REQUESTS: usize = 5;
 
 /// Which caller-supplied API token belongs to a host.
@@ -296,11 +297,11 @@ impl Provider {
                         "{} API rate limit for '{repo_spec}': {} remaining, resets at {}",
                         host.display_name,
                         rl.remaining,
-                        rl.reset_at.with_timezone(&chrono::Local).format("%T")
+                        local_time(rl.reset_at, TimeZone::system())
                     );
                 }
                 if let Some(rate_limit) = result.rate_limit {
-                    let now = Utc::now();
+                    let now = Timestamp::now();
                     let reset_time = rate_limit.reset_at;
                     let wait_until = rate_limit_wait_until(now, reset_time);
 
@@ -324,18 +325,11 @@ impl Provider {
     /// under measurement.
     #[cfg_attr(coverage_nightly, coverage(off))]
     // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, stmt.delete_call, bool_expr.negate, literal.int_decrement, literal.int_increment, reason = "rate-limit status rendering is a logging/progress adapter that depends on process-wide logger state and a detached real-time task")]
-    fn begin_rate_limit_pause(
-        &self,
-        host: &Host,
-        repo_spec: &RepoSpec,
-        tracker: &RequestTracker,
-        now: DateTime<Utc>,
-        wait_until: DateTime<Utc>,
-    ) {
-        let wait_duration = (wait_until - now).to_std().unwrap_or(Duration::ZERO);
+    fn begin_rate_limit_pause(&self, host: &Host, repo_spec: &RepoSpec, tracker: &RequestTracker, now: Timestamp, wait_until: Timestamp) {
+        let wait_duration = Duration::try_from(wait_until - now).expect("rate limit pauses are started only for future reset times");
         if self.throttler.pause_for(wait_duration) {
             tracker.set_topic_status(TrackedTopic::Repos, TopicStatus::Blocked);
-            let formatted_time = wait_until.with_timezone(&chrono::Local).format("%T").to_string();
+            let formatted_time = local_time(wait_until, TimeZone::system());
             log::warn!(target: LOG_TARGET, "Hit {} rate limit for repository '{repo_spec}'", host.display_name);
             // #[gamma::skip(call_result.default, tag = "equivalent", reason = "the call returns unit and still prints its message before unit is replaced with unit")]
             print_to_tracker_if_needed(tracker, log::log_enabled!(log::Level::Warn), || {
@@ -365,7 +359,7 @@ impl Provider {
         throttler: Arc<Throttler>,
         tracker: RequestTracker,
         display_name: &'static str,
-        wait_until: DateTime<Utc>,
+        wait_until: Timestamp,
         formatted_time: String,
         progress_interval: Duration,
     ) {
@@ -376,17 +370,17 @@ impl Provider {
             &formatted_time,
             || async {
                 tokio::time::sleep(progress_interval).await;
-                (throttler.is_paused(), Utc::now())
+                (throttler.is_paused(), Timestamp::now())
             },
             || log::log_enabled!(log::Level::Info),
         )
         .await;
     }
 
-    async fn report_rate_limit_progress_with<F: Future<Output = (bool, DateTime<Utc>)>>(
+    async fn report_rate_limit_progress_with<F: Future<Output = (bool, Timestamp)>>(
         tracker: RequestTracker,
         display_name: &str,
-        wait_until: DateTime<Utc>,
+        wait_until: Timestamp,
         formatted_time: &str,
         mut next_tick: impl FnMut() -> F,
         info_enabled: impl Fn() -> bool,
@@ -404,7 +398,7 @@ impl Provider {
                 break;
             }
             let remaining = wait_until - now;
-            let remaining_mins = remaining.num_minutes();
+            let remaining_mins = remaining.as_secs() / 60;
             if should_report_remaining_minutes(remaining_mins) {
                 log::info!(
                     target: LOG_TARGET,
@@ -537,12 +531,14 @@ impl Provider {
     }
 
     async fn get_issues_and_pulls(&self, client: &Client, owner: &str, repo: &str) -> HostingApiResult<RawIssues> {
-        self.get_issues_and_pulls_at(client, owner, repo, Utc::now()).await
+        self.get_issues_and_pulls_at(client, owner, repo, Timestamp::now()).await
     }
 
-    async fn get_issues_and_pulls_at(&self, client: &Client, owner: &str, repo: &str, now: DateTime<Utc>) -> HostingApiResult<RawIssues> {
-        let since = now - chrono::Duration::days(ISSUE_LOOKBACK_DAYS);
-        let since_str = since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    async fn get_issues_and_pulls_at(&self, client: &Client, owner: &str, repo: &str, now: Timestamp) -> HostingApiResult<RawIssues> {
+        let since = now - (ISSUE_LOOKBACK_DAYS * 24).hours();
+        let since_str = Timestamp::from_second(since.as_second())
+            .expect("truncating a timestamp to whole seconds remains in range")
+            .to_string();
 
         let mut all_issues = Vec::with_capacity(ISSUE_PAGE_SIZE as usize);
         let mut latest_rate_limit: Option<RateLimitInfo> = None;
@@ -591,7 +587,7 @@ impl Provider {
             if self.throttler.is_paused() {
                 return HostingApiResult::RateLimited(RateLimitInfo {
                     remaining: 0,
-                    reset_at: Utc::now(),
+                    reset_at: Timestamp::now(),
                 });
             }
 
@@ -622,12 +618,16 @@ struct RawIssues {
     request_count: u32,
 }
 
-fn rate_limit_wait_until(now: DateTime<Utc>, reset_time: DateTime<Utc>) -> DateTime<Utc> {
-    reset_time.min(now + chrono::Duration::seconds(MAX_RATE_LIMIT_WAIT_SECS.cast_signed()))
+fn rate_limit_wait_until(now: Timestamp, reset_time: Timestamp) -> Timestamp {
+    reset_time.min(now + MAX_RATE_LIMIT_WAIT_SECS.cast_signed().seconds())
 }
 
-fn should_start_rate_limit_pause(now: DateTime<Utc>, wait_until: DateTime<Utc>) -> bool {
+fn should_start_rate_limit_pause(now: Timestamp, wait_until: Timestamp) -> bool {
     wait_until > now
+}
+
+fn local_time(timestamp: Timestamp, time_zone: TimeZone) -> String {
+    timestamp.to_zoned_datetime(time_zone).strftime("%T").to_string()
 }
 
 fn print_to_tracker_if_needed(tracker: &RequestTracker, log_enabled: bool, message: impl FnOnce() -> String) {
@@ -696,7 +696,7 @@ struct IssueFamilyAccumulator {
 
 impl IssueFamilyAccumulator {
     #[expect(clippy::cast_precision_loss, reason = "acceptable for duration")]
-    fn push(&mut self, issue: &CachedIssue, now: DateTime<Utc>, cutoffs: Cutoffs) {
+    fn push(&mut self, issue: &CachedIssue, now: Timestamp, cutoffs: Cutoffs) {
         // #[gamma::skip(call_result.default, tag = "equivalent", reason = "increment_window returns unit and still updates every counter before unit is replaced with unit")]
         increment_window(&mut self.opened, issue.created_at, cutoffs);
 
@@ -708,13 +708,13 @@ impl IssueFamilyAccumulator {
             // contributes only to the open-age statistics.
             if !issue.is_open {
                 self.closed_ages
-                    .push((closed_at - issue.created_at).num_seconds() as f64, closed_at, cutoffs);
+                    .push((closed_at - issue.created_at).as_secs() as f64, closed_at, cutoffs);
             }
         }
 
         if issue.is_open {
             self.open += 1;
-            self.open_ages.push((now - issue.created_at).num_seconds() as f64);
+            self.open_ages.push((now - issue.created_at).as_secs() as f64);
         }
     }
 
@@ -760,7 +760,7 @@ struct PullRequestAccumulator {
 
 impl PullRequestAccumulator {
     #[expect(clippy::cast_precision_loss, reason = "acceptable for duration")]
-    fn push(&mut self, pull: &CachedIssue, now: DateTime<Utc>, cutoffs: Cutoffs) {
+    fn push(&mut self, pull: &CachedIssue, now: Timestamp, cutoffs: Cutoffs) {
         // #[gamma::skip(call_result.default, tag = "equivalent", reason = "increment_window returns unit and still updates every counter before unit is replaced with unit")]
         increment_window(&mut self.opened, pull.created_at, cutoffs);
 
@@ -773,12 +773,12 @@ impl PullRequestAccumulator {
             // #[gamma::skip(call_result.default, tag = "equivalent", reason = "increment_window returns unit and still updates every counter before unit is replaced with unit")]
             increment_window(&mut self.merged, merged_at, cutoffs);
             self.merged_ages
-                .push((merged_at - pull.created_at).num_seconds() as f64, merged_at, cutoffs);
+                .push((merged_at - pull.created_at).as_secs() as f64, merged_at, cutoffs);
         }
 
         if pull.is_open {
             self.open += 1;
-            self.open_ages.push((now - pull.created_at).num_seconds() as f64);
+            self.open_ages.push((now - pull.created_at).as_secs() as f64);
         }
     }
 
@@ -820,23 +820,23 @@ struct PullRequestStats {
     reason = "the shared prefix names the time unit, which each field needs"
 )]
 struct Cutoffs {
-    days_90: DateTime<Utc>,
-    days_180: DateTime<Utc>,
-    days_365: DateTime<Utc>,
+    days_90: Timestamp,
+    days_180: Timestamp,
+    days_365: Timestamp,
 }
 
 impl Cutoffs {
-    fn new(now: DateTime<Utc>) -> Self {
+    fn new(now: Timestamp) -> Self {
         Self {
-            days_90: now - chrono::Duration::days(90),
-            days_180: now - chrono::Duration::days(180),
-            days_365: now - chrono::Duration::days(365),
+            days_90: now - (90 * 24).hours(),
+            days_180: now - (180 * 24).hours(),
+            days_365: now - (365 * 24).hours(),
         }
     }
 }
 
 /// Increment time window counters for a given timestamp.
-fn increment_window(stats: &mut TimeWindowStats, ts: DateTime<Utc>, cutoffs: Cutoffs) {
+fn increment_window(stats: &mut TimeWindowStats, ts: Timestamp, cutoffs: Cutoffs) {
     stats.total += 1;
     if ts >= cutoffs.days_365 {
         stats.last_365_days += 1;
@@ -861,7 +861,7 @@ struct AgeBuckets {
 }
 
 impl AgeBuckets {
-    fn push(&mut self, age_seconds: f64, event_at: DateTime<Utc>, cutoffs: Cutoffs) {
+    fn push(&mut self, age_seconds: f64, event_at: Timestamp, cutoffs: Cutoffs) {
         if !age_seconds.is_finite() || age_seconds < 0.0 {
             return;
         }
@@ -895,14 +895,14 @@ impl AgeBuckets {
 /// bug is also counted in the general issue metrics. Issues with no labels are never counted
 /// as bugs; use `labeled_issue_ratio` to detect repositories that do not label issues at all.
 pub(super) fn compute_hosting_data(repo: &CachedRepo, bug_labels: &BugLabelMatcher) -> HostingData {
-    compute_hosting_data_at(repo, bug_labels, Utc::now())
+    compute_hosting_data_at(repo, bug_labels, Timestamp::now())
 }
 
-pub(super) fn compute_hosting_data_at(repo: &CachedRepo, bug_labels: &BugLabelMatcher, now: DateTime<Utc>) -> HostingData {
+pub(super) fn compute_hosting_data_at(repo: &CachedRepo, bug_labels: &BugLabelMatcher, now: Timestamp) -> HostingData {
     aggregate_hosting_data_at(repo, bug_labels, now, || {})
 }
 
-fn aggregate_hosting_data_at<F>(repo: &CachedRepo, bug_labels: &BugLabelMatcher, now: DateTime<Utc>, mut visit_record: F) -> HostingData
+fn aggregate_hosting_data_at<F>(repo: &CachedRepo, bug_labels: &BugLabelMatcher, now: Timestamp, mut visit_record: F) -> HostingData
 where
     F: FnMut(),
 {
@@ -1200,9 +1200,9 @@ mod tests {
         let erased: Arc<dyn Progress> = Arc::<RecordingProgress>::clone(&progress);
         let tracker = RequestTracker::new(&erased);
         let (host, _) = github_client(&provider);
-        let now = Utc::now();
-        let until = now + chrono::Duration::seconds(90);
-        let formatted = until.with_timezone(&chrono::Local).format("%T").to_string();
+        let now = Timestamp::now();
+        let until = now + 90.seconds();
+        let formatted = local_time(until, TimeZone::system());
         provider.begin_rate_limit_pause(host, &github_repo_spec(), &tracker, now, until);
         assert_eq!(
             progress.messages(),
@@ -1215,8 +1215,8 @@ mod tests {
     #[tokio::test]
     async fn rate_limit_reporting_uses_scripted_ticks_without_wall_clock_deadlines() {
         test_logging::enable_log_argument_evaluation();
-        let now = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
-        for seconds in [90, 30, -30] {
+        let now = Timestamp::from_second(1_700_000_000).unwrap();
+        for seconds in [90, 60, 59, 30, -30] {
             for logged in [false, true] {
                 let progress = Arc::new(RecordingProgress::default());
                 let erased: Arc<dyn Progress> = Arc::<RecordingProgress>::clone(&progress);
@@ -1225,7 +1225,7 @@ mod tests {
                 Provider::report_rate_limit_progress_with(
                     tracker,
                     "GitHub",
-                    now + chrono::Duration::seconds(seconds),
+                    now + seconds.seconds(),
                     "fixed reset",
                     || std::future::ready(ticks.next().expect("the reporter must stop at the first unpaused tick")),
                     || logged,
@@ -1237,7 +1237,7 @@ mod tests {
                 );
                 let mut expected = Vec::new();
                 if !logged {
-                    if seconds == 90 {
+                    if seconds >= 60 {
                         expected.extend([
                             "GitHub rate limit: ~1 minute(s) remaining until fixed reset".to_owned(),
                             "GitHub rate limit: ~1 minute(s) remaining until fixed reset".to_owned(),
@@ -1352,7 +1352,7 @@ mod tests {
 
         let rate_limit = Some(RateLimitInfo {
             remaining: 5000,
-            reset_at: DateTime::from_timestamp(1_234_567_890, 0).unwrap(),
+            reset_at: Timestamp::from_second(1_234_567_890).unwrap(),
         });
 
         let repo_data = RepoData::success(repo_spec.clone(), ProviderResult::Found(hosting_data), rate_limit);
@@ -1456,15 +1456,15 @@ mod tests {
 
     #[test]
     fn test_rate_limit_wait_helpers_cap_and_use_strict_future() {
-        let now = DateTime::from_timestamp(1_704_067_200, 0).expect("fixed timestamp is valid");
+        let now = Timestamp::from_second(1_704_067_200).expect("fixed timestamp is valid");
 
         assert_eq!(
-            rate_limit_wait_until(now, now + chrono::Duration::seconds(7_200)),
-            now + chrono::Duration::seconds(MAX_RATE_LIMIT_WAIT_SECS.cast_signed())
+            rate_limit_wait_until(now, now + 7_200.seconds()),
+            now + MAX_RATE_LIMIT_WAIT_SECS.cast_signed().seconds()
         );
-        assert!(should_start_rate_limit_pause(now, now + chrono::Duration::seconds(1)));
+        assert!(should_start_rate_limit_pause(now, now + 1.seconds()));
         assert!(!should_start_rate_limit_pause(now, now));
-        assert!(!should_start_rate_limit_pause(now, now - chrono::Duration::seconds(1)));
+        assert!(!should_start_rate_limit_pause(now, now - 1.seconds()));
     }
 
     #[test]
@@ -1475,8 +1475,15 @@ mod tests {
     }
 
     #[test]
+    fn local_time_formats_seconds_in_the_supplied_time_zone() {
+        let timestamp = "2024-01-02T03:04:05Z".parse::<Timestamp>().expect("the fixed timestamp is valid");
+
+        assert_eq!(local_time(timestamp, TimeZone::UTC), "03:04:05");
+    }
+
+    #[test]
     fn test_most_constrained_rate_limit_is_order_independent() {
-        let reset_at = DateTime::from_timestamp(1_704_067_200, 0).expect("fixed timestamp is valid");
+        let reset_at = Timestamp::from_second(1_704_067_200).expect("fixed timestamp is valid");
         let low = RateLimitInfo { remaining: 2, reset_at };
         let high = RateLimitInfo { remaining: 50, reset_at };
 
@@ -1484,7 +1491,7 @@ mod tests {
         assert_eq!(most_constrained_rate_limit(Some(high), Some(low)).unwrap().remaining, 2);
         let same_remaining_earlier = RateLimitInfo {
             remaining: 2,
-            reset_at: reset_at - chrono::Duration::seconds(1),
+            reset_at: reset_at - 1.seconds(),
         };
         assert_eq!(
             most_constrained_rate_limit(Some(same_remaining_earlier), Some(low))
@@ -1507,7 +1514,7 @@ mod tests {
         .unwrap()
     }
 
-    fn issue(created_at: DateTime<Utc>, closed_at: Option<DateTime<Utc>>, labels: &[&str]) -> CachedIssue {
+    fn issue(created_at: Timestamp, closed_at: Option<Timestamp>, labels: &[&str]) -> CachedIssue {
         CachedIssue {
             created_at,
             closed_at,
@@ -1518,7 +1525,7 @@ mod tests {
         }
     }
 
-    fn pull(created_at: DateTime<Utc>, closed_at: Option<DateTime<Utc>>, merged_at: Option<DateTime<Utc>>) -> CachedIssue {
+    fn pull(created_at: Timestamp, closed_at: Option<Timestamp>, merged_at: Option<Timestamp>) -> CachedIssue {
         CachedIssue {
             created_at,
             closed_at,
@@ -1538,8 +1545,8 @@ mod tests {
         }
     }
 
-    fn fixed_now() -> DateTime<Utc> {
-        DateTime::from_timestamp(1_704_067_200, 0).expect("fixed timestamp is valid")
+    fn fixed_now() -> Timestamp {
+        Timestamp::from_second(1_704_067_200).expect("fixed timestamp is valid")
     }
 
     #[test]
@@ -1547,7 +1554,7 @@ mod tests {
         let now = fixed_now();
         let cutoffs = Cutoffs::new(now);
         for seconds in [86_399, 86_400, 172_799, 172_800] {
-            let created = now - chrono::Duration::seconds(seconds);
+            let created = now - seconds.seconds();
             let expected = u32::try_from(seconds / 86_400).unwrap();
             for closed in [false, true] {
                 let mut issues = IssueFamilyAccumulator::default();
@@ -1592,7 +1599,7 @@ mod tests {
         let cutoffs = Cutoffs::new(now);
 
         let mut stats = TimeWindowStats::default();
-        increment_window(&mut stats, now - chrono::Duration::days(10), cutoffs);
+        increment_window(&mut stats, now - (10 * 24).hours(), cutoffs);
         assert_eq!(stats.total, 1);
         assert_eq!(stats.last_90_days, 1);
         assert_eq!(stats.last_180_days, 1);
@@ -1605,7 +1612,7 @@ mod tests {
         let cutoffs = Cutoffs::new(now);
 
         let mut stats = TimeWindowStats::default();
-        increment_window(&mut stats, now - chrono::Duration::days(200), cutoffs);
+        increment_window(&mut stats, now - (200 * 24).hours(), cutoffs);
         assert_eq!(stats.total, 1);
         assert_eq!(stats.last_90_days, 0);
         assert_eq!(stats.last_180_days, 0);
@@ -1618,7 +1625,7 @@ mod tests {
         let cutoffs = Cutoffs::new(now);
 
         let mut stats = TimeWindowStats::default();
-        increment_window(&mut stats, now - chrono::Duration::days(400), cutoffs);
+        increment_window(&mut stats, now - (400 * 24).hours(), cutoffs);
         assert_eq!(stats.total, 1);
         assert_eq!(stats.last_90_days, 0);
         assert_eq!(stats.last_180_days, 0);
@@ -1663,12 +1670,12 @@ mod tests {
 
     #[test]
     fn cutoffs_are_exactly_90_180_and_365_days_old() {
-        let now = DateTime::from_timestamp(1_704_067_200, 0).expect("fixed timestamp is valid");
+        let now = Timestamp::from_second(1_704_067_200).expect("fixed timestamp is valid");
         let cutoffs = Cutoffs::new(now);
 
-        assert_eq!(now - cutoffs.days_90, chrono::Duration::days(90));
-        assert_eq!(now - cutoffs.days_180, chrono::Duration::days(180));
-        assert_eq!(now - cutoffs.days_365, chrono::Duration::days(365));
+        assert_eq!((now - cutoffs.days_90).as_secs(), 90 * 86_400);
+        assert_eq!((now - cutoffs.days_180).as_secs(), 180 * 86_400);
+        assert_eq!((now - cutoffs.days_365).as_secs(), 365 * 86_400);
     }
 
     #[test]
@@ -1685,9 +1692,9 @@ mod tests {
     #[test]
     fn test_compute_hosting_data_mixed_issues_and_prs() {
         let now = fixed_now();
-        let day_ago = now - chrono::Duration::days(1);
-        let week_ago = now - chrono::Duration::days(7);
-        let two_days_ago = now - chrono::Duration::days(2);
+        let day_ago = now - 24.hours();
+        let week_ago = now - (7 * 24).hours();
+        let two_days_ago = now - (2 * 24).hours();
 
         let data = compute_hosting_data(
             &repo(vec![
@@ -1719,13 +1726,13 @@ mod tests {
     #[test]
     fn test_unlabeled_repo_reports_issues_but_no_bugs() {
         let now = fixed_now();
-        let week_ago = now - chrono::Duration::days(7);
+        let week_ago = now - (7 * 24).hours();
 
         let data = compute_hosting_data(
             &repo(vec![
                 issue(week_ago, None, &[]),
                 issue(week_ago, None, &[]),
-                issue(week_ago, Some(now - chrono::Duration::days(1)), &[]),
+                issue(week_ago, Some(now - 24.hours()), &[]),
             ]),
             &bug_patterns(),
         );
@@ -1740,8 +1747,8 @@ mod tests {
     #[test]
     fn test_bugs_are_a_subset_of_issues() {
         let now = fixed_now();
-        let week_ago = now - chrono::Duration::days(7);
-        let day_ago = now - chrono::Duration::days(1);
+        let week_ago = now - (7 * 24).hours();
+        let day_ago = now - 24.hours();
 
         let data = compute_hosting_data(
             &repo(vec![
@@ -1770,7 +1777,7 @@ mod tests {
     #[test]
     fn test_pr_labels_never_count_as_bugs() {
         let now = fixed_now();
-        let week_ago = now - chrono::Duration::days(7);
+        let week_ago = now - (7 * 24).hours();
 
         let mut labeled_pr = pull(week_ago, None, None);
         labeled_pr.labels = vec!["bug".to_string()];
@@ -1785,7 +1792,7 @@ mod tests {
     #[test]
     fn test_empty_bug_labels_disables_bug_classification() {
         let now = fixed_now();
-        let week_ago = now - chrono::Duration::days(7);
+        let week_ago = now - (7 * 24).hours();
 
         let data = compute_hosting_data(&repo(vec![issue(week_ago, None, &["bug"])]), &BugLabelMatcher::default());
 
@@ -1796,7 +1803,7 @@ mod tests {
     #[test]
     fn test_custom_bug_labels_are_honored() {
         let now = fixed_now();
-        let week_ago = now - chrono::Duration::days(7);
+        let week_ago = now - (7 * 24).hours();
 
         let patterns = BugLabelMatcher::new(&["crash".to_string()]).unwrap();
         let data = compute_hosting_data(
@@ -1811,7 +1818,7 @@ mod tests {
     #[test]
     fn test_regex_bug_labels_are_honored() {
         let now = fixed_now();
-        let week_ago = now - chrono::Duration::days(7);
+        let week_ago = now - (7 * 24).hours();
 
         let patterns = BugLabelMatcher::new(&["^(c|kind)[-/]bug$".to_string()]).unwrap();
         let data = compute_hosting_data(
@@ -1830,12 +1837,8 @@ mod tests {
         // A bug closed after 2 days and a non-bug closed after 10 days.
         let data = compute_hosting_data(
             &repo(vec![
-                issue(now - chrono::Duration::days(12), Some(now - chrono::Duration::days(10)), &["bug"]),
-                issue(
-                    now - chrono::Duration::days(20),
-                    Some(now - chrono::Duration::days(10)),
-                    &["enhancement"],
-                ),
+                issue(now - (12 * 24).hours(), Some(now - (10 * 24).hours()), &["bug"]),
+                issue(now - (20 * 24).hours(), Some(now - (10 * 24).hours()), &["enhancement"]),
             ]),
             &bug_patterns(),
         );
@@ -1851,8 +1854,8 @@ mod tests {
 
         // A reopened issue: currently open, but retains the closed_at of its prior closure.
         let reopened = CachedIssue {
-            created_at: now - chrono::Duration::days(100),
-            closed_at: Some(now - chrono::Duration::days(50)),
+            created_at: now - (100 * 24).hours(),
+            closed_at: Some(now - (50 * 24).hours()),
             is_open: true,
             is_pr: false,
             merged_at: None,
@@ -1876,7 +1879,7 @@ mod tests {
         let now = fixed_now();
 
         let closed_without_timestamp = CachedIssue {
-            created_at: now - chrono::Duration::days(10),
+            created_at: now - (10 * 24).hours(),
             closed_at: None,
             is_open: false,
             is_pr: false,
@@ -1894,7 +1897,7 @@ mod tests {
     #[test]
     fn test_labeled_issue_ratio() {
         let now = fixed_now();
-        let week_ago = now - chrono::Duration::days(7);
+        let week_ago = now - (7 * 24).hours();
 
         let data = compute_hosting_data(
             &repo(vec![
@@ -1912,7 +1915,7 @@ mod tests {
     #[test]
     fn test_labeled_issue_ratio_ignores_pull_requests() {
         let now = fixed_now();
-        let week_ago = now - chrono::Duration::days(7);
+        let week_ago = now - (7 * 24).hours();
 
         let data = compute_hosting_data(
             &repo(vec![issue(week_ago, None, &["bug"]), pull(week_ago, None, None)]),
@@ -1928,8 +1931,8 @@ mod tests {
 
         let data = compute_hosting_data(
             &repo(vec![
-                issue(now - chrono::Duration::days(30), None, &["bug"]),
-                issue(now - chrono::Duration::days(200), Some(now - chrono::Duration::days(1)), &["bug"]),
+                issue(now - (30 * 24).hours(), None, &["bug"]),
+                issue(now - (200 * 24).hours(), Some(now - 24.hours()), &["bug"]),
             ]),
             &bug_patterns(),
         );
@@ -1953,8 +1956,8 @@ mod tests {
         // A record whose closing predates its creation cannot yield a meaningful age,
         // so it must not skew the statistics.
         let backwards_issue = CachedIssue {
-            created_at: now - chrono::Duration::days(10),
-            closed_at: Some(now - chrono::Duration::days(40)),
+            created_at: now - (10 * 24).hours(),
+            closed_at: Some(now - (40 * 24).hours()),
             is_open: false,
             is_pr: false,
             merged_at: None,
@@ -1962,11 +1965,11 @@ mod tests {
         };
 
         let backwards_pull = CachedIssue {
-            created_at: now - chrono::Duration::days(10),
-            closed_at: Some(now - chrono::Duration::days(40)),
+            created_at: now - (10 * 24).hours(),
+            closed_at: Some(now - (40 * 24).hours()),
             is_open: false,
             is_pr: true,
-            merged_at: Some(now - chrono::Duration::days(40)),
+            merged_at: Some(now - (40 * 24).hours()),
             labels: Vec::new(),
         };
 
@@ -2083,9 +2086,7 @@ mod tests {
         let provider = test_provider(cache_dir.path(), &server.uri());
 
         let (_, client) = github_client(&provider);
-        let now = DateTime::parse_from_rfc3339("2026-10-01T12:00:00Z")
-            .expect("fixed timestamp is valid")
-            .with_timezone(&Utc);
+        let now = "2026-10-01T12:00:00Z".parse::<Timestamp>().expect("fixed timestamp is valid");
         let result = provider.get_issues_and_pulls_at(client, "owner", "repo", now).await;
 
         let HostingApiResult::Success(raw_issues, _) = result else {
@@ -2102,10 +2103,12 @@ mod tests {
         assert_eq!(first_query.get("page").map(String::as_str), Some("1"));
         assert_eq!(second_query.get("page").map(String::as_str), Some("2"));
 
-        let since = DateTime::parse_from_rfc3339(first_query.get("since").expect("issues request includes the since query parameter"))
-            .expect("since is RFC3339")
-            .with_timezone(&Utc);
-        assert_eq!(since, now - chrono::Duration::days(ISSUE_LOOKBACK_DAYS));
+        let since = first_query
+            .get("since")
+            .expect("issues request includes the since query parameter")
+            .parse::<Timestamp>()
+            .expect("since is RFC3339");
+        assert_eq!(since, now - (ISSUE_LOOKBACK_DAYS * 24).hours());
 
         server.reset().await;
         wiremock::Mock::given(wiremock::matchers::method("GET"))
@@ -2329,15 +2332,9 @@ mod tests {
         let cache_dir = test_cache_dir("begin-rate-limit-pause");
         let provider = test_provider(cache_dir.path(), "http://127.0.0.1:1");
         let tracker = RequestTracker::new(&(Arc::new(NoOpProgress) as Arc<dyn Progress>));
-        let now = Utc::now();
+        let now = Timestamp::now();
 
-        provider.begin_rate_limit_pause(
-            &SUPPORTED_HOSTS[0],
-            &github_repo_spec(),
-            &tracker,
-            now,
-            now + chrono::Duration::milliseconds(200),
-        );
+        provider.begin_rate_limit_pause(&SUPPORTED_HOSTS[0], &github_repo_spec(), &tracker, now, now + 200.milliseconds());
 
         assert!(provider.throttler.is_paused());
         assert_eq!(tracker.topic_state(TrackedTopic::Repos).2, TopicStatus::Blocked);
@@ -2359,7 +2356,7 @@ mod tests {
                 Arc::clone(&throttler),
                 tracker.clone(),
                 "GitHub",
-                Utc::now() + chrono::Duration::seconds(61),
+                Timestamp::now() + 61.seconds(),
                 "soon".to_string(),
                 Duration::from_millis(1),
             ),
@@ -2481,12 +2478,12 @@ mod tests {
 
         // The first attempt is rate limited with a reset a few seconds out; the retry that
         // follows the pause gets a plain 404, which ends the loop.
-        let reset_at = DateTime::from_timestamp(Utc::now().timestamp() + 6, 0).expect("current timestamp plus six seconds is valid");
+        let reset_at = Timestamp::from_second(Timestamp::now().as_second() + 6).expect("current timestamp plus six seconds is valid");
         wiremock::Mock::given(wiremock::matchers::any())
             .respond_with(
                 wiremock::ResponseTemplate::new(403)
                     .insert_header("x-ratelimit-remaining", "0")
-                    .insert_header("x-ratelimit-reset", reset_at.timestamp().to_string().as_str()),
+                    .insert_header("x-ratelimit-reset", reset_at.as_second().to_string().as_str()),
             )
             .up_to_n_times(1)
             .mount(&server)
@@ -2497,7 +2494,7 @@ mod tests {
             .await;
 
         let (host, client) = github_client(&provider);
-        let remaining_before_request = (reset_at - Utc::now()).to_std().unwrap_or(Duration::ZERO);
+        let remaining_before_request = Duration::try_from(reset_at - Timestamp::now()).expect("test reset time is in the future");
         assert!(
             remaining_before_request > Duration::from_secs(1),
             "test setup must leave enough future reset time to observe the pause"
@@ -2515,7 +2512,10 @@ mod tests {
             started.elapsed() + timing_slack >= remaining_before_request,
             "a future reset time must pause before retrying the request"
         );
-        assert!(Utc::now() >= reset_at, "the retry must happen after the advertised reset time");
+        assert!(
+            Timestamp::now() >= reset_at,
+            "the retry must happen after the advertised reset time"
+        );
         assert!(!result.is_rate_limited, "the retry after the pause must not be rate limited");
         assert!(matches!(result.result, ProviderResult::Unavailable(_)));
         assert!(server.received_requests().await.is_some_and(|r| r.len() >= 2));
@@ -2532,9 +2532,9 @@ mod tests {
 
         // One event per window, plus one older than every window.
         buckets.push(1.0, now, cutoffs);
-        buckets.push(2.0, now - chrono::Duration::days(120), cutoffs);
-        buckets.push(3.0, now - chrono::Duration::days(200), cutoffs);
-        buckets.push(4.0, now - chrono::Duration::days(400), cutoffs);
+        buckets.push(2.0, now - (120 * 24).hours(), cutoffs);
+        buckets.push(3.0, now - (200 * 24).hours(), cutoffs);
+        buckets.push(4.0, now - (400 * 24).hours(), cutoffs);
 
         // Negative and non-finite ages are dropped outright.
         buckets.push(-1.0, now, cutoffs);

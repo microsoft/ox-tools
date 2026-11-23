@@ -7,8 +7,9 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use compact_str::{CompactString, ToCompactString};
+use jiff::civil::Date;
+use jiff::{Timestamp, ToSpan};
 use semver::Version as SemverVersion;
 use strsim::normalized_damerau_levenshtein;
 use url::Url;
@@ -20,7 +21,7 @@ use super::owner::Owner;
 use super::owner_kind::OwnerKind as PublicOwnerKind;
 use super::tables::{
     CategoriesTableIndex, CategoryId, CrateId, CratesTableIndex, KeywordId, KeywordsTableIndex, OwnerKind as TableOwnerKind, Table,
-    TableMgr, TeamId, TeamsTableIndex, UserId, UsersTableIndex, VersionDownloadRow, VersionId, VersionsTableIndex,
+    TableMgr, TeamId, TeamsTableIndex, UserId, UsersTableIndex, VersionDownloadRow, VersionId, VersionsTableIndex, encode_epoch_day,
 };
 use crate::facts::crate_spec::CrateSpec;
 use crate::facts::progress::Progress;
@@ -44,7 +45,7 @@ pub const DEFAULT_DUMP_URL: &str = "https://static.crates.io/db-dump.tar.gz";
 #[derive(Debug, Clone)]
 pub struct Provider {
     table_mgr: Arc<TableMgr>,
-    now: DateTime<Utc>,
+    now: Timestamp,
 }
 
 #[derive(Debug)]
@@ -87,7 +88,7 @@ impl Provider {
         cache_dir: impl AsRef<Path>,
         cache_ttl: Duration,
         progress: Arc<dyn Progress>,
-        now: DateTime<Utc>,
+        now: Timestamp,
         ignore_cached: bool,
         dump_url: Option<&str>,
     ) -> Result<Self> {
@@ -503,9 +504,9 @@ impl Provider {
         let mut remaining_mappings = needed_version_ids.len();
 
         // Calculate cutoff dates for counting versions in the last 90/180/365 days
-        let cutoff_90 = self.now - chrono::Duration::days(90);
-        let cutoff_180 = self.now - chrono::Duration::days(180);
-        let cutoff_365 = self.now - chrono::Duration::days(365);
+        let cutoff_90 = self.now - (90 * 24).hours();
+        let cutoff_180 = self.now - (180 * 24).hours();
+        let cutoff_365 = self.now - (365 * 24).hours();
 
         for (lean_row, index) in self.table_mgr.versions_table().iter_lean() {
             // For versions belonging to our crates: do a full row read to access num and created_at.
@@ -684,7 +685,7 @@ impl Provider {
         crate_data: &mut HashMap<CrateId, PerCrateData>,
         version_ids: &HashSet<VersionId>,
         all_version_to_crate: &HashMap<VersionId, CrateId>,
-    ) -> (HashMap<VersionId, Vec<(NaiveDate, u64)>>, HashMap<CrateId, Vec<(NaiveDate, u64)>>) {
+    ) -> (HashMap<VersionId, Vec<(Date, u64)>>, HashMap<CrateId, Vec<(Date, u64)>>) {
         self.collect_crate_downloads(crate_data);
         self.aggregate_all_monthly_downloads(version_ids, all_version_to_crate, crate_data)
     }
@@ -697,7 +698,7 @@ impl Provider {
     fn assemble_query_result(
         &self,
         crate_ref: &CrateRef,
-        timestamp: DateTime<Utc>,
+        timestamp: Timestamp,
         crate_name_to_id: &HashMap<CompactString, CrateId>,
         version_data_map: &HashMap<CrateRef, (VersionId, VersionsTableIndex)>,
         resolved_versions: &HashMap<CrateRef, SemverVersion>,
@@ -706,8 +707,8 @@ impl Provider {
         keywords: &HashMap<KeywordId, KeywordsTableIndex>,
         users: &HashMap<UserId, UsersTableIndex>,
         teams: &HashMap<TeamId, TeamsTableIndex>,
-        version_monthly_downloads: &HashMap<VersionId, Vec<(NaiveDate, u64)>>,
-        crate_monthly_downloads: &HashMap<CrateId, Vec<(NaiveDate, u64)>>,
+        version_monthly_downloads: &HashMap<VersionId, Vec<(Date, u64)>>,
+        crate_monthly_downloads: &HashMap<CrateId, Vec<(Date, u64)>>,
         suggestions: &HashMap<CompactString, Vec<CompactString>>,
     ) -> (CrateSpec, ProviderResult<CratesData>) {
         // Check if the crate exists
@@ -862,14 +863,15 @@ impl Provider {
         version_ids: &HashSet<VersionId>,
         all_version_to_crate: &HashMap<VersionId, CrateId>,
         crate_data: &HashMap<CrateId, PerCrateData>,
-    ) -> (HashMap<VersionId, Vec<(NaiveDate, u64)>>, HashMap<CrateId, Vec<(NaiveDate, u64)>>) {
+    ) -> (HashMap<VersionId, Vec<(Date, u64)>>, HashMap<CrateId, Vec<(Date, u64)>>) {
         // Nothing was resolved, so every row would be rejected: skip the largest scan entirely.
         // #[gamma::skip(cond.always_false, reason = "with no resolved versions every download row is rejected and both result maps remain empty; this return is only a fast path")]
         if all_version_to_crate.is_empty() {
             return (HashMap::default(), HashMap::default());
         }
 
-        self.aggregate_monthly_rows(
+        Self::aggregate_monthly_rows(
+            self.now,
             self.table_mgr.version_downloads_table().iter().map(|(row, _)| row),
             version_ids,
             all_version_to_crate,
@@ -882,21 +884,22 @@ impl Provider {
         reason = "the two maps distinguish requested-version downloads from all crate downloads"
     )]
     fn aggregate_monthly_rows(
-        &self,
+        now: Timestamp,
         rows: impl IntoIterator<Item = VersionDownloadRow>,
         version_ids: &HashSet<VersionId>,
         all_version_to_crate: &HashMap<VersionId, CrateId>,
         crate_data: &HashMap<CrateId, PerCrateData>,
-    ) -> (HashMap<VersionId, Vec<(NaiveDate, u64)>>, HashMap<CrateId, Vec<(NaiveDate, u64)>>) {
-        let mut version_monthly: HashMap<VersionId, BTreeMap<(i32, u32), u64>> = hash_map_with_capacity(version_ids.len());
-        let mut crate_monthly: HashMap<CrateId, BTreeMap<(i32, u32), u64>> = hash_map_with_capacity(crate_data.len());
+    ) -> (HashMap<VersionId, Vec<(Date, u64)>>, HashMap<CrateId, Vec<(Date, u64)>>) {
+        let mut version_monthly: HashMap<VersionId, BTreeMap<(i16, i8), u64>> = hash_map_with_capacity(version_ids.len());
+        let mut crate_monthly: HashMap<CrateId, BTreeMap<(i16, i8), u64>> = hash_map_with_capacity(crate_data.len());
 
         // Only the recent window is aggregated. The daily rows can extend arbitrarily far
         // back, and consumers of this series report downloads over the last 90 days: taking
         // the most recent months present in the data instead would report years-old traffic
         // for a crate that has stopped being downloaded.
-        let cutoff = (self.now - chrono::Duration::days(RECENT_DOWNLOADS_DAYS)).date_naive();
-        let cutoff_days = u64::try_from(cutoff.to_epoch_days()).unwrap_or(0);
+        let cutoff = now - (RECENT_DOWNLOADS_DAYS * 24).hours();
+        let cutoff_date = cutoff.to_zoned_datetime(jiff::tz::TimeZone::UTC).date();
+        let cutoff_days = encode_epoch_day(cutoff_date);
 
         // Rows keep their date encoded so the two rejection tests below are plain integer and
         // hash comparisons. Only rows that pass both pay for the date conversion.
@@ -908,7 +911,7 @@ impl Provider {
             // Check crate membership first — version_ids is always a subset of all_version_to_crate keys,
             // so a single lookup handles the common rejection path (~99.99% of rows match neither).
             if let Some(&crate_id) = all_version_to_crate.get(&row.version_id) {
-                let Some(date) = row.date_naive() else {
+                let Some(date) = row.date() else {
                     log::warn!(
                         target: LOG_TARGET,
                         "Ignoring version download row with invalid encoded date {}",
@@ -936,7 +939,7 @@ impl Provider {
         &self,
         crate_name: &str,
         _version: &SemverVersion,
-        _timestamp: DateTime<Utc>,
+        _timestamp: Timestamp,
         crate_id: CrateId,
         version_id: VersionId,
         version_index: VersionsTableIndex,
@@ -945,8 +948,8 @@ impl Provider {
         keywords: &HashMap<KeywordId, KeywordsTableIndex>,
         users: &HashMap<UserId, UsersTableIndex>,
         teams: &HashMap<TeamId, TeamsTableIndex>,
-        version_monthly_downloads: &HashMap<VersionId, Vec<(NaiveDate, u64)>>,
-        crate_monthly_downloads: &HashMap<CrateId, Vec<(NaiveDate, u64)>>,
+        version_monthly_downloads: &HashMap<VersionId, Vec<(Date, u64)>>,
+        crate_monthly_downloads: &HashMap<CrateId, Vec<(Date, u64)>>,
     ) -> CratesData {
         let version_row = self.table_mgr.versions_table().get(version_index);
         let version_data = CrateVersionData {
@@ -1054,13 +1057,13 @@ impl Provider {
 }
 
 /// Convert monthly download maps to sorted vectors.
-fn monthly_btree_to_vec<K: Eq + core::hash::Hash>(monthly: HashMap<K, BTreeMap<(i32, u32), u64>>) -> HashMap<K, Vec<(NaiveDate, u64)>> {
+fn monthly_btree_to_vec<K: Eq + core::hash::Hash>(monthly: HashMap<K, BTreeMap<(i16, i8), u64>>) -> HashMap<K, Vec<(Date, u64)>> {
     monthly
         .into_iter()
         .map(|(key, month_map)| {
             let vec = month_map
                 .into_iter()
-                .filter_map(|((year, month), downloads)| NaiveDate::from_ymd_opt(year, month, 1).map(|date| (date, downloads)))
+                .filter_map(|((year, month), downloads)| Date::new(year, month, 1).ok().map(|date| (date, downloads)))
                 .collect();
             (key, vec)
         })
@@ -1126,10 +1129,11 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
 
-    use chrono::{DateTime, Duration, NaiveDate, Utc};
     use compact_str::CompactString;
     use flate2::Compression;
     use flate2::write::GzEncoder;
+    use jiff::civil::Date;
+    use jiff::{Timestamp, ToSpan};
     use semver::Version;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1173,8 +1177,11 @@ mod tests {
         fn done(&self) {}
     }
 
-    fn timestamp(value: DateTime<Utc>) -> String {
-        value.format("%Y-%m-%d %H:%M:%S%.6f+00").to_string()
+    fn timestamp(value: Timestamp) -> String {
+        value
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+            .strftime("%Y-%m-%d %H:%M:%S%.6f+00")
+            .to_string()
     }
 
     fn csv(headers: &[&str], rows: Vec<Vec<String>>) -> String {
@@ -1213,11 +1220,11 @@ mod tests {
             .expect("finishing an in-memory gzip stream must not fail")
     }
 
-    fn crate_row(id: u64, name: &str, now: DateTime<Utc>) -> Vec<String> {
+    fn crate_row(id: u64, name: &str, now: Timestamp) -> Vec<String> {
         vec![
             id.to_string(),
             name.to_owned(),
-            timestamp(now - Duration::days(400)),
+            timestamp(now - (400 * 24).hours()),
             timestamp(now),
             format!("the {name} crate"),
             String::new(),
@@ -1239,8 +1246,8 @@ mod tests {
         yanked: bool,
     }
 
-    fn version_row(fields: VersionRowFields<'_>, now: DateTime<Utc>) -> Vec<String> {
-        let created_at = now - Duration::days(fields.age_days);
+    fn version_row(fields: VersionRowFields<'_>, now: Timestamp) -> Vec<String> {
+        let created_at = now - (fields.age_days * 24).hours();
         vec![
             fields.id.to_string(),
             fields.crate_id.to_string(),
@@ -1264,7 +1271,7 @@ mod tests {
         ]
     }
 
-    fn crates_table_csv(now: DateTime<Utc>) -> (&'static str, String) {
+    fn crates_table_csv(now: Timestamp) -> (&'static str, String) {
         let mut rows = vec![
             crate_row(10, "offset-target", now),
             crate_row(20, "latest-target", now),
@@ -1325,7 +1332,7 @@ mod tests {
         }
     }
 
-    fn versions_table_csv(now: DateTime<Utc>) -> (&'static str, String) {
+    fn versions_table_csv(now: Timestamp) -> (&'static str, String) {
         (
             "versions.csv",
             csv(
@@ -1378,22 +1385,19 @@ mod tests {
         )
     }
 
-    fn version_downloads_csv(now: DateTime<Utc>) -> (&'static str, String) {
+    fn version_downloads_csv(now: Timestamp) -> (&'static str, String) {
+        let today = now.to_zoned_datetime(jiff::tz::TimeZone::UTC).date();
         (
             "version_downloads.csv",
             csv(
                 &["version_id", "downloads", "date"],
                 vec![
-                    vec![103.to_string(), 12.to_string(), (now.date_naive() - Duration::days(1)).to_string()],
-                    vec![100.to_string(), 77.to_string(), (now.date_naive() - Duration::days(1)).to_string()],
-                    vec![103.to_string(), 90.to_string(), (now.date_naive() - Duration::days(90)).to_string()],
-                    vec![
-                        103.to_string(),
-                        999.to_string(),
-                        (now.date_naive() - Duration::days(91)).to_string(),
-                    ],
+                    vec![103.to_string(), 12.to_string(), (today - 1.days()).to_string()],
+                    vec![100.to_string(), 77.to_string(), (today - 1.days()).to_string()],
+                    vec![103.to_string(), 90.to_string(), (today - 90.days()).to_string()],
+                    vec![103.to_string(), 999.to_string(), (today - 91.days()).to_string()],
                     vec![103.to_string(), 7.to_string(), "1970-01-01".to_owned()],
-                    vec![203.to_string(), 34.to_string(), (now.date_naive() - Duration::days(1)).to_string()],
+                    vec![203.to_string(), 34.to_string(), (today - 1.days()).to_string()],
                 ],
             ),
         )
@@ -1483,7 +1487,7 @@ mod tests {
         )
     }
 
-    fn provider_dump(now: DateTime<Utc>) -> Vec<u8> {
+    fn provider_dump(now: Timestamp) -> Vec<u8> {
         tar_gz(&[
             crates_table_csv(now),
             versions_table_csv(now),
@@ -1530,7 +1534,7 @@ mod tests {
         ])
     }
 
-    async fn provider_from_dump(now: DateTime<Utc>) -> Provider {
+    async fn provider_from_dump(now: Timestamp) -> Provider {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/db-dump.tar.gz"))
@@ -1593,7 +1597,7 @@ mod tests {
     #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
     async fn empty_query_returns_no_results() {
         let now = "2026-08-11T04:13:36Z"
-            .parse::<DateTime<Utc>>()
+            .parse::<Timestamp>()
             .expect("the fixed test timestamp is valid");
         let provider = provider_from_dump(now).await;
         let requested: [CrateRef; 0] = [];
@@ -1604,7 +1608,7 @@ mod tests {
 
     #[tokio::test]
     async fn database_timestamp_matches_the_downloaded_table_header() {
-        let now = DateTime::from_timestamp(1_704_067_200, 0).unwrap();
+        let now = Timestamp::from_second(1_704_067_200).unwrap();
         let provider = provider_from_dump(now).await;
         assert_eq!(provider.table_mgr.created_at(), now);
     }
@@ -1612,7 +1616,7 @@ mod tests {
     #[tokio::test]
     #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
     async fn progress_distinguishes_single_and_multiple_crate_queries() {
-        let now = "2026-08-11T04:13:36Z".parse::<DateTime<Utc>>().unwrap();
+        let now = "2026-08-11T04:13:36Z".parse::<Timestamp>().unwrap();
         let provider = provider_from_dump(now).await;
         let progress = RecordingProgress::default();
 
@@ -1640,7 +1644,7 @@ mod tests {
     #[tokio::test]
     #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
     async fn short_names_are_not_offered_suggestions() {
-        let now = "2026-08-11T04:13:36Z".parse::<DateTime<Utc>>().unwrap();
+        let now = "2026-08-11T04:13:36Z".parse::<Timestamp>().unwrap();
         let provider = provider_from_dump(now).await;
         let requested = [crate_ref("abcd", None)];
         let (_, result) = provider
@@ -1658,7 +1662,7 @@ mod tests {
     #[tokio::test]
     #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
     async fn minimum_length_names_are_offered_suggestions() {
-        let now = "2026-08-11T04:13:36Z".parse::<DateTime<Utc>>().unwrap();
+        let now = "2026-08-11T04:13:36Z".parse::<Timestamp>().unwrap();
         let provider = provider_from_dump(now).await;
         let requested = [crate_ref("abcdf", None)];
         let (_, result) = provider
@@ -1676,7 +1680,7 @@ mod tests {
     #[tokio::test]
     #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
     async fn disabled_suggestions_return_no_similar_names() {
-        let now = "2026-08-11T04:13:36Z".parse::<DateTime<Utc>>().unwrap();
+        let now = "2026-08-11T04:13:36Z".parse::<Timestamp>().unwrap();
         let provider = provider_from_dump(now).await;
         let requested = [crate_ref("abcdefghij", None)];
         let (_, result) = provider
@@ -1694,7 +1698,7 @@ mod tests {
     #[tokio::test]
     #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
     async fn phase1_honors_suggestion_selection_and_score_order_directly() {
-        let now = "2026-08-11T04:13:36Z".parse::<DateTime<Utc>>().unwrap();
+        let now = "2026-08-11T04:13:36Z".parse::<Timestamp>().unwrap();
         let provider = provider_from_dump(now).await;
         let requested = HashSet::from_iter(["abcdefghijklmnopqrst"]);
 
@@ -1715,7 +1719,7 @@ mod tests {
     #[tokio::test]
     #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
     async fn join_table_collectors_reject_unrequested_crates() {
-        let now = "2026-08-11T04:13:36Z".parse::<DateTime<Utc>>().unwrap();
+        let now = "2026-08-11T04:13:36Z".parse::<Timestamp>().unwrap();
         let provider = provider_from_dump(now).await;
         let crate_data = HashMap::from_iter([(CrateId(10), empty_per_crate_data())]);
 
@@ -1736,7 +1740,7 @@ mod tests {
     #[tokio::test]
     #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
     async fn dependency_discovery_rejects_rows_for_other_crates() {
-        let now = "2026-08-11T04:13:36Z".parse::<DateTime<Utc>>().unwrap();
+        let now = "2026-08-11T04:13:36Z".parse::<Timestamp>().unwrap();
         let provider = provider_from_dump(now).await;
         let crate_data = HashMap::from_iter([(CrateId(20), empty_per_crate_data())]);
 
@@ -1749,7 +1753,7 @@ mod tests {
     #[tokio::test]
     #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
     async fn version_age_counts_include_each_exact_boundary() {
-        let now = "2026-08-11T04:13:36Z".parse::<DateTime<Utc>>().unwrap();
+        let now = "2026-08-11T04:13:36Z".parse::<Timestamp>().unwrap();
         let provider = provider_from_dump(now).await;
         let requested = [crate_ref("cutoff-target", None)];
         let (_, result) = provider
@@ -1769,7 +1773,7 @@ mod tests {
     #[tokio::test]
     #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
     async fn absent_download_and_dependent_rows_leave_zero_counts() {
-        let now = "2026-08-11T04:13:36Z".parse::<DateTime<Utc>>().unwrap();
+        let now = "2026-08-11T04:13:36Z".parse::<Timestamp>().unwrap();
         let provider = provider_from_dump(now).await;
         let requested = [crate_ref("no-download-target", None)];
         let (_, result) = provider
@@ -1788,7 +1792,7 @@ mod tests {
     #[tokio::test]
     #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
     async fn missing_crates_use_the_zero_version_placeholder() {
-        let now = "2026-08-11T04:13:36Z".parse::<DateTime<Utc>>().unwrap();
+        let now = "2026-08-11T04:13:36Z".parse::<Timestamp>().unwrap();
         let provider = provider_from_dump(now).await;
         let requested = [crate_ref("missing", None)];
         let (spec, result) = provider
@@ -1804,7 +1808,7 @@ mod tests {
     #[tokio::test]
     #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
     async fn recent_download_window_includes_day_90_but_not_day_91() {
-        let now = "2026-08-11T04:13:36Z".parse::<DateTime<Utc>>().unwrap();
+        let now = "2026-08-11T04:13:36Z".parse::<Timestamp>().unwrap();
         let provider = provider_from_dump(now).await;
         let requested = [crate_ref("offset-target", Some("1.2.3"))];
         let (_, result) = provider
@@ -1837,9 +1841,9 @@ mod tests {
     #[tokio::test]
     #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
     async fn pre_epoch_recent_window_includes_epoch_downloads() {
-        let now = "2026-08-11T04:13:36Z".parse::<DateTime<Utc>>().unwrap();
+        let now = "2026-08-11T04:13:36Z".parse::<Timestamp>().unwrap();
         let mut provider = provider_from_dump(now).await;
-        provider.now = DateTime::UNIX_EPOCH;
+        provider.now = Timestamp::UNIX_EPOCH;
         let version_ids = HashSet::from_iter([VersionId(103)]);
         let all_versions = HashMap::from_iter([(VersionId(103), CrateId(10))]);
         let crate_data = HashMap::from_iter([(CrateId(10), empty_per_crate_data())]);
@@ -1853,7 +1857,7 @@ mod tests {
     #[tokio::test]
     #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
     async fn monthly_aggregation_only_creates_version_series_for_requested_versions() {
-        let now = "2026-08-11T04:13:36Z".parse::<DateTime<Utc>>().unwrap();
+        let now = "2026-08-11T04:13:36Z".parse::<Timestamp>().unwrap();
         let provider = provider_from_dump(now).await;
         let version_ids = HashSet::from_iter([VersionId(103)]);
         let all_versions = HashMap::from_iter([(VersionId(100), CrateId(10)), (VersionId(103), CrateId(10))]);
@@ -1874,12 +1878,46 @@ mod tests {
         assert_eq!(crates[&CrateId(20)].iter().map(|(_, downloads)| downloads).sum::<u64>(), 34);
     }
 
-    #[tokio::test]
-    #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
-    async fn monthly_aggregation_skips_corrupt_dates_without_losing_later_rows() {
-        let now = "2026-08-11T04:13:36Z".parse::<DateTime<Utc>>().unwrap();
-        let provider = provider_from_dump(now).await;
-        let valid_date = u64::try_from(now.date_naive().to_epoch_days()).unwrap();
+    #[test]
+    fn monthly_aggregation_keeps_the_exact_far_future_cutoff_day() {
+        let now = "9999-12-30T00:00:00Z"
+            .parse::<Timestamp>()
+            .expect("the fixed test timestamp is valid");
+        let version_ids = HashSet::from_iter([VersionId(103)]);
+        let all_versions = HashMap::from_iter([(VersionId(103), CrateId(10))]);
+        let crate_data = HashMap::from_iter([(CrateId(10), empty_per_crate_data())]);
+        let rows = [
+            VersionDownloadRow {
+                version_id: VersionId(103),
+                downloads: 42,
+                date: 2_932_805,
+            },
+            VersionDownloadRow {
+                version_id: VersionId(103),
+                downloads: 999,
+                date: 2_932_804,
+            },
+        ];
+
+        let (versions, _) = Provider::aggregate_monthly_rows(now, rows, &version_ids, &all_versions, &crate_data);
+
+        assert_eq!(versions[&VersionId(103)].iter().map(|(_, downloads)| downloads).sum::<u64>(), 42);
+    }
+
+    #[test]
+    fn monthly_aggregation_skips_corrupt_dates_without_losing_later_rows() {
+        let now = "2026-08-11T04:13:36Z".parse::<Timestamp>().unwrap();
+        let valid_date = u64::try_from(
+            now.to_zoned_datetime(jiff::tz::TimeZone::UTC)
+                .date()
+                .at(0, 0, 0, 0)
+                .in_tz("UTC")
+                .unwrap()
+                .timestamp()
+                .as_second()
+                .div_euclid(86_400),
+        )
+        .unwrap();
         let ids = HashSet::from_iter([VersionId(103)]);
         let all_versions = HashMap::from_iter([(VersionId(103), CrateId(10))]);
         let crates = HashMap::from_iter([(CrateId(10), empty_per_crate_data())]);
@@ -1897,7 +1935,7 @@ mod tests {
                 },
             ];
             let logs = crate::facts::test_logging::capture_logs(|| {
-                let (versions, crate_totals) = provider.aggregate_monthly_rows(rows, &ids, &all_versions, &crates);
+                let (versions, crate_totals) = Provider::aggregate_monthly_rows(now, rows, &ids, &all_versions, &crates);
                 assert_eq!(versions[&VersionId(103)].iter().map(|(_, downloads)| downloads).sum::<u64>(), 42);
                 assert_eq!(crate_totals[&CrateId(10)].iter().map(|(_, downloads)| downloads).sum::<u64>(), 42);
             });
@@ -1917,10 +1955,7 @@ mod tests {
 
         let converted = monthly_btree_to_vec(monthly);
 
-        assert_eq!(
-            converted[&CrateId(1)],
-            [(NaiveDate::from_ymd_opt(2026, 8, 1).expect("valid month"), 42)]
-        );
+        assert_eq!(converted[&CrateId(1)], [(Date::constant(2026, 8, 1), 42)]);
     }
 
     #[test]
@@ -1958,7 +1993,7 @@ mod tests {
     #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
     async fn exact_version_lookup_reads_the_matched_table_row() {
         let now = "2026-08-11T04:13:36Z"
-            .parse::<DateTime<Utc>>()
+            .parse::<Timestamp>()
             .expect("the fixed test timestamp is valid");
         let provider = provider_from_dump(now).await;
         let requested = [crate_ref("offset-target", Some("1.2.3"))];
@@ -1987,7 +2022,7 @@ mod tests {
     #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
     async fn latest_version_lookup_uses_the_preferred_stable_row() {
         let now = "2026-08-11T04:13:36Z"
-            .parse::<DateTime<Utc>>()
+            .parse::<Timestamp>()
             .expect("the fixed test timestamp is valid");
         let provider = provider_from_dump(now).await;
         let requested = [crate_ref("latest-target", None)];
@@ -2017,7 +2052,7 @@ mod tests {
     #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
     async fn exact_version_lookup_stops_before_later_duplicate_rows() {
         let now = "2026-08-11T04:13:36Z"
-            .parse::<DateTime<Utc>>()
+            .parse::<Timestamp>()
             .expect("the fixed test timestamp is valid");
         let provider = provider_from_dump(now).await;
         let requested = [crate_ref("offset-target", Some("1.2.3"))];
@@ -2048,7 +2083,7 @@ mod tests {
     #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
     async fn exact_version_lookup_is_not_overwritten_during_a_mixed_latest_query() {
         let now = "2026-08-11T04:13:36Z"
-            .parse::<DateTime<Utc>>()
+            .parse::<Timestamp>()
             .expect("the fixed test timestamp is valid");
         let provider = provider_from_dump(now).await;
         let requested = [crate_ref("offset-target", Some("1.2.3")), crate_ref("latest-target", None)];
@@ -2083,7 +2118,7 @@ mod tests {
     #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
     async fn suggestions_keep_the_first_three_equal_best_matches() {
         let now = "2026-08-11T04:13:36Z"
-            .parse::<DateTime<Utc>>()
+            .parse::<Timestamp>()
             .expect("the fixed test timestamp is valid");
         let provider = provider_from_dump(now).await;
         let requested = [crate_ref("abcdefghij", None)];
@@ -2108,7 +2143,7 @@ mod tests {
     #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
     async fn suggestions_replace_the_lowest_scoring_full_slot() {
         let now = "2026-08-11T04:13:36Z"
-            .parse::<DateTime<Utc>>()
+            .parse::<Timestamp>()
             .expect("the fixed test timestamp is valid");
         let provider = provider_from_dump(now).await;
         let requested = [crate_ref("abcdefghijklmnopqrst", None)];

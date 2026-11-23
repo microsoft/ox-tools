@@ -125,6 +125,8 @@ publishes `anvil-impact-linux` and `anvil-impact-windows`. Each PR group
 depends on successful impact, downloads its OS artifact into
 `target/anvil/impact/`, and consumes the cache without recomputing it.
 Failure of either impact job blocks the dependent stages.
+Impact preparation fails if its checkout is dirty; only the normal clean cache
+path is eligible for publication.
 
 Successful impact does not skip whole stages: scoped recipes can no-op while
 unscoped checks still run. Scheduled groups run independently over the full

@@ -100,7 +100,7 @@ fn generated_recipes_are_split_by_responsibility() {
     assert!(!generated.checks.lines().any(|line| line.starts_with("_anvil-readme ")));
     assert!(generated.groups.contains("anvil-pr-fast:"));
     assert!(!generated.groups.lines().any(|line| line.starts_with("_anvil-unscoped ")));
-    assert!(!generated.helpers.contains("anvil-impact:"));
+    assert!(!generated.helpers.lines().any(|line| line.starts_with("anvil-impact:")));
     assert!(generated.helpers.lines().any(|line| line.starts_with("_anvil-readme ")));
     assert!(generated.helpers.lines().any(|line| line.starts_with("_anvil-unscoped ")));
     assert!(!generated.checks.contains("anvil-clippy-setup"));
@@ -252,7 +252,6 @@ fn shell_scripts_are_limited_to_domain_exceptions() {
     }
     for retired in [
         "_anvil-impact-format",
-        "_anvil-impact-snapshot",
         "_anvil-resolve-stable",
         "_anvil-stable-toolchain-args",
     ] {

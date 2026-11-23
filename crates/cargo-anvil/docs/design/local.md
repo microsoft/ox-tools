@@ -159,9 +159,16 @@ determine which package set each check uses.
 Other nonempty values fail with exit code 2. Scheduled groups and the
 scheduled/full tiers set `off` automatically.
 
-Any tracked edit or non-ignored untracked file widens local checks to the full
-workspace. Commit changes to restore committed-diff scoping. An empty impact
-set skips scoped checks successfully; unscoped checks still run.
+Local runs with tracked edits, staged edits, deletions, renames, or non-ignored
+untracked files snapshot the current filesystem and compute fresh package
+selections. These selections match the tiers produced if that filesystem state
+were committed. Dirty results are isolated from the clean cache and are never
+published. An empty impact set skips scoped checks successfully; unscoped
+checks still run.
+
+GitHub Actions and Azure Pipelines impact jobs require clean checkouts and fail
+if tracked or non-ignored untracked content is present. `consume` mode continues
+to trust only the downloaded clean cache.
 
 ### Base ref and failures
 
@@ -177,7 +184,7 @@ commands are errors, not empty selections.
 
 ### Cache
 
-Results live under `target/anvil/impact/`:
+Clean results live under `target/anvil/impact/`:
 
 | File | Meaning |
 |------|---------|
@@ -187,7 +194,23 @@ Results live under `target/anvil/impact/`:
 
 Each file is directly consumable by cargo-each. An empty file is an explicit
 successful no-op for scoped checks. Delete `target/anvil/impact/` to force
-recomputation.
+clean recomputation.
+
+Dirty local results use immutable generation directories under
+`target/anvil/impact-dirty/` with the same package files and a fresh current
+snapshot. Each Just invocation publishes an `active-<invocation-id>` selector
+for its completed generation; `active` records the latest generation for local
+inspection. Concurrent invocations retain distinct selectors and generations.
+Completed generations are bounded and cleaned up best-effort without deleting
+an active invocation's inputs. The dirty directory is never a CI artifact input
+or a fallback for consume mode.
+
+Checks read package files from `target/anvil/impact-invocations/<invocation-id>/`.
+`anvil-impact` atomically publishes the selected clean-cache or dirty-generation
+package files there before dependent checks start. The deterministic
+invocation path is known while Just evaluates recipe arguments, so checks do
+not need a nested Just invocation or runtime command wrapper to discover the
+completed dirty generation.
 
 In consume mode, `ANVIL_IMPACT_INPUT_DIR` selects another read-only cache
 directory, using an absolute path or a path relative to the recipe's working

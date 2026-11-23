@@ -84,7 +84,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::Arc;
 
-    use chrono::Utc;
+    use jiff::Timestamp;
     use semver::Version;
 
     use super::*;
@@ -95,8 +95,7 @@ mod tests {
 
     #[expect(clippy::too_many_lines, reason = "Test helper function with comprehensive test data")]
     fn create_test_crate_facts() -> CrateFacts {
-        use chrono::TimeZone;
-        let now = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let now: Timestamp = "2024-01-01T00:00:00Z".parse().expect("valid timestamp literal");
 
         CrateFacts {
             crate_spec: CrateSpec::from_arcs(Arc::from("test-crate"), Arc::new(Version::parse("1.0.0").unwrap())),

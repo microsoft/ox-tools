@@ -73,10 +73,6 @@ name = "fixtures"
 required-features = ["test-util"]
 
 [[test]]
-name = "impact"
-required-features = ["test-util"]
-
-[[test]]
 name = "pr_title"
 required-features = ["test-util"]
 
