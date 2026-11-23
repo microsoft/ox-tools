@@ -176,6 +176,8 @@ fn setup_uses_lazy_inventory_and_exact_install_policy() {
     assert!(!recipes.contains("anvil-toolchain-stable-install"));
     assert!(generated.setup.contains("set lazy"));
     assert!(recipes.contains("--disable-strategies compile"));
+    assert!(!recipes.contains("`rustup run {{"));
+    assert!(!generated.helpers.contains("`rustc +{{"));
 }
 
 #[test]

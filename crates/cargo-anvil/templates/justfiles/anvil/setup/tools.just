@@ -13,8 +13,8 @@ installed_cargo_tools := `cargo install --list`
 cargo_binstall_version := replace_regex(installed_cargo_tools, '(?ms)\A.*^cargo-binstall v([^:\r\n]+):\r?$.*\z', '$1')
 cargo_binstall_found := if cargo_binstall_version == installed_cargo_tools { "false" } else { "true" }
 bolero_command_prefix := if os() == "linux" { "" } else { "# " }
-anvil_nightly_sysroot := `rustup run {{ rust_nightly }} rustc --print sysroot`
-anvil_nightly_host := `rustup run {{ rust_nightly }} rustc --print host-tuple`
+anvil_nightly_sysroot := shell("rustup run " + rust_nightly + " rustc --print sysroot")
+anvil_nightly_host := shell("rustup run " + rust_nightly + " rustc --print host-tuple")
 anvil_nightly_rust_src_dir := anvil_nightly_sysroot / "lib/rustlib/src/rust/library"
 anvil_nightly_llvm_profdata := anvil_nightly_sysroot / "lib/rustlib" / anvil_nightly_host / "bin" / (if os() == "windows" { "llvm-profdata.exe" } else { "llvm-profdata" })
 

@@ -518,7 +518,7 @@ _anvil-full: anvil-full-validate-prereqs \
     _anvil-scheduled
 
 anvil_bolero_targets_file := "target" / ("bolero-list-" + just_pid() + ".jsonl")
-anvil_bolero_host_target := `rustc +{{ rust_nightly }} --print host-tuple`
+anvil_bolero_host_target := shell("rustc +" + rust_nightly + " --print host-tuple")
 # Used by anvil-bolero to create its JSONL output directory after impact analysis.
 [private]
 _ensure-target-dir: anvil-impact
