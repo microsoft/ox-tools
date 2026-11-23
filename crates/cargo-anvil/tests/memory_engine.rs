@@ -368,6 +368,20 @@ fn read_directory_and_late_lock_failures_stop_before_publication() {
 }
 
 #[test]
+fn initial_manifest_read_failure_is_returned_without_mutation() {
+    let mut io = FailingIo {
+        repository: historical(),
+        read: Some(".anvil/manifest.toml".to_owned()),
+        ..FailingIo::default()
+    };
+    let before = io.repository.files.clone();
+    let error = update(&upgraded_catalog(), &UpdateOptions::default(), &mut io).unwrap_err();
+    assert_eq!(error.message(), "scripted read failure");
+    assert_eq!(io.repository.files, before);
+    assert!(io.repository.mutations.is_empty());
+}
+
+#[test]
 fn failed_artifact_or_lock_writes_do_not_publish_a_successful_lock() {
     for path in [".gitattributes", "owned.just", ".anvil/manifest.toml"] {
         let mut io = FailingIo {
@@ -396,6 +410,22 @@ fn removal_failure_prevents_lock_publication() {
     let error = update(&upgraded_catalog(), &options, &mut io).unwrap_err();
     assert!(error.to_string().contains("scripted delete failure"));
     assert_eq!(io.repository.files[".anvil/manifest.toml"], lock);
+}
+
+#[test]
+fn legacy_manifest_removal_failure_retains_context() {
+    let mut io = FailingIo {
+        repository: historical(),
+        remove: Some(".anvil.lock".to_owned()),
+        ..FailingIo::default()
+    };
+    io.repository.insert(".anvil.lock", HISTORICAL_LOCK);
+    let error = update(&upgraded_catalog(), &UpdateOptions::default(), &mut io).unwrap_err();
+    assert!(error.to_string().contains("failed to retire legacy manifest"), "{error}");
+    assert_eq!(
+        error.find_source::<std::io::Error>().map(std::io::Error::kind),
+        Some(std::io::ErrorKind::PermissionDenied)
+    );
 }
 
 #[test]

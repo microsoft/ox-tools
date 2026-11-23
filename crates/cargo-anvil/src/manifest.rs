@@ -482,6 +482,7 @@ impl Manifest {
 
 pub(crate) fn save_text(repo_root: &Path, text: &str) -> Result<(), AppError> {
     let path = Manifest::path_for(repo_root);
+    // #[gamma::skip(try.propagate_to_unwrap, reason = "Manifest::path_for always appends .anvil/manifest.toml, which necessarily has the .anvil parent.", tag = "equivalent")]
     let parent = path
         .parent()
         .ok_or_else(|| app_err!("manifest path '{}' has no parent directory", path.display()))?;

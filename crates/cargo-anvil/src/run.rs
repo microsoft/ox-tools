@@ -992,6 +992,7 @@ fn compose_owned_file_sections(catalog: &Catalog, backends: &[Backend]) -> Vec<C
             });
             files.len() - 1
         });
+        // #[gamma::skip(collection.reverse_array, reason = "trim_matches treats this character array as a set; reversing CR and LF cannot change the trimmed body.", tag = "equivalent")]
         let body = spec.body.trim_matches(['\r', '\n']);
         if !files[index].body.is_empty() {
             files[index].body.push_str("\n\n");
@@ -3261,6 +3262,45 @@ mod tests {
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].path, ".anvil/composed");
         assert_eq!(files[0].body, "body\n");
+    }
+
+    #[test]
+    fn justfile_scaffold_is_seeded_only_for_the_absent_import_region() {
+        let spec = RegionSpec {
+            host: HostSelector::Path(artifacts::justfile::JUSTFILE_PATH.to_owned()),
+            id: RegionId::new(artifacts::justfile::JUSTFILE_REGION_ID),
+            body: "body".to_owned(),
+            syntax: CommentSyntax::Hash,
+        };
+        for (host, id, current, expected_seed) in [
+            (
+                artifacts::justfile::JUSTFILE_PATH,
+                artifacts::justfile::JUSTFILE_REGION_ID,
+                None,
+                true,
+            ),
+            (
+                artifacts::justfile::JUSTFILE_PATH,
+                artifacts::justfile::JUSTFILE_REGION_ID,
+                Some("existing".to_owned()),
+                false,
+            ),
+            ("Other", artifacts::justfile::JUSTFILE_REGION_ID, None, false),
+            (artifacts::justfile::JUSTFILE_PATH, "other", None, false),
+        ] {
+            let mut hosts = HostTextCache::default();
+            let mut candidate = spec.clone();
+            candidate.id = RegionId::new(id);
+            let result = seed_justfile_scaffold_if_absent(&mut hosts, host, &candidate, current.clone());
+            if expected_seed {
+                let scaffold = artifacts::justfile::scaffold();
+                assert_eq!(result.as_deref(), Some(scaffold));
+                assert_eq!(hosts.cached(host).as_deref(), Some(scaffold));
+            } else {
+                assert_eq!(result, current);
+                assert!(!hosts.texts.contains_key(host));
+            }
+        }
     }
 
     /// Minimal identity for tests that exercise catalog mechanics rather than

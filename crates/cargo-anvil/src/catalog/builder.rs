@@ -931,6 +931,10 @@ mod tests {
             .unwrap();
 
         assert_ne!(forward.checksum(), reverse.checksum());
+        assert_eq!(
+            forward.checksum(),
+            "sha256:914832116f4431440f8f105b69c8bf2b9943f3a8ab1aff52924a34d16b2f3701"
+        );
     }
 
     #[test]
