@@ -1834,6 +1834,88 @@ fn convergence_still_checks_a_library_without_a_test_harness() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn finish_keeps_all_frozen_root_specs_when_only_one_root_produces_a_test_binary() {
+    let mut work = policy_workspace();
+    work.cargo.features = vec!["--all-features".to_owned()];
+    let mut plan = empty_plan(&work);
+    plan.specs
+        .insert("selected".to_owned(), (Utf8PathBuf::from("selected"), "1.0.0".to_owned()));
+    plan.specs
+        .insert("feature-root".to_owned(), (Utf8PathBuf::from("feature-root"), "2.0.0".to_owned()));
+    plan.mutants.push(Mutant {
+        package: "selected".to_owned().into(),
+        file: Utf8PathBuf::from("selected/src/lib.rs").into(),
+        ..mutant()
+    });
+
+    let frozen_roots = ["selected".to_owned(), "feature-root".to_owned()];
+    let selected = ["selected".to_owned()];
+    let workspace_spec = if cfg!(windows) {
+        "path+file:///C:/synthetic/build-policy"
+    } else {
+        "path+file:///synthetic/build-policy"
+    };
+    let expected_packages = vec![
+        format!("{workspace_spec}/selected#selected@1.0.0"),
+        format!("{workspace_spec}/feature-root#feature-root@2.0.0"),
+    ];
+    let expected_command_packages = expected_packages.clone();
+    let observed_commands = Rc::new(RefCell::new(Vec::new()));
+    let record_command = Rc::clone(&observed_commands);
+    let executable = work.target.join("debug/deps/selected-test");
+    let artifact = serde_json::json!({
+        "reason": "compiler-artifact",
+        "package_id": expected_packages[0].as_str(),
+        "profile": {"test": true},
+        "target": {"name": "selected", "kind": ["test"]},
+        "executable": executable.as_str(),
+    })
+    .to_string();
+
+    let build = with_compiler(
+        move |_work, arguments, _budget, _events| {
+            let packages = arguments
+                .windows(2)
+                .filter(|pair| pair[0] == "--package")
+                .map(|pair| pair[1].clone())
+                .collect::<Vec<_>>();
+            assert_eq!(packages, expected_command_packages);
+            assert!(arguments.iter().any(|argument| argument == "--all-features"));
+            assert!(!arguments.iter().any(|argument| argument == "--workspace"));
+
+            let verb = arguments[0].clone();
+            let stdout = match verb.as_str() {
+                "check" => "",
+                "build" => artifact.as_str(),
+                other => panic!("unexpected Cargo verb: {other}"),
+            };
+            record_command.borrow_mut().push((verb, packages));
+
+            Ok(Some(scripted_output(true, stdout, "")))
+        },
+        || {
+            let mut converger = Converger::default();
+            converger.freeze_context(Some(&frozen_roots));
+            converger.finish(&work, &mut plan, Some(&selected), BuildLimits::default(), &mut Recorder::default())
+        },
+    )
+    .expect("the scripted build succeeds");
+
+    assert_eq!(
+        observed_commands.borrow().as_slice(),
+        &[
+            ("check".to_owned(), expected_packages.clone()),
+            ("build".to_owned(), expected_packages.clone()),
+        ]
+    );
+    let retained_binaries = build.binaries.iter().map(|binary| binary.package.as_str()).collect::<Vec<_>>();
+    assert_eq!(
+        (build.stuck.is_none(), build.packages, retained_binaries),
+        (true, Some(expected_packages), vec!["selected"])
+    );
+}
+
 /// A build that fails for a reason no guard explains stops rather than looping forever.
 #[test]
 fn a_build_that_no_guard_explains_stops_with_the_compiler_output() {
