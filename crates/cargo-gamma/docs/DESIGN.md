@@ -105,6 +105,35 @@ Statement deletion uses concrete names such as `stmt.delete_call` and
 `--in-diff` selects changed mutation sites, not tests affected by a change.
 A test-only edit can select nothing even if it removes protection for unchanged
 production code. A passing diff campaign makes no claim about those other sites.
+An exact, existing, workspace-relative Rust file outside every workspace package
+directory is understood but contributes no mutation sites when no package
+in the selected declaration inventory declares it with `mod` or `#[path]`.
+A diff with such a file still counts as understood if its only other paths
+are unmatched non-Rust files.
+An exact mutation candidate takes precedence, but an exact external file
+checked for module ownership is never redirected to another file by fuzzy
+matching. For a Git rename or copy, the `rename to` or `copy to` header gives
+the destination without a diff prefix. A guessed prefix can help find a
+mutation candidate but cannot justify skipping an unresolved Rust file.
+The standalone skip does not apply to unsafe or absolute paths, missing files,
+or files under a package directory.
+
+Gamma checks module ownership only when a changed file otherwise qualifies for
+the standalone skip. It resolves ordinary module declarations by path, but a
+conditional `#[path]` can select a different file or change the lookup
+directory for an entire inline module. The path of a `mod name;` inside a
+function body or other statement block can also depend on its enclosing
+modules. Rather than untangle those paths, Gamma currently reports an error
+instead of skipping the changed file if it finds either kind of declaration
+in the scanned sources, even if the changed file is unrelated. Incomplete
+declaration analysis also prevents the skip. These diagnostics escape control
+characters in displayed source paths.
+
+Gamma also refuses the skip when it sees `include!` or an unscanned module
+target that could be active in the selected build. An included file or an
+unscanned module could bring additional Rust source into the crate. Gamma
+does not resolve `include!` arguments, expand macros, or follow modules outside
+the inventory.
 
 ### Source policy
 

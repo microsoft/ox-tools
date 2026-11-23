@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-11-20
+
+- 🐛 Bug Fixes
+
+  - cargo-gamma: skip standalone Rust scripts in mutation diffs
+
 ## [0.7.0] - 2026-11-19
 
 - 🐛 Bug Fixes
