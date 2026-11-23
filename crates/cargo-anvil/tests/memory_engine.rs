@@ -378,7 +378,7 @@ fn initial_manifest_read_failure_is_returned_without_mutation() {
     let error = update(&upgraded_catalog(), &UpdateOptions::default(), &mut io).unwrap_err();
     assert_eq!(error.message(), "scripted read failure");
     assert_eq!(io.repository.files, before);
-    assert!(io.repository.mutations.is_empty());
+    assert_eq!(io.repository.mutations, Vec::<String>::new());
 }
 
 #[test]
