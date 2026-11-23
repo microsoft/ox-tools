@@ -94,7 +94,7 @@ GitHub setup uses `binstall`; ADO uses source installation.
 
 Cargo tools are installed at their exact catalog versions. Already-installed
 versions at or above the catalog minimum are accepted and are not downgraded.
-Pins are recorded in `versions.just`. Bootstrap utilities such as cargo-binstall
+Pins are recorded in `.anvil/setup.just`. Bootstrap utilities such as cargo-binstall
 are not covered by the catalog's exact-version guarantee.
 
 ### System prerequisites
@@ -135,7 +135,7 @@ must expose it through rustup under the declared public version.
 
 ### Nightly pinning
 
-Nightly checks use catalog pins from `versions.just`. The general nightly
+Nightly checks use catalog pins from `.anvil/setup.just`. The general nightly
 supports formatting, coverage, unused-dependency checks, Miri, careful, and
 Bolero. External-types has a separate nightly matched to its rustdoc JSON schema.
 A newer installed external-types tool can pass version validation yet fail

@@ -5,6 +5,7 @@
 # Regenerate with cargo-anvil to update this file.
 
 # Install prerequisites for the `anvil-scheduled-advisories` recipe.
+[private]
 anvil-scheduled-advisories-setup installer="install": \
     (anvil-deny-setup installer) \
     (anvil-audit-setup installer) \
@@ -12,6 +13,7 @@ anvil-scheduled-advisories-setup installer="install": \
     (anvil-clippy-setup installer)
 
 # Validate prerequisites for the `anvil-scheduled-advisories` recipe.
+[private]
 anvil-scheduled-advisories-validate-prereqs: \
     anvil-deny-validate-prereqs \
     anvil-audit-validate-prereqs \

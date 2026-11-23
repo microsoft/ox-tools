@@ -750,6 +750,7 @@ anvil-udeps-setup installer="install": anvil-toolchain-nightly-install (anvil-to
 anvil-udeps-validate-prereqs: anvil-toolchain-nightly-validate-prereqs anvil-tool-cargo-udeps-validate-prereqs anvil-tool-cargo-each-validate-prereqs
 
 # Install prerequisites for the `anvil-pr-fast` recipe.
+[private]
 anvil-pr-fast-setup installer="install": \
     (anvil-tool-cargo-delta-install installer) \
     (anvil-fmt-setup installer) \
@@ -768,6 +769,7 @@ anvil-pr-fast-setup installer="install": \
     (anvil-external-types-setup installer)
 
 # Validate prerequisites for the `anvil-pr-fast` recipe.
+[private]
 anvil-pr-fast-validate-prereqs: \
     anvil-tool-cargo-delta-validate-prereqs \
     anvil-fmt-validate-prereqs \
@@ -786,16 +788,19 @@ anvil-pr-fast-validate-prereqs: \
     anvil-external-types-validate-prereqs
 
 # Install prerequisites for the `anvil-pr-msrv` recipe.
+[private]
 anvil-pr-msrv-setup installer="install": \
     (anvil-tool-cargo-delta-install installer) \
     (anvil-msrv-test-setup installer)
 
 # Validate prerequisites for the `anvil-pr-msrv` recipe.
+[private]
 anvil-pr-msrv-validate-prereqs: \
     anvil-tool-cargo-delta-validate-prereqs \
     anvil-msrv-test-validate-prereqs
 
 # Install prerequisites for the `anvil-pr-slow` recipe.
+[private]
 anvil-pr-slow-setup installer="install": \
     (anvil-pr-test-setup installer) \
     (anvil-pr-msrv-setup installer) \
@@ -804,6 +809,7 @@ anvil-pr-slow-setup installer="install": \
     (anvil-pr-mutants-setup installer)
 
 # Validate prerequisites for the `anvil-pr-slow` recipe.
+[private]
 anvil-pr-slow-validate-prereqs: \
     anvil-pr-test-validate-prereqs \
     anvil-pr-msrv-validate-prereqs \
@@ -812,6 +818,7 @@ anvil-pr-slow-validate-prereqs: \
     anvil-pr-mutants-validate-prereqs
 
 # Install prerequisites for the `anvil-pr-test` recipe.
+[private]
 anvil-pr-test-setup installer="install": \
     (anvil-tool-cargo-delta-install installer) \
     (anvil-llvm-cov-setup installer) \
@@ -819,6 +826,7 @@ anvil-pr-test-setup installer="install": \
     (anvil-examples-setup installer)
 
 # Validate prerequisites for the `anvil-pr-test` recipe.
+[private]
 anvil-pr-test-validate-prereqs: \
     anvil-tool-cargo-delta-validate-prereqs \
     anvil-llvm-cov-validate-prereqs \
@@ -826,6 +834,7 @@ anvil-pr-test-validate-prereqs: \
     anvil-examples-validate-prereqs
 
 # Install prerequisites for the `anvil-pr-runtime-analysis` recipe.
+[private]
 anvil-pr-runtime-analysis-setup installer="install": \
     (anvil-tool-cargo-delta-install installer) \
     (anvil-miri-setup installer) \
@@ -833,6 +842,7 @@ anvil-pr-runtime-analysis-setup installer="install": \
     (anvil-loom-setup installer)
 
 # Validate prerequisites for the `anvil-pr-runtime-analysis` recipe.
+[private]
 anvil-pr-runtime-analysis-validate-prereqs: \
     anvil-tool-cargo-delta-validate-prereqs \
     anvil-miri-validate-prereqs \
@@ -840,24 +850,29 @@ anvil-pr-runtime-analysis-validate-prereqs: \
     anvil-loom-validate-prereqs
 
 # Install prerequisites for the `anvil-pr-fuzzing` recipe.
+[private]
 anvil-pr-fuzzing-setup installer="install":
     {{ bolero_command_prefix }}{{ just_executable() }} anvil-tool-cargo-delta-install {{ installer }} anvil-bolero-setup {{ installer }}
 
 # Validate prerequisites for the `anvil-pr-fuzzing` recipe.
+[private]
 anvil-pr-fuzzing-validate-prereqs:
     {{ bolero_command_prefix }}{{ just_executable() }} anvil-tool-cargo-delta-validate-prereqs anvil-bolero-validate-prereqs
 
 # Install prerequisites for the `anvil-pr-mutants` recipe.
+[private]
 anvil-pr-mutants-setup installer="install": \
     (anvil-tool-cargo-delta-install installer) \
     (anvil-mutants-diff-setup installer)
 
 # Validate prerequisites for the `anvil-pr-mutants` recipe.
+[private]
 anvil-pr-mutants-validate-prereqs: \
     anvil-tool-cargo-delta-validate-prereqs \
     anvil-mutants-diff-validate-prereqs
 
 # Install prerequisites for the `anvil-scheduled-test` recipe.
+[private]
 anvil-scheduled-test-setup installer="install": \
     (anvil-check-all-targets-setup installer) \
     (anvil-llvm-cov-setup installer) \
@@ -866,6 +881,7 @@ anvil-scheduled-test-setup installer="install": \
     (anvil-bolero-setup installer)
 
 # Validate prerequisites for the `anvil-scheduled-test` recipe.
+[private]
 anvil-scheduled-test-validate-prereqs: \
     anvil-check-all-targets-validate-prereqs \
     anvil-llvm-cov-validate-prereqs \
@@ -874,6 +890,7 @@ anvil-scheduled-test-validate-prereqs: \
     anvil-bolero-validate-prereqs
 
 # Install prerequisites for the `anvil-scheduled-advisories` recipe.
+[private]
 anvil-scheduled-advisories-setup installer="install": \
     (anvil-deny-setup installer) \
     (anvil-audit-setup installer) \
@@ -881,6 +898,7 @@ anvil-scheduled-advisories-setup installer="install": \
     (anvil-clippy-setup installer)
 
 # Validate prerequisites for the `anvil-scheduled-advisories` recipe.
+[private]
 anvil-scheduled-advisories-validate-prereqs: \
     anvil-deny-validate-prereqs \
     anvil-audit-validate-prereqs \
@@ -888,6 +906,7 @@ anvil-scheduled-advisories-validate-prereqs: \
     anvil-clippy-validate-prereqs
 
 # Install prerequisites for the `anvil-scheduled-runtime-analysis` recipe.
+[private]
 anvil-scheduled-runtime-analysis-setup installer="install": \
     (anvil-miri-setup installer) \
     (anvil-miri-tree-borrows-setup installer) \
@@ -895,6 +914,7 @@ anvil-scheduled-runtime-analysis-setup installer="install": \
     (anvil-miri-race-coverage-setup installer)
 
 # Validate prerequisites for the `anvil-scheduled-runtime-analysis` recipe.
+[private]
 anvil-scheduled-runtime-analysis-validate-prereqs: \
     anvil-miri-validate-prereqs \
     anvil-miri-tree-borrows-validate-prereqs \
@@ -902,12 +922,14 @@ anvil-scheduled-runtime-analysis-validate-prereqs: \
     anvil-miri-race-coverage-validate-prereqs
 
 # Install prerequisites for the `anvil-scheduled-exhaustive` recipe.
+[private]
 anvil-scheduled-exhaustive-setup installer="install": \
     (anvil-mutants-full-setup installer) \
     (anvil-cargo-hack-setup installer) \
     (anvil-bench-setup installer)
 
 # Validate prerequisites for the `anvil-scheduled-exhaustive` recipe.
+[private]
 anvil-scheduled-exhaustive-validate-prereqs: \
     anvil-mutants-full-validate-prereqs \
     anvil-cargo-hack-validate-prereqs \

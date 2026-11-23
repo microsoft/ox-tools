@@ -5,9 +5,11 @@
 # Regenerate with cargo-anvil to update this file.
 
 # Install prerequisites for the `anvil-pr-fuzzing` recipe.
+[private]
 anvil-pr-fuzzing-setup installer="install":
     {{ bolero_command_prefix }}{{ just_executable() }} anvil-tool-cargo-delta-install {{ installer }} anvil-bolero-setup {{ installer }}
 
 # Validate prerequisites for the `anvil-pr-fuzzing` recipe.
+[private]
 anvil-pr-fuzzing-validate-prereqs:
     {{ bolero_command_prefix }}{{ just_executable() }} anvil-tool-cargo-delta-validate-prereqs anvil-bolero-validate-prereqs

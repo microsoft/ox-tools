@@ -5,11 +5,13 @@
 # Regenerate with cargo-anvil to update this file.
 
 # Install prerequisites for the `anvil-pr-mutants` recipe.
+[private]
 anvil-pr-mutants-setup installer="install": \
     (anvil-tool-cargo-delta-install installer) \
     (anvil-mutants-diff-setup installer)
 
 # Validate prerequisites for the `anvil-pr-mutants` recipe.
+[private]
 anvil-pr-mutants-validate-prereqs: \
     anvil-tool-cargo-delta-validate-prereqs \
     anvil-mutants-diff-validate-prereqs

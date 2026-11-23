@@ -5,6 +5,7 @@
 # Regenerate with cargo-anvil to update this file.
 
 # Install prerequisites for the `anvil-scheduled-test` recipe.
+[private]
 anvil-scheduled-test-setup installer="install": \
     (anvil-check-all-targets-setup installer) \
     (anvil-llvm-cov-setup installer) \
@@ -13,6 +14,7 @@ anvil-scheduled-test-setup installer="install": \
     (anvil-bolero-setup installer)
 
 # Validate prerequisites for the `anvil-scheduled-test` recipe.
+[private]
 anvil-scheduled-test-validate-prereqs: \
     anvil-check-all-targets-validate-prereqs \
     anvil-llvm-cov-validate-prereqs \

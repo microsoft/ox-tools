@@ -12,7 +12,7 @@ The downstream tool chooses its CLI name, description, and version. The
 on-disk namespace remains `.anvil/manifest.toml`, `anvil-managed` markers,
 `.anvil-proposed` files, and `anvil-` recipes composed under `.anvil/`.
 
-The lock records the managing tool. A different tool refuses before planning;
+The `tool` field in `.anvil/manifest.toml` identifies the managing tool. A different tool refuses before planning;
 `--force` permits an intentional ownership switch under the normal
 [update rules](updates.md#the-single-tool-guard). It does not authorize
 overwriting customizations.

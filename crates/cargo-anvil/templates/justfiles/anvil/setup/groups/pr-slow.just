@@ -5,6 +5,7 @@
 # Regenerate with cargo-anvil to update this file.
 
 # Install prerequisites for the `anvil-pr-slow` recipe.
+[private]
 anvil-pr-slow-setup installer="install": \
     (anvil-pr-test-setup installer) \
     (anvil-pr-msrv-setup installer) \
@@ -13,6 +14,7 @@ anvil-pr-slow-setup installer="install": \
     (anvil-pr-mutants-setup installer)
 
 # Validate prerequisites for the `anvil-pr-slow` recipe.
+[private]
 anvil-pr-slow-validate-prereqs: \
     anvil-pr-test-validate-prereqs \
     anvil-pr-msrv-validate-prereqs \

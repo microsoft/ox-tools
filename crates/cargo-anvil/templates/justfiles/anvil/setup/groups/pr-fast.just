@@ -5,6 +5,7 @@
 # Regenerate with cargo-anvil to update this file.
 
 # Install prerequisites for the `anvil-pr-fast` recipe.
+[private]
 anvil-pr-fast-setup installer="install": \
     (anvil-tool-cargo-delta-install installer) \
     (anvil-fmt-setup installer) \
@@ -23,6 +24,7 @@ anvil-pr-fast-setup installer="install": \
     (anvil-external-types-setup installer)
 
 # Validate prerequisites for the `anvil-pr-fast` recipe.
+[private]
 anvil-pr-fast-validate-prereqs: \
     anvil-tool-cargo-delta-validate-prereqs \
     anvil-fmt-validate-prereqs \

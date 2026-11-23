@@ -5,6 +5,7 @@
 # Regenerate with cargo-anvil to update this file.
 
 # Install prerequisites for the `anvil-pr-runtime-analysis` recipe.
+[private]
 anvil-pr-runtime-analysis-setup installer="install": \
     (anvil-tool-cargo-delta-install installer) \
     (anvil-miri-setup installer) \
@@ -12,6 +13,7 @@ anvil-pr-runtime-analysis-setup installer="install": \
     (anvil-loom-setup installer)
 
 # Validate prerequisites for the `anvil-pr-runtime-analysis` recipe.
+[private]
 anvil-pr-runtime-analysis-validate-prereqs: \
     anvil-tool-cargo-delta-validate-prereqs \
     anvil-miri-validate-prereqs \

@@ -5,12 +5,14 @@
 # Regenerate with cargo-anvil to update this file.
 
 # Install prerequisites for the `anvil-scheduled-exhaustive` recipe.
+[private]
 anvil-scheduled-exhaustive-setup installer="install": \
     (anvil-mutants-full-setup installer) \
     (anvil-cargo-hack-setup installer) \
     (anvil-bench-setup installer)
 
 # Validate prerequisites for the `anvil-scheduled-exhaustive` recipe.
+[private]
 anvil-scheduled-exhaustive-validate-prereqs: \
     anvil-mutants-full-validate-prereqs \
     anvil-cargo-hack-validate-prereqs \
