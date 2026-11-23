@@ -119,17 +119,18 @@ Reusable workflows default to `contents: read`. Their callers grant the upper
 permission bound; individual jobs restore only their publication scopes:
 
 - PR groups receive `statuses: write`; only `pr-fast` also receives
-  `pull-requests: read` to refresh the pull request title.
+  `pull-requests: read` to fetch the current pull request title for
+  Conventional Commits validation.
 - Mutation jobs receive `actions: read` and `security-events: write` for SARIF.
 - The scheduled failure publisher receives only `issues: write`, without
   repository-content access.
 
-Status and advisory-comment writes are restricted to same-repository
-`pull_request` events, even if an administrator enables write tokens for
-forks. Merge-group jobs still receive their declared write scopes but do not
-perform those writes. Code-scanning uploads are separate and also run for
-merge groups. Keep scheduled-only credentials out of PR workflows; the
-generated roots use `secrets: inherit`.
+Commit-status writes are restricted to same-repository `pull_request` events,
+even if an administrator enables write tokens for forks. Merge-group jobs
+still receive their declared write scopes but do not perform those writes.
+Code-scanning uploads are separate and also run for merge groups. Keep
+scheduled-only credentials out of PR workflows; the generated roots use
+`secrets: inherit`.
 
 Third-party actions are pinned by commit SHA in the source templates. The
 shared actions are implementation details, not a public per-group action API.
