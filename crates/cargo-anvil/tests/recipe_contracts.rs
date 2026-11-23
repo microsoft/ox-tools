@@ -175,6 +175,23 @@ fn common_checks_are_direct_cargo_each_invocations() {
 }
 
 #[test]
+fn test_feature_guard_runs_for_the_workspace_even_without_modified_packages() {
+    let generated = generated();
+    assert!(generated.groups.contains("    anvil-deny-test-features \\\n"));
+    assert!(generated.setup.contains("    (anvil-deny-test-features-setup installer) \\\n"));
+    assert!(generated.setup.contains("    anvil-deny-test-features-validate-prereqs \\\n"));
+    assert!(
+        generated
+            .checks
+            .contains("anvil-deny-test-features: anvil-deny-test-features-validate-prereqs\n")
+    );
+    assert!(generated.checks.contains("ensure-no-test-features --manifest-path"));
+    assert!(generated.checks.contains("--policy "));
+    assert!(generated.setup.contains("cargo_ensure_no_test_features_version := \"0.1.0\""));
+    assert!(!generated.temp.path().join(".anvil/deny-test-features.json").exists());
+}
+
+#[test]
 fn coverage_is_one_domain_tool_invocation() {
     let recipes = generated().checks;
     assert!(recipes.contains("cargo +{{ rust_nightly }} each {{ anvil_affected_selection }} --once --"));

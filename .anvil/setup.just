@@ -484,6 +484,16 @@ anvil-deny-setup installer="install": (anvil-tool-cargo-deny-install installer) 
 [private]
 anvil-deny-validate-prereqs: anvil-tool-cargo-deny-validate-prereqs anvil-tool-cargo-each-validate-prereqs
 
+# Install prerequisites for the `anvil-deny-test-features` recipe.
+[group("anvil-setup")]
+[private]
+anvil-deny-test-features-setup installer="install": (anvil-tool-cargo-each-install installer)
+
+# Validate prerequisites for the `anvil-deny-test-features` recipe.
+[group("anvil-setup")]
+[private]
+anvil-deny-test-features-validate-prereqs: anvil-tool-rustc-validate-prereqs
+
 # Install prerequisites for the `anvil-doc-build` recipe.
 [group("anvil-setup")]
 [private]
@@ -723,6 +733,7 @@ anvil-pr-fast-setup installer="install": \
     (anvil-license-headers-setup installer) \
     (anvil-ensure-no-cyclic-deps-setup installer) \
     (anvil-ensure-no-default-features-setup installer) \
+    (anvil-deny-test-features-setup installer) \
     (anvil-doc-build-setup installer) \
     (anvil-readme-check-setup installer) \
     (anvil-spellcheck-setup installer) \
@@ -743,6 +754,7 @@ anvil-pr-fast-validate-prereqs: \
     anvil-license-headers-validate-prereqs \
     anvil-ensure-no-cyclic-deps-validate-prereqs \
     anvil-ensure-no-default-features-validate-prereqs \
+    anvil-deny-test-features-validate-prereqs \
     anvil-doc-build-validate-prereqs \
     anvil-readme-check-validate-prereqs \
     anvil-spellcheck-validate-prereqs \

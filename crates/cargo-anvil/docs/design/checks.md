@@ -11,7 +11,7 @@ that floor universally.
 
 | Group | Checks |
 |-------|--------|
-| `pr-fast` | fmt, clippy, cargo-sort, license-headers, ensure-no-cyclic-deps, ensure-no-default-features, doc-build, readme-check, spellcheck, pr-title, deny, audit, unused-deps, udeps, external-types |
+| `pr-fast` | fmt, clippy, cargo-sort, license-headers, ensure-no-cyclic-deps, ensure-no-default-features, deny-test-features, doc-build, readme-check, spellcheck, pr-title, deny, audit, unused-deps, udeps, external-types |
 | `pr-test` | llvm-cov, doc-test, examples |
 | `pr-msrv` | msrv-test |
 | `pr-runtime-analysis` | miri, careful, loom |
@@ -54,6 +54,7 @@ Locally, recipes run on the host OS. See [github.md](./github.md) and
 | `license-headers` | Checks workspace license headers with cargo-heather. |
 | `ensure-no-cyclic-deps` | Rejects workspace dependency cycles. |
 | `ensure-no-default-features` | Checks the workspace's default-feature policy. |
+| `deny-test-features` | Rejects denied feature requests on production dependencies and in the default features of publishable packages. |
 | `doc-build` | Builds all-features documentation for selected packages without dependency documentation; rustdoc warnings fail. Local `--open` opens the result. |
 | `readme-check` | Checks generated READMEs for publishable crates except `[package.metadata.ox-gen-readme]` opt-outs. Library/proc-macro rustdoc takes precedence over binary rustdoc. |
 | `spellcheck` | Checks spelling with cargo-spellcheck and repository configuration. |
@@ -81,6 +82,37 @@ PR titles accept these forms:
 
 Types are case-insensitive: `feat`, `fix`, `chore`, `docs`, `refactor`, `test`,
 `build`, `ci`, `perf`, and `revert`. Additional lines of title content are rejected.
+
+#### Test-only features
+
+Run `just anvil-deny-test-features` to check the entire workspace with
+[`cargo-ensure-no-test-features`](https://crates.io/crates/cargo-ensure-no-test-features),
+installed by `just anvil-setup`. The check
+skips `publish = false` members and dev-dependencies. It checks explicit
+feature requests on normal and build dependencies, including inherited,
+optional, and target-specific declarations. It also checks features reachable
+from each publishable member's `default`, including direct forwarding to
+normal or build dependencies. Weak forwarding (`dep?/feature`) is checked
+even when the optional dependency is not enabled. The check does not resolve
+dependencies' own defaults or transitive feature activation.
+
+The checker bundles the exact, case-sensitive names `fakes`, `test-util`,
+and `insecure`. To customize the policy,
+commit a repository-owned `.anvil/deny-test-features.json`. An optional
+`features` array replaces the bundled list. An optional `exceptions` array
+permits individual uses without removing the name from the list:
+
+```json
+{
+  "exceptions": [
+    { "package": "my-client", "dependency": "transport", "feature": "insecure" }
+  ]
+}
+```
+
+Use the dependency key from `Cargo.toml` (the alias if renamed). Omitting
+`dependency` exempts only the package's own default activation of the named
+feature, not dependency requests. An invalid policy fails the check.
 
 ### `pr-test`
 
