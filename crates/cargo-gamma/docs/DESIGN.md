@@ -112,9 +112,9 @@ A diff with such a file still counts as understood if its only other paths
 are unmatched non-Rust files.
 An exact mutation candidate takes precedence, but an exact external file
 checked for module ownership is never redirected to another file by fuzzy
-matching. For a Git rename, the `rename to` header gives the destination
-without a diff prefix. A guessed prefix can help find a mutation candidate
-but cannot justify skipping an unresolved Rust file.
+matching. For a Git rename or copy, the `rename to` or `copy to` header gives
+the destination without a diff prefix. A guessed prefix can help find a
+mutation candidate but cannot justify skipping an unresolved Rust file.
 The standalone skip does not apply to unsafe or absolute paths, missing files,
 or files under a package directory.
 
@@ -129,9 +129,11 @@ in the scanned sources, even if the changed file is unrelated. Incomplete
 declaration analysis also prevents the skip. These diagnostics escape control
 characters in displayed source paths.
 
-Declaration evidence is limited to the parsed workspace inventory: it does
-not resolve `include!` arguments or recursively follow declarations from files
-outside that inventory.
+Gamma also refuses the skip when it sees `include!` or an unscanned module
+target that could be active in the selected build. An included file or an
+unscanned module could bring additional Rust source into the crate. Gamma
+does not resolve `include!` arguments, expand macros, or follow modules outside
+the inventory.
 
 ### Source policy
 

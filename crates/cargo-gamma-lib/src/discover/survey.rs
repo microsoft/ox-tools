@@ -616,7 +616,7 @@ impl Survey {
             walked.dedup();
             let package_directories: Vec<Utf8PathBuf> = specs.values().map(|(directory, _version)| directory.clone()).collect();
             diff.resolve_for_workspace(&root, &walked, &package_directories, || {
-                declared_module_targets(&declaration_files, &cfgs)
+                declared_module_targets(&declaration_files, &roots, &cfgs)
             })?;
 
             // A file the diff does not mention cannot contain a changed line, so it is dropped
@@ -2256,9 +2256,12 @@ fn placed_under(root: &Utf8Path, absolute: &Utf8Path, package: &str) -> Result<U
     Ok(Utf8PathBuf::from(normalize_separators(inside.as_str())))
 }
 
-/// Module targets owned by the declaration inventory, including direct paths outside a source
-/// directory. `include!` is deliberately not part of this proof.
-fn declared_module_targets(declaration_files: &HashMap<String, Vec<Utf8PathBuf>>, cfgs: &Cfgs) -> Result<HashSet<Utf8PathBuf>> {
+/// Module targets from the declaration inventory, if the inventory provides complete evidence.
+fn declared_module_targets(
+    declaration_files: &HashMap<String, Vec<Utf8PathBuf>>,
+    roots: &HashMap<String, Vec<Utf8PathBuf>>,
+    cfgs: &Cfgs,
+) -> Result<HashSet<Utf8PathBuf>> {
     let files: Vec<(&Utf8Path, &CfgSet, &str)> = declaration_files
         .iter()
         .flat_map(|(package, paths)| {
@@ -2267,11 +2270,11 @@ fn declared_module_targets(declaration_files: &HashMap<String, Vec<Utf8PathBuf>>
         })
         .collect();
 
-    module_targets_from(parse_declarations_with_parser(
-        &files,
-        thread::available_parallelism,
-        parse_declarations_for_ownership,
-    )?)
+    let roots: Vec<_> = roots.values().flatten().cloned().collect();
+    module_targets_from(
+        &roots,
+        parse_declarations_with_parser(&files, thread::available_parallelism, parse_declarations_for_ownership)?,
+    )
 }
 
 fn parse_declarations_for_ownership(path: &Utf8Path, cfg: &CfgSet) -> Result<DeclarationOutcome> {
@@ -2296,10 +2299,18 @@ fn ownership_edges(path: &Utf8Path, ast: &syn::File, cfg: &CfgSet) -> Result<Vec
         .usage());
     }
 
+    if modules::has_include(ast) {
+        return Err(error!(
+            "cannot prove that a standalone Rust diff path is unowned: `{}` uses `include!`, whose source path gamma does not resolve",
+            encode_controls(path.as_str())
+        )
+        .usage());
+    }
+
     module_identities::declarations(path, ast, cfg)
 }
 
-fn module_targets_from(declarations: Declarations) -> Result<HashSet<Utf8PathBuf>> {
+fn module_targets_from(roots: &[Utf8PathBuf], declarations: Declarations) -> Result<HashSet<Utf8PathBuf>> {
     if !declarations.skipped.is_empty() {
         let skipped = declarations
             .skipped
@@ -2314,12 +2325,25 @@ fn module_targets_from(declarations: Declarations) -> Result<HashSet<Utf8PathBuf
         .usage());
     }
 
-    Ok(declarations
-        .declared
-        .into_iter()
-        .flat_map(|(_path, declarations)| declarations)
-        .map(|declaration| modules::identity(&declaration.target))
-        .collect())
+    let inventory: HashSet<_> = declarations.declared.iter().map(|(path, _)| modules::identity(path)).collect();
+    let excluded = modules::excluded_files(roots, &declarations.declared);
+    let mut targets = HashSet::default();
+    for (source, edges) in declarations.declared {
+        for edge in edges {
+            let target = modules::identity(&edge.target);
+            if !inventory.contains(&target) && !excluded.contains(&target) {
+                return Err(error!(
+                    "cannot prove that a standalone Rust diff path is unowned: `{}` declares module file `{}`, \
+                     which is outside the declaration inventory",
+                    encode_controls(source.as_str()),
+                    encode_controls(target.as_str())
+                )
+                .usage());
+            }
+            let _inserted = targets.insert(target);
+        }
+    }
+    Ok(targets)
 }
 
 /// Loads cargo metadata for the tree at `dir`.
@@ -2892,6 +2916,34 @@ mod tests {
             |_, _, _| Ok(()),
             read_diff,
         )
+    }
+
+    #[test]
+    fn a_survey_skips_an_external_script_only_when_it_is_unowned() {
+        let root = Utf8Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/standalone-diff");
+        let mut metadata = selection_metadata();
+        metadata.workspace_root = root.clone();
+        metadata.workspace_members.truncate(1);
+        metadata.packages.truncate(1);
+        let args = SelectArgs {
+            dir: root.clone(),
+            workspace: true,
+            in_diff: Some("script.patch".into()),
+            ..SelectArgs::default()
+        };
+        let mut survey = |package: &str| {
+            metadata.packages[0].manifest_path = root.join(package).join("Cargo.toml");
+            metadata.packages[0].targets.truncate(1);
+            metadata.packages[0].targets[0].src_path = root.join(package).join("lib.rs");
+            inventory_survey(&metadata, &args, walk_rust_files_excluding, |_| {
+                Ok(Diff::parse("--- script.rs\n+++ script.rs\n@@ -0,0 +1 @@\n+pub fn work() {}\n"))
+            })
+        };
+
+        assert!(survey("unowned").unwrap().files.is_empty());
+        let failure = survey("owned").unwrap_err();
+        assert!(failure.is_usage(), "{failure}");
+        assert!(failure.message().contains("script.rs"), "{failure}");
     }
 
     #[test]
@@ -3868,17 +3920,20 @@ mod tests {
 
     #[test]
     fn incomplete_declaration_evidence_cannot_prove_a_standalone_rust_path_is_unowned() {
-        let result = module_targets_from(Declarations {
-            digests: HashMap::default(),
-            named: Vec::new(),
-            declared: Vec::new(),
-            skipped: vec![
-                (Utf8PathBuf::from("src/lib\n.rs"), "too deeply nested".into()),
-                (Utf8PathBuf::from("src/main.rs"), "could not parse source".into()),
-            ],
-            defaults: HashMap::default(),
-            incomplete_packages: HashSet::default(),
-        });
+        let result = module_targets_from(
+            &[],
+            Declarations {
+                digests: HashMap::default(),
+                named: Vec::new(),
+                declared: Vec::new(),
+                skipped: vec![
+                    (Utf8PathBuf::from("src/lib\n.rs"), "too deeply nested".into()),
+                    (Utf8PathBuf::from("src/main.rs"), "could not parse source".into()),
+                ],
+                defaults: HashMap::default(),
+                incomplete_packages: HashSet::default(),
+            },
+        );
 
         let error = result.expect_err("incomplete declaration evidence cannot justify ignoring a Rust path");
         assert!(error.is_usage(), "{error}");
@@ -3890,22 +3945,92 @@ mod tests {
     }
 
     #[test]
-    fn complete_ownership_inventory_accepts_known_declarations_and_reports_missing_source() {
+    fn ownership_inventory_reports_a_missing_source() {
         let root = Utf8Path::new(env!("CARGO_MANIFEST_DIR"));
-        let source = root.join("src/discover/mod.rs");
-        let module = root.join("src/discover/diff.rs");
         let cfgs = Cfgs::default();
-        let targets = declared_module_targets(&HashMap::from_iter([("cargo-gamma-lib".to_owned(), vec![source])]), &cfgs).unwrap();
-        assert!(targets.contains(&modules::identity(&module)));
-
         let missing = root.join("src/discover/missing-ownership-source.rs");
         assert!(!missing.exists());
-        let error = declared_module_targets(&HashMap::from_iter([("cargo-gamma-lib".to_owned(), vec![missing.clone()])]), &cfgs)
-            .expect_err("missing declaration source cannot prove ownership");
+        let error = declared_module_targets(
+            &HashMap::from_iter([("cargo-gamma-lib".to_owned(), vec![missing.clone()])]),
+            &HashMap::default(),
+            &cfgs,
+        )
+        .expect_err("missing declaration source cannot prove ownership");
         assert_eq!(error.message(), format!("could not read `{missing}`"));
         assert!(!error.is_usage() && !error.is_skippable(), "{error}");
         let cause = std::error::Error::source(&error).and_then(|cause| cause.downcast_ref::<std::io::Error>());
         assert_eq!(cause.map(std::io::Error::kind), Some(std::io::ErrorKind::NotFound));
+    }
+
+    #[test]
+    fn an_unscanned_module_may_declare_more_source_files() {
+        let root = Utf8PathBuf::from("synthetic/src/lib.rs");
+        let source = Utf8PathBuf::from("synthetic/src/outer.rs");
+        let target = Utf8PathBuf::from("synthetic/scripts/shared.rs");
+        let inventory = |scan_shared, exclude_outer| {
+            let mut declared = vec![
+                (
+                    root.clone(),
+                    vec![modules::Declaration {
+                        target: source.clone(),
+                        excluded: exclude_outer,
+                    }],
+                ),
+                (
+                    source.clone(),
+                    vec![modules::Declaration {
+                        target: target.clone(),
+                        excluded: false,
+                    }],
+                ),
+            ];
+            if scan_shared {
+                declared.push((target.clone(), Vec::new()));
+            }
+            Declarations {
+                digests: HashMap::default(),
+                named: Vec::new(),
+                declared,
+                skipped: Vec::new(),
+                defaults: HashMap::default(),
+                incomplete_packages: HashSet::default(),
+            }
+        };
+        let roots = core::slice::from_ref(&root);
+        for (scan_shared, exclude_outer) in [(true, false), (false, true)] {
+            assert_eq!(
+                module_targets_from(roots, inventory(scan_shared, exclude_outer)).unwrap(),
+                HashSet::from_iter([source.clone(), target.clone()])
+            );
+        }
+        let error =
+            module_targets_from(roots, inventory(false, false)).expect_err("an unscanned module can declare more external source files");
+        assert!(error.is_usage(), "{error}");
+        assert_eq!(
+            error.to_string(),
+            "cannot prove that a standalone Rust diff path is unowned: `synthetic/src/outer.rs` declares module file \
+             `synthetic/scripts/shared.rs`, which is outside the declaration inventory"
+        );
+    }
+
+    #[test]
+    fn source_inclusion_prevents_proving_standalone_ownership() {
+        let path = Utf8Path::new("src/lib.rs");
+        let cfg = CfgSet::default();
+        for code in [
+            r#"include!("../scripts/shared.rs");"#,
+            r#"fn run() { std::include!(concat!("../scripts/", "shared.rs")); }"#,
+        ] {
+            let ast = syn::parse_file(code).unwrap();
+            let error = ownership_edges(path, &ast, &cfg).expect_err("included Rust can belong to the crate");
+            assert!(error.is_usage(), "{error}");
+            assert_eq!(
+                error.to_string(),
+                "cannot prove that a standalone Rust diff path is unowned: `src/lib.rs` uses `include!`, whose source path gamma does not resolve"
+            );
+        }
+        let ast = syn::parse_file(r#"const TEXT: &str = include_str!("README.md");"#).unwrap();
+        assert!(ownership_edges(path, &ast, &cfg).unwrap().is_empty());
     }
 
     #[test]

@@ -82,7 +82,7 @@ impl Diff {
     /// Only added and modified lines count. A deleted line has no position in the new file, so
     /// there is nothing there to mutate, and a context line is by definition unchanged.
     ///
-    /// Git's `rename to` gives the destination without a prefix. For other paths, the diff headers
+    /// Git's `rename to` and `copy to` give the destination without a prefix. For other paths, the diff headers
     /// can identify Git's default, mnemonic, custom, or empty prefix. When they cannot, `b/` is
     /// tried as a fallback for candidate lookup.
     #[must_use]
@@ -96,7 +96,7 @@ impl Diff {
         // What the `diff --git` header said the post-image prefix is, and what the `---` line
         // spelled the pre-image as. Either is enough to recognize the prefix on the `+++` line.
         let mut dst_prefix: Option<String> = None;
-        let mut rename_to = None;
+        let mut destination = None;
         let mut pre_image: Option<String> =
         // #[gamma::skip(option.none_to_some, reason = "This replaces only initial pre_image=None with Some(String::new()). Before any --- header assigns a real path, the only consumer new_file_path selects an explicit dst_prefix first; otherwise derived_prefix(empty, raw) returns None because raw header_path is nonempty and split_first_segment(empty) returns None. Both None and Some(empty) therefore select the identical b/ fallback. Later headers/reset overwrite this initial value.", tag = "equivalent")]
         None;
@@ -150,11 +150,11 @@ impl Diff {
                 dst_prefix = git_prefix(rest);
                 // #[gamma::skip(assign_value.default, reason = "None is exactly the default value of this Option")]
                 pre_image = None;
-                rename_to = None;
-            } else if let Some(rest) = line.strip_prefix("rename to ") {
-                rename_to = Some(rest);
+                destination = None;
+            } else if let Some(rest) = line.strip_prefix("rename to ").or_else(|| line.strip_prefix("copy to ")) {
+                destination = Some(rest);
             } else if let Some(rest) = line.strip_prefix("+++ ") {
-                current = new_file_path(rest, dst_prefix.as_deref(), pre_image.as_deref(), rename_to.take()).map(|(path, mut source)| {
+                current = new_file_path(rest, dst_prefix.as_deref(), pre_image.as_deref(), destination.take()).map(|(path, mut source)| {
                     if let Some(previous) = sources.get(&path) {
                         source.exact &= previous.exact;
                     }
@@ -367,11 +367,11 @@ fn new_file_path(
     rest: &str,
     dst_prefix: Option<&str>,
     pre_image: Option<&str>,
-    rename_to: Option<&str>,
+    destination: Option<&str>,
 ) -> Option<(Utf8PathBuf, PathSource)> {
     let raw = Utf8Path::new(header_path(rest)?);
 
-    if let Some(destination) = rename_to
+    if let Some(destination) = destination
         .map(Utf8Path::new)
         .filter(|path| !path.as_str().is_empty() && !path.as_str().starts_with('"') && safe_relative(path) && ends_with_path(raw, path))
     {
@@ -391,7 +391,7 @@ fn new_file_path(
         return None;
     }
 
-    let exact = rename_to.is_none() && (prefix.is_some() || stripped == raw.as_str());
+    let exact = destination.is_none() && (prefix.is_some() || stripped == raw.as_str());
     Some((
         Utf8PathBuf::from(stripped),
         PathSource {
@@ -1129,21 +1129,23 @@ diff --git before/old.rs next/a.rs
     }
 
     #[test]
-    fn a_rename_header_preserves_a_real_b_directory_with_or_without_git_prefixes() {
+    fn a_rename_or_copy_header_preserves_a_real_b_directory_with_or_without_git_prefixes() {
         let root = Utf8Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
         let script = Utf8Path::new("scripts/publish-gh-release.rs");
         let target = Utf8PathBuf::from("b/scripts/publish-gh-release.rs");
         assert!(root.join(script).is_file(), "the checked-in standalone script exists");
 
-        for (old, new) in [
-            ("a/old.rs", "b/b/scripts/publish-gh-release.rs"),
-            ("old.rs", "b/scripts/publish-gh-release.rs"),
-            ("old/scripts/publish-gh-release.rs", "b/scripts/publish-gh-release.rs"),
+        for (operation, old, new) in [
+            ("rename", "a/old.rs", "b/b/scripts/publish-gh-release.rs"),
+            ("rename", "old.rs", "b/scripts/publish-gh-release.rs"),
+            ("rename", "old/scripts/publish-gh-release.rs", "b/scripts/publish-gh-release.rs"),
+            ("copy", "a/a/scripts/publish-gh-release.rs", "b/b/scripts/publish-gh-release.rs"),
+            ("copy", "a/scripts/publish-gh-release.rs", "b/scripts/publish-gh-release.rs"),
         ] {
-            let text = format!("diff --git {old} {new}\nrename to {target}\n--- {old}\n+++ {new}\n@@ -1 +1,2 @@\n one\n+two\n");
+            let text = format!("diff --git {old} {new}\n{operation} to {target}\n--- {old}\n+++ {new}\n@@ -1 +1,2 @@\n one\n+two\n");
             let mut diff = Diff::parse(&text);
             diff.resolve_for_workspace(&root, core::slice::from_ref(&target), &[Utf8PathBuf::from("b")], || {
-                panic!("an inventoried rename destination does not need ownership evidence")
+                panic!("an inventoried destination does not need ownership evidence")
             })
             .unwrap();
 
@@ -1158,7 +1160,7 @@ diff --git before/old.rs next/a.rs
         let target = Utf8PathBuf::from("b/scripts/publish-gh-release.rs");
         assert!(root.join(script).is_file(), "the checked-in standalone script exists");
 
-        for metadata in ["", "rename to elsewhere.rs\n"] {
+        for metadata in ["", "rename to elsewhere.rs\n", "copy to elsewhere.rs\n"] {
             let text = format!("diff --git old.rs {target}\n{metadata}--- old.rs\n+++ {target}\n@@ -1 +1,2 @@\n one\n+two\n");
             let mut diff = Diff::parse(&text);
             diff.resolve_for_workspace(&root, core::slice::from_ref(&target), &[Utf8PathBuf::from("b")], || {

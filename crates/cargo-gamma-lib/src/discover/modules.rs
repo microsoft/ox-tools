@@ -195,6 +195,22 @@ fn cfg_attr_has_path(meta: &Meta) -> bool {
         })
 }
 
+/// Detects source inclusion without trying to expand macros or resolve the included path.
+pub(super) fn has_include(ast: &syn::File) -> bool {
+    #[derive(Default)]
+    struct Finder(bool);
+
+    impl<'ast> Visit<'ast> for Finder {
+        fn visit_macro(&mut self, i: &'ast syn::Macro) {
+            self.0 |= i.path.segments.last().is_some_and(|segment| segment.ident == "include");
+        }
+    }
+
+    let mut finder = Finder::default();
+    finder.visit_file(ast);
+    finder.0
+}
+
 /// Works out which files have no live module path under the selected configuration.
 ///
 /// `roots` are the crate roots — a package's lib and bin entry points — which are never test code.
