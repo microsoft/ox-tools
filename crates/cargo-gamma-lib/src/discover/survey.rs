@@ -2943,7 +2943,15 @@ mod tests {
         assert!(survey("unowned").unwrap().files.is_empty());
         let failure = survey("owned").unwrap_err();
         assert!(failure.is_usage(), "{failure}");
-        assert!(failure.message().contains("script.rs"), "{failure}");
+        let owner = root.join("owned").join("lib.rs");
+        let script = root.join("script.rs").canonicalize_utf8().unwrap();
+        assert_eq!(
+            failure.message(),
+            format!(
+                "cannot prove that a standalone Rust diff path is unowned: `{owner}` declares module file `{script}`, \
+                 which is outside the declaration inventory"
+            )
+        );
     }
 
     #[test]
