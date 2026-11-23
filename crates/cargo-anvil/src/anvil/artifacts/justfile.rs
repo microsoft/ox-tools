@@ -23,15 +23,15 @@ const REPEATED_TEMPLATE_HEADER: &str = "# Copyright (c) Microsoft Corporation.\n
 # Regenerate with cargo-anvil to update this file.\n";
 
 /// Repo-root-relative path of the generated import hub.
-pub(crate) const ANVIL_JUST_PATH: &str = ".anvil/anvil.just";
+const ANVIL_JUST_PATH: &str = ".anvil/anvil.just";
 /// Repo-root-relative path of check and developer-utility recipes.
-pub(crate) const CHECKS_JUST_PATH: &str = ".anvil/checks.just";
+const CHECKS_JUST_PATH: &str = ".anvil/checks.just";
 /// Repo-root-relative path of public group and tier recipes.
-pub(crate) const GROUPS_JUST_PATH: &str = ".anvil/groups.just";
+const GROUPS_JUST_PATH: &str = ".anvil/groups.just";
 /// Repo-root-relative path of private recipes and shared definitions.
-pub(crate) const HELPERS_JUST_PATH: &str = ".anvil/helpers.just";
+const HELPERS_JUST_PATH: &str = ".anvil/helpers.just";
 /// Repo-root-relative path of tool pins and setup/validation recipes.
-pub(crate) const SETUP_JUST_PATH: &str = ".anvil/setup.just";
+const SETUP_JUST_PATH: &str = ".anvil/setup.just";
 
 /// Contents of `justfiles/anvil/setup/versions.just` baked into the binary.
 const VERSIONS_JUST: &str = include_str!("../../../templates/justfiles/anvil/setup/versions.just");

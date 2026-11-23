@@ -271,11 +271,7 @@ fn shell_scripts_are_limited_to_domain_exceptions() {
     ] {
         assert!(recipe_names.contains(portable));
     }
-    for retired in [
-        "_anvil-impact-format",
-        "_anvil-resolve-stable",
-        "_anvil-stable-toolchain-args",
-    ] {
+    for retired in ["_anvil-impact-format", "_anvil-resolve-stable", "_anvil-stable-toolchain-args"] {
         assert!(!recipes.contains(retired), "retired helper survived: {retired}");
     }
 }
