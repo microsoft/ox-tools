@@ -119,7 +119,7 @@ Reusable workflows default to `contents: read`. Their callers grant the upper
 permission bound; individual jobs restore only their publication scopes:
 
 - PR groups receive `statuses: write`; only `pr-fast` also receives
-  `pull-requests: write`.
+  `pull-requests: read` to refresh the pull request title.
 - Mutation jobs receive `actions: read` and `security-events: write` for SARIF.
 - The scheduled failure publisher receives only `issues: write`, without
   repository-content access.
