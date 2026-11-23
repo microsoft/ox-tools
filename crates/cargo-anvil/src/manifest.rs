@@ -574,6 +574,27 @@ mod tests {
         assert_eq!(manifest.region_checksum("Cargo.toml", "same-id"), None);
     }
 
+    #[test]
+    fn manifest_source_errors_name_the_failing_source() {
+        for (current, legacy, expected) in [
+            (Some("not = [valid".to_owned()), None, "current.toml"),
+            (None, Some("not = [valid".to_owned()), "legacy.lock"),
+        ] {
+            let error = Manifest::from_sources(current, legacy, "current.toml", "legacy.lock").unwrap_err();
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn divergent_manifest_sources_are_refused() {
+        let current = sample_manifest().to_toml();
+        let mut legacy = sample_manifest();
+        legacy.set_file("extra.txt", "sha256:extra");
+
+        let error = Manifest::from_sources(Some(current), Some(legacy.to_toml()), "current.toml", "legacy.lock").unwrap_err();
+        assert!(error.to_string().contains("contain different ownership state"), "{error}");
+    }
+
     fn sample_manifest() -> Manifest {
         let mut m = Manifest {
             tool: Some("anvil".into()),

@@ -101,6 +101,13 @@ runs:
     - name: Install cargo-binstall
       uses: cargo-bins/cargo-binstall@851112458b5f28a29e5bc14a690c3f283d9dcc6f # v1.26.2
 
+    # Setup inventory and source-install fallbacks invoke Cargo before
+    # group-specific toolchain recipes run. Install the checkout-selected
+    # toolchain first so rustup shims can service those calls on cold runners.
+    - name: Install checkout Rust toolchain
+      shell: bash
+      run: rustup toolchain install --profile minimal
+
     # cargo-spellcheck links libclang when cargo-binstall falls back to a source
     # build. Install it eagerly on Linux jobs whose selected setup group includes
     # spellcheck, keeping package-manager policy in the GitHub runner adapter

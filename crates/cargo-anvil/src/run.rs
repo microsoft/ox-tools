@@ -3220,6 +3220,49 @@ mod tests {
         assert!(error.to_string().contains("injected late manifest read failure"), "{error}");
     }
 
+    #[test]
+    fn expanded_owned_section_conflicts_with_a_member_region() {
+        let catalog = Catalog::builder(test_cli())
+            .with_artifact(Artifact::owned_file_section("crates/example/Cargo.toml", "section", "body"))
+            .with_artifact(Artifact::region(RegionSpec {
+                host: HostSelector::EachMemberManifest,
+                id: RegionId::new("managed"),
+                body: "body".to_owned(),
+                syntax: CommentSyntax::Hash,
+            }))
+            .build()
+            .unwrap();
+        let workspace = Workspace {
+            members: vec![crate::workspace::WorkspaceMember {
+                manifest_relpath: "crates/example/Cargo.toml".to_owned(),
+            }],
+            has_workspace_table: true,
+        };
+
+        let error = validate_expanded_section_ownership(&workspace, &[], &catalog).unwrap_err();
+        assert!(error.to_string().contains("conflict with managed-region host"), "{error}");
+    }
+
+    #[test]
+    fn owned_sections_compose_active_nonempty_bodies_only() {
+        let catalog = Catalog::builder(test_cli())
+            .with_artifact(Artifact::owned_file_section(".anvil/composed", "empty", "\n"))
+            .with_artifact(Artifact::backend_file_section(
+                Backend::GitHub,
+                ".anvil/github-only",
+                "github",
+                "github-only",
+            ))
+            .with_artifact(Artifact::owned_file_section(".anvil/composed", "body", "\nbody\n"))
+            .build()
+            .unwrap();
+
+        let files = compose_owned_file_sections(&catalog, &[]);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, ".anvil/composed");
+        assert_eq!(files[0].body, "body\n");
+    }
+
     /// Minimal identity for tests that exercise catalog mechanics rather than
     /// the built-in catalog's full embedded artifact set.
     fn test_cli() -> CliMeta {
@@ -3765,6 +3808,7 @@ mod tests {
         let source = "version: 2\nupdates:\n- package-ecosystem: github-actions\n  directory: /\n";
         for owner in [
             Artifact::owned_file(".github/dependabot.yml", source),
+            Artifact::owned_file_section(".github/dependabot.yml", "repository-policy", source),
             Artifact::region(RegionSpec {
                 host: HostSelector::Path(".github/dependabot.yml".to_owned()),
                 id: RegionId::new("repository-policy"),

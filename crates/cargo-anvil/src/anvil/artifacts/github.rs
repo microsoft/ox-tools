@@ -184,6 +184,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn setup_installs_the_checkout_toolchain_before_cargo_backed_steps() {
+        let toolchain = SETUP_ACTION
+            .find("    - name: Install checkout Rust toolchain\n")
+            .expect("setup action must install the checkout-selected toolchain");
+        let just = SETUP_ACTION
+            .find("    - name: Install just\n")
+            .expect("setup action must install just");
+        let tools = SETUP_ACTION
+            .find("    - name: Install anvil toolchains + tools\n")
+            .expect("setup action must install Anvil prerequisites");
+
+        assert!(toolchain < just);
+        assert!(toolchain < tools);
+        assert!(SETUP_ACTION.contains("run: rustup toolchain install --profile minimal"));
+    }
+
     fn run_group_step_for_group(group: &str, fake_output: &str, fake_status: i32) -> (ExitStatus, String) {
         let temp = tempdir().expect("the test must be able to create a temporary action workspace");
         let output_path = temp.path().join("github-output");
