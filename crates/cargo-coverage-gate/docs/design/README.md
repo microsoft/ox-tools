@@ -491,18 +491,23 @@ With no selection options, the collector passes `--workspace`.
 Feature configurations and concurrent invocations never share instrumented
 build/profile state: each configuration uses
 `target/coverage-gate/run-<pid>-<nonce>/cargo-target/<configuration>` (under
-Cargo's resolved target directory). A private target starts empty, so `run`
-does not invoke `cargo llvm-cov clean`; it removes only the enclosing
-per-invocation scratch directory after a passing evaluation or an evaluation
-error. If collection, publication, or a coverage gate fails, `run` retains that
-directory and prints its path. It preserves raw profiles and reports for
-diagnosis without changing the original error or exit code. Collection and
-publication errors never publish incomplete consumer reports. A gate failure
-keeps both raw evidence and the completed filtered reports so export and
-filtering can be compared. Remove the retained directory after diagnosis.
-Shared cargo-llvm-cov
-HTML/text reports, trybuild targets, UI test targets, and ordinary Cargo target
-state are never cleanup inputs. `CARGO_TARGET_DIR` is set to the same private
+Cargo's resolved target directory). Each private build directory starts empty.
+After export, `run` keeps the raw LCOV report outside that build directory.
+If another configuration remains, `run` removes the completed configuration's
+build directory before it starts the next one. If removal fails, `run` stops
+with an error.
+
+After a passing evaluation or an evaluation error, `run` removes the remaining
+scratch directory. If collection, publication, or a coverage gate fails,
+`run` keeps the remaining scratch files and prints the directory path.
+Raw profiles from earlier completed configurations are no longer available.
+Collection and publication errors do not publish incomplete consumer reports.
+A gate failure keeps the raw LCOV and completed filtered reports for comparison.
+Remove the retained directory after diagnosis.
+
+`run` does not invoke `cargo llvm-cov clean`. It does not remove shared reports,
+trybuild targets, UI test targets, or ordinary Cargo build files.
+`CARGO_TARGET_DIR` points to the same private
 configuration directory as cargo-llvm-cov's target and build overrides, so
 metadata-derived trybuild, UI, and report paths are private as well.
 
@@ -559,7 +564,7 @@ callers must not run simultaneous invocations against the same
 
 Scratch cleanup has explicit result precedence. An evaluation error remains the
 primary error and carries any cleanup failure as additional context. A rendered
-policy failure keeps its exit code and retains scratch data without cleanup.
+policy failure keeps its exit code and retains the remaining scratch data.
 A passing evaluation cannot claim complete success when cleanup fails, so that
 case exits `2`. Successful cleanup never changes
 the evaluation outcome.

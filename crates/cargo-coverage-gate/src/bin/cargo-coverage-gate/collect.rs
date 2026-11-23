@@ -96,8 +96,12 @@ pub(crate) fn run(args: &CoverageGateArgs, collection: &CollectionArgs) -> Resul
         quiet: args.quiet,
     };
     let evaluation = (|| {
-        let mut collected = Vec::with_capacity(configurations.len());
+        let mut collected: Vec<CollectedReport> = Vec::with_capacity(configurations.len());
         for configuration in configurations {
+            if let Some(previous) = collected.last() {
+                // Keep the exported LCOV, which lives outside the private build directory.
+                remove_coverage_target_with(&configuration_target_dir(&execution, previous.configuration), remove_dir_if_present)?;
+            }
             collected.push(collect_configuration(&execution, configuration)?);
         }
         filter_then_evaluate(&execution, &collected, |lcov_paths| {
@@ -1352,10 +1356,14 @@ impl TemporaryDirectory {
         // Windows explicit cleanup owns the full attempt budget; other platforms retain the Drop fallback.
         // #[gamma::skip(stmt.delete_assign, reason = "The alternate assignment changes native Drop cleanup after an explicit removal failure; observing it needs the deferred owned-directory cleanup backend.", tag = "native-boundary")]
         self.armed = !cfg!(windows);
-        let result = remove(&self.path);
-        let context = cleanup_error_context(&self.path, result.as_ref().err());
-        result.into_app_err(context)
+        remove_coverage_target_with(&self.path, remove)
     }
+}
+
+fn remove_coverage_target_with(path: &Path, remove: impl FnOnce(&Path) -> io::Result<()>) -> Result<(), AppError> {
+    let result = remove(path);
+    let context = cleanup_error_context(path, result.as_ref().err());
+    result.into_app_err(context)
 }
 
 #[cfg(windows)]

@@ -108,6 +108,15 @@ fn run_cargo(args: &[std::ffi::OsString]) -> Result<(), String> {
         }
         let target_dir =
             PathBuf::from(env::var_os("CARGO_LLVM_COV_TARGET_DIR").ok_or_else(|| "coverage target directory is not set".to_owned())?);
+        if env::var_os("FAKE_EXPECT_PREVIOUS_TARGET_CLEANED").is_some()
+            && args.iter().any(|arg| arg == "--no-default-features")
+            && target_dir
+                .with_file_name("all-features")
+                .try_exists()
+                .map_err(|error| error.to_string())?
+        {
+            return Err("the all-features build directory still exists at the start of the no-default-features pass".to_owned());
+        }
         fs::create_dir_all(&target_dir).map_err(|error| error.to_string())?;
         if env::var_os("FAKE_NO_PROFILE").is_none() {
             fs::write(target_dir.join("fake.profraw"), b"profile").map_err(|error| error.to_string())?;
