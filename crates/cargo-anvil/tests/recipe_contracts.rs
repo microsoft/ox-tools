@@ -125,6 +125,13 @@ fn unused_deps_keeps_scope_and_fixes_explicit() {
 }
 
 #[test]
+fn unused_deps_rejects_whitespace_only_package_files() {
+    let generated = generated();
+    assert!(generated.checks.contains("IsNullOrWhiteSpace($packageText)"));
+    assert!(generated.checks.contains("contains whitespace but no package specs"));
+}
+
+#[test]
 fn common_checks_are_direct_cargo_each_invocations() {
     let recipes = generated().checks;
     for command in [

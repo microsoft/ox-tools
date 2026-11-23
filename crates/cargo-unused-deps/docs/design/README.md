@@ -737,8 +737,9 @@ The Anvil recipe always examines workspace dependencies, even when there are no
 required packages. After `anvil-impact` completes, it obtains the `required` tier
 from the current invocation's `required.packages` file and forwards each exact
 package spec as `--package <spec>`. An empty file produces no package selectors,
-so only the workspace inheritance check runs. With impact disabled, the recipe
-passes `--workspace` and checks every workspace package.
+so only the workspace inheritance check runs. A nonempty whitespace-only file is
+malformed and fails rather than silently suppressing package analysis. With
+impact disabled, the recipe passes `--workspace` and checks every workspace package.
 
 Standalone, grouped, and CI invocations are check-only by default. Explicit local
 `just anvil-unused-deps --fix` forwards the catalog-only fix option without

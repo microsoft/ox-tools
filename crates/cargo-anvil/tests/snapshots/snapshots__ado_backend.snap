@@ -1284,7 +1284,12 @@ anvil-unused-deps fix="false": anvil-unused-deps-validate-prereqs anvil-impact
         $pkg += '--workspace'
     } else {
         $packageFile = {{ quote(anvil_impact_input_dir + "/required.packages") }}
-        foreach ($spec in @(Get-Content -LiteralPath $packageFile | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
+        $packageText = Get-Content -Raw -LiteralPath $packageFile
+        if (-not [string]::IsNullOrEmpty($packageText) -and [string]::IsNullOrWhiteSpace($packageText)) {
+            Write-Error "anvil-unused-deps: $packageFile contains whitespace but no package specs"
+            exit 1
+        }
+        foreach ($spec in @(Get-Content -LiteralPath $packageFile)) {
             $pkg += @('--package', $spec)
         }
     }
