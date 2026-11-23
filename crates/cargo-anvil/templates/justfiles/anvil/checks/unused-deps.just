@@ -9,10 +9,15 @@
 [script("pwsh", "-NoProfile")]
 anvil-unused-deps fix="false": anvil-unused-deps-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $include = (& "{{ just_executable() }}" _anvil-impact-exclude required)
-    $impactExit = $LASTEXITCODE
-    if ($impactExit -ne 0) { exit $impactExit }
-    # --skip leaves $pkg empty, so unused-deps runs only the workspace inheritance check.
-    $pkg = @(if ($include -ne '--skip') { -split $include })
+    $pkg = @()
+    if ('{{ anvil_impact_mode }}' -eq 'off') {
+        $pkg += '--workspace'
+    } else {
+        $packageFile = {{ quote(anvil_impact_input_dir + "/required.packages") }}
+        foreach ($spec in @(Get-Content -LiteralPath $packageFile | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
+            $pkg += @('--package', $spec)
+        }
+    }
+    # An empty required set leaves $pkg empty, so unused-deps runs only the workspace inheritance check.
     & cargo "+{{ rust_nightly }}" unused-deps @pkg {{ if fix == 'true' { '--fix' } else { '' } }}
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
