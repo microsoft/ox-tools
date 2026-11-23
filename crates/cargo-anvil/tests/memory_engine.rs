@@ -369,16 +369,18 @@ fn read_directory_and_late_lock_failures_stop_before_publication() {
 
 #[test]
 fn initial_manifest_read_failure_is_returned_without_mutation() {
-    let mut io = FailingIo {
-        repository: historical(),
-        read: Some(".anvil/manifest.toml".to_owned()),
-        ..FailingIo::default()
-    };
-    let before = io.repository.files.clone();
-    let error = update(&upgraded_catalog(), &UpdateOptions::default(), &mut io).unwrap_err();
-    assert_eq!(error.message(), "scripted read failure");
-    assert_eq!(io.repository.files, before);
-    assert_eq!(io.repository.mutations, Vec::<String>::new());
+    for path in [".anvil/manifest.toml", ".anvil.lock"] {
+        let mut io = FailingIo {
+            repository: historical(),
+            read: Some(path.to_owned()),
+            ..FailingIo::default()
+        };
+        let before = io.repository.files.clone();
+        let error = update(&upgraded_catalog(), &UpdateOptions::default(), &mut io).unwrap_err();
+        assert_eq!(error.message(), "scripted read failure");
+        assert_eq!(io.repository.files, before);
+        assert_eq!(io.repository.mutations, Vec::<String>::new());
+    }
 }
 
 #[test]

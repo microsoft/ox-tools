@@ -3245,6 +3245,106 @@ mod tests {
     }
 
     #[test]
+    fn build_plan_propagates_expanded_section_ownership_conflicts() {
+        let catalog = Catalog::builder(test_cli())
+            .with_artifact(Artifact::owned_file_section("crates/example/Cargo.toml", "section", "body"))
+            .with_artifact(Artifact::region(RegionSpec {
+                host: HostSelector::EachMemberManifest,
+                id: RegionId::new("managed"),
+                body: "body".to_owned(),
+                syntax: CommentSyntax::Hash,
+            }))
+            .build()
+            .unwrap();
+        let workspace = Workspace {
+            members: vec![crate::workspace::WorkspaceMember {
+                manifest_relpath: "crates/example/Cargo.toml".to_owned(),
+            }],
+            has_workspace_table: true,
+        };
+
+        let error = build_plan(Path::new("workspace"), &workspace, &Manifest::default(), &[], &catalog).unwrap_err();
+        assert!(error.to_string().contains("conflict with managed-region host"), "{error}");
+    }
+
+    #[test]
+    fn inactive_backend_sections_do_not_conflict_with_regions() {
+        let catalog = Catalog::builder(test_cli())
+            .with_artifact(Artifact::backend_file_section(
+                Backend::GitHub,
+                "crates/example/Cargo.toml",
+                "github-only",
+                "body",
+            ))
+            .with_artifact(Artifact::region(RegionSpec {
+                host: HostSelector::EachMemberManifest,
+                id: RegionId::new("managed"),
+                body: "body".to_owned(),
+                syntax: CommentSyntax::Hash,
+            }))
+            .build()
+            .unwrap();
+        let workspace = Workspace {
+            members: vec![crate::workspace::WorkspaceMember {
+                manifest_relpath: "crates/example/Cargo.toml".to_owned(),
+            }],
+            has_workspace_table: true,
+        };
+
+        validate_expanded_section_ownership(&workspace, &[], &catalog).unwrap();
+    }
+
+    #[test]
+    fn owned_section_planning_propagates_resolution_and_read_failures() {
+        fn fail_resolution(_: &Path, _: &str) -> Result<String, AppError> {
+            Err(ohno::app_err!("injected section resolution failure"))
+        }
+
+        fn fail_read(_: &Path) -> Result<Option<String>, AppError> {
+            Err(ohno::app_err!("injected section read failure"))
+        }
+
+        let catalog = Catalog::builder(test_cli())
+            .with_artifact(Artifact::owned_file_section("owned.just", "section", "body"))
+            .build()
+            .unwrap();
+        let workspace = Workspace {
+            members: Vec::new(),
+            has_workspace_table: true,
+        };
+
+        let mut resolution_hosts = HostTextCache {
+            resolve: fail_resolution,
+            ..HostTextCache::default()
+        };
+        let error = build_plan_with_hosts(
+            Path::new("workspace"),
+            &workspace,
+            &Manifest::default(),
+            &[],
+            &catalog,
+            &mut resolution_hosts,
+        )
+        .unwrap_err();
+        assert_eq!(error.message(), "injected section resolution failure");
+
+        let mut read_hosts = HostTextCache {
+            read: fail_read,
+            ..HostTextCache::default()
+        };
+        let error = build_plan_with_hosts(
+            Path::new("workspace"),
+            &workspace,
+            &Manifest::default(),
+            &[],
+            &catalog,
+            &mut read_hosts,
+        )
+        .unwrap_err();
+        assert_eq!(error.message(), "injected section read failure");
+    }
+
+    #[test]
     fn owned_sections_compose_active_nonempty_bodies_only() {
         let catalog = Catalog::builder(test_cli())
             .with_artifact(Artifact::owned_file_section(".anvil/composed", "empty", "\n"))
@@ -3254,7 +3354,7 @@ mod tests {
                 "github",
                 "github-only",
             ))
-            .with_artifact(Artifact::owned_file_section(".anvil/composed", "body", "\nbody\n"))
+            .with_artifact(Artifact::owned_file_section(".anvil/composed", "body", "\r\nbody\r\n"))
             .build()
             .unwrap();
 

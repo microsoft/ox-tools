@@ -319,6 +319,7 @@ pub(crate) fn generated_header(path: &'static str, id: &'static str) -> Artifact
 }
 
 fn without_generated_header(body: &str) -> String {
+    // #[gamma::skip(literal.str_to_xyzzy, reason = "template_section passes this result to section, which independently normalizes every remaining CRLF sequence before constructing the artifact.", tag = "equivalent")]
     let normalized = body.replace("\r\n", "\n");
     normalized.strip_prefix(REPEATED_TEMPLATE_HEADER).unwrap_or(&normalized).to_owned()
 }
@@ -650,5 +651,84 @@ mod tests {
                 "artifact must be emitted to {expected_path}"
             );
         }
+    }
+
+    #[test]
+    fn special_source_sections_keep_their_catalog_identities() {
+        for (artifact, expected_path, expected_id) in [
+            (checks::impact(), CHECKS_JUST_PATH, "source:justfiles/anvil/checks/impact.just"),
+            (groups::tiers(), GROUPS_JUST_PATH, "source:justfiles/anvil/groups/tiers.just"),
+            (setup::versions(), SETUP_JUST_PATH, "source:justfiles/anvil/setup/versions.just"),
+            (setup::tiers(), SETUP_JUST_PATH, "source:justfiles/anvil/setup/tiers.just"),
+            (helpers::common(), HELPERS_JUST_PATH, "source:justfiles/anvil/helpers/common.just"),
+            (helpers::impact(), HELPERS_JUST_PATH, "source:justfiles/anvil/helpers/impact.just"),
+            (helpers::tiers(), HELPERS_JUST_PATH, "source:justfiles/anvil/helpers/tiers.just"),
+        ] {
+            assert!(
+                matches!(
+                    artifact,
+                    Artifact::OwnedFileSection(section)
+                        if section.path == expected_path && section.id == expected_id
+                ),
+                "special source must retain {expected_id} in {expected_path}"
+            );
+        }
+
+        assert!(
+            matches!(
+                entry(),
+                Artifact::OwnedFileSection(section)
+                    if section.path == ANVIL_JUST_PATH && section.id == "alias:anvil"
+            ),
+            "the hub alias must retain its stable section identity"
+        );
+    }
+
+    #[test]
+    fn section_helpers_normalize_line_endings_and_remove_only_the_generated_header() {
+        let section = section("generated.just", "test", "first\r\nsecond\r\n");
+        let Artifact::OwnedFileSection(section) = section else {
+            panic!("section helper must return an owned-file section");
+        };
+        assert_eq!(section.body, "first\nsecond\n");
+
+        let body = format!("{REPEATED_TEMPLATE_HEADER}recipe:\r\n    echo ok\r\n");
+        let artifact = template_section("generated.just", "source.just", &body);
+        let Artifact::OwnedFileSection(section) = artifact else {
+            panic!("template helper must return an owned-file section");
+        };
+        assert_eq!(section.body, "recipe:\n    echo ok\n");
+    }
+
+    #[test]
+    fn generated_headers_and_dev_sections_keep_catalog_order() {
+        let identities = |artifacts: Vec<Artifact>| {
+            artifacts
+                .into_iter()
+                .map(|artifact| {
+                    let Artifact::OwnedFileSection(section) = artifact else {
+                        panic!("catalog ordering helpers must return owned-file sections");
+                    };
+                    (section.path, section.id)
+                })
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            identities(headers()),
+            [
+                (CHECKS_JUST_PATH, "header:checks".to_owned()),
+                (GROUPS_JUST_PATH, "header:groups".to_owned()),
+                (HELPERS_JUST_PATH, "header:helpers".to_owned()),
+                (SETUP_JUST_PATH, "header:setup".to_owned()),
+            ]
+        );
+        assert_eq!(
+            identities(dev_files()),
+            [
+                (CHECKS_JUST_PATH, "source:justfiles/anvil/checks/dev/build.just".to_owned(),),
+                (SETUP_JUST_PATH, "source:justfiles/anvil/setup/dev/build.just".to_owned(),),
+            ]
+        );
     }
 }

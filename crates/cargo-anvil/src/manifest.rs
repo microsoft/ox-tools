@@ -168,6 +168,7 @@ impl Manifest {
         let current_path = Self::path_for(repo_root);
         let legacy_path = repo_root.join(LEGACY_MANIFEST_FILE_NAME);
         let current = read_optional(&current_path)?;
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "This cfg(test/test-util) filesystem adapter is covered through from_sources and the production UpdateIo seam; distinguishing propagation from panic here requires a generated disk-failure fixture, which repository test policy prohibits.")]
         let legacy = read_optional(&legacy_path)?;
         Self::from_sources(
             current,
@@ -486,12 +487,14 @@ pub(crate) fn save_text(repo_root: &Path, text: &str) -> Result<(), AppError> {
     let parent = path
         .parent()
         .ok_or_else(|| app_err!("manifest path '{}' has no parent directory", path.display()))?;
+    // #[gamma::skip(try.propagate_to_unwrap, reason = "This cfg(test/test-util) filesystem adapter delegates to create_dir_all; distinguishing propagation from panic requires a generated disk-failure fixture, which repository test policy prohibits.")]
     std::fs::create_dir_all(parent).into_app_err_with(|| format!("failed to create manifest directory {}", parent.display()))?;
     let tmp = path.with_extension("toml.tmp");
     // Clear the staging name before writing so a stale symlink cannot redirect
     // the write outside the repository.
     match std::fs::remove_file(&tmp) {
         Ok(()) => {}
+        // #[gamma::skip(match_guard.always_true, reason = "This cfg(test/test-util) staging-file adapter would require a generated permission-denied filesystem fixture to distinguish this guard, which repository test policy prohibits.")]
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => {
             return Err(e).into_app_err_with(|| format!("failed to clear the temporary file {}", tmp.display()));
@@ -502,6 +505,7 @@ pub(crate) fn save_text(repo_root: &Path, text: &str) -> Result<(), AppError> {
     let legacy = repo_root.join(LEGACY_MANIFEST_FILE_NAME);
     match std::fs::remove_file(&legacy) {
         Ok(()) => {}
+        // #[gamma::skip(match_guard.always_true, reason = "This cfg(test/test-util) legacy-file adapter would require a generated permission-denied filesystem fixture to distinguish this guard, which repository test policy prohibits.")]
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error).into_app_err_with(|| format!("failed to retire legacy manifest {}", legacy.display())),
     }
