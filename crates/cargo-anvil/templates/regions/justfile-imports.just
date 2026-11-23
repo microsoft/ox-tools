@@ -1,1 +1,1 @@
-import 'justfiles/anvil/mod.just'
+import '.anvil/anvil.just'

@@ -6,18 +6,24 @@ region bodies belong to the catalog and edits require reconciliation.
 
 ## 1. The manifest
 
-Commit `.anvil.lock` with the generated files. It records the managing tool,
-tool version, catalog checksum, and last-rendered checksum of each owned file
-and `(host, region ID)`. Do not edit checksums to accept an update.
+Commit `.anvil/manifest.toml` with the generated files. It records the managing
+tool, tool version, catalog checksum, and last-rendered checksum of each owned
+file and `(host, region ID)`. Do not edit checksums to accept an update.
 
-The current schema is 2. A lock with a newer schema is refused: upgrade the
+The current schema is 2. A manifest with a newer schema is refused: upgrade the
 generator rather than deleting its ownership history. Paths are relative to
 and contained within the repository. Structural JSON regions also retain
 selector and scanner provenance for safe retirement.
 
+An update can migrate legacy `.anvil.lock` ownership into
+`.anvil/manifest.toml`. Conflicting simultaneous legacy and current ownership
+state is refused rather than guessed. Clean legacy generated files retire or
+move through the normal ownership rules; edited files are preserved for manual
+reconciliation.
+
 Checksums normalize CRLF to LF but otherwise treat whitespace as content.
 Region checksums cover the body, not markers or surrounding repository text.
-The lock is refreshed after artifact application; dry runs never write it.
+The manifest is refreshed after artifact application; dry runs never write it.
 
 ### The single-tool guard
 
@@ -46,6 +52,19 @@ gate. Per-item checksums determine whether repository content can be updated.
 Empty owned files follow the same rules. They can disable an artifact without
 being regenerated on every run; a later catalog change may produce a proposal.
 Deleting a live owned file instead requests regeneration.
+
+### Composed owned files
+
+The generated `.anvil/*.just` files are physical owned files composed from
+independently addressable catalog sections. Catalogs can add, replace, or remove
+one source-template block by section identity; enabled sections for one path
+render in catalog order with canonical blank-line separation. A source template
+is the smallest built-in section; cargo-anvil does not parse recipes within it.
+
+Repository ownership remains whole-file: editing one composed section dirties
+the physical file, and a later catalog change proposes the complete file.
+Section identities contribute to the catalog checksum, while the manifest
+stores one rendered checksum for the composed file.
 
 ## 3. Managed regions
 
@@ -168,14 +187,15 @@ catalog changes. Proposal files are not ignored by Git.
 
 ## 7. Dry-run and summary
 
-`--dry-run` performs the same planning without changing artifacts or the lock.
+`--dry-run` performs the same planning without changing artifacts or the
+manifest.
 Exit 0 means no pending changes or refusals. Exit 1 means drift, refusal, or
 error. Normal updates print the categorized plan and apply safe items while
 retaining refusals.
 
 Application is not a repository-wide transaction. Earlier artifact changes
-can remain after a later I/O failure; the lock is published only after artifact
-operations succeed.
+can remain after a later I/O failure; the manifest is published only after
+artifact operations succeed.
 
 ## 8. Backend selection
 
