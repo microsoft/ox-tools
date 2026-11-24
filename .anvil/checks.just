@@ -292,8 +292,9 @@ anvil-clippy: anvil-clippy-validate-prereqs anvil-impact
     cargo each {{ anvil_affected_selection }} --once -- cargo {{ anvil_stable_toolchain_arg }} clippy '{packages}' --all-targets --all-features --locked -- -D warnings
 
 # Validate dependency licenses, bans, sources, and advisories.
-anvil-deny: anvil-deny-validate-prereqs
-    cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} deny check
+[arg("advisories", long, pattern='(?:true|false)')]
+anvil-deny advisories="true": anvil-deny-validate-prereqs
+    cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} deny check {{ if advisories == "true" { "all" } else { "bans licenses sources" } }}
 
 # Build required-package documentation with rustdoc warnings denied.
 [arg("open", long, value="true")]

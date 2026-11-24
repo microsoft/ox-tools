@@ -317,8 +317,9 @@ anvil-clippy: anvil-clippy-validate-prereqs anvil-impact
     cargo each {{ anvil_affected_selection }} --once -- cargo {{ anvil_stable_toolchain_arg }} clippy '{packages}' --all-targets --all-features --locked -- -D warnings
 
 # Validate dependency licenses, bans, sources, and advisories.
-anvil-deny: anvil-deny-validate-prereqs
-    cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} deny check
+[arg("advisories", long, pattern='(?:true|false)')]
+anvil-deny advisories="true": anvil-deny-validate-prereqs
+    cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} deny check {{ if advisories == "true" { "all" } else { "bans licenses sources" } }}
 
 # Build required-package documentation with rustdoc warnings denied.
 [arg("open", long, value="true")]
@@ -2238,6 +2239,7 @@ anvil-pr-fast: anvil-pr-fast-validate-prereqs \
     anvil-readme-check \
     anvil-spellcheck \
     anvil-pr-title \
+    (anvil-deny "false") \
     anvil-audit \
     anvil-udeps \
     anvil-external-types
@@ -3713,6 +3715,7 @@ anvil-pr-fast-setup installer="install": \
     (anvil-readme-check-setup installer) \
     (anvil-spellcheck-setup installer) \
     (anvil-pr-title-setup installer) \
+    (anvil-deny-setup installer) \
     (anvil-audit-setup installer) \
     (anvil-udeps-setup installer) \
     (anvil-external-types-setup installer)
@@ -3731,6 +3734,7 @@ anvil-pr-fast-validate-prereqs: \
     anvil-readme-check-validate-prereqs \
     anvil-spellcheck-validate-prereqs \
     anvil-pr-title-validate-prereqs \
+    anvil-deny-validate-prereqs \
     anvil-audit-validate-prereqs \
     anvil-udeps-validate-prereqs \
     anvil-external-types-validate-prereqs

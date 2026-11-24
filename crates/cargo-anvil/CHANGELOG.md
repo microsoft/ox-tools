@@ -4,12 +4,17 @@
 
 ## [0.28.0] - 2026-11-24
 
-- ✨ Features
+- 📚 Documentation
 
-  - cargo-anvil: consolidate generated infrastructure ([#204](https://github.com/microsoft/ox-tools/pull/204))
+  - cargo-anvil: name cargo-audit execution groups
+
+- ✔️ Tasks
+
+  - cargo-anvil: release 0.28.0 and regenerate scheduled deny routing
 
 - 🔄 Continuous Integration
 
+  - cargo-anvil: retain advisory-independent deny checks in PRs
   - cargo-anvil: move cargo-deny to scheduled checks
 
 ## [0.27.0] - 2026-11-23
