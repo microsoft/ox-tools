@@ -83,7 +83,6 @@ libc = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
 bolero = { workspace = true }
-bolero-engine = { workspace = true, features = ["any"] }
 # Cargo omits versionless dev-dependencies from published packages. The local path keeps the
 # cross-crate agreement tests available without adding a registry or release-order dependency.
 cargo-gamma-attrs-impl = { path = "../cargo-gamma-attrs-impl", features = ["agreement"] }

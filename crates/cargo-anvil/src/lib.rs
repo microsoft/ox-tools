@@ -207,6 +207,7 @@
 //!   [`cargo-audit`](https://crates.io/crates/cargo-audit),
 //!   [`cargo-aprz`](https://crates.io/crates/cargo-aprz),
 //!   [`cargo-udeps`](https://crates.io/crates/cargo-udeps),
+//!   [`cargo-unused-deps`](https://crates.io/crates/cargo-unused-deps),
 //!   [`cargo-check-external-types`](https://crates.io/crates/cargo-check-external-types).
 //! - **Tests and coverage:** tests under the declared MSRV, coverage with
 //!   [`cargo-llvm-cov`](https://crates.io/crates/cargo-llvm-cov) and
