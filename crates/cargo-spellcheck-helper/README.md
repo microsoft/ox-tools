@@ -40,10 +40,14 @@ empty dictionary, empty and ASCII-decimal-only lines are removed, entries
 are sorted with duplicates retained, and UTF-8/LF output is published
 atomically.
 
-The prerequisite check searches `LIBCLANG_PATH` and conventional LLVM
-locations on Windows, Linux, and macOS. On Windows the selected directory
-must also be on `PATH`. Missing prerequisites produce installation guidance;
-other filesystem failures are reported rather than silently skipped.
+The prerequisite check models native default-feature cargo-spellcheck
+0.15.7 installation. It follows clang-sys’s link-time libclang discovery:
+an authoritative file or directory in `LIBCLANG_PATH`, LLVM/Xcode discovery,
+`LD_LIBRARY_PATH`, and platform search patterns. ELF/PE architecture,
+Windows MSVC import libraries and DLL `PATH`, and dynamic loadability are
+checked. C/C++ compiler and archiver availability use `cc` discovery.
+Missing prerequisites produce installation guidance; the actual dependency
+build remains authoritative for headers, SDKs, and final linking.
 
 Success exits with code 0 and produces no stdout. Operational failures
 exit with code 1 and a diagnostic on stderr; argument errors exit with

@@ -17,8 +17,11 @@ homepage.workspace = true
 repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-spellcheck-helper"
 
 [dependencies]
+cc = { workspace = true }
 clap = { workspace = true, features = ["derive", "std", "help", "usage", "error-context"] }
+glob = { workspace = true }
 hunspell-dictgen = { workspace = true }
+libloading = { workspace = true }
 ohno = { workspace = true, features = ["app-err"] }
 
 [lints]

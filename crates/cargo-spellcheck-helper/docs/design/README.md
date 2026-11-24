@@ -31,35 +31,74 @@ Other input, decoding, and output failures are not treated as missing input.
 
 ### Source-build prerequisites
 
-The check supports Windows, Linux, and macOS. It searches `LIBCLANG_PATH`
-first, then these conventional directories in order:
+The check models a native, default-feature source installation of
+`cargo-spellcheck 0.15.7`. Its bundled `hunspell-sys 0.3.1` compiles C++ and
+uses `bindgen 0.61.0` without the runtime feature. Therefore
+`clang-sys 1.8.1` must find a **link-time** dynamic libclang, not just any
+file whose name resembles libclang.
 
-- Windows: `C:\Program Files\LLVM\bin`, then
-  `%USERPROFILE%\scoop\apps\llvm\current\bin` when `USERPROFILE` is set.
-- macOS: `/usr/local/opt/llvm/lib`, `/opt/homebrew/opt/llvm/lib`.
-- Linux: `/usr/lib/x86_64-linux-gnu`, `/usr/lib/aarch64-linux-gnu`,
-  `/usr/lib64`.
+The caller's `rustc -vV` supplies the native host architecture and environment;
+the helper's own compilation target does not select the installation target.
+Windows (MSVC and GNU), Linux, and macOS are supported. Cross-target
+installation is not supported: a differing `CARGO_BUILD_TARGET` is rejected.
 
-The expected library filenames are `libclang.dll` on Windows,
-`libclang.dylib` on macOS, and `libclang.so` or `libclang.so.1` on Linux.
-If Linux's initial search fails, the check scans `/usr/lib`, `/usr/lib64`,
-`/usr/lib/x86_64-linux-gnu`, and `/usr/lib/aarch64-linux-gnu` for regular
-files named `libclang*.so*`, considering filenames in sorted order.
-Symlinks to files are accepted.
+Discovery follows clang-sys's order and candidate policy:
 
-An absent candidate is skipped; filesystem failures such as permission denial
-are reported with the affected path rather than hidden. The check establishes
-file presence, not ABI compatibility or loadability.
+- A set `LIBCLANG_PATH` is authoritative, including an empty value. It accepts
+  a matching library file or a directory. No other location is searched when
+  this override is set. Windows `lib` directories also search sibling `bin`.
+- Otherwise, `llvm-config --prefix` (or the executable named by
+  `LLVM_CONFIG_PATH`) supplies `bin`, `lib`, and `lib64` search directories.
+  macOS also uses `xcode-select --print-path` and its toolchain library directory.
+- `LD_LIBRARY_PATH` entries precede clang-sys's platform directory globs.
+  Those include versioned LLVM directories and Visual Studio installations,
+  as well as system library directories. Directory glob matching ignores case.
+- Linux candidates are `libclang.so` and `libclang-*.so`; suffix-only sonames
+  such as `libclang.so.1` are not link-time candidates. `libclang-cpp` is
+  excluded. Windows accepts `clang.dll` and `libclang.dll`; macOS accepts
+  `libclang.dylib`.
+- Candidates are validated before selection. Linux ELF class must match the
+  host pointer width; Windows PE class and recognized machine architecture
+  must match the host. The highest filename version wins, with earlier
+  discovery locations winning ties, as in clang-sys.
 
-On Windows the selected directory must also be an entry in `PATH`.
-Comparison ignores ASCII case, separator direction, and trailing separators;
-it does not equate aliases or resolve symbolic links. If a library is found
-but its directory is absent from `PATH`, the diagnostic identifies the directory
-and explains how to set both `LIBCLANG_PATH` and `PATH`.
+On Windows MSVC, the selected library's directory (or the sibling `lib` when
+the DLL is in `bin`) must contain `libclang.lib` or `libclang.dll.a`.
+The selected DLL directory must also be on `PATH` so the linked bindgen build
+script can load it. Path comparison ignores ASCII case, separator direction,
+and trailing separators.
 
-A missing library produces Linux package-manager, Homebrew, or Windows
-LLVM installation guidance appropriate to the current platform. Unsupported
-platforms fail explicitly.
+The selected dynamic library is opened to check loader availability and the
+`clang_createIndex` export; this detects missing dependent libraries and
+non-libclang lookalikes without requiring libclang when building the helper.
+The library is not used to generate bindings.
+
+Compiler discovery delegates to `cc` for C and C++, preserving its `CC`,
+`CXX`, flags, wrappers, and Visual Studio environment selection. Help/version
+commands check that the selected tools launch successfully. Archiver discovery
+also uses `cc`; its executable must launch, but a nonzero help/version exit
+is allowed because archiver option conventions differ by platform. No native
+objects or source fixtures are compiled by the helper.
+
+System Hunspell and system liblzma are not mandatory: the default installation
+bundles Hunspell and can build liblzma's C sources when system discovery fails.
+Cargo, rustc, a linker, SDK headers, and the C/C++ standard libraries remain
+normal Rust/native development prerequisites. Successful probes do not promise
+that every header, symbol, SDK, or final link will work; compiling the actual
+dependencies remains authoritative.
+
+Absent search locations are skipped. Optional discovery commands may be
+unavailable or fail, as upstream permits; their diagnostics are retained if
+no valid libclang is found. Invalid candidates are reported when no valid
+candidate remains. Unexpected filesystem access failures are reported with
+paths instead of hidden. Errors provide platform-specific installation or
+environment guidance and never install system packages.
+
+Upstream contracts:
+[cargo-spellcheck](https://docs.rs/crate/cargo-spellcheck/0.15.7/source/Cargo.toml),
+[hunspell-sys](https://docs.rs/crate/hunspell-sys/0.3.1/source/build.rs),
+[clang-sys discovery](https://github.com/KyleMayes/clang-sys/blob/v1.8.1/build/common.rs),
+[clang-sys validation and linking](https://github.com/KyleMayes/clang-sys/blob/v1.8.1/build/dynamic.rs).
 
 ## Integration boundary
 

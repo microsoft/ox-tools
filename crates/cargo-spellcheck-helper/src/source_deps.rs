@@ -1,9 +1,12 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+mod library;
+mod native;
+
 use std::ffi::OsString;
+use std::io;
 use std::path::{Path, PathBuf};
-use std::{fs, io};
 
 use ohno::{AppError, IntoAppError};
 
@@ -15,409 +18,318 @@ enum Platform {
 }
 
 #[derive(Debug)]
-struct Environment {
+struct Target {
+    triple: String,
     platform: Platform,
+    arch: String,
+    pointer_width: u8,
+    msvc: bool,
+}
+
+impl Target {
+    fn parse(triple: &str) -> Result<Self, AppError> {
+        let platform = if triple.contains("-windows-") {
+            Platform::Windows
+        } else if triple.contains("-linux-") {
+            Platform::Linux
+        } else if triple.ends_with("-darwin") {
+            Platform::MacOs
+        } else {
+            return Err(AppError::new(format!(
+                "unsupported native installation target `{triple}`; expected Windows, Linux, or macOS"
+            )));
+        };
+        let arch = triple.split('-').next().unwrap_or_default();
+        let pointer_width = if triple.ends_with("-gnux32") {
+            32
+        } else {
+            match arch {
+                "x86_64" | "aarch64" | "powerpc64" | "powerpc64le" | "s390x" | "riscv64gc" | "loongarch64" => 64,
+                "i586" | "i686" | "arm" | "armv7" | "armv7a" | "thumbv7neon" | "powerpc" | "riscv32gc" => 32,
+                _ => {
+                    return Err(AppError::new(format!(
+                        "unsupported architecture in native installation target `{triple}`"
+                    )));
+                }
+            }
+        };
+        Ok(Self {
+            triple: triple.to_owned(),
+            platform,
+            arch: arch.to_owned(),
+            pointer_width,
+            msvc: triple.ends_with("-msvc"),
+        })
+    }
+}
+
+#[derive(Debug)]
+struct Environment {
+    target: Target,
     libclang_path: Option<PathBuf>,
-    user_profile: Option<PathBuf>,
+    llvm_config: OsString,
+    ld_library_path: Vec<PathBuf>,
     path: Vec<PathBuf>,
+}
+
+#[derive(Debug)]
+struct CommandOutput {
+    success: bool,
+    stdout: String,
+    stderr: String,
+}
+
+trait Probe {
+    fn glob(&mut self, pattern: &str, case_sensitive: bool) -> Result<Vec<PathBuf>, AppError>;
+    fn is_file(&mut self, path: &Path) -> io::Result<bool>;
+    fn read(&mut self, path: &Path, offset: u64, length: usize) -> io::Result<Vec<u8>>;
+    fn command(&mut self, executable: &std::ffi::OsStr, args: &[&str]) -> io::Result<CommandOutput>;
+    fn load_library(&mut self, path: &Path) -> Result<(), AppError>;
+    fn check_tools(&mut self, target: &Target) -> Result<(), AppError>;
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub(super) fn check() -> Result<(), AppError> {
-    let platform = if cfg!(windows) {
-        Platform::Windows
-    } else if cfg!(target_os = "linux") {
-        Platform::Linux
-    } else if cfg!(target_os = "macos") {
-        Platform::MacOs
-    } else {
-        return Err(AppError::new(
-            "source prerequisite checks support Windows, Linux, and macOS; this platform is unsupported",
-        ));
-    };
+    let mut probe = native::Native;
+    let output = probe
+        .command(std::ffi::OsStr::new("rustc"), &["-vV"])
+        .into_app_err("failed to run `rustc -vV` to identify the installation host")?;
+    if !output.success {
+        return Err(AppError::new(format!("`rustc -vV` failed: {}", output.stderr)));
+    }
+    let target = installation_target(&output.stdout, std::env::var_os("CARGO_BUILD_TARGET").as_deref())?;
     let environment = Environment {
-        platform,
-        libclang_path: std::env::var_os("LIBCLANG_PATH")
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from),
-        user_profile: std::env::var_os("USERPROFILE").filter(|value| !value.is_empty()).map(PathBuf::from),
+        target,
+        libclang_path: std::env::var_os("LIBCLANG_PATH").map(PathBuf::from),
+        llvm_config: std::env::var_os("LLVM_CONFIG_PATH").unwrap_or_else(|| "llvm-config".into()),
+        ld_library_path: std::env::var_os("LD_LIBRARY_PATH")
+            .map(|value| std::env::split_paths(&value).collect())
+            .unwrap_or_default(),
         path: std::env::var_os("PATH")
             .map(|value| std::env::split_paths(&value).collect())
             .unwrap_or_default(),
     };
-    check_with(&environment, is_file, directory_entries)
+    check_with(&environment, &mut probe)
 }
 
-fn check_with(
-    environment: &Environment,
-    mut is_file: impl FnMut(&Path) -> io::Result<bool>,
-    mut directory_entries: impl FnMut(&Path) -> io::Result<Vec<OsString>>,
-) -> Result<(), AppError> {
-    let directory = find_libclang(environment, &mut is_file, &mut directory_entries)?
-        .ok_or_else(|| AppError::new(missing_libclang_message(environment.platform)))?;
-
-    if environment.platform == Platform::Windows && !environment.path.iter().any(|entry| windows_path_matches(entry, &directory)) {
+fn installation_target(rustc_output: &str, build_target: Option<&std::ffi::OsStr>) -> Result<Target, AppError> {
+    let host = rustc_output
+        .lines()
+        .find_map(|line| line.strip_prefix("host: "))
+        .ok_or_else(|| AppError::new("`rustc -vV` did not report a host target"))?;
+    if let Some(build_target) = build_target
+        && build_target != host
+    {
         return Err(AppError::new(format!(
-            "libclang.dll exists in `{}` but that directory is not on PATH.\n\
-             cargo-spellcheck source builds need libclang on PATH as well as LIBCLANG_PATH.\n\
-             Set LIBCLANG_PATH to `{}` and add that directory to PATH before retrying setup.",
-            directory.display(),
-            directory.display(),
+            "CARGO_BUILD_TARGET `{}` differs from rustc host `{host}`; this check supports native cargo-spellcheck installations only. \
+                 Unset CARGO_BUILD_TARGET before checking and installing.",
+            build_target.to_string_lossy()
         )));
     }
-    Ok(())
+    Target::parse(host)
 }
 
-fn find_libclang(
-    environment: &Environment,
-    is_file: &mut impl FnMut(&Path) -> io::Result<bool>,
-    directory_entries: &mut impl FnMut(&Path) -> io::Result<Vec<OsString>>,
-) -> Result<Option<PathBuf>, AppError> {
-    let library_names: &[&str] = match environment.platform {
-        Platform::Windows => &["libclang.dll"],
-        Platform::Linux => &["libclang.so", "libclang.so.1"],
-        Platform::MacOs => &["libclang.dylib"],
-    };
-    let mut directories = Vec::new();
-    if let Some(directory) = &environment.libclang_path {
-        directories.push(directory.clone());
-    }
-    match environment.platform {
-        Platform::Windows => {
-            directories.push(PathBuf::from(r"C:\Program Files\LLVM\bin"));
-            if let Some(profile) = &environment.user_profile {
-                directories.push(profile.join(r"scoop\apps\llvm\current\bin"));
-            }
-        }
-        Platform::Linux => directories.extend(["/usr/lib/x86_64-linux-gnu", "/usr/lib/aarch64-linux-gnu", "/usr/lib64"].map(PathBuf::from)),
-        Platform::MacOs => directories.extend(["/usr/local/opt/llvm/lib", "/opt/homebrew/opt/llvm/lib"].map(PathBuf::from)),
-    }
-    for directory in directories {
-        for name in library_names {
-            if probe_file(&directory.join(name), is_file)? {
-                return Ok(Some(directory));
-            }
-        }
-    }
+fn check_with(environment: &Environment, probe: &mut impl Probe) -> Result<(), AppError> {
+    let library = find_libclang(environment, probe)?;
+    library::check_link_requirements(environment, &library, probe)?;
+    probe.load_library(&library).into_app_err(format!(
+        "cannot load libclang `{}`; install a matching LLVM distribution and make its dependent libraries discoverable",
+        library.display()
+    ))?;
+    probe.check_tools(&environment.target)
+}
 
-    if environment.platform == Platform::Linux {
-        for directory in ["/usr/lib", "/usr/lib64", "/usr/lib/x86_64-linux-gnu", "/usr/lib/aarch64-linux-gnu"] {
-            let directory = Path::new(directory);
-            let mut entries = match directory_entries(directory) {
-                Ok(entries) => entries,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(error).into_app_err(format!("failed to search libclang directory `{}`", directory.display())),
-            };
-            entries.sort_unstable();
-            for entry in entries {
-                if entry.to_str().is_some_and(is_linux_library_name) && probe_file(&directory.join(entry), is_file)? {
-                    return Ok(Some(directory.to_path_buf()));
+fn find_libclang(environment: &Environment, probe: &mut impl Probe) -> Result<PathBuf, AppError> {
+    let mut candidates = Vec::new();
+    let mut notes = Vec::new();
+    if let Some(path) = &environment.libclang_path {
+        if let Some(parent) = path.parent() {
+            let files = search_directory(environment, parent, probe)?;
+            if files.contains(path) {
+                candidates.push(path.clone());
+            }
+        }
+        if candidates.is_empty() {
+            candidates.extend(search_directory(environment, path, probe)?);
+        }
+    } else {
+        if let Some(prefix) = optional_directory_command(probe, &environment.llvm_config, &["--prefix"], &mut notes) {
+            for name in ["bin", "lib", "lib64"] {
+                candidates.extend(search_directory(environment, &prefix.join(name), probe)?);
+            }
+        }
+        if environment.target.platform == Platform::MacOs
+            && let Some(prefix) = optional_directory_command(probe, std::ffi::OsStr::new("xcode-select"), &["--print-path"], &mut notes)
+        {
+            candidates.extend(search_directory(
+                environment,
+                &prefix.join("Toolchains/XcodeDefault.xctoolchain/usr/lib"),
+                probe,
+            )?);
+        }
+        for directory in &environment.ld_library_path {
+            candidates.extend(search_directory(environment, directory, probe)?);
+        }
+        for pattern in directory_patterns(&environment.target) {
+            for directory in probe.glob(pattern, false)? {
+                candidates.extend(search_directory(environment, &directory, probe)?);
+            }
+        }
+    }
+    let mut best: Option<(PathBuf, Vec<u32>)> = None;
+    for candidate in candidates {
+        match library::validate(&environment.target, &candidate, probe) {
+            Ok(()) => {
+                let version = library::version(&candidate);
+                if best.as_ref().is_none_or(|(_, previous)| version > *previous) {
+                    best = Some((candidate, version));
                 }
             }
+            Err(error) => notes.push(format!("{}: {error}", candidate.display())),
         }
     }
-    Ok(None)
+    best.map(|(path, _)| path).ok_or_else(|| {
+        let override_hint = environment.libclang_path.as_ref().map_or(String::new(), |path| {
+            format!(
+                "\nLIBCLANG_PATH `{}` is authoritative; fix or unset it to search other installations.",
+                path.display()
+            )
+        });
+        let details = if notes.is_empty() {
+            String::new()
+        } else {
+            format!("\nDiscovery details:\n{}", notes.join("\n"))
+        };
+        AppError::new(format!(
+            "No valid link-time libclang found for `{}`.{}{}\n{}",
+            environment.target.triple,
+            override_hint,
+            details,
+            installation_hint(environment.target.platform)
+        ))
+    })
 }
 
-fn probe_file(path: &Path, is_file: &mut impl FnMut(&Path) -> io::Result<bool>) -> Result<bool, AppError> {
-    match is_file(path) {
-        Ok(found) => Ok(found),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error).into_app_err(format!("failed to inspect libclang candidate `{}`", path.display())),
+fn search_directory(environment: &Environment, directory: &Path, probe: &mut impl Probe) -> Result<Vec<PathBuf>, AppError> {
+    let mut found = search_files(environment.target.platform, directory, probe)?;
+    if environment.target.platform == Platform::Windows
+        && directory.ends_with("lib")
+        && let Some(parent) = directory.parent()
+    {
+        found.extend(search_files(environment.target.platform, &parent.join("bin"), probe)?);
     }
+    Ok(found)
 }
 
-fn is_linux_library_name(name: &str) -> bool {
-    name.starts_with("libclang") && name.contains(".so")
-}
-
-fn windows_path_matches(left: &Path, right: &Path) -> bool {
-    let normalize = |path: &Path| {
-        let mut bytes: Vec<_> = path
-            .as_os_str()
-            .as_encoded_bytes()
-            .iter()
-            .map(|byte| if *byte == b'/' { b'\\' } else { byte.to_ascii_lowercase() })
-            .collect();
-        while bytes.last() == Some(&b'\\') {
-            bytes.pop();
-        }
-        bytes
+fn search_files(platform: Platform, directory: &Path, probe: &mut impl Probe) -> Result<Vec<PathBuf>, AppError> {
+    let names: &[&str] = match platform {
+        Platform::Windows => &["clang.dll", "libclang.dll"],
+        Platform::Linux => &["libclang.so", "libclang-*.so"],
+        Platform::MacOs => &["libclang.dylib"],
     };
-    normalize(left) == normalize(right)
+    let directory = directory
+        .to_str()
+        .ok_or_else(|| AppError::new(format!("libclang search directory is not valid Unicode: `{}`", directory.display())))?;
+    let directory = glob::Pattern::escape(directory);
+    let mut files = Vec::new();
+    for name in names {
+        let pattern = Path::new(&directory).join(name);
+        let pattern = pattern
+            .to_str()
+            .ok_or_else(|| AppError::new("libclang search pattern is not valid Unicode"))?;
+        for file in probe.glob(pattern, true)? {
+            if !file.file_name().is_some_and(|name| name.to_string_lossy().contains("-cpp.")) {
+                files.push(file);
+            }
+        }
+    }
+    Ok(files)
 }
 
-fn missing_libclang_message(platform: Platform) -> &'static str {
+fn optional_directory_command(
+    probe: &mut impl Probe,
+    executable: &std::ffi::OsStr,
+    args: &[&str],
+    notes: &mut Vec<String>,
+) -> Option<PathBuf> {
+    let result = probe.command(executable, args);
+    match result {
+        Ok(output) if output.success => {
+            if let Some(line) = output.stdout.lines().next().filter(|line| !line.is_empty()) {
+                Some(PathBuf::from(line))
+            } else {
+                notes.push(format!("{} {} returned no directory", executable.to_string_lossy(), args.join(" ")));
+                None
+            }
+        }
+        Ok(output) => {
+            notes.push(format!(
+                "{} {} failed: {}",
+                executable.to_string_lossy(),
+                args.join(" "),
+                output.stderr.trim()
+            ));
+            None
+        }
+        Err(error) => {
+            notes.push(format!("{} {}: {error}", executable.to_string_lossy(), args.join(" ")));
+            None
+        }
+    }
+}
+
+fn directory_patterns(target: &Target) -> &'static [&'static str] {
+    match target.platform {
+        Platform::Linux => &[
+            "/usr/local/llvm*/lib*",
+            "/usr/local/lib*/*/*",
+            "/usr/local/lib*/*",
+            "/usr/local/lib*",
+            "/usr/lib*/*/*",
+            "/usr/lib*/*",
+            "/usr/lib*",
+        ],
+        Platform::MacOs => &[
+            "/usr/local/opt/llvm*/lib/llvm*/lib",
+            "/Library/Developer/CommandLineTools/usr/lib",
+            "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib",
+            "/usr/local/opt/llvm*/lib",
+        ],
+        Platform::Windows if target.msvc => &[
+            r"C:\Users\*\scoop\apps\llvm\current\lib",
+            r"C:\Program Files*\LLVM\lib",
+            r"C:\LLVM\lib",
+            r"C:\Program Files*\Microsoft Visual Studio\*\VC\Tools\Llvm\**\lib",
+        ],
+        Platform::Windows => &[
+            r"C:\Users\*\scoop\apps\llvm\current\lib",
+            r"C:\MSYS*\MinGW*\lib",
+            r"C:\Program Files*\LLVM\lib",
+            r"C:\LLVM\lib",
+            r"C:\Program Files*\Microsoft Visual Studio\*\VC\Tools\Llvm\**\lib",
+        ],
+    }
+}
+
+fn installation_hint(platform: Platform) -> &'static str {
     match platform {
         Platform::Windows => {
-            "missing source-build dependency: libclang.dll.\n\
-             cargo-spellcheck (clang-sys/hunspell-rs) needs libclang at build time.\n\
-             Install LLVM with `scoop install llvm`, or `winget install LLVM.LLVM` (may require administrator rights).\n\
-             Set LIBCLANG_PATH to the LLVM bin directory and add that directory to PATH, then retry setup."
+            "Install LLVM (`scoop install llvm` or `winget install LLVM.LLVM`) and Visual Studio C++ build tools. \
+            Set LIBCLANG_PATH to the matching library file or directory and add its DLL directory to PATH."
         }
         Platform::Linux => {
-            "missing source-build dependency: libclang.\n\
-             cargo-spellcheck (clang-sys/hunspell-rs) needs libclang at build time.\n\
-             Ubuntu/Debian: `sudo apt-get install -y libclang-dev`.\n\
-             Azure Linux: `sudo tdnf install -y clang-devel`; RHEL: `sudo dnf install -y clang-devel`.\n\
-             For a nonstandard installation, set LIBCLANG_PATH to its library directory, then retry setup."
+            "Install a C/C++ development toolchain and libclang development libraries. \
+            Ubuntu/Debian: `sudo apt-get install build-essential libclang-dev`; \
+            Azure Linux/RHEL: install gcc, gcc-c++, binutils, and clang-devel. \
+            Set LIBCLANG_PATH or LLVM_CONFIG_PATH for a nonstandard LLVM installation."
         }
         Platform::MacOs => {
-            "missing source-build dependency: libclang.dylib.\n\
-             cargo-spellcheck (clang-sys/hunspell-rs) needs libclang at build time.\n\
-             Install LLVM with `brew install llvm`.\n\
-             For a nonstandard installation, set LIBCLANG_PATH to its library directory, then retry setup."
+            "Install Xcode command-line tools (`xcode-select --install`) and LLVM (`brew install llvm`). \
+            Set LLVM_CONFIG_PATH to the installed llvm-config executable or LIBCLANG_PATH to its libclang.dylib."
         }
     }
-}
-
-#[cfg_attr(coverage_nightly, coverage(off))]
-fn is_file(path: &Path) -> io::Result<bool> {
-    fs::metadata(path).map(|metadata| metadata.is_file())
-}
-
-#[cfg_attr(coverage_nightly, coverage(off))]
-fn directory_entries(path: &Path) -> io::Result<Vec<OsString>> {
-    fs::read_dir(path)?.map(|entry| entry.map(|entry| entry.file_name())).collect()
 }
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
-mod tests {
-    use std::collections::VecDeque;
-
-    use super::*;
-
-    type FileProbe = (PathBuf, io::Result<bool>);
-    type DirectoryProbe = (PathBuf, io::Result<Vec<OsString>>);
-
-    fn environment(platform: Platform) -> Environment {
-        Environment {
-            platform,
-            libclang_path: None,
-            user_profile: None,
-            path: Vec::new(),
-        }
-    }
-
-    fn check_scripted(environment: &Environment, files: Vec<FileProbe>, directories: Vec<DirectoryProbe>) -> Result<(), AppError> {
-        let mut files: VecDeque<_> = files.into();
-        let mut directories: VecDeque<_> = directories.into();
-        let result = check_with(
-            environment,
-            |path| {
-                let (expected, result) = files.pop_front().expect("every file probe must be scripted");
-                assert_eq!(path, expected);
-                result
-            },
-            |path| {
-                let (expected, result) = directories.pop_front().expect("every directory probe must be scripted");
-                assert_eq!(path, expected);
-                result
-            },
-        );
-        assert!(files.is_empty(), "all scripted file probes must be used");
-        assert!(directories.is_empty(), "all scripted directory probes must be used");
-        result
-    }
-
-    fn absent_linux_files() -> Vec<FileProbe> {
-        [
-            "/usr/lib/x86_64-linux-gnu/libclang.so",
-            "/usr/lib/x86_64-linux-gnu/libclang.so.1",
-            "/usr/lib/aarch64-linux-gnu/libclang.so",
-            "/usr/lib/aarch64-linux-gnu/libclang.so.1",
-            "/usr/lib64/libclang.so",
-            "/usr/lib64/libclang.so.1",
-        ]
-        .map(|path| (PathBuf::from(path), Ok(false)))
-        .into()
-    }
-
-    #[test]
-    fn explicit_library_directory_has_priority_on_each_platform() {
-        for (platform, name) in [
-            (Platform::Windows, "libclang.dll"),
-            (Platform::Linux, "libclang.so"),
-            (Platform::MacOs, "libclang.dylib"),
-        ] {
-            let mut environment = environment(platform);
-            environment.libclang_path = Some("custom LLVM".into());
-            environment.path = vec!["custom LLVM".into()];
-            check_scripted(&environment, vec![(Path::new("custom LLVM").join(name), Ok(true))], vec![]).unwrap();
-        }
-    }
-
-    #[test]
-    fn absent_override_falls_back_to_windows_scoop_and_normalizes_path_entries() {
-        let mut environment = environment(Platform::Windows);
-        environment.libclang_path = Some("absent".into());
-        environment.user_profile = Some(r"C:\Users\developer".into());
-        environment.path = vec![r"c:/users/developer/scoop/apps/llvm/current/bin/".into()];
-        check_scripted(
-            &environment,
-            vec![
-                (Path::new("absent").join("libclang.dll"), Err(io::ErrorKind::NotFound.into())),
-                (Path::new(r"C:\Program Files\LLVM\bin").join("libclang.dll"), Ok(false)),
-                (
-                    Path::new(r"C:\Users\developer")
-                        .join(r"scoop\apps\llvm\current\bin")
-                        .join("libclang.dll"),
-                    Ok(true),
-                ),
-            ],
-            vec![],
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn windows_library_without_matching_path_reports_the_fix() {
-        let mut environment = environment(Platform::Windows);
-        environment.libclang_path = Some(r"C:\LLVM\bin".into());
-        environment.path = vec![r"C:\LLVM\bin-extra".into()];
-        let error = check_scripted(
-            &environment,
-            vec![(Path::new(r"C:\LLVM\bin").join("libclang.dll"), Ok(true))],
-            vec![],
-        )
-        .unwrap_err();
-        let message = error.to_string();
-        assert!(message.contains(r"libclang.dll exists in `C:\LLVM\bin` but that directory is not on PATH"));
-        assert!(message.contains(r"Set LIBCLANG_PATH to `C:\LLVM\bin` and add that directory to PATH"));
-    }
-
-    #[test]
-    fn macos_probes_both_homebrew_prefixes_without_requiring_path() {
-        check_scripted(
-            &environment(Platform::MacOs),
-            vec![
-                ("/usr/local/opt/llvm/lib/libclang.dylib".into(), Ok(false)),
-                ("/opt/homebrew/opt/llvm/lib/libclang.dylib".into(), Ok(true)),
-            ],
-            vec![],
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn linux_accepts_versioned_soname_without_requiring_path() {
-        check_scripted(
-            &environment(Platform::Linux),
-            vec![
-                ("/usr/lib/x86_64-linux-gnu/libclang.so".into(), Ok(false)),
-                ("/usr/lib/x86_64-linux-gnu/libclang.so.1".into(), Ok(true)),
-            ],
-            vec![],
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn linux_fallback_sorts_matching_names_and_rejects_non_files() {
-        let mut files = absent_linux_files();
-        files.extend([
-            ("/usr/lib/libclang-17.so.1".into(), Ok(false)),
-            ("/usr/lib/libclang-18.so.1".into(), Ok(true)),
-        ]);
-        check_scripted(
-            &environment(Platform::Linux),
-            files,
-            vec![(
-                "/usr/lib".into(),
-                Ok(["libclang-18.so.1", "libclang.a", "other.so", "libclang-17.so.1"]
-                    .map(OsString::from)
-                    .into()),
-            )],
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn linux_fallback_skips_absent_directories_and_uses_later_locations() {
-        let mut files = absent_linux_files();
-        files.push(("/usr/lib64/libclang-18.so.1".into(), Ok(true)));
-        check_scripted(
-            &environment(Platform::Linux),
-            files,
-            vec![
-                ("/usr/lib".into(), Err(io::ErrorKind::NotFound.into())),
-                ("/usr/lib64".into(), Ok(vec!["libclang-18.so.1".into()])),
-            ],
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn missing_libraries_report_platform_specific_installation_guidance() {
-        let cases = [
-            (
-                Platform::Windows,
-                vec![(Path::new(r"C:\Program Files\LLVM\bin").join("libclang.dll"), Ok(false))],
-                vec![],
-                "scoop install llvm",
-            ),
-            (
-                Platform::MacOs,
-                vec![
-                    ("/usr/local/opt/llvm/lib/libclang.dylib".into(), Ok(false)),
-                    ("/opt/homebrew/opt/llvm/lib/libclang.dylib".into(), Ok(false)),
-                ],
-                vec![],
-                "brew install llvm",
-            ),
-            (
-                Platform::Linux,
-                absent_linux_files(),
-                ["/usr/lib", "/usr/lib64", "/usr/lib/x86_64-linux-gnu", "/usr/lib/aarch64-linux-gnu"]
-                    .map(|path| (PathBuf::from(path), Ok(Vec::new())))
-                    .into(),
-                "apt-get install -y libclang-dev",
-            ),
-        ];
-        for (platform, files, directories, hint) in cases {
-            let error = check_scripted(&environment(platform), files, directories).unwrap_err();
-            let message = error.to_string();
-            assert!(message.contains("missing source-build dependency"));
-            assert!(message.contains(hint));
-            assert!(message.contains("retry setup"));
-        }
-    }
-
-    #[test]
-    fn candidate_read_failure_preserves_cause_and_does_not_fall_back() {
-        let mut environment = environment(Platform::Linux);
-        environment.libclang_path = Some("inaccessible".into());
-        let path = Path::new("inaccessible").join("libclang.so");
-        let error = check_scripted(
-            &environment,
-            vec![(
-                path.clone(),
-                Err(io::Error::new(io::ErrorKind::PermissionDenied, "scripted refusal")),
-            )],
-            vec![],
-        )
-        .unwrap_err();
-        assert_eq!(error.find_source::<io::Error>().unwrap().kind(), io::ErrorKind::PermissionDenied);
-        assert!(
-            error
-                .to_string()
-                .contains(&format!("failed to inspect libclang candidate `{}`", path.display()))
-        );
-    }
-
-    #[test]
-    fn directory_read_failure_is_not_reported_as_a_missing_library() {
-        let error = check_scripted(
-            &environment(Platform::Linux),
-            absent_linux_files(),
-            vec![(
-                "/usr/lib".into(),
-                Err(io::Error::new(io::ErrorKind::PermissionDenied, "scripted directory refusal")),
-            )],
-        )
-        .unwrap_err();
-        assert_eq!(error.find_source::<io::Error>().unwrap().kind(), io::ErrorKind::PermissionDenied);
-        assert!(error.to_string().contains("failed to search libclang directory `/usr/lib`"));
-    }
-}
+#[path = "source_deps/tests.rs"]
+mod tests;
