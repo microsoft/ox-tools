@@ -82,6 +82,13 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
 
+      - name: Report disk usage
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          __DISK_USAGE__
+
   scheduled-advisories:
     # Cross-OS / cross-arch because clippy and udeps in this group
     # compile per host, so cfg-gated code must be linted/scanned on
@@ -101,6 +108,13 @@ jobs:
       - uses: ./.github/actions/anvil-run-group
         with:
           group: scheduled-advisories
+
+      - name: Report disk usage
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          __DISK_USAGE__
 
   scheduled-runtime-analysis:
     # Full-workspace counterpart of pr-runtime-analysis. OS matrix
@@ -129,6 +143,13 @@ jobs:
         with:
           group: scheduled-runtime-analysis
 
+      - name: Report disk usage
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          __DISK_USAGE__
+
   scheduled-exhaustive:
     # Keep exhaustive mutation testing, feature powersets, and benchmark
     # compilation on the existing x86_64 schedule to bound recurring cost.
@@ -148,6 +169,13 @@ jobs:
       - uses: ./.github/actions/anvil-run-group
         with:
           group: scheduled-exhaustive
+
+      - name: Report disk usage
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          __DISK_USAGE__
 
   publish-failure:
     name: Publish scheduled failure
@@ -216,3 +244,9 @@ jobs:
                 body,
               });
             }
+      - name: Report disk usage
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          __DISK_USAGE__

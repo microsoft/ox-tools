@@ -84,6 +84,13 @@ jobs:
         env:
           BASE_REF: ${{ inputs.base_ref }}
 
+      - name: Report disk usage
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          __DISK_USAGE__
+
   impact-windows:
     name: "Preparation: Impact Analysis (windows)"
     runs-on: ${{ inputs.windows_runner }}
@@ -96,6 +103,13 @@ jobs:
       - uses: ./.github/actions/anvil-impact
         env:
           BASE_REF: ${{ inputs.base_ref }}
+
+      - name: Report disk usage
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          __DISK_USAGE__
 
   # These job display names form repository-ruleset contexts. Treat cosmetic
   # changes as compatibility changes across PR and merge-group events.
@@ -188,6 +202,13 @@ jobs:
           header: anvil-semver
           delete: true
 
+      - name: Report disk usage
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          __DISK_USAGE__
+
   pr-test:
     name: "Check Group: Tests and Coverage (${{ matrix.os }})"
     permissions:
@@ -250,6 +271,13 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
 
+      - name: Report disk usage
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          __DISK_USAGE__
+
   pr-msrv:
     name: "Check Group: MSRV Tests (${{ matrix.os }})"
     permissions:
@@ -279,6 +307,13 @@ jobs:
           publish_commit_statuses: ${{ inputs.publish_commit_statuses }}
           free-disk-space: true
           impact_mode: consume
+
+      - name: Report disk usage
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          __DISK_USAGE__
 
   pr-runtime-analysis:
     name: "Check Group: Runtime Analysis (${{ matrix.os }})"
@@ -315,6 +350,13 @@ jobs:
           publish_commit_statuses: ${{ inputs.publish_commit_statuses }}
           impact_mode: consume
 
+      - name: Report disk usage
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          __DISK_USAGE__
+
   pr-fuzzing:
     name: "Check Group: Fuzzing (${{ matrix.os }})"
     permissions:
@@ -340,6 +382,13 @@ jobs:
           group: pr-fuzzing
           publish_commit_statuses: ${{ inputs.publish_commit_statuses }}
           impact_mode: consume
+
+      - name: Report disk usage
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          __DISK_USAGE__
 
   pr-mutants:
     name: "Check Group: Mutation Testing (${{ matrix.os }})"
@@ -388,6 +437,13 @@ jobs:
         shell: bash
         run: echo "Mutation testing is covered by the Windows x64 matrix leg."
 
+      - name: Report disk usage
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          __DISK_USAGE__
+
   required-checks:
     # This display name is the repository-ruleset context. Keep it stable
     # across pull-request and merge-group callers.
@@ -435,3 +491,9 @@ jobs:
             fi
           done
           exit "$status"
+      - name: Report disk usage
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          __DISK_USAGE__

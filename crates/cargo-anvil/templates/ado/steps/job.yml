@@ -93,6 +93,7 @@ jobs:
             displayName: Download ${{ artifact.name }}
             inputs:
               artifact: ${{ artifact.name }}
+
               path: ${{ artifact.path }}
       - template: ../hooks/before-checks.yml
       - ${{ each step in parameters.steps }}:
@@ -105,3 +106,8 @@ jobs:
             inputs:
               targetPath: ${{ artifact.path }}
               artifact: ${{ artifact.name }}
+      - pwsh: |
+          __DISK_USAGE__
+        displayName: Report disk usage
+        condition: always()
+        continueOnError: true
