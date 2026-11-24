@@ -89,33 +89,39 @@ trait Probe {
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
+// #[gamma::skip(all, tag = "native-boundary", reason = "Only supplies native environment access and the native adapter; check_environment tests the same orchestration with owned environment values and a scripted probe.")]
 pub(super) fn check() -> Result<(), AppError> {
-    let mut probe = native::Native;
+    check_environment(&mut native::Native, |name| std::env::var_os(name))
+}
+
+fn check_environment(probe: &mut impl Probe, mut variable: impl FnMut(&str) -> Option<OsString>) -> Result<(), AppError> {
     let output = probe
         .command(std::ffi::OsStr::new("rustc"), &["-vV"])
+        // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, tag = "diagnostic", reason = "Only changes contextual prose; tests verify that the command failure and its typed cause propagate.")]
         .into_app_err("failed to run `rustc -vV` to identify the installation host")?;
     if !output.success {
         return Err(AppError::new(format!("`rustc -vV` failed: {}", output.stderr)));
     }
-    let target = installation_target(&output.stdout, std::env::var_os("CARGO_BUILD_TARGET").as_deref())?;
+    let target = installation_target(&output.stdout, variable("CARGO_BUILD_TARGET").as_deref())?;
     let environment = Environment {
         target,
-        libclang_path: std::env::var_os("LIBCLANG_PATH").map(PathBuf::from),
-        llvm_config: std::env::var_os("LLVM_CONFIG_PATH").unwrap_or_else(|| "llvm-config".into()),
-        ld_library_path: std::env::var_os("LD_LIBRARY_PATH")
+        libclang_path: variable("LIBCLANG_PATH").map(PathBuf::from),
+        llvm_config: variable("LLVM_CONFIG_PATH").unwrap_or_else(|| "llvm-config".into()),
+        ld_library_path: variable("LD_LIBRARY_PATH")
             .map(|value| std::env::split_paths(&value).collect())
             .unwrap_or_default(),
-        path: std::env::var_os("PATH")
+        path: variable("PATH")
             .map(|value| std::env::split_paths(&value).collect())
             .unwrap_or_default(),
     };
-    check_with(&environment, &mut probe)
+    check_with(&environment, probe)
 }
 
 fn installation_target(rustc_output: &str, build_target: Option<&std::ffi::OsStr>) -> Result<Target, AppError> {
     let host = rustc_output
         .lines()
         .find_map(|line| line.strip_prefix("host: "))
+        // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, tag = "diagnostic", reason = "Only changes refusal prose; absence of a rustc host must still fail.")]
         .ok_or_else(|| AppError::new("`rustc -vV` did not report a host target"))?;
     if let Some(build_target) = build_target
         && build_target != host
@@ -195,6 +201,7 @@ fn find_libclang(environment: &Environment, probe: &mut impl Probe) -> Result<Pa
                 path.display()
             )
         });
+        // #[gamma::skip(cond.always_false, tag = "equivalent", reason = "With no notes this only adds an empty Discovery details heading to the already-failed result.")]
         let details = if notes.is_empty() {
             String::new()
         } else {
@@ -236,7 +243,7 @@ fn search_files(platform: Platform, directory: &Path, probe: &mut impl Probe) ->
         let pattern = Path::new(&directory).join(name);
         let pattern = pattern
             .to_str()
-            .ok_or_else(|| AppError::new("libclang search pattern is not valid Unicode"))?;
+            .expect("joining a Unicode directory and a Unicode library name preserves Unicode");
         for file in probe.glob(pattern, true)? {
             if !file.file_name().is_some_and(|name| name.to_string_lossy().contains("-cpp.")) {
                 files.push(file);
@@ -311,6 +318,7 @@ fn directory_patterns(target: &Target) -> &'static [&'static str] {
     }
 }
 
+// #[gamma::skip(all, tag = "diagnostic", reason = "Only returns platform-specific installation prose; asserting copied constants would not test prerequisite behavior.")]
 fn installation_hint(platform: Platform) -> &'static str {
     match platform {
         Platform::Windows => {

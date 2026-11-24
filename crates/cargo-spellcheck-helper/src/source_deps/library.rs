@@ -10,6 +10,7 @@ use super::{Environment, Platform, Probe, Target};
 pub(super) fn validate(target: &Target, path: &Path, probe: &mut impl Probe) -> Result<(), AppError> {
     match target.platform {
         Platform::Linux => {
+            // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, tag = "diagnostic", reason = "Only changes read-error context; rejection and the candidate path are tested without pinning prose.")]
             let header = probe.read(path, 0, 5).into_app_err("cannot read ELF header")?;
             let expected = if target.pointer_width == 64 { 2 } else { 1 };
             if header.get(..4) != Some(b"\x7fELF") || header.get(4) != Some(&expected) {
@@ -20,11 +21,15 @@ pub(super) fn validate(target: &Target, path: &Path, probe: &mut impl Probe) -> 
             }
         }
         Platform::Windows => {
+            // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, tag = "diagnostic", reason = "Only changes error context; tests reject failed and truncated offset reads.")]
             let offset = probe.read(path, 0x3c, 4).into_app_err("cannot read PE header offset")?;
+            // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, tag = "diagnostic", reason = "Only changes error context; tests reject truncated offset reads.")]
             let offset = <[u8; 4]>::try_from(offset.as_slice()).into_app_err("truncated PE header offset")?;
             let offset = u64::from(u32::from_le_bytes(offset));
+            // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, tag = "diagnostic", reason = "Only changes error context; tests reject failed header reads.")]
             let header = probe.read(path, offset, 26).into_app_err("cannot read PE header")?;
             if header.get(..4) != Some(b"PE\0\0") {
+                // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, tag = "diagnostic", reason = "Only changes refusal prose; malformed signatures must still be rejected.")]
                 return Err(AppError::new("invalid PE signature"));
             }
             let machine = word(&header, 4)?;
@@ -46,6 +51,7 @@ pub(super) fn validate(target: &Target, path: &Path, probe: &mut impl Probe) -> 
 }
 
 fn word(header: &[u8], offset: usize) -> Result<u16, AppError> {
+    // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, tag = "diagnostic", reason = "Only changes refusal prose; truncated fields must still be rejected.")]
     let bytes = header.get(offset..offset + 2).ok_or_else(|| AppError::new("truncated PE header"))?;
     Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
 }
@@ -54,6 +60,7 @@ pub(super) fn version(path: &Path) -> Vec<u32> {
     path.file_name()
         .and_then(|name| name.to_str())
         .and_then(|name| name.strip_prefix("libclang-"))
+        // #[gamma::skip(literal.str_to_empty, tag = "equivalent", reason = "All versioned candidates end in .so; keeping that suffix appends the same parsed zero component to every version and preserves lexicographic ranking, including prefix ties.")]
         .and_then(|name| name.strip_suffix(".so"))
         .map(|version| version.split('.').map(|part| part.parse().unwrap_or(0)).collect())
         .unwrap_or_default()
@@ -65,12 +72,13 @@ pub(super) fn check_link_requirements(environment: &Environment, library: &Path,
     }
     let directory = library
         .parent()
+        // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, tag = "diagnostic", reason = "Only changes error context; a parentless library is rejected in-process.")]
         .ok_or_else(|| AppError::new("selected libclang DLL has no parent directory"))?;
     if environment.target.msvc {
         let import_directory = if directory.ends_with("bin") {
             directory
                 .parent()
-                .ok_or_else(|| AppError::new("LLVM bin directory has no parent"))?
+                .expect("a directory ending in the normal component bin has a parent, possibly the empty relative path")
                 .join("lib")
         } else {
             directory.to_path_buf()
@@ -115,9 +123,11 @@ fn normalized_path(path: &Path) -> Vec<u8> {
         .as_os_str()
         .as_encoded_bytes()
         .iter()
+        // #[gamma::skip(string.lower_to_upper, tag = "equivalent", reason = "Both sides of the equality undergo the same ASCII case normalization; uppercase and lowercase induce the same equivalence classes.")]
         .map(|byte| if *byte == b'/' { b'\\' } else { byte.to_ascii_lowercase() })
         .collect();
     while bytes.last() == Some(&b'\\') {
+        // #[gamma::skip(stmt.delete_call, tag = "timeout", reason = "Removing pop leaves the trailing separator in place forever; a deterministic assertion cannot observe a nonreturning loop.")]
         bytes.pop();
     }
     bytes

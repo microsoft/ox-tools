@@ -15,6 +15,7 @@ pub(super) struct Native;
 
 #[cfg_attr(coverage_nightly, coverage(off))]
 impl Probe for Native {
+    // #[gamma::skip(all, tag = "native-boundary", reason = "Traverses real directories and metadata through glob; discovery policy is tested with scripted paths, while this adapter requires provisioned filesystem state.")]
     fn glob(&mut self, pattern: &str, case_sensitive: bool) -> Result<Vec<PathBuf>, AppError> {
         let options = glob::MatchOptions {
             case_sensitive,
@@ -38,10 +39,12 @@ impl Probe for Native {
         Ok(paths)
     }
 
+    // #[gamma::skip(all, tag = "native-boundary", reason = "Only maps native filesystem metadata to is_file; link policy is tested with scripted metadata outcomes.")]
     fn is_file(&mut self, path: &Path) -> io::Result<bool> {
         std::fs::metadata(path).map(|metadata| metadata.is_file())
     }
 
+    // #[gamma::skip(all, tag = "native-boundary", reason = "Opens and reads an installed native library; format validation tests script byte ranges and read failures without creating files.")]
     fn read(&mut self, path: &Path, offset: u64, length: usize) -> io::Result<Vec<u8>> {
         let mut file = File::open(path)?;
         file.seek(SeekFrom::Start(offset))?;
@@ -50,6 +53,7 @@ impl Probe for Native {
         Ok(bytes)
     }
 
+    // #[gamma::skip(all, tag = "native-boundary", reason = "Only converts native process output to the probe result; orchestration tests supply command outputs without child processes.")]
     fn command(&mut self, executable: &OsStr, args: &[&str]) -> io::Result<CommandOutput> {
         let output = Command::new(executable).args(args).output()?;
         Ok(CommandOutput {
@@ -59,6 +63,7 @@ impl Probe for Native {
         })
     }
 
+    // #[gamma::skip(all, tag = "native-boundary", reason = "Requires a host-compatible libclang and its native dependencies; loader failures and sequencing are tested through the injected probe.")]
     fn load_library(&mut self, path: &Path) -> Result<(), AppError> {
         // SAFETY: this deliberately loads the user-selected native LLVM library,
         // just as bindgen does. No symbol is called, and none outlives the library.
@@ -68,6 +73,7 @@ impl Probe for Native {
         Ok(())
     }
 
+    // #[gamma::skip(all, tag = "native-boundary", reason = "cc discovers and launches installed native compilers and an archiver; portable tests inject tool-check outcomes rather than depend on native tools or child processes.")]
     fn check_tools(&mut self, target: &Target) -> Result<(), AppError> {
         let mut build = cc::Build::new();
         build
