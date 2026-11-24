@@ -41,6 +41,8 @@ The caller's `rustc -vV` supplies the native host architecture and environment;
 the helper's own compilation target does not select the installation target.
 Windows (MSVC and GNU), Linux, and macOS are supported. Cross-target
 installation is not supported: a differing `CARGO_BUILD_TARGET` is rejected.
+Cargo's `host-tuple` alias is expanded using the host reported by `cargo -vV`;
+it is accepted only when that Cargo host matches the rustc host.
 
 Discovery follows clang-sys's order and candidate policy:
 
@@ -98,8 +100,11 @@ dependencies remains authoritative.
 Absent search locations are skipped. Optional discovery commands may be
 unavailable or fail, as upstream permits; their diagnostics are retained if
 no valid libclang is found. Invalid candidates are reported when no valid
-candidate remains. Unexpected filesystem access failures are reported with
-paths instead of hidden. Errors provide platform-specific installation or
+candidate remains. Access failures in automatic discovery directories are
+retained while other locations and already-found candidates are considered;
+they are reported with paths and a typed underlying cause if discovery fails.
+An explicit `LIBCLANG_PATH` remains authoritative, and its access failures
+are immediate errors. Errors provide platform-specific installation or
 environment guidance and never install system packages.
 
 Upstream contracts:

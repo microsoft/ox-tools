@@ -1,7 +1,7 @@
 version: 4
 tool: cargo-gamma 0.6.0
 context:
-  repo_sha: 08440a582522e433a2372ca56650ea872f156d76
+  repo_sha: c5ee87b5c6f391c8056154384be7a22d76e5afb9
   generated_on: 2026-11-24
 files:
 - path: crates/cargo-anvil/src/anvil/artifacts/ado.rs
@@ -218019,13 +218019,28 @@ files:
   killers:
   - package: cargo-spellcheck-helper
     target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::bootstrap_accepts_native_cargo_host_alias
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::bootstrap_cargo_alias_failure_preserves_typed_cause
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
     test: source_deps::tests::bootstrap_passes_llvm_override_and_loader_paths_to_discovery
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::bootstrap_rejects_cargo_host_alias_if_cargo_and_rustc_hosts_differ
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::bootstrap_rejects_failed_or_missing_cargo_host_output_before_discovery
   - package: cargo-spellcheck-helper
     target: bin:cargo-spellcheck-helper
     test: source_deps::tests::bootstrap_rejects_rustc_failure_and_cross_target_before_discovery
   - package: cargo-spellcheck-helper
     target: bin:cargo-spellcheck-helper
     test: source_deps::tests::bootstrap_uses_owned_override_and_path_values_without_host_environment
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::discovery_errors_remain_fatal_for_overrides_and_are_retained_for_optional_search
   - package: cargo-spellcheck-helper
     target: bin:cargo-spellcheck-helper
     test: source_deps::tests::every_discovery_stage_propagates_glob_errors_without_panicking_or_continuing
@@ -218055,6 +218070,9 @@ files:
     test: source_deps::tests::optional_discovery_failures_record_one_note_and_never_accept_failed_stdout
   - package: cargo-spellcheck-helper
     target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::optional_search_failure_retains_first_typed_cause_when_discovery_fails
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
     test: source_deps::tests::selected_library_path_resolution_failure_preserves_cause_without_loading
   - package: cargo-spellcheck-helper
     target: bin:cargo-spellcheck-helper
@@ -218073,319 +218091,405 @@ files:
     test: source_deps::tests::windows_rejects_missing_import_library_and_missing_path
   mutants:
   - id: 01ac796ac62d
-    killer: 3
+    killer: 2
   - id: 01b7bb2bf148
-    killer: 3
+    killer: 21
   - id: 02ce2cc9495a
-    killer: 2
+    killer: 6
   - id: 03e348a614bd
-    killer: 4
+    killer: 9
   - id: 0429525b79c4
-    killer: 4
+    killer: 9
   - id: 044743f8bca2
-    killer: 2
+    killer: 6
   - id: 06befcdc3716
-    killer: 0
-  - id: 0d91948ded6b
     killer: 2
-  - id: 0e0cea223f7b
-    killer: 3
-  - id: 0fb971223281
-    killer: 11
-  - id: 0fb9bf55647e
-    killer: 0
-  - id: 0fc74ab5f449
-    killer: 0
-  - id: 11916c79f9a3
-    killer: 2
-  - id: 144bdcbd2f95
-    killer: 3
-  - id: 145fe84dad64
-    killer: 3
-  - id: 165af10d03e2
-    killer: 0
-  - id: 166c3f66d07f
-    killer: 0
-  - id: 16a212fbab2c
-    killer: 15
-  - id: 18c07f3cffb4
-    killer: 5
-  - id: 1994de110113
-    killer: 3
-  - id: 1a14b1e24af6
-    killer: 0
-  - id: 1b8896fca775
+  - id: 0b7e10ef5599
     killer: 7
+  - id: 0d91948ded6b
+    killer: 6
+  - id: 0e0cea223f7b
+    killer: 21
+  - id: 0fb971223281
+    killer: 16
+  - id: 0fb9bf55647e
+    killer: 2
+  - id: 0fc74ab5f449
+    killer: 2
+  - id: 11916c79f9a3
+    killer: 6
+  - id: 13ac00bdfe3d
+    killer: 0
+  - id: 144bdcbd2f95
+    killer: 7
+  - id: 145fe84dad64
+    killer: 8
+  - id: 165af10d03e2
+    killer: 2
+  - id: 166c3f66d07f
+    killer: 2
+  - id: 16a212fbab2c
+    killer: 21
+  - id: 18c07f3cffb4
+    killer: 10
+  - id: 1994de110113
+    killer: 7
+  - id: 1a14b1e24af6
+    killer: 2
+  - id: 1b8896fca775
+    killer: 12
   - id: 1cf3889d35ba
-    killer: 3
+    killer: 20
+  - id: 21ff1e1a4a52
+    killer: 0
   - id: 2327d90ef876
-    killer: 0
+    killer: 2
   - id: 2433b3a00641
-    killer: 0
+    killer: 2
   - id: 24b07d22754d
-    killer: 1
+    killer: 5
+  - id: 26bbc3b84733
+    killer: 0
   - id: 275a981591ae
-    killer: 0
+    killer: 2
   - id: 2785bac0a214
-    killer: 0
+    killer: 2
   - id: 292fb2a1f4ab
-    killer: 2
+    killer: 6
   - id: 2af69725c6c4
-    killer: 14
+    killer: 20
   - id: 2b22decf6d80
-    killer: 3
+    killer: 7
   - id: 2cd65437c2cd
-    killer: 14
+    killer: 20
+  - id: 2d595e35cc9d
+    killer: 12
   - id: 2dda8bf71047
-    killer: 0
-  - id: 2e94f22e7bdf
     killer: 2
+  - id: 2e94f22e7bdf
+    killer: 6
+  - id: 2f1d193bc1b7
+    killer: 4
   - id: 2f4259e2601f
-    killer: 14
+    killer: 20
   - id: 2f999fbcf7c8
+    killer: 2
+  - id: 31008c989713
     killer: 0
   - id: 31eeebb30956
-    killer: 3
+    killer: 8
   - id: 3674a47ef99c
-    killer: 5
+    killer: 10
   - id: 36a57da78259
-    killer: 3
+    killer: 2
   - id: 3764e48e277a
-    killer: 3
+    killer: 20
   - id: 38a03b1753df
+    killer: 2
+  - id: 38a8a29456b1
     killer: 0
   - id: 3903a20a8b7c
-    killer: 6
+    killer: 11
   - id: 3a38f53740d8
-    killer: 7
-  - id: 3a401b4e3bd8
-    killer: 3
-  - id: 3b9f4f0ecbb5
-    killer: 2
-  - id: 3d73c49a872a
-    killer: 0
-  - id: 417bbe11c00f
-    killer: 0
-  - id: 421d39b50022
-    killer: 2
-  - id: 424bdbfda322
-    killer: 3
-  - id: 45cdf8d5e022
-    killer: 10
-  - id: 46dd34030e82
-    killer: 0
-  - id: 471d67b79d85
-    killer: 14
-  - id: 47c787efded2
-    killer: 14
-  - id: 49b6218fe8d1
-    killer: 14
-  - id: 4c051f7af8c5
-    killer: 0
-  - id: 4d9f14a3b559
     killer: 12
-  - id: 4df49379050c
-    killer: 1
-  - id: 4ea8fedf5770
-    killer: 4
-  - id: 508da5853c44
-    killer: 3
-  - id: 50fad0ef4484
-    killer: 4
-  - id: 51488889efff
-    killer: 3
-  - id: 57d00c544cbd
-    killer: 14
-  - id: 5e0acddbecd5
-    killer: 3
-  - id: 5ee38b6956f0
-    killer: 4
-  - id: 5f0b582caf02
+  - id: 3a401b4e3bd8
     killer: 2
+  - id: 3b9f4f0ecbb5
+    killer: 6
+  - id: 3d73c49a872a
+    killer: 2
+  - id: 417bbe11c00f
+    killer: 2
+  - id: 421d39b50022
+    killer: 6
+  - id: 424bdbfda322
+    killer: 8
+  - id: 45cdf8d5e022
+    killer: 15
+  - id: 46dd34030e82
+    killer: 2
+  - id: 471d67b79d85
+    killer: 20
+  - id: 47c787efded2
+    killer: 20
+  - id: 499e30b30a16
+    killer: 19
+  - id: 49b6218fe8d1
+    killer: 20
+  - id: 4c051f7af8c5
+    killer: 2
+  - id: 4d9f14a3b559
+    killer: 18
+  - id: 4df49379050c
+    killer: 5
+  - id: 4ea8fedf5770
+    killer: 9
+  - id: 4fd4dd8c9561
+    killer: 0
+  - id: 508da5853c44
+    killer: 2
+  - id: 50fad0ef4484
+    killer: 9
+  - id: 51488889efff
+    killer: 7
+  - id: 54294def3980
+    killer: 2
+  - id: 54a742cd7f3b
+    killer: 5
+  - id: 57d00c544cbd
+    killer: 20
+  - id: 59340ace6d53
+    killer: 7
+  - id: 5b25647e6ec6
+    killer: 5
+  - id: 5e0acddbecd5
+    killer: 20
+  - id: 5ebaa82ca574
+    killer: 0
+  - id: 5ee38b6956f0
+    killer: 9
+  - id: 5f0b582caf02
+    killer: 6
+  - id: 6254addf9e3b
+    killer: 7
   - id: 6476c6e40a68
-    killer: 13
+    killer: 19
   - id: 650fafa5382f
+    killer: 2
+  - id: 67ab48622586
     killer: 0
   - id: 6873b7c718f4
-    killer: 6
-  - id: 6879b2dae8ec
-    killer: 14
-  - id: 6a44f9c6c56e
-    killer: 0
-  - id: 6c4407f75b10
-    killer: 3
-  - id: 6e314aa03a09
     killer: 11
-  - id: 72e6d3642484
-    killer: 3
-  - id: 74f923b47d36
-    killer: 13
-  - id: 76ec9efe9436
+  - id: 6879b2dae8ec
+    killer: 20
+  - id: 697bf827d27c
+    killer: 12
+  - id: 6a44f9c6c56e
     killer: 2
-  - id: 781bfb6cfbfb
-    killer: 3
-  - id: 79ddab8cc26e
-    killer: 2
-  - id: 7c897b6a8c0c
-    killer: 3
-  - id: 7f4ef709ee9c
-    killer: 0
-  - id: 7f8b92b4920f
-    killer: 0
-  - id: 7fb117a6e514
-    killer: 17
-  - id: 80f016cb0429
-    killer: 16
-  - id: 83d50d883ec0
-    killer: 3
-  - id: 865d3668ce3e
-    killer: 3
-  - id: 86745821e312
-    killer: 1
-  - id: 86aedede595f
-    killer: 2
-  - id: 86c61a75bee8
-    killer: 3
-  - id: 87604c3624d8
-    killer: 0
-  - id: 883421e2a743
-    killer: 14
-  - id: 8dbaac5c86e2
-    killer: 0
-  - id: 8de60ecafcd9
-    killer: 3
-  - id: 8dfe8867e268
-    killer: 0
-  - id: 8f44852d67c3
-    killer: 4
-  - id: 90ac281b7cc5
-    killer: 2
-  - id: 9463aecac8f3
-    killer: 16
-  - id: 9a382147d621
-    killer: 0
-  - id: 9d16d5b36dba
-    killer: 3
-  - id: 9f3e66abdfd2
-    killer: 14
-  - id: 9fc1bcdca6af
-    killer: 0
-  - id: a4abad596d15
-    killer: 13
-  - id: a617c3f7e20b
-    killer: 3
-  - id: a8c6225265e5
-    killer: 1
-  - id: a95604d07203
-    killer: 0
-  - id: a98618add838
-    killer: 9
-  - id: aa04e4b2df0f
-    killer: 4
-  - id: aa803b965fbc
-    killer: 3
-  - id: ace330f350c3
-    killer: 2
-  - id: ae94f05e4faf
+  - id: 6c4407f75b10
     killer: 8
-  - id: af359ca1f93b
-    killer: 2
-  - id: aff17ea8d739
-    killer: 0
-  - id: b003e8886187
-    killer: 0
-  - id: b1d31fb5a825
-    killer: 2
-  - id: b41f7281aaab
-    killer: 3
-  - id: b5e02ee00543
-    killer: 3
-  - id: b5fdd2439a91
-    killer: 3
-  - id: b8bae3a810ab
-    killer: 3
-  - id: b938a2700852
-    killer: 0
-  - id: bca3065fc7da
-    killer: 3
-  - id: c18f081c2a0c
-    killer: 3
-  - id: c3a5417c4735
-    killer: 3
-  - id: c5ec62f06aeb
-    killer: 3
-  - id: c656d0b41dfd
-    killer: 1
-  - id: c7d997e18189
-    killer: 0
-  - id: c815916d45e9
-    killer: 3
-  - id: caa87ad68fb9
-    killer: 3
-  - id: d009c6bd9eda
-    killer: 14
-  - id: d134a44634c3
-    killer: 3
-  - id: d2016f2679e5
-    killer: 0
-  - id: d4cd9cdcf151
-    killer: 3
-  - id: d56cf57dce9e
+  - id: 6de5cd4a35b2
+    killer: 7
+  - id: 6e314aa03a09
     killer: 16
-  - id: d575366e0097
-    killer: 1
-  - id: d6697cd843e0
-    killer: 14
-  - id: d699782ac2c8
-    killer: 14
-  - id: d861008bbab3
-    killer: 3
-  - id: da4faaaf7a7e
-    killer: 3
-  - id: daa09fe1da99
-    killer: 3
-  - id: dcf470dfdd95
-    killer: 0
-  - id: e085b2ded16a
-    killer: 0
-  - id: e151da526215
-    killer: 0
-  - id: e375ced6d4ac
-    killer: 3
-  - id: e3d1684c3f55
-    killer: 3
-  - id: ea14acafe81c
+  - id: 6e957ecd9cac
     killer: 5
-  - id: eaf5532273a7
-    killer: 0
-  - id: ec03cf2146c6
-    killer: 0
-  - id: ec19ad6c16e6
-    killer: 0
-  - id: eddb13a565a5
-    killer: 3
-  - id: ef5fc22dcb3a
-    killer: 2
-  - id: f000933c50bf
-    killer: 2
-  - id: f0467047890d
-    killer: 3
-  - id: f0f43067bbaa
-    killer: 3
-  - id: f18a951a8837
-    killer: 3
-  - id: f476f0ed9ab7
-    killer: 14
-  - id: f7ab076132c3
-    killer: 0
-  - id: f80b83565868
-    killer: 3
-  - id: fdd9db9cff66
+  - id: 71a7c0c018a2
     killer: 4
-  - id: fdec86a62192
+  - id: 72e6d3642484
+    killer: 6
+  - id: 742b4374dc87
+    killer: 17
+  - id: 74f923b47d36
+    killer: 19
+  - id: 76ec9efe9436
+    killer: 6
+  - id: 781bfb6cfbfb
+    killer: 7
+  - id: 7979d21c87cf
     killer: 5
-  - id: ff5b599d0091
+  - id: 79ddab8cc26e
+    killer: 6
+  - id: 7c897b6a8c0c
+    killer: 20
+  - id: 7f4ef709ee9c
+    killer: 2
+  - id: 7f8b92b4920f
+    killer: 2
+  - id: 7fb117a6e514
+    killer: 23
+  - id: 80f016cb0429
+    killer: 22
+  - id: 81734bc83c29
+    killer: 7
+  - id: 83d50d883ec0
+    killer: 20
+  - id: 84972da64376
+    killer: 7
+  - id: 865d3668ce3e
+    killer: 21
+  - id: 86745821e312
+    killer: 5
+  - id: 86aedede595f
+    killer: 6
+  - id: 86c61a75bee8
+    killer: 7
+  - id: 87604c3624d8
+    killer: 2
+  - id: 883421e2a743
+    killer: 20
+  - id: 8dbaac5c86e2
+    killer: 2
+  - id: 8de60ecafcd9
+    killer: 7
+  - id: 8dfe8867e268
+    killer: 2
+  - id: 8e1c32e1fe53
+    killer: 4
+  - id: 8f44852d67c3
+    killer: 9
+  - id: 90ac281b7cc5
+    killer: 6
+  - id: 9463aecac8f3
+    killer: 22
+  - id: 9a382147d621
+    killer: 2
+  - id: 9d16d5b36dba
+    killer: 20
+  - id: 9e32f275de36
+    killer: 12
+  - id: 9f3e66abdfd2
+    killer: 20
+  - id: 9f8cf95960cb
+    killer: 12
+  - id: 9fa98708c6ea
+    killer: 0
+  - id: 9fc1bcdca6af
+    killer: 2
+  - id: a4abad596d15
+    killer: 19
+  - id: a4b5ad12d322
+    killer: 7
+  - id: a617c3f7e20b
+    killer: 7
+  - id: a8c6225265e5
+    killer: 5
+  - id: a95604d07203
+    killer: 2
+  - id: a98618add838
     killer: 14
+  - id: aa04e4b2df0f
+    killer: 9
+  - id: aa803b965fbc
+    killer: 7
+  - id: ace330f350c3
+    killer: 6
+  - id: ad461d79f566
+    killer: 0
+  - id: ae94f05e4faf
+    killer: 13
+  - id: af359ca1f93b
+    killer: 6
+  - id: aff17ea8d739
+    killer: 2
+  - id: b003e8886187
+    killer: 2
+  - id: b1d31fb5a825
+    killer: 6
+  - id: b41f7281aaab
+    killer: 2
+  - id: b5e02ee00543
+    killer: 7
+  - id: b5fdd2439a91
+    killer: 7
+  - id: b8bae3a810ab
+    killer: 2
+  - id: b938a2700852
+    killer: 2
+  - id: bca3065fc7da
+    killer: 2
+  - id: bf7cec212c52
+    killer: 10
+  - id: c084ac1d2834
+    killer: 0
+  - id: c0f38a2c2b35
+    killer: 5
+  - id: c18f081c2a0c
+    killer: 2
+  - id: c3a5417c4735
+    killer: 7
+  - id: c53b64132c67
+    killer: 2
+  - id: c5ec62f06aeb
+    killer: 21
+  - id: c656d0b41dfd
+    killer: 5
+  - id: c79fa4b7ca28
+    killer: 0
+  - id: c7d997e18189
+    killer: 2
+  - id: c815916d45e9
+    killer: 21
+  - id: caa87ad68fb9
+    killer: 7
+  - id: d009c6bd9eda
+    killer: 20
+  - id: d134a44634c3
+    killer: 7
+  - id: d2016f2679e5
+    killer: 2
+  - id: d4cd9cdcf151
+    killer: 7
+  - id: d56cf57dce9e
+    killer: 22
+  - id: d575366e0097
+    killer: 5
+  - id: d5f515d1387e
+    killer: 10
+  - id: d6697cd843e0
+    killer: 20
+  - id: d699782ac2c8
+    killer: 20
+  - id: d861008bbab3
+    killer: 8
+  - id: d952fd7a4b4c
+    killer: 1
+  - id: da4faaaf7a7e
+    killer: 8
+  - id: da524327815d
+    killer: 2
+  - id: daa09fe1da99
+    killer: 7
+  - id: daba7b274d54
+    killer: 7
+  - id: dcf470dfdd95
+    killer: 2
+  - id: e085b2ded16a
+    killer: 2
+  - id: e151da526215
+    killer: 2
+  - id: e375ced6d4ac
+    killer: 8
+  - id: e3d1684c3f55
+    killer: 2
+  - id: e41ac0219b29
+    killer: 2
+  - id: ea14acafe81c
+    killer: 10
+  - id: eaf5532273a7
+    killer: 2
+  - id: ec03cf2146c6
+    killer: 2
+  - id: ec19ad6c16e6
+    killer: 2
+  - id: ed864a47a1f9
+    killer: 3
+  - id: eddb13a565a5
+    killer: 8
+  - id: ef5fc22dcb3a
+    killer: 6
+  - id: f000933c50bf
+    killer: 6
+  - id: f0394a7c82ca
+    killer: 17
+  - id: f0467047890d
+    killer: 8
+  - id: f0f43067bbaa
+    killer: 7
+  - id: f18a951a8837
+    killer: 2
+  - id: f476f0ed9ab7
+    killer: 20
+  - id: f7ab076132c3
+    killer: 2
+  - id: f80b83565868
+    killer: 2
+  - id: fdd9db9cff66
+    killer: 9
+  - id: fdec86a62192
+    killer: 10
+  - id: ff5b599d0091
+    killer: 20
 - path: crates/cargo-unique-target-names/src/collisions.rs
   killers:
   - package: cargo-unique-target-names
@@ -256767,6 +256871,126 @@ generalized:
   - package: cargo-heather
     target: toml_mit
     test: toml_mismatch
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::bootstrap_accepts_native_cargo_host_alias
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::bootstrap_cargo_alias_failure_preserves_typed_cause
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::bootstrap_passes_llvm_override_and_loader_paths_to_discovery
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::bootstrap_rejects_cargo_host_alias_if_cargo_and_rustc_hosts_differ
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::bootstrap_rejects_failed_or_missing_cargo_host_output_before_discovery
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::bootstrap_rejects_rustc_failure_and_cross_target_before_discovery
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::bootstrap_uses_owned_override_and_path_values_without_host_environment
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::discovery_errors_remain_fatal_for_overrides_and_are_retained_for_optional_search
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::elf_validation_checks_signature_and_both_native_widths
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::every_discovery_stage_propagates_glob_errors_without_panicking_or_continuing
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::explicit_library_file_does_not_search_other_locations
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::failed_discovery_command_diagnostic_is_retained_when_no_library_is_found
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::linux_suffix_sonames_and_cpp_library_are_not_link_time_candidates
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::llvm_config_and_ld_library_path_are_used_and_earlier_location_wins_ties
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::loader_and_compiler_failures_are_propagated_in_order
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::malformed_or_inaccessible_headers_are_reported_with_candidate_paths
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::malformed_pe_headers_are_rejected_without_import_or_loader_checks
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::msvc_import_library_can_be_beside_dll_and_inspection_errors_propagate
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::non_unicode_search_directory_is_rejected_before_any_probe
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::optional_command_failure_allows_platform_glob_discovery
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::optional_discovery_failures_record_one_note_and_never_accept_failed_stdout
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::optional_search_failure_retains_first_typed_cause_when_discovery_fails
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::pe_header_read_failures_and_truncation_propagate_without_panicking
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::pe_validation_checks_machine_width_and_accepts_unknown_machine_like_clang_sys
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::pe_validation_rejects_wrong_architecture_and_pointer_width
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::relative_windows_dll_directory_matches_absolute_path_entry
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::selected_library_path_resolution_failure_preserves_cause_without_loading
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::target_comes_from_caller_rustc_and_cross_installation_is_rejected
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::target_parsing_accepts_native_widths_and_rejects_unsupported_targets
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::version_selection_compares_components_numerically_and_treats_invalid_parts_as_zero
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::version_selection_uses_highest_valid_version_not_first_candidate
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::windows_gnu_needs_no_msvc_import_library_and_normalizes_path
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::windows_lib_directory_searches_sibling_bin_and_accepts_mingw_import_library
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::windows_msys_directory_discovery_is_only_enabled_for_gnu
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::windows_path_matching_does_not_confuse_different_directories
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::windows_path_resolution_failures_preserve_cause_and_stop_comparison
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::windows_rejects_missing_import_library_and_missing_path
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: tests::cargo_and_direct_invocations_dispatch_dictionary_paths
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: tests::cargo_argument_adaptation_preserves_executable_and_remaining_arguments
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: tests::dictionary_failure_retains_underlying_cause
   - package: cargo-unique-target-names
     target: bin:cargo-unique-target-names
     test: tests::campaign_regression_main_preserves_a_rejected_invocations_nonzero_exit_code
@@ -257788,6 +258012,8 @@ generalized:
     target: test:toml_mit
   - package: cargo-heather
     target: toml_mit
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
   - package: cargo-unique-target-names
     target: bin:cargo-unique-target-names
   - package: cargo-unique-target-names
@@ -435927,17 +436153,533 @@ generalized:
       measuredMs: 136900
       samples: 104
       order: 54
+  - file: crates/cargo-spellcheck-helper/src/main.rs
+    item: command_args
+    candidates:
+    - candidate: 11325
+      seeds: 1
+      hits: 31
+      misses: 1
+      measuredMs: 73859
+      samples: 32
+      order: 2
+    - candidate: 11326
+      seeds: 1
+      hits: 2
+      misses: 0
+      measuredMs: 4616
+      samples: 2
+      order: 13
+  - file: crates/cargo-spellcheck-helper/src/main.rs
+    item: run_with
+    candidates:
+    - candidate: 11327
+      seeds: 1
+      hits: 2
+      misses: 0
+      measuredMs: 4197
+      samples: 2
+      order: 1
+  - file: crates/cargo-spellcheck-helper/src/source_deps/library.rs
+    item: check_link_requirements
+    candidates:
+    - candidate: 11294
+      seeds: 1
+      hits: 83
+      misses: 20
+      measuredMs: 248948
+      samples: 103
+      order: 2
+    - candidate: 11302
+      seeds: 1
+      hits: 2
+      misses: 15
+      measuredMs: 38849
+      samples: 17
+      order: 13
+    - candidate: 11305
+      seeds: 1
+      hits: 14
+      misses: 9
+      measuredMs: 47814
+      samples: 23
+      order: 43
+    - candidate: 11313
+      seeds: 1
+      hits: 2
+      misses: 8
+      measuredMs: 16403
+      samples: 10
+      order: 72
+    - candidate: 11320
+      seeds: 1
+      hits: 20
+      misses: 10
+      measuredMs: 69328
+      samples: 30
+      order: 104
+    - candidate: 11324
+      seeds: 1
+      hits: 6
+      misses: 0
+      measuredMs: 13554
+      samples: 6
+      order: 193
+    - candidate: 11323
+      seeds: 1
+      hits: 4
+      misses: 0
+      measuredMs: 9135
+      samples: 4
+      order: 201
+    - candidate: 11322
+      seeds: 1
+      hits: 2
+      misses: 0
+      measuredMs: 4654
+      samples: 2
+      order: 205
+  - file: crates/cargo-spellcheck-helper/src/source_deps/library.rs
+    item: normalized_path
+    candidates:
+    - candidate: 11294
+      seeds: 1
+      hits: 17
+      misses: 7
+      measuredMs: 58110
+      samples: 24
+      order: 4
+    - candidate: 11319
+      seeds: 1
+      hits: 26
+      misses: 0
+      measuredMs: 59019
+      samples: 26
+      order: 18
+  - file: crates/cargo-spellcheck-helper/src/source_deps/library.rs
+    item: validate
+    candidates:
+    - candidate: 11294
+      seeds: 1
+      hits: 137
+      misses: 60
+      measuredMs: 460039
+      samples: 197
+      order: 1
+    - candidate: 11303
+      seeds: 1
+      hits: 2
+      misses: 12
+      measuredMs: 32527
+      samples: 14
+      order: 9
+    - candidate: 11296
+      seeds: 1
+      hits: 113
+      misses: 37
+      measuredMs: 350164
+      samples: 150
+      order: 11
+    - candidate: 11310
+      seeds: 1
+      hits: 16
+      misses: 18
+      measuredMs: 78429
+      samples: 34
+      order: 91
+    - candidate: 11304
+      seeds: 1
+      hits: 2
+      misses: 3
+      measuredMs: 11039
+      samples: 5
+      order: 125
+    - candidate: 11311
+      seeds: 1
+      hits: 52
+      misses: 2
+      measuredMs: 123410
+      samples: 54
+      order: 127
+    - candidate: 11312
+      seeds: 1
+      hits: 4
+      misses: 0
+      measuredMs: 9004
+      samples: 4
+      order: 188
+  - file: crates/cargo-spellcheck-helper/src/source_deps/library.rs
+    item: version
+    candidates:
+    - candidate: 11317
+      seeds: 1
+      hits: 23
+      misses: 1
+      measuredMs: 53708
+      samples: 24
+      order: 3
+    - candidate: 11318
+      seeds: 1
+      hits: 2
+      misses: 0
+      measuredMs: 4362
+      samples: 2
+      order: 16
+  - file: crates/cargo-spellcheck-helper/src/source_deps/library.rs
+    item: word
+    candidates:
+    - candidate: 11294
+      seeds: 1
+      hits: 56
+      misses: 1
+      measuredMs: 138649
+      samples: 57
+      order: 5
+    - candidate: 11304
+      seeds: 1
+      hits: 2
+      misses: 0
+      measuredMs: 4548
+      samples: 2
+      order: 21
+  - file: crates/cargo-spellcheck-helper/src/source_deps.rs
+    item: Target::parse
+    candidates:
+    - candidate: 11294
+      seeds: 1
+      hits: 38
+      misses: 28
+      measuredMs: 151960
+      samples: 66
+      order: 1
+    - candidate: 11290
+      seeds: 1
+      hits: 23
+      misses: 29
+      measuredMs: 121664
+      samples: 52
+      order: 12
+    - candidate: 11297
+      seeds: 1
+      hits: 5
+      misses: 21
+      measuredMs: 62214
+      samples: 26
+      order: 51
+    - candidate: 11316
+      seeds: 1
+      hits: 55
+      misses: 0
+      measuredMs: 124574
+      samples: 55
+      order: 76
+  - file: crates/cargo-spellcheck-helper/src/source_deps.rs
+    item: append_optional_paths
+    candidates:
+    - candidate: 11290
+      seeds: 1
+      hits: 1
+      misses: 4
+      measuredMs: 9257
+      samples: 5
+      order: 322
+    - candidate: 11295
+      seeds: 1
+      hits: 8
+      misses: 1
+      measuredMs: 17298
+      samples: 9
+      order: 325
+    - candidate: 11309
+      seeds: 1
+      hits: 2
+      misses: 0
+      measuredMs: 2267
+      samples: 2
+      order: 326
+  - file: crates/cargo-spellcheck-helper/src/source_deps.rs
+    item: check_environment
+    candidates:
+    - candidate: 11290
+      seeds: 1
+      hits: 53
+      misses: 25
+      measuredMs: 171581
+      samples: 78
+      order: 3
+    - candidate: 11293
+      seeds: 1
+      hits: 17
+      misses: 17
+      measuredMs: 73427
+      samples: 34
+      order: 13
+    - candidate: 11288
+      seeds: 1
+      hits: 15
+      misses: 9
+      measuredMs: 50627
+      samples: 24
+      order: 263
+    - candidate: 11289
+      seeds: 1
+      hits: 1
+      misses: 0
+      measuredMs: 2146
+      samples: 1
+      order: 287
+    - candidate: 11292
+      seeds: 1
+      hits: 3
+      misses: 0
+      measuredMs: 6337
+      samples: 3
+      order: 294
+    - candidate: 11291
+      seeds: 1
+      hits: 1
+      misses: 0
+      measuredMs: 2133
+      samples: 1
+      order: 300
+  - file: crates/cargo-spellcheck-helper/src/source_deps.rs
+    item: check_with
+    candidates:
+    - candidate: 11290
+      seeds: 1
+      hits: 5
+      misses: 3
+      measuredMs: 21933
+      samples: 8
+      order: 9
+    - candidate: 11324
+      seeds: 1
+      hits: 2
+      misses: 2
+      measuredMs: 10767
+      samples: 4
+      order: 25
+    - candidate: 11314
+      seeds: 1
+      hits: 2
+      misses: 1
+      measuredMs: 7601
+      samples: 3
+      order: 47
+    - candidate: 11302
+      seeds: 1
+      hits: 2
+      misses: 0
+      measuredMs: 4536
+      samples: 2
+      order: 64
+  - file: crates/cargo-spellcheck-helper/src/source_deps.rs
+    item: directory_patterns
+    candidates:
+    - candidate: 11307
+      seeds: 1
+      hits: 2
+      misses: 2
+      measuredMs: 9834
+      samples: 4
+      order: 6
+    - candidate: 11321
+      seeds: 1
+      hits: 8
+      misses: 0
+      measuredMs: 19129
+      samples: 8
+      order: 15
+  - file: crates/cargo-spellcheck-helper/src/source_deps.rs
+    item: find_libclang
+    candidates:
+    - candidate: 11297
+      seeds: 1
+      hits: 32
+      misses: 52
+      measuredMs: 200581
+      samples: 84
+      order: 2
+    - candidate: 11298
+      seeds: 1
+      hits: 23
+      misses: 27
+      measuredMs: 112147
+      samples: 50
+      order: 16
+    - candidate: 11301
+      seeds: 1
+      hits: 12
+      misses: 16
+      measuredMs: 54958
+      samples: 28
+      order: 153
+    - candidate: 11317
+      seeds: 1
+      hits: 12
+      misses: 22
+      measuredMs: 73279
+      samples: 34
+      order: 155
+    - candidate: 11299
+      seeds: 1
+      hits: 8
+      misses: 20
+      measuredMs: 59373
+      samples: 28
+      order: 156
+    - candidate: 11295
+      seeds: 1
+      hits: 18
+      misses: 0
+      measuredMs: 30005
+      samples: 18
+      order: 272
+    - candidate: 11290
+      seeds: 1
+      hits: 25
+      misses: 14
+      measuredMs: 82646
+      samples: 39
+      order: 280
+  - file: crates/cargo-spellcheck-helper/src/source_deps.rs
+    item: installation_target
+    candidates:
+    - candidate: 11293
+      seeds: 1
+      hits: 5
+      misses: 6
+      measuredMs: 27766
+      samples: 11
+      order: 8
+    - candidate: 11315
+      seeds: 1
+      hits: 4
+      misses: 2
+      measuredMs: 15207
+      samples: 6
+      order: 18
+  - file: crates/cargo-spellcheck-helper/src/source_deps.rs
+    item: optional_directory_command
+    candidates:
+    - candidate: 11290
+      seeds: 1
+      hits: 14
+      misses: 4
+      measuredMs: 41645
+      samples: 18
+      order: 4
+    - candidate: 11299
+      seeds: 1
+      hits: 5
+      misses: 2
+      measuredMs: 15725
+      samples: 7
+      order: 21
+    - candidate: 11308
+      seeds: 1
+      hits: 5
+      misses: 0
+      measuredMs: 11439
+      samples: 5
+      order: 49
+  - file: crates/cargo-spellcheck-helper/src/source_deps.rs
+    item: search_directory
+    candidates:
+    - candidate: 11290
+      seeds: 1
+      hits: 11
+      misses: 18
+      measuredMs: 68066
+      samples: 29
+      order: 7
+    - candidate: 11297
+      seeds: 1
+      hits: 8
+      misses: 9
+      measuredMs: 40076
+      samples: 17
+      order: 17
+    - candidate: 11295
+      seeds: 1
+      hits: 14
+      misses: 0
+      measuredMs: 24927
+      samples: 14
+      order: 330
+    - candidate: 11294
+      seeds: 1
+      hits: 1
+      misses: 0
+      measuredMs: 2103
+      samples: 1
+      order: 338
+  - file: crates/cargo-spellcheck-helper/src/source_deps.rs
+    item: search_files
+    candidates:
+    - candidate: 11290
+      seeds: 1
+      hits: 5
+      misses: 8
+      measuredMs: 30699
+      samples: 13
+      order: 5
+    - candidate: 11306
+      seeds: 1
+      hits: 2
+      misses: 4
+      measuredMs: 14095
+      samples: 6
+      order: 14
+    - candidate: 11297
+      seeds: 1
+      hits: 0
+      misses: 4
+      measuredMs: 9634
+      samples: 4
+      order: 32
+    - candidate: 11294
+      seeds: 1
+      hits: 14
+      misses: 3
+      measuredMs: 31116
+      samples: 17
+      order: 54
+    - candidate: 11300
+      seeds: 1
+      hits: 5
+      misses: 1
+      measuredMs: 10271
+      samples: 6
+      order: 73
+    - candidate: 11295
+      seeds: 1
+      hits: 1
+      misses: 0
+      measuredMs: 1904
+      samples: 1
+      order: 269
+  - file: crates/cargo-spellcheck-helper/src/source_deps.rs
+    item: version_host
+    candidates:
+    - candidate: 11288
+      seeds: 1
+      hits: 7
+      misses: 0
+      measuredMs: 15545
+      samples: 7
+      order: 323
   - file: crates/cargo-unique-target-names/src/collisions.rs
     item: Collision::render
     candidates:
-    - candidate: 11290
+    - candidate: 11330
       seeds: 1
       hits: 11
       misses: 0
       measuredMs: 3548
       samples: 11
       order: 2
-    - candidate: 11309
+    - candidate: 11349
       seeds: 1
       hits: 251
       misses: 0
@@ -435947,14 +436689,14 @@ generalized:
   - file: crates/cargo-unique-target-names/src/collisions.rs
     item: Family::artifacts
     candidates:
-    - candidate: 11289
+    - candidate: 11329
       seeds: 1
       hits: 0
       misses: 0
       measuredMs: 0
       samples: 0
       order: 22
-    - candidate: 11308
+    - candidate: 11348
       seeds: 1
       hits: 20
       misses: 0
@@ -435964,49 +436706,49 @@ generalized:
   - file: crates/cargo-unique-target-names/src/collisions.rs
     item: Family::label
     candidates:
-    - candidate: 11296
+    - candidate: 11336
       seeds: 1
       hits: 5
       misses: 3
       measuredMs: 12769
       samples: 8
       order: 4
-    - candidate: 11298
+    - candidate: 11338
       seeds: 1
       hits: 1
       misses: 3
       measuredMs: 3570
       samples: 4
       order: 27
-    - candidate: 11300
+    - candidate: 11340
       seeds: 1
       hits: 1
       misses: 0
       measuredMs: 1720
       samples: 1
       order: 31
-    - candidate: 11318
+    - candidate: 11358
       seeds: 1
       hits: 41
       misses: 0
       measuredMs: 84233
       samples: 41
       order: 89
-    - candidate: 11316
+    - candidate: 11356
       seeds: 1
       hits: 41
       misses: 0
       measuredMs: 89712
       samples: 41
       order: 91
-    - candidate: 11319
+    - candidate: 11359
       seeds: 1
       hits: 41
       misses: 0
       measuredMs: 82692
       samples: 41
       order: 93
-    - candidate: 11306
+    - candidate: 11346
       seeds: 1
       hits: 83
       misses: 0
@@ -436016,14 +436758,14 @@ generalized:
   - file: crates/cargo-unique-target-names/src/collisions.rs
     item: Family::of
     candidates:
-    - candidate: 11291
+    - candidate: 11331
       seeds: 1
       hits: 8
       misses: 0
       measuredMs: 3315
       samples: 8
       order: 7
-    - candidate: 11310
+    - candidate: 11350
       seeds: 1
       hits: 188
       misses: 0
@@ -436033,14 +436775,14 @@ generalized:
   - file: crates/cargo-unique-target-names/src/collisions.rs
     item: collect_target_owners
     candidates:
-    - candidate: 11317
+    - candidate: 11357
       seeds: 1
       hits: 41
       misses: 0
       measuredMs: 67815
       samples: 41
       order: 99
-    - candidate: 11306
+    - candidate: 11346
       seeds: 1
       hits: 209
       misses: 0
@@ -436050,14 +436792,14 @@ generalized:
   - file: crates/cargo-unique-target-names/src/collisions.rs
     item: crate_name
     candidates:
-    - candidate: 11289
+    - candidate: 11329
       seeds: 1
       hits: 5
       misses: 0
       measuredMs: 1992
       samples: 5
       order: 10
-    - candidate: 11308
+    - candidate: 11348
       seeds: 1
       hits: 125
       misses: 0
@@ -436067,28 +436809,28 @@ generalized:
   - file: crates/cargo-unique-target-names/src/collisions.rs
     item: directory
     candidates:
-    - candidate: 11296
+    - candidate: 11336
       seeds: 1
       hits: 5
       misses: 2
       measuredMs: 9890
       samples: 7
       order: 6
-    - candidate: 11299
+    - candidate: 11339
       seeds: 1
       hits: 2
       misses: 2
       measuredMs: 5360
       samples: 4
       order: 58
-    - candidate: 11307
+    - candidate: 11347
       seeds: 1
       hits: 146
       misses: 0
       measuredMs: 161631
       samples: 146
       order: 160
-    - candidate: 11306
+    - candidate: 11346
       seeds: 1
       hits: 62
       misses: 0
@@ -436098,35 +436840,35 @@ generalized:
   - file: crates/cargo-unique-target-names/src/collisions.rs
     item: find
     candidates:
-    - candidate: 11293
+    - candidate: 11333
       seeds: 1
       hits: 3
       misses: 12
       measuredMs: 15457
       samples: 15
       order: 1
-    - candidate: 11292
+    - candidate: 11332
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 1661
       samples: 2
       order: 76
-    - candidate: 11297
+    - candidate: 11337
       seeds: 1
       hits: 7
       misses: 5
       measuredMs: 10373
       samples: 12
       order: 88
-    - candidate: 11312
+    - candidate: 11352
       seeds: 1
       hits: 167
       misses: 0
       measuredMs: 323418
       samples: 167
       order: 111
-    - candidate: 11311
+    - candidate: 11351
       seeds: 1
       hits: 125
       misses: 0
@@ -436136,21 +436878,21 @@ generalized:
   - file: crates/cargo-unique-target-names/src/collisions.rs
     item: is_hashed
     candidates:
-    - candidate: 11292
+    - candidate: 11332
       seeds: 1
       hits: 1
       misses: 1
       measuredMs: 2240
       samples: 2
       order: 13
-    - candidate: 11293
+    - candidate: 11333
       seeds: 1
       hits: 0
       misses: 0
       measuredMs: 0
       samples: 0
       order: 43
-    - candidate: 11306
+    - candidate: 11346
       seeds: 1
       hits: 62
       misses: 0
@@ -436160,14 +436902,14 @@ generalized:
   - file: crates/cargo-unique-target-names/src/collisions.rs
     item: kind_key
     candidates:
-    - candidate: 11297
+    - candidate: 11337
       seeds: 1
       hits: 1
       misses: 2
       measuredMs: 2419
       samples: 3
       order: 12
-    - candidate: 11307
+    - candidate: 11347
       seeds: 1
       hits: 83
       misses: 0
@@ -436177,28 +436919,28 @@ generalized:
   - file: crates/cargo-unique-target-names/src/collisions.rs
     item: label
     candidates:
-    - candidate: 11296
+    - candidate: 11336
       seeds: 1
       hits: 3
       misses: 2
       measuredMs: 6037
       samples: 5
       order: 9
-    - candidate: 11301
+    - candidate: 11341
       seeds: 1
       hits: 2
       misses: 1
       measuredMs: 3543
       samples: 3
       order: 69
-    - candidate: 11306
+    - candidate: 11346
       seeds: 1
       hits: 83
       misses: 0
       measuredMs: 95642
       samples: 83
       order: 170
-    - candidate: 11307
+    - candidate: 11347
       seeds: 1
       hits: 83
       misses: 0
@@ -436208,21 +436950,21 @@ generalized:
   - file: crates/cargo-unique-target-names/src/lib.rs
     item: Outcome::render
     candidates:
-    - candidate: 11292
+    - candidate: 11332
       seeds: 1
       hits: 3
       misses: 2
       measuredMs: 8264
       samples: 5
       order: 1
-    - candidate: 11311
+    - candidate: 11351
       seeds: 1
       hits: 41
       misses: 0
       measuredMs: 81956
       samples: 41
       order: 16
-    - candidate: 11305
+    - candidate: 11345
       seeds: 1
       hits: 83
       misses: 0
@@ -436232,28 +436974,28 @@ generalized:
   - file: crates/cargo-unique-target-names/src/lib.rs
     item: check
     candidates:
-    - candidate: 11293
+    - candidate: 11333
       seeds: 1
       hits: 2
       misses: 2
       measuredMs: 4626
       samples: 4
       order: 2
-    - candidate: 11292
+    - candidate: 11332
       seeds: 1
       hits: 1
       misses: 1
       measuredMs: 3255
       samples: 2
       order: 12
-    - candidate: 11312
+    - candidate: 11352
       seeds: 1
       hits: 62
       misses: 0
       measuredMs: 122097
       samples: 62
       order: 22
-    - candidate: 11311
+    - candidate: 11351
       seeds: 1
       hits: 20
       misses: 0
@@ -436263,7 +437005,7 @@ generalized:
   - file: crates/cargo-unique-target-names/src/lib.rs
     item: metadata_command
     candidates:
-    - candidate: 11304
+    - candidate: 11344
       seeds: 1
       hits: 74
       misses: 0
@@ -436273,35 +437015,35 @@ generalized:
   - file: crates/cargo-unique-target-names/src/lib.rs
     item: run
     candidates:
-    - candidate: 11294
+    - candidate: 11334
       seeds: 1
       hits: 1
       misses: 4
       measuredMs: 1335
       samples: 5
       order: 3
-    - candidate: 11295
+    - candidate: 11335
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 458
       samples: 2
       order: 15
-    - candidate: 11315
+    - candidate: 11355
       seeds: 1
       hits: 0
       misses: 3
       measuredMs: 1324
       samples: 3
       order: 26
-    - candidate: 11313
+    - candidate: 11353
       seeds: 1
       hits: 1
       misses: 3
       measuredMs: 2840
       samples: 4
       order: 27
-    - candidate: 11314
+    - candidate: 11354
       seeds: 1
       hits: 0
       misses: 3
@@ -436311,21 +437053,21 @@ generalized:
   - file: crates/cargo-unique-target-names/src/lib.rs
     item: run_with
     candidates:
-    - candidate: 11315
+    - candidate: 11355
       seeds: 1
       hits: 79
       misses: 5
       measuredMs: 96302
       samples: 84
       order: 45
-    - candidate: 11302
+    - candidate: 11342
       seeds: 1
       hits: 59
       misses: 2
       measuredMs: 74945
       samples: 61
       order: 50
-    - candidate: 11303
+    - candidate: 11343
       seeds: 1
       hits: 39
       misses: 0
@@ -436335,7 +437077,7 @@ generalized:
   - file: crates/cargo-unique-target-names/src/main.rs
     item: main
     candidates:
-    - candidate: 11288
+    - candidate: 11328
       seeds: 1
       hits: 10
       misses: 0
@@ -436345,21 +437087,21 @@ generalized:
   - file: crates/cargo-unused-deps/src/detect.rs
     item: Declared::extern_name
     candidates:
-    - candidate: 11363
+    - candidate: 11403
       seeds: 1
       hits: 1
       misses: 4
       measuredMs: 22225
       samples: 5
       order: 112
-    - candidate: 11386
+    - candidate: 11426
       seeds: 1
       hits: 0
       misses: 1
       measuredMs: 4989
       samples: 1
       order: 119
-    - candidate: 11416
+    - candidate: 11456
       seeds: 1
       hits: 125
       misses: 0
@@ -436369,28 +437111,28 @@ generalized:
   - file: crates/cargo-unused-deps/src/detect.rs
     item: allowed_names
     candidates:
-    - candidate: 11320
+    - candidate: 11360
       seeds: 1
       hits: 7
       misses: 1
       measuredMs: 2570
       samples: 8
       order: 111
-    - candidate: 11395
+    - candidate: 11435
       seeds: 1
       hits: 0
       misses: 0
       measuredMs: 0
       samples: 0
       order: 196
-    - candidate: 11413
+    - candidate: 11453
       seeds: 1
       hits: 167
       misses: 0
       measuredMs: 207363
       samples: 167
       order: 371
-    - candidate: 11476
+    - candidate: 11516
       seeds: 1
       hits: 20
       misses: 0
@@ -436400,21 +437142,21 @@ generalized:
   - file: crates/cargo-unused-deps/src/detect.rs
     item: array_of
     candidates:
-    - candidate: 11394
+    - candidate: 11434
       seeds: 1
       hits: 1
       misses: 2
       measuredMs: 1814
       samples: 3
       order: 36
-    - candidate: 11320
+    - candidate: 11360
       seeds: 1
       hits: 3
       misses: 0
       measuredMs: 1035
       samples: 3
       order: 98
-    - candidate: 11413
+    - candidate: 11453
       seeds: 1
       hits: 83
       misses: 0
@@ -436424,35 +437166,35 @@ generalized:
   - file: crates/cargo-unused-deps/src/detect.rs
     item: catalog
     candidates:
-    - candidate: 11391
+    - candidate: 11431
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 799
       samples: 2
       order: 2
-    - candidate: 11394
+    - candidate: 11434
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 674
       samples: 2
       order: 26
-    - candidate: 11395
+    - candidate: 11435
       seeds: 1
       hits: 8
       misses: 5
       measuredMs: 8555
       samples: 13
       order: 35
-    - candidate: 11320
+    - candidate: 11360
       seeds: 1
       hits: 14
       misses: 1
       measuredMs: 5548
       samples: 15
       order: 95
-    - candidate: 11413
+    - candidate: 11453
       seeds: 1
       hits: 209
       misses: 0
@@ -436462,28 +437204,28 @@ generalized:
   - file: crates/cargo-unused-deps/src/detect.rs
     item: collect_declared
     candidates:
-    - candidate: 11321
+    - candidate: 11361
       seeds: 1
       hits: 3
       misses: 2
       measuredMs: 1238
       samples: 5
       order: 106
-    - candidate: 11322
+    - candidate: 11362
       seeds: 1
       hits: 7
       misses: 0
       measuredMs: 2461
       samples: 7
       order: 139
-    - candidate: 11414
+    - candidate: 11454
       seeds: 1
       hits: 83
       misses: 0
       measuredMs: 104050
       samples: 83
       order: 304
-    - candidate: 11415
+    - candidate: 11455
       seeds: 1
       hits: 167
       misses: 0
@@ -436493,28 +437235,28 @@ generalized:
   - file: crates/cargo-unused-deps/src/detect.rs
     item: collect_from_dep_table
     candidates:
-    - candidate: 11398
+    - candidate: 11438
       seeds: 1
       hits: 17
       misses: 3
       measuredMs: 15489
       samples: 20
       order: 8
-    - candidate: 11391
+    - candidate: 11431
       seeds: 1
       hits: 4
       misses: 2
       measuredMs: 4046
       samples: 6
       order: 48
-    - candidate: 11508
+    - candidate: 11548
       seeds: 1
       hits: 20
       misses: 0
       measuredMs: 21515
       samples: 20
       order: 276
-    - candidate: 11417
+    - candidate: 11457
       seeds: 1
       hits: 125
       misses: 0
@@ -436524,28 +437266,28 @@ generalized:
   - file: crates/cargo-unused-deps/src/detect.rs
     item: collect_inherited
     candidates:
-    - candidate: 11398
+    - candidate: 11438
       seeds: 1
       hits: 2
       misses: 4
       measuredMs: 3337
       samples: 6
       order: 6
-    - candidate: 11410
+    - candidate: 11450
       seeds: 1
       hits: 15
       misses: 2
       measuredMs: 12355
       samples: 17
       order: 41
-    - candidate: 11526
+    - candidate: 11566
       seeds: 1
       hits: 83
       misses: 0
       measuredMs: 103611
       samples: 83
       order: 269
-    - candidate: 11417
+    - candidate: 11457
       seeds: 1
       hits: 62
       misses: 0
@@ -436555,35 +437297,35 @@ generalized:
   - file: crates/cargo-unused-deps/src/detect.rs
     item: declared_dependencies
     candidates:
-    - candidate: 11321
+    - candidate: 11361
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 450
       samples: 2
       order: 103
-    - candidate: 11322
+    - candidate: 11362
       seeds: 1
       hits: 3
       misses: 9
       measuredMs: 2449
       samples: 12
       order: 121
-    - candidate: 11415
+    - candidate: 11455
       seeds: 1
       hits: 62
       misses: 0
       measuredMs: 71633
       samples: 62
       order: 294
-    - candidate: 11414
+    - candidate: 11454
       seeds: 1
       hits: 125
       misses: 0
       measuredMs: 148941
       samples: 125
       order: 297
-    - candidate: 11416
+    - candidate: 11456
       seeds: 1
       hits: 20
       misses: 0
@@ -436593,14 +437335,14 @@ generalized:
   - file: crates/cargo-unused-deps/src/detect.rs
     item: feature_dependency
     candidates:
-    - candidate: 11322
+    - candidate: 11362
       seeds: 1
       hits: 9
       misses: 0
       measuredMs: 2881
       samples: 9
       order: 109
-    - candidate: 11415
+    - candidate: 11455
       seeds: 1
       hits: 209
       misses: 0
@@ -436610,35 +437352,35 @@ generalized:
   - file: crates/cargo-unused-deps/src/detect.rs
     item: feature_references
     candidates:
-    - candidate: 11322
+    - candidate: 11362
       seeds: 1
       hits: 13
       misses: 4
       measuredMs: 5303
       samples: 17
       order: 101
-    - candidate: 11386
+    - candidate: 11426
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 12090
       samples: 2
       order: 158
-    - candidate: 11415
+    - candidate: 11455
       seeds: 1
       hits: 293
       misses: 3
       measuredMs: 373993
       samples: 296
       order: 316
-    - candidate: 11412
+    - candidate: 11452
       seeds: 1
       hits: 20
       misses: 3
       measuredMs: 25365
       samples: 23
       order: 328
-    - candidate: 11419
+    - candidate: 11459
       seeds: 1
       hits: 18
       misses: 0
@@ -436648,49 +437390,49 @@ generalized:
   - file: crates/cargo-unused-deps/src/detect.rs
     item: inherited
     candidates:
-    - candidate: 11398
+    - candidate: 11438
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 1940
       samples: 2
       order: 14
-    - candidate: 11323
+    - candidate: 11363
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 806
       samples: 2
       order: 79
-    - candidate: 11324
+    - candidate: 11364
       seeds: 1
       hits: 1
       misses: 3
       measuredMs: 1347
       samples: 4
       order: 97
-    - candidate: 11389
+    - candidate: 11429
       seeds: 1
       hits: 2
       misses: 0
       measuredMs: 13331
       samples: 2
       order: 201
-    - candidate: 11507
+    - candidate: 11547
       seeds: 1
       hits: 62
       misses: 0
       measuredMs: 240515
       samples: 62
       order: 245
-    - candidate: 11418
+    - candidate: 11458
       seeds: 1
       hits: 41
       misses: 0
       measuredMs: 53392
       samples: 41
       order: 248
-    - candidate: 11417
+    - candidate: 11457
       seeds: 1
       hits: 62
       misses: 0
@@ -436700,28 +437442,28 @@ generalized:
   - file: crates/cargo-unused-deps/src/detect.rs
     item: inherits_from_workspace
     candidates:
-    - candidate: 11398
+    - candidate: 11438
       seeds: 1
       hits: 11
       misses: 5
       measuredMs: 10785
       samples: 16
       order: 10
-    - candidate: 11391
+    - candidate: 11431
       seeds: 1
       hits: 5
       misses: 4
       measuredMs: 6119
       samples: 9
       order: 53
-    - candidate: 11508
+    - candidate: 11548
       seeds: 1
       hits: 20
       misses: 0
       measuredMs: 24463
       samples: 20
       order: 283
-    - candidate: 11417
+    - candidate: 11457
       seeds: 1
       hits: 83
       misses: 0
@@ -436731,14 +437473,14 @@ generalized:
   - file: crates/cargo-unused-deps/src/detect.rs
     item: is_optional
     candidates:
-    - candidate: 11322
+    - candidate: 11362
       seeds: 1
       hits: 5
       misses: 0
       measuredMs: 1561
       samples: 5
       order: 113
-    - candidate: 11415
+    - candidate: 11455
       seeds: 1
       hits: 125
       misses: 0
@@ -436748,14 +437490,14 @@ generalized:
   - file: crates/cargo-unused-deps/src/detect.rs
     item: package_allowed
     candidates:
-    - candidate: 11384
+    - candidate: 11424
       seeds: 1
       hits: 8
       misses: 0
       measuredMs: 63202
       samples: 8
       order: 110
-    - candidate: 11476
+    - candidate: 11516
       seeds: 1
       hits: 188
       misses: 0
@@ -436765,14 +437507,14 @@ generalized:
   - file: crates/cargo-unused-deps/src/detect.rs
     item: parse_manifest
     candidates:
-    - candidate: 11391
+    - candidate: 11431
       seeds: 1
       hits: 1
       misses: 0
       measuredMs: 668
       samples: 1
       order: 18
-    - candidate: 11413
+    - candidate: 11453
       seeds: 1
       hits: 11
       misses: 0
@@ -436782,84 +437524,84 @@ generalized:
   - file: crates/cargo-unused-deps/src/detect.rs
     item: partition
     candidates:
-    - candidate: 11391
+    - candidate: 11431
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 977
       samples: 2
       order: 4
-    - candidate: 11395
+    - candidate: 11435
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 753
       samples: 2
       order: 78
-    - candidate: 11398
+    - candidate: 11438
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 770
       samples: 2
       order: 82
-    - candidate: 11406
+    - candidate: 11446
       seeds: 1
       hits: 10
       misses: 3
       measuredMs: 11808
       samples: 13
       order: 92
-    - candidate: 11407
+    - candidate: 11447
       seeds: 1
       hits: 29
       misses: 3
       measuredMs: 23996
       samples: 32
       order: 94
-    - candidate: 11389
+    - candidate: 11429
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 6450
       samples: 2
       order: 213
-    - candidate: 11353
+    - candidate: 11393
       seeds: 1
       hits: 1
       misses: 1
       measuredMs: 876
       samples: 2
       order: 244
-    - candidate: 11507
+    - candidate: 11547
       seeds: 1
       hits: 20
       misses: 0
       measuredMs: 96399
       samples: 20
       order: 253
-    - candidate: 11522
+    - candidate: 11562
       seeds: 1
       hits: 56
       misses: 0
       measuredMs: 94621
       samples: 56
       order: 254
-    - candidate: 11508
+    - candidate: 11548
       seeds: 1
       hits: 95
       misses: 0
       measuredMs: 126756
       samples: 95
       order: 255
-    - candidate: 11523
+    - candidate: 11563
       seeds: 1
       hits: 83
       misses: 0
       measuredMs: 123095
       samples: 83
       order: 260
-    - candidate: 11481
+    - candidate: 11521
       seeds: 1
       hits: 77
       misses: 0
@@ -436869,14 +437611,14 @@ generalized:
   - file: crates/cargo-unused-deps/src/detect.rs
     item: read_manifest
     candidates:
-    - candidate: 11393
+    - candidate: 11433
       seeds: 1
       hits: 0
       misses: 1
       measuredMs: 393
       samples: 1
       order: 117
-    - candidate: 11467
+    - candidate: 11507
       seeds: 1
       hits: 32
       misses: 0
@@ -436886,21 +437628,21 @@ generalized:
   - file: crates/cargo-unused-deps/src/detect.rs
     item: read_manifest_text
     candidates:
-    - candidate: 11391
+    - candidate: 11431
       seeds: 1
       hits: 6
       misses: 0
       measuredMs: 4136
       samples: 6
       order: 12
-    - candidate: 11417
+    - candidate: 11457
       seeds: 1
       hits: 23
       misses: 0
       measuredMs: 34304
       samples: 23
       order: 347
-    - candidate: 11508
+    - candidate: 11548
       seeds: 1
       hits: 17
       misses: 0
@@ -436910,14 +437652,14 @@ generalized:
   - file: crates/cargo-unused-deps/src/doctests.rs
     item: DoctestEvidence::insert
     candidates:
-    - candidate: 11328
+    - candidate: 11368
       seeds: 1
       hits: 2
       misses: 0
       measuredMs: 798
       samples: 2
       order: 12
-    - candidate: 11430
+    - candidate: 11470
       seeds: 1
       hits: 62
       misses: 0
@@ -436927,14 +437669,14 @@ generalized:
   - file: crates/cargo-unused-deps/src/doctests.rs
     item: DoctestEvidence::used
     candidates:
-    - candidate: 11328
+    - candidate: 11368
       seeds: 1
       hits: 4
       misses: 0
       measuredMs: 1700
       samples: 4
       order: 10
-    - candidate: 11430
+    - candidate: 11470
       seeds: 1
       hits: 104
       misses: 0
@@ -436944,14 +437686,14 @@ generalized:
   - file: crates/cargo-unused-deps/src/doctests.rs
     item: capture_compiler_output
     candidates:
-    - candidate: 11496
+    - candidate: 11536
       seeds: 1
       hits: 20
       misses: 0
       measuredMs: 133943
       samples: 20
       order: 176
-    - candidate: 11425
+    - candidate: 11465
       seeds: 1
       hits: 200
       misses: 0
@@ -436961,21 +437703,21 @@ generalized:
   - file: crates/cargo-unused-deps/src/doctests.rs
     item: clear_capture
     candidates:
-    - candidate: 11331
+    - candidate: 11371
       seeds: 1
       hits: 3
       misses: 1
       measuredMs: 1276
       samples: 4
       order: 11
-    - candidate: 11436
+    - candidate: 11476
       seeds: 1
       hits: 74
       misses: 0
       measuredMs: 93241
       samples: 74
       order: 371
-    - candidate: 11422
+    - candidate: 11462
       seeds: 1
       hits: 29
       misses: 0
@@ -436985,7 +437727,7 @@ generalized:
   - file: crates/cargo-unused-deps/src/doctests.rs
     item: create_capture
     candidates:
-    - candidate: 11421
+    - candidate: 11461
       seeds: 1
       hits: 41
       misses: 0
@@ -436995,35 +437737,35 @@ generalized:
   - file: crates/cargo-unused-deps/src/doctests.rs
     item: gather_package
     candidates:
-    - candidate: 11371
+    - candidate: 11411
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 8000
       samples: 2
       order: 2
-    - candidate: 11366
+    - candidate: 11406
       seeds: 1
       hits: 9
       misses: 10
       measuredMs: 87977
       samples: 19
       order: 124
-    - candidate: 11373
+    - candidate: 11413
       seeds: 1
       hits: 2
       misses: 1
       measuredMs: 17805
       samples: 3
       order: 137
-    - candidate: 11498
+    - candidate: 11538
       seeds: 1
       hits: 0
       misses: 0
       measuredMs: 0
       samples: 0
       order: 211
-    - candidate: 11496
+    - candidate: 11536
       seeds: 1
       hits: 19
       misses: 0
@@ -437033,28 +437775,28 @@ generalized:
   - file: crates/cargo-unused-deps/src/doctests.rs
     item: gather_package_with
     candidates:
-    - candidate: 11498
+    - candidate: 11538
       seeds: 1
       hits: 62
       misses: 1
       measuredMs: 327710
       samples: 63
       order: 212
-    - candidate: 11493
+    - candidate: 11533
       seeds: 1
       hits: 20
       misses: 2
       measuredMs: 163840
       samples: 22
       order: 213
-    - candidate: 11428
+    - candidate: 11468
       seeds: 1
       hits: 482
       misses: 1
       measuredMs: 602092
       samples: 483
       order: 216
-    - candidate: 11429
+    - candidate: 11469
       seeds: 1
       hits: 20
       misses: 0
@@ -437064,14 +437806,14 @@ generalized:
   - file: crates/cargo-unused-deps/src/doctests.rs
     item: next_capture_sequence
     candidates:
-    - candidate: 11423
+    - candidate: 11463
       seeds: 1
       hits: 104
       misses: 0
       measuredMs: 131063
       samples: 104
       order: 315
-    - candidate: 11422
+    - candidate: 11462
       seeds: 1
       hits: 20
       misses: 0
@@ -437081,21 +437823,21 @@ generalized:
   - file: crates/cargo-unused-deps/src/doctests.rs
     item: read_capture_entries
     candidates:
-    - candidate: 11421
+    - candidate: 11461
       seeds: 1
       hits: 41
       misses: 0
       measuredMs: 49794
       samples: 41
       order: 384
-    - candidate: 11422
+    - candidate: 11462
       seeds: 1
       hits: 20
       misses: 0
       measuredMs: 23432
       samples: 20
       order: 386
-    - candidate: 11424
+    - candidate: 11464
       seeds: 1
       hits: 188
       misses: 0
@@ -437105,35 +437847,35 @@ generalized:
   - file: crates/cargo-unused-deps/src/doctests.rs
     item: read_captures
     candidates:
-    - candidate: 11326
+    - candidate: 11366
       seeds: 1
       hits: 12
       misses: 4
       measuredMs: 4429
       samples: 16
       order: 6
-    - candidate: 11325
+    - candidate: 11365
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 379
       samples: 2
       order: 164
-    - candidate: 11424
+    - candidate: 11464
       seeds: 1
       hits: 83
       misses: 0
       measuredMs: 104941
       samples: 83
       order: 378
-    - candidate: 11420
+    - candidate: 11460
       seeds: 1
       hits: 20
       misses: 0
       measuredMs: 25013
       samples: 20
       order: 379
-    - candidate: 11422
+    - candidate: 11462
       seeds: 1
       hits: 20
       misses: 0
@@ -437143,21 +437885,21 @@ generalized:
   - file: crates/cargo-unused-deps/src/doctests.rs
     item: record
     candidates:
-    - candidate: 11326
+    - candidate: 11366
       seeds: 1
       hits: 12
       misses: 2
       measuredMs: 3853
       samples: 14
       order: 8
-    - candidate: 11424
+    - candidate: 11464
       seeds: 1
       hits: 293
       misses: 0
       measuredMs: 405739
       samples: 293
       order: 300
-    - candidate: 11422
+    - candidate: 11462
       seeds: 1
       hits: 20
       misses: 0
@@ -437167,14 +437909,14 @@ generalized:
   - file: crates/cargo-unused-deps/src/doctests.rs
     item: rustdoc_in_sysroot
     candidates:
-    - candidate: 11330
+    - candidate: 11370
       seeds: 1
       hits: 10
       misses: 0
       measuredMs: 3022
       samples: 10
       order: 9
-    - candidate: 11433
+    - candidate: 11473
       seeds: 1
       hits: 221
       misses: 0
@@ -437184,35 +437926,35 @@ generalized:
   - file: crates/cargo-unused-deps/src/doctests.rs
     item: rustdoc_wrapper
     candidates:
-    - candidate: 11371
+    - candidate: 11411
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 9549
       samples: 2
       order: 5
-    - candidate: 11386
+    - candidate: 11426
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 12820
       samples: 2
       order: 71
-    - candidate: 11366
+    - candidate: 11406
       seeds: 1
       hits: 9
       misses: 3
       measuredMs: 93659
       samples: 12
       order: 72
-    - candidate: 11373
+    - candidate: 11413
       seeds: 1
       hits: 1
       misses: 0
       measuredMs: 9101
       samples: 1
       order: 82
-    - candidate: 11498
+    - candidate: 11538
       seeds: 1
       hits: 11
       misses: 0
@@ -437222,21 +437964,21 @@ generalized:
   - file: crates/cargo-unused-deps/src/doctests.rs
     item: rustdoc_wrapper_with
     candidates:
-    - candidate: 11493
+    - candidate: 11533
       seeds: 1
       hits: 41
       misses: 0
       measuredMs: 229068
       samples: 41
       order: 188
-    - candidate: 11498
+    - candidate: 11538
       seeds: 1
       hits: 20
       misses: 0
       measuredMs: 112944
       samples: 20
       order: 189
-    - candidate: 11434
+    - candidate: 11474
       seeds: 1
       hits: 410
       misses: 0
@@ -437246,7 +437988,7 @@ generalized:
   - file: crates/cargo-unused-deps/src/doctests.rs
     item: selected_cargo
     candidates:
-    - candidate: 11435
+    - candidate: 11475
       seeds: 1
       hits: 95
       misses: 0
@@ -437256,7 +437998,7 @@ generalized:
   - file: crates/cargo-unused-deps/src/doctests.rs
     item: selected_rustc
     candidates:
-    - candidate: 11435
+    - candidate: 11475
       seeds: 1
       hits: 95
       misses: 0
@@ -437266,21 +438008,21 @@ generalized:
   - file: crates/cargo-unused-deps/src/doctests.rs
     item: selected_rustdoc
     candidates:
-    - candidate: 11366
+    - candidate: 11406
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 6950
       samples: 2
       order: 7
-    - candidate: 11371
+    - candidate: 11411
       seeds: 1
       hits: 7
       misses: 3
       measuredMs: 72803
       samples: 10
       order: 141
-    - candidate: 11496
+    - candidate: 11536
       seeds: 1
       hits: 11
       misses: 0
@@ -437290,14 +438032,14 @@ generalized:
   - file: crates/cargo-unused-deps/src/doctests.rs
     item: selected_rustdoc_with
     candidates:
-    - candidate: 11496
+    - candidate: 11536
       seeds: 1
       hits: 20
       misses: 0
       measuredMs: 83559
       samples: 20
       order: 241
-    - candidate: 11435
+    - candidate: 11475
       seeds: 1
       hits: 242
       misses: 0
@@ -437307,28 +438049,28 @@ generalized:
   - file: crates/cargo-unused-deps/src/doctests.rs
     item: shim
     candidates:
-    - candidate: 11371
+    - candidate: 11411
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 9224
       samples: 2
       order: 4
-    - candidate: 11373
+    - candidate: 11413
       seeds: 1
       hits: 1
       misses: 0
       measuredMs: 12984
       samples: 1
       order: 33
-    - candidate: 11498
+    - candidate: 11538
       seeds: 1
       hits: 11
       misses: 0
       measuredMs: 64990
       samples: 11
       order: 165
-    - candidate: 11496
+    - candidate: 11536
       seeds: 1
       hits: 209
       misses: 0
@@ -437338,21 +438080,21 @@ generalized:
   - file: crates/cargo-unused-deps/src/doctests.rs
     item: stable_diagnostic_args
     candidates:
-    - candidate: 11327
+    - candidate: 11367
       seeds: 1
       hits: 33
       misses: 3
       measuredMs: 11293
       samples: 36
       order: 1
-    - candidate: 11427
+    - candidate: 11467
       seeds: 1
       hits: 704
       misses: 4
       measuredMs: 948072
       samples: 708
       order: 262
-    - candidate: 11426
+    - candidate: 11466
       seeds: 1
       hits: 83
       misses: 4
@@ -437362,14 +438104,14 @@ generalized:
   - file: crates/cargo-unused-deps/src/doctests.rs
     item: tool_or_default
     candidates:
-    - candidate: 11332
+    - candidate: 11372
       seeds: 1
       hits: 1
       misses: 0
       measuredMs: 364
       samples: 1
       order: 13
-    - candidate: 11437
+    - candidate: 11477
       seeds: 1
       hits: 32
       misses: 0
@@ -437379,35 +438121,35 @@ generalized:
   - file: crates/cargo-unused-deps/src/doctests.rs
     item: unused_name
     candidates:
-    - candidate: 11326
+    - candidate: 11366
       seeds: 1
       hits: 3
       misses: 5
       measuredMs: 2133
       samples: 8
       order: 3
-    - candidate: 11329
+    - candidate: 11369
       seeds: 1
       hits: 18
       misses: 3
       measuredMs: 6170
       samples: 21
       order: 102
-    - candidate: 11424
+    - candidate: 11464
       seeds: 1
       hits: 83
       misses: 0
       measuredMs: 100844
       samples: 83
       order: 321
-    - candidate: 11432
+    - candidate: 11472
       seeds: 1
       hits: 83
       misses: 0
       measuredMs: 103493
       samples: 83
       order: 322
-    - candidate: 11431
+    - candidate: 11471
       seeds: 1
       hits: 398
       misses: 0
@@ -437417,28 +438159,28 @@ generalized:
   - file: crates/cargo-unused-deps/src/evidence.rs
     item: Evidence::reports_for
     candidates:
-    - candidate: 11337
+    - candidate: 11377
       seeds: 1
       hits: 2
       misses: 1
       measuredMs: 789
       samples: 3
       order: 23
-    - candidate: 11341
+    - candidate: 11381
       seeds: 1
       hits: 0
       misses: 0
       measuredMs: 0
       samples: 0
       order: 76
-    - candidate: 11447
+    - candidate: 11487
       seeds: 1
       hits: 62
       misses: 0
       measuredMs: 82501
       samples: 62
       order: 367
-    - candidate: 11455
+    - candidate: 11495
       seeds: 1
       hits: 20
       misses: 0
@@ -437448,28 +438190,28 @@ generalized:
   - file: crates/cargo-unused-deps/src/evidence.rs
     item: Evidence::targets_of
     candidates:
-    - candidate: 11337
+    - candidate: 11377
       seeds: 1
       hits: 5
       misses: 1
       measuredMs: 2100
       samples: 6
       order: 18
-    - candidate: 11363
+    - candidate: 11403
       seeds: 1
       hits: 0
       misses: 0
       measuredMs: 0
       samples: 0
       order: 71
-    - candidate: 11491
+    - candidate: 11531
       seeds: 1
       hits: 20
       misses: 0
       measuredMs: 77487
       samples: 20
       order: 287
-    - candidate: 11447
+    - candidate: 11487
       seeds: 1
       hits: 104
       misses: 0
@@ -437479,84 +438221,84 @@ generalized:
   - file: crates/cargo-unused-deps/src/evidence.rs
     item: Evidence::used_by_any_unit
     candidates:
-    - candidate: 11337
+    - candidate: 11377
       seeds: 1
       hits: 10
       misses: 4
       measuredMs: 4705
       samples: 14
       order: 4
-    - candidate: 11340
+    - candidate: 11380
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 365
       samples: 2
       order: 42
-    - candidate: 11345
+    - candidate: 11385
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 613
       samples: 2
       order: 43
-    - candidate: 11341
+    - candidate: 11381
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 449
       samples: 2
       order: 44
-    - candidate: 11371
+    - candidate: 11411
       seeds: 1
       hits: 2
       misses: 4
       measuredMs: 41764
       samples: 6
       order: 47
-    - candidate: 11368
+    - candidate: 11408
       seeds: 1
       hits: 2
       misses: 2
       measuredMs: 58326
       samples: 4
       order: 59
-    - candidate: 11386
+    - candidate: 11426
       seeds: 1
       hits: 0
       misses: 0
       measuredMs: 0
       samples: 0
       order: 63
-    - candidate: 11505
+    - candidate: 11545
       seeds: 1
       hits: 83
       misses: 0
       measuredMs: 490192
       samples: 83
       order: 259
-    - candidate: 11447
+    - candidate: 11487
       seeds: 1
       hits: 314
       misses: 0
       measuredMs: 381198
       samples: 314
       order: 263
-    - candidate: 11454
+    - candidate: 11494
       seeds: 1
       hits: 20
       misses: 0
       measuredMs: 25258
       samples: 20
       order: 265
-    - candidate: 11459
+    - candidate: 11499
       seeds: 1
       hits: 20
       misses: 0
       measuredMs: 25710
       samples: 20
       order: 266
-    - candidate: 11455
+    - candidate: 11495
       seeds: 1
       hits: 20
       misses: 0
@@ -437566,28 +438308,28 @@ generalized:
   - file: crates/cargo-unused-deps/src/evidence.rs
     item: Evidence::used_by_build_script
     candidates:
-    - candidate: 11377
+    - candidate: 11417
       seeds: 1
       hits: 4
       misses: 1
       measuredMs: 51104
       samples: 5
       order: 22
-    - candidate: 11340
+    - candidate: 11380
       seeds: 1
       hits: 0
       misses: 0
       measuredMs: 0
       samples: 0
       order: 66
-    - candidate: 11502
+    - candidate: 11542
       seeds: 1
       hits: 62
       misses: 0
       measuredMs: 414766
       samples: 62
       order: 281
-    - candidate: 11454
+    - candidate: 11494
       seeds: 1
       hits: 62
       misses: 0
@@ -437597,28 +438339,28 @@ generalized:
   - file: crates/cargo-unused-deps/src/evidence.rs
     item: Evidence::used_by_plain_unit
     candidates:
-    - candidate: 11369
+    - candidate: 11409
       seeds: 1
       hits: 3
       misses: 2
       measuredMs: 32839
       samples: 5
       order: 20
-    - candidate: 11340
+    - candidate: 11380
       seeds: 1
       hits: 1
       misses: 2
       measuredMs: 755
       samples: 3
       order: 36
-    - candidate: 11495
+    - candidate: 11535
       seeds: 1
       hits: 62
       misses: 0
       measuredMs: 243178
       samples: 62
       order: 253
-    - candidate: 11454
+    - candidate: 11494
       seeds: 1
       hits: 62
       misses: 0
@@ -437628,28 +438370,28 @@ generalized:
   - file: crates/cargo-unused-deps/src/evidence.rs
     item: TargetKind::classify
     candidates:
-    - candidate: 11337
+    - candidate: 11377
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 559
       samples: 2
       order: 17
-    - candidate: 11344
+    - candidate: 11384
       seeds: 1
       hits: 5
       misses: 0
       measuredMs: 1734
       samples: 5
       order: 30
-    - candidate: 11447
+    - candidate: 11487
       seeds: 1
       hits: 20
       misses: 0
       measuredMs: 26770
       samples: 20
       order: 360
-    - candidate: 11458
+    - candidate: 11498
       seeds: 1
       hits: 125
       misses: 0
@@ -437659,7 +438401,7 @@ generalized:
   - file: crates/cargo-unused-deps/src/evidence.rs
     item: cargo
     candidates:
-    - candidate: 11363
+    - candidate: 11403
       seeds: 1
       hits: 0
       misses: 2
@@ -437669,21 +438411,21 @@ generalized:
   - file: crates/cargo-unused-deps/src/evidence.rs
     item: cargo_config_paths
     candidates:
-    - candidate: 11364
+    - candidate: 11404
       seeds: 1
       hits: 5
       misses: 5
       measuredMs: 20508
       samples: 10
       order: 14
-    - candidate: 11365
+    - candidate: 11405
       seeds: 1
       hits: 1
       misses: 5
       measuredMs: 5895
       samples: 6
       order: 124
-    - candidate: 11492
+    - candidate: 11532
       seeds: 1
       hits: 116
       misses: 0
@@ -437693,7 +438435,7 @@ generalized:
   - file: crates/cargo-unused-deps/src/evidence.rs
     item: cargo_config_paths_with
     candidates:
-    - candidate: 11439
+    - candidate: 11479
       seeds: 1
       hits: 200
       misses: 0
@@ -437703,14 +438445,14 @@ generalized:
   - file: crates/cargo-unused-deps/src/evidence.rs
     item: cargo_home
     candidates:
-    - candidate: 11364
+    - candidate: 11404
       seeds: 1
       hits: 5
       misses: 4
       measuredMs: 15109
       samples: 9
       order: 16
-    - candidate: 11492
+    - candidate: 11532
       seeds: 1
       hits: 74
       misses: 0
@@ -437720,14 +438462,14 @@ generalized:
   - file: crates/cargo-unused-deps/src/evidence.rs
     item: cargo_home_in
     candidates:
-    - candidate: 11333
+    - candidate: 11373
       seeds: 1
       hits: 13
       misses: 1
       measuredMs: 3486
       samples: 14
       order: 10
-    - candidate: 11440
+    - candidate: 11480
       seeds: 1
       hits: 284
       misses: 0
@@ -437737,7 +438479,7 @@ generalized:
   - file: crates/cargo-unused-deps/src/evidence.rs
     item: cargo_home_with
     candidates:
-    - candidate: 11439
+    - candidate: 11479
       seeds: 1
       hits: 200
       misses: 0
@@ -437747,14 +438489,14 @@ generalized:
   - file: crates/cargo-unused-deps/src/evidence.rs
     item: cargo_or_default
     candidates:
-    - candidate: 11334
+    - candidate: 11374
       seeds: 1
       hits: 3
       misses: 0
       measuredMs: 680
       samples: 3
       order: 25
-    - candidate: 11441
+    - candidate: 11481
       seeds: 1
       hits: 74
       misses: 0
@@ -437764,21 +438506,21 @@ generalized:
   - file: crates/cargo-unused-deps/src/evidence.rs
     item: ensure_no_configured_workspace_wrapper
     candidates:
-    - candidate: 11364
+    - candidate: 11404
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 934
       samples: 2
       order: 9
-    - candidate: 11363
+    - candidate: 11403
       seeds: 1
       hits: 5
       misses: 5
       measuredMs: 27728
       samples: 10
       order: 114
-    - candidate: 11492
+    - candidate: 11532
       seeds: 1
       hits: 20
       misses: 0
@@ -437788,7 +438530,7 @@ generalized:
   - file: crates/cargo-unused-deps/src/evidence.rs
     item: ensure_no_configured_workspace_wrapper_with
     candidates:
-    - candidate: 11439
+    - candidate: 11479
       seeds: 1
       hits: 314
       misses: 0
@@ -437798,14 +438540,14 @@ generalized:
   - file: crates/cargo-unused-deps/src/evidence.rs
     item: evidence_rustc_arg
     candidates:
-    - candidate: 11491
+    - candidate: 11531
       seeds: 1
       hits: 26
       misses: 17
       measuredMs: 100145
       samples: 43
       order: 802
-    - candidate: 11443
+    - candidate: 11483
       seeds: 1
       hits: 147
       misses: 0
@@ -437815,21 +438557,21 @@ generalized:
   - file: crates/cargo-unused-deps/src/evidence.rs
     item: evidence_rustc_args
     candidates:
-    - candidate: 11491
+    - candidate: 11531
       seeds: 1
       hits: 53
       misses: 15
       measuredMs: 126777
       samples: 68
       order: 799
-    - candidate: 11443
+    - candidate: 11483
       seeds: 1
       hits: 102
       misses: 3
       measuredMs: 100551
       samples: 105
       order: 806
-    - candidate: 11445
+    - candidate: 11485
       seeds: 1
       hits: 24
       misses: 0
@@ -437839,28 +438581,28 @@ generalized:
   - file: crates/cargo-unused-deps/src/evidence.rs
     item: failure_diagnostics
     candidates:
-    - candidate: 11339
+    - candidate: 11379
       seeds: 1
       hits: 13
       misses: 1
       measuredMs: 4360
       samples: 14
       order: 11
-    - candidate: 11374
+    - candidate: 11414
       seeds: 1
       hits: 0
       misses: 0
       measuredMs: 0
       samples: 0
       order: 190
-    - candidate: 11499
+    - candidate: 11539
       seeds: 1
       hits: 20
       misses: 0
       measuredMs: 48186
       samples: 20
       order: 320
-    - candidate: 11451
+    - candidate: 11491
       seeds: 1
       hits: 293
       misses: 0
@@ -437870,49 +438612,49 @@ generalized:
   - file: crates/cargo-unused-deps/src/evidence.rs
     item: gather
     candidates:
-    - candidate: 11364
+    - candidate: 11404
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 882
       samples: 2
       order: 2
-    - candidate: 11367
+    - candidate: 11407
       seeds: 1
       hits: 6
       misses: 9
       measuredMs: 56962
       samples: 15
       order: 79
-    - candidate: 11376
+    - candidate: 11416
       seeds: 1
       hits: 18
       misses: 9
       measuredMs: 303321
       samples: 27
       order: 85
-    - candidate: 11370
+    - candidate: 11410
       seeds: 1
       hits: 1
       misses: 8
       measuredMs: 30451
       samples: 9
       order: 96
-    - candidate: 11374
+    - candidate: 11414
       seeds: 1
       hits: 2
       misses: 1
       measuredMs: 9809
       samples: 3
       order: 107
-    - candidate: 11499
+    - candidate: 11539
       seeds: 1
       hits: 20
       misses: 0
       measuredMs: 30198
       samples: 20
       order: 293
-    - candidate: 11494
+    - candidate: 11534
       seeds: 1
       hits: 41
       misses: 0
@@ -437922,7 +438664,7 @@ generalized:
   - file: crates/cargo-unused-deps/src/evidence.rs
     item: gather_with
     candidates:
-    - candidate: 11438
+    - candidate: 11478
       seeds: 1
       hits: 860
       misses: 0
@@ -437932,21 +438674,21 @@ generalized:
   - file: crates/cargo-unused-deps/src/evidence.rs
     item: has_workspace_wrapper_config
     candidates:
-    - candidate: 11336
+    - candidate: 11376
       seeds: 1
       hits: 17
       misses: 4
       measuredMs: 5223
       samples: 21
       order: 6
-    - candidate: 11446
+    - candidate: 11486
       seeds: 1
       hits: 377
       misses: 0
       measuredMs: 465899
       samples: 377
       order: 466
-    - candidate: 11450
+    - candidate: 11490
       seeds: 1
       hits: 83
       misses: 0
@@ -437956,28 +438698,28 @@ generalized:
   - file: crates/cargo-unused-deps/src/evidence.rs
     item: is_lint
     candidates:
-    - candidate: 11341
+    - candidate: 11381
       seeds: 1
       hits: 9
       misses: 1
       measuredMs: 2381
       samples: 10
       order: 15
-    - candidate: 11345
+    - candidate: 11385
       seeds: 1
       hits: 0
       misses: 0
       measuredMs: 0
       samples: 0
       order: 252
-    - candidate: 11455
+    - candidate: 11495
       seeds: 1
       hits: 209
       misses: 0
       measuredMs: 259921
       samples: 209
       order: 513
-    - candidate: 11459
+    - candidate: 11499
       seeds: 1
       hits: 20
       misses: 0
@@ -437987,84 +438729,84 @@ generalized:
   - file: crates/cargo-unused-deps/src/evidence.rs
     item: parse
     candidates:
-    - candidate: 11337
+    - candidate: 11377
       seeds: 1
       hits: 9
       misses: 5
       measuredMs: 3083
       samples: 14
       order: 3
-    - candidate: 11342
+    - candidate: 11382
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 351
       samples: 2
       order: 206
-    - candidate: 11343
+    - candidate: 11383
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 376
       samples: 2
       order: 210
-    - candidate: 11386
+    - candidate: 11426
       seeds: 1
       hits: 8
       misses: 4
       measuredMs: 78637
       samples: 12
       order: 212
-    - candidate: 11345
+    - candidate: 11385
       seeds: 1
       hits: 1
       misses: 3
       measuredMs: 872
       samples: 4
       order: 224
-    - candidate: 11367
+    - candidate: 11407
       seeds: 1
       hits: 0
       misses: 0
       measuredMs: 0
       samples: 0
       order: 232
-    - candidate: 11494
+    - candidate: 11534
       seeds: 1
       hits: 20
       misses: 0
       measuredMs: 98129
       samples: 20
       order: 335
-    - candidate: 11447
+    - candidate: 11487
       seeds: 1
       hits: 251
       misses: 2
       measuredMs: 325309
       samples: 253
       order: 336
-    - candidate: 11457
+    - candidate: 11497
       seeds: 1
       hits: 20
       misses: 0
       measuredMs: 26414
       samples: 20
       order: 340
-    - candidate: 11452
+    - candidate: 11492
       seeds: 1
       hits: 62
       misses: 0
       measuredMs: 81807
       samples: 62
       order: 341
-    - candidate: 11455
+    - candidate: 11495
       seeds: 1
       hits: 165
       misses: 0
       measuredMs: 211863
       samples: 165
       order: 352
-    - candidate: 11459
+    - candidate: 11499
       seeds: 1
       hits: 41
       misses: 0
@@ -438074,21 +438816,21 @@ generalized:
   - file: crates/cargo-unused-deps/src/evidence.rs
     item: reported_name
     candidates:
-    - candidate: 11338
+    - candidate: 11378
       seeds: 1
       hits: 11
       misses: 7
       measuredMs: 3694
       samples: 18
       order: 8
-    - candidate: 11448
+    - candidate: 11488
       seeds: 1
       hits: 251
       misses: 0
       measuredMs: 317110
       samples: 251
       order: 524
-    - candidate: 11449
+    - candidate: 11489
       seeds: 1
       hits: 146
       misses: 0
@@ -438098,49 +438840,49 @@ generalized:
   - file: crates/cargo-unused-deps/src/evidence.rs
     item: target_of
     candidates:
-    - candidate: 11337
+    - candidate: 11377
       seeds: 1
       hits: 10
       misses: 8
       measuredMs: 3580
       samples: 18
       order: 7
-    - candidate: 11363
+    - candidate: 11403
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 4454
       samples: 2
       order: 234
-    - candidate: 11342
+    - candidate: 11382
       seeds: 1
       hits: 0
       misses: 0
       measuredMs: 0
       samples: 0
       order: 251
-    - candidate: 11447
+    - candidate: 11487
       seeds: 1
       hits: 230
       misses: 0
       measuredMs: 293697
       samples: 230
       order: 491
-    - candidate: 11452
+    - candidate: 11492
       seeds: 1
       hits: 20
       misses: 0
       measuredMs: 26657
       samples: 20
       order: 493
-    - candidate: 11453
+    - candidate: 11493
       seeds: 1
       hits: 125
       misses: 0
       measuredMs: 160618
       samples: 125
       order: 498
-    - candidate: 11456
+    - candidate: 11496
       seeds: 1
       hits: 20
       misses: 0
@@ -438150,28 +438892,28 @@ generalized:
   - file: crates/cargo-unused-deps/src/evidence.rs
     item: wrapper
     candidates:
-    - candidate: 11363
+    - candidate: 11403
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 5240
       samples: 2
       order: 13
-    - candidate: 11374
+    - candidate: 11414
       seeds: 1
       hits: 1
       misses: 0
       measuredMs: 1129
       samples: 1
       order: 185
-    - candidate: 11499
+    - candidate: 11539
       seeds: 1
       hits: 71
       misses: 0
       measuredMs: 161957
       samples: 71
       order: 307
-    - candidate: 11444
+    - candidate: 11484
       seeds: 1
       hits: 83
       misses: 0
@@ -438181,14 +438923,14 @@ generalized:
   - file: crates/cargo-unused-deps/src/evidence.rs
     item: wrapper_command
     candidates:
-    - candidate: 11335
+    - candidate: 11375
       seeds: 1
       hits: 1
       misses: 0
       measuredMs: 269
       samples: 1
       order: 29
-    - candidate: 11442
+    - candidate: 11482
       seeds: 1
       hits: 41
       misses: 0
@@ -438198,7 +438940,7 @@ generalized:
   - file: crates/cargo-unused-deps/src/evidence.rs
     item: wrapper_executable
     candidates:
-    - candidate: 11438
+    - candidate: 11478
       seeds: 1
       hits: 95
       misses: 0
@@ -438208,28 +438950,28 @@ generalized:
   - file: crates/cargo-unused-deps/src/evidence.rs
     item: wrapper_with
     candidates:
-    - candidate: 11491
+    - candidate: 11531
       seeds: 1
       hits: 71
       misses: 4
       measuredMs: 107738
       samples: 75
       order: 850
-    - candidate: 11501
+    - candidate: 11541
       seeds: 1
       hits: 8
       misses: 1
       measuredMs: 39564
       samples: 9
       order: 858
-    - candidate: 11499
+    - candidate: 11539
       seeds: 1
       hits: 8
       misses: 0
       measuredMs: 20442
       samples: 8
       order: 862
-    - candidate: 11444
+    - candidate: 11484
       seeds: 1
       hits: 48
       misses: 0
@@ -438239,14 +438981,14 @@ generalized:
   - file: crates/cargo-unused-deps/src/fix.rs
     item: CommentBlock::extend
     candidates:
-    - candidate: 11400
+    - candidate: 11440
       seeds: 1
       hits: 8
       misses: 0
       measuredMs: 8644
       samples: 8
       order: 4
-    - candidate: 11516
+    - candidate: 11556
       seeds: 1
       hits: 62
       misses: 0
@@ -438256,21 +438998,21 @@ generalized:
   - file: crates/cargo-unused-deps/src/fix.rs
     item: comments_of
     candidates:
-    - candidate: 11400
+    - candidate: 11440
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 1984
       samples: 2
       order: 3
-    - candidate: 11346
+    - candidate: 11386
       seeds: 1
       hits: 7
       misses: 0
       measuredMs: 4003
       samples: 7
       order: 30
-    - candidate: 11460
+    - candidate: 11500
       seeds: 1
       hits: 104
       misses: 0
@@ -438280,21 +439022,21 @@ generalized:
   - file: crates/cargo-unused-deps/src/fix.rs
     item: dotted_leaf
     candidates:
-    - candidate: 11401
+    - candidate: 11441
       seeds: 1
       hits: 6
       misses: 0
       measuredMs: 6436
       samples: 6
       order: 26
-    - candidate: 11517
+    - candidate: 11557
       seeds: 1
       hits: 20
       misses: 0
       measuredMs: 27523
       samples: 20
       order: 72
-    - candidate: 11481
+    - candidate: 11521
       seeds: 1
       hits: 20
       misses: 0
@@ -438304,35 +439046,35 @@ generalized:
   - file: crates/cargo-unused-deps/src/fix.rs
     item: leading_comments
     candidates:
-    - candidate: 11400
+    - candidate: 11440
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 1290
       samples: 2
       order: 5
-    - candidate: 11401
+    - candidate: 11441
       seeds: 1
       hits: 12
       misses: 3
       measuredMs: 15051
       samples: 15
       order: 34
-    - candidate: 11402
+    - candidate: 11442
       seeds: 1
       hits: 4
       misses: 2
       measuredMs: 5100
       samples: 6
       order: 43
-    - candidate: 11517
+    - candidate: 11557
       seeds: 1
       hits: 104
       misses: 0
       measuredMs: 162106
       samples: 104
       order: 74
-    - candidate: 11518
+    - candidate: 11558
       seeds: 1
       hits: 20
       misses: 0
@@ -438342,56 +439084,56 @@ generalized:
   - file: crates/cargo-unused-deps/src/fix.rs
     item: prepend_comments
     candidates:
-    - candidate: 11400
+    - candidate: 11440
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 1474
       samples: 2
       order: 2
-    - candidate: 11404
+    - candidate: 11444
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 1616
       samples: 2
       order: 28
-    - candidate: 11405
+    - candidate: 11445
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 1365
       samples: 2
       order: 29
-    - candidate: 11403
+    - candidate: 11443
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 1218
       samples: 2
       order: 32
-    - candidate: 11516
+    - candidate: 11556
       seeds: 1
       hits: 41
       misses: 0
       measuredMs: 58502
       samples: 41
       order: 80
-    - candidate: 11519
+    - candidate: 11559
       seeds: 1
       hits: 41
       misses: 0
       measuredMs: 55452
       samples: 41
       order: 81
-    - candidate: 11520
+    - candidate: 11560
       seeds: 1
       hits: 83
       misses: 0
       measuredMs: 121086
       samples: 83
       order: 83
-    - candidate: 11521
+    - candidate: 11561
       seeds: 1
       hits: 62
       misses: 0
@@ -438401,56 +439143,56 @@ generalized:
   - file: crates/cargo-unused-deps/src/fix.rs
     item: remove
     candidates:
-    - candidate: 11400
+    - candidate: 11440
       seeds: 1
       hits: 15
       misses: 6
       measuredMs: 20282
       samples: 21
       order: 1
-    - candidate: 11406
+    - candidate: 11446
       seeds: 1
       hits: 10
       misses: 6
       measuredMs: 15659
       samples: 16
       order: 11
-    - candidate: 11401
+    - candidate: 11441
       seeds: 1
       hits: 7
       misses: 6
       measuredMs: 10830
       samples: 13
       order: 18
-    - candidate: 11402
+    - candidate: 11442
       seeds: 1
       hits: 37
       misses: 6
       measuredMs: 39344
       samples: 43
       order: 24
-    - candidate: 11522
+    - candidate: 11562
       seeds: 1
       hits: 83
       misses: 0
       measuredMs: 118923
       samples: 83
       order: 47
-    - candidate: 11518
+    - candidate: 11558
       seeds: 1
       hits: 272
       misses: 0
       measuredMs: 381956
       samples: 272
       order: 48
-    - candidate: 11517
+    - candidate: 11557
       seeds: 1
       hits: 62
       misses: 0
       measuredMs: 86760
       samples: 62
       order: 62
-    - candidate: 11481
+    - candidate: 11521
       seeds: 1
       hits: 104
       misses: 0
@@ -438460,14 +439202,14 @@ generalized:
   - file: crates/cargo-unused-deps/src/lib.rs
     item: Check::wanted
     candidates:
-    - candidate: 11348
+    - candidate: 11388
       seeds: 1
       hits: 5
       misses: 0
       measuredMs: 1382
       samples: 5
       order: 251
-    - candidate: 11462
+    - candidate: 11502
       seeds: 1
       hits: 125
       misses: 0
@@ -438477,14 +439219,14 @@ generalized:
   - file: crates/cargo-unused-deps/src/lib.rs
     item: PackageSelection::flags
     candidates:
-    - candidate: 11350
+    - candidate: 11390
       seeds: 1
       hits: 15
       misses: 0
       measuredMs: 3857
       samples: 15
       order: 244
-    - candidate: 11464
+    - candidate: 11504
       seeds: 1
       hits: 326
       misses: 0
@@ -438494,42 +439236,42 @@ generalized:
   - file: crates/cargo-unused-deps/src/lib.rs
     item: PackageSelection::resolve
     candidates:
-    - candidate: 11408
+    - candidate: 11448
       seeds: 1
       hits: 4
       misses: 4
       measuredMs: 5505
       samples: 8
       order: 248
-    - candidate: 11366
+    - candidate: 11406
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 30338
       samples: 2
       order: 356
-    - candidate: 11390
+    - candidate: 11430
       seeds: 1
       hits: 1
       misses: 0
       measuredMs: 5059
       samples: 1
       order: 360
-    - candidate: 11472
+    - candidate: 11512
       seeds: 1
       hits: 107
       misses: 0
       measuredMs: 142352
       samples: 107
       order: 787
-    - candidate: 11465
+    - candidate: 11505
       seeds: 1
       hits: 83
       misses: 0
       measuredMs: 102834
       samples: 83
       order: 793
-    - candidate: 11493
+    - candidate: 11533
       seeds: 1
       hits: 8
       misses: 0
@@ -438539,14 +439281,14 @@ generalized:
   - file: crates/cargo-unused-deps/src/lib.rs
     item: canonical_manifest
     candidates:
-    - candidate: 11467
+    - candidate: 11507
       seeds: 1
       hits: 11
       misses: 0
       measuredMs: 14107
       samples: 11
       order: 769
-    - candidate: 11477
+    - candidate: 11517
       seeds: 1
       hits: 20
       misses: 0
@@ -438556,42 +439298,42 @@ generalized:
   - file: crates/cargo-unused-deps/src/lib.rs
     item: catalog_check
     candidates:
-    - candidate: 11351
+    - candidate: 11391
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 541
       samples: 2
       order: 254
-    - candidate: 11400
+    - candidate: 11440
       seeds: 1
       hits: 1
       misses: 2
       measuredMs: 1203
       samples: 3
       order: 421
-    - candidate: 11411
+    - candidate: 11451
       seeds: 1
       hits: 1
       misses: 0
       measuredMs: 285
       samples: 1
       order: 424
-    - candidate: 11516
+    - candidate: 11556
       seeds: 1
       hits: 41
       misses: 0
       measuredMs: 56202
       samples: 41
       order: 659
-    - candidate: 11527
+    - candidate: 11567
       seeds: 1
       hits: 41
       misses: 0
       measuredMs: 50407
       samples: 41
       order: 660
-    - candidate: 11479
+    - candidate: 11519
       seeds: 1
       hits: 11
       misses: 0
@@ -438601,182 +439343,182 @@ generalized:
   - file: crates/cargo-unused-deps/src/lib.rs
     item: catalog_check_with_hook
     candidates:
-    - candidate: 11351
+    - candidate: 11391
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 412
       samples: 2
       order: 234
-    - candidate: 11353
+    - candidate: 11393
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 538
       samples: 2
       order: 428
-    - candidate: 11411
+    - candidate: 11451
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 363
       samples: 2
       order: 431
-    - candidate: 11354
+    - candidate: 11394
       seeds: 1
       hits: 2
       misses: 8
       measuredMs: 1794
       samples: 10
       order: 433
-    - candidate: 11392
+    - candidate: 11432
       seeds: 1
       hits: 1
       misses: 6
       measuredMs: 1536
       samples: 7
       order: 439
-    - candidate: 11395
+    - candidate: 11435
       seeds: 1
       hits: 5
       misses: 8
       measuredMs: 4466
       samples: 13
       order: 451
-    - candidate: 11352
+    - candidate: 11392
       seeds: 1
       hits: 1
       misses: 6
       measuredMs: 1602
       samples: 7
       order: 456
-    - candidate: 11398
+    - candidate: 11438
       seeds: 1
       hits: 1
       misses: 4
       measuredMs: 1825
       samples: 5
       order: 470
-    - candidate: 11407
+    - candidate: 11447
       seeds: 1
       hits: 1
       misses: 4
       measuredMs: 1554
       samples: 5
       order: 474
-    - candidate: 11409
+    - candidate: 11449
       seeds: 1
       hits: 1
       misses: 4
       measuredMs: 1493
       samples: 5
       order: 476
-    - candidate: 11391
+    - candidate: 11431
       seeds: 1
       hits: 4
       misses: 5
       measuredMs: 3654
       samples: 9
       order: 480
-    - candidate: 11355
+    - candidate: 11395
       seeds: 1
       hits: 1
       misses: 2
       measuredMs: 967
       samples: 3
       order: 489
-    - candidate: 11400
+    - candidate: 11440
       seeds: 1
       hits: 1
       misses: 1
       measuredMs: 872
       samples: 2
       order: 491
-    - candidate: 11527
+    - candidate: 11567
       seeds: 1
       hits: 62
       misses: 0
       measuredMs: 79447
       samples: 62
       order: 664
-    - candidate: 11509
+    - candidate: 11549
       seeds: 1
       hits: 20
       misses: 0
       measuredMs: 24798
       samples: 20
       order: 666
-    - candidate: 11511
+    - candidate: 11551
       seeds: 1
       hits: 83
       misses: 0
       measuredMs: 111362
       samples: 83
       order: 668
-    - candidate: 11514
+    - candidate: 11554
       seeds: 1
       hits: 20
       misses: 0
       measuredMs: 27399
       samples: 20
       order: 672
-    - candidate: 11523
+    - candidate: 11563
       seeds: 1
       hits: 41
       misses: 0
       measuredMs: 55911
       samples: 41
       order: 673
-    - candidate: 11508
+    - candidate: 11548
       seeds: 1
       hits: 62
       misses: 0
       measuredMs: 87552
       samples: 62
       order: 675
-    - candidate: 11516
+    - candidate: 11556
       seeds: 1
       hits: 41
       misses: 0
       measuredMs: 60321
       samples: 41
       order: 678
-    - candidate: 11479
+    - candidate: 11519
       seeds: 1
       hits: 116
       misses: 0
       measuredMs: 143759
       samples: 116
       order: 680
-    - candidate: 11481
+    - candidate: 11521
       seeds: 1
       hits: 209
       misses: 0
       measuredMs: 292289
       samples: 209
       order: 681
-    - candidate: 11482
+    - candidate: 11522
       seeds: 1
       hits: 62
       misses: 0
       measuredMs: 74452
       samples: 62
       order: 682
-    - candidate: 11471
+    - candidate: 11511
       seeds: 1
       hits: 20
       misses: 0
       measuredMs: 26502
       samples: 20
       order: 685
-    - candidate: 11480
+    - candidate: 11520
       seeds: 1
       hits: 41
       misses: 0
       measuredMs: 54836
       samples: 41
       order: 691
-    - candidate: 11483
+    - candidate: 11523
       seeds: 1
       hits: 41
       misses: 0
@@ -438786,56 +439528,56 @@ generalized:
   - file: crates/cargo-unused-deps/src/lib.rs
     item: check
     candidates:
-    - candidate: 11391
+    - candidate: 11431
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 1563
       samples: 2
       order: 2
-    - candidate: 11411
+    - candidate: 11451
       seeds: 1
       hits: 5
       misses: 23
       measuredMs: 11282
       samples: 28
       order: 13
-    - candidate: 11392
+    - candidate: 11432
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 546
       samples: 2
       order: 15
-    - candidate: 11395
+    - candidate: 11435
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 1149
       samples: 2
       order: 19
-    - candidate: 11407
+    - candidate: 11447
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 1089
       samples: 2
       order: 26
-    - candidate: 11398
+    - candidate: 11438
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 1479
       samples: 2
       order: 28
-    - candidate: 11409
+    - candidate: 11449
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 1615
       samples: 2
       order: 34
-    - candidate: 11400
+    - candidate: 11440
       seeds: 1
       hits: 0
       misses: 2
@@ -438845,84 +439587,84 @@ generalized:
   - file: crates/cargo-unused-deps/src/lib.rs
     item: check_with_hook
     candidates:
-    - candidate: 11353
+    - candidate: 11393
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 1137
       samples: 2
       order: 164
-    - candidate: 11411
+    - candidate: 11451
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 627
       samples: 2
       order: 174
-    - candidate: 11354
+    - candidate: 11394
       seeds: 1
       hits: 2
       misses: 4
       measuredMs: 1780
       samples: 6
       order: 175
-    - candidate: 11392
+    - candidate: 11432
       seeds: 1
       hits: 1
       misses: 2
       measuredMs: 1195
       samples: 3
       order: 181
-    - candidate: 11395
+    - candidate: 11435
       seeds: 1
       hits: 2
       misses: 4
       measuredMs: 2156
       samples: 6
       order: 185
-    - candidate: 11351
+    - candidate: 11391
       seeds: 1
       hits: 1
       misses: 2
       measuredMs: 1353
       samples: 3
       order: 186
-    - candidate: 11352
+    - candidate: 11392
       seeds: 1
       hits: 1
       misses: 4
       measuredMs: 1696
       samples: 5
       order: 190
-    - candidate: 11407
+    - candidate: 11447
       seeds: 1
       hits: 3
       misses: 4
       measuredMs: 3809
       samples: 7
       order: 195
-    - candidate: 11409
+    - candidate: 11449
       seeds: 1
       hits: 1
       misses: 3
       measuredMs: 1548
       samples: 4
       order: 200
-    - candidate: 11391
+    - candidate: 11431
       seeds: 1
       hits: 3
       misses: 4
       measuredMs: 4311
       samples: 7
       order: 204
-    - candidate: 11355
+    - candidate: 11395
       seeds: 1
       hits: 1
       misses: 1
       measuredMs: 1302
       samples: 2
       order: 210
-    - candidate: 11400
+    - candidate: 11440
       seeds: 1
       hits: 0
       misses: 0
@@ -438932,7 +439674,7 @@ generalized:
   - file: crates/cargo-unused-deps/src/lib.rs
     item: create_evidence_directory
     candidates:
-    - candidate: 11476
+    - candidate: 11516
       seeds: 1
       hits: 41
       misses: 0
@@ -438942,7 +439684,7 @@ generalized:
   - file: crates/cargo-unused-deps/src/lib.rs
     item: dependency_section
     candidates:
-    - candidate: 11473
+    - candidate: 11513
       seeds: 1
       hits: 167
       misses: 0
@@ -438952,21 +439694,21 @@ generalized:
   - file: crates/cargo-unused-deps/src/lib.rs
     item: dependency_table
     candidates:
-    - candidate: 11383
+    - candidate: 11423
       seeds: 1
       hits: 1
       misses: 1
       measuredMs: 10109
       samples: 2
       order: 255
-    - candidate: 11387
+    - candidate: 11427
       seeds: 1
       hits: 0
       misses: 0
       measuredMs: 0
       samples: 0
       order: 418
-    - candidate: 11473
+    - candidate: 11513
       seeds: 1
       hits: 62
       misses: 0
@@ -438976,35 +439718,35 @@ generalized:
   - file: crates/cargo-unused-deps/src/lib.rs
     item: dispatch
     candidates:
-    - candidate: 11391
+    - candidate: 11431
       seeds: 1
       hits: 3
       misses: 5
       measuredMs: 3769
       samples: 8
       order: 241
-    - candidate: 11363
+    - candidate: 11403
       seeds: 1
       hits: 5
       misses: 6
       measuredMs: 41348
       samples: 11
       order: 288
-    - candidate: 11366
+    - candidate: 11406
       seeds: 1
       hits: 1
       misses: 4
       measuredMs: 30616
       samples: 5
       order: 295
-    - candidate: 11371
+    - candidate: 11411
       seeds: 1
       hits: 4
       misses: 2
       measuredMs: 54342
       samples: 6
       order: 300
-    - candidate: 11508
+    - candidate: 11548
       seeds: 1
       hits: 11
       misses: 0
@@ -439014,14 +439756,14 @@ generalized:
   - file: crates/cargo-unused-deps/src/lib.rs
     item: dispatch_with
     candidates:
-    - candidate: 11508
+    - candidate: 11548
       seeds: 1
       hits: 11
       misses: 0
       measuredMs: 15497
       samples: 11
       order: 572
-    - candidate: 11468
+    - candidate: 11508
       seeds: 1
       hits: 440
       misses: 0
@@ -439031,21 +439773,21 @@ generalized:
   - file: crates/cargo-unused-deps/src/lib.rs
     item: doctest_evidence
     candidates:
-    - candidate: 11371
+    - candidate: 11411
       seeds: 1
       hits: 4
       misses: 9
       measuredMs: 50766
       samples: 13
       order: 243
-    - candidate: 11363
+    - candidate: 11403
       seeds: 1
       hits: 3
       misses: 5
       measuredMs: 22899
       samples: 8
       order: 404
-    - candidate: 11496
+    - candidate: 11536
       seeds: 1
       hits: 20
       misses: 0
@@ -439055,14 +439797,14 @@ generalized:
   - file: crates/cargo-unused-deps/src/lib.rs
     item: doctest_evidence_with
     candidates:
-    - candidate: 11496
+    - candidate: 11536
       seeds: 1
       hits: 20
       misses: 0
       measuredMs: 121525
       samples: 20
       order: 547
-    - candidate: 11470
+    - candidate: 11510
       seeds: 1
       hits: 335
       misses: 0
@@ -439072,28 +439814,28 @@ generalized:
   - file: crates/cargo-unused-deps/src/lib.rs
     item: entries
     candidates:
-    - candidate: 11397
+    - candidate: 11437
       seeds: 1
       hits: 26
       misses: 6
       measuredMs: 23610
       samples: 32
       order: 4
-    - candidate: 11399
+    - candidate: 11439
       seeds: 1
       hits: 13
       misses: 4
       measuredMs: 11786
       samples: 17
       order: 69
-    - candidate: 11515
+    - candidate: 11555
       seeds: 1
       hits: 104
       misses: 0
       measuredMs: 141594
       samples: 104
       order: 736
-    - candidate: 11513
+    - candidate: 11553
       seeds: 1
       hits: 167
       misses: 0
@@ -439103,14 +439845,14 @@ generalized:
   - file: crates/cargo-unused-deps/src/lib.rs
     item: faultable
     candidates:
-    - candidate: 11359
+    - candidate: 11399
       seeds: 1
       hits: 6
       misses: 0
       measuredMs: 2788
       samples: 6
       order: 169
-    - candidate: 11486
+    - candidate: 11526
       seeds: 1
       hits: 125
       misses: 0
@@ -439120,28 +439862,28 @@ generalized:
   - file: crates/cargo-unused-deps/src/lib.rs
     item: lines
     candidates:
-    - candidate: 11400
+    - candidate: 11440
       seeds: 1
       hits: 13
       misses: 4
       measuredMs: 12608
       samples: 17
       order: 5
-    - candidate: 11401
+    - candidate: 11441
       seeds: 1
       hits: 26
       misses: 6
       measuredMs: 30715
       samples: 32
       order: 85
-    - candidate: 11516
+    - candidate: 11556
       seeds: 1
       hits: 104
       misses: 0
       measuredMs: 153237
       samples: 104
       order: 749
-    - candidate: 11517
+    - candidate: 11557
       seeds: 1
       hits: 167
       misses: 0
@@ -439151,21 +439893,21 @@ generalized:
   - file: crates/cargo-unused-deps/src/lib.rs
     item: members_of
     candidates:
-    - candidate: 11356
+    - candidate: 11396
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 893
       samples: 2
       order: 9
-    - candidate: 11351
+    - candidate: 11391
       seeds: 1
       hits: 3
       misses: 0
       measuredMs: 1595
       samples: 3
       order: 171
-    - candidate: 11479
+    - candidate: 11519
       seeds: 1
       hits: 53
       misses: 0
@@ -439175,42 +439917,42 @@ generalized:
   - file: crates/cargo-unused-deps/src/lib.rs
     item: package_checks_selected
     candidates:
-    - candidate: 11408
+    - candidate: 11448
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 742
       samples: 2
       order: 250
-    - candidate: 11392
+    - candidate: 11432
       seeds: 1
       hits: 2
       misses: 2
       measuredMs: 2127
       samples: 4
       order: 305
-    - candidate: 11366
+    - candidate: 11406
       seeds: 1
       hits: 2
       misses: 2
       measuredMs: 46580
       samples: 4
       order: 307
-    - candidate: 11493
+    - candidate: 11533
       seeds: 1
       hits: 41
       misses: 0
       measuredMs: 90292
       samples: 41
       order: 505
-    - candidate: 11509
+    - candidate: 11549
       seeds: 1
       hits: 20
       misses: 0
       measuredMs: 27470
       samples: 20
       order: 507
-    - candidate: 11474
+    - candidate: 11514
       seeds: 1
       hits: 104
       misses: 0
@@ -439220,14 +439962,14 @@ generalized:
   - file: crates/cargo-unused-deps/src/lib.rs
     item: report_carries
     candidates:
-    - candidate: 11400
+    - candidate: 11440
       seeds: 1
       hits: 9
       misses: 0
       measuredMs: 8306
       samples: 9
       order: 7
-    - candidate: 11516
+    - candidate: 11556
       seeds: 1
       hits: 62
       misses: 0
@@ -439237,28 +439979,28 @@ generalized:
   - file: crates/cargo-unused-deps/src/lib.rs
     item: report_clean
     candidates:
-    - candidate: 11407
+    - candidate: 11447
       seeds: 1
       hits: 20
       misses: 7
       measuredMs: 19597
       samples: 27
       order: 6
-    - candidate: 11409
+    - candidate: 11449
       seeds: 1
       hits: 10
       misses: 6
       measuredMs: 10734
       samples: 16
       order: 55
-    - candidate: 11523
+    - candidate: 11563
       seeds: 1
       hits: 83
       misses: 0
       measuredMs: 114102
       samples: 83
       order: 726
-    - candidate: 11525
+    - candidate: 11565
       seeds: 1
       hits: 104
       misses: 0
@@ -439268,28 +440010,28 @@ generalized:
   - file: crates/cargo-unused-deps/src/lib.rs
     item: report_findings
     candidates:
-    - candidate: 11363
+    - candidate: 11403
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 3548
       samples: 2
       order: 246
-    - candidate: 11383
+    - candidate: 11423
       seeds: 1
       hits: 3
       misses: 5
       measuredMs: 51420
       samples: 8
       order: 409
-    - candidate: 11388
+    - candidate: 11428
       seeds: 1
       hits: 3
       misses: 0
       measuredMs: 9712
       samples: 3
       order: 413
-    - candidate: 11506
+    - candidate: 11546
       seeds: 1
       hits: 146
       misses: 0
@@ -439299,14 +440041,14 @@ generalized:
   - file: crates/cargo-unused-deps/src/lib.rs
     item: report_stale
     candidates:
-    - candidate: 11395
+    - candidate: 11435
       seeds: 1
       hits: 3
       misses: 0
       measuredMs: 1518
       samples: 3
       order: 52
-    - candidate: 11511
+    - candidate: 11551
       seeds: 1
       hits: 20
       misses: 0
@@ -439316,14 +440058,14 @@ generalized:
   - file: crates/cargo-unused-deps/src/lib.rs
     item: report_unused
     candidates:
-    - candidate: 11391
+    - candidate: 11431
       seeds: 1
       hits: 3
       misses: 0
       measuredMs: 1712
       samples: 3
       order: 63
-    - candidate: 11508
+    - candidate: 11548
       seeds: 1
       hits: 20
       misses: 0
@@ -439333,63 +440075,63 @@ generalized:
   - file: crates/cargo-unused-deps/src/lib.rs
     item: resolve_selectors
     candidates:
-    - candidate: 11347
+    - candidate: 11387
       seeds: 1
       hits: 3
       misses: 9
       measuredMs: 2588
       samples: 12
       order: 245
-    - candidate: 11349
+    - candidate: 11389
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 298
       samples: 2
       order: 363
-    - candidate: 11408
+    - candidate: 11448
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 507
       samples: 2
       order: 365
-    - candidate: 11363
+    - candidate: 11403
       seeds: 1
       hits: 1
       misses: 0
       measuredMs: 5996
       samples: 1
       order: 377
-    - candidate: 11524
+    - candidate: 11564
       seeds: 1
       hits: 20
       misses: 0
       measuredMs: 26252
       samples: 20
       order: 644
-    - candidate: 11461
+    - candidate: 11501
       seeds: 1
       hits: 86
       misses: 0
       measuredMs: 108856
       samples: 86
       order: 645
-    - candidate: 11463
+    - candidate: 11503
       seeds: 1
       hits: 62
       misses: 0
       measuredMs: 73196
       samples: 62
       order: 647
-    - candidate: 11465
+    - candidate: 11505
       seeds: 1
       hits: 125
       misses: 0
       measuredMs: 143641
       samples: 125
       order: 648
-    - candidate: 11491
+    - candidate: 11531
       seeds: 1
       hits: 8
       misses: 0
@@ -439399,35 +440141,35 @@ generalized:
   - file: crates/cargo-unused-deps/src/lib.rs
     item: run
     candidates:
-    - candidate: 11391
+    - candidate: 11431
       seeds: 1
       hits: 5
       misses: 8
       measuredMs: 5759
       samples: 13
       order: 11
-    - candidate: 11392
+    - candidate: 11432
       seeds: 1
       hits: 7
       misses: 8
       measuredMs: 4379
       samples: 15
       order: 97
-    - candidate: 11408
+    - candidate: 11448
       seeds: 1
       hits: 3
       misses: 8
       measuredMs: 3493
       samples: 11
       order: 497
-    - candidate: 11363
+    - candidate: 11403
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 5096
       samples: 2
       order: 504
-    - candidate: 11509
+    - candidate: 11549
       seeds: 1
       hits: 11
       misses: 0
@@ -439437,14 +440179,14 @@ generalized:
   - file: crates/cargo-unused-deps/src/lib.rs
     item: run_with
     candidates:
-    - candidate: 11509
+    - candidate: 11549
       seeds: 1
       hits: 41
       misses: 0
       measuredMs: 60262
       samples: 41
       order: 595
-    - candidate: 11474
+    - candidate: 11514
       seeds: 1
       hits: 347
       misses: 0
@@ -439454,63 +440196,63 @@ generalized:
   - file: crates/cargo-unused-deps/src/lib.rs
     item: source_checks
     candidates:
-    - candidate: 11363
+    - candidate: 11403
       seeds: 1
       hits: 1
       misses: 11
       measuredMs: 33160
       samples: 12
       order: 236
-    - candidate: 11370
+    - candidate: 11410
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 3707
       samples: 2
       order: 380
-    - candidate: 11367
+    - candidate: 11407
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 6029
       samples: 2
       order: 381
-    - candidate: 11381
+    - candidate: 11421
       seeds: 1
       hits: 6
       misses: 6
       measuredMs: 75131
       samples: 12
       order: 382
-    - candidate: 11382
+    - candidate: 11422
       seeds: 1
       hits: 2
       misses: 6
       measuredMs: 25861
       samples: 8
       order: 385
-    - candidate: 11371
+    - candidate: 11411
       seeds: 1
       hits: 2
       misses: 4
       measuredMs: 29844
       samples: 6
       order: 389
-    - candidate: 11380
+    - candidate: 11420
       seeds: 1
       hits: 3
       misses: 5
       measuredMs: 37455
       samples: 8
       order: 393
-    - candidate: 11503
+    - candidate: 11543
       seeds: 1
       hits: 23
       misses: 0
       measuredMs: 74954
       samples: 23
       order: 513
-    - candidate: 11496
+    - candidate: 11536
       seeds: 1
       hits: 17
       misses: 0
@@ -439520,21 +440262,21 @@ generalized:
   - file: crates/cargo-unused-deps/src/lib.rs
     item: source_checks_with
     candidates:
-    - candidate: 11504
+    - candidate: 11544
       seeds: 1
       hits: 62
       misses: 0
       measuredMs: 307265
       samples: 62
       order: 515
-    - candidate: 11469
+    - candidate: 11509
       seeds: 1
       hits: 398
       misses: 0
       measuredMs: 436676
       samples: 398
       order: 518
-    - candidate: 11475
+    - candidate: 11515
       seeds: 1
       hits: 188
       misses: 0
@@ -439544,49 +440286,49 @@ generalized:
   - file: crates/cargo-unused-deps/src/lib.rs
     item: verify_members_unchanged
     candidates:
-    - candidate: 11357
+    - candidate: 11397
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 664
       samples: 2
       order: 50
-    - candidate: 11358
+    - candidate: 11398
       seeds: 1
       hits: 1
       misses: 2
       measuredMs: 1049
       samples: 3
       order: 170
-    - candidate: 11353
+    - candidate: 11393
       seeds: 1
       hits: 2
       misses: 1
       measuredMs: 1881
       samples: 3
       order: 277
-    - candidate: 11355
+    - candidate: 11395
       seeds: 1
       hits: 0
       misses: 0
       measuredMs: 0
       samples: 0
       order: 278
-    - candidate: 11484
+    - candidate: 11524
       seeds: 1
       hits: 32
       misses: 0
       measuredMs: 44317
       samples: 32
       order: 816
-    - candidate: 11481
+    - candidate: 11521
       seeds: 1
       hits: 71
       misses: 0
       measuredMs: 98563
       samples: 71
       order: 820
-    - candidate: 11483
+    - candidate: 11523
       seeds: 1
       hits: 20
       misses: 0
@@ -439596,7 +440338,7 @@ generalized:
   - file: crates/cargo-unused-deps/src/lib.rs
     item: workspace_from
     candidates:
-    - candidate: 11476
+    - candidate: 11516
       seeds: 1
       hits: 230
       misses: 0
@@ -439606,35 +440348,35 @@ generalized:
   - file: crates/cargo-unused-deps/src/lib.rs
     item: workspace_manifest_of
     candidates:
-    - candidate: 11391
+    - candidate: 11431
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 883
       samples: 2
       order: 238
-    - candidate: 11393
+    - candidate: 11433
       seeds: 1
       hits: 10
       misses: 10
       measuredMs: 9257
       samples: 20
       order: 317
-    - candidate: 11392
+    - candidate: 11432
       seeds: 1
       hits: 3
       misses: 10
       measuredMs: 3347
       samples: 13
       order: 326
-    - candidate: 11396
+    - candidate: 11436
       seeds: 1
       hits: 2
       misses: 2
       measuredMs: 1642
       samples: 4
       order: 336
-    - candidate: 11512
+    - candidate: 11552
       seeds: 1
       hits: 11
       misses: 0
@@ -439644,35 +440386,35 @@ generalized:
   - file: crates/cargo-unused-deps/src/lib.rs
     item: workspace_manifest_resolved_with
     candidates:
-    - candidate: 11510
+    - candidate: 11550
       seeds: 1
       hits: 41
       misses: 3
       measuredMs: 53798
       samples: 44
       order: 615
-    - candidate: 11466
+    - candidate: 11506
       seeds: 1
       hits: 21
       misses: 3
       measuredMs: 23272
       samples: 24
       order: 617
-    - candidate: 11467
+    - candidate: 11507
       seeds: 1
       hits: 514
       misses: 3
       measuredMs: 614604
       samples: 517
       order: 618
-    - candidate: 11478
+    - candidate: 11518
       seeds: 1
       hits: 20
       misses: 3
       measuredMs: 20082
       samples: 23
       order: 622
-    - candidate: 11485
+    - candidate: 11525
       seeds: 1
       hits: 18
       misses: 0
@@ -439682,14 +440424,14 @@ generalized:
   - file: crates/cargo-unused-deps/src/lib.rs
     item: workspace_manifest_with
     candidates:
-    - candidate: 11466
+    - candidate: 11506
       seeds: 1
       hits: 0
       misses: 1
       measuredMs: 332
       samples: 1
       order: 768
-    - candidate: 11467
+    - candidate: 11507
       seeds: 1
       hits: 10
       misses: 0
@@ -439699,7 +440441,7 @@ generalized:
   - file: crates/cargo-unused-deps/src/lib.rs
     item: workspace_of
     candidates:
-    - candidate: 11363
+    - candidate: 11403
       seeds: 1
       hits: 0
       misses: 2
@@ -439709,7 +440451,7 @@ generalized:
   - file: crates/cargo-unused-deps/src/lib.rs
     item: workspace_of_with
     candidates:
-    - candidate: 11477
+    - candidate: 11517
       seeds: 1
       hits: 20
       misses: 0
@@ -439719,28 +440461,28 @@ generalized:
   - file: crates/cargo-unused-deps/src/lib.rs
     item: write_back
     candidates:
-    - candidate: 11360
+    - candidate: 11400
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 754
       samples: 2
       order: 47
-    - candidate: 11362
+    - candidate: 11402
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 633
       samples: 2
       order: 163
-    - candidate: 11355
+    - candidate: 11395
       seeds: 1
       hits: 0
       misses: 0
       measuredMs: 0
       samples: 0
       order: 232
-    - candidate: 11483
+    - candidate: 11523
       seeds: 1
       hits: 20
       misses: 0
@@ -439750,70 +440492,70 @@ generalized:
   - file: crates/cargo-unused-deps/src/lib.rs
     item: write_back_with_fault
     candidates:
-    - candidate: 11355
+    - candidate: 11395
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 966
       samples: 2
       order: 165
-    - candidate: 11359
+    - candidate: 11399
       seeds: 1
       hits: 13
       misses: 4
       measuredMs: 7012
       samples: 17
       order: 218
-    - candidate: 11362
+    - candidate: 11402
       seeds: 1
       hits: 4
       misses: 4
       measuredMs: 2318
       samples: 8
       order: 221
-    - candidate: 11361
+    - candidate: 11401
       seeds: 1
       hits: 2
       misses: 4
       measuredMs: 1650
       samples: 6
       order: 265
-    - candidate: 11400
+    - candidate: 11440
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 1000
       samples: 2
       order: 267
-    - candidate: 11516
+    - candidate: 11556
       seeds: 1
       hits: 20
       misses: 0
       measuredMs: 30096
       samples: 20
       order: 704
-    - candidate: 11486
+    - candidate: 11526
       seeds: 1
       hits: 188
       misses: 0
       measuredMs: 231636
       samples: 188
       order: 705
-    - candidate: 11483
+    - candidate: 11523
       seeds: 1
       hits: 20
       misses: 0
       measuredMs: 28283
       samples: 20
       order: 709
-    - candidate: 11488
+    - candidate: 11528
       seeds: 1
       hits: 83
       misses: 0
       measuredMs: 103015
       samples: 83
       order: 710
-    - candidate: 11487
+    - candidate: 11527
       seeds: 1
       hits: 62
       misses: 0
@@ -439823,14 +440565,14 @@ generalized:
   - file: crates/cargo-unused-deps/src/main.rs
     item: main
     candidates:
-    - candidate: 11391
+    - candidate: 11431
       seeds: 1
       hits: 1
       misses: 0
       measuredMs: 510
       samples: 1
       order: 2
-    - candidate: 11508
+    - candidate: 11548
       seeds: 1
       hits: 11
       misses: 0
@@ -439840,63 +440582,63 @@ generalized:
   - file: crates/cargo-unused-deps/src/verdict.rs
     item: judge
     candidates:
-    - candidate: 11363
+    - candidate: 11403
       seeds: 1
       hits: 3
       misses: 4
       measuredMs: 33643
       samples: 7
       order: 1
-    - candidate: 11385
+    - candidate: 11425
       seeds: 1
       hits: 10
       misses: 6
       measuredMs: 323279
       samples: 16
       order: 3
-    - candidate: 11379
+    - candidate: 11419
       seeds: 1
       hits: 3
       misses: 4
       measuredMs: 70795
       samples: 7
       order: 14
-    - candidate: 11378
+    - candidate: 11418
       seeds: 1
       hits: 3
       misses: 4
       measuredMs: 40814
       samples: 7
       order: 21
-    - candidate: 11389
+    - candidate: 11429
       seeds: 1
       hits: 2
       misses: 4
       measuredMs: 32826
       samples: 6
       order: 26
-    - candidate: 11384
+    - candidate: 11424
       seeds: 1
       hits: 1
       misses: 4
       measuredMs: 20026
       samples: 5
       order: 27
-    - candidate: 11469
+    - candidate: 11509
       seeds: 1
       hits: 83
       misses: 0
       measuredMs: 104122
       samples: 83
       order: 67
-    - candidate: 11490
+    - candidate: 11530
       seeds: 1
       hits: 398
       misses: 0
       measuredMs: 515468
       samples: 398
       order: 68
-    - candidate: 11489
+    - candidate: 11529
       seeds: 1
       hits: 251
       misses: 0
@@ -439906,98 +440648,98 @@ generalized:
   - file: crates/cargo-unused-deps/src/verdict.rs
     item: judge_one
     candidates:
-    - candidate: 11363
+    - candidate: 11403
       seeds: 1
       hits: 2
       misses: 4
       measuredMs: 31668
       samples: 6
       order: 2
-    - candidate: 11369
+    - candidate: 11409
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 6954
       samples: 2
       order: 34
-    - candidate: 11367
+    - candidate: 11407
       seeds: 1
       hits: 1
       misses: 3
       measuredMs: 25122
       samples: 4
       order: 37
-    - candidate: 11375
+    - candidate: 11415
       seeds: 1
       hits: 3
       misses: 3
       measuredMs: 58168
       samples: 6
       order: 40
-    - candidate: 11371
+    - candidate: 11411
       seeds: 1
       hits: 2
       misses: 2
       measuredMs: 29296
       samples: 4
       order: 45
-    - candidate: 11372
+    - candidate: 11412
       seeds: 1
       hits: 0
       misses: 1
       measuredMs: 3525
       samples: 1
       order: 46
-    - candidate: 11377
+    - candidate: 11417
       seeds: 1
       hits: 0
       misses: 0
       measuredMs: 0
       samples: 0
       order: 49
-    - candidate: 11495
+    - candidate: 11535
       seeds: 1
       hits: 20
       misses: 0
       measuredMs: 75127
       samples: 20
       order: 50
-    - candidate: 11494
+    - candidate: 11534
       seeds: 1
       hits: 83
       misses: 0
       measuredMs: 392750
       samples: 83
       order: 51
-    - candidate: 11500
+    - candidate: 11540
       seeds: 1
       hits: 20
       misses: 0
       measuredMs: 134081
       samples: 20
       order: 52
-    - candidate: 11496
+    - candidate: 11536
       seeds: 1
       hits: 41
       misses: 0
       measuredMs: 230378
       samples: 41
       order: 56
-    - candidate: 11497
+    - candidate: 11537
       seeds: 1
       hits: 20
       misses: 0
       measuredMs: 102299
       samples: 20
       order: 57
-    - candidate: 11469
+    - candidate: 11509
       seeds: 1
       hits: 146
       misses: 0
       measuredMs: 163777
       samples: 146
       order: 59
-    - candidate: 11502
+    - candidate: 11542
       seeds: 1
       hits: 20
       misses: 0
@@ -440193,14 +440935,14 @@ generalized:
   - file: crates/hunspell-dictgen/src/lib.rs
     item: generate
     candidates:
-    - candidate: 11530
+    - candidate: 11570
       seeds: 1
       hits: 47
       misses: 1
       measuredMs: 52627
       samples: 48
       order: 34
-    - candidate: 11533
+    - candidate: 11573
       seeds: 1
       hits: 15
       misses: 0
@@ -440210,7 +440952,7 @@ generalized:
   - file: crates/hunspell-dictgen/src/lib.rs
     item: is_dictionary_entry
     candidates:
-    - candidate: 11531
+    - candidate: 11571
       seeds: 1
       hits: 67
       misses: 1
@@ -440220,14 +440962,14 @@ generalized:
   - file: crates/hunspell-dictgen/src/lib.rs
     item: output_parent
     candidates:
-    - candidate: 11530
+    - candidate: 11570
       seeds: 1
       hits: 14
       misses: 2
       measuredMs: 14451
       samples: 16
       order: 71
-    - candidate: 11535
+    - candidate: 11575
       seeds: 1
       hits: 29
       misses: 0
@@ -440237,21 +440979,21 @@ generalized:
   - file: crates/hunspell-dictgen/src/lib.rs
     item: publish_dictionary
     candidates:
-    - candidate: 11530
+    - candidate: 11570
       seeds: 1
       hits: 16
       misses: 8
       measuredMs: 18826
       samples: 24
       order: 22
-    - candidate: 11534
+    - candidate: 11574
       seeds: 1
       hits: 15
       misses: 5
       measuredMs: 16595
       samples: 20
       order: 24
-    - candidate: 11536
+    - candidate: 11576
       seeds: 1
       hits: 15
       misses: 1
@@ -440261,21 +441003,21 @@ generalized:
   - file: crates/hunspell-dictgen/src/lib.rs
     item: read_input
     candidates:
-    - candidate: 11532
+    - candidate: 11572
       seeds: 1
       hits: 13
       misses: 3
       measuredMs: 8803
       samples: 16
       order: 27
-    - candidate: 11530
+    - candidate: 11570
       seeds: 1
       hits: 56
       misses: 3
       measuredMs: 55442
       samples: 59
       order: 29
-    - candidate: 11533
+    - candidate: 11573
       seeds: 1
       hits: 40
       misses: 0
@@ -440285,14 +441027,14 @@ generalized:
   - file: crates/hunspell-dictgen/src/lib.rs
     item: render_dictionary
     candidates:
-    - candidate: 11530
+    - candidate: 11570
       seeds: 1
       hits: 31
       misses: 2
       measuredMs: 35190
       samples: 33
       order: 1
-    - candidate: 11531
+    - candidate: 11571
       seeds: 1
       hits: 159
       misses: 0
@@ -440302,7 +441044,7 @@ generalized:
   - file: crates/hunspell-dictgen/src/lib.rs
     item: stage_dictionary
     candidates:
-    - candidate: 11537
+    - candidate: 11577
       seeds: 1
       hits: 44
       misses: 0
@@ -440312,14 +441054,14 @@ generalized:
   - file: crates/hunspell-dictgen/src/main.rs
     item: run_with
     candidates:
-    - candidate: 11528
+    - candidate: 11568
       seeds: 1
       hits: 5
       misses: 2
       measuredMs: 4704
       samples: 7
       order: 1
-    - candidate: 11529
+    - candidate: 11569
       seeds: 1
       hits: 38
       misses: 0
@@ -449743,74 +450485,7 @@ generalized:
       measuredMs: 0
       samples: 0
       order: 54
-  - file: crates/cargo-unique-target-names/src/collisions.rs
-    candidates:
-    - candidate: 137
-      seeds: 1
-      hits: 1
-      misses: 1
-      measuredMs: 5486
-      samples: 2
-      order: 1
-    - candidate: 136
-      seeds: 1
-      hits: 0
-      misses: 0
-      measuredMs: 0
-      samples: 0
-      order: 2
-    - candidate: 138
-      seeds: 1
-      hits: 1
-      misses: 0
-      measuredMs: 7340
-      samples: 1
-      order: 4
-    - candidate: 141
-      seeds: 1
-      hits: 0
-      misses: 0
-      measuredMs: 0
-      samples: 0
-      order: 89
-    - candidate: 139
-      seeds: 1
-      hits: 0
-      misses: 0
-      measuredMs: 0
-      samples: 0
-      order: 94
-    - candidate: 140
-      seeds: 1
-      hits: 0
-      misses: 0
-      measuredMs: 0
-      samples: 0
-      order: 111
-  - file: crates/cargo-unique-target-names/src/lib.rs
-    candidates:
-    - candidate: 137
-      seeds: 1
-      hits: 2
-      misses: 1
-      measuredMs: 7291
-      samples: 3
-      order: 1
-    - candidate: 140
-      seeds: 1
-      hits: 1
-      misses: 0
-      measuredMs: 3524
-      samples: 1
-      order: 16
-    - candidate: 139
-      seeds: 1
-      hits: 1
-      misses: 3
-      measuredMs: 1704
-      samples: 4
-      order: 18
-  - file: crates/cargo-unique-target-names/src/main.rs
+  - file: crates/cargo-spellcheck-helper/src/main.rs
     candidates:
     - candidate: 135
       seeds: 1
@@ -449819,44 +450494,138 @@ generalized:
       measuredMs: 0
       samples: 0
       order: 1
+  - file: crates/cargo-spellcheck-helper/src/source_deps/library.rs
+    candidates:
+    - candidate: 135
+      seeds: 1
+      hits: 0
+      misses: 0
+      measuredMs: 0
+      samples: 0
+      order: 1
+  - file: crates/cargo-spellcheck-helper/src/source_deps.rs
+    candidates:
+    - candidate: 135
+      seeds: 1
+      hits: 0
+      misses: 0
+      measuredMs: 0
+      samples: 0
+      order: 1
+  - file: crates/cargo-unique-target-names/src/collisions.rs
+    candidates:
+    - candidate: 138
+      seeds: 1
+      hits: 1
+      misses: 1
+      measuredMs: 5486
+      samples: 2
+      order: 1
+    - candidate: 137
+      seeds: 1
+      hits: 0
+      misses: 0
+      measuredMs: 0
+      samples: 0
+      order: 2
+    - candidate: 139
+      seeds: 1
+      hits: 1
+      misses: 0
+      measuredMs: 7340
+      samples: 1
+      order: 4
+    - candidate: 142
+      seeds: 1
+      hits: 0
+      misses: 0
+      measuredMs: 0
+      samples: 0
+      order: 89
+    - candidate: 140
+      seeds: 1
+      hits: 0
+      misses: 0
+      measuredMs: 0
+      samples: 0
+      order: 94
+    - candidate: 141
+      seeds: 1
+      hits: 0
+      misses: 0
+      measuredMs: 0
+      samples: 0
+      order: 111
+  - file: crates/cargo-unique-target-names/src/lib.rs
+    candidates:
+    - candidate: 138
+      seeds: 1
+      hits: 2
+      misses: 1
+      measuredMs: 7291
+      samples: 3
+      order: 1
+    - candidate: 141
+      seeds: 1
+      hits: 1
+      misses: 0
+      measuredMs: 3524
+      samples: 1
+      order: 16
+    - candidate: 140
+      seeds: 1
+      hits: 1
+      misses: 3
+      measuredMs: 1704
+      samples: 4
+      order: 18
+  - file: crates/cargo-unique-target-names/src/main.rs
+    candidates:
+    - candidate: 136
+      seeds: 1
+      hits: 0
+      misses: 0
+      measuredMs: 0
+      samples: 0
+      order: 1
   - file: crates/cargo-unused-deps/src/detect.rs
     candidates:
-    - candidate: 144
+    - candidate: 145
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 14353
       samples: 2
       order: 2
-    - candidate: 142
+    - candidate: 143
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 1722
       samples: 2
       order: 79
-    - candidate: 143
+    - candidate: 144
       seeds: 1
       hits: 1
       misses: 0
       measuredMs: 106535
       samples: 1
       order: 110
-    - candidate: 146
+    - candidate: 147
       seeds: 1
       hits: 0
       misses: 0
       measuredMs: 0
       samples: 0
       order: 245
-    - candidate: 145
+    - candidate: 146
       seeds: 1
       hits: 0
       misses: 0
       measuredMs: 0
       samples: 0
       order: 248
-    - candidate: 147
+    - candidate: 148
       seeds: 1
       hits: 0
       misses: 2
@@ -449865,28 +450634,28 @@ generalized:
       order: 254
   - file: crates/cargo-unused-deps/src/doctests.rs
     candidates:
-    - candidate: 142
+    - candidate: 143
       seeds: 1
       hits: 2
       misses: 66
       measuredMs: 96002
       samples: 68
       order: 1
-    - candidate: 143
+    - candidate: 144
       seeds: 1
       hits: 8
       misses: 2
       measuredMs: 793300
       samples: 10
       order: 2
-    - candidate: 146
+    - candidate: 147
       seeds: 1
       hits: 0
       misses: 4
       measuredMs: 1093214
       samples: 4
       order: 165
-    - candidate: 145
+    - candidate: 146
       seeds: 1
       hits: 0
       misses: 0
@@ -449895,28 +450664,28 @@ generalized:
       order: 177
   - file: crates/cargo-unused-deps/src/evidence.rs
     candidates:
-    - candidate: 143
+    - candidate: 144
       seeds: 1
       hits: 0
       misses: 1
       measuredMs: 290801
       samples: 1
       order: 2
-    - candidate: 142
+    - candidate: 143
       seeds: 1
       hits: 0
       misses: 0
       measuredMs: 0
       samples: 0
       order: 3
-    - candidate: 146
+    - candidate: 147
       seeds: 1
       hits: 1
       misses: 0
       measuredMs: 565
       samples: 1
       order: 253
-    - candidate: 145
+    - candidate: 146
       seeds: 1
       hits: 18
       misses: 0
@@ -449925,28 +450694,28 @@ generalized:
       order: 256
   - file: crates/cargo-unused-deps/src/fix.rs
     candidates:
-    - candidate: 144
+    - candidate: 145
       seeds: 1
       hits: 13
       misses: 1
       measuredMs: 57616
       samples: 14
       order: 1
-    - candidate: 142
+    - candidate: 143
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 1865
       samples: 2
       order: 30
-    - candidate: 147
+    - candidate: 148
       seeds: 1
       hits: 0
       misses: 0
       measuredMs: 0
       samples: 0
       order: 44
-    - candidate: 145
+    - candidate: 146
       seeds: 1
       hits: 0
       misses: 0
@@ -449955,42 +450724,42 @@ generalized:
       order: 67
   - file: crates/cargo-unused-deps/src/lib.rs
     candidates:
-    - candidate: 144
+    - candidate: 145
       seeds: 1
       hits: 4
       misses: 28
       measuredMs: 153788
       samples: 32
       order: 2
-    - candidate: 142
+    - candidate: 143
       seeds: 1
       hits: 2
       misses: 11
       measuredMs: 16063
       samples: 13
       order: 9
-    - candidate: 143
+    - candidate: 144
       seeds: 1
       hits: 0
       misses: 1
       measuredMs: 281999
       samples: 1
       order: 236
-    - candidate: 146
+    - candidate: 147
       seeds: 1
       hits: 0
       misses: 2
       measuredMs: 421885
       samples: 2
       order: 505
-    - candidate: 147
+    - candidate: 148
       seeds: 1
       hits: 0
       misses: 0
       measuredMs: 0
       samples: 0
       order: 507
-    - candidate: 145
+    - candidate: 146
       seeds: 1
       hits: 0
       misses: 0
@@ -449999,14 +450768,14 @@ generalized:
       order: 508
   - file: crates/cargo-unused-deps/src/main.rs
     candidates:
-    - candidate: 144
+    - candidate: 145
       seeds: 1
       hits: 0
       misses: 0
       measuredMs: 0
       samples: 0
       order: 2
-    - candidate: 147
+    - candidate: 148
       seeds: 1
       hits: 0
       misses: 0
@@ -450015,21 +450784,21 @@ generalized:
       order: 3
   - file: crates/cargo-unused-deps/src/verdict.rs
     candidates:
-    - candidate: 143
+    - candidate: 144
       seeds: 1
       hits: 2
       misses: 1
       measuredMs: 394484
       samples: 3
       order: 1
-    - candidate: 146
+    - candidate: 147
       seeds: 1
       hits: 0
       misses: 0
       measuredMs: 0
       samples: 0
       order: 50
-    - candidate: 145
+    - candidate: 146
       seeds: 1
       hits: 0
       misses: 0
@@ -450077,7 +450846,7 @@ generalized:
       order: 5
   - file: crates/hunspell-dictgen/src/lib.rs
     candidates:
-    - candidate: 149
+    - candidate: 150
       seeds: 1
       hits: 0
       misses: 0
@@ -450086,7 +450855,7 @@ generalized:
       order: 1
   - file: crates/hunspell-dictgen/src/main.rs
     candidates:
-    - candidate: 148
+    - candidate: 149
       seeds: 1
       hits: 0
       misses: 0

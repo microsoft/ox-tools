@@ -50,7 +50,7 @@ impl Probe for Script {
         };
         assert_eq!(Path::new(pattern), Path::new(&expected));
         assert_eq!(case_sensitive, expected_case);
-        result.into_app_err("scripted discovery failure")
+        result.into_app_err(format!("scripted discovery failure for `{pattern}`"))
     }
     fn is_file(&mut self, path: &Path) -> io::Result<bool> {
         let Call::File(expected, result) = self.next() else {
@@ -277,6 +277,70 @@ fn successful_probe_checks_loader_and_native_tools() {
     ]);
     let mut script = Script::new(calls);
     check_with(&environment, &mut script).unwrap();
+    script.done();
+}
+
+#[test]
+fn unreadable_optional_search_does_not_discard_valid_library() {
+    let environment = environment("x86_64-unknown-linux-gnu", None);
+    let path = pattern("llvm/lib", "libclang-18.so");
+    let mut calls = vec![Call::Command(
+        "llvm-config".into(),
+        vec!["--prefix".into()],
+        Ok(CommandOutput {
+            success: true,
+            stdout: "llvm".into(),
+            stderr: String::new(),
+        }),
+    )];
+    calls.extend(linux_search("llvm/bin", &[], &[]));
+    calls.extend(linux_search("llvm/lib", &[], &[&path]));
+    calls.extend(linux_search("llvm/lib64", &[], &[]));
+    for (index, glob) in directory_patterns(&environment.target).iter().enumerate() {
+        if index == 0 {
+            calls.push(Call::Glob((*glob).into(), false, vec!["unreadable".into()]));
+            calls.push(Call::GlobError(
+                pattern("unreadable", "libclang.so"),
+                true,
+                io::ErrorKind::PermissionDenied,
+            ));
+        } else {
+            calls.push(Call::Glob((*glob).into(), false, vec![]));
+        }
+    }
+    calls.extend([
+        elf(&path, 2),
+        absolute(&path),
+        Call::Load(path.into(), Ok(())),
+        Call::Tools(environment.target.triple.clone(), Ok(())),
+    ]);
+    let mut script = Script::new(calls);
+    check_with(&environment, &mut script).unwrap();
+    script.done();
+}
+
+#[test]
+fn optional_search_failure_retains_first_typed_cause_when_discovery_fails() {
+    let environment = environment("x86_64-unknown-linux-gnu", None);
+    let mut calls = vec![Call::Command(
+        "llvm-config".into(),
+        vec!["--prefix".into()],
+        Err(io::ErrorKind::NotFound.into()),
+    )];
+    for (index, glob) in directory_patterns(&environment.target).iter().enumerate() {
+        calls.push(match index {
+            0 => Call::GlobError((*glob).into(), false, io::ErrorKind::PermissionDenied),
+            1 => Call::GlobError((*glob).into(), false, io::ErrorKind::NotFound),
+            _ => Call::Glob((*glob).into(), false, vec![]),
+        });
+    }
+    let mut script = Script::new(calls);
+    let error = find_libclang(&environment, &mut script).unwrap_err();
+    assert_eq!(error.find_source::<io::Error>().unwrap().kind(), io::ErrorKind::PermissionDenied);
+    let details = error.to_string();
+    for pattern in &directory_patterns(&environment.target)[..2] {
+        assert!(details.contains(pattern), "every failed search location must remain diagnosable");
+    }
     script.done();
 }
 
@@ -654,24 +718,33 @@ fn pe_validation_checks_machine_width_and_accepts_unknown_machine_like_clang_sys
 fn pe_header_read_failures_and_truncation_propagate_without_panicking() {
     let target = Target::parse("x86_64-pc-windows-msvc").unwrap();
     let path = Path::new("libclang.dll");
-    for offset in [Err(io::ErrorKind::PermissionDenied.into()), Ok(vec![128, 0, 0])] {
+    for (offset, kind) in [
+        (Err(io::ErrorKind::PermissionDenied.into()), Some(io::ErrorKind::PermissionDenied)),
+        (Ok(vec![128, 0, 0]), None),
+    ] {
         let mut script = Script::new(vec![Call::Read(path.into(), 0x3c, 4, offset)]);
-        assert!(library::validate(&target, path, &mut script).is_err());
+        let error = library::validate(&target, path, &mut script).unwrap_err();
+        if let Some(kind) = kind {
+            assert_eq!(error.find_source::<io::Error>().unwrap().kind(), kind);
+        } else {
+            assert!(error.find_source::<std::array::TryFromSliceError>().is_some());
+        }
         script.done();
     }
     let mut bad_signature = vec![0; 26];
     bad_signature[4..6].copy_from_slice(&0x8664_u16.to_le_bytes());
     bad_signature[24..26].copy_from_slice(&0x20b_u16.to_le_bytes());
-    for header in [
-        Err(io::ErrorKind::UnexpectedEof.into()),
-        Ok(b"PE\0\0\x64\x86".to_vec()),
-        Ok(bad_signature),
+    for (header, kind) in [
+        (Err(io::ErrorKind::UnexpectedEof.into()), Some(io::ErrorKind::UnexpectedEof)),
+        (Ok(b"PE\0\0\x64\x86".to_vec()), None),
+        (Ok(bad_signature), None),
     ] {
         let mut script = Script::new(vec![
             Call::Read(path.into(), 0x3c, 4, Ok(128_u32.to_le_bytes().to_vec())),
             Call::Read(path.into(), 128, 26, header),
         ]);
-        assert!(library::validate(&target, path, &mut script).is_err());
+        let error = library::validate(&target, path, &mut script).unwrap_err();
+        assert_eq!(error.find_source::<io::Error>().map(io::Error::kind), kind);
         script.done();
     }
 }
@@ -781,11 +854,21 @@ fn discovery_calls(environment: &Environment) -> Vec<Call> {
 fn assert_glob_errors_propagate(environment: &Environment, make_calls: impl Fn() -> Vec<Call>) {
     let count = make_calls().len();
     for index in 0..count {
-        let mut calls: Vec<_> = make_calls().into_iter().take(index + 1).collect();
-        let Some(Call::Glob(pattern, case, _)) = calls.pop() else {
+        let mut calls = make_calls();
+        let Call::Glob(pattern, case, _) = calls.remove(index) else {
             continue;
         };
-        calls.push(Call::GlobError(pattern, case, io::ErrorKind::PermissionDenied));
+        let directory = Path::new(&pattern).parent().map(Path::to_path_buf);
+        calls.insert(index, Call::GlobError(pattern, case, io::ErrorKind::PermissionDenied));
+        if environment.libclang_path.is_some() {
+            calls.truncate(index + 1);
+        } else {
+            while matches!(calls.get(index + 1), Some(Call::Glob(next, true, _))
+                if !case || Path::new(next).parent() == directory.as_deref())
+            {
+                calls.remove(index + 1);
+            }
+        }
         let mut script = Script::new(calls);
         let error = check_with(environment, &mut script).unwrap_err();
         assert_eq!(error.find_source::<io::Error>().unwrap().kind(), io::ErrorKind::PermissionDenied);
@@ -794,7 +877,7 @@ fn assert_glob_errors_propagate(environment: &Environment, make_calls: impl Fn()
 }
 
 #[test]
-fn every_discovery_stage_propagates_glob_errors_without_panicking_or_continuing() {
+fn discovery_errors_remain_fatal_for_overrides_and_are_retained_for_optional_search() {
     let mut environment = environment("x86_64-unknown-linux-gnu", None);
     environment.ld_library_path = vec!["loader".into()];
     assert_glob_errors_propagate(&environment, || discovery_calls(&environment));
@@ -810,7 +893,7 @@ fn every_discovery_stage_propagates_glob_errors_without_panicking_or_continuing(
     let environment = self::environment("aarch64-apple-darwin", None);
     let directory = Path::new("Xcode").join("Toolchains/XcodeDefault.xctoolchain/usr/lib");
     assert_glob_errors_propagate(&environment, || {
-        vec![
+        let mut calls = vec![
             Call::Command("llvm-config".into(), vec!["--prefix".into()], Err(io::ErrorKind::NotFound.into())),
             Call::Command(
                 "xcode-select".into(),
@@ -822,7 +905,13 @@ fn every_discovery_stage_propagates_glob_errors_without_panicking_or_continuing(
                 }),
             ),
             Call::Glob(directory.join("libclang.dylib").to_str().unwrap().into(), true, vec![]),
-        ]
+        ];
+        calls.extend(
+            directory_patterns(&environment.target)
+                .iter()
+                .map(|glob| Call::Glob((*glob).into(), false, vec![])),
+        );
+        calls
     });
 }
 
@@ -996,6 +1085,114 @@ fn bootstrap_uses_owned_override_and_path_values_without_host_environment() {
     )
     .unwrap();
     script.done();
+}
+
+#[test]
+fn bootstrap_accepts_native_cargo_host_alias() {
+    let environment = environment("x86_64-unknown-linux-gnu", Some("custom"));
+    let path = pattern("custom", "libclang-18.so");
+    let mut calls = ["rustc", "cargo"]
+        .into_iter()
+        .map(|tool| {
+            Call::Command(
+                tool.into(),
+                vec!["-vV".into()],
+                Ok(CommandOutput {
+                    success: true,
+                    stdout: "host: x86_64-unknown-linux-gnu".into(),
+                    stderr: String::new(),
+                }),
+            )
+        })
+        .collect::<Vec<_>>();
+    calls.extend(linux_override(&[&path]));
+    calls.extend([
+        elf(&path, 2),
+        absolute(&path),
+        Call::Load(path.into(), Ok(())),
+        Call::Tools(environment.target.triple, Ok(())),
+    ]);
+    let mut script = Script::new(calls);
+    check_environment(
+        &mut script,
+        variables(vec![
+            ("CARGO_BUILD_TARGET", Some("host-tuple".into())),
+            ("LIBCLANG_PATH", Some("custom".into())),
+            ("LLVM_CONFIG_PATH", None),
+            ("LD_LIBRARY_PATH", None),
+            ("PATH", None),
+        ]),
+    )
+    .unwrap();
+    script.done();
+}
+
+#[test]
+fn bootstrap_rejects_cargo_host_alias_if_cargo_and_rustc_hosts_differ() {
+    let mut script = Script::new(
+        [("rustc", "x86_64-unknown-linux-gnu"), ("cargo", "aarch64-unknown-linux-gnu")]
+            .map(|(tool, host)| {
+                Call::Command(
+                    tool.into(),
+                    vec!["-vV".into()],
+                    Ok(CommandOutput {
+                        success: true,
+                        stdout: format!("host: {host}"),
+                        stderr: String::new(),
+                    }),
+                )
+            })
+            .into(),
+    );
+    check_environment(&mut script, variables(vec![("CARGO_BUILD_TARGET", Some("host-tuple".into()))])).unwrap_err();
+    script.done();
+}
+
+#[test]
+fn bootstrap_cargo_alias_failure_preserves_typed_cause() {
+    let mut script = Script::new(vec![
+        Call::Command(
+            "rustc".into(),
+            vec!["-vV".into()],
+            Ok(CommandOutput {
+                success: true,
+                stdout: "host: x86_64-unknown-linux-gnu".into(),
+                stderr: String::new(),
+            }),
+        ),
+        Call::Command("cargo".into(), vec!["-vV".into()], Err(io::ErrorKind::NotFound.into())),
+    ]);
+    let error = check_environment(&mut script, variables(vec![("CARGO_BUILD_TARGET", Some("host-tuple".into()))])).unwrap_err();
+    assert_eq!(error.find_source::<io::Error>().unwrap().kind(), io::ErrorKind::NotFound);
+    script.done();
+}
+
+#[test]
+fn bootstrap_rejects_failed_or_missing_cargo_host_output_before_discovery() {
+    for (success, stdout) in [(false, "host: x86_64-unknown-linux-gnu"), (true, "cargo version only")] {
+        let mut script = Script::new(vec![
+            Call::Command(
+                "rustc".into(),
+                vec!["-vV".into()],
+                Ok(CommandOutput {
+                    success: true,
+                    stdout: "host: x86_64-unknown-linux-gnu".into(),
+                    stderr: String::new(),
+                }),
+            ),
+            Call::Command(
+                "cargo".into(),
+                vec!["-vV".into()],
+                Ok(CommandOutput {
+                    success,
+                    stdout: stdout.into(),
+                    stderr: "injected cargo failure".into(),
+                }),
+            ),
+        ]);
+        check_environment(&mut script, variables(vec![("CARGO_BUILD_TARGET", Some("host-tuple".into()))])).unwrap_err();
+        script.done();
+    }
 }
 
 #[test]

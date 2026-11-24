@@ -103,7 +103,22 @@ fn check_environment(probe: &mut impl Probe, mut variable: impl FnMut(&str) -> O
     if !output.success {
         return Err(AppError::new(format!("`rustc -vV` failed: {}", output.stderr)));
     }
-    let target = installation_target(&output.stdout, variable("CARGO_BUILD_TARGET").as_deref())?;
+    let build_target = variable("CARGO_BUILD_TARGET");
+    let build_target = match build_target {
+        Some(target) if target == "host-tuple" => {
+            let cargo = probe
+                .command(std::ffi::OsStr::new("cargo"), &["-vV"])
+                // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, tag = "diagnostic", reason = "Only changes command-failure context; the injected execution error and typed cause must still propagate.")]
+                .into_app_err("failed to run `cargo -vV` to resolve CARGO_BUILD_TARGET=host-tuple")?;
+            if !cargo.success {
+                return Err(AppError::new(format!("`cargo -vV` failed: {}", cargo.stderr)));
+            }
+            // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, tag = "diagnostic", reason = "The tool label affects only missing-host prose; failed host parsing must still reject the alias.")]
+            Some(OsString::from(version_host(&cargo.stdout, "cargo")?))
+        }
+        target => target,
+    };
+    let target = installation_target(&output.stdout, build_target.as_deref())?;
     let environment = Environment {
         target,
         libclang_path: variable("LIBCLANG_PATH").map(PathBuf::from),
@@ -119,11 +134,8 @@ fn check_environment(probe: &mut impl Probe, mut variable: impl FnMut(&str) -> O
 }
 
 fn installation_target(rustc_output: &str, build_target: Option<&std::ffi::OsStr>) -> Result<Target, AppError> {
-    let host = rustc_output
-        .lines()
-        .find_map(|line| line.strip_prefix("host: "))
-        // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, tag = "diagnostic", reason = "Only changes refusal prose; absence of a rustc host must still fail.")]
-        .ok_or_else(|| AppError::new("`rustc -vV` did not report a host target"))?;
+    // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, tag = "diagnostic", reason = "The tool label affects only missing-host prose; failed host parsing must still reject installation.")]
+    let host = version_host(rustc_output, "rustc")?;
     if let Some(build_target) = build_target
         && build_target != host
     {
@@ -134,6 +146,13 @@ fn installation_target(rustc_output: &str, build_target: Option<&std::ffi::OsStr
         )));
     }
     Target::parse(host)
+}
+
+fn version_host<'a>(output: &'a str, tool: &str) -> Result<&'a str, AppError> {
+    output
+        .lines()
+        .find_map(|line| line.strip_prefix("host: "))
+        .ok_or_else(|| AppError::new(format!("`{tool} -vV` did not report a host target")))
 }
 
 fn check_with(environment: &Environment, probe: &mut impl Probe) -> Result<(), AppError> {
@@ -157,6 +176,7 @@ fn check_with(environment: &Environment, probe: &mut impl Probe) -> Result<(), A
 fn find_libclang(environment: &Environment, probe: &mut impl Probe) -> Result<PathBuf, AppError> {
     let mut candidates = Vec::new();
     let mut notes = Vec::new();
+    let mut first_search_error = None;
     if let Some(path) = &environment.libclang_path {
         if let Some(parent) = path.parent() {
             let files = search_directory(environment, parent, probe)?;
@@ -170,24 +190,47 @@ fn find_libclang(environment: &Environment, probe: &mut impl Probe) -> Result<Pa
     } else {
         if let Some(prefix) = optional_directory_command(probe, &environment.llvm_config, &["--prefix"], &mut notes) {
             for name in ["bin", "lib", "lib64"] {
-                candidates.extend(search_directory(environment, &prefix.join(name), probe)?);
+                // #[gamma::skip(call_result.default, tag = "equivalent", reason = "default_after still executes this side-effecting call and replaces its unit result with unit.")]
+                append_optional_paths(
+                    search_directory(environment, &prefix.join(name), probe),
+                    &mut candidates,
+                    &mut notes,
+                    &mut first_search_error,
+                );
             }
         }
         if environment.target.platform == Platform::MacOs
             && let Some(prefix) = optional_directory_command(probe, std::ffi::OsStr::new("xcode-select"), &["--print-path"], &mut notes)
         {
-            candidates.extend(search_directory(
-                environment,
-                &prefix.join("Toolchains/XcodeDefault.xctoolchain/usr/lib"),
-                probe,
-            )?);
+            // #[gamma::skip(call_result.default, tag = "equivalent", reason = "default_after still executes this side-effecting call and replaces its unit result with unit.")]
+            append_optional_paths(
+                search_directory(environment, &prefix.join("Toolchains/XcodeDefault.xctoolchain/usr/lib"), probe),
+                &mut candidates,
+                &mut notes,
+                &mut first_search_error,
+            );
         }
         for directory in &environment.ld_library_path {
-            candidates.extend(search_directory(environment, directory, probe)?);
+            // #[gamma::skip(call_result.default, tag = "equivalent", reason = "default_after still executes this side-effecting call and replaces its unit result with unit.")]
+            append_optional_paths(
+                search_directory(environment, directory, probe),
+                &mut candidates,
+                &mut notes,
+                &mut first_search_error,
+            );
         }
         for pattern in directory_patterns(&environment.target) {
-            for directory in probe.glob(pattern, false)? {
-                candidates.extend(search_directory(environment, &directory, probe)?);
+            let mut directories = Vec::new();
+            // #[gamma::skip(call_result.default, tag = "equivalent", reason = "default_after still executes this side-effecting call and replaces its unit result with unit.")]
+            append_optional_paths(probe.glob(pattern, false), &mut directories, &mut notes, &mut first_search_error);
+            for directory in directories {
+                // #[gamma::skip(call_result.default, tag = "equivalent", reason = "default_after still executes this side-effecting call and replaces its unit result with unit.")]
+                append_optional_paths(
+                    search_directory(environment, &directory, probe),
+                    &mut candidates,
+                    &mut notes,
+                    &mut first_search_error,
+                );
             }
         }
     }
@@ -203,27 +246,49 @@ fn find_libclang(environment: &Environment, probe: &mut impl Probe) -> Result<Pa
             Err(error) => notes.push(format!("{}: {error}", candidate.display())),
         }
     }
-    best.map(|(path, _)| path).ok_or_else(|| {
-        let override_hint = environment.libclang_path.as_ref().map_or(String::new(), |path| {
-            format!(
-                "\nLIBCLANG_PATH `{}` is authoritative; fix or unset it to search other installations.",
-                path.display()
-            )
-        });
-        // #[gamma::skip(cond.always_false, tag = "equivalent", reason = "With no notes this only adds an empty Discovery details heading to the already-failed result.")]
-        let details = if notes.is_empty() {
-            String::new()
-        } else {
-            format!("\nDiscovery details:\n{}", notes.join("\n"))
-        };
-        AppError::new(format!(
-            "No valid link-time libclang found for `{}`.{}{}\n{}",
-            environment.target.triple,
-            override_hint,
-            details,
-            installation_hint(environment.target.platform)
-        ))
-    })
+    if let Some((path, _)) = best {
+        return Ok(path);
+    }
+    let override_hint = environment.libclang_path.as_ref().map_or(String::new(), |path| {
+        format!(
+            "\nLIBCLANG_PATH `{}` is authoritative; fix or unset it to search other installations.",
+            path.display()
+        )
+    });
+    // #[gamma::skip(cond.always_false, tag = "equivalent", reason = "With no notes this only adds an empty Discovery details heading to the already-failed result.")]
+    let details = if notes.is_empty() {
+        String::new()
+    } else {
+        format!("\nDiscovery details:\n{}", notes.join("\n"))
+    };
+    let message = format!(
+        "No valid link-time libclang found for `{}`.{}{}\n{}",
+        environment.target.triple,
+        override_hint,
+        details,
+        installation_hint(environment.target.platform)
+    );
+    match first_search_error {
+        Some(error) => Err(error).into_app_err(message),
+        None => Err(AppError::new(message)),
+    }
+}
+
+fn append_optional_paths(
+    result: Result<Vec<PathBuf>, AppError>,
+    paths: &mut Vec<PathBuf>,
+    notes: &mut Vec<String>,
+    first_error: &mut Option<AppError>,
+) {
+    match result {
+        Ok(found) => paths.extend(found),
+        Err(error) => {
+            notes.push(error.to_string());
+            if first_error.is_none() {
+                *first_error = Some(error);
+            }
+        }
+    }
 }
 
 fn search_directory(environment: &Environment, directory: &Path, probe: &mut impl Probe) -> Result<Vec<PathBuf>, AppError> {
