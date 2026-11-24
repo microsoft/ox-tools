@@ -11,7 +11,7 @@ that floor universally.
 
 | Group | Checks |
 |-------|--------|
-| `pr-fast` | fmt, clippy, cargo-sort, license-headers, ensure-no-cyclic-deps, ensure-no-default-features, doc-build, readme-check, spellcheck, pr-title, deny, audit, unused-deps, udeps, external-types |
+| `pr-fast` | fmt, clippy, cargo-sort, license-headers, ensure-no-cyclic-deps, ensure-no-default-features, doc-build, readme-check, spellcheck, pr-title, deny, audit, udeps, external-types |
 | `pr-test` | llvm-cov, doc-test, examples |
 | `pr-msrv` | msrv-test |
 | `pr-runtime-analysis` | miri, careful, loom |
@@ -64,11 +64,13 @@ Locally, recipes run on the host OS. See [github.md](./github.md) and
 | `udeps` | Checks unused dependencies with all features, both for default targets and for all targets. This catches unused dev-dependencies and regular dependencies used only by tests, benches, or examples. |
 | `external-types` | Checks exposed dependency types in selected libraries with a schema-matched nightly. Bin-only packages are skipped; tool/nightly incompatibility fails. |
 
-`unused-deps` runs immediately before `udeps`, which remains a temporary safety
-net while `cargo-unused-deps` replaces both `cargo-udeps` and `cargo-machete`.
-After unused-deps passes, a dependency finding from udeps is a discrepancy to
-investigate: it may expose a gap in unused-deps or a known udeps false positive,
-such as a correctly declared doctest-only dev-dependency.
+`unused-deps` is available as a standalone opt-in check and is intentionally
+excluded from `pr-fast`: cargo-unused-deps 0.2.0 cannot preserve source-qualified
+workspace identity when a registry dependency has the same name and version, so
+package evidence can resolve ambiguously. Once a checker release fixes that
+limitation, it can return to the mandatory PR group. `udeps` remains in that
+group as the current safety net while cargo-unused-deps is evaluated for
+replacement.
 
 PR titles accept these forms:
 

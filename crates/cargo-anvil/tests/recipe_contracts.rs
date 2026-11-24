@@ -120,6 +120,7 @@ fn unused_deps_keeps_scope_and_fixes_explicit() {
     assert!(generated.checks.contains(r#"anvil-unused-deps fix="false":"#));
     assert!(generated.checks.contains(r#"anvil_impact_input_dir + "/required.packages""#));
     assert!(generated.checks.contains("$pkg += @('--package', $spec)"));
+    assert!(generated.checks.contains("Where-Object { -not [string]::IsNullOrWhiteSpace($_) }"));
     assert!(generated.setup.contains("cargo_unused_deps_version"));
     assert!(generated.setup.contains("anvil-tool-cargo-unused-deps-validate-prereqs"));
 }

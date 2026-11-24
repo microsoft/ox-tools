@@ -19,7 +19,7 @@ anvil-unused-deps fix="false": anvil-unused-deps-validate-prereqs anvil-impact
             Write-Error "anvil-unused-deps: $packageFile contains whitespace but no package specs"
             exit 1
         }
-        foreach ($spec in @(Get-Content -LiteralPath $packageFile)) {
+        foreach ($spec in @(Get-Content -LiteralPath $packageFile | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
             $pkg += @('--package', $spec)
         }
     }

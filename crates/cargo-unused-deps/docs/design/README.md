@@ -723,12 +723,11 @@ did not happen would send the reviewer hunting for text that is not in the diff.
 ## 7. CI integration
 
 The complete check is intended to replace both `cargo-udeps` and `cargo-machete`.
-Anvil temporarily retains `cargo-udeps` as a safety net against gaps in this
-replacement. In `pr-fast`, this check runs immediately before `cargo-udeps`.
-Once unused-deps passes, the subsequent udeps check is expected to find nothing;
-any dependency finding there is a discrepancy to investigate. It may expose a
-gap in unused-deps or a known udeps false positive, such as a correctly declared
-doctest-only dev-dependency.
+Anvil retains `cargo-udeps` in `pr-fast`. The unused-deps recipe is currently an
+opt-in standalone check because 0.2.0 cannot preserve source-qualified workspace
+identity when a registry dependency has the same name and version. Returning it
+to the mandatory group requires a checker release that fixes that ambiguity for
+both compiler and doctest evidence.
 
 Generated setup installs the pinned 0.2.0 release from crates.io rather than
 relying on an unpublished local build.

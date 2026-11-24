@@ -783,7 +783,6 @@ anvil-pr-fast-setup installer="install": \
     (anvil-pr-title-setup installer) \
     (anvil-deny-setup installer) \
     (anvil-audit-setup installer) \
-    (anvil-unused-deps-setup installer) \
     (anvil-udeps-setup installer) \
     (anvil-external-types-setup installer)
 
@@ -803,7 +802,6 @@ anvil-pr-fast-validate-prereqs: \
     anvil-pr-title-validate-prereqs \
     anvil-deny-validate-prereqs \
     anvil-audit-validate-prereqs \
-    anvil-unused-deps-validate-prereqs \
     anvil-udeps-validate-prereqs \
     anvil-external-types-validate-prereqs
 

@@ -1289,7 +1289,7 @@ anvil-unused-deps fix="false": anvil-unused-deps-validate-prereqs anvil-impact
             Write-Error "anvil-unused-deps: $packageFile contains whitespace but no package specs"
             exit 1
         }
-        foreach ($spec in @(Get-Content -LiteralPath $packageFile)) {
+        foreach ($spec in @(Get-Content -LiteralPath $packageFile | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
             $pkg += @('--package', $spec)
         }
     }
@@ -2584,7 +2584,6 @@ anvil-pr-fast: anvil-pr-fast-validate-prereqs \
     anvil-pr-title \
     anvil-deny \
     anvil-audit \
-    anvil-unused-deps \
     anvil-udeps \
     anvil-external-types
 
@@ -4079,7 +4078,6 @@ anvil-pr-fast-setup installer="install": \
     (anvil-pr-title-setup installer) \
     (anvil-deny-setup installer) \
     (anvil-audit-setup installer) \
-    (anvil-unused-deps-setup installer) \
     (anvil-udeps-setup installer) \
     (anvil-external-types-setup installer)
 
@@ -4099,7 +4097,6 @@ anvil-pr-fast-validate-prereqs: \
     anvil-pr-title-validate-prereqs \
     anvil-deny-validate-prereqs \
     anvil-audit-validate-prereqs \
-    anvil-unused-deps-validate-prereqs \
     anvil-udeps-validate-prereqs \
     anvil-external-types-validate-prereqs
 
