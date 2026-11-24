@@ -652,6 +652,7 @@ mod tests {
             });
         }
         Member {
+            package_id: "metadata-id-m".to_owned(),
             name: "m".to_owned(),
             version: "0.1.0".to_owned(),
             rust_version: Some("1.70.0".parse().expect("valid Rust version")),

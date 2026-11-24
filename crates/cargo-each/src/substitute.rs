@@ -10,7 +10,7 @@
 //!   `{spec}`, `{cargo-spec}`, `{version}`, `{manifest}`. Replaced textually inside each
 //!   argument.
 //! - The per-target token `{target}`.
-//! - The once token (valid only in `--once` mode): `{packages}`. Must stand
+//! - The once tokens (valid only in `--once` mode): `{packages}`, `{cargo-specs}`. Must stand
 //!   alone as a whole argument; it expands to the resolved selection flags,
 //!   which is several tokens.
 //! - The workspace token `{workspace-rust-version}`, valid in Cargo-backed
@@ -37,6 +37,8 @@ const PER_PACKAGE_TOKENS: [&str; 5] = ["{name}", "{spec}", "{cargo-spec}", "{ver
 const TARGET_TOKEN: &str = "{target}";
 /// The once-mode placeholder token.
 const PACKAGES_TOKEN: &str = "{packages}";
+/// The once-mode source-qualified selection placeholder.
+const CARGO_SPECS_TOKEN: &str = "{cargo-specs}";
 /// The workspace-wide Rust compatibility floor token.
 const WORKSPACE_RUST_VERSION_TOKEN: &str = "{workspace-rust-version}";
 /// Prefix of a dynamic JSON-record field placeholder.
@@ -51,7 +53,7 @@ pub(crate) enum Placeholders {
         name: String,
         /// `{spec}` — `name@version`.
         spec: String,
-        /// `{cargo-spec}` — source-qualified Cargo selector.
+        /// `{cargo-spec}` — opaque Cargo metadata package ID.
         cargo_spec: String,
         /// `{version}` — package version.
         version: String,
@@ -75,6 +77,8 @@ pub(crate) enum Placeholders {
         /// The cargo selection flags for the resolved set (e.g.
         /// `["--workspace"]` or `["--package", "a@1", "--package", "b@2"]`).
         packages: Vec<String>,
+        /// Source-qualified selection flags, or `--workspace` for the untouched workspace.
+        cargo_specs: Vec<String>,
         /// The root workspace Rust-version declaration, when requested.
         workspace_rust_version: Option<String>,
     },
@@ -201,7 +205,7 @@ pub(crate) fn uses_workspace_rust_version(args: &[String]) -> bool {
 /// # Errors
 ///
 /// Returns [`EachError`] if a per-package token appears under [`Mode::Once`],
-/// if `{packages}` appears outside [`Mode::Once`], or if `{packages}` is
+/// if `{packages}` or `{cargo-specs}` appears outside [`Mode::Once`], or if either is
 /// embedded in a larger argument rather than standing alone.
 pub(crate) fn validate_placeholders(args: &[String], mode: Mode) -> Result<(), EachError> {
     for arg in args {
@@ -221,16 +225,20 @@ pub(crate) fn validate_placeholders(args: &[String], mode: Mode) -> Result<(), E
                 )
                 .into());
             }
-            if arg != PACKAGES_TOKEN && arg.contains(PACKAGES_TOKEN) {
-                return Err(PlaceholderMisuseError::new(
-                    PACKAGES_TOKEN.to_owned(),
-                    "must stand alone as a whole argument (it expands to multiple tokens)".to_owned(),
-                )
-                .into());
+            for token in [PACKAGES_TOKEN, CARGO_SPECS_TOKEN] {
+                if arg != token && arg.contains(token) {
+                    return Err(PlaceholderMisuseError::new(
+                        token.to_owned(),
+                        "must stand alone as a whole argument (it expands to multiple tokens)".to_owned(),
+                    )
+                    .into());
+                }
             }
         } else {
-            if arg.contains(PACKAGES_TOKEN) {
-                return Err(PlaceholderMisuseError::new(PACKAGES_TOKEN.to_owned(), "only valid in --once mode".to_owned()).into());
+            for token in [PACKAGES_TOKEN, CARGO_SPECS_TOKEN] {
+                if arg.contains(token) {
+                    return Err(PlaceholderMisuseError::new(token.to_owned(), "only valid in --once mode".to_owned()).into());
+                }
             }
             if mode == Mode::PerPackage && arg.contains(TARGET_TOKEN) {
                 return Err(PlaceholderMisuseError::new(TARGET_TOKEN.to_owned(), "only valid in per-target mode".to_owned()).into());
@@ -245,7 +253,7 @@ pub(crate) fn validate_json_placeholders(args: &[String]) -> Result<(), EachErro
     for arg in args {
         for token in PER_PACKAGE_TOKENS
             .into_iter()
-            .chain([TARGET_TOKEN, PACKAGES_TOKEN, WORKSPACE_RUST_VERSION_TOKEN])
+            .chain([TARGET_TOKEN, PACKAGES_TOKEN, CARGO_SPECS_TOKEN, WORKSPACE_RUST_VERSION_TOKEN])
         {
             if arg.contains(token) {
                 return Err(PlaceholderMisuseError::new(token.to_owned(), "not valid in JSON-record mode".to_owned()).into());
@@ -273,7 +281,7 @@ pub(crate) fn substitute_json_prevalidated(
 /// # Errors
 ///
 /// Returns [`EachError`] if a token is used in the wrong mode (a per-package
-/// token under `--once`, or `{packages}` outside `--once`), or if `{packages}`
+/// token under `--once`, or `{packages}`/`{cargo-specs}` outside `--once`), or if either
 /// is embedded in a larger argument rather than standing alone.
 pub(crate) fn substitute(args: &[String], placeholders: &Placeholders) -> Result<Vec<String>, EachError> {
     match placeholders {
@@ -324,11 +332,11 @@ pub(crate) fn substitute(args: &[String], placeholders: &Placeholders) -> Result
                 let replaced = replace_arg(arg, placeholders, replacements);
                 out.push(replaced);
             }
-            Placeholders::Once { packages, .. } => {
-                // Validation above guarantees each arg is either exactly
-                // `{packages}` or contains no placeholder token at all.
+            Placeholders::Once { packages, cargo_specs, .. } => {
                 if arg == PACKAGES_TOKEN {
                     out.extend(packages.iter().cloned());
+                } else if arg == CARGO_SPECS_TOKEN {
+                    out.extend(cargo_specs.iter().cloned());
                 } else {
                     out.push(replace_arg(arg, placeholders, Vec::new()));
                 }
@@ -468,6 +476,7 @@ mod tests {
     fn once_expands_packages_token() {
         let ph = Placeholders::Once {
             packages: args(&["--package", "a@1", "--package", "b@2"]),
+            cargo_specs: Vec::new(),
             workspace_rust_version: None,
         };
         let out = substitute(&args(&["clippy", "{packages}", "--all-targets"]), &ph).expect("substitute");
@@ -475,9 +484,57 @@ mod tests {
     }
 
     #[test]
+    fn cargo_specs_expand_without_rescanning_and_coexist_with_packages() {
+        let ph = Placeholders::Once {
+            packages: args(&["--package", "a@1"]),
+            cargo_specs: args(&["--package", "path+file:///ws/{packages}#a@1"]),
+            workspace_rust_version: None,
+        };
+        assert_eq!(
+            substitute(&args(&["check", "{cargo-specs}", "{packages}", "{cargo-specs}"]), &ph).expect("once tokens"),
+            [
+                "check",
+                "--package",
+                "path+file:///ws/{packages}#a@1",
+                "--package",
+                "a@1",
+                "--package",
+                "path+file:///ws/{packages}#a@1",
+            ],
+        );
+    }
+
+    #[test]
+    fn cargo_specs_require_a_standalone_argument_in_once_mode() {
+        for mode in [Mode::PerPackage, Mode::PerTarget] {
+            assert_eq!(
+                validate_placeholders(&args(&["{cargo-specs}"]), mode)
+                    .expect_err("once-only token")
+                    .to_string(),
+                "placeholder `{cargo-specs}` cannot be used here: only valid in --once mode",
+            );
+        }
+        for token in ["prefix={cargo-specs}", "{cargo-specs}{cargo-specs}", "{packages}{cargo-specs}"] {
+            assert!(
+                validate_placeholders(&args(&[token]), Mode::Once)
+                    .expect_err("standalone token")
+                    .to_string()
+                    .contains("must stand alone")
+            );
+        }
+        assert_eq!(
+            validate_json_placeholders(&args(&["{cargo-specs}"]))
+                .expect_err("Cargo-only token")
+                .to_string(),
+            "placeholder `{cargo-specs}` cannot be used here: not valid in JSON-record mode",
+        );
+    }
+
+    #[test]
     fn once_rejects_per_package_token() {
         let ph = Placeholders::Once {
             packages: args(&["--workspace"]),
+            cargo_specs: Vec::new(),
             workspace_rust_version: None,
         };
         let err = substitute(&args(&["test", "--package", "{name}"]), &ph).expect_err("misuse");
@@ -491,6 +548,7 @@ mod tests {
     fn once_rejects_target_token() {
         let ph = Placeholders::Once {
             packages: args(&["--workspace"]),
+            cargo_specs: Vec::new(),
             workspace_rust_version: None,
         };
         let err = substitute(&args(&["test", "--test", "{target}"]), &ph).expect_err("misuse");
@@ -504,6 +562,7 @@ mod tests {
     fn once_rejects_embedded_packages_token() {
         let ph = Placeholders::Once {
             packages: args(&["--workspace"]),
+            cargo_specs: Vec::new(),
             workspace_rust_version: None,
         };
         let err = substitute(&args(&["x={packages}"]), &ph).expect_err("misuse");
@@ -575,6 +634,7 @@ mod tests {
 
         let once = Placeholders::Once {
             packages: args(&["--workspace"]),
+            cargo_specs: Vec::new(),
             workspace_rust_version: Some("1.80".to_owned()),
         };
         assert_eq!(
@@ -605,6 +665,7 @@ mod tests {
 
         let once = Placeholders::Once {
             packages: args(&["--workspace"]),
+            cargo_specs: Vec::new(),
             workspace_rust_version: None,
         };
         assert_eq!(substitute(&command, &once).expect("optional once value"), ["echo", ""]);

@@ -14,7 +14,6 @@ use std::path::{Path, PathBuf};
 use cargo_metadata::semver::Version;
 use cargo_metadata::{Metadata, MetadataCommand, TargetKind};
 use serde_json::Value;
-use url::Url;
 
 use crate::error::{EachError, LoadMetadataError, WorkspaceManifestParseError, WorkspaceManifestReadError, WorkspaceRustVersionError};
 
@@ -34,6 +33,8 @@ pub(crate) struct Workspace {
 /// A single workspace member and the facts selection/filtering key on.
 #[derive(Debug, Clone)]
 pub(crate) struct Member {
+    /// Opaque package ID supplied by Cargo metadata.
+    pub(crate) package_id: String,
     /// Cargo package name (e.g. `cargo-anvil`).
     pub(crate) name: String,
     /// Package version, rendered (e.g. `0.3.0`).
@@ -72,11 +73,10 @@ pub(crate) struct MemberTarget {
 }
 
 impl Member {
-    /// A source-qualified Cargo selector, independent of metadata ID syntax.
+    /// The source-qualified Cargo selector supplied by metadata, without reconstruction.
     #[must_use]
     pub(crate) fn cargo_spec(&self) -> String {
-        let source = Url::from_file_path(self.manifest_dir()).expect("Cargo metadata manifest directories are absolute filesystem paths");
-        format!("{source}#{}", self.spec())
+        self.package_id.clone()
     }
 
     /// The version-qualified cargo spec, `name@version`.
@@ -134,6 +134,7 @@ impl Workspace {
                     .collect();
                 targets.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.kinds.cmp(&b.kinds)));
                 Member {
+                    package_id: pkg.id.to_string(),
                     name: pkg.name.to_string(),
                     version: pkg.version.to_string(),
                     rust_version: pkg.rust_version.clone(),
@@ -305,6 +306,7 @@ mod tests {
 
     fn member(name: &str, manifest_path: PathBuf, rust_version: &str) -> Member {
         Member {
+            package_id: format!("metadata-id-{name}"),
             name: name.to_owned(),
             version: "0.1.0".to_owned(),
             rust_version: Some(rust_version.parse().expect("the test Rust version is semver")),
@@ -558,7 +560,6 @@ mod tests {
         registry["id"] = json!("registry+https://github.com/rust-lang/crates.io-index#enabled-lib@0.1.0");
         registry["source"] = json!("registry+https://github.com/rust-lang/crates.io-index");
         packages.push(registry);
-        let source = Url::from_file_path(path.parent().expect("manifest parent")).expect("absolute fixture path");
         for id in [
             "enabled-lib 0.1.0 (path+file:///old/checkout)",
             "path+file:///old/checkout#enabled-lib@0.1.0",
@@ -582,7 +583,7 @@ mod tests {
             let members = selected.resolve(&workspace).expect("workspace-only selection");
             assert_eq!(members.len(), 1);
             assert_eq!(members[0].manifest_path, path);
-            assert_eq!(members[0].cargo_spec(), format!("{source}#enabled-lib@0.1.0"));
+            assert_eq!(members[0].cargo_spec(), id);
         }
     }
 

@@ -5,7 +5,7 @@
 //! a [`Workspace`].
 //!
 //! Mirrors `cargo build`'s selection surface: `-p`/`--package` (with glob
-//! support and optional `@version` qualifier), `--workspace`/`--all`, and
+//! support, optional `@version` qualifier, and source-qualified identities), `--workspace`/`--all`, and
 //! `--exclude`, plus a repeatable `--package-file` and the
 //! `cargo-each`-specific `--none` (explicit empty set). When nothing is named
 //! the default is cargo's `default-members`, exactly like `cargo build`.
@@ -15,6 +15,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use cargo_metadata::semver::Version;
+use url::Url;
 
 use crate::error::{EachError, InvalidPackageFileLineError, PackageFileReadError, PackageFileUtf8Error, UnknownSelectorError};
 use crate::filter::glob_matches;
@@ -165,6 +166,10 @@ fn validate_package_file_spec<'a>(path: &str, line: usize, spec: &'a str) -> Res
     if spec.starts_with('-') {
         return Err(invalid("command-line tokens are not package specs"));
     }
+    // Source-qualified values are checked against current workspace metadata during resolution.
+    if spec.contains("://") {
+        return Ok(spec);
+    }
     let mut pieces = spec.split('@');
     let name = pieces.next().expect("split always yields at least one element");
     let version = pieces.next();
@@ -192,6 +197,20 @@ fn validate_package_file_spec<'a>(path: &str, line: usize, spec: &'a str) -> Res
 fn resolve_selectors<'w>(workspace: &'w Workspace, selectors: &[String]) -> Result<Vec<&'w Member>, EachError> {
     let mut matched: HashSet<&str> = HashSet::new();
     for selector in selectors {
+        if let Some(member) = workspace.members.iter().find(|member| {
+            member.package_id == *selector
+                || (selector.starts_with("file://") && {
+                    let source = Url::from_file_path(member.manifest_dir())
+                        .expect("Cargo metadata manifest directories are absolute filesystem paths");
+                    format!("{source}#{}", member.spec()) == *selector
+                })
+        }) {
+            matched.insert(member.name.as_str());
+            continue;
+        }
+        if selector.contains("://") {
+            return Err(UnknownSelectorError::new(selector.clone()).into());
+        }
         // A `name@version` spec matches on the name (glob) *and*, when a
         // version is supplied, on the version per cargo's package-id-spec:
         // the qualifier may be partial, so `alpha@0.1` matches member `0.1.0`
@@ -309,6 +328,7 @@ mod tests {
 
     fn member(name: &str) -> Member {
         Member {
+            package_id: format!("metadata-id-{name}"),
             name: name.to_owned(),
             version: "0.1.0".to_owned(),
             rust_version: Some("1.70.0".parse().expect("valid Rust version")),

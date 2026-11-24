@@ -1138,6 +1138,7 @@ mod tests {
 
     fn target_requirement_workspace() -> Workspace {
         let member = |name: &str, features: &[&str], targets: Vec<MemberTarget>| Member {
+            package_id: format!("metadata-id-{name}"),
             name: name.to_owned(),
             version: "0.1.0".to_owned(),
             rust_version: Some("1.70.0".parse().expect("valid Rust version")),

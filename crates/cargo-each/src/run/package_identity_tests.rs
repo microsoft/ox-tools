@@ -35,7 +35,7 @@ fn expected_selector(checkout: &str, package: &str) -> String {
     }
 }
 
-fn expected_invocation(checkout: &str, package: &str) -> Invocation {
+fn expected_invocation(package: &str) -> Invocation {
     Invocation {
         label: Some(package.to_owned()),
         argv: vec![
@@ -43,7 +43,11 @@ fn expected_invocation(checkout: &str, package: &str) -> Invocation {
             "check".to_owned(),
             "--offline".to_owned(),
             "-p".to_owned(),
-            expected_selector(checkout, package),
+            match package {
+                "alpha" => "literal-local-id".to_owned(),
+                "root-package" => "literal-root-id".to_owned(),
+                unexpected => panic!("unexpected package: {unexpected}"),
+            },
             format!("legacy={package}@0.1.0"),
         ],
         work_dir: None,
@@ -153,10 +157,7 @@ fn dispatch_resolves_only_workspace_packages_and_applies_existing_filters() {
         (vec!["--none"], vec![]),
         (vec!["--workspace", "--filter", "bin"], vec![]),
     ] {
-        let expected = expected
-            .iter()
-            .map(|package| expected_invocation(checkout, package))
-            .collect::<Vec<_>>();
+        let expected = expected.iter().map(|package| expected_invocation(package)).collect::<Vec<_>>();
         assert_eq!(dispatch(checkout, &options), expected, "{options:?}");
     }
 }
@@ -212,7 +213,7 @@ fn command_dispatch_is_source_qualified_in_both_package_modes() {
                                 "check".to_owned(),
                                 "--offline".to_owned(),
                                 "-p".to_owned(),
-                                expected_selector(checkout, "alpha"),
+                                "literal-local-id".to_owned(),
                                 "legacy=alpha@0.1.0".to_owned(),
                                 "target=alpha".to_owned(),
                             ],
@@ -279,7 +280,7 @@ fn explicit_root_selection_does_not_dispatch_other_default_members() {
                             "check".to_owned(),
                             "--offline".to_owned(),
                             "-p".to_owned(),
-                            expected_selector(checkout, "root-package"),
+                            "literal-root-id".to_owned(),
                         ],
                         work_dir: None,
                     }],
@@ -348,7 +349,7 @@ fn portable_package_file_resolves_against_each_checkout_without_filesystem_mutat
                                 "check".to_owned(),
                                 "--offline".to_owned(),
                                 "-p".to_owned(),
-                                expected_selector(checkout, "alpha"),
+                                id.to_owned(),
                                 "--manifest-path".to_owned(),
                                 checkout_path(checkout).join("local alpha").join("Cargo.toml").display().to_string(),
                             ],
@@ -375,4 +376,140 @@ fn aggregate_selection_options_are_not_exposed() {
     }
     let error = CargoCli::try_parse_from(["cargo", "each"]).expect_err("execution requires a command");
     assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
+}
+
+fn dispatch_source_selection(
+    checkout: &str,
+    local_id: &str,
+    options: &[&str],
+    contents: &str,
+    command: &[&str],
+) -> Result<Vec<Invocation>, AppError> {
+    let mut options = options.to_vec();
+    options.push("--");
+    options.extend_from_slice(command);
+    let args = args(&options);
+    let mut invocations = Vec::new();
+    run_workspace_with(
+        &args,
+        |args| {
+            Selection::from_sources_with_reader(
+                &args.packages,
+                &args.package_files,
+                args.workspace,
+                &args.exclude,
+                args.none,
+                |path| {
+                    assert_eq!(path, Path::new("selection.txt"));
+                    Ok(contents.as_bytes().to_vec())
+                },
+            )
+        },
+        |_| Ok(workspace(checkout, local_id)),
+        |plan, _, _, _| {
+            invocations.clone_from(&plan.invocations);
+            Ok(ExitCode::SUCCESS)
+        },
+    )?;
+    Ok(invocations)
+}
+
+#[test]
+fn source_selection_input_and_output_forms_are_independent() {
+    let checkout = "checkout with spaces";
+    let former_spec = expected_selector(checkout, "alpha");
+    let id = format!("path+{former_spec}");
+    for input in ["alpha@0.1.0", former_spec.as_str(), id.as_str()] {
+        for (options, contents) in [(vec!["-p", input], ""), (vec!["--package-file", "selection.txt"], input)] {
+            let mut once_options = options.clone();
+            once_options.push("--once");
+            for (token, value) in [("{packages}", "alpha@0.1.0"), ("{cargo-specs}", id.as_str())] {
+                let invocations =
+                    dispatch_source_selection(checkout, &id, &once_options, contents, &["cargo", "check", token]).expect("once selection");
+                assert_eq!(invocations[0].argv, ["cargo", "check", "--package", value]);
+            }
+            let command = ["report", "{name}", "{spec}", "{cargo-spec}"];
+            let invocations = dispatch_source_selection(checkout, &id, &options, contents, &command).expect("per-package selection");
+            assert_eq!(invocations[0].argv, ["report", "alpha", "alpha@0.1.0", &id]);
+            let mut target_options = options.clone();
+            target_options.extend(["--each-target", "lib"]);
+            let invocations = dispatch_source_selection(checkout, &id, &target_options, contents, &command).expect("per-target selection");
+            assert_eq!(invocations[0].argv, ["report", "alpha", "alpha@0.1.0", &id]);
+        }
+    }
+}
+
+#[test]
+fn cargo_specs_preserve_selection_policy_and_mixed_input_order() {
+    let checkout = "checkout with spaces";
+    let former_spec = expected_selector(checkout, "alpha");
+    let id = format!("path+{former_spec}");
+    let contents = format!("\u{feff}root-package@0.1.0\r\n{id}\r\n{former_spec}\r\nalpha@0.1.0\r\n");
+    let command = ["cargo", "check", "{cargo-specs}"];
+    let mixed = dispatch_source_selection(checkout, &id, &["--package-file", "selection.txt", "--once"], &contents, &command)
+        .expect("mixed package file");
+    assert_eq!(mixed[0].argv, ["cargo", "check", "--package", &id, "--package", "literal-root-id"]);
+    assert_eq!(
+        dispatch_source_selection(checkout, &id, &["--workspace", "--once"], "", &command).expect("workspace")[0].argv,
+        ["cargo", "check", "--workspace"],
+    );
+    for options in [
+        vec!["--workspace", "--exclude", id.as_str(), "--once"],
+        vec!["--workspace", "--exclude", former_spec.as_str(), "--once"],
+    ] {
+        assert_eq!(
+            dispatch_source_selection(checkout, &id, &options, "", &command).expect("source-qualified exclude")[0].argv,
+            ["cargo", "check", "--package", "literal-root-id"],
+        );
+    }
+    assert_eq!(
+        dispatch_source_selection(checkout, &id, &["--workspace", "--filter", "not dep:alpha", "--once"], "", &command)
+            .expect("filtered workspace")[0]
+            .argv,
+        ["cargo", "check", "--package", &id],
+    );
+    for options in [vec!["--none", "--once"], vec!["--package-file", "selection.txt", "--once"]] {
+        assert_eq!(
+            dispatch_source_selection(checkout, &id, &options, "", &command).expect("empty selection"),
+            []
+        );
+    }
+}
+
+#[test]
+fn source_selection_rejects_registry_and_stale_checkout_identities() {
+    let id = "path+file:///original/alpha#alpha@0.1.0";
+    for invalid in [
+        "registry+https://github.com/rust-lang/crates.io-index#alpha@0.1.0",
+        "path+file:///relocated/alpha#alpha@0.1.0",
+        "file:///relocated/alpha#alpha@0.1.0",
+    ] {
+        for (options, contents) in [
+            (vec!["-p", invalid, "--once"], ""),
+            (vec!["--package-file", "selection.txt", "--once"], invalid),
+        ] {
+            let error = dispatch_source_selection("original checkout", id, &options, contents, &["cargo", "check", "{cargo-specs}"])
+                .expect_err("not a current workspace member");
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("package selector `{invalid}` did not match any workspace member")),
+                "{error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn metadata_id_file_inputs_are_not_split_as_name_version_specs() {
+    let id = "path+file:///C:/checkout@branch@two/renamed#0.1.0";
+    let invocations = dispatch_source_selection(
+        "checkout",
+        id,
+        &["--package-file", "selection.txt", "--once"],
+        id,
+        &["cargo", "check", "{cargo-specs}"],
+    )
+    .expect("opaque metadata ID");
+    assert_eq!(invocations[0].argv, ["cargo", "check", "--package", id]);
 }

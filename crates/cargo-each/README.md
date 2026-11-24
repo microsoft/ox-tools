@@ -45,7 +45,8 @@ sources are deliberately mutually exclusive.
 ### Selection (mirrors `cargo build`)
 
 * `-p` / `--package <SPEC>` — select a member. Repeatable. `SPEC` is a
-  package name, a `name@version` spec, or a Unix glob (`tokio-*`).
+  package name, a `name@version` spec, a Unix glob (`tokio-*`), or a
+  source-qualified Cargo package ID. Input forms may be mixed.
 * `--package-file <PATH>` — read package specs from a UTF-8 file, one per
   nonempty line. Repeatable; specs are unioned with `--package`. An empty
   file explicitly selects no members. One leading UTF-8 byte-order mark is
@@ -65,9 +66,16 @@ missing, unreadable, or non-UTF-8 files are errors.
 Selection remains workspace-only, even when a registry dependency has the
 same name and version. Existing `-p name@version` and `--package-file`
 inputs resolve in the current checkout; no cargo-delta record format is
-required. Use `{cargo-spec}` for child Cargo commands that must distinguish
-the local package from a registry copy. Selectors are checkout-local and
-are reconstructed from metadata in each checkout.
+required. Source-qualified metadata IDs and the former
+`file:///...#name@version` spelling are also accepted through `--package`,
+`--package-file`, and `--exclude`, without an input-format flag. These
+match only current workspace members; registry-only and stale identities
+fail rather than falling back to names.
+Use `{cargo-spec}` per package/target or `{cargo-specs}` in once mode for
+child Cargo commands that must distinguish the local package from a
+registry copy. Both copy Cargo metadata’s opaque package IDs without
+parsing or reconstruction. Portable name/version inputs still resolve
+against the current checkout.
 
 Ordinary aggregate `cargo build` and `cargo test` commands do not need
 cargo-each. Cargo’s `--workspace` with `--exclude` flags scopes selection
@@ -159,10 +167,9 @@ Substituted inside each command argument:
 
 * `{name}` — bare package name (per-package and per-target).
 * `{spec}` — `name@version` (per-package and per-target).
-* `{cargo-spec}` — source-qualified `file:///...#name@version` Cargo
-  selector (per-package and per-target). Paths are URL-encoded, so spaces
-  remain part of one argv element. Built from the manifest directory,
-  package name, and version.
+* `{cargo-spec}` — the selected member’s exact opaque Cargo metadata
+  package ID (per-package and per-target). Inserted verbatim rather than
+  reconstructed from the manifest directory, package name, or version.
 * `{version}` — package version (per-package and per-target).
 * `{manifest}` — absolute member `Cargo.toml` path (per-package and
   per-target).
@@ -171,6 +178,10 @@ Substituted inside each command argument:
   (`--workspace` for the whole workspace, else `--package name@version …`);
   valid only in `--once` mode and only as a standalone argument.
   Like `{spec}`, this expansion is not source-qualified.
+* `{cargo-specs}` — the same selection flags as `{packages}`, but explicit
+  `--package` values copy each member’s exact Cargo metadata ID. Preserves
+  the untouched whole-workspace `--workspace` fast path; valid only in
+  `--once` mode and only as a standalone argument.
 * `{workspace-rust-version}` — the root `[workspace.package].rust-version`,
   or root `[package].rust-version` in a single-package repository; valid in
   Cargo-backed per-package, per-target, and `--once` modes. Expands to an
@@ -260,6 +271,12 @@ Select a local package even when a registry dependency shares its identity:
 ```text
 cargo each -p crate-a@1.0.0 -- cargo check --package {cargo-spec}
 cargo each --package-file selected.txt -- cargo check --package {cargo-spec}
+```
+
+Run once over mixed name/version and source-qualified package inputs:
+
+```text
+cargo each --package-file selected.txt --once -- cargo check {cargo-specs}
 ```
 
 Run a per-manifest tool over every library crate:
