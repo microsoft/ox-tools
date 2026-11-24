@@ -100,18 +100,6 @@ Upstream contracts:
 [clang-sys discovery](https://github.com/KyleMayes/clang-sys/blob/v1.8.1/build/common.rs),
 [clang-sys validation and linking](https://github.com/KyleMayes/clang-sys/blob/v1.8.1/build/dynamic.rs).
 
-## Integration boundary
-
-Just remains responsible for tool-version validation and installation.
-Install this helper before using `check-source-deps` for a cargo-spellcheck
-source install or prebuilt-install source fallback. A satisfied installed
-version or successful prebuilt installation does not need the source probe.
-
-Dictionary preparation precedes the existing cargo-spellcheck command; Just
-propagates either command's failure. Anvil recipe adoption, Windows shell
-configuration, container recipes, and CI bootstrap migration are separate
-changes.
-
 ## Structure and testing
 
 The package is a publishable binary crate at version `0.1.0`, inheriting the
