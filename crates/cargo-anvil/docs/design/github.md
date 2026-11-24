@@ -88,14 +88,10 @@ payload. Lookup failures fail the leg; merge-group runs skip title validation.
 ## Toolchains, setup, and caches
 
 Every generated job ends with a non-blocking `Report disk usage` step, including
-impact preparation, no-op matrix legs, and result publication. It runs after
-earlier failures while the runner remains available. The log shows filesystem
-capacity, used and free space (all fixed Windows drives, including the build
-drive), plus logical sizes for the workspace, Cargo and rustup directories,
-`target/` children, and each coverage run's feature-configuration target trees.
-Directory totals overlap and must not be summed. No report files are written,
-so diagnostics do not require space for another artifact. Measurement errors
-are logged without changing the checks' verdict. These are end-of-job
+impact preparation, no-op matrix legs, and result publication. One PowerShell
+command logs filesystem drives and their used/free space, including Windows C:
+and D:, even after earlier failures. It writes no files and scans no directories.
+Reporting failures do not change the checks' verdict. These are final
 observations, not peak usage; runner termination can prevent reporting.
 
 The generated configuration requires Rust/Cargo 1.95 or newer and Just 1.46.0

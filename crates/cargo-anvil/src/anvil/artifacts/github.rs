@@ -87,11 +87,7 @@ pub fn impact_action() -> Artifact {
 /// `.github/workflows/anvil-pr-impl.yml` — the PR reusable workflow.
 #[must_use]
 pub fn pr_impl_workflow() -> Artifact {
-    Artifact::backend_file(
-        Backend::GitHub,
-        ".github/workflows/anvil-pr-impl.yml",
-        super::with_disk_usage(PR_IMPL_WORKFLOW),
-    )
+    Artifact::backend_file(Backend::GitHub, ".github/workflows/anvil-pr-impl.yml", PR_IMPL_WORKFLOW)
 }
 
 /// `.github/workflows/anvil-scheduled-impl.yml` — the scheduled reusable workflow.
@@ -100,7 +96,7 @@ pub fn scheduled_impl_workflow() -> Artifact {
     Artifact::backend_file(
         Backend::GitHub,
         ".github/workflows/anvil-scheduled-impl.yml",
-        super::with_disk_usage(SCHEDULED_IMPL_WORKFLOW),
+        SCHEDULED_IMPL_WORKFLOW,
     )
 }
 

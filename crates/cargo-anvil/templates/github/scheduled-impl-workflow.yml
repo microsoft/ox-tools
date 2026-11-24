@@ -86,8 +86,7 @@ jobs:
         if: always()
         continue-on-error: true
         shell: pwsh -NoProfile -Command ". '{0}'"
-        run: |
-          __DISK_USAGE__
+        run: Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
 
   scheduled-advisories:
     # Cross-OS / cross-arch because clippy and udeps in this group
@@ -113,8 +112,7 @@ jobs:
         if: always()
         continue-on-error: true
         shell: pwsh -NoProfile -Command ". '{0}'"
-        run: |
-          __DISK_USAGE__
+        run: Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
 
   scheduled-runtime-analysis:
     # Full-workspace counterpart of pr-runtime-analysis. OS matrix
@@ -147,8 +145,7 @@ jobs:
         if: always()
         continue-on-error: true
         shell: pwsh -NoProfile -Command ". '{0}'"
-        run: |
-          __DISK_USAGE__
+        run: Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
 
   scheduled-exhaustive:
     # Keep exhaustive mutation testing, feature powersets, and benchmark
@@ -174,8 +171,7 @@ jobs:
         if: always()
         continue-on-error: true
         shell: pwsh -NoProfile -Command ". '{0}'"
-        run: |
-          __DISK_USAGE__
+        run: Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
 
   publish-failure:
     name: Publish scheduled failure
@@ -248,5 +244,4 @@ jobs:
         if: always()
         continue-on-error: true
         shell: pwsh -NoProfile -Command ". '{0}'"
-        run: |
-          __DISK_USAGE__
+        run: Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize

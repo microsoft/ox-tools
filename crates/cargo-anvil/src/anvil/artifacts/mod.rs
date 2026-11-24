@@ -27,23 +27,6 @@ pub mod region;
 
 use crate::catalog::{Artifact, ComposedHost};
 
-/// Embed the shared diagnostics inline so they need neither checkout nor setup.
-pub(crate) fn with_disk_usage(template: &str) -> String {
-    let script = include_str!("../../../templates/disk-usage.ps1");
-    let indented = script
-        .lines()
-        .map(|line| {
-            if line.is_empty() {
-                String::new()
-            } else {
-                format!("          {line}")
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    template.replace("          __DISK_USAGE__", &indented)
-}
-
 /// The impact-scoping mode a group's CI job runs under -- the word emitted into
 /// `export ANVIL_IMPACT=<mode>` in the group's action/step template.
 ///
@@ -141,7 +124,6 @@ mod tests {
             let Artifact::OwnedFile(spec) = artifact else {
                 panic!("workflow must be a file")
             };
-            assert!(!spec.body.contains("__DISK_USAGE__"));
             let body = spec.body.split_once("\njobs:\n").unwrap().1;
             let mut jobs = Vec::new();
             let mut start = None;
@@ -162,8 +144,7 @@ mod tests {
                 assert!(final_step.starts_with("name: Report disk usage\n"), "{job}");
                 assert!(final_step.contains("if: always()"));
                 assert!(final_step.contains("continue-on-error: true"));
-                assert!(final_step.contains("Get-CimInstance Win32_LogicalDisk"));
-                assert!(final_step.contains("& df -h"));
+                assert!(final_step.contains("\n        run: Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize"));
             }
         }
     }
@@ -178,7 +159,10 @@ mod tests {
         assert!(report > spec.body.find("PublishPipelineArtifact@1").unwrap());
         assert!(spec.body[report..].contains("condition: always()"));
         assert!(spec.body[report..].contains("continueOnError: true"));
-        assert!(!spec.body.contains("__DISK_USAGE__"));
+        assert!(
+            spec.body
+                .contains("- pwsh: Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize")
+        );
     }
 
     /// Catalog authors must compose valid TOML without array-of-table ownership.

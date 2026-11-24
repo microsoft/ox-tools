@@ -139,7 +139,7 @@ pub fn advisory_comments() -> Artifact {
 /// `.pipelines/anvil/steps/job.yml` — the dirty-file job wrapper.
 #[must_use]
 pub fn job_wrapper() -> Artifact {
-    Artifact::backend_file(Backend::Ado, ".pipelines/anvil/steps/job.yml", super::with_disk_usage(JOB_WRAPPER))
+    Artifact::backend_file(Backend::Ado, ".pipelines/anvil/steps/job.yml", JOB_WRAPPER)
 }
 
 /// Repository check prerequisites, emitted at `.pipelines/anvil/hooks/before-checks.yml`.

@@ -106,8 +106,7 @@ jobs:
             inputs:
               targetPath: ${{ artifact.path }}
               artifact: ${{ artifact.name }}
-      - pwsh: |
-          __DISK_USAGE__
+      - pwsh: Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
         displayName: Report disk usage
         condition: always()
         continueOnError: true
