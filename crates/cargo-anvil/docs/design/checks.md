@@ -206,7 +206,7 @@ before the next one.
 ### `scheduled-advisories`
 
 Cargo-deny enforces dependency policy only in this scheduled group, not in PR
-checks. Cargo-audit remains in both tiers.
+checks. `cargo-audit` runs in `pr-fast` and `scheduled-advisories`.
 
 `deny`, `audit`, and `aprz` check external policy, vulnerability, and dependency
 risk data; `clippy` checks the selected compiler's lint set. Despite the group
