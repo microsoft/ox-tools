@@ -83,13 +83,12 @@ enum CargoCommand {
 #[must_use]
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub fn run() -> ExitCode {
-    let mut stderr = io::stderr().lock();
     execute(
         &Cli::parse().command,
         |name| env::var_os(name),
         |path| std::fs::read(path),
         Command::output,
-        |message| write_diagnostic(&mut stderr, message),
+        &mut io::stderr().lock(),
     )
 }
 
@@ -103,8 +102,9 @@ fn execute(
     env: impl FnOnce(&str) -> Option<OsString>,
     read: impl FnOnce(&Path) -> io::Result<Vec<u8>>,
     output: impl FnOnce(&mut Command) -> io::Result<Output>,
-    mut report: impl FnMut(&str),
+    stderr: &mut impl Write,
 ) -> ExitCode {
+    let mut report = |message: &str| write_diagnostic(stderr, message);
     match check(args, env, read, output) {
         Ok(violations) if violations.is_empty() => return ExitCode::SUCCESS,
         Ok(violations) => {
@@ -220,11 +220,11 @@ mod tests {
                     stderr: Vec::new(),
                 })
             },
-            |message| messages.push(message.to_owned()),
+            &mut messages,
         );
         assert_eq!(code, ExitCode::FAILURE);
         assert_eq!(
-            messages,
+            String::from_utf8_lossy(&messages).lines().collect::<Vec<_>>(),
             [
                 "cargo-ensure-no-test-features: Cargo.toml: 'app' enables its own 'test-util' through default features",
                 "cargo-ensure-no-test-features: remove these requests from production dependencies and defaults (including inherited workspace dependencies), or use --policy with an exact exception",
@@ -282,10 +282,13 @@ mod tests {
                     );
                     result
                 },
-                |message| messages.push(message.to_owned()),
+                &mut messages,
             );
             assert_eq!(actual, code);
-            assert_eq!(messages, expected.into_iter().collect::<Vec<_>>());
+            assert_eq!(
+                String::from_utf8_lossy(&messages).lines().collect::<Vec<_>>(),
+                expected.into_iter().collect::<Vec<_>>()
+            );
         }
     }
 
@@ -301,7 +304,7 @@ mod tests {
             |_| panic!("policy must be read before looking up Cargo"),
             |_| Err(io::Error::other("scripted read failure")),
             |_| panic!("metadata must not run with an unreadable policy"),
-            |message| write_diagnostic(&mut messages, message),
+            &mut messages,
         );
         assert_eq!(code, ExitCode::FAILURE);
         assert_eq!(
@@ -322,7 +325,7 @@ mod tests {
             |_| panic!("policy must be read before looking up Cargo"),
             |_| Err(io::Error::other("scripted read failure")),
             |_| panic!("metadata must not run with an unreadable policy"),
-            |message| write_diagnostic(&mut stderr, message),
+            &mut stderr,
         );
         assert_eq!(code, ExitCode::FAILURE);
     }
