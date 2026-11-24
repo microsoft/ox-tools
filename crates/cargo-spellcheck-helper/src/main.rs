@@ -116,6 +116,8 @@ enum HelperCommand {
 mod tests {
     use std::io;
 
+    use clap::CommandFactory;
+
     use super::*;
 
     fn parse(args: &[&str]) -> Cli {
@@ -208,7 +210,7 @@ mod tests {
             vec!["cargo-spellcheck-helper", "prepare-dictionary", "--output", "spelling.dic"],
             vec!["cargo-spellcheck-helper", "unknown"],
         ] {
-            let error = Cli::try_parse_from(args).unwrap_err();
+            let error = Cli::command().term_width(80).try_get_matches_from(args).unwrap_err();
             assert!(matches!(
                 error.kind(),
                 clap::error::ErrorKind::MissingRequiredArgument
