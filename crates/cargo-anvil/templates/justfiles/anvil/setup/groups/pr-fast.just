@@ -18,6 +18,7 @@ anvil-pr-fast-setup installer="install": \
     (anvil-readme-check-setup installer) \
     (anvil-spellcheck-setup installer) \
     (anvil-pr-title-setup installer) \
+    (anvil-deny-setup installer) \
     (anvil-audit-setup installer) \
     (anvil-udeps-setup installer) \
     (anvil-external-types-setup installer)
@@ -36,6 +37,7 @@ anvil-pr-fast-validate-prereqs: \
     anvil-readme-check-validate-prereqs \
     anvil-spellcheck-validate-prereqs \
     anvil-pr-title-validate-prereqs \
+    anvil-deny-validate-prereqs \
     anvil-audit-validate-prereqs \
     anvil-udeps-validate-prereqs \
     anvil-external-types-validate-prereqs
