@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+mod elf;
 mod library;
 mod native;
 
@@ -86,6 +87,7 @@ trait Probe {
     fn read(&mut self, path: &Path, offset: u64, length: usize) -> io::Result<Vec<u8>>;
     fn command(&mut self, executable: &std::ffi::OsStr, args: &[&str]) -> io::Result<CommandOutput>;
     fn load_library(&mut self, path: &Path) -> Result<(), AppError>;
+    fn runtime_name(&mut self, path: &Path) -> Result<Option<PathBuf>, AppError>;
     fn check_tools(&mut self, target: &Target) -> Result<(), AppError>;
 }
 
@@ -161,6 +163,22 @@ fn check_with(environment: &Environment, probe: &mut impl Probe) -> Result<(), A
     let library = probe
         .absolute_path(&library)
         .into_app_err(format!("cannot resolve selected libclang path `{}`", library.display()))?;
+    if environment.target.platform == Platform::Linux {
+        let name = probe
+            .runtime_name(&library)
+            .into_app_err(format!("cannot determine the runtime name of libclang `{}`", library.display()))?
+            .unwrap_or_else(|| library.file_name().expect("discovery selects a named libclang file").into());
+        probe.load_library(&name).into_app_err(format!(
+            "the Linux loader cannot load libclang runtime name `{}` required by the linked Hunspell build script for rustc host `{}`; \
+             this helper runs as {}-bit {}. If you changed toolchain architecture, reinstall cargo-spellcheck-helper for the active toolchain. \
+             Otherwise add the runtime library directory to LD_LIBRARY_PATH before checking and installing, or configure the system loader. \
+             LIBCLANG_PATH alone only supplies link-time discovery",
+            name.display(),
+            environment.target.triple,
+            usize::BITS,
+            std::env::consts::ARCH
+        ))?;
+    }
     probe.load_library(&library).into_app_err(format!(
         "cannot load libclang `{}` for rustc host `{}`; this helper runs as {}-bit {}. \
          If you changed toolchain architecture, reinstall cargo-spellcheck-helper for the active toolchain. \

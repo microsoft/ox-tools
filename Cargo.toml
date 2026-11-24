@@ -53,6 +53,7 @@ command-group = { version = "5.0.1", default-features = false }
 compact_str = { version = "0.10.0", default-features = false }
 csv = { version = "1.4.0", default-features = false }
 duct = { version = "1.1.2", default-features = false }
+elf = { version = "0.8.0", default-features = false }
 env_logger = { version = "0.11.11", default-features = false }
 fakeable = { version = "0.2.2", default-features = false }
 fetch = { version = "0.19.0", default-features = false }

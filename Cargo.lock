@@ -748,6 +748,7 @@ version = "0.1.0"
 dependencies = [
  "cc",
  "clap",
+ "elf",
  "glob",
  "hunspell-dictgen",
  "libloading",
@@ -1277,6 +1278,12 @@ name = "either"
 version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be"
+
+[[package]]
+name = "elf"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "55dd888a213fc57e957abf2aa305ee3e8a28dbe05687a251f33b637cd46b0070"
 
 [[package]]
 name = "encode_unicode"

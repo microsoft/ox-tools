@@ -83,6 +83,20 @@ architecture, including guidance to reinstall the helper if a toolchain change
 made them incompatible. This does not change target selection or add a separate
 process for the probe.
 
+On Linux, the helper first reads the selected ELF library's dynamic segment
+and extracts `DT_SONAME`. When no SONAME is present, the selected filename is
+the runtime name, as when linking that library with `-l`. The native loader
+must find and open that name before the helper opens the selected absolute
+path. This checks the current loader environment, including `LD_LIBRARY_PATH`
+and system loader configuration, without allowing an already-open selected
+library to satisfy the name lookup. A custom LLVM directory supplied only
+through `LIBCLANG_PATH` is not enough: failures advise adding its runtime
+directory to `LD_LIBRARY_PATH` or configuring the system loader. The helper
+does not predict rpaths that a later build may add through linker flags.
+ELF parsing supports both pointer widths and byte orders and uses program
+headers, including for stripped libraries without section headers. It reads
+only metadata and the bounded runtime name, not the entire library.
+
 Compiler discovery delegates to `cc` for C and C++, preserving its `CC`,
 `CXX`, flags, wrappers, and Visual Studio environment selection. Help/version
 commands check that the selected tools launch successfully. Archiver discovery

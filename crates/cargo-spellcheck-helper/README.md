@@ -45,7 +45,9 @@ The prerequisite check models native default-feature cargo-spellcheck
 an authoritative file or directory in `LIBCLANG_PATH`, LLVM/Xcode discovery,
 `LD_LIBRARY_PATH`, and platform search patterns. ELF/PE architecture,
 Windows MSVC import libraries and DLL `PATH`, and dynamic loadability are
-checked. C/C++ compiler and archiver availability use `cc` discovery.
+checked. Linux also checks the selected library’s ELF SONAME (or filename
+when absent) through native runtime lookup before loading its absolute path.
+C/C++ compiler and archiver availability use `cc` discovery.
 Missing prerequisites produce installation guidance; the actual dependency
 build remains authoritative for headers, SDKs, and final linking.
 

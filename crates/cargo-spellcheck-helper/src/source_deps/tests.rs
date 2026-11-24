@@ -16,6 +16,7 @@ enum Call {
     File(PathBuf, io::Result<bool>),
     Command(OsString, Vec<String>, io::Result<CommandOutput>),
     Load(PathBuf, Result<(), AppError>),
+    RuntimeName(PathBuf, Result<Option<PathBuf>, AppError>),
     Tools(String, Result<(), AppError>),
 }
 
@@ -77,6 +78,13 @@ impl Probe for Script {
     fn load_library(&mut self, path: &Path) -> Result<(), AppError> {
         let Call::Load(expected, result) = self.next() else {
             panic!("expected a loader check");
+        };
+        assert_eq!(path, expected);
+        result
+    }
+    fn runtime_name(&mut self, path: &Path) -> Result<Option<PathBuf>, AppError> {
+        let Call::RuntimeName(expected, result) = self.next() else {
+            panic!("expected an ELF runtime-name read");
         };
         assert_eq!(path, expected);
         result
@@ -236,6 +244,8 @@ fn loader_and_compiler_failures_are_propagated_in_order() {
         let mut calls = linux_override(&[&path]);
         calls.push(elf(&path, 2));
         calls.push(absolute(&path));
+        calls.push(Call::RuntimeName(path.clone().into(), Ok(Some("libclang.so.18".into()))));
+        calls.push(Call::Load("libclang.so.18".into(), Ok(())));
         calls.push(Call::Load(
             path.clone().into(),
             if loader_fails {
@@ -272,12 +282,49 @@ fn successful_probe_checks_loader_and_native_tools() {
     calls.extend([
         elf(&path, 2),
         absolute(&path),
+        Call::RuntimeName(path.clone().into(), Ok(Some("libclang.so.18".into()))),
+        Call::Load("libclang.so.18".into(), Ok(())),
         Call::Load(path.into(), Ok(())),
         Call::Tools(environment.target.triple.clone(), Ok(())),
     ]);
     let mut script = Script::new(calls);
     check_with(&environment, &mut script).unwrap();
     script.done();
+}
+
+#[test]
+fn linux_runtime_discovery_failures_stop_before_selected_file_load() {
+    let path = pattern("custom", "libclang-18.so");
+    let environment = environment("x86_64-unknown-linux-gnu", Some("custom"));
+    for metadata_fails in [false, true] {
+        let mut calls = linux_override(&[&path]);
+        calls.extend([elf(&path, 2), absolute(&path)]);
+        calls.push(Call::RuntimeName(
+            path.clone().into(),
+            if metadata_fails {
+                Err(io::Error::from(io::ErrorKind::PermissionDenied)).into_app_err("injected ELF metadata failure")
+            } else {
+                Ok(Some("libclang.so.18".into()))
+            },
+        ));
+        if !metadata_fails {
+            calls.push(Call::Load(
+                "libclang.so.18".into(),
+                Err(io::Error::from(io::ErrorKind::NotFound)).into_app_err("injected runtime lookup failure"),
+            ));
+        }
+        let mut script = Script::new(calls);
+        let error = check_with(&environment, &mut script).unwrap_err();
+        assert_eq!(
+            error.find_source::<io::Error>().unwrap().kind(),
+            if metadata_fails {
+                io::ErrorKind::PermissionDenied
+            } else {
+                io::ErrorKind::NotFound
+            }
+        );
+        script.done();
+    }
 }
 
 #[test]
@@ -311,6 +358,8 @@ fn unreadable_optional_search_does_not_discard_valid_library() {
     calls.extend([
         elf(&path, 2),
         absolute(&path),
+        Call::RuntimeName(path.clone().into(), Ok(Some("libclang.so.18".into()))),
+        Call::Load("libclang.so.18".into(), Ok(())),
         Call::Load(path.into(), Ok(())),
         Call::Tools(environment.target.triple.clone(), Ok(())),
     ]);
@@ -351,6 +400,8 @@ fn relative_library_filename_is_loaded_as_selected_absolute_file() {
     calls.extend([
         elf("libclang.so", 2),
         Call::Absolute("libclang.so".into(), Ok("/repo/libclang.so".into())),
+        Call::RuntimeName("/repo/libclang.so".into(), Ok(None)),
+        Call::Load("libclang.so".into(), Ok(())),
         Call::Load("/repo/libclang.so".into(), Ok(())),
         Call::Tools(environment.target.triple.clone(), Ok(())),
     ]);
@@ -1109,6 +1160,8 @@ fn bootstrap_accepts_native_cargo_host_alias() {
     calls.extend([
         elf(&path, 2),
         absolute(&path),
+        Call::RuntimeName(path.clone().into(), Ok(Some("libclang.so.18".into()))),
+        Call::Load("libclang.so.18".into(), Ok(())),
         Call::Load(path.into(), Ok(())),
         Call::Tools(environment.target.triple, Ok(())),
     ]);

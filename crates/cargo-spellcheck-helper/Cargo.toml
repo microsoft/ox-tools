@@ -19,6 +19,7 @@ repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-spell
 [dependencies]
 cc = { workspace = true }
 clap = { workspace = true, features = ["derive", "std", "help", "usage", "error-context"] }
+elf = { workspace = true, features = ["std"] }
 glob = { workspace = true }
 hunspell-dictgen = { workspace = true }
 libloading = { workspace = true }

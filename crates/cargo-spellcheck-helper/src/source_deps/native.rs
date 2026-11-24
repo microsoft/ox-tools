@@ -78,6 +78,28 @@ impl Probe for Native {
         Ok(())
     }
 
+    // #[gamma::skip(all, tag = "native-boundary", reason = "Only opens the selected file and converts its parsed name to a native path; ELF parsing is tested with in-memory readers and loader sequencing with scripted probe outcomes.")]
+    fn runtime_name(&mut self, path: &Path) -> Result<Option<PathBuf>, AppError> {
+        let mut file = File::open(path).into_app_err(format!("cannot open selected ELF library `{}`", path.display()))?;
+        let name = super::elf::soname(&mut file)?;
+        match name {
+            Some(name) => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::ffi::OsStringExt;
+                    Ok(Some(std::ffi::OsString::from_vec(name).into()))
+                }
+                #[cfg(not(unix))]
+                {
+                    String::from_utf8(name)
+                        .map(|name| Some(PathBuf::from(name)))
+                        .into_app_err("ELF runtime name is not valid UTF-8")
+                }
+            }
+            None => Ok(None),
+        }
+    }
+
     // #[gamma::skip(all, tag = "native-boundary", reason = "cc discovers and launches installed native compilers and an archiver; portable tests inject tool-check outcomes rather than depend on native tools or child processes.")]
     fn check_tools(&mut self, target: &Target) -> Result<(), AppError> {
         let mut build = cc::Build::new();
