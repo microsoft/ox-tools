@@ -722,22 +722,31 @@ did not happen would send the reviewer hunting for text that is not in the diff.
 
 ## 7. CI integration
 
-The complete check replaces both `cargo-udeps` and `cargo-machete`, but Anvil cannot
-adopt it in the same change that first publishes the implementation. Generated Anvil
-setup installs the pinned release from crates.io, so the sequence is:
+The complete check is intended to replace both `cargo-udeps` and `cargo-machete`.
+Anvil retains `cargo-udeps` in `pr-fast`. The unused-deps recipe is currently an
+opt-in standalone check because 0.2.0 cannot preserve source-qualified workspace
+identity when a registry dependency has the same name and version. Returning it
+to the mandatory group requires a checker release that fixes that ambiguity for
+both compiler and doctest evidence.
 
-1. publish `cargo-unused-deps` 0.2.0 with the complete checker;
-2. update Anvil's pin and generated recipes in a follow-up change.
+Generated setup installs the pinned 0.2.0 release from crates.io rather than
+relying on an unpublished local build.
 
-The Anvil recipe always invokes the tool. It obtains the `required` impact tier and
-forwards a nonempty result as Cargo-style package selectors. When impact reports
-`--skip`, the recipe passes no package selector: the workspace-global catalog check
-still runs, while compile-evidence checks have an explicitly empty package set.
-With impact disabled, the recipe passes `--workspace`.
+The Anvil recipe always examines workspace dependencies, even when there are no
+required packages. After `anvil-impact` completes, it obtains the `required` tier
+from the current invocation's `required.packages` file and forwards each exact
+package spec as `--package <spec>`. An empty file produces no package selectors,
+so only the workspace inheritance check runs. A nonempty whitespace-only file is
+malformed and fails rather than silently suppressing package analysis. With
+impact disabled, the recipe passes `--workspace` and checks every workspace package.
+
+Standalone, grouped, and CI invocations are check-only by default. Explicit local
+`just anvil-unused-deps --fix` forwards the catalog-only fix option without
+disabling the selected package checks.
 
 This split is essential. A workspace-root manifest change may be invisible to
-package-level impact analysis, so allowing `--skip` to bypass the process would miss
-an uninherited catalog entry. Conversely, compiling the whole workspace merely to ask
+package-level impact analysis, so skipping the check when no packages are required
+could miss an uninherited catalog entry. Conversely, compiling the whole workspace merely to ask
 the global manifest question would discard the value of impact scoping.
 
 ## 8. Out of scope

@@ -29,7 +29,6 @@ blake3 = { version = "1.8.7", default-features = false }
 # Newer Bolero releases require a derive crate that pins indexmap 2.11.2,
 # which conflicts with toml_edit's indexmap >=2.13 requirement.
 bolero = { version = "=0.13.4", default-features = false, features = ["std"] }
-bolero-engine = { version = "=0.13.4", default-features = false }
 bytes = { version = "1.12.1", default-features = false }
 camino = { version = "1.2.6", default-features = false }
 # local dependencies

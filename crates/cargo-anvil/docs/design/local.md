@@ -163,8 +163,9 @@ Local runs with tracked edits, staged edits, deletions, renames, or non-ignored
 untracked files snapshot the current filesystem and compute fresh package
 selections. These selections match the tiers produced if that filesystem state
 were committed. Dirty results are isolated from the clean cache and are never
-published. An empty impact set skips scoped checks successfully; unscoped
-checks still run.
+published. An empty impact set skips scoped package work successfully; unscoped
+checks still run, including the unused-deps workspace dependency inheritance
+check.
 
 GitHub Actions and Azure Pipelines impact jobs require clean checkouts and fail
 if tracked or non-ignored untracked content is present. `consume` mode continues
@@ -254,6 +255,7 @@ just anvil-build --package my-crate
 just anvil-doc-build --open
 just anvil-examples --package my-crate --example basic
 just anvil-fmt --fix
+just anvil-unused-deps --fix
 just anvil-miri --package my-crate --test test_name
 just anvil-miri --package my-crate --example basic
 just anvil-readme --fix
@@ -262,6 +264,14 @@ just anvil-readme --fix
 `anvil` aliases `anvil-pr`. `anvil-build` builds all workspace targets with all
 features and the lockfile; it is a development command, not a check-group member.
 `anvil-readme` checks by default and regenerates with `--fix`.
+
+### Unused dependencies
+
+`anvil-unused-deps` is check-only by default, including in groups and CI.
+Explicit `--fix` removes uninherited workspace catalog entries, never package
+dependency declarations. Compiler-backed package analysis uses the required
+impact set; workspace dependency inheritance is checked even when that set is
+empty. Disabling impact analyzes every workspace package.
 
 ### Examples
 

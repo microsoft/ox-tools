@@ -340,3 +340,10 @@ anvil-tool-cargo-udeps-install installer="install": (_install-tool "cargo-udeps"
 [group("anvil-setup")]
 [private]
 anvil-tool-cargo-udeps-validate-prereqs: (_check-tool "cargo-udeps" cargo_udeps_version)
+
+[group("anvil-setup")]
+[private]
+anvil-tool-cargo-unused-deps-install installer="install": (_install-tool "cargo-unused-deps" cargo_unused_deps_version installer)
+[group("anvil-setup")]
+[private]
+anvil-tool-cargo-unused-deps-validate-prereqs: (_check-tool "cargo-unused-deps" cargo_unused_deps_version)
