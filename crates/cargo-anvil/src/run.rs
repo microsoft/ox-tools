@@ -118,11 +118,16 @@ fn update_with_backend_resolution(
         args,
         &root,
         |_| {
-            let manifest = shared.borrow().read_file(Path::new(".anvil.lock"))?.map_or_else(
-                || Ok(Manifest::default()),
-                |text| Manifest::parse(&text).into_app_err("failed to parse manifest at .anvil.lock"),
+            let current = shared.borrow().read_file(Path::new(crate::manifest::MANIFEST_FILE_NAME))?;
+            let legacy = shared.borrow().read_file(Path::new(crate::manifest::LEGACY_MANIFEST_FILE_NAME))?;
+            let legacy_present = legacy.is_some();
+            let manifest = Manifest::from_sources(
+                current,
+                legacy,
+                crate::manifest::MANIFEST_FILE_NAME,
+                crate::manifest::LEGACY_MANIFEST_FILE_NAME,
             )?;
-            Ok((root.clone(), manifest))
+            Ok((root.clone(), manifest, legacy_present))
         },
         |root, manifest| {
             let io = shared.borrow();
@@ -147,7 +152,17 @@ fn update_with_backend_resolution(
                     |path| shared.borrow_mut().remove_file(path),
                 ),
             )?;
-            shared.borrow_mut().write_file(Path::new(".anvil.lock"), &next.to_toml())
+            shared
+                .borrow_mut()
+                .write_file(Path::new(crate::manifest::MANIFEST_FILE_NAME), &next.to_toml())?;
+            match shared
+                .borrow_mut()
+                .remove_file(Path::new(crate::manifest::LEGACY_MANIFEST_FILE_NAME))
+            {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error).into_app_err("failed to retire legacy manifest"),
+            }
         },
     )
 }
@@ -158,12 +173,12 @@ fn run_update_with(
     catalog: &Catalog,
     args: &Cli,
     start_dir: &Path,
-    discover: impl FnOnce(&Path) -> Result<(PathBuf, Manifest), AppError>,
+    discover: impl FnOnce(&Path) -> Result<(PathBuf, Manifest, bool), AppError>,
     plan_update: impl FnOnce(&Path, &Manifest) -> Result<(Plan, Vec<Backend>), AppError>,
     read_manifest: impl FnOnce(&Path) -> Result<Option<String>, AppError>,
     publish: impl FnOnce(&Path, &Plan, &Manifest) -> Result<(), AppError>,
 ) -> Result<RunOutcome, AppError> {
-    let (repo_root, manifest) = discover(start_dir)?;
+    let (repo_root, manifest, legacy_manifest_present) = discover(start_dir)?;
 
     // The single-tool guard: a repository is managed by exactly one
     // anvil-family tool. If the lock records a *different* tool, refuse
@@ -186,7 +201,7 @@ fn run_update_with(
 
     let expected_manifest = next.to_toml();
     let manifest_is_current = manifest_matches(read_manifest(&Manifest::path_for(&repo_root)), &expected_manifest)?;
-    plan.set_manifest_update_required(!manifest_is_current);
+    plan.set_manifest_update_required(!manifest_is_current || legacy_manifest_present);
 
     let applied = !args.dry_run;
     if applied {
@@ -222,7 +237,7 @@ fn enforce_single_tool_guard(catalog: &Catalog, args: &Cli, manifest: &Manifest)
         && !args.force
     {
         bail!(
-            "this repository is managed by '{owner}' (per .anvil.lock); refusing to run '{current}'. \
+            "this repository is managed by '{owner}' (per .anvil/manifest.toml); refusing to run '{current}'. \
              A repository must be managed by a single anvil-family tool. Run '{owner}' instead, \
              or re-run with --force to switch this repository to '{current}'."
         );
@@ -291,6 +306,7 @@ fn build_plan_with_hosts(
     catalog: &Catalog,
     hosts: &mut HostTextCache,
 ) -> Result<Plan, AppError> {
+    validate_expanded_section_ownership(workspace, backends, catalog)?;
     let mut plan = Plan::default();
     // Hosts already reported as unsafe to compose. Every region targeting one
     // hits the same fault, and four copies of one message is noise.
@@ -361,6 +377,13 @@ fn build_plan_with_hosts(
             &mut composed,
             &json_scanner_hosts,
         )?;
+    }
+
+    for file in compose_owned_file_sections(catalog, backends) {
+        let path = hosts.resolve_path(repo_root, file.path)?;
+        plan.push(plan_owned_file(repo_root, manifest, &path, &file.body, |path| {
+            hosts.read_file(path)
+        })?);
     }
 
     plan_removals_with_array_hosts(repo_root, manifest, &mut plan, hosts, &composed, &recorded_json_scanner_hosts)?;
@@ -443,6 +466,7 @@ fn plan_dependabot_exclusions(
         Ok(Some(updated)) => {
             if catalog.artifacts().iter().any(|artifact| match artifact {
                 Artifact::OwnedFile(spec) => spec.path.eq_ignore_ascii_case(&path),
+                Artifact::OwnedFileSection(spec) => spec.path.eq_ignore_ascii_case(&path),
                 Artifact::Region(spec) => matches!(&spec.host, HostSelector::Path(host) if host.eq_ignore_ascii_case(&path)),
             }) {
                 plan.refusal(format!(
@@ -673,6 +697,7 @@ fn plan_catalog_artifact(
                 push_region(repo_root, workspace, manifest, plan, hosts, composed, json_scanner_hosts, spec)?;
             }
         }
+        Artifact::OwnedFileSection(_) => {}
     }
     Ok(())
 }
@@ -919,6 +944,68 @@ fn validate_array_host_overlaps(
     Ok(())
 }
 
+fn validate_expanded_section_ownership(workspace: &Workspace, backends: &[Backend], catalog: &Catalog) -> Result<(), AppError> {
+    let section_paths = catalog
+        .artifacts()
+        .iter()
+        .filter_map(|artifact| match artifact {
+            Artifact::OwnedFileSection(spec) if spec.gate.is_none_or(|gate| backends.contains(&gate)) => Some(spec.path),
+            Artifact::OwnedFile(_) | Artifact::OwnedFileSection(_) | Artifact::Region(_) => None,
+        })
+        .collect::<BTreeSet<_>>();
+
+    for artifact in catalog.artifacts() {
+        let Artifact::Region(spec) = artifact else {
+            continue;
+        };
+        for host in region_host_paths(workspace, spec) {
+            if let Some(section_path) = section_paths.iter().find(|path| path.eq_ignore_ascii_case(host)) {
+                bail!(
+                    "owned-file sections composing '{section_path}' conflict with managed-region host '{host}' after workspace expansion"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+struct ComposedOwnedFile {
+    path: &'static str,
+    body: String,
+}
+
+fn compose_owned_file_sections(catalog: &Catalog, backends: &[Backend]) -> Vec<ComposedOwnedFile> {
+    let mut positions = HashMap::<&'static str, usize>::new();
+    let mut files = Vec::<ComposedOwnedFile>::new();
+
+    for artifact in catalog.artifacts() {
+        let Artifact::OwnedFileSection(spec) = artifact else {
+            continue;
+        };
+        if spec.gate.is_some_and(|gate| !backends.contains(&gate)) {
+            continue;
+        }
+        let index = *positions.entry(spec.path).or_insert_with(|| {
+            files.push(ComposedOwnedFile {
+                path: spec.path,
+                body: String::new(),
+            });
+            files.len() - 1
+        });
+        // #[gamma::skip(collection.reverse_array, reason = "trim_matches treats this character array as a set; reversing CR and LF cannot change the trimmed body.", tag = "equivalent")]
+        let body = spec.body.trim_matches(['\r', '\n']);
+        if !files[index].body.is_empty() {
+            files[index].body.push_str("\n\n");
+        }
+        files[index].body.push_str(body);
+    }
+
+    for file in &mut files {
+        file.body.push('\n');
+    }
+    files
+}
+
 /// In-memory accumulator of host-file text, shared across every region
 /// (and region removal) targeting the same host file within one planning
 /// pass.
@@ -1142,23 +1229,9 @@ fn push_region_at_with_scanner(
         return Ok(());
     }
     // #[gamma::skip(try.propagate_to_unwrap, reason = "successful marker repair already cached this exact host, including absent files; the repeated lookup cannot perform I/O or return Err")]
-    let current = hosts.get_or_read(repo_root, &host)?;
-    if let Some(declared) = composed_host
-        && !declared.order.contains(&spec.id.as_str())
-    {
-        // End-of-file is the default placement everywhere else, and it is wrong
-        // here by construction: it lands below the region that closes the file.
-        // A built-in region reaching this is caught by the registry test in
-        // `artifacts::mod`, but a downstream catalog can add one at run time,
-        // and appending it below `CMD` would be silent and would classify the
-        // host as composable on every later run.
-        bail!(
-            "region '{}' targets the composed host '{host}', whose region order is semantic, \
-             but is not declared in that order. Add it to the host's `ComposedHost::order` \
-             at the position it must occupy.",
-            spec.id.as_str()
-        );
-    }
+    let cached = hosts.get_or_read(repo_root, &host)?;
+    let current = seed_justfile_scaffold_if_absent(hosts, &host, spec, cached);
+    validate_composed_host_region(&host, spec, composed_host)?;
     let Some(placement) = region_placement_or_refuse(plan, &host, spec, composed_host, current.as_deref()) else {
         return Ok(());
     };
@@ -1239,6 +1312,32 @@ fn push_region_at_with_scanner(
         hosts.set(&host, spliced.clone());
     }
     plan.push(item);
+    Ok(())
+}
+
+fn seed_justfile_scaffold_if_absent(hosts: &mut HostTextCache, host: &str, spec: &RegionSpec, current: Option<String>) -> Option<String> {
+    if current.is_some()
+        || !host.eq_ignore_ascii_case(artifacts::justfile::JUSTFILE_PATH)
+        || spec.id.as_str() != artifacts::justfile::JUSTFILE_REGION_ID
+    {
+        return current;
+    }
+    let scaffold = artifacts::justfile::scaffold().to_owned();
+    hosts.set(host, scaffold.clone());
+    Some(scaffold)
+}
+
+fn validate_composed_host_region(host: &str, spec: &RegionSpec, composed_host: Option<ComposedHost>) -> Result<(), AppError> {
+    if let Some(declared) = composed_host
+        && !declared.order.contains(&spec.id.as_str())
+    {
+        bail!(
+            "region '{}' targets the composed host '{host}', whose region order is semantic, \
+             but is not declared in that order. Add it to the host's `ComposedHost::order` \
+             at the position it must occupy.",
+            spec.id.as_str()
+        );
+    }
     Ok(())
 }
 
@@ -3106,7 +3205,7 @@ mod tests {
             root,
             |start| {
                 assert_eq!(start, root);
-                Ok((root.to_owned(), Manifest::default()))
+                Ok((root.to_owned(), Manifest::default(), false))
             },
             |path, _| {
                 assert_eq!(path, root);
@@ -3120,6 +3219,197 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("injected late manifest read failure"), "{error}");
+    }
+
+    #[test]
+    fn expanded_owned_section_conflicts_with_a_member_region() {
+        let catalog = Catalog::builder(test_cli())
+            .with_artifact(Artifact::owned_file_section("crates/example/Cargo.toml", "section", "body"))
+            .with_artifact(Artifact::region(RegionSpec {
+                host: HostSelector::EachMemberManifest,
+                id: RegionId::new("managed"),
+                body: "body".to_owned(),
+                syntax: CommentSyntax::Hash,
+            }))
+            .build()
+            .unwrap();
+        let workspace = Workspace {
+            members: vec![crate::workspace::WorkspaceMember {
+                manifest_relpath: "crates/example/Cargo.toml".to_owned(),
+            }],
+            has_workspace_table: true,
+        };
+
+        let error = validate_expanded_section_ownership(&workspace, &[], &catalog).unwrap_err();
+        assert!(error.to_string().contains("conflict with managed-region host"), "{error}");
+    }
+
+    #[test]
+    fn build_plan_propagates_expanded_section_ownership_conflicts() {
+        let catalog = Catalog::builder(test_cli())
+            .with_artifact(Artifact::owned_file_section("crates/example/Cargo.toml", "section", "body"))
+            .with_artifact(Artifact::region(RegionSpec {
+                host: HostSelector::EachMemberManifest,
+                id: RegionId::new("managed"),
+                body: "body".to_owned(),
+                syntax: CommentSyntax::Hash,
+            }))
+            .build()
+            .unwrap();
+        let workspace = Workspace {
+            members: vec![crate::workspace::WorkspaceMember {
+                manifest_relpath: "crates/example/Cargo.toml".to_owned(),
+            }],
+            has_workspace_table: true,
+        };
+
+        let error = build_plan(Path::new("workspace"), &workspace, &Manifest::default(), &[], &catalog).unwrap_err();
+        assert!(error.to_string().contains("conflict with managed-region host"), "{error}");
+    }
+
+    #[test]
+    fn inactive_backend_sections_do_not_conflict_with_regions() {
+        let catalog = Catalog::builder(test_cli())
+            .with_artifact(Artifact::backend_file_section(
+                Backend::GitHub,
+                "crates/example/Cargo.toml",
+                "github-only",
+                "body",
+            ))
+            .with_artifact(Artifact::region(RegionSpec {
+                host: HostSelector::EachMemberManifest,
+                id: RegionId::new("managed"),
+                body: "body".to_owned(),
+                syntax: CommentSyntax::Hash,
+            }))
+            .build()
+            .unwrap();
+        let workspace = Workspace {
+            members: vec![crate::workspace::WorkspaceMember {
+                manifest_relpath: "crates/example/Cargo.toml".to_owned(),
+            }],
+            has_workspace_table: true,
+        };
+
+        validate_expanded_section_ownership(&workspace, &[], &catalog).unwrap();
+    }
+
+    #[test]
+    fn owned_section_planning_propagates_resolution_and_read_failures() {
+        fn fail_resolution(_: &Path, _: &str) -> Result<String, AppError> {
+            Err(ohno::app_err!("injected section resolution failure"))
+        }
+
+        fn fail_read(_: &Path) -> Result<Option<String>, AppError> {
+            Err(ohno::app_err!("injected section read failure"))
+        }
+
+        #[expect(
+            clippy::unnecessary_wraps,
+            reason = "the injected resolver must match HostTextCache's fallible function-pointer seam"
+        )]
+        fn preserve_path(_: &Path, path: &str) -> Result<String, AppError> {
+            Ok(path.to_owned())
+        }
+
+        let catalog = Catalog::builder(test_cli())
+            .with_artifact(Artifact::owned_file_section("owned.just", "section", "body"))
+            .build()
+            .unwrap();
+        let workspace = Workspace {
+            members: Vec::new(),
+            has_workspace_table: true,
+        };
+
+        let mut resolution_hosts = HostTextCache {
+            resolve: fail_resolution,
+            ..HostTextCache::default()
+        };
+        let error = build_plan_with_hosts(
+            Path::new("workspace"),
+            &workspace,
+            &Manifest::default(),
+            &[],
+            &catalog,
+            &mut resolution_hosts,
+        )
+        .unwrap_err();
+        assert_eq!(error.message(), "injected section resolution failure");
+
+        let mut read_hosts = HostTextCache {
+            resolve: preserve_path,
+            read: fail_read,
+            ..HostTextCache::default()
+        };
+        let error = build_plan_with_hosts(
+            Path::new("workspace"),
+            &workspace,
+            &Manifest::default(),
+            &[],
+            &catalog,
+            &mut read_hosts,
+        )
+        .unwrap_err();
+        assert_eq!(error.message(), "injected section read failure");
+    }
+
+    #[test]
+    fn owned_sections_compose_active_nonempty_bodies_only() {
+        let catalog = Catalog::builder(test_cli())
+            .with_artifact(Artifact::owned_file_section(".anvil/composed", "empty", "\n"))
+            .with_artifact(Artifact::backend_file_section(
+                Backend::GitHub,
+                ".anvil/github-only",
+                "github",
+                "github-only",
+            ))
+            .with_artifact(Artifact::owned_file_section(".anvil/composed", "body", "\r\nbody\r\n"))
+            .build()
+            .unwrap();
+
+        let files = compose_owned_file_sections(&catalog, &[]);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, ".anvil/composed");
+        assert_eq!(files[0].body, "body\n");
+    }
+
+    #[test]
+    fn justfile_scaffold_is_seeded_only_for_the_absent_import_region() {
+        let spec = RegionSpec {
+            host: HostSelector::Path(artifacts::justfile::JUSTFILE_PATH.to_owned()),
+            id: RegionId::new(artifacts::justfile::JUSTFILE_REGION_ID),
+            body: "body".to_owned(),
+            syntax: CommentSyntax::Hash,
+        };
+        for (host, id, current, expected_seed) in [
+            (
+                artifacts::justfile::JUSTFILE_PATH,
+                artifacts::justfile::JUSTFILE_REGION_ID,
+                None,
+                true,
+            ),
+            (
+                artifacts::justfile::JUSTFILE_PATH,
+                artifacts::justfile::JUSTFILE_REGION_ID,
+                Some("existing".to_owned()),
+                false,
+            ),
+            ("Other", artifacts::justfile::JUSTFILE_REGION_ID, None, false),
+            (artifacts::justfile::JUSTFILE_PATH, "other", None, false),
+        ] {
+            let mut hosts = HostTextCache::default();
+            let mut candidate = spec.clone();
+            candidate.id = RegionId::new(id);
+            let result = seed_justfile_scaffold_if_absent(&mut hosts, host, &candidate, current.clone());
+            if expected_seed {
+                let scaffold = artifacts::justfile::scaffold();
+                assert_eq!(result.as_deref(), Some(scaffold));
+                assert_eq!(hosts.cached(host).as_deref(), Some(scaffold));
+            } else {
+                assert_eq!(result, current);
+                assert!(!hosts.texts.contains_key(host));
+            }
+        }
     }
 
     /// Minimal identity for tests that exercise catalog mechanics rather than
@@ -3290,7 +3580,7 @@ mod tests {
             assert_eq!(plan.items().len(), 1);
             assert_eq!(plan.items()[0].target, Target::File { path: path.to_owned() });
             let updated = hosts.cached(path).unwrap();
-            assert!(updated.contains(".github/actions/anvil-setup/action.yml"));
+            assert!(updated.contains(".anvil/github/actions/setup/action.yml"));
             assert!(updated.contains(".github/workflows/anvil-pr-impl.yml"));
             assert_eq!(plan.projected_manifest(&Manifest::default()), Manifest::default());
             let rerun = if path == ".github/dependabot.yml" {
@@ -3583,7 +3873,7 @@ mod tests {
             let mut plan = Plan::default();
             plan.push(PlanItem::remove_file(retired));
             plan_dependabot_exclusions(Path::new("memory"), &[Backend::GitHub], &catalog, &mut plan, &mut hosts).unwrap();
-            let expected = crate::dependabot::update(source, &[".github/actions/anvil-setup/action.yml"])
+            let expected = crate::dependabot::update(source, &[".anvil/github/actions/setup/action.yml"])
                 .unwrap()
                 .unwrap();
             assert_eq!(plan.items().len(), 2);
@@ -3619,7 +3909,7 @@ mod tests {
             path: ".github/dependabot.yml".to_owned(),
         }));
         plan_dependabot_exclusions(Path::new("memory"), &[Backend::GitHub], &catalog, &mut plan, &mut hosts).unwrap();
-        let expected = crate::dependabot::update(source, &[".github/actions/anvil-setup/action.yml"])
+        let expected = crate::dependabot::update(source, &[".anvil/github/actions/setup/action.yml"])
             .unwrap()
             .unwrap();
         assert_eq!(plan.items().len(), 2);
@@ -3667,6 +3957,7 @@ mod tests {
         let source = "version: 2\nupdates:\n- package-ecosystem: github-actions\n  directory: /\n";
         for owner in [
             Artifact::owned_file(".github/dependabot.yml", source),
+            Artifact::owned_file_section(".github/dependabot.yml", "repository-policy", source),
             Artifact::region(RegionSpec {
                 host: HostSelector::Path(".github/dependabot.yml".to_owned()),
                 id: RegionId::new("repository-policy"),
@@ -7224,21 +7515,20 @@ mod tests {
 
         for expected in [
             "Justfile",
-            "justfiles/anvil/mod.just",
-            "justfiles/anvil/helpers.just",
-            "justfiles/anvil/checks/fmt.just",
-            "justfiles/anvil/checks/miri.just",
-            "justfiles/anvil/groups/pr-fast.just",
-            "justfiles/anvil/groups/scheduled-exhaustive.just",
-            "justfiles/anvil/tiers.just",
-            "justfiles/anvil/tools.just",
-            "justfiles/anvil/versions.just",
+            ".anvil/anvil.just",
+            ".anvil/checks.just",
+            ".anvil/groups.just",
+            ".anvil/helpers.just",
+            ".anvil/setup.just",
+            ".anvil/container.just",
+            ".anvil/manifest.toml",
+            ".anvil/container/Dockerfile",
+            ".anvil/container/Dockerfile.dockerignore",
             "deny.toml",
             "rustfmt.toml",
             ".delta.toml",
             "spellcheck.toml",
             "clippy.toml",
-            ".anvil.lock",
         ] {
             assert!(tmp.path().join(expected).is_file(), "expected '{expected}' after update");
         }
@@ -7254,6 +7544,9 @@ mod tests {
         let member_manifest = fs::read_to_string(tmp.path().join("crates/alpha/Cargo.toml")).unwrap();
         assert!(member_manifest.contains("# >>> anvil-managed: anvil-lints"));
         assert!(member_manifest.contains("workspace = true"));
+        let justfile = fs::read_to_string(tmp.path().join("Justfile")).unwrap();
+        assert!(justfile.contains("set unstable"));
+        assert!(justfile.contains("set windows-shell"));
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
@@ -7284,8 +7577,8 @@ mod tests {
         let outcome = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
         assert!(!outcome.applied);
         assert!(outcome.plan.has_changes());
-        assert!(!tmp.path().join("justfiles/anvil/tools.just").exists());
-        assert!(!tmp.path().join(".anvil.lock").exists());
+        assert!(!tmp.path().join(".anvil/anvil.just").exists());
+        assert!(!Manifest::path_for(tmp.path()).exists());
     }
 
     fn assert_dry_run_detects_manifest_drift(mutate: impl FnOnce(&mut Manifest)) {
@@ -7304,7 +7597,7 @@ mod tests {
 
         assert!(!outcome.applied);
         assert_eq!(outcome.plan.dry_run_exit_code(), 1);
-        assert!(outcome.plan.summary(Some(&manifest)).contains(".anvil.lock"));
+        assert!(outcome.plan.summary(Some(&manifest)).contains(".anvil/manifest.toml"));
         assert_eq!(fs::read_to_string(Manifest::path_for(tmp.path())).unwrap(), stale_lock);
     }
 
@@ -8559,7 +8852,8 @@ mod tests {
     #[test]
     fn run_update_propagates_manifest_save_failures() {
         let tmp = empty_workspace();
-        fs::create_dir(Manifest::path_for(tmp.path()).with_extension("lock.tmp")).unwrap();
+        fs::create_dir(tmp.path().join(".anvil")).unwrap();
+        fs::create_dir(Manifest::path_for(tmp.path()).with_extension("toml.tmp")).unwrap();
 
         let err = run_update(&empty_catalog(), &local_only(), tmp.path()).unwrap_err();
 
@@ -8940,7 +9234,7 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("managed by 'forge2'"), "got: {msg}");
         assert!(msg.contains("--force"), "refusal should suggest --force; got: {msg}");
-        assert!(!tmp.path().join("justfiles/anvil/tools.just").exists(), "guard must write nothing");
+        assert!(!tmp.path().join(".anvil/anvil.just").exists(), "guard must write nothing");
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
@@ -8994,7 +9288,7 @@ mod tests {
         let catalog = Catalog::anvil();
         let outcome = run_update(&catalog, &args, tmp.path()).unwrap();
         assert!(outcome.applied, "force should proceed as a normal update");
-        assert!(tmp.path().join("justfiles/anvil/tools.just").is_file());
+        assert!(tmp.path().join(".anvil/anvil.just").is_file());
         let saved = Manifest::load(tmp.path()).unwrap();
         assert_eq!(saved.tool.as_deref(), Some("anvil"), "force rewrites the lock owner");
         assert_eq!(saved.catalog_checksum, Some(catalog.checksum()));
@@ -9179,11 +9473,11 @@ mod tests {
         assert!(outcome.applied);
         assert_eq!(outcome.backends, vec![Backend::GitHub]);
         for expected in [
-            ".github/actions/anvil-setup/action.yml",
-            ".github/actions/anvil-setup/just-problem-matcher.json",
-            ".github/actions/anvil-run-group/action.yml",
-            ".github/actions/anvil-report-status/action.yml",
-            ".github/actions/anvil-impact/action.yml",
+            ".anvil/github/actions/setup/action.yml",
+            ".anvil/github/actions/setup/just-problem-matcher.json",
+            ".anvil/github/actions/run-group/action.yml",
+            ".anvil/github/actions/report-status/action.yml",
+            ".anvil/github/actions/impact/action.yml",
             ".github/workflows/anvil-pr-impl.yml",
             ".github/workflows/anvil-scheduled-impl.yml",
             ".github/workflows/anvil-pr.yml",
@@ -9228,21 +9522,20 @@ mod tests {
         assert!(outcome.applied);
         assert_eq!(outcome.backends, vec![Backend::Ado]);
         for expected in [
-            ".pipelines/anvil/steps/setup.yml",
-            ".pipelines/anvil/steps/impact.yml",
-            ".pipelines/anvil/steps/advisory-comments.yml",
-            ".pipelines/anvil/steps/pr-fast.yml",
-            ".pipelines/anvil/steps/pr-test.yml",
-            ".pipelines/anvil/steps/pr-msrv.yml",
-            ".pipelines/anvil/steps/pr-runtime-analysis.yml",
-            ".pipelines/anvil/steps/pr-fuzzing.yml",
-            ".pipelines/anvil/steps/pr-mutants.yml",
-            ".pipelines/anvil/steps/scheduled-test.yml",
-            ".pipelines/anvil/steps/scheduled-advisories.yml",
-            ".pipelines/anvil/steps/scheduled-runtime-analysis.yml",
-            ".pipelines/anvil/steps/scheduled-exhaustive.yml",
-            ".pipelines/anvil/pr.yml",
-            ".pipelines/anvil/scheduled.yml",
+            ".anvil/ado/steps/setup.yml",
+            ".anvil/ado/steps/impact.yml",
+            ".anvil/ado/steps/pr-fast.yml",
+            ".anvil/ado/steps/pr-test.yml",
+            ".anvil/ado/steps/pr-msrv.yml",
+            ".anvil/ado/steps/pr-runtime-analysis.yml",
+            ".anvil/ado/steps/pr-fuzzing.yml",
+            ".anvil/ado/steps/pr-mutants.yml",
+            ".anvil/ado/steps/scheduled-test.yml",
+            ".anvil/ado/steps/scheduled-advisories.yml",
+            ".anvil/ado/steps/scheduled-runtime-analysis.yml",
+            ".anvil/ado/steps/scheduled-exhaustive.yml",
+            ".anvil/ado/pr.yml",
+            ".anvil/ado/scheduled.yml",
             ".pipelines/anvil-pr.yml",
             ".pipelines/anvil-scheduled.yml",
         ] {

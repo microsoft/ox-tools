@@ -43,7 +43,7 @@ thread_local! {
 
 /// Installs current-thread command and complete environment replacements, clearing both on unwind.
 #[cfg(test)]
-fn with_native_queries<T>(
+pub(super) fn with_native_queries<T>(
     environment: BTreeMap<String, OsString>,
     observer: impl FnMut(&Command) -> std::io::Result<(bool, Vec<u8>)> + 'static,
     body: impl FnOnce() -> T,

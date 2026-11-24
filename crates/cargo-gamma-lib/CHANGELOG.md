@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-11-20
+
+- 🐛 Bug Fixes
+
+  - cargo-gamma: skip standalone Rust scripts in mutation diffs
+
+- ♻️ Code Refactoring
+
+  - cargo-aprz: migrate time handling to Jiff ([#369](https://github.com/microsoft/ox-tools/pull/369))
+
 ## [0.7.0] - 2026-11-19
 
 - 🐛 Bug Fixes

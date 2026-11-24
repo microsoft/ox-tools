@@ -22,7 +22,8 @@
 //! declaration cannot contribute production mutants, no matter what it contains.
 
 use camino::{Utf8Path, Utf8PathBuf};
-use syn::{Attribute, Item, Meta};
+use syn::visit::{self, Visit};
+use syn::{Attribute, Block, Ident, Item, ItemMod, Meta};
 
 use crate::cfg::{CfgSet, test_gated_for};
 use crate::{HashMap, HashSet};
@@ -140,6 +141,74 @@ pub(super) fn path_attribute(attrs: &[Attribute]) -> Option<String> {
 
         Some(text.value())
     })
+}
+
+/// Whether a conditional attribute can redirect a module path this walker cannot resolve.
+pub(super) fn has_conditional_path(items: &[Item]) -> bool {
+    items.iter().any(|item| {
+        let Item::Mod(module) = item else { return false };
+        module.attrs.iter().any(|attr| cfg_attr_has_path(&attr.meta))
+            || module.content.as_ref().is_some_and(|(_brace, items)| has_conditional_path(items))
+    })
+}
+
+/// Finds a file-backed module inside a statement block, which the declaration walker does not enter.
+pub(super) fn block_local_module(ast: &syn::File) -> Option<&Ident> {
+    #[derive(Default)]
+    struct Finder<'ast> {
+        inside_block: bool,
+        found: Option<&'ast Ident>,
+    }
+
+    impl<'ast> Visit<'ast> for Finder<'ast> {
+        fn visit_block(&mut self, i: &'ast Block) {
+            let previous = core::mem::replace(&mut self.inside_block, true);
+            visit::visit_block(self, i);
+            self.inside_block = previous;
+        }
+
+        fn visit_item_mod(&mut self, i: &'ast ItemMod) {
+            if self.inside_block && i.content.is_none() {
+                let _ = self.found.get_or_insert(&i.ident);
+            } else {
+                visit::visit_item_mod(self, i);
+            }
+        }
+    }
+
+    let mut finder = Finder::default();
+    finder.visit_file(ast);
+    finder.found
+}
+
+fn cfg_attr_has_path(meta: &Meta) -> bool {
+    let Meta::List(list) = meta else { return false };
+    if !list.path.is_ident("cfg_attr") {
+        return false;
+    }
+
+    list.parse_args_with(syn::punctuated::Punctuated::<Meta, syn::Token![,]>::parse_terminated)
+        .map_or(true, |args| {
+            args.iter()
+                .skip(1)
+                .any(|attr| attr.path().is_ident("path") || cfg_attr_has_path(attr))
+        })
+}
+
+/// Detects source inclusion without trying to expand macros or resolve the included path.
+pub(super) fn has_include(ast: &syn::File) -> bool {
+    #[derive(Default)]
+    struct Finder(bool);
+
+    impl<'ast> Visit<'ast> for Finder {
+        fn visit_macro(&mut self, i: &'ast syn::Macro) {
+            self.0 |= i.path.segments.last().is_some_and(|segment| segment.ident == "include");
+        }
+    }
+
+    let mut finder = Finder::default();
+    finder.visit_file(ast);
+    finder.0
 }
 
 /// Works out which files have no live module path under the selected configuration.
@@ -300,6 +369,61 @@ mod tests {
         );
         assert_eq!(owned_directory(Utf8Path::new(".")), None);
         assert_eq!(owned_directory(Utf8Path::new("")), None);
+    }
+
+    #[test]
+    fn a_direct_path_attribute_can_own_a_file_outside_the_package_directory() {
+        let source = Utf8Path::new("workspace/crates/app/src/lib.rs");
+        let target = Utf8Path::new("workspace/crates/app/src/../../../scripts/shared.rs");
+        let ast = parse("#[path = \"../../../scripts/shared.rs\"] mod shared;");
+        let found = declarations_with(source, &ast, &CfgSet::unconditional(), |path| {
+            assert_eq!(path, target);
+            true
+        });
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].target, target);
+    }
+
+    #[test]
+    fn include_macros_are_not_treated_as_module_declarations() {
+        let source = Utf8Path::new("workspace/crates/app/src/lib.rs");
+        let ast = parse("include!(\"../../../scripts/shared.rs\");");
+        let found = declarations_with(source, &ast, &CfgSet::unconditional(), |_path| {
+            panic!("include! does not declare a module path")
+        });
+
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    fn conditional_module_path_prevents_proving_standalone_ownership() {
+        for source in [
+            r#"mod unrelated; mod outer { #[allow(dead_code)] #[cfg_attr(windows, allow(dead_code), path = "../../scripts/shared.rs")] mod shared; }"#,
+            r#"#[cfg_attr(windows, cfg_attr(test, path = "../scripts/shared.rs"))] mod shared;"#,
+            "#[cfg_attr(windows, 0)] mod malformed;",
+        ] {
+            assert!(has_conditional_path(&parse(source).items), "{source}");
+        }
+
+        for source in [
+            r#"#[cfg_attr(path, allow(dead_code))] mod normal; #[path = "known.rs"] mod known;"#,
+            r#"#[cfg_attr(windows, other_attr(flag, path = "known.rs"))] mod normal;"#,
+            "#[cfg(windows)] mod normal;",
+            "mod normal;",
+            "fn normal() {}",
+        ] {
+            assert!(!has_conditional_path(&parse(source).items), "{source}");
+        }
+    }
+
+    #[test]
+    fn only_file_backed_modules_inside_blocks_need_the_ownership_safeguard() {
+        let ast = parse("mod top; mod outer { fn run() { mod inline {} } mod sibling; }");
+        assert!(block_local_module(&ast).is_none());
+
+        let ast = parse(r#"mod outer { fn run() { #[path = "alt"] mod inner { mod shared; } } }"#);
+        assert_eq!(block_local_module(&ast).map(ToString::to_string).as_deref(), Some("shared"));
     }
 
     #[test]

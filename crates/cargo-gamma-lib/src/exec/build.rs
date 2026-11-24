@@ -1004,6 +1004,13 @@ pub struct Build {
 
     pub binaries: Vec<TestBinary>,
 
+    /// The `--package` specs the test build was rooted at, exactly as cargo received them, or
+    /// `None` when it built `--workspace`.
+    ///
+    /// Anything that asks cargo about these binaries again has to select the same packages: under
+    /// `--all-features` the selection decides which features are on, and so every binary's hash.
+    pub packages: Option<Vec<String>>,
+
     /// Cargo's successful final build stream, retained until the test runtime environment has
     /// been reconstructed from its artifacts and build-script outputs.
     pub artifacts: String,
@@ -1896,6 +1903,7 @@ impl Converger {
                         history: self.history.clone(),
                         census: self.tally(plan),
                         binaries: Vec::new(),
+                        packages: None,
                         artifacts: String::new(),
                         withdrawn: self.historical_exclusions + self.withdrawn.len().saturating_sub(self.abandoned.len()),
                         rounds: self.total_rounds,
@@ -1923,11 +1931,13 @@ impl Converger {
         let mut binaries = test_binaries_with_linkage(&stdout, &work.root, captures.as_deref());
         // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
         retain_linked_to_population(&mut binaries, plan);
+        let packages = roots.map(|roots| roots.iter().map(|package| plan.spec(&work.root, package)).collect());
 
         Ok(Build {
             history: self.history.clone(),
             census: self.tally(plan),
             binaries,
+            packages,
             artifacts: stdout,
             withdrawn: self.historical_exclusions + self.withdrawn.len().saturating_sub(self.abandoned.len()),
             rounds: self.total_rounds,

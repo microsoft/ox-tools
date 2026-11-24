@@ -565,6 +565,17 @@ members = ["cra*tes"]
         assert!(err.to_string().contains("zero members"), "{err}");
     }
 
+    #[test]
+    fn repository_root_zero_member_error_names_the_repository_root() {
+        let error = parse_workspace(Path::new(""), "[workspace]\n", |_| Ok(Vec::new())).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("workspace at the repository root resolved to zero members"),
+            "{error}"
+        );
+    }
+
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn empty_member_pattern_errors() {

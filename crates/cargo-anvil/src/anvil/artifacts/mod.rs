@@ -3,14 +3,14 @@
 
 //! The built-in (`anvil`) artifacts, exposed as a registry of functions.
 //!
-//! Each function returns the [`Artifact`] for one built-in catalog entry —
-//! a `justfiles/anvil/` recipe file, a managed region, or a backend file.
-//! A fork overrides a built-in by deriving from the corresponding function
-//! via [`Artifact::with_body`], so the artifact's identity and gate are
-//! preserved by construction:
+//! Each function returns one [`Artifact`] for one built-in catalog section.
+//! A fork overrides a built-in by deriving from the corresponding function via
+//! [`Artifact::with_body`], so the artifact's identity and gate are preserved
+//! by construction:
 //!
 //! ```ignore
 //! catalog.replace_artifact(artifacts::region::rustfmt().with_body(my_body));
+//! catalog.replace_artifact(artifacts::justfile::checks::clippy().with_body(my_recipe));
 //! ```
 //!
 //! This is the single source of truth for the base catalog: both
@@ -59,11 +59,6 @@ pub(crate) fn anvil_artifacts() -> Vec<Artifact> {
     // and the shared-config regions.
     let mut out = vec![
         justfile::entry(),
-        justfile::tools(),
-        justfile::versions(),
-        justfile::helpers(),
-        justfile::impact(),
-        justfile::tiers(),
         instructions::cargo_anvil(),
         instructions::adoption_skill(),
         region::justfile_imports(),
@@ -87,7 +82,18 @@ pub(crate) fn anvil_artifacts() -> Vec<Artifact> {
         region::gitattributes(),
     ];
 
-    // One owned file per developer utility, check, and group.
+    out.extend(justfile::headers());
+    out.push(justfile::setup::tools());
+    out.push(justfile::setup::versions());
+    out.push(justfile::helpers::common());
+    out.push(justfile::helpers::impact());
+    out.push(justfile::checks::impact());
+    out.push(justfile::groups::tiers());
+    out.push(justfile::helpers::tiers());
+    out.push(justfile::setup::tiers());
+
+    // Independently addressable source-template sections for every developer
+    // utility, check, and group.
     out.extend(justfile::dev_files());
     out.extend(justfile::check_files());
     out.extend(justfile::group_files());
@@ -159,10 +165,11 @@ mod tests {
         assert!(report > spec.body.find("PublishPipelineArtifact@1").unwrap());
         assert!(spec.body[report..].contains("condition: always()"));
         assert!(spec.body[report..].contains("continueOnError: true"));
-        assert!(
-            spec.body
-                .contains("- pwsh: Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize")
-        );
+        let final_step = spec.body.rsplit("\n      - ").next().unwrap();
+        assert!(final_step.starts_with("pwsh: |\n"));
+        assert!(final_step.contains("Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize"));
+        assert!(final_step.contains("Write-Warning \"Disk usage report unavailable: $_\""));
+        assert!(final_step.contains("\n          exit 0\n"));
     }
 
     /// Catalog authors must compose valid TOML without array-of-table ownership.
@@ -279,11 +286,6 @@ mod tests {
 
         let singletons = [
             justfile::entry(),
-            justfile::versions(),
-            justfile::tools(),
-            justfile::helpers(),
-            justfile::impact(),
-            justfile::tiers(),
             instructions::cargo_anvil(),
             instructions::adoption_skill(),
             region::justfile_imports(),
@@ -318,7 +320,6 @@ mod tests {
             github::test_review_rules(),
             ado::setup_step(),
             ado::impact_step(),
-            ado::advisory_comments(),
             ado::job_wrapper(),
             ado::pr_stages(),
             ado::scheduled_stages(),
@@ -335,11 +336,20 @@ mod tests {
             assert!(present(artifact), "backend artifact is not in Catalog::anvil(): {artifact:?}");
         }
 
-        for artifact in justfile::dev_files()
-            .iter()
-            .chain(justfile::check_files().iter())
-            .chain(justfile::group_files().iter())
-        {
+        let mut recipe_artifacts = vec![
+            justfile::setup::tools(),
+            justfile::setup::versions(),
+            justfile::helpers::common(),
+            justfile::helpers::impact(),
+            justfile::checks::impact(),
+            justfile::groups::tiers(),
+            justfile::helpers::tiers(),
+            justfile::setup::tiers(),
+        ];
+        recipe_artifacts.extend(justfile::dev_files());
+        recipe_artifacts.extend(justfile::check_files());
+        recipe_artifacts.extend(justfile::group_files());
+        for artifact in &recipe_artifacts {
             assert!(present(artifact), "split recipe file is not in Catalog::anvil(): {artifact:?}");
         }
         for artifact in container::all() {
@@ -353,16 +363,35 @@ mod tests {
         ignore = "native/cargo-careful retain the generated-marker scan; artifact construction and rendering remain interpreted"
     )]
     fn every_owned_file_identifies_cargo_anvil_as_its_generator() {
+        const USER_CUSTOMIZABLE: &[&str] = &[
+            ".github/workflows/anvil-pr.yml",
+            ".github/workflows/anvil-scheduled.yml",
+            ".pipelines/anvil-pr.yml",
+            ".pipelines/anvil-scheduled.yml",
+            ".anvil/ado/hooks/before-checks.yml",
+            ".anvil/ado/hooks/after-checks.yml",
+            ".anvil/ado/custom/pr-stages.yml",
+            ".anvil/ado/custom/scheduled-stages.yml",
+            ".anvil/ado/steps/job.yml",
+        ];
         for artifact in anvil_artifacts() {
             if let Artifact::OwnedFile(spec) = artifact {
-                let generated_marker = spec.body.contains("GENERATED BY cargo-anvil. DO NOT EDIT DIRECTLY.");
-                let customizable_wrapper =
-                    spec.path == ".pipelines/anvil/steps/job.yml" && spec.body.contains("Default job wrapper emitted by cargo-anvil.");
+                let generated_marker = spec
+                    .body
+                    .contains("GENERATED BY cargo-anvil. DO NOT EDIT DIRECTLY unless you intend to depart from anvil-provided defaults.");
+                let customizable = USER_CUSTOMIZABLE.contains(&spec.path);
                 assert!(
-                    generated_marker || customizable_wrapper,
+                    generated_marker || customizable,
                     "owned file '{}' lacks the generated-content marker",
                     spec.path
                 );
+                if customizable {
+                    assert!(
+                        !generated_marker,
+                        "user-customizable owned file '{}' must not discourage edits",
+                        spec.path
+                    );
+                }
             }
         }
     }

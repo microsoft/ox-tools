@@ -24,7 +24,7 @@ fn main() -> Result<(), AppError> {
 
     let generated = update(&catalog, &options, &mut repository)?;
     assert!(generated.applied);
-    assert!(repository.files.contains_key(".anvil.lock"));
+    assert!(repository.files.contains_key(".anvil/manifest.toml"));
     let repeat = update(&catalog, &options, &mut repository)?;
     assert!(repeat.in_sync);
     println!("{}", generated.summary);
