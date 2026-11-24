@@ -29,13 +29,16 @@ cargo ensure-no-test-features --manifest-path path/to/Cargo.toml --policy policy
 ```
 
 The checker scans publishable members of the selected Cargo workspace, even
-when `--manifest-path` names a member. It checks explicit direct production
-dependency requests and requests reachable from a member’s default features.
+when `--manifest-path` names a member. It checks explicit requests on direct
+normal and build dependencies and requests reachable from a member’s default features.
 It ignores dev dependencies, transitive activation and dependency defaults.
 
 By default it denies the exact, case-sensitive names `fakes`, `test-util`,
 and `insecure`. A JSON policy passed with `--policy` can replace the list
-with `features` or omit that field to keep the defaults. For example:
+with a nonempty list of unique feature names in `features`, or omit that
+field to keep the defaults. Exceptions must name a feature on the active
+deny list. Unknown fields are errors except for the optional top-level
+`$comment` field. Duplicate exceptions are also errors. For example:
 
 ```json
 {
@@ -47,9 +50,10 @@ with `features` or omit that field to keep the defaults. For example:
 ```
 
 The first exception matches a dependency manifest key (the alias if renamed).
-The second matches only the package’s own default activation. Success is
-silent (exit 0); violations and runtime errors go to stderr (exit 1).
-Invalid CLI usage exits 2.
+The second matches only the package’s own `test-util` feature when reached
+from `default`, not a request for `test-util` on a dependency.
+The checker exits silently with 0 when there are no findings. It reports
+findings and runtime errors to stderr and exits 1. Invalid CLI usage exits 2.
 
 
 <hr/>

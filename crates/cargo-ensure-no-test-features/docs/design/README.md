@@ -9,7 +9,9 @@ Cargo discovers the manifest from the current directory unless a path is
 provided. Relative paths are resolved from the current directory. Selecting a
 member manifest still checks the entire workspace.
 
-The checker uses `cargo metadata --no-deps --format-version 1`. It skips members
+The checker uses `cargo metadata --no-deps --format-version 1` so it sees
+Cargo's effective declarations, including workspace inheritance and aliases,
+without resolving the transitive dependency graph. It skips members
 with `publish = false`; registry-restricted packages are checked. It checks all
 explicit feature requests on direct normal and build dependencies, including
 optional, inherited and target-specific dependencies, regardless of the host.
@@ -34,6 +36,7 @@ unknown fields (except the top-level `$comment`), and duplicates are errors.
 An explicitly selected policy is required to exist; there is no implicit
 workspace policy file lookup.
 
-Success is silent and exits 0. Findings are sorted and deduplicated, printed to
-stderr with manifest paths and remediation guidance, and exit 1. Policy and
-metadata errors also exit 1 with a diagnostic; CLI syntax errors exit 2.
+The checker exits silently with 0 on success. It sorts and deduplicates
+findings, reports them to stderr with manifest paths and remediation guidance,
+and exits 1. Policy and metadata errors also result in exit 1, even if stderr
+cannot be written. Invalid CLI usage exits 2.

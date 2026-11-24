@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use ohno::AppError;
 use serde::Deserialize;
@@ -21,7 +21,7 @@ struct Package {
     id: String,
     name: String,
     manifest_path: PathBuf,
-    #[serde(deserialize_with = "Deserialize::deserialize")]
+    #[serde(deserialize_with = "Deserialize::deserialize")] // Cargo must emit the field, even when null.
     publish: Option<Vec<String>>,
     features: BTreeMap<String, Vec<String>>,
     dependencies: Vec<Dependency>,
@@ -31,7 +31,7 @@ struct Package {
 struct Dependency {
     name: String,
     rename: Option<String>,
-    #[serde(deserialize_with = "Deserialize::deserialize")]
+    #[serde(deserialize_with = "Deserialize::deserialize")] // Cargo must emit the field, even when null.
     kind: Option<Kind>,
     target: Option<String>,
     features: Vec<String>,
@@ -72,7 +72,7 @@ fn inspect(metadata: &Metadata, policy: &Policy) -> Result<BTreeSet<String>, App
     Ok(violations)
 }
 
-fn inspect_package(package: &Package, workspace: &std::path::Path, policy: &Policy, violations: &mut BTreeSet<String>) {
+fn inspect_package(package: &Package, workspace: &Path, policy: &Policy, violations: &mut BTreeSet<String>) {
     let name = &package.name;
     let manifest = package
         .manifest_path
@@ -115,6 +115,7 @@ fn inspect_package(package: &Package, workspace: &std::path::Path, policy: &Poli
                     if !weak && optional.contains(key) {
                         pending.push(key);
                     }
+                    // Weak forwards are requests even when the dependency never activates.
                     if dependencies.contains(key) && policy.denies(name, Some(key), forwarded) {
                         violations.insert(format!(
                             "{manifest}: '{name}' forwards '{forwarded}' to dependency '{key}' through default features"
@@ -131,8 +132,6 @@ fn inspect_package(package: &Package, workspace: &std::path::Path, policy: &Poli
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use std::path::Path;
-
     use super::*;
     use crate::policy;
 

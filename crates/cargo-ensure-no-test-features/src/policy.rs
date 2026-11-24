@@ -19,7 +19,7 @@ struct PolicyFile {
     #[serde(default)]
     exceptions: Vec<Exception>,
     #[serde(default, rename = "$comment")]
-    _comment: Option<serde_json::Value>,
+    _comment: Option<serde::de::IgnoredAny>,
 }
 
 #[derive(Deserialize)]
@@ -37,11 +37,13 @@ pub(crate) struct Policy {
 }
 
 fn present<'de, T: Deserialize<'de>, D: Deserializer<'de>>(deserializer: D) -> Result<Option<T>, D::Error> {
+    // A missing key uses the field default; an explicit null must not do so.
     T::deserialize(deserializer).map(Some)
 }
 
 fn read_policy(bytes: &[u8], path: impl fmt::Display) -> Result<PolicyFile, AppError> {
     let bytes = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes);
+    // Serde also accepts positional arrays for structs; policy fields must be named.
     if bytes.iter().find(|byte| !byte.is_ascii_whitespace()) != Some(&b'{') {
         return Err(AppError::new(format!("invalid policy at {path}: expected a JSON object")));
     }
@@ -171,9 +173,16 @@ mod tests {
                 .expect("an invalid policy must fail");
             assert_eq!(result.to_string(), format!("invalid policy at policy.json: {detail}"), "{invalid}");
         }
-        assert!(load_with_defaults(None, |_| unreachable!(), b"{}").is_err());
-        assert!(load_with_defaults(Some(path), |_| Ok(b"{}".to_vec()), b"{}").is_err());
-        assert!(load_with_defaults(Some(path), |_| Ok(b"{}".to_vec()), b"not json").is_err());
+        for (path, bundled, expected) in [
+            (None, b"{}".as_slice(), "missing features"),
+            (Some(path), b"{}".as_slice(), "missing features"),
+            (Some(path), b"not json".as_slice(), "expected a JSON object"),
+        ] {
+            let error = load_with_defaults(path, |_| Ok(b"{}".to_vec()), bundled)
+                .err()
+                .expect("unusable bundled features must be reported");
+            assert_eq!(error.to_string(), format!("invalid policy at bundled defaults.json: {expected}"));
+        }
         for error in [io::ErrorKind::PermissionDenied, io::ErrorKind::NotFound] {
             let result = load(Some(path), |_| Err(io::Error::new(error, "scripted read failure")))
                 .err()

@@ -17,13 +17,16 @@
 //! ```
 //!
 //! The checker scans publishable members of the selected Cargo workspace, even
-//! when `--manifest-path` names a member. It checks explicit direct production
-//! dependency requests and requests reachable from a member's default features.
+//! when `--manifest-path` names a member. It checks explicit requests on direct
+//! normal and build dependencies and requests reachable from a member's default features.
 //! It ignores dev dependencies, transitive activation and dependency defaults.
 //!
 //! By default it denies the exact, case-sensitive names `fakes`, `test-util`,
 //! and `insecure`. A JSON policy passed with `--policy` can replace the list
-//! with `features` or omit that field to keep the defaults. For example:
+//! with a nonempty list of unique feature names in `features`, or omit that
+//! field to keep the defaults. Exceptions must name a feature on the active
+//! deny list. Unknown fields are errors except for the optional top-level
+//! `$comment` field. Duplicate exceptions are also errors. For example:
 //!
 //! ```json
 //! {
@@ -35,9 +38,10 @@
 //! ```
 //!
 //! The first exception matches a dependency manifest key (the alias if renamed).
-//! The second matches only the package's own default activation. Success is
-//! silent (exit 0); violations and runtime errors go to stderr (exit 1).
-//! Invalid CLI usage exits 2.
+//! The second matches only the package's own `test-util` feature when reached
+//! from `default`, not a request for `test-util` on a dependency.
+//! The checker exits silently with 0 when there are no findings. It reports
+//! findings and runtime errors to stderr and exits 1. Invalid CLI usage exits 2.
 
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
@@ -45,6 +49,7 @@ mod inspect;
 mod policy;
 
 use std::ffi::OsString;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Output};
 use std::{env, io};
@@ -78,13 +83,19 @@ enum CargoCommand {
 #[must_use]
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub fn run() -> ExitCode {
+    let mut stderr = io::stderr().lock();
     execute(
         &Cli::parse().command,
         |name| env::var_os(name),
         |path| std::fs::read(path),
         Command::output,
-        |message| eprintln!("{message}"),
+        |message| write_diagnostic(&mut stderr, message),
     )
+}
+
+fn write_diagnostic(stderr: &mut impl Write, message: &str) {
+    // An unavailable stderr cannot replace the checker's failure status with a panic.
+    let _ = writeln!(stderr, "{message}");
 }
 
 fn execute(
@@ -117,6 +128,7 @@ fn check(
 ) -> Result<std::collections::BTreeSet<String>, AppError> {
     let CargoCommand::EnsureNoTestFeatures { manifest_path, policy } = args;
     let policy = policy::load(policy.as_deref(), read)?;
+    // Use the invoking Cargo executable so its toolchain is preserved.
     let cargo = env("CARGO").unwrap_or_else(|| "cargo".into());
     let mut command = Command::new(cargo);
     command.args(["metadata", "--no-deps", "--format-version", "1"]);
@@ -289,12 +301,29 @@ mod tests {
             |_| panic!("policy must be read before looking up Cargo"),
             |_| Err(io::Error::other("scripted read failure")),
             |_| panic!("metadata must not run with an unreadable policy"),
-            |message| messages.push(message.to_owned()),
+            |message| write_diagnostic(&mut messages, message),
         );
         assert_eq!(code, ExitCode::FAILURE);
         assert_eq!(
             messages,
-            ["cargo-ensure-no-test-features: could not read policy at policy.json: scripted read failure"]
+            b"cargo-ensure-no-test-features: could not read policy at policy.json: scripted read failure\n"
         );
+    }
+
+    #[test]
+    fn diagnostic_write_failure_does_not_change_the_exit_code() {
+        let args = CargoCommand::EnsureNoTestFeatures {
+            manifest_path: None,
+            policy: Some("policy.json".into()),
+        };
+        let mut stderr = &mut [][..];
+        let code = execute(
+            &args,
+            |_| panic!("policy must be read before looking up Cargo"),
+            |_| Err(io::Error::other("scripted read failure")),
+            |_| panic!("metadata must not run with an unreadable policy"),
+            |message| write_diagnostic(&mut stderr, message),
+        );
+        assert_eq!(code, ExitCode::FAILURE);
     }
 }

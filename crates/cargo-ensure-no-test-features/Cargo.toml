@@ -10,6 +10,7 @@ keywords = ["cargo", "subcommand", "features", "ci"]
 categories = ["command-line-utilities", "development-tools::cargo-plugins"]
 
 edition.workspace = true
+# Match the Rust 1.95 floor of the standalone installer and the ohno dependency.
 rust-version = "1.95"
 authors.workspace = true
 license.workspace = true
