@@ -30,7 +30,18 @@ use crate::catalog::{Artifact, ComposedHost};
 /// Embed the shared diagnostics inline so they need neither checkout nor setup.
 pub(crate) fn with_disk_usage(template: &str) -> String {
     let script = include_str!("../../../templates/disk-usage.ps1");
-    template.replace("__DISK_USAGE__", &script.trim_end().replace('\n', "\n          "))
+    let indented = script
+        .lines()
+        .map(|line| {
+            if line.is_empty() {
+                String::new()
+            } else {
+                format!("          {line}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    template.replace("          __DISK_USAGE__", &indented)
 }
 
 /// The impact-scoping mode a group's CI job runs under -- the word emitted into
@@ -136,10 +147,12 @@ mod tests {
             let mut start = None;
             let mut offset = 0;
             for line in body.split_inclusive('\n') {
-                if line.starts_with("  ") && !line.starts_with("   ") && line.trim_end().ends_with(':') {
-                    if let Some(previous) = start.replace(offset) {
-                        jobs.push(&body[previous..offset]);
-                    }
+                if line.starts_with("  ")
+                    && !line.starts_with("   ")
+                    && line.trim_end().ends_with(':')
+                    && let Some(previous) = start.replace(offset)
+                {
+                    jobs.push(&body[previous..offset]);
                 }
                 offset += line.len();
             }

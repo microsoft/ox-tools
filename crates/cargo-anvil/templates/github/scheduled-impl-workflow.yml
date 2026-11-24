@@ -85,7 +85,7 @@ jobs:
       - name: Report disk usage
         if: always()
         continue-on-error: true
-        shell: pwsh
+        shell: pwsh -NoProfile -Command ". '{0}'"
         run: |
           __DISK_USAGE__
 
@@ -112,7 +112,7 @@ jobs:
       - name: Report disk usage
         if: always()
         continue-on-error: true
-        shell: pwsh
+        shell: pwsh -NoProfile -Command ". '{0}'"
         run: |
           __DISK_USAGE__
 
@@ -146,7 +146,7 @@ jobs:
       - name: Report disk usage
         if: always()
         continue-on-error: true
-        shell: pwsh
+        shell: pwsh -NoProfile -Command ". '{0}'"
         run: |
           __DISK_USAGE__
 
@@ -173,7 +173,7 @@ jobs:
       - name: Report disk usage
         if: always()
         continue-on-error: true
-        shell: pwsh
+        shell: pwsh -NoProfile -Command ". '{0}'"
         run: |
           __DISK_USAGE__
 
@@ -247,6 +247,6 @@ jobs:
       - name: Report disk usage
         if: always()
         continue-on-error: true
-        shell: pwsh
+        shell: pwsh -NoProfile -Command ". '{0}'"
         run: |
           __DISK_USAGE__

@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.26.1] - 2026-11-24
+
+- ✨ Features
+
+  - cargo-anvil: report disk usage at the end of CI jobs
+
 ## [0.26.0] - 2026-11-20
 
 - ✨ Features
