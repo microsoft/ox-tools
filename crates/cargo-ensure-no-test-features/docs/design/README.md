@@ -16,8 +16,10 @@ optional, inherited and target-specific dependencies, regardless of the host.
 Starting at each package's `default` feature, it follows local feature edges and
 checks the package's own reached names and both `dep/feature` and `dep?/feature`
 forwarding to production dependency keys. A reachable weak forward counts as a
-request even when activation is conditional. A `dep:key` entry merely activates
-a dependency and is not a feature request. Dev dependencies, transitive feature
+request even when activation is conditional. A strong forward to an optional
+dependency also follows the same-named local feature if one exists, as Cargo does.
+A `dep:key` entry merely activates a dependency and is not a feature request.
+Dev dependencies, transitive feature
 activation, and features enabled implicitly by dependency defaults are outside
 the check.
 

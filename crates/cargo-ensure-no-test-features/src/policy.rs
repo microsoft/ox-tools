@@ -123,30 +123,62 @@ mod tests {
     use super::*;
 
     #[test]
+    fn an_exception_cannot_exempt_another_package() -> Result<(), AppError> {
+        let policy = load(Some(Path::new("policy.json")), |_| {
+            Ok(br#"{"exceptions":[{"package":"app","dependency":"wire","feature":"fakes"}]}"#.to_vec())
+        })?;
+        assert!(!policy.denies("app", Some("wire"), "fakes"));
+        assert!(policy.denies("other", Some("wire"), "fakes"));
+        Ok(())
+    }
+
+    #[test]
     fn rejects_invalid_policy_and_distinguishes_io_errors() -> Result<(), AppError> {
         let path = Path::new("policy.json");
-        for invalid in [
-            "null",
-            "[]",
-            r#"{"features":null}"#,
-            r#"{"features":[]}"#,
-            r#"{"features":[" "]}"#,
-            r#"{"features":["fakes","fakes"]}"#,
-            r#"{"unknown":[]}"#,
-            r#"{"exceptions":[{"package":"app","feature":"not-denied"}]}"#,
-            r#"{"exceptions":[{"package":"app","feature":"fakes","dependency":null}]}"#,
-            r#"{"exceptions":[{"package":"app","feature":"fakes"},{"package":"app","feature":"fakes"}]}"#,
+        let invalid_features = "features must contain at least one feature and all names must be unique, nonempty strings";
+        let invalid_exception = "each exception requires a package, a denied feature, and an optional dependency key";
+        for (invalid, detail) in [
+            ("null", "expected a JSON object"),
+            ("[]", "expected a JSON object"),
+            (
+                r#"{"features":null}"#,
+                "invalid type: null, expected a sequence at line 1 column 16",
+            ),
+            (r#"{"features":[]}"#, invalid_features),
+            (r#"{"features":[" "]}"#, invalid_features),
+            (r#"{"features":["fakes","fakes"]}"#, invalid_features),
+            (
+                r#"{"unknown":[]}"#,
+                "unknown field `unknown`, expected one of `features`, `exceptions`, `$comment` at line 1 column 10",
+            ),
+            (r#"{"exceptions":[{"package":"app","feature":"not-denied"}]}"#, invalid_exception),
+            (r#"{"exceptions":[{"package":" ","feature":"fakes"}]}"#, invalid_exception),
+            (
+                r#"{"exceptions":[{"package":"app","feature":"fakes","dependency":" "}]}"#,
+                invalid_exception,
+            ),
+            (
+                r#"{"exceptions":[{"package":"app","feature":"fakes","dependency":null}]}"#,
+                "invalid type: null, expected a string at line 1 column 67",
+            ),
+            (
+                r#"{"exceptions":[{"package":"app","feature":"fakes"},{"package":"app","feature":"fakes"}]}"#,
+                "duplicate exception",
+            ),
         ] {
-            assert!(load(Some(path), |_| Ok(invalid.as_bytes().to_vec())).is_err(), "{invalid}");
+            let result = load(Some(path), |_| Ok(invalid.as_bytes().to_vec()))
+                .err()
+                .expect("an invalid policy must fail");
+            assert_eq!(result.to_string(), format!("invalid policy at policy.json: {detail}"), "{invalid}");
         }
         assert!(load_with_defaults(None, |_| unreachable!(), b"{}").is_err());
         assert!(load_with_defaults(Some(path), |_| Ok(b"{}".to_vec()), b"{}").is_err());
         assert!(load_with_defaults(Some(path), |_| Ok(b"{}".to_vec()), b"not json").is_err());
         for error in [io::ErrorKind::PermissionDenied, io::ErrorKind::NotFound] {
-            let result = load(Some(path), |_| Err(error.into()))
+            let result = load(Some(path), |_| Err(io::Error::new(error, "scripted read failure")))
                 .err()
                 .expect("explicit policy must be readable");
-            assert!(result.to_string().contains("could not read policy at policy.json"));
+            assert_eq!(result.to_string(), "could not read policy at policy.json: scripted read failure");
         }
         let with_bom = load(Some(path), |_| Ok(b"\xef\xbb\xbf{\"features\":[\"test-util\"]}".to_vec()))?;
         assert!(with_bom.denies("app", None, "test-util"));

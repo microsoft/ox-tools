@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 
 use ohno::AppError;
@@ -35,6 +35,7 @@ struct Dependency {
     kind: Option<Kind>,
     target: Option<String>,
     features: Vec<String>,
+    optional: bool,
 }
 
 #[derive(Deserialize, PartialEq)]
@@ -79,12 +80,16 @@ fn inspect_package(package: &Package, workspace: &std::path::Path, policy: &Poli
         .unwrap_or(&package.manifest_path)
         .display();
     let mut dependencies = HashSet::new();
+    let mut optional = HashSet::new();
     for dep in &package.dependencies {
         if dep.kind == Some(Kind::Dev) {
             continue;
         }
         let key = dep.rename.as_deref().unwrap_or(&dep.name);
         dependencies.insert(key);
+        if dep.optional {
+            optional.insert(key);
+        }
         let kind = if dep.kind == Some(Kind::Build) { "build" } else { "normal" };
         for feature in &dep.features {
             if policy.denies(name, Some(key), feature) {
@@ -97,28 +102,27 @@ fn inspect_package(package: &Package, workspace: &std::path::Path, policy: &Poli
         }
     }
 
-    if !package.features.contains_key("default") {
-        return;
-    }
     let mut pending = vec!["default"];
-    let mut visited = HashSet::new();
+    let mut remaining: HashMap<_, _> = package.features.iter().map(|(key, edges)| (key.as_str(), edges)).collect();
     while let Some(feature) = pending.pop() {
-        if !visited.insert(feature) {
-            continue;
-        }
-        if policy.denies(name, None, feature) {
-            violations.insert(format!("{manifest}: '{name}' enables its own '{feature}' through default features"));
-        }
-        for item in package.features.get(feature).into_iter().flatten() {
-            if let Some((key, forwarded)) = item.split_once('/') {
-                let key = key.strip_suffix('?').unwrap_or(key);
-                if dependencies.contains(key) && policy.denies(name, Some(key), forwarded) {
-                    violations.insert(format!(
-                        "{manifest}: '{name}' forwards '{forwarded}' to dependency '{key}' through default features"
-                    ));
+        if let Some(edges) = remaining.remove(feature) {
+            if policy.denies(name, None, feature) {
+                violations.insert(format!("{manifest}: '{name}' enables its own '{feature}' through default features"));
+            }
+            for item in edges {
+                if let Some((key, forwarded)) = item.split_once('/') {
+                    let (key, weak) = key.strip_suffix('?').map_or((key, false), |key| (key, true));
+                    if !weak && optional.contains(key) {
+                        pending.push(key);
+                    }
+                    if dependencies.contains(key) && policy.denies(name, Some(key), forwarded) {
+                        violations.insert(format!(
+                            "{manifest}: '{name}' forwards '{forwarded}' to dependency '{key}' through default features"
+                        ));
+                    }
+                } else {
+                    pending.push(item);
                 }
-            } else if !item.starts_with("dep:") {
-                pending.push(item);
             }
         }
     }
@@ -148,13 +152,13 @@ mod tests {
                          "alias":["other","test-util","wire?/insecure"],"other":["alias","wire/fakes"],
                          "test-util":[],"not-default":["wire/test-util"]},
              "dependencies":[
-               {"name":"transport","rename":"wire","kind":"build","target":"cfg(unix)","features":["insecure","Test-Util"]},
-               {"name":"dev","rename":"test-dev","kind":"dev","features":["test-util"]},
-               {"name":"explicit","kind":null,"features":["test-util"]}]},
+               {"name":"transport","rename":"wire","kind":"build","target":"cfg(unix)","features":["insecure","Test-Util"],"optional":true},
+               {"name":"dev","rename":"test-dev","kind":"dev","features":["test-util"],"optional":false},
+               {"name":"explicit","kind":null,"features":["test-util"],"optional":false}]},
             {"id":"private","name":"private","manifest_path":"private/Cargo.toml","publish":[],
-             "features":{"default":["fakes"]},"dependencies":[]},
+             "features":{"default":["fakes"],"fakes":[]},"dependencies":[]},
             {"id":"external","name":"external","manifest_path":"other/Cargo.toml","publish":null,
-             "features":{"default":["fakes"]},"dependencies":[]}
+             "features":{"default":["fakes"],"fakes":[]},"dependencies":[]}
           ]
         }"#;
         let actual = check(json, &load(None)?)?;
@@ -173,7 +177,14 @@ mod tests {
             {"package":"app","feature":"fakes","dependency":"wire"},
             {"package":"app","feature":"insecure","dependency":"transport"}
         ]}"#;
-        assert_eq!(check(json, &load(Some(exceptions))?)?.len(), 3);
+        assert_eq!(
+            check(json, &load(Some(exceptions))?)?.into_iter().collect::<Vec<_>>(),
+            [
+                "Cargo.toml: 'app' forwards 'insecure' to dependency 'wire' through default features",
+                "Cargo.toml: 'app' requests 'insecure' on dependency 'wire' (package 'transport', build, target cfg(unix))",
+                "Cargo.toml: 'app' requests 'test-util' on dependency 'explicit' (package 'explicit', normal)",
+            ]
+        );
         let replace = r#"{"features":["different"]}"#;
         assert!(check(json, &load(Some(replace))?)?.is_empty());
         Ok(())
@@ -183,7 +194,7 @@ mod tests {
     fn unrestricted_members_are_checked_and_absent_defaults_are_not() -> Result<(), AppError> {
         let json = br#"{"workspace_root":".","workspace_members":["member"],"packages":[
             {"id":"member","name":"member","manifest_path":"Cargo.toml","publish":null,"features":{},
-             "dependencies":[{"name":"dep","kind":"normal","features":["fakes"]}]}
+             "dependencies":[{"name":"dep","kind":"normal","features":["fakes"],"optional":false}]}
         ]}"#;
         let active = load(Some(r#"{"features":["fakes","default"]}"#))?;
         assert_eq!(
@@ -194,40 +205,73 @@ mod tests {
     }
 
     #[test]
+    fn only_a_strong_forward_to_an_optional_dependency_enables_the_matching_local_feature() -> Result<(), AppError> {
+        let active = load(None)?;
+        for (request, optional, expected) in [
+            (
+                "transport/std",
+                true,
+                &["Cargo.toml: 'app' enables its own 'insecure' through default features"][..],
+            ),
+            ("transport?/std", true, &[][..]),
+            ("dep:transport", true, &[][..]),
+            ("transport/std", false, &[][..]),
+        ] {
+            let json = format!(
+                r#"{{"workspace_root":".","workspace_members":["app"],"packages":[
+                    {{"id":"app","name":"app","manifest_path":"Cargo.toml","publish":null,
+                      "features":{{"default":["{request}"],"transport":["insecure"],"insecure":[]}},
+                      "dependencies":[{{"name":"serde","rename":"transport","kind":null,"features":[],"optional":{optional}}}]}}
+                ]}}"#
+            );
+            assert_eq!(
+                check(json.as_bytes(), &active)?.into_iter().collect::<Vec<_>>(),
+                expected,
+                "{request}, optional={optional}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn rejects_inconsistent_or_invalid_metadata() -> Result<(), AppError> {
         let active = load(None)?;
         let missing = br#"{"workspace_root":".","workspace_members":["missing"],"packages":[]}"#;
-        assert!(
+        assert_eq!(
             check(missing, &active)
                 .expect_err("every member ID must resolve to a package")
-                .to_string()
-                .contains("missing package")
+                .to_string(),
+            "missing package for workspace member 'missing' in cargo metadata"
         );
         let duplicates = br#"{"workspace_root":".","workspace_members":["app"],"packages":[
             {"id":"app","name":"app","manifest_path":"Cargo.toml","publish":null,"features":{},"dependencies":[]},
             {"id":"app","name":"app","manifest_path":"Cargo.toml","publish":null,"features":{},"dependencies":[]}
         ]}"#;
-        assert!(
-            check(duplicates, &active)
-                .expect_err("package IDs must be unique")
-                .to_string()
-                .contains("duplicate package ID")
+        assert_eq!(
+            check(duplicates, &active).expect_err("package IDs must be unique").to_string(),
+            "duplicate package ID 'app' in cargo metadata"
         );
-        for malformed in [
-            "{}",
-            r#"{"workspace_root":".","workspace_members":["app"],"packages":[
+        for (malformed, field) in [
+            ("{}", "workspace_root"),
+            (
+                r#"{"workspace_root":".","workspace_members":["app"],"packages":[
                 {"id":"app","name":"app","manifest_path":"Cargo.toml","features":{},"dependencies":[]}
             ]}"#,
-            r#"{"workspace_root":".","workspace_members":["app"],"packages":[
+                "publish",
+            ),
+            (
+                r#"{"workspace_root":".","workspace_members":["app"],"packages":[
                 {"id":"app","name":"app","manifest_path":"Cargo.toml","publish":null,"features":{},
-                 "dependencies":[{"name":"dep","features":[]}]}
+                 "dependencies":[{"name":"dep","features":[],"optional":false}]}
             ]}"#,
+                "kind",
+            ),
         ] {
             assert!(
                 check(malformed.as_bytes(), &active)
                     .expect_err("invalid cargo metadata must not be accepted")
                     .to_string()
-                    .contains("could not parse cargo metadata output"),
+                    .starts_with(&format!("could not parse cargo metadata output: missing field `{field}`")),
                 "{malformed}"
             );
         }
