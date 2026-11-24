@@ -205,6 +205,9 @@ before the next one.
 
 ### `scheduled-advisories`
 
+Cargo-deny enforces dependency policy only in this scheduled group, not in PR
+checks. Cargo-audit remains in both tiers.
+
 `deny`, `audit`, and `aprz` check external policy, vulnerability, and dependency
 risk data; `clippy` checks the selected compiler's lint set. Despite the group
 name, failures are enforcing. APRZ uses `GITHUB_TOKEN` or an authenticated `gh`

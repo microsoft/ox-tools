@@ -29,7 +29,6 @@ anvil-pr-fast: anvil-pr-fast-validate-prereqs \
     anvil-readme-check \
     anvil-spellcheck \
     anvil-pr-title \
-    anvil-deny \
     anvil-audit \
     anvil-udeps \
     anvil-external-types

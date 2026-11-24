@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-11-24
+
+- ✨ Features
+
+  - cargo-anvil: consolidate generated infrastructure ([#204](https://github.com/microsoft/ox-tools/pull/204))
+
+- 🔄 Continuous Integration
+
+  - cargo-anvil: move cargo-deny to scheduled checks
+
 ## [0.27.0] - 2026-11-23
 
 - ⚠️ Breaking
