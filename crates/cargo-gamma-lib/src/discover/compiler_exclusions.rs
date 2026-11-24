@@ -211,7 +211,7 @@ fn block_leading_binary_or_cast(original: &str) -> bool {
         return false;
     }
     let mut leading = &expression;
-    // #[gamma::skip(bool_expr.negate, tag = "equivalent", reason = "every loop exit returns directly from this function, so a negation outside the loop never receives a value")]
+    // #[gamma::skip(bool_expr.negate, tag = "equivalent", reason = "every loop exit returns directly from this function, so a negation outside the loop never receives a value. Temporary: once the pinned cargo-gamma withholds negation of breakless loops itself, remove this directive with `cargo gamma unsuppress --apply`")]
     loop {
         // #[gamma::skip(stmt.delete_assign, tag = "timeout", reason = "the leading operand must advance or a binary or cast expression is inspected forever")]
         leading = match leading {

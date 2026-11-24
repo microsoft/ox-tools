@@ -128,6 +128,13 @@ distinct logical source identities.
 The analysis does not attempt inter-procedural ownership or state-machine
 analysis.
 
+Divergence checks for value wrappers are syntactic as well. A `break` anywhere
+in an active loop or labeled-block body counts as a possible exit, including
+one that belongs to a nested loop or item. So does any macro other than a
+standard value macro, and a standard value macro whose argument tokens contain
+`break` or `!`: telling a nested macro call apart from a negation would require
+a parse.
+
 Resource admission reconstructs the proposed loop and compares its progress
 with the original. Its fixed-point interpreter uses lexical environments,
 typed primitive values, bounded field/collection provenance, and source-resolved
