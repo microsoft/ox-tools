@@ -405,3 +405,26 @@ anvil-spellcheck: anvil-spellcheck-validate-prereqs
 anvil-udeps: anvil-udeps-validate-prereqs anvil-impact
     cargo +{{ rust_nightly }} each {{ anvil_required_selection }} --once -- cargo +{{ rust_nightly }} udeps '{packages}' --all-features
     cargo +{{ rust_nightly }} each {{ anvil_required_selection }} --once -- cargo +{{ rust_nightly }} udeps '{packages}' --all-features --all-targets
+
+# Check global catalog inheritance and required packages' unused/misplaced dependencies.
+[arg("fix", long, value="true")]
+[script("pwsh", "-NoProfile")]
+anvil-unused-deps fix="false": anvil-unused-deps-validate-prereqs anvil-impact
+    $ErrorActionPreference = 'Stop'
+    $pkg = @()
+    if ('{{ anvil_impact_mode }}' -eq 'off') {
+        $pkg += '--workspace'
+    } else {
+        $packageFile = {{ quote(anvil_impact_input_dir + "/required.packages") }}
+        $packageText = Get-Content -Raw -LiteralPath $packageFile
+        if (-not [string]::IsNullOrEmpty($packageText) -and [string]::IsNullOrWhiteSpace($packageText)) {
+            Write-Error "anvil-unused-deps: $packageFile contains whitespace but no package specs"
+            exit 1
+        }
+        foreach ($spec in @(Get-Content -LiteralPath $packageFile | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
+            $pkg += @('--package', $spec)
+        }
+    }
+    # An empty required set leaves $pkg empty, so unused-deps runs only the workspace inheritance check.
+    & cargo "+{{ rust_nightly }}" unused-deps @pkg {{ if fix == 'true' { '--fix' } else { '' } }}
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

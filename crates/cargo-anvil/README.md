@@ -207,18 +207,19 @@ above compose these recipes into the default policy:
   [`cargo-audit`][__link12],
   [`cargo-aprz`][__link13],
   [`cargo-udeps`][__link14],
-  [`cargo-check-external-types`][__link15].
+  [`cargo-unused-deps`][__link15],
+  [`cargo-check-external-types`][__link16].
 * **Tests and coverage:** tests under the declared MSRV, coverage with
-  [`cargo-llvm-cov`][__link16] and
-  [`cargo-coverage-gate`][__link17],
+  [`cargo-llvm-cov`][__link17] and
+  [`cargo-coverage-gate`][__link18],
   documentation tests, example compilation, and execution of selected examples.
-* **Runtime analysis:** [`Miri`][__link18],
-  [`cargo-careful`][__link19],
-  [`Loom`][__link20], and
-  [`Bolero`][__link21].
+* **Runtime analysis:** [`Miri`][__link19],
+  [`cargo-careful`][__link20],
+  [`Loom`][__link21], and
+  [`Bolero`][__link22].
 * **Broader validation:** diff-scoped and full
-  [`cargo-gamma`][__link22] runs,
-  [`cargo-hack`][__link23] feature-powerset
+  [`cargo-gamma`][__link23] runs,
+  [`cargo-hack`][__link24] feature-powerset
   checks, and benchmark compilation.
 
 ### Configuring checks
@@ -261,7 +262,7 @@ dictionary format expected by cargo-spellcheck.
 
 #### Coverage
 
-[`cargo-coverage-gate`][__link24]
+[`cargo-coverage-gate`][__link25]
 metadata controls workspace and package thresholds, target-specific policy,
 and intentional exclusions. The generated check delegates both supported
 feature configurations to `cargo coverage-gate run`, which filters coverage
@@ -404,9 +405,9 @@ customization.
 ### Building another tool on the engine
 
 The crate also exposes the catalog engine used by `cargo-anvil`. A
-downstream tool can start from [`Catalog::anvil`][__link25], add, replace, or remove
-[`Artifact`][__link26] values, select its own CLI identity, and pass the result to
-[`run_app`][__link27]:
+downstream tool can start from [`Catalog::anvil`][__link26], add, replace, or remove
+[`Artifact`][__link27] values, select its own CLI identity, and pass the result to
+[`run_app`][__link28]:
 
 ```rust
 use std::process::ExitCode;
@@ -441,15 +442,15 @@ normal content-conflict protections.
 
 ### In-process catalog updates
 
-[`update`][__link28] runs the same update engine as the CLI with explicit
-[`UpdateOptions`][__link29] and caller-supplied [`UpdateIo`][__link30]. It parses the workspace
+[`update`][__link29] runs the same update engine as the CLI with explicit
+[`UpdateOptions`][__link30] and caller-supplied [`UpdateIo`][__link31]. It parses the workspace
 and lock, plans changes, and applies them through that boundary, without
 reading process arguments, initializing tracing, consulting Git, or
 accessing the host environment or current directory.
 
 Implement `UpdateIo` over an in-memory repository to test a downstream
 catalog’s actual generation and upgrade behavior, not a mocked result.
-[`UpdateResult`][__link31] reports drift, refusals, diagnostics, and the plan summary;
+[`UpdateResult`][__link32] reports drift, refusals, diagnostics, and the plan summary;
 inspect generated files and `.anvil/manifest.toml` in the supplied repository.
 Use `dry_run` to perform the same planning without writes or deletions.
 An empty backend set explicitly selects local-only generation.
@@ -469,7 +470,7 @@ More detailed design and operational guidance is available in the
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQb6_YoDxLi3Q8bp5KpFNSPT8cbi5v0Kg0x66Ybzf9tpp0ITVNhZIGDa2NhcmdvLWFudmlsZjAuMjguMGtjYXJnb19hbnZpbA
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbcKe7oLq7LMcbf0l4XQ2f2sUbjN9MOdF1zfUbXTc2ZOJbOn5hZIGDa2NhcmdvLWFudmlsZjAuMjkuMGtjYXJnb19hbnZpbA
  [__link0]: https://github.com/casey/just
  [__link1]: https://rust-lang.github.io/rustfmt/
  [__link10]: https://www.conventionalcommits.org/
@@ -477,25 +478,26 @@ This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Br
  [__link12]: https://crates.io/crates/cargo-audit
  [__link13]: https://crates.io/crates/cargo-aprz
  [__link14]: https://crates.io/crates/cargo-udeps
- [__link15]: https://crates.io/crates/cargo-check-external-types
- [__link16]: https://crates.io/crates/cargo-llvm-cov
- [__link17]: https://crates.io/crates/cargo-coverage-gate
- [__link18]: https://github.com/rust-lang/miri
- [__link19]: https://crates.io/crates/cargo-careful
+ [__link15]: https://crates.io/crates/cargo-unused-deps
+ [__link16]: https://crates.io/crates/cargo-check-external-types
+ [__link17]: https://crates.io/crates/cargo-llvm-cov
+ [__link18]: https://crates.io/crates/cargo-coverage-gate
+ [__link19]: https://github.com/rust-lang/miri
  [__link2]: https://doc.rust-lang.org/clippy/
- [__link20]: https://crates.io/crates/loom
- [__link21]: https://crates.io/crates/bolero
- [__link22]: https://crates.io/crates/cargo-gamma
- [__link23]: https://crates.io/crates/cargo-hack
- [__link24]: https://crates.io/crates/cargo-coverage-gate
- [__link25]: https://docs.rs/cargo-anvil/0.28.0/cargo_anvil/?search=Catalog::anvil
- [__link26]: https://docs.rs/cargo-anvil/0.28.0/cargo_anvil/?search=Artifact
- [__link27]: https://docs.rs/cargo-anvil/0.28.0/cargo_anvil/fn.run_app.html
- [__link28]: https://docs.rs/cargo-anvil/0.28.0/cargo_anvil/?search=update
- [__link29]: https://docs.rs/cargo-anvil/0.28.0/cargo_anvil/?search=UpdateOptions
+ [__link20]: https://crates.io/crates/cargo-careful
+ [__link21]: https://crates.io/crates/loom
+ [__link22]: https://crates.io/crates/bolero
+ [__link23]: https://crates.io/crates/cargo-gamma
+ [__link24]: https://crates.io/crates/cargo-hack
+ [__link25]: https://crates.io/crates/cargo-coverage-gate
+ [__link26]: https://docs.rs/cargo-anvil/0.29.0/cargo_anvil/?search=Catalog::anvil
+ [__link27]: https://docs.rs/cargo-anvil/0.29.0/cargo_anvil/?search=Artifact
+ [__link28]: https://docs.rs/cargo-anvil/0.29.0/cargo_anvil/fn.run_app.html
+ [__link29]: https://docs.rs/cargo-anvil/0.29.0/cargo_anvil/?search=update
  [__link3]: https://crates.io/crates/cargo-each
- [__link30]: https://docs.rs/cargo-anvil/0.28.0/cargo_anvil/?search=UpdateIo
- [__link31]: https://docs.rs/cargo-anvil/0.28.0/cargo_anvil/?search=UpdateResult
+ [__link30]: https://docs.rs/cargo-anvil/0.29.0/cargo_anvil/?search=UpdateOptions
+ [__link31]: https://docs.rs/cargo-anvil/0.29.0/cargo_anvil/?search=UpdateIo
+ [__link32]: https://docs.rs/cargo-anvil/0.29.0/cargo_anvil/?search=UpdateResult
  [__link4]: https://crates.io/crates/cargo-sort
  [__link5]: https://crates.io/crates/cargo-heather
  [__link6]: https://crates.io/crates/cargo-ensure-no-cyclic-deps

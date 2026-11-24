@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-## [0.28.0] - 2026-11-24
+## [0.29.0] - 2026-11-24
 
 - 📚 Documentation
 
@@ -10,12 +10,19 @@
 
 - ✔️ Tasks
 
+  - cargo-anvil: regenerate split deny check artifacts
   - cargo-anvil: release 0.28.0 and regenerate scheduled deny routing
 
 - 🔄 Continuous Integration
 
   - cargo-anvil: retain advisory-independent deny checks in PRs
   - cargo-anvil: move cargo-deny to scheduled checks
+
+## [0.28.0] - 2026-11-23
+
+- ✨ Features
+
+  - cargo-anvil: add cargo-unused-deps check ([#378](https://github.com/microsoft/ox-tools/pull/378))
 
 ## [0.27.0] - 2026-11-23
 
