@@ -41,6 +41,7 @@ aprz
 args
 argv
 ARM64
+SONAME
 auth
 AspNet
 async
