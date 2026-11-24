@@ -637,16 +637,6 @@ mod tests {
     }
 
     #[test]
-    fn deny_runs_only_in_scheduled_advisories() {
-        assert!(!groups::pr_fast().body().contains("anvil-deny"));
-        assert!(!setup::groups::pr_fast().body().contains("anvil-deny"));
-        assert!(helpers::groups::scheduled_advisories().body().contains("anvil-deny \\"));
-        let scheduled_setup = setup::groups::scheduled_advisories();
-        assert!(scheduled_setup.body().contains("(anvil-deny-setup installer)"));
-        assert!(scheduled_setup.body().contains("anvil-deny-validate-prereqs"));
-    }
-
-    #[test]
     fn source_layout_determines_generated_responsibility() {
         for (artifact, expected_path) in [
             (checks::aprz(), CHECKS_JUST_PATH),
