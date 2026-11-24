@@ -92,11 +92,6 @@ pub fn run() -> ExitCode {
     )
 }
 
-fn write_diagnostic(stderr: &mut impl Write, message: &str) {
-    // An unavailable stderr cannot replace the checker's failure status with a panic.
-    let _ = writeln!(stderr, "{message}");
-}
-
 fn execute(
     args: &CargoCommand,
     env: impl FnOnce(&str) -> Option<OsString>,
@@ -104,7 +99,10 @@ fn execute(
     output: impl FnOnce(&mut Command) -> io::Result<Output>,
     stderr: &mut impl Write,
 ) -> ExitCode {
-    let mut report = |message: &str| write_diagnostic(stderr, message);
+    let mut report = |message: &str| {
+        // An unavailable stderr must not replace the failure status with a panic.
+        let _ = writeln!(stderr, "{message}");
+    };
     match check(args, env, read, output) {
         Ok(violations) if violations.is_empty() => return ExitCode::SUCCESS,
         Ok(violations) => {
