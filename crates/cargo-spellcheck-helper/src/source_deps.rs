@@ -81,6 +81,7 @@ struct CommandOutput {
 
 trait Probe {
     fn glob(&mut self, pattern: &str, case_sensitive: bool) -> Result<Vec<PathBuf>, AppError>;
+    fn absolute_path(&mut self, path: &Path) -> io::Result<PathBuf>;
     fn is_file(&mut self, path: &Path) -> io::Result<bool>;
     fn read(&mut self, path: &Path, offset: u64, length: usize) -> io::Result<Vec<u8>>;
     fn command(&mut self, executable: &std::ffi::OsStr, args: &[&str]) -> io::Result<CommandOutput>;
@@ -138,9 +139,17 @@ fn installation_target(rustc_output: &str, build_target: Option<&std::ffi::OsStr
 fn check_with(environment: &Environment, probe: &mut impl Probe) -> Result<(), AppError> {
     let library = find_libclang(environment, probe)?;
     library::check_link_requirements(environment, &library, probe)?;
+    let library = probe
+        .absolute_path(&library)
+        .into_app_err(format!("cannot resolve selected libclang path `{}`", library.display()))?;
     probe.load_library(&library).into_app_err(format!(
-        "cannot load libclang `{}`; install a matching LLVM distribution and make its dependent libraries discoverable",
-        library.display()
+        "cannot load libclang `{}` for rustc host `{}`; this helper runs as {}-bit {}. \
+         If you changed toolchain architecture, reinstall cargo-spellcheck-helper for the active toolchain. \
+         Otherwise install a matching LLVM distribution and make its dependent libraries discoverable",
+        library.display(),
+        environment.target.triple,
+        usize::BITS,
+        std::env::consts::ARCH
     ))?;
     probe.check_tools(&environment.target)
 }

@@ -66,12 +66,20 @@ On Windows MSVC, the selected library's directory (or the sibling `lib` when
 the DLL is in `bin`) must contain `libclang.lib` or `libclang.dll.a`.
 The selected DLL directory must also be on `PATH` so the linked bindgen build
 script can load it. Path comparison ignores ASCII case, separator direction,
-and trailing separators.
+and trailing separators after resolving the DLL directory and PATH entries
+against the process working directory. Empty PATH entries mean the working
+directory. Path-resolution failures retain their underlying cause.
 
-The selected dynamic library is opened to check loader availability and the
+The selected dynamic library's path is made absolute before opening it, so a
+bare filename selects that file rather than invoking the loader's library
+search. The library is opened to check loader availability and the
 `clang_createIndex` export; this detects missing dependent libraries and
 non-libclang lookalikes without requiring libclang when building the helper.
 The library is not used to generate bindings.
+Loader failures identify both the requested rustc host and the helper process
+architecture, including guidance to reinstall the helper if a toolchain change
+made them incompatible. This does not change target selection or add a separate
+process for the probe.
 
 Compiler discovery delegates to `cc` for C and C++, preserving its `CC`,
 `CXX`, flags, wrappers, and Visual Studio environment selection. Help/version

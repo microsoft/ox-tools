@@ -105,17 +105,21 @@ pub(super) fn check_link_requirements(environment: &Environment, library: &Path,
             )));
         }
     }
-    if !environment
-        .path
-        .iter()
-        .any(|entry| normalized_path(entry) == normalized_path(directory))
-    {
-        return Err(AppError::new(format!(
-            "libclang DLL directory `{}` is not on PATH; add it to PATH so the linked bindgen build script can load the DLL.",
-            directory.display()
-        )));
+    let resolved_directory = probe
+        .absolute_path(directory)
+        .into_app_err(format!("cannot resolve libclang DLL directory `{}`", directory.display()))?;
+    for entry in &environment.path {
+        let resolved_entry = probe
+            .absolute_path(entry)
+            .into_app_err(format!("cannot resolve PATH entry `{}`", entry.display()))?;
+        if normalized_path(&resolved_entry) == normalized_path(&resolved_directory) {
+            return Ok(());
+        }
     }
-    Ok(())
+    Err(AppError::new(format!(
+        "libclang DLL directory `{}` is not on PATH; add it to PATH so the linked bindgen build script can load the DLL.",
+        directory.display()
+    )))
 }
 
 fn normalized_path(path: &Path) -> Vec<u8> {

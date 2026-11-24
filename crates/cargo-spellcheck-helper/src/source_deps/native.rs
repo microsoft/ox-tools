@@ -15,6 +15,11 @@ pub(super) struct Native;
 
 #[cfg_attr(coverage_nightly, coverage(off))]
 impl Probe for Native {
+    // #[gamma::skip(all, tag = "native-boundary", reason = "Resolves paths through the process working directory and Windows drive state; scripted path-resolution results test selection, comparison, and failure propagation without host state.")]
+    fn absolute_path(&mut self, path: &Path) -> io::Result<PathBuf> {
+        std::path::absolute(if path.as_os_str().is_empty() { Path::new(".") } else { path })
+    }
+
     // #[gamma::skip(all, tag = "native-boundary", reason = "Traverses real directories and metadata through glob; discovery policy is tested with scripted paths, while this adapter requires provisioned filesystem state.")]
     fn glob(&mut self, pattern: &str, case_sensitive: bool) -> Result<Vec<PathBuf>, AppError> {
         let options = glob::MatchOptions {

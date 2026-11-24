@@ -1,8 +1,8 @@
 version: 4
 tool: cargo-gamma 0.6.0
 context:
-  repo_sha: 6c00d00fc822d47ec02e10aa4e86c53622c4ab1a
-  generated_on: 2026-11-17
+  repo_sha: 08440a582522e433a2372ca56650ea872f156d76
+  generated_on: 2026-11-24
 files:
 - path: crates/cargo-anvil/src/anvil/artifacts/ado.rs
   killers:
@@ -217513,6 +217513,879 @@ files:
     unviable: true
   - id: e970b4d02b10
     killer: 1
+- path: crates/cargo-spellcheck-helper/src/main.rs
+  killers:
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: tests::cargo_and_direct_invocations_dispatch_dictionary_paths
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: tests::cargo_argument_adaptation_preserves_executable_and_remaining_arguments
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: tests::dictionary_failure_retains_underlying_cause
+  mutants:
+  - id: 02bfb1766fd5
+    killer: 0
+  - id: 13e63a89b692
+    killer: 0
+  - id: 1e2a0be61d47
+    killer: 0
+  - id: 2338a325ff59
+    killer: 0
+  - id: 6c1159f3bbae
+    killer: 2
+  - id: 6e81a431b63d
+    killer: 0
+  - id: 8a613103638d
+    killer: 0
+  - id: 923c46c8242b
+    killer: 0
+  - id: aeaa4eaab18c
+    killer: 0
+  - id: cc4857335bd2
+    killer: 0
+  - id: dbf62232aea4
+    killer: 0
+  - id: f2a864d75d65
+    killer: 0
+  - id: f61dce948d7d
+    killer: 1
+- path: crates/cargo-spellcheck-helper/src/source_deps/library.rs
+  killers:
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::bootstrap_uses_owned_override_and_path_values_without_host_environment
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::elf_validation_checks_signature_and_both_native_widths
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::loader_and_compiler_failures_are_propagated_in_order
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::malformed_or_inaccessible_headers_are_reported_with_candidate_paths
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::malformed_pe_headers_are_rejected_without_import_or_loader_checks
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::msvc_import_library_can_be_beside_dll_and_inspection_errors_propagate
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::pe_header_read_failures_and_truncation_propagate_without_panicking
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::pe_validation_checks_machine_width_and_accepts_unknown_machine_like_clang_sys
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::pe_validation_rejects_wrong_architecture_and_pointer_width
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::relative_windows_dll_directory_matches_absolute_path_entry
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::version_selection_compares_components_numerically_and_treats_invalid_parts_as_zero
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::version_selection_uses_highest_valid_version_not_first_candidate
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::windows_gnu_needs_no_msvc_import_library_and_normalizes_path
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::windows_lib_directory_searches_sibling_bin_and_accepts_mingw_import_library
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::windows_path_matching_does_not_confuse_different_directories
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::windows_path_resolution_failures_preserve_cause_and_stop_comparison
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::windows_rejects_missing_import_library_and_missing_path
+  mutants:
+  - id: 0044084c6e55
+    killer: 1
+  - id: 03124578cac2
+    killer: 10
+  - id: 034550aa39ed
+    killer: 0
+  - id: 052e88eaeefb
+    killer: 0
+  - id: 05dc293119a6
+    killer: 12
+  - id: 05fdd0390f12
+    killer: 1
+  - id: 0797f1e54053
+    killer: 0
+  - id: 0871eb104a78
+    killer: 12
+  - id: 096504cbfbf8
+    killer: 0
+  - id: 0c1fc8ffc22c
+    killer: 0
+  - id: 0d123c7cd02b
+    killer: 0
+  - id: 0e8a69d977a3
+    killer: 7
+  - id: 105edf4cb603
+    killer: 1
+  - id: 12d5257c97ec
+    killer: 1
+  - id: 131a7840b12e
+    killer: 0
+  - id: 133533b1dffc
+    killer: 0
+  - id: 139560fd8d5c
+    killer: 0
+  - id: 143ff355d0e4
+    killer: 6
+  - id: 14482f087d14
+    killer: 6
+  - id: 14a92820ef1c
+    killer: 1
+  - id: 15bfd9466b8e
+    killer: 0
+  - id: 162ee0b266f6
+    killer: 10
+  - id: 162f34188631
+    killer: 3
+  - id: 16636244f89d
+    killer: 0
+  - id: 16fe67528b61
+    killer: 6
+  - id: 17676e871e0c
+    killer: 12
+  - id: 19288888ee83
+    killer: 0
+  - id: 1a628f4630a5
+    killer: 0
+  - id: 1a76bd0ab954
+    killer: 0
+  - id: 1cd70da6c2d1
+    killer: 0
+  - id: 2045fc54b74b
+    killer: 0
+  - id: 2395d54455e1
+    killer: 0
+  - id: 23c5391ed0e6
+    killer: 1
+  - id: 23ed93523401
+    killer: 1
+  - id: 2652b2dab189
+    killer: 1
+  - id: 26f72ebda79f
+    killer: 0
+  - id: 2816d6a70b6a
+    killer: 1
+  - id: 28332068c34c
+    killer: 6
+  - id: 285ded6794eb
+    killer: 0
+  - id: 293a1e315b64
+    killer: 16
+  - id: 2969bb434946
+    killer: 0
+  - id: 298d01e6783e
+    killer: 0
+  - id: 2ce2c8a6eefd
+    killer: 0
+  - id: 2cf55d4f5521
+    killer: 1
+  - id: 2ded56e549a7
+    killer: 0
+  - id: 2e364dd65a9c
+    killer: 5
+  - id: 2f8b017984c4
+    killer: 7
+  - id: 30333e2d6bab
+    killer: 0
+  - id: 304d4f585312
+    killer: 0
+  - id: 319675863ad6
+    killer: 0
+  - id: 3353ef9a8e3e
+    killer: 0
+  - id: 33a4d6a7890b
+    killer: 1
+  - id: 348eb48ebbc0
+    killer: 0
+  - id: 374187574ca4
+    killer: 10
+  - id: 3742bb313294
+    killer: 0
+  - id: 383a34466329
+    killer: 1
+  - id: 3b204240154c
+    killer: 1
+  - id: 3c480355cf5b
+    killer: 0
+  - id: 3fb0fbe730b9
+    killer: 13
+  - id: 425fcb49a338
+    killer: 12
+  - id: 42d6e6f422e9
+    killer: 14
+  - id: 43fc5056ee0d
+    killer: 13
+  - id: 474cdba9ec42
+    killer: 0
+  - id: 47fa08685a09
+    killer: 1
+  - id: 48651e3fd670
+    killer: 5
+  - id: 4877de9eb871
+    killer: 0
+  - id: 48a380f43c79
+    killer: 0
+  - id: 491a437b0ed2
+    killer: 0
+  - id: 49294ff22566
+    killer: 0
+  - id: 49d59f8ceed3
+    killer: 8
+  - id: 4b8befdf354f
+    killer: 5
+  - id: 4bf59fe5c310
+    killer: 0
+  - id: 4d45322aab5b
+    killer: 0
+  - id: 4dff3b9cd485
+    killer: 0
+  - id: 4e2264461fa7
+    killer: 0
+  - id: 4f6d3b3a43d4
+    killer: 1
+  - id: 50d71ec12a11
+    killer: 0
+  - id: 52b93f0d5b6e
+    killer: 13
+  - id: 52c1ebbdebf4
+    killer: 0
+  - id: 5507635d55b3
+    killer: 0
+  - id: 55487d307253
+    killer: 1
+  - id: 579b027cdb02
+    killer: 12
+  - id: 5b5b30503411
+    killer: 0
+  - id: 5bedfa0600cf
+    killer: 0
+  - id: 5c89483fa558
+    killer: 0
+  - id: 5cbc26e7bfbb
+    killer: 0
+  - id: 5d53db0cb2eb
+    killer: 2
+  - id: 5eb9ef3c8d3e
+    killer: 16
+  - id: 5f44f8b93b94
+    killer: 1
+  - id: 603bf093f273
+    killer: 0
+  - id: 6116ae8c8a7c
+    killer: 0
+  - id: 6334c5b669da
+    killer: 1
+  - id: 635e67b1f44d
+    killer: 10
+  - id: 677aad1dc472
+    killer: 6
+  - id: 68379babf75c
+    killer: 7
+  - id: 6a7a61347d24
+    killer: 0
+  - id: 6ac1d489056a
+    killer: 0
+  - id: 6c64daf4207a
+    killer: 0
+  - id: 6d6c35e98e68
+    killer: 0
+  - id: 6d789aee2f95
+    killer: 1
+  - id: 6db73747a55c
+    killer: 9
+  - id: 6ee9752229f9
+    killer: 0
+  - id: 6f0f738d773a
+    killer: 1
+  - id: 71eadb185249
+    killer: 0
+  - id: 7395dd5f26ab
+    killer: 1
+  - id: 746d4b6be90b
+    killer: 10
+  - id: 761145b172bf
+    killer: 1
+  - id: 77073a77ff9d
+    killer: 0
+  - id: 77c23187ccae
+    killer: 0
+  - id: 7ad0761c849f
+    killer: 1
+  - id: 7c172d10af54
+    killer: 13
+  - id: 7c5dfd1afa92
+    killer: 0
+  - id: 7cefa2599807
+    killer: 1
+  - id: 7fc7ef3646dc
+    killer: 0
+  - id: 81de2b9e43e2
+    killer: 1
+  - id: 825647d6139b
+    killer: 0
+  - id: 83ce667ef5bb
+    killer: 7
+  - id: 88975d853b1e
+    killer: 7
+  - id: 899b36c7373e
+    killer: 1
+  - id: 8aebf16e9265
+    killer: 12
+  - id: 8dcdf564c689
+    killer: 7
+  - id: 913be87e5f62
+    killer: 13
+  - id: 916192a0c531
+    killer: 0
+  - id: '927945253746'
+    killer: 12
+  - id: 92a557778aea
+    killer: 0
+  - id: 94aa8f53fa83
+    killer: 1
+  - id: 98992afe485b
+    killer: 6
+  - id: 98fb0f214372
+    killer: 1
+  - id: 99fcd3543e21
+    killer: 1
+  - id: 9a65835beefc
+    killer: 0
+  - id: 9af87d8b984e
+    killer: 0
+  - id: 9b0241c66278
+    killer: 7
+  - id: 9e048c02ca97
+    killer: 1
+  - id: 9e8cac481b23
+    killer: 1
+  - id: 9f05f01f59b9
+    killer: 10
+  - id: 9f4e6d4e53c4
+    killer: 7
+  - id: a01f96384973
+    killer: 7
+  - id: a06b059eb0db
+    killer: 0
+  - id: a0ada6f4364d
+    killer: 0
+  - id: a30e11046d87
+    killer: 0
+  - id: a4f173f8ba3c
+    killer: 0
+  - id: a4fb2a137bcb
+    killer: 7
+  - id: a5016e19fb7b
+    killer: 0
+  - id: a57ad2bc780a
+    killer: 7
+  - id: a7b86ad1dbcd
+    killer: 0
+  - id: a96a22ff9fe1
+    killer: 0
+  - id: ab609b9b24b1
+    killer: 12
+  - id: aba31b68e747
+    killer: 15
+  - id: ac714bb15993
+    killer: 0
+  - id: acc0f9588ff1
+    killer: 0
+  - id: ae8d5111c81c
+    killer: 0
+  - id: af7fbc7251e8
+    killer: 0
+  - id: b2c87de009f0
+    killer: 0
+  - id: b3b8fae7ba5a
+    killer: 4
+  - id: b49270d232df
+    killer: 7
+  - id: b606dc2cd581
+    killer: 1
+  - id: b710705448e0
+    killer: 7
+  - id: b809de82bed5
+    killer: 0
+  - id: b899edd17055
+    killer: 0
+  - id: bae17fcba794
+    killer: 0
+  - id: bd806009e42f
+    killer: 1
+  - id: be048040888d
+    killer: 13
+  - id: be6ade5e0237
+    killer: 1
+  - id: bf215fe93dfb
+    killer: 0
+  - id: c1f88bad872c
+    killer: 0
+  - id: c33b15648860
+    killer: 15
+  - id: c3473659c967
+    killer: 0
+  - id: c354efb773f4
+    killer: 0
+  - id: c4ffb0f67133
+    killer: 7
+  - id: c6ed52c901ce
+    killer: 1
+  - id: c6fe28147cf7
+    killer: 13
+  - id: c7eac305eac5
+    killer: 0
+  - id: c87ca3137d3c
+    killer: 0
+  - id: cc092434f700
+    killer: 0
+  - id: cc17edfa7f5d
+    killer: 1
+  - id: cf5f5003cd76
+    killer: 10
+  - id: d1cd0b8a9c22
+    killer: 7
+  - id: d31e6c069341
+    killer: 0
+  - id: d46c29b6fba2
+    killer: 0
+  - id: d53cf7577218
+    killer: 5
+  - id: d64485c7cab1
+    killer: 16
+  - id: dc3ac6c0d400
+    killer: 4
+  - id: dcc6ce4acd79
+    killer: 8
+  - id: de28332da964
+    killer: 0
+  - id: de34dafa6c45
+    killer: 0
+  - id: de97321ce482
+    killer: 11
+  - id: e031a32e8d74
+    killer: 1
+  - id: e202c80498a5
+    killer: 7
+  - id: e555daa62c46
+    killer: 10
+  - id: e7ce5e7f619b
+    killer: 0
+  - id: ea2efb6021d0
+    killer: 0
+  - id: ea81c463e0ec
+    killer: 0
+  - id: eb8423da4151
+    killer: 7
+  - id: ebd3ed77c39e
+    killer: 1
+  - id: eee249a17224
+    killer: 7
+  - id: f0b8bc4d833e
+    killer: 0
+  - id: f0e92c0aa9db
+    killer: 7
+  - id: f4449414da72
+    killer: 0
+  - id: f5616009a197
+    killer: 0
+  - id: f590469e9875
+    killer: 0
+  - id: fa824736137e
+    killer: 12
+  - id: fb79cc2cd60d
+    killer: 0
+  - id: fc65298767eb
+    killer: 5
+  - id: fd47912ac1e2
+    killer: 0
+  - id: fe08234e43dc
+    killer: 0
+- path: crates/cargo-spellcheck-helper/src/source_deps.rs
+  killers:
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::bootstrap_passes_llvm_override_and_loader_paths_to_discovery
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::bootstrap_rejects_rustc_failure_and_cross_target_before_discovery
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::bootstrap_uses_owned_override_and_path_values_without_host_environment
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::every_discovery_stage_propagates_glob_errors_without_panicking_or_continuing
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::explicit_library_file_does_not_search_other_locations
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::failed_discovery_command_diagnostic_is_retained_when_no_library_is_found
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::linux_suffix_sonames_and_cpp_library_are_not_link_time_candidates
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::llvm_config_and_ld_library_path_are_used_and_earlier_location_wins_ties
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::loader_and_compiler_failures_are_propagated_in_order
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::non_unicode_search_directory_is_rejected_before_any_probe
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::optional_command_failure_allows_platform_glob_discovery
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::optional_discovery_failures_record_one_note_and_never_accept_failed_stdout
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::selected_library_path_resolution_failure_preserves_cause_without_loading
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::target_comes_from_caller_rustc_and_cross_installation_is_rejected
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::target_parsing_accepts_native_widths_and_rejects_unsupported_targets
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::version_selection_compares_components_numerically_and_treats_invalid_parts_as_zero
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::windows_msys_directory_discovery_is_only_enabled_for_gnu
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::windows_rejects_missing_import_library_and_missing_path
+  mutants:
+  - id: 01ac796ac62d
+    killer: 3
+  - id: 01b7bb2bf148
+    killer: 3
+  - id: 02ce2cc9495a
+    killer: 2
+  - id: 03e348a614bd
+    killer: 4
+  - id: 0429525b79c4
+    killer: 4
+  - id: 044743f8bca2
+    killer: 2
+  - id: 06befcdc3716
+    killer: 0
+  - id: 0d91948ded6b
+    killer: 2
+  - id: 0e0cea223f7b
+    killer: 3
+  - id: 0fb971223281
+    killer: 11
+  - id: 0fb9bf55647e
+    killer: 0
+  - id: 0fc74ab5f449
+    killer: 0
+  - id: 11916c79f9a3
+    killer: 2
+  - id: 144bdcbd2f95
+    killer: 3
+  - id: 145fe84dad64
+    killer: 3
+  - id: 165af10d03e2
+    killer: 0
+  - id: 166c3f66d07f
+    killer: 0
+  - id: 16a212fbab2c
+    killer: 15
+  - id: 18c07f3cffb4
+    killer: 5
+  - id: 1994de110113
+    killer: 3
+  - id: 1a14b1e24af6
+    killer: 0
+  - id: 1b8896fca775
+    killer: 7
+  - id: 1cf3889d35ba
+    killer: 3
+  - id: 2327d90ef876
+    killer: 0
+  - id: 2433b3a00641
+    killer: 0
+  - id: 24b07d22754d
+    killer: 1
+  - id: 275a981591ae
+    killer: 0
+  - id: 2785bac0a214
+    killer: 0
+  - id: 292fb2a1f4ab
+    killer: 2
+  - id: 2af69725c6c4
+    killer: 14
+  - id: 2b22decf6d80
+    killer: 3
+  - id: 2cd65437c2cd
+    killer: 14
+  - id: 2dda8bf71047
+    killer: 0
+  - id: 2e94f22e7bdf
+    killer: 2
+  - id: 2f4259e2601f
+    killer: 14
+  - id: 2f999fbcf7c8
+    killer: 0
+  - id: 31eeebb30956
+    killer: 3
+  - id: 3674a47ef99c
+    killer: 5
+  - id: 36a57da78259
+    killer: 3
+  - id: 3764e48e277a
+    killer: 3
+  - id: 38a03b1753df
+    killer: 0
+  - id: 3903a20a8b7c
+    killer: 6
+  - id: 3a38f53740d8
+    killer: 7
+  - id: 3a401b4e3bd8
+    killer: 3
+  - id: 3b9f4f0ecbb5
+    killer: 2
+  - id: 3d73c49a872a
+    killer: 0
+  - id: 417bbe11c00f
+    killer: 0
+  - id: 421d39b50022
+    killer: 2
+  - id: 424bdbfda322
+    killer: 3
+  - id: 45cdf8d5e022
+    killer: 10
+  - id: 46dd34030e82
+    killer: 0
+  - id: 471d67b79d85
+    killer: 14
+  - id: 47c787efded2
+    killer: 14
+  - id: 49b6218fe8d1
+    killer: 14
+  - id: 4c051f7af8c5
+    killer: 0
+  - id: 4d9f14a3b559
+    killer: 12
+  - id: 4df49379050c
+    killer: 1
+  - id: 4ea8fedf5770
+    killer: 4
+  - id: 508da5853c44
+    killer: 3
+  - id: 50fad0ef4484
+    killer: 4
+  - id: 51488889efff
+    killer: 3
+  - id: 57d00c544cbd
+    killer: 14
+  - id: 5e0acddbecd5
+    killer: 3
+  - id: 5ee38b6956f0
+    killer: 4
+  - id: 5f0b582caf02
+    killer: 2
+  - id: 6476c6e40a68
+    killer: 13
+  - id: 650fafa5382f
+    killer: 0
+  - id: 6873b7c718f4
+    killer: 6
+  - id: 6879b2dae8ec
+    killer: 14
+  - id: 6a44f9c6c56e
+    killer: 0
+  - id: 6c4407f75b10
+    killer: 3
+  - id: 6e314aa03a09
+    killer: 11
+  - id: 72e6d3642484
+    killer: 3
+  - id: 74f923b47d36
+    killer: 13
+  - id: 76ec9efe9436
+    killer: 2
+  - id: 781bfb6cfbfb
+    killer: 3
+  - id: 79ddab8cc26e
+    killer: 2
+  - id: 7c897b6a8c0c
+    killer: 3
+  - id: 7f4ef709ee9c
+    killer: 0
+  - id: 7f8b92b4920f
+    killer: 0
+  - id: 7fb117a6e514
+    killer: 17
+  - id: 80f016cb0429
+    killer: 16
+  - id: 83d50d883ec0
+    killer: 3
+  - id: 865d3668ce3e
+    killer: 3
+  - id: 86745821e312
+    killer: 1
+  - id: 86aedede595f
+    killer: 2
+  - id: 86c61a75bee8
+    killer: 3
+  - id: 87604c3624d8
+    killer: 0
+  - id: 883421e2a743
+    killer: 14
+  - id: 8dbaac5c86e2
+    killer: 0
+  - id: 8de60ecafcd9
+    killer: 3
+  - id: 8dfe8867e268
+    killer: 0
+  - id: 8f44852d67c3
+    killer: 4
+  - id: 90ac281b7cc5
+    killer: 2
+  - id: 9463aecac8f3
+    killer: 16
+  - id: 9a382147d621
+    killer: 0
+  - id: 9d16d5b36dba
+    killer: 3
+  - id: 9f3e66abdfd2
+    killer: 14
+  - id: 9fc1bcdca6af
+    killer: 0
+  - id: a4abad596d15
+    killer: 13
+  - id: a617c3f7e20b
+    killer: 3
+  - id: a8c6225265e5
+    killer: 1
+  - id: a95604d07203
+    killer: 0
+  - id: a98618add838
+    killer: 9
+  - id: aa04e4b2df0f
+    killer: 4
+  - id: aa803b965fbc
+    killer: 3
+  - id: ace330f350c3
+    killer: 2
+  - id: ae94f05e4faf
+    killer: 8
+  - id: af359ca1f93b
+    killer: 2
+  - id: aff17ea8d739
+    killer: 0
+  - id: b003e8886187
+    killer: 0
+  - id: b1d31fb5a825
+    killer: 2
+  - id: b41f7281aaab
+    killer: 3
+  - id: b5e02ee00543
+    killer: 3
+  - id: b5fdd2439a91
+    killer: 3
+  - id: b8bae3a810ab
+    killer: 3
+  - id: b938a2700852
+    killer: 0
+  - id: bca3065fc7da
+    killer: 3
+  - id: c18f081c2a0c
+    killer: 3
+  - id: c3a5417c4735
+    killer: 3
+  - id: c5ec62f06aeb
+    killer: 3
+  - id: c656d0b41dfd
+    killer: 1
+  - id: c7d997e18189
+    killer: 0
+  - id: c815916d45e9
+    killer: 3
+  - id: caa87ad68fb9
+    killer: 3
+  - id: d009c6bd9eda
+    killer: 14
+  - id: d134a44634c3
+    killer: 3
+  - id: d2016f2679e5
+    killer: 0
+  - id: d4cd9cdcf151
+    killer: 3
+  - id: d56cf57dce9e
+    killer: 16
+  - id: d575366e0097
+    killer: 1
+  - id: d6697cd843e0
+    killer: 14
+  - id: d699782ac2c8
+    killer: 14
+  - id: d861008bbab3
+    killer: 3
+  - id: da4faaaf7a7e
+    killer: 3
+  - id: daa09fe1da99
+    killer: 3
+  - id: dcf470dfdd95
+    killer: 0
+  - id: e085b2ded16a
+    killer: 0
+  - id: e151da526215
+    killer: 0
+  - id: e375ced6d4ac
+    killer: 3
+  - id: e3d1684c3f55
+    killer: 3
+  - id: ea14acafe81c
+    killer: 5
+  - id: eaf5532273a7
+    killer: 0
+  - id: ec03cf2146c6
+    killer: 0
+  - id: ec19ad6c16e6
+    killer: 0
+  - id: eddb13a565a5
+    killer: 3
+  - id: ef5fc22dcb3a
+    killer: 2
+  - id: f000933c50bf
+    killer: 2
+  - id: f0467047890d
+    killer: 3
+  - id: f0f43067bbaa
+    killer: 3
+  - id: f18a951a8837
+    killer: 3
+  - id: f476f0ed9ab7
+    killer: 14
+  - id: f7ab076132c3
+    killer: 0
+  - id: f80b83565868
+    killer: 3
+  - id: fdd9db9cff66
+    killer: 4
+  - id: fdec86a62192
+    killer: 5
+  - id: ff5b599d0091
+    killer: 14
 - path: crates/cargo-unique-target-names/src/collisions.rs
   killers:
   - package: cargo-unique-target-names

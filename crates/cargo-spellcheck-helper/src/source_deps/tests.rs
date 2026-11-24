@@ -11,6 +11,7 @@ use super::*;
 enum Call {
     Glob(String, bool, Vec<PathBuf>),
     GlobError(String, bool, io::ErrorKind),
+    Absolute(PathBuf, io::Result<PathBuf>),
     Read(PathBuf, u64, usize, io::Result<Vec<u8>>),
     File(PathBuf, io::Result<bool>),
     Command(OsString, Vec<String>, io::Result<CommandOutput>),
@@ -33,6 +34,14 @@ impl Script {
 }
 
 impl Probe for Script {
+    fn absolute_path(&mut self, path: &Path) -> io::Result<PathBuf> {
+        let Call::Absolute(expected, result) = self.next() else {
+            panic!("expected a path-resolution operation");
+        };
+        assert_eq!(path, expected);
+        result
+    }
+
     fn glob(&mut self, pattern: &str, case_sensitive: bool) -> Result<Vec<PathBuf>, AppError> {
         let (expected, expected_case, result) = match self.next() {
             Call::Glob(expected, case, paths) => (expected, case, Ok(paths)),
@@ -93,6 +102,11 @@ fn environment(triple: &str, override_path: Option<&str>) -> Environment {
 
 fn pattern(directory: &str, name: &str) -> String {
     Path::new(directory).join(name).to_str().expect("test paths are Unicode").to_owned()
+}
+
+fn absolute(path: impl Into<PathBuf>) -> Call {
+    let path = path.into();
+    Call::Absolute(path.clone(), Ok(path))
 }
 
 fn linux_search(directory: &str, unversioned: &[&str], versioned: &[&str]) -> Vec<Call> {
@@ -221,6 +235,7 @@ fn loader_and_compiler_failures_are_propagated_in_order() {
     for loader_fails in [true, false] {
         let mut calls = linux_override(&[&path]);
         calls.push(elf(&path, 2));
+        calls.push(absolute(&path));
         calls.push(Call::Load(
             path.clone().into(),
             if loader_fails {
@@ -256,12 +271,84 @@ fn successful_probe_checks_loader_and_native_tools() {
     let mut calls = linux_override(&[&path]);
     calls.extend([
         elf(&path, 2),
+        absolute(&path),
         Call::Load(path.into(), Ok(())),
         Call::Tools(environment.target.triple.clone(), Ok(())),
     ]);
     let mut script = Script::new(calls);
     check_with(&environment, &mut script).unwrap();
     script.done();
+}
+
+#[test]
+fn relative_library_filename_is_loaded_as_selected_absolute_file() {
+    let environment = environment("x86_64-unknown-linux-gnu", Some("libclang.so"));
+    let mut calls = linux_search("", &["libclang.so"], &[]);
+    calls.extend([
+        elf("libclang.so", 2),
+        Call::Absolute("libclang.so".into(), Ok("/repo/libclang.so".into())),
+        Call::Load("/repo/libclang.so".into(), Ok(())),
+        Call::Tools(environment.target.triple.clone(), Ok(())),
+    ]);
+    let mut script = Script::new(calls);
+    check_with(&environment, &mut script).unwrap();
+    script.done();
+}
+
+#[test]
+fn relative_windows_dll_directory_matches_absolute_path_entry() {
+    let mut environment = environment("x86_64-pc-windows-gnu", None);
+    environment.path = vec!["C:/repo/llvm/bin".into()];
+    let mut script = Script::new(vec![
+        Call::Absolute("llvm/bin".into(), Ok("C:/repo/llvm/bin".into())),
+        absolute("C:/repo/llvm/bin"),
+    ]);
+    library::check_link_requirements(&environment, &Path::new("llvm/bin").join("clang.dll"), &mut script).unwrap();
+    script.done();
+}
+
+#[test]
+fn relative_windows_path_entry_matches_absolute_dll_directory() {
+    let mut environment = environment("x86_64-pc-windows-gnu", None);
+    environment.path = vec!["llvm/bin".into()];
+    let mut script = Script::new(vec![
+        absolute("C:/repo/llvm/bin"),
+        Call::Absolute("llvm/bin".into(), Ok("C:/repo/llvm/bin".into())),
+    ]);
+    library::check_link_requirements(&environment, &Path::new("C:/repo/llvm/bin").join("clang.dll"), &mut script).unwrap();
+    script.done();
+}
+
+#[test]
+fn selected_library_path_resolution_failure_preserves_cause_without_loading() {
+    let path = pattern("custom", "libclang-18.so");
+    let environment = environment("x86_64-unknown-linux-gnu", Some("custom"));
+    let mut calls = linux_override(&[&path]);
+    calls.extend([
+        elf(&path, 2),
+        Call::Absolute(path.into(), Err(io::ErrorKind::PermissionDenied.into())),
+    ]);
+    let mut script = Script::new(calls);
+    let error = check_with(&environment, &mut script).unwrap_err();
+    assert_eq!(error.find_source::<io::Error>().unwrap().kind(), io::ErrorKind::PermissionDenied);
+    script.done();
+}
+
+#[test]
+fn windows_path_resolution_failures_preserve_cause_and_stop_comparison() {
+    let mut environment = environment("x86_64-pc-windows-gnu", None);
+    environment.path = vec!["llvm/bin".into()];
+    for resolve_directory in [false, true] {
+        let mut calls = Vec::new();
+        if resolve_directory {
+            calls.push(absolute("llvm/bin"));
+        }
+        calls.push(Call::Absolute("llvm/bin".into(), Err(io::ErrorKind::PermissionDenied.into())));
+        let mut script = Script::new(calls);
+        let error = library::check_link_requirements(&environment, &Path::new("llvm/bin").join("clang.dll"), &mut script).unwrap_err();
+        assert_eq!(error.find_source::<io::Error>().unwrap().kind(), io::ErrorKind::PermissionDenied);
+        script.done();
+    }
 }
 
 #[test]
@@ -386,6 +473,9 @@ fn windows_lib_directory_searches_sibling_bin_and_accepts_mingw_import_library()
     calls.extend([
         Call::File(lib.join("libclang.lib"), Ok(false)),
         Call::File(lib.join("libclang.dll.a"), Ok(true)),
+        absolute(path.parent().unwrap()),
+        absolute(&environment.path[0]),
+        absolute(&path),
         Call::Load(path, Ok(())),
         Call::Tools(environment.target.triple.clone(), Ok(())),
     ]);
@@ -428,7 +518,9 @@ fn windows_rejects_missing_import_library_and_missing_path() {
         ];
         calls.extend(pe(&library, 0x8664, 0x20b));
         calls.push(Call::File(import.join("libclang.lib"), Ok(found_import)));
-        if !found_import {
+        if found_import {
+            calls.push(absolute(library.parent().unwrap()));
+        } else {
             calls.push(Call::File(import.join("libclang.dll.a"), Err(io::ErrorKind::NotFound.into())));
         }
         let mut script = Script::new(calls);
@@ -441,7 +533,7 @@ fn windows_rejects_missing_import_library_and_missing_path() {
 fn windows_gnu_needs_no_msvc_import_library_and_normalizes_path() {
     let mut environment = environment("x86_64-pc-windows-gnu", None);
     environment.path = vec!["c:/llvm/bin/".into()];
-    let mut script = Script::new(vec![]);
+    let mut script = Script::new(vec![absolute(r"C:\LLVM\bin"), absolute(&environment.path[0])]);
     library::check_link_requirements(&environment, Path::new(r"C:\LLVM\bin").join("clang.dll").as_path(), &mut script).unwrap();
     script.done();
 }
@@ -619,7 +711,9 @@ fn windows_path_matching_does_not_confuse_different_directories() {
         (vec!["c:/LLVM/bin/"], true),
     ] {
         environment.path = entries.into_iter().map(PathBuf::from).collect();
-        let mut script = Script::new(vec![]);
+        let mut calls = vec![absolute(library.parent().unwrap())];
+        calls.extend(environment.path.iter().map(absolute));
+        let mut script = Script::new(calls);
         assert_eq!(library::check_link_requirements(&environment, &library, &mut script).is_ok(), valid);
         script.done();
     }
@@ -630,12 +724,18 @@ fn msvc_import_library_can_be_beside_dll_and_inspection_errors_propagate() {
     let mut environment = environment("x86_64-pc-windows-msvc", None);
     environment.path = vec![PathBuf::from("custom")];
     let path = Path::new("custom").join("libclang.dll");
-    let mut script = Script::new(vec![Call::File(Path::new("custom").join("libclang.lib"), Ok(true))]);
+    let mut script = Script::new(vec![
+        Call::File(Path::new("custom").join("libclang.lib"), Ok(true)),
+        absolute("custom"),
+        absolute("custom"),
+    ]);
     library::check_link_requirements(&environment, &path, &mut script).unwrap();
     script.done();
     let mut script = Script::new(vec![
         Call::File(Path::new("custom").join("libclang.lib"), Err(io::ErrorKind::NotFound.into())),
         Call::File(Path::new("custom").join("libclang.dll.a"), Ok(true)),
+        absolute("custom"),
+        absolute("custom"),
     ]);
     library::check_link_requirements(&environment, &path, &mut script).unwrap();
     script.done();
@@ -875,6 +975,10 @@ fn bootstrap_uses_owned_override_and_path_values_without_host_environment() {
     calls.extend(pe(&path, 0x8664, 0x20b));
     calls.extend([
         Call::File(Path::new("custom").join("libclang.lib"), Ok(true)),
+        absolute("custom"),
+        absolute("other"),
+        absolute("custom"),
+        absolute(&path),
         Call::Load(path, Ok(())),
         Call::Tools("x86_64-pc-windows-msvc".into(), Ok(())),
     ]);
