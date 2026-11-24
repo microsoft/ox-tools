@@ -24,5 +24,7 @@ hunspell-dictgen = { workspace = true }
 libloading = { workspace = true }
 ohno = { workspace = true, features = ["app-err"] }
 
+# >>> anvil-managed: anvil-lints
 [lints]
 workspace = true
+# <<< anvil-managed: anvil-lints

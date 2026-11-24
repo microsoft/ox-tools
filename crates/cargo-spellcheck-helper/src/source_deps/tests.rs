@@ -756,7 +756,7 @@ fn optional_discovery_failures_record_one_note_and_never_accept_failed_stdout() 
 
 #[test]
 fn windows_msys_directory_discovery_is_only_enabled_for_gnu() {
-    let directory = Path::new(r"C:\MSYS64\MinGW64\lib");
+    let directory = Path::new("C:/MSYS64/MinGW64/lib");
     let path = directory.join("clang.dll");
     for (triple, should_find) in [("x86_64-pc-windows-gnu", true), ("x86_64-pc-windows-msvc", false)] {
         let environment = environment(triple, None);
@@ -767,7 +767,8 @@ fn windows_msys_directory_discovery_is_only_enabled_for_gnu() {
         )];
         let mut candidates = 0;
         for glob in directory_patterns(&environment.target) {
-            let matches = glob::Pattern::new(glob).unwrap().matches_path(directory);
+            // Interpret Windows separators on every host, including Unix test runners.
+            let matches = glob::Pattern::new(&glob.replace('\\', "/")).unwrap().matches_path(directory);
             calls.push(Call::Glob(
                 (*glob).into(),
                 false,

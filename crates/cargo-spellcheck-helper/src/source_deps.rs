@@ -318,6 +318,7 @@ fn directory_patterns(target: &Target) -> &'static [&'static str] {
     }
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 // #[gamma::skip(all, tag = "diagnostic", reason = "Only returns platform-specific installation prose; asserting copied constants would not test prerequisite behavior.")]
 fn installation_hint(platform: Platform) -> &'static str {
     match platform {
