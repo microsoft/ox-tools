@@ -11,7 +11,7 @@ that floor universally.
 
 | Group | Checks |
 |-------|--------|
-| `pr-fast` | fmt, clippy, cargo-sort, license-headers, ensure-no-cyclic-deps, ensure-no-default-features, doc-build, readme-check, spellcheck, pr-title, deny, audit, udeps, external-types |
+| `pr-fast` | fmt, clippy, cargo-sort, license-headers, ensure-no-cyclic-deps, ensure-no-default-features, doc-build, readme-check, spellcheck, pr-title, audit, udeps, external-types |
 | `pr-test` | llvm-cov, doc-test, examples |
 | `pr-msrv` | msrv-test |
 | `pr-runtime-analysis` | miri, careful, loom |
@@ -58,7 +58,6 @@ Locally, recipes run on the host OS. See [github.md](./github.md) and
 | `readme-check` | Checks generated READMEs for publishable crates except `[package.metadata.ox-gen-readme]` opt-outs. Library/proc-macro rustdoc takes precedence over binary rustdoc. |
 | `spellcheck` | Checks spelling with cargo-spellcheck and repository configuration. |
 | `pr-title` | Validates `PR_TITLE`; skips when it is unset or empty. CI retrieves the current title and fails if a known PR's title cannot be read. |
-| `deny` | Enforces cargo-deny policy. |
 | `audit` | Checks the lockfile against security advisories. |
 | `udeps` | Checks unused dependencies with all features, both for default targets and for all targets. This catches unused dev-dependencies and regular dependencies used only by tests, benches, or examples. |
 | `external-types` | Checks exposed dependency types in selected libraries with a schema-matched nightly. Bin-only packages are skipped; tool/nightly incompatibility fails. |
