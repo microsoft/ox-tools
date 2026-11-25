@@ -304,6 +304,29 @@ fn mutation_diff_setup_includes_the_impact_driver() {
 }
 
 #[test]
+fn impact_delegates_snapshot_management_to_delta_without_a_shell_script() {
+    let check = include_str!("../templates/justfiles/anvil/checks/impact.just");
+    let helper = include_str!("../templates/justfiles/anvil/helpers/impact.just");
+    for tier in ["modified", "affected", "required"] {
+        assert!(check.contains(&format!(
+            "impact --base-ref {{{{ quote(anvil_base_ref) }}}} --{tier} --format packages --output {{{{ quote(anvil_impact_input_dir + \"/{tier}.packages\") }}}}"
+        )));
+        assert!(check.contains(&format!("(_anvil-impact-consume-file \"{tier}\")")));
+    }
+    assert!(check.contains(r#"[env("RUSTUP_TOOLCHAIN", anvil_impact_toolchain)]"#));
+    assert!(check.contains(r#"[env("GIT_LFS_SKIP_SMUDGE", "1")]"#));
+    assert!(helper.contains(r#"shell("rustc " + anvil_stable_toolchain_arg + " --print sysroot")"#));
+    assert!(helper.contains("cloud impact computation requires a clean working tree"));
+    assert!(helper.contains(r#""target/anvil/impact-invocations/" + ANVIL_IMPACT_INVOCATION_ID"#));
+    assert!(helper.contains(r#"if read(file) == """#));
+    assert!(helper.contains("download a complete impact artifact or correct ANVIL_IMPACT_INPUT_DIR"));
+    for recipes in [check, helper] {
+        assert!(!recipes.contains("[script("));
+        assert!(!recipes.contains("_anvil-impact-snapshot"));
+    }
+}
+
+#[test]
 fn shell_scripts_are_limited_to_domain_exceptions() {
     let recipes = generated().all_recipes();
     let recipe_names = recipes

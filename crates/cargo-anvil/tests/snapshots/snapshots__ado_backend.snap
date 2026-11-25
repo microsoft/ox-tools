@@ -397,9 +397,8 @@ steps:
     displayName: anvil impact (install tools)
   - pwsh: just anvil-impact
     # Run the shared anvil-impact recipe -- the same impact building block
-    # adopters run locally. It resolves the base ref (_anvil-base-ref),
-    # snapshots the base ref in a throwaway worktree and the working
-    # tree, runs `cargo delta impact`, and writes the cache under
+    # adopters run locally. It resolves the base ref, delegates snapshots
+    # and caching to cargo-delta, and writes package selections under
     # target/anvil/impact/. This is the only job that needs cargo-delta; the
     # group stages just download the artifact it produces.
     displayName: anvil impact (cargo-delta)
@@ -884,245 +883,14 @@ alias anvil := anvil-pr
 # Regenerate with cargo-anvil to update this file.
 
 # Compute modified, affected, and required package files with cargo-delta.
-# Compute the impact set and write its clean cache or dirty local output.
 [group("anvil")]
-[script("pwsh", "-NoProfile")]
-anvil-impact:
-    $ErrorActionPreference = 'Stop'
-    if ($env:ANVIL_IMPACT_INVOCATION_ID -notmatch '^\d+$') {
-        Write-Error "anvil-impact: ANVIL_IMPACT_INVOCATION_ID must be a numeric Just process id"
-        exit 2
-    }
-    # Exit 2 = invalid caller configuration (bad ANVIL_IMPACT), distinct from
-    # the generic 1 used for operational failures -- see _anvil-impact-snapshot.
-    if ($env:ANVIL_IMPACT -and $env:ANVIL_IMPACT -notin @('off', 'consume')) {
-        [Console]::Error.WriteLine("anvil: ANVIL_IMPACT='$($env:ANVIL_IMPACT)' is not recognized (expected 'off', 'consume', or unset).")
-        exit 2
-    }
-    if ($env:ANVIL_IMPACT -eq 'off') { exit 0 }
-    if ($env:ANVIL_IMPACT -eq 'consume') {
-        $inputDir = if ($env:ANVIL_IMPACT_INPUT_DIR) { $env:ANVIL_IMPACT_INPUT_DIR } else { 'target/anvil/impact' }
-        # consume = trust an already-downloaded cache verbatim, so assert the
-        # cache is actually present. If the CI download ever stops landing at
-        # target/anvil/impact/ (renamed artifact, a missing download step, or
-        # an adopter invoking the group action directly), every scoped check
-        # would otherwise silently widen to --workspace and the pipeline would
-        # stay green. Fail loudly instead. (Presence only -- freshness stays a
-        # deliberate non-goal in consume mode.)
-        $missing = @('modified', 'affected', 'required') |
-            Where-Object { -not (Test-Path -LiteralPath (Join-Path $inputDir "$_.packages") -PathType Leaf) }
-        if ($missing.Count -gt 0) {
-            Write-Error "anvil-impact: ANVIL_IMPACT=consume but the input impact cache is missing ($($missing -join ', ') package file(s) absent under $inputDir). A complete cache holds modified.packages, affected.packages and required.packages. The read directory is ANVIL_IMPACT_INPUT_DIR when set, otherwise target/anvil/impact -- check that variable if the path above is not where you expected. Supply a complete impact cache before scoped checks run."
-            exit 1
-        }
-        exit 0
-    }
-
-    $dirtyChanges = @(git status --porcelain -- . ':(exclude)target/' | Where-Object { $_ })
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    $dirty = $dirtyChanges.Count -gt 0
-    $cloudCompute = ($env:GITHUB_ACTIONS -eq 'true') -or ($env:TF_BUILD -eq 'True')
-    if ($dirty -and $cloudCompute) {
-        Write-Error 'anvil-impact: cloud impact computation requires a clean working tree; restore or commit all checkout changes before running the impact job.'
-        exit 1
-    }
-    $cleanImpactDir = 'target/anvil/impact'
-    $dirtyImpactRoot = 'target/anvil/impact-dirty'
-    $impactDir = if ($dirty) {
-        Join-Path $dirtyImpactRoot ([System.Guid]::NewGuid().ToString('N'))
-    } else {
-        $cleanImpactDir
-    }
-    $workspaceHash = [Convert]::ToHexString(
-        [System.Security.Cryptography.SHA256]::HashData(
-            [System.Text.Encoding]::UTF8.GetBytes((Get-Location).Path)
-        )
-    )
-    $publicationMutex = [System.Threading.Mutex]::new($false, "anvil-impact-publication-$workspaceHash")
-    if (-not $dirty) {
-        try {
-            [void]$publicationMutex.WaitOne()
-            foreach ($marker in @(
-                (Join-Path $dirtyImpactRoot "active-$env:ANVIL_IMPACT_INVOCATION_ID"),
-                (Join-Path $dirtyImpactRoot 'active')
-            )) {
-                if (Test-Path -LiteralPath $marker -PathType Leaf) {
-                    Remove-Item -LiteralPath $marker -Force -ErrorAction Stop
-                }
-            }
-        } finally {
-            $publicationMutex.ReleaseMutex()
-        }
-    } else {
-        $invocationMarker = Join-Path $dirtyImpactRoot "active-$env:ANVIL_IMPACT_INVOCATION_ID"
-    }
-    & "{{ just_executable() }}" _anvil-impact-snapshot $impactDir
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    if ($dirty) {
-        $publishDirty = {
-            try {
-                [void]$publicationMutex.WaitOne()
-                [System.IO.Directory]::CreateDirectory($dirtyImpactRoot) | Out-Null
-                foreach ($marker in @($invocationMarker, (Join-Path $dirtyImpactRoot 'active'))) {
-                    $pendingMarker = Join-Path $dirtyImpactRoot "pending-$([System.Guid]::NewGuid().ToString('N'))"
-                    Set-Content -LiteralPath $pendingMarker -Value $impactDir -Encoding UTF8 -NoNewline
-                    [System.IO.File]::Move($pendingMarker, $marker, $true)
-                }
-
-                $activeGenerations = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
-                foreach ($marker in @(Get-ChildItem -LiteralPath $dirtyImpactRoot -File -Filter 'active*' -ErrorAction SilentlyContinue)) {
-                    if ($marker.Name -match '^active-(\d+)$') {
-                        $invocationProcess = Get-Process -Id ([int]$Matches[1]) -ErrorAction SilentlyContinue
-                        if (-not $invocationProcess) {
-                            Remove-Item -LiteralPath $marker.FullName -Force -ErrorAction Stop
-                            continue
-                        }
-                    }
-                    $markerGeneration = "$(Get-Content -Raw -LiteralPath $marker.FullName)".Trim()
-                    if ($markerGeneration) {
-                        [void]$activeGenerations.Add((Resolve-Path -LiteralPath $markerGeneration).Path)
-                    }
-                }
-
-                # Eight is intentionally generous relative to the tiny local
-                # cache cost and keeps cleanup bounded without thrashing.
-                $completedGenerations = @(Get-ChildItem -LiteralPath $dirtyImpactRoot -Directory -ErrorAction SilentlyContinue |
-                    Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'complete') -PathType Leaf } |
-                    Sort-Object -Property LastWriteTimeUtc -Descending)
-                $retiredGenerations = @($completedGenerations | Select-Object -Skip 8)
-                $abandonedGenerations = @(Get-ChildItem -LiteralPath $dirtyImpactRoot -Directory -ErrorAction SilentlyContinue |
-                    Where-Object {
-                        if (Test-Path -LiteralPath (Join-Path $_.FullName 'complete') -PathType Leaf) { return $false }
-                        $producerFile = Join-Path $_.FullName 'producer.pid'
-                        if (-not (Test-Path -LiteralPath $producerFile -PathType Leaf)) { return $false }
-                        $producerId = 0
-                        [void][int]::TryParse("$(Get-Content -Raw -LiteralPath $producerFile)".Trim(), [ref]$producerId)
-                        $producerId -gt 0 -and -not (Get-Process -Id $producerId -ErrorAction SilentlyContinue)
-                    })
-                foreach ($oldGeneration in @($retiredGenerations + $abandonedGenerations | Sort-Object -Unique FullName)) {
-                    if ($activeGenerations.Contains($oldGeneration.FullName)) { continue }
-                    $generationMutex = [System.Threading.Mutex]::new($false, "anvil-impact-generation-$($oldGeneration.Name)")
-                    $locked = $false
-                    try {
-                        $locked = $generationMutex.WaitOne(0)
-                        if ($locked -and (Test-Path -LiteralPath $oldGeneration.FullName -PathType Container)) {
-                            Remove-Item -LiteralPath $oldGeneration.FullName -Recurse -Force -ErrorAction Stop
-                        }
-                    } catch [System.UnauthorizedAccessException] {
-                        # Leave the generation for a later cleanup pass.
-                    } catch [System.IO.IOException] {
-                        # Leave the generation for a later cleanup pass.
-                    } finally {
-                        if ($locked) { $generationMutex.ReleaseMutex() }
-                        $generationMutex.Dispose()
-                    }
-                }
-            } finally {
-                $publicationMutex.ReleaseMutex()
-            }
-        }
-    }
-    $deltaConfigDirty = $dirty -and (@(git status --porcelain -- .delta.toml | Where-Object { $_ }).Count -gt 0)
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    $baselineImpactDir = if ($dirty) { $impactDir } else { $cleanImpactDir }
-    $snapDir = Join-Path $impactDir 'snapshots'
-    $baselineSnapDir = Join-Path $baselineImpactDir 'snapshots'
-    $baselineJson = Join-Path $baselineSnapDir 'baseline.json'
-    $currentJson = Join-Path $snapDir 'current.json'
-    $baselineKeyFile = Join-Path $baselineSnapDir 'baseline.key'
-    $currentKeyFile = Join-Path $snapDir 'current.key'
-    $packageFiles = @('modified', 'affected', 'required') | ForEach-Object { Join-Path $impactDir "$_.packages" }
-    $impactStateFile = Join-Path $impactDir 'impact.state'
-    $invocationRoot = 'target/anvil/impact-invocations'
-    $invocationDir = Join-Path $invocationRoot $env:ANVIL_IMPACT_INVOCATION_ID
-    $publishInvocation = {
-        try {
-            [void]$publicationMutex.WaitOne()
-            [System.IO.Directory]::CreateDirectory($invocationRoot) | Out-Null
-            $pending = Join-Path $invocationRoot "pending-$([System.Guid]::NewGuid().ToString('N'))"
-            [System.IO.Directory]::CreateDirectory($pending) | Out-Null
-            foreach ($packageFile in $packageFiles) {
-                Copy-Item -LiteralPath $packageFile -Destination (Join-Path $pending (Split-Path $packageFile -Leaf)) -Force
-            }
-            if (Test-Path -LiteralPath $invocationDir -PathType Container) {
-                Remove-Item -LiteralPath $invocationDir -Recurse -Force
-            }
-            [System.IO.Directory]::Move($pending, $invocationDir)
-            foreach ($oldInvocation in @(Get-ChildItem -LiteralPath $invocationRoot -Directory -ErrorAction SilentlyContinue)) {
-                $invocationId = 0
-                if (-not [int]::TryParse($oldInvocation.Name, [ref]$invocationId)) { continue }
-                if ($invocationId -eq [int]$env:ANVIL_IMPACT_INVOCATION_ID) { continue }
-                if (-not (Get-Process -Id $invocationId -ErrorAction SilentlyContinue)) {
-                    Remove-Item -LiteralPath $oldInvocation.FullName -Recurse -Force -ErrorAction SilentlyContinue
-                }
-            }
-        } finally {
-            $publicationMutex.ReleaseMutex()
-        }
-    }
-
-    if ($dirty) {
-        Write-Host "anvil-impact: using fresh impact for $($dirtyChanges.Count) uncommitted change(s) in the local working tree" -ForegroundColor Yellow
-    }
-
-    $wantState = $null
-    if (-not $dirty) {
-        $wantState = ("$(Get-Content -Raw $baselineKeyFile)".Trim()) + ' ' + ("$(Get-Content -Raw $currentKeyFile)".Trim())
-        $fresh = (Test-Path $impactStateFile) -and `
-            ("$(Get-Content -Raw $impactStateFile)".Trim() -eq $wantState) -and `
-            (@($packageFiles | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) }).Count -eq 0)
-        if ($fresh) {
-            Write-Host 'anvil-impact: package selections up to date (cache hit)'
-            & $publishInvocation
-            exit 0
-        }
-    }
-
-    if (Test-Path (Join-Path $baselineSnapDir 'baseline-no-workspace')) {
-        Write-Host 'anvil-impact: baseline has no workspace; selecting the current workspace'
-        $metadata = (& cargo metadata --no-deps --format-version 1 | Out-String) | ConvertFrom-Json
-        if ($LASTEXITCODE -ne 0) { Write-Error 'anvil-impact: cargo metadata failed'; exit 1 }
-        $members = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
-        foreach ($id in $metadata.workspace_members) { [void]$members.Add([string]$id) }
-        $specs = @($metadata.packages | Where-Object { $members.Contains([string]$_.id) } | ForEach-Object { "$($_.name)@$($_.version)" } | Sort-Object)
-        Set-Content -LiteralPath (Join-Path $impactDir 'modified.packages') -Value '' -Encoding UTF8 -NoNewline
-        foreach ($tier in @('affected', 'required')) {
-            Set-Content -LiteralPath (Join-Path $impactDir "$tier.packages") -Value ($specs -join "`n") -Encoding UTF8 -NoNewline
-        }
-    } else {
-        $deltaArgs = @()
-        if (Test-Path '.delta.toml') { $deltaArgs = @('--config', (Resolve-Path '.delta.toml').Path) }
-        $stableArgs = @({{ anvil_stable_toolchain_arg }})
-        foreach ($tier in @('modified', 'affected', 'required')) {
-            $output = Join-Path $impactDir "$tier.packages"
-            $args = @('delta') + $deltaArgs + @(
-                'impact', '--baseline', $baselineJson, '--current', $currentJson,
-                "--$tier", '--format', 'packages', '--output', $output
-            )
-            & cargo @stableArgs @args
-            if ($LASTEXITCODE -ne 0) { Write-Error "anvil-impact: cargo delta impact --$tier failed"; exit 1 }
-            if (-not (Test-Path -LiteralPath $output -PathType Leaf)) {
-                Set-Content -LiteralPath $output -Value '' -Encoding UTF8 -NoNewline
-            }
-            Write-Host "anvil-impact: $tier -> $output"
-        }
-    }
-
-    if (-not $dirty) {
-        Set-Content -LiteralPath $impactStateFile -Value $wantState -Encoding UTF8 -NoNewline
-    }
-    & $publishInvocation
-    if ($dirty) {
-        $generationMutex = [System.Threading.Mutex]::new($false, "anvil-impact-generation-$(Split-Path $impactDir -Leaf)")
-        try {
-            [void]$generationMutex.WaitOne()
-            New-Item -ItemType File -Path (Join-Path $impactDir 'complete') -Force | Out-Null
-            & $publishDirty
-        } finally {
-            $generationMutex.ReleaseMutex()
-            $generationMutex.Dispose()
-        }
-    }
+[env("RUSTUP_TOOLCHAIN", anvil_impact_toolchain)]
+[env("GIT_LFS_SKIP_SMUDGE", "1")]
+anvil-impact: (_check-tool "cargo-delta" cargo_delta_version if anvil_impact_mode == "" { "true" } else { "false" }) (_anvil-impact-consume-file "modified") (_anvil-impact-consume-file "affected") (_anvil-impact-consume-file "required")
+    @{{ anvil_impact_compute_prefix }}{{ if path_exists(".delta.toml") { "# repository impact configuration available" } else { "echo " + quote("anvil-impact: warning: no .delta.toml found; cargo-delta defaults may under-scope checks. Restore the repository's impact configuration for conservative scoping.") } }}
+    {{ anvil_impact_compute_prefix }}cargo delta {{ anvil_impact_config_arg }} impact --base-ref {{ quote(anvil_base_ref) }} --modified --format packages --output {{ quote(anvil_impact_input_dir + "/modified.packages") }}
+    {{ anvil_impact_compute_prefix }}cargo delta {{ anvil_impact_config_arg }} impact --base-ref {{ quote(anvil_base_ref) }} --affected --format packages --output {{ quote(anvil_impact_input_dir + "/affected.packages") }}
+    {{ anvil_impact_compute_prefix }}cargo delta {{ anvil_impact_config_arg }} impact --base-ref {{ quote(anvil_base_ref) }} --required --format packages --output {{ quote(anvil_impact_input_dir + "/required.packages") }}
 
 # Build all workspace targets and features, optionally for one package or profile.
 [arg("package", long, pattern='(?:[A-Za-z0-9_.-]+)?')]
@@ -2658,16 +2426,36 @@ anvil_impact_mode := if anvil_impact_override != "" {
 } else {
     error("ANVIL_IMPACT must be unset, 'consume', or 'off'")
 }
-export ANVIL_IMPACT_INVOCATION_ID := env_var_or_default("ANVIL_IMPACT_INVOCATION_ID", just_pid())
+export ANVIL_IMPACT_INVOCATION_ID := env("ANVIL_IMPACT_INVOCATION_ID", just_pid())
+anvil_impact_cloud := if env("GITHUB_ACTIONS", "") == "true" { "true" } else if env("TF_BUILD", "") == "True" { "true" } else { "false" }
 anvil_impact_input_dir := if anvil_impact_mode == "consume" {
     env("ANVIL_IMPACT_INPUT_DIR", "target/anvil/impact")
-} else if anvil_impact_mode == "" {
+} else if anvil_impact_mode == "off" {
+    "target/anvil/impact"
+} else if anvil_impact_cloud == "true" {
+    "target/anvil/impact"
+} else if ANVIL_IMPACT_INVOCATION_ID =~ '^\d+$' {
     "target/anvil/impact-invocations/" + ANVIL_IMPACT_INVOCATION_ID
 } else {
-    "target/anvil/impact"
+    error("ANVIL_IMPACT_INVOCATION_ID must be a numeric Just process id")
 }
-anvil_impact_compute_prefix := if anvil_impact_mode == "" { "" } else { "# " }
-anvil_impact_toolchain_arg := if anvil_impact_mode == "" { anvil_stable_toolchain_arg } else { "" }
+anvil_impact_compute_prefix := if anvil_impact_mode != "" {
+    "# "
+} else if anvil_impact_cloud == "true" {
+    if trim(shell("git status --porcelain -- . " + quote(":(exclude)target/"))) == "" {
+        ""
+    } else {
+        error("anvil-impact: cloud impact computation requires a clean working tree; restore or commit checkout changes before running the impact job")
+    }
+} else {
+    ""
+}
+anvil_impact_config_arg := if path_exists(".delta.toml") { "--config " + quote(absolute_path(".delta.toml")) } else { "" }
+anvil_impact_toolchain := if anvil_impact_mode == "" {
+    trim(shell("rustc " + anvil_stable_toolchain_arg + " --print sysroot"))
+} else {
+    env("RUSTUP_TOOLCHAIN", "")
+}
 
 anvil_base_ref := if env("BASE_REF", "") == "" {
     if env("SYSTEM_PULLREQUEST_TARGETBRANCH", "") == "" {
@@ -2727,418 +2515,10 @@ anvil_stable_toolchain_arg := if env("RUSTUP_TOOLCHAIN", "") == "" {
 anvil_msrv_selection := if workspace_rust_version == "" { "--none" } else { anvil_affected_selection }
 anvil_msrv_workspace_selection := if workspace_rust_version == "" { "--none" } else { "--workspace" }
 
-# Private. Produces cargo-delta snapshots with two independent cache keys:
-#   * baseline.json  -- snapshot of the base ref. EXPENSIVE (needs a throwaway
-#     git worktree). Keyed on the base commit sha, effective .delta.toml
-#     identity, and pinned cargo-delta version (baseline.key stores
-#     "<base-sha> <config-hash> <cargo-delta-version>"). A clean run stores
-#     it under target/anvil/impact/snapshots/ and reuses it while fresh.
-#   * current.json   -- snapshot of the working tree. Cheap. Keyed on
-#     "<HEAD sha> <cargo-delta-version>" (current.key) for a clean tree.
-#     Dirty local runs always snapshot the files on disk into a unique
-#     target/anvil/impact-dirty/<generation>/snapshots/ directory and write no
-#     current key. The completed generation is published through a selector
-#     keyed by the Just invocation process id, plus an `active` inspection
-#     selector. Generations remain immutable so concurrent invocations cannot
-#     delete each other's producer or consumer inputs. Tool upgrades invalidate
-#     cached clean snapshots so incompatible formats are never reused. If
-#     .delta.toml itself is dirty,
-#     the baseline is also rebuilt in the dirty generation so snapshots always
-#     use one config.
-
-# Snapshot the base ref and working tree for impact analysis.
-[script("pwsh", "-NoProfile")]
-_anvil-impact-snapshot impact_dir="":
-    $ErrorActionPreference = 'Stop'
-    $impactDirArgument = '{{ impact_dir }}'
-    # Exit 2 (not the generic 1 used for operational failures below) marks
-    # *invalid caller configuration*: an unrecognized ANVIL_IMPACT value is a
-    # mistake in how the recipe was invoked, not a runtime failure of the work
-    # it does. Keeping the two distinct lets a caller (or CI) tell a bad-mode
-    # misconfiguration apart from a genuine snapshot/impact failure. All three
-    # Both ANVIL_IMPACT readers (_anvil-impact-snapshot and anvil-impact) use
-    # the same 2/1 split; keep them in sync.
-    if ($env:ANVIL_IMPACT -and $env:ANVIL_IMPACT -notin @('off', 'consume')) {
-        [Console]::Error.WriteLine("anvil: ANVIL_IMPACT='$($env:ANVIL_IMPACT)' is not recognized (expected 'off', 'consume', or unset).")
-        exit 2
-    }
-    if ($env:ANVIL_IMPACT -eq 'off' -or $env:ANVIL_IMPACT -eq 'consume') { exit 0 }
-
-    # A dirty local tree snapshots the current files on disk. target/ is
-    # excluded because both clean and dirty impact products live there. Git
-    # handles rename and case semantics through the pathspec.
-    $dirtyChanges = @(git status --porcelain -- . ':(exclude)target/' | Where-Object { $_ })
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    $dirty = $dirtyChanges.Count -gt 0
-    $cloudCompute = ($env:GITHUB_ACTIONS -eq 'true') -or ($env:TF_BUILD -eq 'True')
-    if ($dirty -and $cloudCompute) {
-        Write-Error 'anvil-impact: cloud impact computation requires a clean working tree; restore or commit all checkout changes before running the impact job.'
-        exit 1
-    }
-
-    $cleanImpactDir = 'target/anvil/impact'
-    $impactDir = if (-not [string]::IsNullOrWhiteSpace($impactDirArgument)) {
-        $impactDirArgument
-    } elseif ($dirty) {
-        Join-Path 'target/anvil/impact-dirty' ([System.Guid]::NewGuid().ToString('N'))
-    } else {
-        $cleanImpactDir
-    }
-    [System.IO.Directory]::CreateDirectory($impactDir) | Out-Null
-    if ($dirty) {
-        Set-Content -LiteralPath (Join-Path $impactDir 'producer.pid') -Value $env:ANVIL_IMPACT_INVOCATION_ID -Encoding UTF8 -NoNewline
-    }
-    $deltaConfigDirty = $dirty -and (@(git status --porcelain -- .delta.toml | Where-Object { $_ }).Count -gt 0)
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    $baselineImpactDir = if ($deltaConfigDirty) { $impactDir } else { $cleanImpactDir }
-    $baselineSnapDir = Join-Path $baselineImpactDir 'snapshots'
-    $snapDir = Join-Path $impactDir 'snapshots'
-    $baselineJson = Join-Path $baselineSnapDir 'baseline.json'
-    $baselineKeyFile = Join-Path $baselineSnapDir 'baseline.key'
-    $currentJson = Join-Path $snapDir 'current.json'
-    $currentKeyFile = Join-Path $snapDir 'current.key'
-    $noWorkspaceMarker = Join-Path $baselineSnapDir 'baseline-no-workspace'
-    $generationSnapDir = Join-Path $impactDir 'snapshots'
-    $generationBaselineJson = Join-Path $generationSnapDir 'baseline.json'
-    $generationBaselineKey = Join-Path $generationSnapDir 'baseline.key'
-    $generationNoWorkspaceMarker = Join-Path $generationSnapDir 'baseline-no-workspace'
-    $workspacePath = (Get-Location).Path
-    $workspaceHash = [Convert]::ToHexString(
-        [System.Security.Cryptography.SHA256]::HashData(
-            [System.Text.Encoding]::UTF8.GetBytes($workspacePath)
-        )
-    )
-    $baselineMutex = [System.Threading.Mutex]::new($false, "anvil-impact-baseline-$workspaceHash")
-
-    # Effective cargo-delta config identity -- part of the baseline cache key.
-    # Resolve the repo's `.delta.toml` ONCE here, at the repo root, before the
-    # fast path below and before any Push-Location into the base worktree.
-    # (This probe -- like the one in anvil-impact -- is CWD-relative; it relies
-    # on `just` invoking recipes at the repo root, which the generated Justfile
-    # guarantees.) cargo-delta's default config lookup is `delta.toml` (no dot),
-    # so a repo that uses `.delta.toml` must pass `--config` explicitly or every
-    # snapshot/impact runs under cargo-delta's built-in defaults -- ignoring
-    # file_exclude / [parser] / assume_patterns / trip_wire_patterns. All three
-    # invocations (baseline snapshot, current snapshot, impact) share this one
-    # `$deltaArgs`.
-    #
-    # Because that config governs WHAT every snapshot captures, it is part of
-    # the baseline's identity: editing `.delta.toml` (or adding/removing it)
-    # must invalidate the baseline exactly like a moved base ref would.
-    # Otherwise a warm local cache keyed on the base sha alone would keep an
-    # old-config baseline while the current snapshot -- regenerated because the
-    # committed config edit moved HEAD -- is captured under the new config, and
-    # `cargo delta impact` would then diff two snapshots taken under different
-    # rules and silently mis-scope. So hash the resolved config (or mark its
-    # absence) and fold it into the composite baseline key alongside the base
-    # sha and pinned cargo-delta version
-    # below (which also flows into anvil-impact's projection cache via
-    # baseline.key). Absent a config file, `$deltaArgs` stays empty and the id
-    # is `<none>`, so adopters without a `.delta.toml` are unaffected.
-    #
-    # anvil manages `.delta.toml` (the anvil-delta artifact owns its
-    # trip_wire_patterns region), so in an anvil-managed repo the file should
-    # exist whenever this impact recipe does. Its absence means cargo-delta runs
-    # under defaults with trip wires + file_exclude OFF, which can silently
-    # UNDER-scope -- the opposite of what trip wires exist to prevent. Every
-    # neighbouring precondition here (missing base ref, shallow clone) is a hard
-    # error; failing open on this one alone would be surprising, so warn loudly.
-    # We warn rather than fail because a repo may legitimately opt out of the
-    # `.delta.toml` region; the warning surfaces the reduced coverage without
-    # blocking. (anvil-impact re-probes but stays silent: this dependency
-    # recipe always runs first, so one warning per compute is enough.)
-    $deltaArgs = @()
-    $deltaConfigId = '<none>'
-    if (Test-Path '.delta.toml') {
-        $deltaConfigPath = (Resolve-Path '.delta.toml').Path
-        $deltaArgs = @('--config', $deltaConfigPath)
-        # SHA-256 is an arbitrary but stable choice: the key only needs a
-        # deterministic content fingerprint to detect config edits, not any
-        # cryptographic property. Get-FileHash defaults to SHA-256, so this
-        # avoids pulling in another algorithm. Changing it only invalidates
-        # already-cached baselines (they recompute once); it is not a contract.
-        $deltaConfigId = (Get-FileHash -LiteralPath $deltaConfigPath -Algorithm SHA256).Hash
-    } else {
-        [Console]::Error.WriteLine("anvil-impact: warning: no .delta.toml found at the repo root; cargo-delta will run under its defaults (trip_wire_patterns and file_exclude_patterns inactive), which can under-scope the impact set. Restore the anvil-managed .delta.toml to get conservative scoping.")
-    }
-
-    # Only a clean tree corresponds exactly to HEAD. Include the pinned
-    # cargo-delta version in the clean current key without invoking the tool,
-    # so an upgrade invalidates old snapshot formats. target/ changes do not
-    # perturb this key.
-    $currentState = "$((git rev-parse HEAD).Trim()) {{ cargo_delta_version }}"
-
-    # Consumer fast path: reuse an already-present, matching snapshot set
-    # WITHOUT cargo-delta or a fetched base ref -- this short-circuits a local
-    # repeat run when nothing changed. (The cloud-workflow consume path never
-    # reaches here: ANVIL_IMPACT=consume returned at the guard above and trusts
-    # the downloaded artifact verbatim -- anvil-impact asserts its presence
-    # before any scoped check reads it.) We still detect a moved base ref when
-    # it is cheaply resolvable (best effort). If the base cannot be resolved
-    # $baseSha stays $null, the baseline is treated as not fresh, and we fall
-    # through to the recompute path, which fails fast with git-fetch guidance
-    # rather than scoping against a stale baseline.
-    $currentFresh = (-not $dirty) -and (Test-Path $currentJson) -and (Test-Path $currentKeyFile) -and `
-        ("$(Get-Content -Raw $currentKeyFile)".Trim() -eq $currentState)
-    $baseSha = $null
-    $base = '{{ replace(anvil_base_ref, "'", "''") }}'
-    if ($base) {
-        git rev-parse --verify "$base^{commit}" 2>$null | Out-Null
-        if ($LASTEXITCODE -eq 0) { $baseSha = (git rev-parse $base).Trim() }
-    }
-    # A moved base ref, changed config, or tool upgrade invalidates the
-    # baseline, so it is never reused across incompatible rules or formats.
-    $baselineKey = "$baseSha $deltaConfigId {{ cargo_delta_version }}"
-    $baselineFresh = (-not $deltaConfigDirty) -and (Test-Path $baselineKeyFile) -and `
-        ((Test-Path $baselineJson) -or (Test-Path $noWorkspaceMarker)) -and `
-        ("$(Get-Content -Raw $baselineKeyFile)".Trim() -eq $baselineKey)
-    if ($currentFresh -and $baselineFresh) {
-        Write-Host 'anvil-impact: snapshots up to date'
-        exit 0
-    }
-
-    # --- (Re)compute path: this is the only path that needs cargo-delta and a
-    # resolvable base ref (the impact job in cloud workflows, or a local first
-    # run / cache miss). ---
-    # cargo-delta is validated here -- inside the recompute path, after the
-    # off/consume guard and the fast path -- rather than as a hard `just`
-    # dependency of `anvil-impact`. Only recompute needs the tool; the paths
-    # that skip it (ANVIL_IMPACT=off/consume, or a cache hit) must be able to
-    # no-op without it. Groups that can actually reach recompute declare
-    # cargo-delta as their own setup prereq (see groups/*.just), so a local
-    # `just anvil-<group>` still fails fast if it is missing; keeping it off
-    # anvil-impact's dependency line is what lets the no-op paths stay
-    # tool-agnostic.
-    # PowerShell on Linux ARM can abort while multiple fresh pwsh processes
-    # initialize concurrently during this nested tool probe. Serialize only
-    # this probe with the existing workspace mutex; snapshot and impact work
-    # remains concurrent under immutable generations.
-    $prerequisiteLockHeld = $false
-    try {
-        try {
-            [void]$baselineMutex.WaitOne()
-            $prerequisiteLockHeld = $true
-        } catch [System.Threading.AbandonedMutexException] {
-            $prerequisiteLockHeld = $true
-        }
-        & "{{ just_executable() }}" anvil-tool-cargo-delta-validate-prereqs
-        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    } finally {
-        if ($prerequisiteLockHeld) { $baselineMutex.ReleaseMutex() }
-    }
-    [System.IO.Directory]::CreateDirectory($baselineSnapDir) | Out-Null
-    [System.IO.Directory]::CreateDirectory($snapDir) | Out-Null
-
-    # The best-effort base-ref resolution above may have left `$baseSha` unset
-    # (unresolvable ref, or a `just`/git hiccup). Recompute cannot proceed
-    # without it, so resolve with fail-fast diagnostics now. We deliberately do
-    # NOT `git fetch`: mutating git state as a side effect of a build check is
-    # surprising and can race the user's own git operations.
-    if (-not $baseSha) {
-        $base = '{{ replace(anvil_base_ref, "'", "''") }}'
-        git rev-parse --verify "$base^{commit}" 2>$null | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            $branch = ($base -replace '^origin/', '')
-            Write-Error "anvil-impact: base ref '$base' not found locally. Run ``git fetch origin $branch`` and retry."
-            exit 1
-        }
-        $baseSha = (git rev-parse $base).Trim()
-    }
-    if ((git rev-parse --is-shallow-repository) -eq 'true') {
-        Write-Error 'anvil-impact: shallow clone detected; cargo-delta needs full history for the base ref. Run ``git fetch --unshallow`` and retry.'
-        exit 1
-    }
-    if ($dirty) {
-        Set-Content -LiteralPath (Join-Path $impactDir 'base.sha') -Value $baseSha -Encoding UTF8 -NoNewline
-    }
-
-    # --- Baseline snapshot: only when the base sha, config, or tool changed. ---
-    # Re-derive the composite key now that `$baseSha` is authoritatively
-    # resolved (the fast-path value above may have been $null on a cache miss).
-    $baselineKey = "$baseSha $deltaConfigId {{ cargo_delta_version }}"
-    $haveBaseline = (Test-Path $baselineKeyFile) -and `
-        ("$(Get-Content -Raw $baselineKeyFile)".Trim() -eq $baselineKey) -and `
-        ((Test-Path $baselineJson) -or (Test-Path $noWorkspaceMarker))
-    if ($haveBaseline) {
-        Write-Host "anvil-impact: baseline snapshot up to date (base $baseSha)"
-    } else {
-        Write-Host "anvil-impact: snapshotting baseline at $base ($baseSha)"
-        # The baseline worktree is checked out at the merge target, whose
-        # rust-toolchain.toml may pin a toolchain that is NOT installed on this
-        # machine (any PR that bumps rust-toolchain.toml hits this). The
-        # snapshot is metadata-only (file presence + content hashes), so use
-        # the selected compiler from the current checkout to override any
-        # different toolchain file in the baseline worktree. Environment/MSRV
-        # selections are already valid rustup overrides. For a selecting
-        # toolchain file, use the selected rustc sysroot as an unambiguous path
-        # toolchain.
-        $stableArgs = @({{ anvil_stable_toolchain_arg }})
-        $baselineToolchain = if (-not [string]::IsNullOrWhiteSpace($env:RUSTUP_TOOLCHAIN)) {
-            $env:RUSTUP_TOOLCHAIN.Trim()
-        } elseif ($stableArgs.Count -eq 1) {
-            ([string] $stableArgs[0]).Substring(1)
-        } else {
-            $sysroot = @(& rustc --print sysroot)
-            if ($LASTEXITCODE -ne 0 -or $sysroot.Count -ne 1 -or [string]::IsNullOrWhiteSpace([string] $sysroot[0])) {
-                Write-Error 'anvil-impact: rustc could not report the current checkout stable toolchain sysroot'
-                exit 1
-            }
-            ([string] $sysroot[0]).Trim()
-        }
-
-        # Temp-root precedence follows the runner-managed scratch dir on each
-        # host: RUNNER_TEMP on GitHub Actions, AGENT_TEMPDIRECTORY on Azure
-        # Pipelines -- both are job-owned and cleaned up by the runner, so the
-        # throwaway worktree never leaks into the workspace or survives the job.
-        # Local runs fall back to the system temp dir. A fresh nonce prevents
-        # collisions with abandoned directories when the OS reuses a PID.
-        $tmpRoot = $env:RUNNER_TEMP
-        if (-not $tmpRoot) { $tmpRoot = $env:AGENT_TEMPDIRECTORY }
-        if (-not $tmpRoot) { $tmpRoot = [System.IO.Path]::GetTempPath() }
-        $wt = Join-Path $tmpRoot "anvil-baseline-$PID-$([System.Guid]::NewGuid().ToString('N'))"
-        # GIT_LFS_SKIP_SMUDGE=1: the worktree inherits the repo config but not
-        # the credential helper, so LFS smudge would fail. cargo-delta only
-        # needs file content hashes; LFS pointer files hash consistently.
-        $env:GIT_LFS_SKIP_SMUDGE = '1'
-        $baselineFailed = $false
-        $baselineNoWorkspace = $false
-        $baseSnap = $null
-        try {
-            $worktreeOutput = @(git worktree add --detach $wt $baseSha 2>&1)
-            if ($LASTEXITCODE -ne 0) {
-                throw "anvil-impact: failed to create baseline worktree at ${wt}: $($worktreeOutput -join [Environment]::NewLine)"
-            }
-            if (-not (Test-Path (Join-Path $wt 'Cargo.toml'))) {
-                # First-time anvil adoption: the base predates the cargo
-                # workspace (no root Cargo.toml), so there is nothing for
-                # cargo-delta to snapshot. Record a marker; anvil-impact falls
-                # back to full-workspace validation rather than failing.
-                Write-Host "anvil-impact: base '$base' has no root Cargo.toml (first-time adoption?); falling back to full-workspace"
-                $baselineNoWorkspace = $true
-            } else {
-                Push-Location $wt
-                # Override only this baseline subprocess scope, then restore the
-                # caller's input override before returning to the current tree.
-                $hadToolchain = Test-Path Env:\RUSTUP_TOOLCHAIN
-                $priorToolchain = if ($hadToolchain) { $env:RUSTUP_TOOLCHAIN } else { $null }
-                try {
-                    $env:RUSTUP_TOOLCHAIN = $baselineToolchain
-                    $baseSnap = cargo delta @deltaArgs snapshot
-                    if ($LASTEXITCODE -ne 0) { throw 'cargo delta snapshot (baseline) failed' }
-                } finally {
-                    if ($hadToolchain) {
-                        $env:RUSTUP_TOOLCHAIN = $priorToolchain
-                    } else {
-                        Remove-Item Env:\RUSTUP_TOOLCHAIN -ErrorAction SilentlyContinue
-                    }
-                    Pop-Location
-                }
-            }
-        } catch {
-            $baselineFailed = $true
-            throw
-        } finally {
-            $cleanupFailures = [System.Collections.Generic.List[string]]::new()
-            $worktreeOutput = @(git worktree list --porcelain -z)
-            $listFailed = $LASTEXITCODE -ne 0
-            if ($listFailed) {
-                $cleanupFailures.Add("failed to list worktrees: $($worktreeOutput -join [Environment]::NewLine)")
-            }
-            $worktrees = if ($listFailed) { @() } else { ($worktreeOutput -join "`n").Split([char] 0) }
-            $registeredPath = 'worktree ' + $wt.Replace([System.IO.Path]::DirectorySeparatorChar, [char] '/')
-            if ($listFailed -or $worktrees -contains $registeredPath) {
-                $cleanupOutput = @(git worktree remove --force --force $wt 2>&1)
-                if ($LASTEXITCODE -ne 0) {
-                    $cleanupFailures.Add("failed to remove baseline worktree at ${wt}: $($cleanupOutput -join [Environment]::NewLine)")
-                }
-            }
-            try {
-                if (Test-Path -LiteralPath $wt) {
-                    Remove-Item -LiteralPath $wt -Recurse -Force -ErrorAction Stop
-                }
-            } catch {
-                $cleanupFailures.Add("failed to remove baseline directory at ${wt}: $($_.Exception.Message)")
-            }
-            if ($cleanupFailures.Count -gt 0) {
-                $cleanupMessage = "anvil-impact: baseline cleanup failed: $($cleanupFailures -join '; ')"
-                if ($baselineFailed) {
-                    Write-Warning -Message $cleanupMessage -WarningAction Continue
-                } else {
-                    throw $cleanupMessage
-                }
-            }
-        }
-
-        # Publish baseline cache files only after the snapshot succeeds. A
-        # workspace-wide mutex serializes replacement for concurrent local
-        # invocations, while dirty runs copy their selected baseline into the
-        # immutable generation before releasing it.
-        if (-not $baselineNoWorkspace -and -not $baseSnap) {
-            throw 'cargo-delta did not produce a baseline snapshot'
-        }
-        try {
-            [void]$baselineMutex.WaitOne()
-            if ($baselineNoWorkspace) {
-                Remove-Item -LiteralPath $baselineJson -ErrorAction SilentlyContinue
-                New-Item -ItemType File -Path $noWorkspaceMarker -Force | Out-Null
-                if ($dirty) {
-                    New-Item -ItemType File -Path $generationNoWorkspaceMarker -Force | Out-Null
-                    Remove-Item -LiteralPath $generationBaselineJson -ErrorAction SilentlyContinue
-                }
-            } else {
-                Set-Content -LiteralPath $baselineJson -Value $baseSnap -Encoding UTF8
-                Remove-Item -LiteralPath $noWorkspaceMarker -ErrorAction SilentlyContinue
-                if ($dirty) {
-                    Set-Content -LiteralPath $generationBaselineJson -Value $baseSnap -Encoding UTF8
-                    Remove-Item -LiteralPath $generationNoWorkspaceMarker -ErrorAction SilentlyContinue
-                }
-            }
-            Set-Content -LiteralPath $baselineKeyFile -Value $baselineKey -Encoding UTF8 -NoNewline
-            if ($dirty) {
-                Set-Content -LiteralPath $generationBaselineKey -Value $baselineKey -Encoding UTF8 -NoNewline
-            }
-        } finally {
-            $baselineMutex.ReleaseMutex()
-        }
-    }
-    if ($dirty -and $haveBaseline) {
-        try {
-            [void]$baselineMutex.WaitOne()
-            $actualKey = "$(Get-Content -Raw -LiteralPath $baselineKeyFile)".Trim()
-            if ($actualKey -ne $baselineKey) {
-                Write-Error "anvil-impact: baseline '$base' changed while publishing dirty impact; rerun the command."
-                exit 1
-            }
-            if (Test-Path -LiteralPath $noWorkspaceMarker -PathType Leaf) {
-                New-Item -ItemType File -Path $generationNoWorkspaceMarker -Force | Out-Null
-            } else {
-                Copy-Item -LiteralPath $baselineJson -Destination $generationBaselineJson -Force
-            }
-            Set-Content -LiteralPath $generationBaselineKey -Value $baselineKey -Encoding UTF8 -NoNewline
-        } finally {
-            $baselineMutex.ReleaseMutex()
-        }
-    }
-
-    # --- Current snapshot: clean content is cached by HEAD, while dirty
-    # content is always captured fresh from the filesystem. ---
-    $haveCurrent = (-not $dirty) -and (Test-Path $currentJson) -and (Test-Path $currentKeyFile) -and `
-        ("$(Get-Content -Raw $currentKeyFile)".Trim() -eq $currentState)
-    if ($haveCurrent) {
-        Write-Host 'anvil-impact: current snapshot up to date'
-    } else {
-        if ($dirty) {
-            Write-Host 'anvil-impact: snapshotting dirty working tree'
-        } else {
-            Write-Host 'anvil-impact: snapshotting working tree'
-        }
-        $curSnap = & cargo @stableArgs delta @deltaArgs snapshot
-        if ($LASTEXITCODE -ne 0) { Write-Error 'anvil-impact: cargo delta snapshot (current) failed'; exit 1 }
-        Set-Content -LiteralPath $currentJson -Value $curSnap -Encoding UTF8
-        if (-not $dirty) {
-            Set-Content -LiteralPath $currentKeyFile -Value $currentState -Encoding UTF8 -NoNewline
-        }
-    }
+# Validate downloaded inputs without invoking cargo-delta or recomputing impact.
+[private]
+_anvil-impact-consume-file tier file=(anvil_impact_input_dir + "/" + tier + ".packages"):
+    {{ if anvil_impact_mode != "consume" { "# no downloaded impact input required" } else if path_exists(file) { if read(file) == "" { "# empty impact selection: " + tier } else { "# downloaded impact selection: " + tier } } else { error("anvil-impact: ANVIL_IMPACT=consume requires " + file + "; download a complete impact artifact or correct ANVIL_IMPACT_INPUT_DIR") } }}
 
 # Used by anvil-scheduled and _anvil-full to fan out all scheduled groups.
 [private]
@@ -3339,8 +2719,8 @@ _binstall-with-source-fallback name minimum prerequisite:
 
 # Fail before a check starts when a required Cargo tool is missing or too old.
 [private]
-_check-tool name minimum extracted=(replace_regex(installed_cargo_tools, ('(?ms)\A.*^' + name + ' v([^:\r\n]+):\r?$.*\z'), '$1')) found=(if extracted == installed_cargo_tools { "false" } else { "true" }) installed=(if found == "true" { extracted } else { "" }) satisfied=(if found == "true" { semver_matches(installed, ">=" + minimum) } else { "false" }):
-    {{ if satisfied == "true" { "# " + name + " " + installed + " satisfies >= " + minimum } else { error(name + " >= " + minimum + " is required; run its setup recipe") } }}
+_check-tool name minimum enabled="true" extracted=(if enabled == "true" { replace_regex(installed_cargo_tools, ('(?ms)\A.*^' + name + ' v([^:\r\n]+):\r?$.*\z'), '$1') } else { "" }) found=(if enabled != "true" { "false" } else if extracted == installed_cargo_tools { "false" } else { "true" }) installed=(if found == "true" { extracted } else { "" }) satisfied=(if found == "true" { semver_matches(installed, ">=" + minimum) } else { "false" }):
+    {{ if enabled != "true" { "# " + name + " is not needed in this mode" } else if satisfied == "true" { "# " + name + " " + installed + " satisfies >= " + minimum } else { error(name + " >= " + minimum + " is required; run its setup recipe") } }}
 
 # Install cargo-each with the Cargo available to the setup caller.
 [group("anvil-setup")]

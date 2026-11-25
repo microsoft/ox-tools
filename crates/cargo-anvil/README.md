@@ -56,7 +56,7 @@ Supported adopter toolchains are **Rust and Cargo 1.95 or newer**, including
 the repository’s declared MSRV. Building this release of cargo-anvil from
 source requires **Rust 1.97 or newer**. Generated recipes require
 **Just 1.47.0 or newer**, Git, and rustup. PowerShell Core (`pwsh`) is
-needed for container commands, impact analysis, and scoped unused-dependency checks.
+needed for container commands and scoped unused-dependency checks.
 They target one Cargo workspace or single-crate package at the repository root.
 Older adopter toolchains and multi-workspace orchestration are unsupported.
 
@@ -473,7 +473,7 @@ More detailed design and operational guidance is available in the
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQb2ISaqXi48DMb5EdY4d_LqxkbqWowtrQrWdEbPeESfFi_Y3NhZIGDa2NhcmdvLWFudmlsZjAuMjguM2tjYXJnb19hbnZpbA
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbTNbNbpXc4x0bAjHaixWClC0bHyLeRbMqv_QbpG2Y3yWsNWxhZIGDa2NhcmdvLWFudmlsZjAuMjguM2tjYXJnb19hbnZpbA
  [__link0]: https://github.com/casey/just
  [__link1]: https://rust-lang.github.io/rustfmt/
  [__link10]: https://www.conventionalcommits.org/

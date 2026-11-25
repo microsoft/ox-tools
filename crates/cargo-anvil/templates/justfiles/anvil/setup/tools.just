@@ -45,8 +45,8 @@ _binstall-with-source-fallback name minimum prerequisite:
 
 # Fail before a check starts when a required Cargo tool is missing or too old.
 [private]
-_check-tool name minimum extracted=(replace_regex(installed_cargo_tools, ('(?ms)\A.*^' + name + ' v([^:\r\n]+):\r?$.*\z'), '$1')) found=(if extracted == installed_cargo_tools { "false" } else { "true" }) installed=(if found == "true" { extracted } else { "" }) satisfied=(if found == "true" { semver_matches(installed, ">=" + minimum) } else { "false" }):
-    {{ if satisfied == "true" { "# " + name + " " + installed + " satisfies >= " + minimum } else { error(name + " >= " + minimum + " is required; run its setup recipe") } }}
+_check-tool name minimum enabled="true" extracted=(if enabled == "true" { replace_regex(installed_cargo_tools, ('(?ms)\A.*^' + name + ' v([^:\r\n]+):\r?$.*\z'), '$1') } else { "" }) found=(if enabled != "true" { "false" } else if extracted == installed_cargo_tools { "false" } else { "true" }) installed=(if found == "true" { extracted } else { "" }) satisfied=(if found == "true" { semver_matches(installed, ">=" + minimum) } else { "false" }):
+    {{ if enabled != "true" { "# " + name + " is not needed in this mode" } else if satisfied == "true" { "# " + name + " " + installed + " satisfies >= " + minimum } else { error(name + " >= " + minimum + " is required; run its setup recipe") } }}
 
 # Install cargo-each with the Cargo available to the setup caller.
 [group("anvil-setup")]
