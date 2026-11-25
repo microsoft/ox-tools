@@ -266,7 +266,7 @@ pub fn dispatch(args: &[OsString]) -> std::result::Result<ExitCode, AppError> {
         evidence::wrapper,
         doctests::rustdoc_wrapper,
         doctests::shim,
-        run,
+        || run(Cli::parse()),
     )
 }
 
@@ -297,7 +297,7 @@ fn dispatch_with(
 /// The cargo subcommand this binary answers to.
 const SUBCOMMAND: &str = "unused-deps";
 
-/// Parse the Cargo subcommand arguments and execute the requested checks.
+/// Execute the requested Cargo subcommand checks.
 ///
 /// Returns [`ExitCode::SUCCESS`] when every catalog entry is inherited or
 /// allowed and the selected package checks find no unused or misplaced
@@ -313,9 +313,9 @@ const SUBCOMMAND: &str = "unused-deps";
 /// Returns an error if a manifest cannot be read or parsed, workspace members
 /// cannot be enumerated, compiler or doctest evidence collection fails, package
 /// selectors are invalid, or a fixed manifest cannot be written back.
-fn run() -> Result<ExitCode> {
+fn run(cli: Cli) -> Result<ExitCode> {
     run_with(
-        Cli::parse(),
+        cli,
         |path| fs::read(path),
         workspace_manifest_of,
         workspace_of,
@@ -1122,6 +1122,22 @@ mod source_campaign_tests {
     fn cli(package: &str) -> Cli {
         Cli::try_parse_from(["cargo", SUBCOMMAND, "--manifest-path", "Cargo.toml", "--package", package])
             .expect("test CLI arguments are valid")
+    }
+
+    #[test]
+    fn package_file_reader_rejects_malformed_disk_input_before_checks_or_fixing() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let cli = Cli::try_parse_from([
+            OsString::from("cargo"),
+            SUBCOMMAND.into(),
+            "--package-file".into(),
+            path.as_os_str().to_owned(),
+            "--fix".into(),
+        ])
+        .expect("package-file supports --fix");
+        let error = run(cli).expect_err("a Cargo manifest is not a package selection file");
+        assert!(error.to_string().contains("invalid package spec"), "{error}");
+        assert!(error.to_string().contains(&path.display().to_string()), "{error}");
     }
 
     #[test]
