@@ -15,9 +15,10 @@ credentials, runner pools, and additional checks.
   supported toolchain in an adopting repository.
 - Generated recipes require **Just 1.47.0 or newer**, Git, rustup, and the
   prerequisites of the selected checks. PowerShell Core (`pwsh`) is required
-  for container orchestration, spell-dictionary preparation, and the
-  cargo-spellcheck source-build prerequisite probe, but not for ordinary
-  portable checks. `just anvil-setup` installs catalog tools and pinned public
+  for container orchestration, impact analysis, and the scoped unused-dependency
+  check. Spellcheck uses `cargo-spellcheck-helper` for portable dictionary
+  preparation and source-build prerequisite checks. `just anvil-setup`
+  installs catalog tools and pinned public
   toolchains; it does not provision private toolchains, credentials,
   compliance infrastructure, or arbitrary native libraries.
 - The generated recipes target one Cargo workspace or single-crate package at

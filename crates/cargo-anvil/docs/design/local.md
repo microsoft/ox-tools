@@ -17,8 +17,9 @@ compatibility, not a universal Rust/Cargo 1.95 minimum. Passing prerequisite
 validation with an older compiler does not make that configuration supported.
 
 Local execution also requires rustup and **just 1.47.0+**. PowerShell 7+
-(`pwsh`) is needed only for container commands, spell-dictionary preparation,
-and the cargo-spellcheck source-build prerequisite probe. Setup installs
+(`pwsh`) is needed for container commands, impact analysis, and the scoped
+unused-dependency check. Spellcheck dictionary preparation and source-build
+prerequisite checks use `cargo-spellcheck-helper` without PowerShell. Setup installs
 catalog tools and Rust components; install the prerequisites needed by the
 selected recipes before invoking them.
 
@@ -99,7 +100,14 @@ are not covered by the catalog's exact-version guarantee.
 
 ### System prerequisites
 
-Building cargo-spellcheck from source requires discoverable libclang. On
+Spellcheck setup installs the pinned `cargo-spellcheck-helper` before installing
+cargo-spellcheck. Dictionary preparation uses the helper to turn `.spelling`
+into `target/spelling.dic`: missing input yields an empty dictionary; empty
+and ASCII-decimal-only lines are removed; entries are sorted ordinally with
+duplicates retained. Output is atomic UTF-8 with LF line endings.
+
+Building cargo-spellcheck from source requires discoverable libclang and native
+C/C++ build tools, checked by `cargo spellcheck-helper check-source-deps`. On
 Windows, its directory must also be on `PATH`; `LIBCLANG_PATH` alone is
 insufficient. Missing prerequisites produce installation guidance rather than
 an automatic system-package installation. A successful prebuilt installation

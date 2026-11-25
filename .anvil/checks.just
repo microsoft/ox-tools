@@ -385,20 +385,9 @@ anvil-readme fix="false": (_anvil-readme if fix == "true" { "generate" } else { 
 anvil-readme-check: (_anvil-readme "check")
 
 # Check spelling in source comments and documentation.
-[script("pwsh", "-NoProfile")]
 anvil-spellcheck: anvil-spellcheck-validate-prereqs
-    $ErrorActionPreference = 'Stop'
-    $output_file = 'target/spelling.dic'
-    $filtered_lines = @()
-    if (Test-Path '.spelling') {
-        $lines = Get-Content '.spelling' | Sort-Object
-        $filtered_lines = @($lines | Where-Object { $_ -notmatch '^\d+$' -and $_ -ne '' })
-    }
-    $line_count = $filtered_lines.Count
-    [System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($output_file)) | Out-Null
-    @($line_count) + $filtered_lines | Set-Content $output_file
-    & cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} spellcheck --cfg spellcheck.toml check --code 1
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    cargo spellcheck-helper prepare-dictionary --input .spelling --output target/spelling.dic
+    cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} spellcheck --cfg spellcheck.toml check --code 1
 
 # Check required packages for unused normal and development dependencies.
 anvil-udeps: anvil-udeps-validate-prereqs anvil-impact
