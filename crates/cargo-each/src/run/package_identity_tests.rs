@@ -459,14 +459,22 @@ fn opaque_metadata_ids_bypass_only_ordinary_file_selector_validation() {
             vec!["--package-file", "selection.txt", "--none", "--once"],
             vec!["--package-file", "selection.txt", "--workspace", "--once"],
         ] {
-            let invalid = "not a current metadata ID";
-            let error = dispatch_source_selection("checkout", id, &options, invalid, &["cargo", "check", "{cargo-specs}"])
-                .expect_err("non-ID whitespace is still invalid");
-            let cause = error.find_source::<InvalidPackageFileLineError>().expect("file syntax error");
-            assert_eq!(cause.path, "selection.txt");
-            assert_eq!(cause.line, 1);
-            assert_eq!(cause.spec, invalid);
-            assert_eq!(cause.reason, "leading, trailing, and embedded whitespace are not allowed");
+            for (invalid, reason) in [
+                (
+                    "not a current metadata ID",
+                    "leading, trailing, and embedded whitespace are not allowed",
+                ),
+                ("://", "invalid source-qualified URL: relative URL without a base"),
+                ("1invalid://checkout", "invalid source-qualified URL: relative URL without a base"),
+            ] {
+                let error = dispatch_source_selection("checkout", id, &options, invalid, &["cargo", "check", "{cargo-specs}"])
+                    .expect_err("malformed non-ID entries are still invalid");
+                let cause = error.find_source::<InvalidPackageFileLineError>().expect("file syntax error");
+                assert_eq!(cause.path, "selection.txt");
+                assert_eq!(cause.line, 1);
+                assert_eq!(cause.spec, invalid);
+                assert_eq!(cause.reason, reason);
+            }
         }
     }
 }

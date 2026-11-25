@@ -171,8 +171,9 @@ fn validate_package_file_spec<'a>(workspace: &Workspace, path: &str, line: usize
     if spec.starts_with('-') {
         return Err(invalid("command-line tokens are not package specs"));
     }
-    // Source-qualified values are checked against current workspace metadata during resolution.
+    // Validate non-ID URL syntax even when selection precedence skips resolution.
     if spec.contains("://") {
+        Url::parse(spec).map_err(|error| invalid(&format!("invalid source-qualified URL: {error}")))?;
         return Ok(spec);
     }
     let mut pieces = spec.split('@');
