@@ -126,6 +126,15 @@ fn unused_deps_keeps_scope_and_fixes_explicit() {
 }
 
 #[test]
+fn unused_deps_runs_immediately_before_udeps_in_pr_fast() {
+    let generated = generated();
+    assert!(
+        generated.groups.contains("    anvil-unused-deps \\\n    anvil-udeps \\\n"),
+        "execution order must keep unused-deps immediately before udeps"
+    );
+}
+
+#[test]
 fn unused_deps_rejects_whitespace_only_package_files() {
     let generated = generated();
     assert!(generated.checks.contains("IsNullOrWhiteSpace($packageText)"));

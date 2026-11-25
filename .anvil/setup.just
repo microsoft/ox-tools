@@ -378,7 +378,7 @@ cargo_nextest_version := "0.9.150"
 cargo_sort_version := "2.1.4"
 cargo_spellcheck_version := "0.15.7"
 cargo_udeps_version := "0.1.61"
-cargo_unused_deps_version := "0.2.0"
+cargo_unused_deps_version := "0.2.1"
 
 # Install prerequisites for the `anvil-pr` recipe.
 [private]
@@ -783,6 +783,7 @@ anvil-pr-fast-setup installer="install": \
     (anvil-pr-title-setup installer) \
     (anvil-deny-setup installer) \
     (anvil-audit-setup installer) \
+    (anvil-unused-deps-setup installer) \
     (anvil-udeps-setup installer) \
     (anvil-external-types-setup installer)
 
@@ -802,6 +803,7 @@ anvil-pr-fast-validate-prereqs: \
     anvil-pr-title-validate-prereqs \
     anvil-deny-validate-prereqs \
     anvil-audit-validate-prereqs \
+    anvil-unused-deps-validate-prereqs \
     anvil-udeps-validate-prereqs \
     anvil-external-types-validate-prereqs
 
