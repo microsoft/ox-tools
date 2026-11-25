@@ -563,7 +563,8 @@ as uninherited.
 
 ```text
 cargo +nightly unused-deps [--manifest-path <PATH>]
-    [-p <SPEC>...] [--workspace [--exclude <SPEC>...]]
+    [-p <SPEC>...] [--package-file <PATH>...]
+    [--workspace [--exclude <SPEC>...]]
     [--check <NAME>...] [--fix] [--require-workspace]
 ```
 
@@ -571,6 +572,7 @@ cargo +nightly unused-deps [--manifest-path <PATH>]
 |-----------------------|--------------|------------------------------------------------------------------------------|
 | `--manifest-path`     | `Cargo.toml` | Workspace root or crate manifest to check.                                   |
 | `-p`, `--package`     | *(none)*     | Gather compile evidence for an exact package name or `name@version`. Repeatable. |
+| `--package-file`      | *(none)*     | Read exact package specs from a UTF-8 file, one per line. Repeatable; combined with `--package` and other files. |
 | `--workspace`         | *(off)*      | Gather compile evidence for every workspace member.                          |
 | `--exclude`           | *(none)*     | Exclude an exact package name or `name@version` from `--workspace`. Missing exclusions retain Cargo's warning-only behavior. |
 | `--check`             | *(all)*      | Restrict per-package checks to `unused` and/or `misplaced`; catalog still runs. |
@@ -582,6 +584,21 @@ when no package selector is supplied. Package selection applies only to compile
 evidence. This gives impact-scoped callers a safe zero-selection representation:
 invoke the tool with no selector to check the global catalog without compiling any
 package. An ordinary full-workspace run is explicit as `--workspace`.
+
+Package files accept LF or CRLF line endings and one optional leading UTF-8 BOM.
+Empty lines are ignored alongside package specs, but nonempty whitespace-only
+files are rejected. Nonempty lines must be exact package names or
+`name@version`, without whitespace, comments, glob patterns, or command-line
+tokens. Missing or unreadable files, invalid UTF-8, malformed lines, and specs
+that do not resolve to exactly one workspace member fail explicitly before any
+check or fix. Malformed-line errors identify the file and line number.
+Relative file paths are resolved from the caller's working directory, independently
+of `--manifest-path`. As with `--package`, `--package-file` conflicts with
+`--workspace`.
+
+An empty package file adds no selectors, so supplying only empty files runs the
+global catalog check without loading compiler evidence. It does not skip the
+catalog check or prevent `--fix` from removing uninherited entries.
 
 Package-level checks require nightly because collecting doctest evidence uses
 rustdoc's unstable `--no-run` and `--test-builder` options. A selector-free
