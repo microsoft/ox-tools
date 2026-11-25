@@ -267,6 +267,32 @@ availability, or registry publication state. It does not sort candidates,
 define consumer subsets, propagate candidates through dependencies, or
 determine publishing order.
 
+## Release dependency validation
+
+`just anvil-release-dependencies` runs discovery once and succeeds without
+building anything if the report is empty. For a populated report it uses the
+matching `cargo-anvil` binary (or the local binary source in ox-tools).
+
+The check runs `cargo package` for exactly the candidates in one batch,
+including Cargo's default verification build. It leaves registry selection
+to Cargo and does not impose additional manifest rules.
+
+Each `.crate` is extracted separately outside the checkout. The Anvil recipe
+passes the CI temp directory when available. Direct callers can set the
+scratch parent with `cargo anvil release-dependencies --temp-dir <DIR>`; if
+omitted, the validator uses the OS temp directory. The check runs
+`cargo test` separately with `--all-features` and `--no-default-features`
+from the packaged manifests. Cargo resolves dependencies during testing and
+may update the extracted crate's lockfile. A temporary `[patch.crates-io]`
+makes only the extracted candidates available to crates.io dependencies;
+dependencies on other registries are not patched. A published version that
+meets the requirement is also valid. A versionless dev-dependency that Cargo
+omits is not an error on its own. If a shipped test needs an omitted dependency
+or fixture, the test fails. Test targets omitted from the archive are not tested.
+
+The check is standalone: it does not run as part of the PR tier or publish
+anything.
+
 ## 5. Miri execution customization
 
 Miri setup installs its pinned nightly components and prepares the sysroot.

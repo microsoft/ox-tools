@@ -41,11 +41,14 @@ test-util = []
 
 [dependencies]
 clap = { workspace = true, features = ["derive", "std", "help", "usage", "error-context", "string"] }
+flate2 = { workspace = true, features = ["zlib-rs"] }
 jsonc-parser.workspace = true
 ohno = { workspace = true, features = ["app-err"] }
 saphyr-parser = { workspace = true }
 serde_json = { workspace = true, features = ["std"] }
 sha2.workspace = true
+tar.workspace = true
+tempfile.workspace = true
 toml_edit = { workspace = true, features = ["parse", "display"] }
 toml_parser = { workspace = true }
 tracing = { workspace = true }
@@ -57,7 +60,6 @@ assert_cmd = { workspace = true }
 insta = { workspace = true, features = ["filters"] }
 predicates = { workspace = true }
 serial_test = { workspace = true }
-tempfile = { workspace = true }
 walkdir = { workspace = true }
 
 [[test]]
