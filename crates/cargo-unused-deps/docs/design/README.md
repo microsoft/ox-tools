@@ -458,7 +458,12 @@ forwarded, each as an exact workspace-only name pattern: `fixture` becomes `[f]i
 The one-character class preserves the exact name while forcing Cargo's package
 pattern selection. That selection is workspace-scoped by name and cannot select
 a registry package; any requested version was already checked against workspace
-metadata.
+metadata. Workspace-only pattern matching is current
+[Cargo implementation behavior](https://github.com/rust-lang/cargo/blob/df742db36461027c257890d835485e9b7e55d83b/src/ops/cargo_compile/packages.rs#L81-L93),
+not an explicitly documented part of the `--package` glob contract. The
+`cargo_package_globs_keep_evidence_on_the_workspace_member` integration test
+pins the behavior through both compile and doctest evidence so a future Cargo
+change is detected when the tested toolchain advances.
 
 This form is intentionally used for every explicit member rather than switching
 between bare names, URL package IDs, and a special non-ASCII fallback. It uses

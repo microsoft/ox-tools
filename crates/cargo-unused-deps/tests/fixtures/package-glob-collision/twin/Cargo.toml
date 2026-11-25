@@ -1,0 +1,9 @@
+[package]
+name = "twin"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+doc-only = { path = "../doc-only" }
+library-used = { path = "../library-used" }
+registry-twin = { package = "twin", version = "=0.1.0" }

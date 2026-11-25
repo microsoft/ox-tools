@@ -1,0 +1,3 @@
+[workspace]
+members = ["doc-only", "library-used", "twin"]
+resolver = "2"
