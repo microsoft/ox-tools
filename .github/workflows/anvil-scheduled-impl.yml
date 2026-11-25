@@ -72,6 +72,12 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
 
+      - name: Report disk usage
+        if: always()
+        continue-on-error: true
+        shell: pwsh -NoProfile -Command ". '{0}'"
+        run: Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
+
   scheduled-advisories:
     # Clippy and udeps compile host-specific cfg-gated code.
     strategy:
@@ -89,6 +95,12 @@ jobs:
       - uses: ./.anvil/github/actions/run-group
         with:
           group: scheduled-advisories
+
+      - name: Report disk usage
+        if: always()
+        continue-on-error: true
+        shell: pwsh -NoProfile -Command ". '{0}'"
+        run: Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
 
   scheduled-runtime-analysis:
     # Each OS leg runs all Miri profiles sequentially so they share setup and
@@ -109,6 +121,12 @@ jobs:
         with:
           group: scheduled-runtime-analysis
 
+      - name: Report disk usage
+        if: always()
+        continue-on-error: true
+        shell: pwsh -NoProfile -Command ". '{0}'"
+        run: Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
+
   scheduled-exhaustive:
     # Keep exhaustive mutation testing, feature powersets, and benchmark
     # compilation on the existing x86_64 schedule to bound recurring cost.
@@ -128,6 +146,12 @@ jobs:
       - uses: ./.anvil/github/actions/run-group
         with:
           group: scheduled-exhaustive
+
+      - name: Report disk usage
+        if: always()
+        continue-on-error: true
+        shell: pwsh -NoProfile -Command ". '{0}'"
+        run: Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
 
   publish-failure:
     name: Publish scheduled failure
@@ -196,3 +220,8 @@ jobs:
                 body,
               });
             }
+      - name: Report disk usage
+        if: always()
+        continue-on-error: true
+        shell: pwsh -NoProfile -Command ". '{0}'"
+        run: Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize

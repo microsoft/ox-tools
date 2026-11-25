@@ -8,6 +8,10 @@
 
   - cargo-anvil: add cargo-unused-deps check ([#378](https://github.com/microsoft/ox-tools/pull/378))
 
+- 🐛 Bug Fixes
+
+  - cargo-gamma: address audit findings ([#381](https://github.com/microsoft/ox-tools/pull/381))
+
 - 📚 Documentation
 
   - cargo-anvil: name cargo-audit execution groups
@@ -24,7 +28,25 @@
 
 - 🧩 Miscellaneous
 
+  - Merge main and preserve cargo-deny advisory split
   - Merge main and reconcile cargo-anvil 0.29.0 catalog
+
+## [0.28.2] - 2026-11-25
+
+- ✨ Features
+
+  - cargo-anvil: add cargo-unused-deps check ([#378](https://github.com/microsoft/ox-tools/pull/378))
+  - cargo-anvil: report disk usage at the end of CI jobs
+
+- 🐛 Bug Fixes
+
+  - cargo-anvil: reconcile disk diagnostics with new catalog release
+  - cargo-anvil: preserve final diagnostics across consolidation
+  - cargo-anvil: simplify final disk reports to one native command
+
+- ✔️ Tasks
+
+  - cargo-anvil: release disk diagnostics catalog as 0.26.1
 
 ## [0.28.1] - 2026-11-24
 

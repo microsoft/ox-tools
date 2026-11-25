@@ -88,6 +88,13 @@ payload. Lookup failures fail the leg; merge-group runs skip title validation.
 
 ## Toolchains, setup, and caches
 
+Every generated job ends with a non-blocking `Report disk usage` step, including
+impact preparation, no-op matrix legs, and result publication. One PowerShell
+command logs filesystem drives and their used/free space, including Windows C:
+and D:, even after earlier failures. It writes no files and scans no directories.
+Reporting failures do not change the checks' verdict. These are final
+observations, not peak usage; runner termination can prevent reporting.
+
 The generated configuration requires Rust/Cargo 1.95 or newer and Just 1.47.0
 or newer. Individual tools can impose higher requirements. Stable-toolchain
 selection follows the [local contract](./local.md): caller

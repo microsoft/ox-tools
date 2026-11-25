@@ -512,6 +512,7 @@ async function scenario({ env = {}, history = [], context = baseContext } = {}) 
             .expect("scheduled workflow should contain an inline script")
             .1
             .lines()
+            .take_while(|line| line.is_empty() || line.starts_with("            "))
             .map(|line| line.strip_prefix("            ").unwrap_or(line))
             .collect::<Vec<_>>()
             .join("\n");

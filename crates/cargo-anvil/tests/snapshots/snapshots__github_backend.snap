@@ -4594,6 +4594,12 @@ jobs:
         env:
           BASE_REF: ${{ inputs.base_ref }}
 
+      - name: Report disk usage
+        if: always()
+        continue-on-error: true
+        shell: pwsh -NoProfile -Command ". '{0}'"
+        run: Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
+
   impact-windows:
     name: "Preparation: Impact Analysis (windows)"
     runs-on: ${{ inputs.windows_runner }}
@@ -4606,6 +4612,12 @@ jobs:
       - uses: ./.anvil/github/actions/impact
         env:
           BASE_REF: ${{ inputs.base_ref }}
+
+      - name: Report disk usage
+        if: always()
+        continue-on-error: true
+        shell: pwsh -NoProfile -Command ". '{0}'"
+        run: Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
 
   # These job display names form repository-ruleset contexts. Treat cosmetic
   # changes as compatibility changes across PR and merge-group events.
@@ -4663,6 +4675,12 @@ jobs:
         env:
           BASE_REF: ${{ inputs.base_ref }}
           PR_TITLE: ${{ steps.pr_title.outputs.title }}
+      - name: Report disk usage
+        if: always()
+        continue-on-error: true
+        shell: pwsh -NoProfile -Command ". '{0}'"
+        run: Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
+
   pr-test:
     name: "Check Group: Tests and Coverage (${{ matrix.os }})"
     permissions:
@@ -4711,6 +4729,12 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
 
+      - name: Report disk usage
+        if: always()
+        continue-on-error: true
+        shell: pwsh -NoProfile -Command ". '{0}'"
+        run: Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
+
   pr-msrv:
     name: "Check Group: MSRV Tests (${{ matrix.os }})"
     permissions:
@@ -4740,6 +4764,12 @@ jobs:
           publish_commit_statuses: ${{ inputs.publish_commit_statuses }}
           free-disk-space: true
           impact_mode: consume
+
+      - name: Report disk usage
+        if: always()
+        continue-on-error: true
+        shell: pwsh -NoProfile -Command ". '{0}'"
+        run: Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
 
   pr-runtime-analysis:
     name: "Check Group: Runtime Analysis (${{ matrix.os }})"
@@ -4776,6 +4806,12 @@ jobs:
           publish_commit_statuses: ${{ inputs.publish_commit_statuses }}
           impact_mode: consume
 
+      - name: Report disk usage
+        if: always()
+        continue-on-error: true
+        shell: pwsh -NoProfile -Command ". '{0}'"
+        run: Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
+
   pr-fuzzing:
     name: "Check Group: Fuzzing (${{ matrix.os }})"
     permissions:
@@ -4801,6 +4837,12 @@ jobs:
           group: pr-fuzzing
           publish_commit_statuses: ${{ inputs.publish_commit_statuses }}
           impact_mode: consume
+
+      - name: Report disk usage
+        if: always()
+        continue-on-error: true
+        shell: pwsh -NoProfile -Command ". '{0}'"
+        run: Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
 
   pr-mutants:
     name: "Check Group: Mutation Testing (${{ matrix.os }})"
@@ -4849,6 +4891,12 @@ jobs:
         shell: bash
         run: echo "Mutation testing is covered by the Windows x64 matrix leg."
 
+      - name: Report disk usage
+        if: always()
+        continue-on-error: true
+        shell: pwsh -NoProfile -Command ". '{0}'"
+        run: Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
+
   required-checks:
     # This display name is the repository-ruleset context. Keep it stable
     # across pull-request and merge-group callers.
@@ -4896,6 +4944,11 @@ jobs:
             fi
           done
           exit "$status"
+      - name: Report disk usage
+        if: always()
+        continue-on-error: true
+        shell: pwsh -NoProfile -Command ". '{0}'"
+        run: Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
 
 === .github/workflows/anvil-pr.yml ===
 # Copyright (c) Microsoft Corporation.
@@ -5011,6 +5064,12 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
 
+      - name: Report disk usage
+        if: always()
+        continue-on-error: true
+        shell: pwsh -NoProfile -Command ". '{0}'"
+        run: Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
+
   scheduled-advisories:
     # Clippy and udeps compile host-specific cfg-gated code.
     strategy:
@@ -5028,6 +5087,12 @@ jobs:
       - uses: ./.anvil/github/actions/run-group
         with:
           group: scheduled-advisories
+
+      - name: Report disk usage
+        if: always()
+        continue-on-error: true
+        shell: pwsh -NoProfile -Command ". '{0}'"
+        run: Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
 
   scheduled-runtime-analysis:
     # Each OS leg runs all Miri profiles sequentially so they share setup and
@@ -5048,6 +5113,12 @@ jobs:
         with:
           group: scheduled-runtime-analysis
 
+      - name: Report disk usage
+        if: always()
+        continue-on-error: true
+        shell: pwsh -NoProfile -Command ". '{0}'"
+        run: Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
+
   scheduled-exhaustive:
     # Keep exhaustive mutation testing, feature powersets, and benchmark
     # compilation on the existing x86_64 schedule to bound recurring cost.
@@ -5067,6 +5138,12 @@ jobs:
       - uses: ./.anvil/github/actions/run-group
         with:
           group: scheduled-exhaustive
+
+      - name: Report disk usage
+        if: always()
+        continue-on-error: true
+        shell: pwsh -NoProfile -Command ". '{0}'"
+        run: Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
 
   publish-failure:
     name: Publish scheduled failure
@@ -5135,6 +5212,11 @@ jobs:
                 body,
               });
             }
+      - name: Report disk usage
+        if: always()
+        continue-on-error: true
+        shell: pwsh -NoProfile -Command ". '{0}'"
+        run: Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
 
 === .github/workflows/anvil-scheduled.yml ===
 # Copyright (c) Microsoft Corporation.

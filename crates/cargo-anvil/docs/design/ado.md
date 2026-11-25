@@ -36,6 +36,15 @@ does not remove a job. Excluding a check does not remove its stage or setup.
 
 ## Repository extension points
 
+The default job wrapper appends a non-blocking `Report disk usage` step after
+artifact publication, with `condition: always()`. The same single PowerShell
+command as [GitHub jobs](./github.md#toolchains-setup-and-caches) logs filesystem
+drives and used/free space. It writes no files, scans no directories, and does
+not change the checks' verdict. Command failures are logged as warnings and
+the reporting script exits successfully. Terminated runners cannot report.
+Repository-owned job wrappers must retain or add this step to get diagnostics;
+custom stages outside the wrapper are not instrumented.
+
 ### Custom stages
 
 Each root also includes `.anvil/ado/custom/pr-stages.yml` or
