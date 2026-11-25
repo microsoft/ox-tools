@@ -64,14 +64,14 @@ fn run_cargo_with(
 /// Share workspace orchestration between production and tests, with controlled input, discovery, and execution.
 fn run_workspace_with(
     args: &EachArgs,
-    load_selection: impl FnOnce(&EachArgs) -> Result<Selection, EachError>,
+    load_selection: impl FnOnce(&EachArgs, &Workspace) -> Result<Selection, EachError>,
     load_workspace: impl FnOnce(Option<&Path>) -> Result<Workspace, EachError>,
     execute_plan: impl FnOnce(&Plan, bool, NonZeroUsize, Option<Duration>) -> Result<ExitCode, AppError>,
 ) -> Result<ExitCode, AppError> {
     let command_uses_workspace_rust_version = uses_workspace_rust_version(&args.command);
 
-    let selection = load_selection(args).into_app_err(SELECTION_READ_CONTEXT)?;
     let workspace = load_workspace(args.manifest_path.as_deref()).into_app_err("failed to load workspace")?;
+    let selection = load_selection(args, &workspace).into_app_err(SELECTION_READ_CONTEXT)?;
 
     let mut members = selection.resolve(&workspace).into_app_err("failed to resolve package selection")?;
     apply_package_filters(&mut members, args)?;
@@ -206,8 +206,15 @@ fn validate_json_mode(args: &EachArgs) -> Result<(), AppError> {
 }
 
 /// Assemble a [`Selection`] from direct and file-backed package specs.
-fn build_selection(args: &EachArgs) -> Result<Selection, crate::error::EachError> {
-    Selection::from_sources(&args.packages, &args.package_files, args.workspace, &args.exclude, args.none)
+fn build_selection(args: &EachArgs, workspace: &Workspace) -> Result<Selection, crate::error::EachError> {
+    Selection::from_sources(
+        workspace,
+        &args.packages,
+        &args.package_files,
+        args.workspace,
+        &args.exclude,
+        args.none,
+    )
 }
 
 /// Narrow `members` by package filter expressions. Repeated expressions are

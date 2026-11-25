@@ -51,17 +51,19 @@ impl Selection {
     /// Returns [`EachError`] when a package file cannot be read as UTF-8 or
     /// contains a malformed nonempty line.
     pub(crate) fn from_sources(
+        workspace: &Workspace,
         packages: &[String],
         package_files: &[PathBuf],
         all: bool,
         exclude: &[String],
         none: bool,
     ) -> Result<Self, EachError> {
-        Self::from_sources_with_reader(packages, package_files, all, exclude, none, |path| fs::read(path))
+        Self::from_sources_with_reader(workspace, packages, package_files, all, exclude, none, |path| fs::read(path))
     }
 
     /// Build a selection with an explicit package-file reader.
     pub(crate) fn from_sources_with_reader(
+        workspace: &Workspace,
         packages: &[String],
         package_files: &[PathBuf],
         all: bool,
@@ -72,7 +74,7 @@ impl Selection {
         let mut combined = packages.to_vec();
         for path in package_files {
             let bytes = read(path).map_err(|error| PackageFileReadError::caused_by(path.display().to_string(), error))?;
-            combined.extend(parse_package_file(path, bytes)?);
+            combined.extend(parse_package_file(workspace, path, bytes)?);
         }
         Ok(Self {
             packages: combined,
@@ -137,7 +139,7 @@ impl Selection {
     }
 }
 
-fn parse_package_file(path: &Path, bytes: Vec<u8>) -> Result<Vec<String>, EachError> {
+fn parse_package_file(workspace: &Workspace, path: &Path, bytes: Vec<u8>) -> Result<Vec<String>, EachError> {
     let display = path.display().to_string();
     let contents = String::from_utf8(bytes).map_err(|error| PackageFileUtf8Error::caused_by(display.clone(), error))?;
     contents
@@ -149,13 +151,16 @@ fn parse_package_file(path: &Path, bytes: Vec<u8>) -> Result<Vec<String>, EachEr
             if line.is_empty() {
                 None
             } else {
-                Some(validate_package_file_spec(&display, index + 1, line).map(str::to_owned))
+                Some(validate_package_file_spec(workspace, &display, index + 1, line).map(str::to_owned))
             }
         })
         .collect()
 }
 
-fn validate_package_file_spec<'a>(path: &str, line: usize, spec: &'a str) -> Result<&'a str, EachError> {
+fn validate_package_file_spec<'a>(workspace: &Workspace, path: &str, line: usize, spec: &'a str) -> Result<&'a str, EachError> {
+    if workspace.members.iter().any(|member| member.package_id == spec) {
+        return Ok(spec);
+    }
     let invalid = |reason: &str| InvalidPackageFileLineError::new(path.to_owned(), line, spec.to_owned(), reason.to_owned()).into();
     if spec.bytes().any(|byte| byte.is_ascii_whitespace()) {
         return Err(invalid("leading, trailing, and embedded whitespace are not allowed"));
@@ -390,6 +395,7 @@ mod tests {
 
     #[test]
     fn package_file_lines_reject_comments_tokens_and_whitespace() {
+        let ws = workspace(&[]);
         for (spec, reason) in [
             ("#alpha", "comments are not supported"),
             ("--workspace", "command-line tokens are not package specs"),
@@ -402,12 +408,14 @@ mod tests {
             ("alpha@1@2", "a package spec may contain at most one `@`"),
         ] {
             assert_eq!(
-                validate_package_file_spec("packages.txt", 7, spec).expect_err(spec).to_string(),
+                validate_package_file_spec(&ws, "packages.txt", 7, spec)
+                    .expect_err(spec)
+                    .to_string(),
                 format!("invalid package spec in `packages.txt` at line 7: `{spec}` ({reason})")
             );
         }
         for spec in ["alpha", "alpha@1.2.3", "cargo-*", "?eta"] {
-            assert_eq!(validate_package_file_spec("packages.txt", 1, spec).expect(spec), spec);
+            assert_eq!(validate_package_file_spec(&ws, "packages.txt", 1, spec).expect(spec), spec);
         }
     }
 

@@ -195,6 +195,12 @@ member order. Unknown, registry-only, and stale checkout identities fail
 rather than falling back to a bare name. Metadata IDs are matched literally,
 not parsed or rewritten.
 
+Package-file lines are matched against current workspace metadata IDs before
+ordinary selector syntax is validated. An exact opaque ID may therefore contain
+spaces or other characters that are invalid in an ordinary name/version
+selector; malformed non-ID entries remain errors, including with `--none` or
+`--workspace`.
+
 The former spelling is matched using the current member's absolute manifest
 directory, name, and version solely for input compatibility. Output always
 uses the package ID supplied by Cargo metadata.

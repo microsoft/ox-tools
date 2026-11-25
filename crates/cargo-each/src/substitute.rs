@@ -225,7 +225,6 @@ pub(crate) fn validate_placeholders(args: &[String], mode: Mode) -> Result<(), E
                 )
                 .into());
             }
-            // #[gamma::skip(collection.reverse_array, reason = "Both standalone-only tokens are checked independently; either order rejects the same invalid command templates.", tag = "equivalent")]
             for token in [PACKAGES_TOKEN, CARGO_SPECS_TOKEN] {
                 if arg != token && arg.contains(token) {
                     return Err(PlaceholderMisuseError::new(
@@ -236,7 +235,6 @@ pub(crate) fn validate_placeholders(args: &[String], mode: Mode) -> Result<(), E
                 }
             }
         } else {
-            // #[gamma::skip(collection.reverse_array, reason = "Both once-only tokens are checked independently; either order rejects the same invalid command templates.", tag = "equivalent")]
             for token in [PACKAGES_TOKEN, CARGO_SPECS_TOKEN] {
                 if arg.contains(token) {
                     return Err(PlaceholderMisuseError::new(token.to_owned(), "only valid in --once mode".to_owned()).into());
@@ -509,19 +507,27 @@ mod tests {
     #[test]
     fn cargo_specs_require_a_standalone_argument_in_once_mode() {
         for mode in [Mode::PerPackage, Mode::PerTarget] {
-            assert_eq!(
-                validate_placeholders(&args(&["{cargo-specs}"]), mode)
-                    .expect_err("once-only token")
-                    .to_string(),
-                "placeholder `{cargo-specs}` cannot be used here: only valid in --once mode",
-            );
+            for (argument, placeholder) in [("{cargo-specs}", "{cargo-specs}"), ("{packages}{cargo-specs}", "{packages}")] {
+                assert_eq!(
+                    validate_placeholders(&args(&[argument]), mode)
+                        .expect_err("once-only token")
+                        .to_string(),
+                    format!("placeholder `{placeholder}` cannot be used here: only valid in --once mode"),
+                );
+            }
         }
-        for token in ["prefix={cargo-specs}", "{cargo-specs}{cargo-specs}", "{packages}{cargo-specs}"] {
-            assert!(
-                validate_placeholders(&args(&[token]), Mode::Once)
+        for (argument, placeholder) in [
+            ("prefix={cargo-specs}", "{cargo-specs}"),
+            ("{cargo-specs}{cargo-specs}", "{cargo-specs}"),
+            ("{packages}{cargo-specs}", "{packages}"),
+        ] {
+            assert_eq!(
+                validate_placeholders(&args(&[argument]), Mode::Once)
                     .expect_err("standalone token")
-                    .to_string()
-                    .contains("must stand alone")
+                    .to_string(),
+                format!(
+                    "placeholder `{placeholder}` cannot be used here: must stand alone as a whole argument (it expands to multiple tokens)"
+                ),
             );
         }
         assert_eq!(

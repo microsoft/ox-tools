@@ -15,6 +15,7 @@ use serde_json::{Value, from_str, from_value, json};
 
 use super::*;
 use crate::cli::CargoCli;
+use crate::error::{InvalidPackageFileLineError, UnknownSelectorError};
 
 fn checkout_path(checkout: &str) -> PathBuf {
     PathBuf::from(if cfg!(windows) { r"C:\checkouts" } else { "/checkouts" }).join(checkout)
@@ -108,8 +109,9 @@ fn args(options: &[&str]) -> EachArgs {
     args
 }
 
-fn selection_without_files(args: &EachArgs) -> Result<Selection, EachError> {
+fn selection_without_files(args: &EachArgs, workspace: &Workspace) -> Result<Selection, EachError> {
     Selection::from_sources_with_reader(
+        workspace,
         &args.packages,
         &args.package_files,
         args.workspace,
@@ -165,7 +167,7 @@ fn dispatch_resolves_only_workspace_packages_and_applies_existing_filters() {
 #[test]
 fn target_names_do_not_select_packages() {
     let workspace = workspace("checkout with spaces", "literal-local-id");
-    let selection = selection_without_files(&args(&["-p", "custom_library_name", "--", "cargo", "check"])).expect("selection");
+    let selection = selection_without_files(&args(&["-p", "custom_library_name", "--", "cargo", "check"]), &workspace).expect("selection");
     let error = selection.resolve(&workspace).expect_err("a target name is not a package selector");
     assert_eq!(
         error.to_string(),
@@ -319,8 +321,9 @@ fn portable_package_file_resolves_against_each_checkout_without_filesystem_mutat
         let mut executions = 0;
         let code = run_workspace_with(
             &args,
-            |args| {
+            |args, workspace| {
                 Selection::from_sources_with_reader(
+                    workspace,
                     &args.packages,
                     &args.package_files,
                     args.workspace,
@@ -392,8 +395,9 @@ fn dispatch_source_selection(
     let mut invocations = Vec::new();
     run_workspace_with(
         &args,
-        |args| {
+        |args, workspace| {
             Selection::from_sources_with_reader(
+                workspace,
                 &args.packages,
                 &args.package_files,
                 args.workspace,
@@ -435,6 +439,34 @@ fn source_selection_input_and_output_forms_are_independent() {
             target_options.extend(["--each-target", "lib"]);
             let invocations = dispatch_source_selection(checkout, &id, &target_options, contents, &command).expect("per-target selection");
             assert_eq!(invocations[0].argv, ["report", "alpha", "alpha@0.1.0", &id]);
+        }
+    }
+}
+
+#[test]
+fn opaque_metadata_ids_bypass_only_ordinary_file_selector_validation() {
+    for id in ["alpha 0.1.0 (path+file:///old/checkout)", "opaque future metadata ID"] {
+        for (options, contents) in [
+            (vec!["-p", id, "--once"], ""),
+            (vec!["--package-file", "selection.txt", "--once"], id),
+        ] {
+            let invocations = dispatch_source_selection("checkout", id, &options, contents, &["cargo", "check", "{cargo-specs}"])
+                .expect("exact opaque metadata ID");
+            assert_eq!(invocations[0].argv, ["cargo", "check", "--package", id]);
+        }
+        for options in [
+            vec!["--package-file", "selection.txt", "--once"],
+            vec!["--package-file", "selection.txt", "--none", "--once"],
+            vec!["--package-file", "selection.txt", "--workspace", "--once"],
+        ] {
+            let invalid = "not a current metadata ID";
+            let error = dispatch_source_selection("checkout", id, &options, invalid, &["cargo", "check", "{cargo-specs}"])
+                .expect_err("non-ID whitespace is still invalid");
+            let cause = error.find_source::<InvalidPackageFileLineError>().expect("file syntax error");
+            assert_eq!(cause.path, "selection.txt");
+            assert_eq!(cause.line, 1);
+            assert_eq!(cause.spec, invalid);
+            assert_eq!(cause.reason, "leading, trailing, and embedded whitespace are not allowed");
         }
     }
 }
@@ -509,12 +541,10 @@ fn source_selection_rejects_registry_and_stale_checkout_identities() {
         ] {
             let error = dispatch_source_selection("original checkout", id, &options, contents, &["cargo", "check", "{cargo-specs}"])
                 .expect_err("not a current workspace member");
-            assert!(
-                error
-                    .to_string()
-                    .contains(&format!("package selector `{invalid}` did not match any workspace member")),
-                "{error}"
-            );
+            let cause = error
+                .find_source::<UnknownSelectorError>()
+                .expect("workspace identity resolution error");
+            assert_eq!(cause.selector, invalid);
         }
     }
 }
