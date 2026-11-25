@@ -1136,8 +1136,13 @@ mod source_campaign_tests {
         ])
         .expect("package-file supports --fix");
         let error = run(cli).expect_err("a Cargo manifest is not a package selection file");
-        assert!(error.to_string().contains("invalid package spec"), "{error}");
-        assert!(error.to_string().contains(&path.display().to_string()), "{error}");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "invalid package spec in {} at line 1: \"# Copyright (c) Microsoft Corporation.\"; expected an exact package name or name@version, without whitespace, comments, glob patterns, or command-line tokens",
+                path.display()
+            )
+        );
     }
 
     #[test]
@@ -1741,11 +1746,11 @@ mod selection_tests {
                 "\u{feff}alpha\r\n\r\nbeta@1.2.3\r\n".as_bytes().to_vec()
             } else {
                 assert_eq!(path, files[1]);
-                b"\ngamma\n".to_vec()
+                b"\ngamma-delta\ngamma_delta\n".to_vec()
             })
         })
         .expect("valid file sources combine");
-        assert_eq!(packages, ["direct", "alpha", "beta@1.2.3", "gamma"]);
+        assert_eq!(packages, ["direct", "alpha", "beta@1.2.3", "gamma-delta", "gamma_delta"]);
     }
 
     #[test]
@@ -1764,26 +1769,39 @@ mod selection_tests {
             "@1",
             "alpha@",
             "alpha@1@2",
+            "alpha@1.2.3 ",
+            "alpha@1. 2.3",
+            "alpha@1.2.3\u{a0}",
             "alpha\u{a0}",
             "\u{feff}alpha",
         ] {
             let error =
                 package_specs(Vec::new(), &files, |_| Ok(format!("valid\n{spec}\n").into_bytes())).expect_err("malformed lines must fail");
-            let message = error.to_string();
-            assert!(message.contains("required.packages at line 2"), "{message}");
-            assert!(message.contains("expected an exact package name or name@version"), "{message}");
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "invalid package spec in required.packages at line 2: {spec:?}; expected an exact package name or name@version, without whitespace, comments, glob patterns, or command-line tokens"
+                )
+            );
         }
         let error = package_specs(Vec::new(), &files, |_| Ok(vec![0xff])).expect_err("invalid UTF-8 must fail");
-        assert!(error.to_string().contains("required.packages is not valid UTF-8"), "{error}");
+        assert_eq!(
+            error.to_string().split(" (at ").next(),
+            Some(
+                "invalid utf-8 sequence of 1 bytes from index 0\n> package file required.packages is not valid UTF-8; save it as UTF-8 with one package spec per line"
+            )
+        );
         for kind in [std::io::ErrorKind::NotFound, std::io::ErrorKind::PermissionDenied] {
             let error = package_specs(Vec::new(), &files, |path| {
                 assert_eq!(path, Path::new("required.packages"));
                 Err(std::io::Error::new(kind, "injected read failure"))
             })
             .expect_err("missing and unreadable files must fail");
-            assert!(
-                error.to_string().contains("failed to read package file required.packages"),
-                "{error}"
+            assert_eq!(
+                error.to_string().split(" (at ").next(),
+                Some(
+                    "injected read failure\n> failed to read package file required.packages; supply a readable UTF-8 file with one package spec per line"
+                )
             );
             assert_eq!(error.message(), "injected read failure");
         }
@@ -1802,8 +1820,25 @@ mod selection_tests {
             "direct",
         ])
         .expect("package files are repeatable and combine with direct packages");
-        for args in [vec!["--package-file", "required.packages", "--workspace"], vec!["--package-file"]] {
-            Cli::try_parse_from(["cargo", "unused-deps"].into_iter().chain(args)).expect_err("invalid selector combinations must fail");
+        for (args, kind, argument) in [
+            (
+                vec!["--package-file", "required.packages", "--workspace"],
+                clap::error::ErrorKind::ArgumentConflict,
+                "--package-file <PATH>",
+            ),
+            (
+                vec!["--package-file"],
+                clap::error::ErrorKind::InvalidValue,
+                "--package-file <PATH>",
+            ),
+        ] {
+            let error =
+                Cli::try_parse_from(["cargo", "unused-deps"].into_iter().chain(args)).expect_err("invalid selector combinations must fail");
+            assert_eq!(error.kind(), kind);
+            assert_eq!(
+                error.get(clap::error::ContextKind::InvalidArg),
+                Some(&clap::error::ContextValue::String(argument.into()))
+            );
         }
     }
 
