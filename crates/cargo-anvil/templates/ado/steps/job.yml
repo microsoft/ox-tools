@@ -52,3 +52,13 @@ jobs:
             inputs:
               targetPath: ${{ artifact.path }}
               artifact: ${{ artifact.name }}
+      - pwsh: |
+          try {
+            Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
+          } catch {
+            Write-Warning "Disk usage report unavailable: $_"
+          }
+          exit 0
+        displayName: Report disk usage
+        condition: always()
+        continueOnError: true
