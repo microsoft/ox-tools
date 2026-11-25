@@ -6,6 +6,7 @@
 
 - ♻️ Code Refactoring
 
+  - cargo-anvil: delegate impact snapshots to cargo-delta
   - cargo-anvil: use portable spellcheck helpers
 
 ## [0.28.2] - 2026-11-25
