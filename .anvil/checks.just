@@ -9,10 +9,10 @@
 [env("RUSTUP_TOOLCHAIN", anvil_impact_toolchain)]
 [env("GIT_LFS_SKIP_SMUDGE", "1")]
 anvil-impact: (_check-tool "cargo-delta" cargo_delta_version if anvil_impact_mode == "" { "true" } else { "false" }) (_anvil-impact-consume-file "modified") (_anvil-impact-consume-file "affected") (_anvil-impact-consume-file "required")
-    @{{ anvil_impact_compute_prefix }}{{ if path_exists(".delta.toml") { "# repository impact configuration available" } else { "echo " + quote("anvil-impact: warning: no .delta.toml found; cargo-delta defaults may under-scope checks. Restore the repository's impact configuration for conservative scoping.") } }}
-    {{ anvil_impact_compute_prefix }}cargo delta {{ anvil_impact_config_arg }} impact --base-ref {{ quote(anvil_base_ref) }} --modified --format packages --output {{ quote(anvil_impact_input_dir + "/modified.packages") }}
-    {{ anvil_impact_compute_prefix }}cargo delta {{ anvil_impact_config_arg }} impact --base-ref {{ quote(anvil_base_ref) }} --affected --format packages --output {{ quote(anvil_impact_input_dir + "/affected.packages") }}
-    {{ anvil_impact_compute_prefix }}cargo delta {{ anvil_impact_config_arg }} impact --base-ref {{ quote(anvil_base_ref) }} --required --format packages --output {{ quote(anvil_impact_input_dir + "/required.packages") }}
+    @{{ anvil_impact_skip_prefix }}{{ if path_exists(".delta.toml") { "# repository impact configuration available" } else { "echo " + quote("anvil-impact: warning: no .delta.toml found; cargo-delta defaults may under-scope checks. Restore the repository's impact configuration for conservative scoping.") } }}
+    {{ anvil_impact_skip_prefix }}cargo delta {{ anvil_impact_config_arg }} impact --base-ref {{ quote(anvil_base_ref) }} --modified --format packages --output {{ quote(anvil_impact_input_dir + "/modified.packages") }}
+    {{ anvil_impact_skip_prefix }}cargo delta {{ anvil_impact_config_arg }} impact --base-ref {{ quote(anvil_base_ref) }} --affected --format packages --output {{ quote(anvil_impact_input_dir + "/affected.packages") }}
+    {{ anvil_impact_skip_prefix }}cargo delta {{ anvil_impact_config_arg }} impact --base-ref {{ quote(anvil_base_ref) }} --required --format packages --output {{ quote(anvil_impact_input_dir + "/required.packages") }}
 
 # Build all workspace targets and features, optionally for one package or profile.
 [arg("package", long, pattern='(?:[A-Za-z0-9_.-]+)?')]

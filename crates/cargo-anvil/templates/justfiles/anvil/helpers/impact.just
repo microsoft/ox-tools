@@ -29,7 +29,7 @@ anvil_impact_input_dir := if anvil_impact_mode == "consume" {
 } else {
     error("ANVIL_IMPACT_INVOCATION_ID must be a numeric Just process id")
 }
-anvil_impact_compute_prefix := if anvil_impact_mode != "" {
+anvil_impact_skip_prefix := if anvil_impact_mode != "" {
     "# "
 } else if anvil_impact_cloud == "true" {
     if trim(shell("git status --porcelain -- . " + quote(":(exclude)target/"))) == "" {
