@@ -1626,6 +1626,14 @@ mod selection_tests {
                 allowed: BTreeSet::new(),
                 has_doctests: false,
             },
+            verdict::Package {
+                name: "beta".to_owned(),
+                version: "1.0.0".to_owned(),
+                manifest_path: PathBuf::from("beta").join("Cargo.toml"),
+                declared: Vec::new(),
+                allowed: BTreeSet::new(),
+                has_doctests: false,
+            },
         ];
         let selected = selection.resolve(&packages).expect("the selectors resolve");
         assert_eq!(
