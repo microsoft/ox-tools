@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 /// Uses a dependency that ordinary compilation never loads.
 ///
 /// ```

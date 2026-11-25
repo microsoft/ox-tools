@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 #[cfg(test)]
 compile_error!("registry twin was selected for compiler evidence");
 
