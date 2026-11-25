@@ -2,10 +2,13 @@
 // Licensed under the MIT License.
 
 use std::collections::HashSet;
+use std::marker::PhantomData;
 use std::path::Path;
 use std::{fmt, io};
 
 use ohno::AppError;
+use serde::de::value::MapAccessDeserializer;
+use serde::de::{MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 
 const BUNDLED: &[u8] = include_bytes!("../defaults.json");
@@ -16,7 +19,7 @@ const BUNDLED_LABEL: &str = "bundled defaults.json";
 struct PolicyFile {
     #[serde(default, deserialize_with = "present")]
     features: Option<Vec<String>>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "read_exceptions")]
     exceptions: Vec<Exception>,
     #[serde(default, rename = "$comment")]
     _comment: Option<serde::de::IgnoredAny>,
@@ -29,6 +32,31 @@ struct Exception {
     feature: String,
     #[serde(default, deserialize_with = "present")]
     dependency: Option<String>,
+}
+
+fn read_exceptions<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<Exception>, D::Error> {
+    #[derive(Deserialize)]
+    struct Entry(#[serde(deserialize_with = "read_object")] Exception);
+
+    Vec::<Entry>::deserialize(deserializer).map(|entries| entries.into_iter().map(|entry| entry.0).collect())
+}
+
+fn read_object<'de, T: Deserialize<'de>, D: Deserializer<'de>>(deserializer: D) -> Result<T, D::Error> {
+    struct Object<T>(PhantomData<T>);
+
+    impl<'de, T: Deserialize<'de>> Visitor<'de> for Object<T> {
+        type Value = T;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a JSON object")
+        }
+
+        fn visit_map<M: MapAccess<'de>>(self, map: M) -> Result<T, M::Error> {
+            T::deserialize(MapAccessDeserializer::new(map))
+        }
+    }
+
+    deserializer.deserialize_map(Object(PhantomData))
 }
 
 pub(crate) struct Policy {
@@ -73,7 +101,7 @@ impl Policy {
             let dependency = entry.dependency.as_deref();
             if entry.package.trim().is_empty() || !denied.contains(&entry.feature) || dependency.is_some_and(|key| key.trim().is_empty()) {
                 return Err(invalid(
-                    "each exception requires a package, a denied feature, and an optional dependency key",
+                    "each exception requires a nonblank package and a denied feature; dependency may be omitted but must not be blank if supplied",
                 ));
             }
             if !seen.insert((&entry.package, dependency, &entry.feature)) {
@@ -138,7 +166,8 @@ mod tests {
     fn rejects_invalid_policy_and_distinguishes_io_errors() -> Result<(), AppError> {
         let path = Path::new("policy.json");
         let invalid_features = "features must contain at least one feature and all names must be unique, nonempty strings";
-        let invalid_exception = "each exception requires a package, a denied feature, and an optional dependency key";
+        let invalid_exception =
+            "each exception requires a nonblank package and a denied feature; dependency may be omitted but must not be blank if supplied";
         for (invalid, detail) in [
             ("null", "expected a JSON object"),
             ("[]", "expected a JSON object"),
@@ -193,5 +222,19 @@ mod tests {
         assert!(with_bom.denies("app", None, "test-util"));
         assert!(!with_bom.denies("app", None, "fakes"));
         Ok(())
+    }
+
+    #[test]
+    fn rejects_positional_exceptions() {
+        for json in [
+            br#"{"exceptions":[["app","fakes"]]}"#.as_slice(),
+            br#"{"exceptions":[["app","fakes","wire"]]}"#.as_slice(),
+        ] {
+            let error = load(Some(Path::new("policy.json")), |_| Ok(json.to_vec()))
+                .err()
+                .expect("exception entries must name their fields");
+            assert!(error.to_string().starts_with("invalid policy at policy.json:"));
+            assert!(error.to_string().contains("expected a JSON object"));
+        }
     }
 }

@@ -28,8 +28,9 @@ cargo ensure-no-test-features
 cargo ensure-no-test-features --manifest-path path/to/Cargo.toml --policy policy.json
 ```
 
-The checker scans publishable members of the selected Cargo workspace, even
-when `--manifest-path` names a member. It checks explicit requests on direct
+The checker scans the selected Cargo workspace, even when `--manifest-path`
+names a member. It skips `publish = false` but checks members restricted to
+named registries. It checks explicit requests on direct
 normal and build dependencies and requests reachable from a member’s default features.
 It ignores dev dependencies, transitive activation and dependency defaults.
 
