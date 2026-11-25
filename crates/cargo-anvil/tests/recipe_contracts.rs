@@ -178,33 +178,26 @@ fn coverage_is_one_domain_tool_invocation() {
 
 #[test]
 fn spellcheck_uses_portable_helpers_with_validated_setup() {
-    let generated = generated();
-    let spellcheck = generated
-        .checks
-        .split("\nanvil-spellcheck:")
-        .nth(1)
-        .unwrap()
-        .split("\n\n")
-        .next()
-        .unwrap();
+    let spellcheck = include_str!("../templates/justfiles/anvil/checks/spellcheck.just");
+    let setup = include_str!("../templates/justfiles/anvil/setup/checks/spellcheck.just");
+    let tools = include_str!("../templates/justfiles/anvil/setup/tools.just");
     assert!(spellcheck.contains("cargo spellcheck-helper prepare-dictionary --input .spelling --output target/spelling.dic"));
     assert!(spellcheck.contains("cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} spellcheck"));
-    assert!(!generated.checks.contains("[script(\"pwsh\", \"-NoProfile\")]\nanvil-spellcheck:"));
-    assert!(generated.setup.contains(
+    assert!(!spellcheck.contains("[script(\"pwsh\", \"-NoProfile\")]\nanvil-spellcheck:"));
+    assert!(setup.contains(
         "anvil-spellcheck-validate-prereqs: anvil-tool-cargo-spellcheck-helper-validate-prereqs anvil-tool-cargo-spellcheck-validate-prereqs anvil-tool-cargo-each-validate-prereqs"
     ));
     assert!(
-        generated
-            .setup
-            .contains("anvil-tool-cargo-spellcheck-install installer=\"install\": (anvil-tool-cargo-spellcheck-helper-install installer)")
+        tools.contains("anvil-tool-cargo-spellcheck-install installer=\"install\": (anvil-tool-cargo-spellcheck-helper-install installer)")
     );
-    assert!(generated.setup.contains(
+    assert!(tools.contains(
         "anvil-tool-cargo-spellcheck-helper-install installer=\"install\": (_install-tool \"cargo-spellcheck-helper\" cargo_spellcheck_helper_version installer)"
     ));
-    assert!(generated.setup.contains(
+    assert!(tools.contains(
         "anvil-tool-cargo-spellcheck-source-deps-check: anvil-tool-cargo-spellcheck-helper-validate-prereqs\n    cargo spellcheck-helper check-source-deps"
     ));
-    assert!(!generated.setup.contains("[script(\"pwsh\""));
+    assert!(!setup.contains("[script(\"pwsh\""));
+    assert!(!tools.contains("[script(\"pwsh\""));
 }
 
 #[test]
