@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.28.3] - 2026-11-25
+
+- ♻️ Code Refactoring
+
+  - cargo-anvil: use portable spellcheck helpers
+
 ## [0.28.2] - 2026-11-25
 
 - ✨ Features
