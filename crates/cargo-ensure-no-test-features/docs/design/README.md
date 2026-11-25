@@ -1,5 +1,9 @@
 # Standalone test feature checker
 
+The goal is to keep production code from depending on test-only features or
+features that disable security protections. The checker catches those requests
+in publishable workspace packages before they ship.
+
 `cargo ensure-no-test-features [--manifest-path PATH] [--policy PATH]` checks
 workspace members without building them or requiring Anvil. It skips
 `publish = false`, not members restricted to named registries. Cargo

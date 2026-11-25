@@ -13,7 +13,10 @@
 
 </div>
 
-A Cargo subcommand that rejects test-only feature requests in publishable workspace packages.
+Keep test-only features and insecure settings out of production code.
+
+This Cargo subcommand rejects requests for denied features in publishable
+workspace packages so production builds do not accidentally opt into them.
 
 ## Installation
 
