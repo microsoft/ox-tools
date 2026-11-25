@@ -533,6 +533,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "cargo-ark"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "flate2",
+ "serde_json",
+ "tar",
+ "tempfile",
+ "toml_edit 0.25.17+spec-1.1.0",
+]
+
+[[package]]
 name = "cargo-coverage-gate"
 version = "0.7.5"
 dependencies = [

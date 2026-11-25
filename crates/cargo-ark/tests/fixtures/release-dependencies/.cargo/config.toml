@@ -1,0 +1,12 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[registries.fixture]
+index = "sparse+https://fixture.invalid/index/"
+
+[source.fixture]
+registry = "sparse+https://fixture.invalid/index/"
+replace-with = "fixture-files"
+
+[source.fixture-files]
+directory = "vendor"
