@@ -450,6 +450,20 @@ mod tests {
     }
 
     #[test]
+    fn newer_supported_collection_without_reach_preserves_learned_clusters() {
+        let mut target = GeneralizedHints::empty_supported();
+        target.test_sets = vec![vec![killer("tests::learned")]];
+        target.reach = vec![ReachCluster {
+            site: site("learned"),
+            test_set: 0,
+        }];
+        let expected = target.clone();
+        target.merge_from(GeneralizedHints::empty_supported());
+        assert_eq!(target.test_sets, expected.test_sets);
+        assert_eq!(target.reach, expected.reach);
+    }
+
+    #[test]
     fn indexed_merge_preserves_last_duplicate_precedence_and_order() {
         let item = |name: &str, test: &str| ItemHints {
             file: "src/lib.rs".into(),

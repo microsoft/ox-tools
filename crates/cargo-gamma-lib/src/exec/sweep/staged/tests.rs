@@ -120,7 +120,10 @@ fn recovered_inferred_probes_preserve_case_rank_primary_tier_and_only_successful
         [(1, Some("alpha")), (2, Some("beta"))]
     );
     assert_eq!(state.binary_runs.len(), 1);
-    assert_eq!(state.passed_tests, crate::HashSet::from_iter([(0, "alpha".into())]));
+    assert_eq!(
+        state.passed_tests,
+        crate::HashMap::from_iter([(0, crate::HashSet::from_iter(["alpha".into()]))])
+    );
     assert_eq!(tally.exact_candidates.load(Ordering::Relaxed), 0);
     let Some(Judgement::Reached(Outcome::Killed, None, Some(note))) = judged else {
         panic!("enumeration failures must retain their score and explanatory note");
@@ -392,7 +395,7 @@ fn staged_libtest_runs_six_ranked_cases_individually_and_skips_passing_duplicate
     let candidates = [
         (1, "passed-exact"),
         (2, "best"),
-        (0, "second"),
+        (0, "passed-exact"),
         (3, "third"),
         (2, "another"),
         (0, "tail"),
@@ -413,7 +416,7 @@ fn staged_libtest_runs_six_ranked_cases_individually_and_skips_passing_duplicate
                     calls,
                     [
                         ("binary-1".into(), "One(\"passed-exact\")".into()),
-                        ("binary-0".into(), "One(\"second\")".into()),
+                        ("binary-0".into(), "One(\"passed-exact\")".into()),
                         ("binary-0".into(), "One(\"tail\")".into()),
                         ("binary-1".into(), "One(\"sixth\")".into()),
                         ("binary-2".into(), "One(\"also-after-six\")".into()),
@@ -430,7 +433,6 @@ fn staged_libtest_runs_six_ranked_cases_individually_and_skips_passing_duplicate
         },
     );
     assert_eq!(tally.launches.load(Ordering::Relaxed), 7);
-    assert_eq!(state.passed_tests.len(), 7);
     assert_eq!(tally.inferred_probes.load(Ordering::Relaxed), 6);
     assert_eq!(tally.accounting.lock().unwrap().duplicate_launches_avoided, 1);
 }
@@ -471,7 +473,6 @@ fn staged_case_cap_ignores_unreachable_filtered_duplicate_and_binary_candidates(
             },
         );
         assert_eq!(tally.launches.load(Ordering::Relaxed), 6);
-        assert_eq!(state.passed_tests.len(), 6);
     }
 }
 
@@ -512,7 +513,6 @@ fn staged_six_case_cap_keeps_every_candidate_for_full_binary_inference() {
     );
     assert!(matches!(judged, Some(Judgement::Reached(Outcome::Killed, Some(found), None)) if found.test == "test-8"));
     assert_eq!(tally.launches.load(Ordering::Relaxed), 15);
-    assert_eq!(state.passed_tests.len(), 6);
 }
 
 #[test]
@@ -1538,7 +1538,9 @@ fn all_phases_run_for_17_admitted_mutants_without_aggregate_memory_reservations(
         launch_workers(17, || {
             let next = scheduler.reserve_next(&mut scheduler.state.lock().unwrap());
             admitted.push(next.expect("all configured mutants must be admitted without waiting"));
-        });
+            Ok(())
+        })
+        .expect("all scripted worker launches succeed");
         assert_eq!(admitted, (0..17).collect::<Vec<_>>());
         let runner = Arc::new({
             let scheduler = Arc::clone(&scheduler);

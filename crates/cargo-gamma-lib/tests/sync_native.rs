@@ -426,12 +426,10 @@ fn share_denials_preserve_inconsistent_trees_and_reject_stale_file_or_directory_
         .share_mode(0)
         .open(to.join("stale"))
         .unwrap();
-    let failure = remove_stale(&to, &HashSet::new()).expect_err("a locked empty stale directory is neither missing nor nonempty");
-    assert_eq!(
-        failure.message(),
-        format!("could not remove stale directory `{}`", to.join("stale"))
-    );
+    let failure = remove_stale(&to, &HashSet::new()).expect_err("a locked directory prevents completing the stale-entry inventory");
+    assert_eq!(failure.message(), format!("could not read the scratch tree at `{to}`"));
     drop(held);
+    assert!(to.join("stale").is_dir(), "an incomplete walk must not remove stale entries");
     remove_stale(&to, &HashSet::new()).unwrap();
     assert!(to.is_dir());
 }
@@ -446,7 +444,11 @@ fn invalid_destination_shapes_preserve_creation_and_delta_entry_errors() {
     let nested = to.join("missing/file");
     let failure =
         sync_entry(&from.join("lib.rs"), &nested, &Reflinks::new()).expect_err("missing ancestors beneath a file cannot be created");
+    #[cfg(windows)]
     assert_eq!(failure.message(), format!("could not create `{}`", nested.parent().unwrap()));
+    #[cfg(unix)]
+    assert_eq!(failure.message(), format!("could not inspect `{nested}`"));
+    assert_eq!(fs::read_to_string(&to).unwrap(), "destination is not a directory");
     let invalid = Utf8Path::new("invalid\0root");
     let failure = delta_sync(&from, invalid, &from.join("target"), CopyOptions::default(), &Reflinks::new())
         .expect_err("valid enumeration must still propagate a later entry-copy failure");

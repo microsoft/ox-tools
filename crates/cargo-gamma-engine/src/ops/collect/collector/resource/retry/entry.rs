@@ -58,7 +58,6 @@ impl<'a> State<'a> {
         let _old = state.values.insert("self".into(), Value::Opaque);
         for input in &signature.inputs {
             if let FnArg::Typed(parameter) = input {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 let Pat::Ident(pattern) = &*parameter.pat else { return None };
                 if (
                     // #[gamma::skip(logical.or_remove_right, reason = "Pinned Syn stores function argument attributes on PatType, leaving its simple inner PatIdent attributes empty.", tag = "equivalent")]
@@ -66,7 +65,6 @@ impl<'a> State<'a> {
                 ) || pattern.by_ref.is_some()
                     || pattern.subpat.is_some()
                 {
-                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                     return None;
                 }
                 let name = pattern.ident.to_string();
@@ -85,19 +83,16 @@ impl<'a> State<'a> {
                     Pat::Type(pattern) => (&*pattern.pat, Some(&*pattern.ty)),
                     pattern => (pattern, None),
                 };
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 let Pat::Ident(pattern) = pattern else { return None };
                 if (
                     // #[gamma::skip(logical.or_remove_left, reason = "Pinned Syn stores parsed local attributes on Local, not its simple PatIdent.", tag = "equivalent")]
                     !pattern.attrs.is_empty() || pattern.by_ref.is_some()
                 ) || pattern.subpat.is_some()
                 {
-                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                     return None;
                 }
                 let init = local.init.as_ref()?;
                 if init.diverge.is_some() {
-                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                     return None;
                 }
                 let value = self.eval(&init.expr, ty)?;
@@ -116,7 +111,6 @@ impl<'a> State<'a> {
                 let ty = self.ty(&name)?;
                 let value = self.eval(&assignment.right, Some(&ty))?;
                 if !matches!(value, Value::Count(_) | Value::Bool(_) | Value::Cache(_) | Value::EmptyMap) {
-                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                     return None;
                 }
                 let _old = self.values.insert(name, value);
@@ -139,7 +133,6 @@ impl<'a> State<'a> {
             if let Type::Reference(reference) = ty {
                 ty = *reference.elem;
             }
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             let Type::Path(record) = &ty else { return None };
             let record = self.records.get(&record.path.get_ident()?.to_string())?;
             ty = record
@@ -180,21 +173,17 @@ impl<'a> State<'a> {
                     // #[gamma::skip(logical.or_remove_left, reason = "A supported struct literal without rest initializes every declared field; unknown and duplicate names are independently rejected below.", tag = "equivalent")]
                     record.fields.len() != declaration.fields.len() || record.fields.len() > MAX_ELEMENTS
                 {
-                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                     return None;
                 }
                 let mut fields = HashMap::with_capacity_and_hasher(record.fields.len(), FxBuildHasher);
                 for field in &record.fields {
                     if !field.attrs.is_empty() {
-                        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                         return None;
                     }
-                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                     let syn::Member::Named(name) = &field.member else { return None };
                     let ty = &declaration.fields.iter().find(|field| field.ident.as_ref() == Some(name))?.ty;
                     let value = self.eval(&field.expr, Some(ty))?;
                     if fields.insert(name.to_string(), value).is_some() {
-                        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                         return None;
                     }
                 }
@@ -205,7 +194,6 @@ impl<'a> State<'a> {
                 let mut kind = None;
                 for element in &array.elems {
                     let Value::Record(record_name, fields) = self.eval(element, None)? else {
-                        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                         return None;
                     };
                     // #[gamma::skip(try.propagate_to_unwrap, reason = "Value::Record is constructed only after this same immutable record declaration was found.", tag = "equivalent")]
@@ -216,17 +204,14 @@ impl<'a> State<'a> {
                         // #[gamma::skip(logical.and_remove_left, reason = "A different u32 field cannot produce a population: the subsequent fields.get still requires the certified ordinal name.", tag = "equivalent")]
                         .any(|field| field.ident.as_ref().is_some_and(|field| field == self.ordinal) && type_name(&field.ty, "u32"))
                     {
-                        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                         return None;
                     }
                     if kind.as_ref().is_some_and(|kind| *kind != record_name) {
-                        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                         return None;
                     }
                     kind = Some(record_name);
                     // #[gamma::skip(try.propagate_to_unwrap, reason = "The declaration contains the ordinal, and Record construction verified complete unique declared fields.", tag = "equivalent")]
                     let Value::Ordinal(ordinal) = fields.get(self.ordinal)? else {
-                        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                         return None;
                     };
                     population.push(*ordinal);
@@ -243,10 +228,8 @@ impl<'a> State<'a> {
                 // #[gamma::skip(logical.and_remove_right, reason = "The retained exact standard HashMap::from constructor requires exactly one argument in supported Rust.", tag = "equivalent")]
                 if standard_cache_constructor && call.args.len() == 1 =>
             {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 let Expr::Array(entries) = &call.args[0] else { return None };
                 if !entries.attrs.is_empty() || entries.elems.len() > MAX_ELEMENTS {
-                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                     return None;
                 }
                 if entries.elems.is_empty() {
@@ -254,25 +237,19 @@ impl<'a> State<'a> {
                 }
                 let mut cache = Vec::with_capacity(entries.elems.len());
                 for entry in &entries.elems {
-                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                     let Expr::Tuple(pair) = entry else { return None };
                     if
                         // #[gamma::skip(logical.or_remove_right, reason = "The exact standard HashMap::from array element is a two-tuple in supported Rust.", tag = "equivalent")]
                         !pair.attrs.is_empty() || pair.elems.len() != 2
                     {
-                        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                         return None;
                     }
-                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                     let Expr::Call(key) = &pair.elems[0] else { return None };
                     if !key.attrs.is_empty() || *key.func != syn::parse_quote!(std::vec::Vec::from) || key.args.len() != 1 {
-                        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                         return None;
                     }
-                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                     let Expr::Array(ordinals) = &key.args[0] else { return None };
                     if !ordinals.attrs.is_empty() || ordinals.elems.len() > MAX_ELEMENTS {
-                        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                         return None;
                     }
                     let ordinals = ordinals
@@ -291,17 +268,13 @@ impl<'a> State<'a> {
                         Expr::Call(some)
                             if some.attrs.is_empty() && name(&some.func).as_deref() == Some("Some") && some.args.len() == 1 =>
                         {
-                            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                             let Expr::Lit(literal) = &some.args[0] else { return None };
-                            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                             let syn::Lit::Bool(value) = &literal.lit else { return None };
                             if !literal.attrs.is_empty() {
-                                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                                 return None;
                             }
                             Some(value.value)
                         }
-                        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                         _ => return None,
                     };
                     cache.push((ordinals, verdict));
@@ -357,7 +330,6 @@ impl<'a> State<'a> {
 }
 
 pub(super) fn name(expression: &Expr) -> Option<String> {
-    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
     let Expr::Path(path) = expression else { return None };
     // #[gamma::skip(logical.and_remove_right, reason = "The following get_ident independently rejects qualified-self paths by leading colon or segment count.", tag = "equivalent")]
     (path.attrs.is_empty() && path.qself.is_none())
@@ -370,11 +342,9 @@ fn place(expression: &Expr) -> Option<String> {
         return Some(name);
     }
     let Expr::Field(field) = expression else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None; // #[gamma::skip(option.none_to_some, reason = "The only consumer immediately resolves State::ty; an empty place has no typed root and rejects just like None.", tag = "equivalent")]
     };
     let syn::Member::Named(name) = &field.member else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None; // #[gamma::skip(option.none_to_some, reason = "The only consumer immediately resolves State::ty; an empty place has no typed root and rejects just like None.", tag = "equivalent")]
     };
     field
@@ -389,12 +359,9 @@ fn type_name(ty: &Type, name: &str) -> bool {
 }
 
 pub(super) fn small(expression: &Expr) -> Option<u16> {
-    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
     let Expr::Lit(literal) = expression else { return None };
-    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
     let syn::Lit::Int(value) = &literal.lit else { return None };
     if !literal.attrs.is_empty() || !matches!(value.suffix(), "" | "usize" | "u32") {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
     let value = value.base10_parse::<u16>().ok()?;

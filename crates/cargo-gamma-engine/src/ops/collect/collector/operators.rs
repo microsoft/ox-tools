@@ -40,7 +40,6 @@ impl Collector<'_> {
             BinOp::Div(_) => "/",
             BinOp::Rem(_) => "%",
             _ => {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
         };
@@ -120,7 +119,6 @@ impl Collector<'_> {
             BinOp::Rem(_) => "%",
             BinOp::RemAssign(_) => "%=",
             _ => {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
                 return false;
             }
         };
@@ -147,7 +145,6 @@ impl Collector<'_> {
             };
         }
         let (Some(left), Some(right)) = (self.operator_operand(&node.left), self.operator_operand(&node.right)) else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         };
         let operator = replacement.trim_end_matches('=');

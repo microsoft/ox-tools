@@ -1,7 +1,10 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+use core::any::type_name;
+use core::fmt;
 use std::collections::hash_map::Entry;
+use std::sync::Arc;
 
 use syn::visit::{self, Visit};
 use syn::{
@@ -11,6 +14,7 @@ use syn::{
 
 use super::default_identity::{Identities, Pending};
 use crate::cfg::CfgSet;
+use crate::parse::{Extent as _, SourceFile};
 use crate::{HashMap, HashSet};
 
 /// The spellings in one file that name the standard-library `Default` trait.
@@ -19,7 +23,7 @@ use crate::{HashMap, HashSet};
 /// and imports can shadow it in different namespaces. The collector cannot run name resolution,
 /// so it records explicit standard aliases and explicit shadows before it decides whether a call,
 /// bound, derive, or impl refers to the standard trait.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct DefaultPaths {
     aliases: HashSet<String>,
     absolute_aliases: HashSet<String>,
@@ -161,7 +165,6 @@ impl DefaultPaths {
         let mut segments: Vec<String> = path.segments.iter().map(|segment| segment.ident.to_string()).collect();
 
         if segments.pop().as_deref() != Some("default") {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
 
@@ -174,7 +177,6 @@ impl DefaultPaths {
 
     pub(super) fn is_standard_default_segments(&self, segments: &[String]) -> bool {
         let Some((method, qualifier)) = segments.split_last() else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         };
 
@@ -328,7 +330,6 @@ impl DefaultPaths {
 
     fn unambiguous_root(&self, root: &str) -> bool {
         if self.external_roots.get(root) == Some(&None) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         self.absolute_aliases.contains(root)
@@ -568,8 +569,9 @@ impl Completeness {
 /// A type it has no definition for stays optimistic, because it may come from a dependency that
 /// does implement `Default`. Unexpanded item macros and procedural attributes may supply
 /// implementations elsewhere in the crate, so they also prevent proof of absence.
-#[derive(Debug, Default)]
+#[derive(Clone, Default)]
 pub struct Defaults {
+    file_declarations: HashMap<blake3::Hash, Vec<Arc<Declarations>>>,
     identities: Option<Identities>,
     sources: super::source_identities::Sources,
     resource_namespaces: super::resource_namespaces::Namespaces,
@@ -635,6 +637,58 @@ pub struct Defaults {
     module_certain: bool,
 }
 
+impl fmt::Debug for Defaults {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct(type_name::<Self>())
+            .field("cached_sources", &self.file_declarations.len())
+            .field("identities", &self.identities)
+            .field("sources", &self.sources)
+            .field("resource_namespaces", &self.resource_namespaces)
+            .field("local_imports", &self.local_imports)
+            .field("aliases", &self.aliases)
+            .field("module_path", &self.module_path)
+            .field("uncertain_types", &self.uncertain_types)
+            .field("unexpanded_implementations", &self.unexpanded_implementations)
+            .field("alias_targets", &self.alias_targets)
+            .field("paths", &self.paths)
+            .field("macro_names", &self.macro_names)
+            .field("opaque_macro_imports", &self.opaque_macro_imports)
+            .field("defined", &self.defined)
+            .field("defaulted", &self.defaulted)
+            .field("ambiguous", &self.ambiguous)
+            .field("indirect", &self.indirect)
+            .field("generic", &self.generic)
+            .field("unproven_generic_types", &self.unproven_generic_types)
+            .field("result_error", &self.result_error)
+            .field("cfg", &self.cfg)
+            .field("completeness", &self.completeness)
+            .field("module_depth", &self.module_depth)
+            .field("module_certain", &self.module_certain)
+            .finish()
+    }
+}
+
+/// File-local path and nominal identity evidence retained separately from aggregate defaults.
+/// A cached snapshot is reusable only for the same source digest and active configuration.
+#[derive(Debug, Default)]
+pub(super) struct Declarations {
+    cfg: CfgSet,
+    pub(super) paths: DefaultPaths,
+    pub(super) identities: Identities,
+}
+
+impl Declarations {
+    pub(super) fn of(file: &File, cfg: &CfgSet) -> Self {
+        let paths = DefaultPaths::of_in(file, cfg);
+        let identities = Pending::with_paths(file, cfg, paths.clone()).finish();
+        Self {
+            cfg: cfg.clone(),
+            paths,
+            identities,
+        }
+    }
+}
+
 /// Folds one alias into the map, demoting a key two files disagree about.
 ///
 /// The last writer must not win. The partials are built by worker threads and folded in completion
@@ -662,8 +716,10 @@ impl Defaults {
     /// Builds declaration evidence labeled with the physical source that supplied it.
     #[must_use]
     pub fn of_source_in(file: &File, cfg: &CfgSet, source: &str) -> Self {
-        let mut index = Self::of_in(file, cfg);
-        index.sources.insert(source, Pending::of(file, cfg));
+        let paths = DefaultPaths::of_in(file, cfg);
+        let pending = Pending::with_paths(file, cfg, paths.clone());
+        let mut index = Self::with_declarations(file, cfg, paths, pending.clone().finish());
+        index.sources.insert(source, pending);
         index.resource_namespaces.label(source);
         index
     }
@@ -754,12 +810,22 @@ impl Defaults {
     /// Builds the index over one parsed file for the selected configuration.
     #[must_use]
     pub fn of_in(file: &File, cfg: &CfgSet) -> Self {
-        let identities = Identities::of(file, cfg);
+        let paths = DefaultPaths::of_in(file, cfg);
+        let identities = Pending::with_paths(file, cfg, paths.clone()).finish();
+        Self::with_declarations(file, cfg, paths, identities)
+    }
+
+    fn with_declarations(file: &File, cfg: &CfgSet, paths: DefaultPaths, identities: Identities) -> Self {
+        let declarations = Arc::new(Declarations {
+            cfg: cfg.clone(),
+            paths: paths.clone(),
+            identities: identities.clone(),
+        });
         let mut index = Self {
             unexpanded_implementations: identities.unexpanded_implementations,
             identities: Some(identities),
             resource_namespaces: super::resource_namespaces::Namespaces::of(file, cfg),
-            paths: DefaultPaths::of_in(file, cfg),
+            paths,
             cfg: cfg.clone(),
             module_certain: true,
             completeness: Completeness::Complete,
@@ -768,7 +834,26 @@ impl Defaults {
 
         index.visit_file(file);
         index.note_default_aliases();
+        // The span supplies the original bytes without quoting the AST; the retained key owns no AST or source copy.
+        if let Some(text) = file.extent().source_text() {
+            index
+                .file_declarations
+                .entry(blake3::hash(text.as_bytes()))
+                .or_default()
+                .push(declarations);
+        }
         index
+    }
+
+    pub(super) fn declarations_for(&self, file: &SourceFile, cfg: &CfgSet) -> Arc<Declarations> {
+        let extent = file.ast.extent().byte_range();
+        if let Some(text) = file.text.get(extent)
+            && let Some(entries) = self.file_declarations.get(&blake3::hash(text.as_bytes()))
+            && let Some(declarations) = entries.iter().find(|declarations| declarations.cfg == *cfg)
+        {
+            return Arc::clone(declarations);
+        }
+        Arc::new(Declarations::of(&file.ast, cfg))
     }
 
     /// Builds only the file-local path-resolution evidence, without negative type evidence.
@@ -791,7 +876,6 @@ impl Defaults {
     #[must_use]
     pub fn lacks_default(&self, ty: &Type) -> bool {
         let Some(name) = unqualified_name_of(ty) else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         };
 
@@ -807,7 +891,6 @@ impl Defaults {
     /// Exact source-local paths are useful only before indexes with unknown module roots merge.
     pub(crate) fn lacks_local_path(&self, path: &[String]) -> bool {
         if !self.is_complete() {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         if let Some(identities) = &self.identities {
@@ -880,6 +963,14 @@ impl Defaults {
     /// `result_error` cannot union, because its values are single names rather than membership, so
     /// a key two files disagree about is demoted to "unknown" instead — see [`merge_alias`].
     pub fn absorb(&mut self, other: Self) {
+        for (source, entries) in other.file_declarations {
+            let existing = self.file_declarations.entry(source).or_default();
+            for entry in entries {
+                if !existing.iter().any(|existing| existing.cfg == entry.cfg) {
+                    existing.push(entry);
+                }
+            }
+        }
         self.sources.absorb(other.sources);
         self.resource_namespaces.absorb(other.resource_namespaces);
         self.macro_names.extend(other.macro_names);
@@ -931,7 +1022,6 @@ impl Defaults {
     #[must_use]
     pub fn lacks_error_default(&self, name: &str) -> bool {
         if !self.completeness.supplies_negative_evidence() || self.indirect.contains("*") || self.unexpanded_implementations {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         // At most one step per local import plus the terminal or repeated name.
@@ -956,19 +1046,16 @@ impl Defaults {
             seen.insert(name)
         } {
             if self.aliases.contains(name) || self.uncertain_types.contains(name) {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
                 return false;
             }
             if self.indirect.contains(name) {
                 let Some(Some(target)) = self.local_imports.get(name) else {
-                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
                     return false;
                 };
                 if target != name {
                     if
                     // #[gamma::skip(logical.and_remove_left, reason = "Both defaulted and ambiguous names come from defined declarations; either already implies defined membership.", tag = "equivalent")]
                     self.defined.contains(name) && (self.defaulted.contains(name) || self.ambiguous.contains(name)) {
-                        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
                         return false;
                     }
                     name = target;
@@ -1323,7 +1410,6 @@ fn unqualified_name_of(ty: &Type) -> Option<String> {
 /// The name of a type's `index`th generic argument.
 fn payload_name(ty: &Type, index: usize) -> Option<String> {
     let Type::Path(path) = ty else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     };
 
@@ -1331,7 +1417,6 @@ fn payload_name(ty: &Type, index: usize) -> Option<String> {
     // #[gamma::skip(try.propagate_to_unwrap, reason = "payload_name is called on a source-parsed alias target. A parsed Type::Path has at least one segment, so segments.last() cannot fail on this call path.", tag = "equivalent")]
     path.path.segments.last()?.arguments
     else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     };
 
@@ -1352,6 +1437,83 @@ mod tests {
     use syn::{parse_file, parse_quote};
 
     use super::*;
+
+    #[test]
+    fn absorbed_declarations_retain_each_cfg_once_and_reuse_its_evidence() {
+        let file = SourceFile::parse(
+            "root.rs",
+            "#[cfg(unix)] #[derive(Default)] struct S; #[cfg(windows)] struct S;".into(),
+        )
+        .unwrap();
+        let unix = CfgSet::parse("unix");
+        let windows = CfgSet::parse("windows");
+        let unix_index = Defaults::of_source_in(&file.ast, &unix, "root.rs");
+        let windows_index = Defaults::of_source_in(&file.ast, &windows, "root.rs");
+        let unix_declarations = unix_index.declarations_for(&file, &unix);
+        let windows_declarations = windows_index.declarations_for(&file, &windows);
+        let mut combined = Defaults::default();
+        combined.absorb(unix_index);
+        assert_eq!(combined.file_declarations.values().next().unwrap().len(), 1);
+        combined.absorb(windows_index);
+        let _formatted = format!("{combined:?}");
+        assert_eq!(combined.file_declarations.values().next().unwrap().len(), 2);
+        combined.absorb(Defaults::of_source_in(&file.ast, &unix, "root.rs"));
+        assert_eq!(combined.file_declarations.values().next().unwrap().len(), 2);
+        combined.absorb(Defaults::of_source_in(&file.ast, &windows, "root.rs"));
+        assert_eq!(combined.file_declarations.values().next().unwrap().len(), 2);
+        assert!(Arc::ptr_eq(&combined.declarations_for(&file, &unix), &unix_declarations));
+        assert!(Arc::ptr_eq(&combined.declarations_for(&file, &windows), &windows_declarations));
+        assert_eq!(unix_declarations.identities.default_for(&["crate".into(), "S".into()]), Some(true));
+        assert_eq!(
+            windows_declarations.identities.default_for(&["crate".into(), "S".into()]),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn shared_declaration_inputs_match_independent_indexes_in_nested_modules() {
+        let file = parse_file(
+            r"
+            use core::default::Default as D;
+            #[derive(Default)] struct Root;
+            mod outer {
+                use core::default::Default as D;
+                #[derive(D)] pub struct Value;
+                mod inner {
+                    use super::Value as Alias;
+                    pub struct Wrapper(Alias);
+                    impl Default for Wrapper { fn default() -> Self { Self(Default::default()) } }
+                }
+            }
+        ",
+        )
+        .unwrap();
+        let cfg = CfgSet::parse("");
+        let indexed = Defaults::of_source_in(&file, &cfg, "root.rs");
+        assert_eq!(indexed.paths, DefaultPaths::of_in(&file, &cfg));
+        assert_eq!(indexed.identities, Some(Identities::of(&file, &cfg)));
+    }
+
+    #[test]
+    fn collection_reuses_only_content_and_cfg_matching_declarations_after_merge() {
+        let cfg = CfgSet::parse("");
+        let source = "mod child { #[derive(Default)] pub struct S; } #[cfg(unix)] struct UnixOnly;";
+        let file = SourceFile::parse("root.rs", source.to_owned()).unwrap();
+        let mut indexed = Defaults::of_source_in(&file.ast, &cfg, "root.rs");
+        let retained = Arc::clone(indexed.file_declarations.values().next().unwrap().first().unwrap());
+        indexed.absorb(Defaults::of_source_in(&parse_file("pub struct Other;").unwrap(), &cfg, "other.rs"));
+        let reused = indexed.declarations_for(&file, &cfg);
+        assert!(Arc::ptr_eq(&retained, &reused));
+        assert_eq!(reused.paths, DefaultPaths::of_in(&file.ast, &cfg));
+        assert_eq!(reused.identities, Identities::of(&file.ast, &cfg));
+        let other_cfg = CfgSet::parse("unix");
+        let different_cfg = indexed.declarations_for(&file, &other_cfg);
+        assert!(!Arc::ptr_eq(&retained, &different_cfg));
+        assert_eq!(different_cfg.identities, Identities::of(&file.ast, &other_cfg));
+        let changed = SourceFile::parse("root.rs", "struct Changed;".to_owned()).unwrap();
+        let changed = indexed.declarations_for(&changed, &cfg);
+        assert!(!Arc::ptr_eq(&retained, &changed));
+    }
 
     #[test]
     fn nov7_absorbed_imports_aliases_and_alias_implementations_remain_unknown() {

@@ -642,12 +642,14 @@ dependencies = [
 name = "cargo-gamma-lib"
 version = "0.7.1"
 dependencies = [
+ "base64 0.22.1",
  "blake3",
  "bolero",
  "camino",
  "cargo-gamma-attrs-impl",
  "cargo-gamma-engine",
  "cargo-gamma-process",
+ "cargo-gamma-process-test-helper",
  "cargo-gamma-rt",
  "cargo-gamma-unsafe",
  "cargo_metadata",
@@ -657,6 +659,7 @@ dependencies = [
  "ignore",
  "libc",
  "loom",
+ "ohno",
  "owo-colors",
  "proc-macro2",
  "quote",
@@ -666,6 +669,7 @@ dependencies = [
  "saphyr-parser",
  "serde",
  "serde_json",
+ "sha2",
  "syn 3.0.9",
  "tempfile",
  "tick",
@@ -680,11 +684,18 @@ dependencies = [
 name = "cargo-gamma-process"
 version = "0.7.0"
 dependencies = [
+ "bolero",
  "camino",
+ "cargo-gamma-process-test-helper",
  "cargo-gamma-unsafe",
  "libc",
+ "ohno",
  "tempfile",
 ]
+
+[[package]]
+name = "cargo-gamma-process-test-helper"
+version = "0.0.0"
 
 [[package]]
 name = "cargo-gamma-rt"

@@ -3,7 +3,7 @@
 
 //! Closed metadata-only proof identities. Dynamic Cargo graphs deliberately have no identity.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 #[cfg(test)]
 use std::ops::ControlFlow;
 #[cfg(not(test))]
@@ -55,8 +55,8 @@ impl Snapshot for NativeSnapshot {
 }
 
 fn content(path: &Utf8Path) -> std::io::Result<Option<[u8; 32]>> {
-    match super::rustc_replay::read_snapshot(path) {
-        Ok(bytes) => Ok(Some(*blake3::hash(&bytes).as_bytes())),
+    match super::rustc_replay::digest_snapshot(path) {
+        Ok(digest) => Ok(Some(digest)),
         Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(cause) => Err(cause),
     }
@@ -160,6 +160,11 @@ fn source_only_tokens(tokens: proc_macro2::TokenStream) -> bool {
     })
 }
 
+fn closed_source(path: &Utf8Path, snapshot: &impl Snapshot) -> Option<()> {
+    let tokens: proc_macro2::TokenStream = snapshot.text(path)?.parse().ok()?;
+    (super::rustc_replay::source_tokens_closed(tokens.clone()) && source_only_tokens(tokens)).then_some(())
+}
+
 fn closed_sources(paths: &[Utf8PathBuf], snapshot: &impl Snapshot, runtime: Option<&Utf8Path>) -> Option<()> {
     let mut manifests = 0;
     for path in paths {
@@ -175,16 +180,20 @@ fn closed_sources(paths: &[Utf8PathBuf], snapshot: &impl Snapshot, runtime: Opti
             manifests += 1;
         }
         if path.extension() == Some("rs") {
-            let tokens: proc_macro2::TokenStream = snapshot.text(path)?.parse().ok()?;
-            if !super::rustc_replay::source_tokens_closed(tokens.clone()) || !source_only_tokens(tokens) {
-                return None;
-            }
+            closed_source(path, snapshot)?;
         }
     }
     (manifests != 0).then_some(())
 }
 
 fn immutable_snapshot(work: &Workspace, plan: &Plan, shape: &[Utf8PathBuf]) -> Option<Vec<(Utf8PathBuf, Option<[u8; 32]>)>> {
+    immutable_paths(work, plan, shape)?
+        .into_iter()
+        .map(|path| Some((path.clone(), content(&path).ok()?)))
+        .collect()
+}
+
+fn immutable_paths(work: &Workspace, plan: &Plan, shape: &[Utf8PathBuf]) -> Option<Vec<Utf8PathBuf>> {
     let mutable: BTreeSet<_> = plan.files.iter().map(|file| work.root.join(&file.path)).collect();
     let mut paths: Vec<_> = shape.iter().filter(|path| !mutable.contains(*path)).cloned().collect();
     paths.extend(controls(&work.root)?);
@@ -192,7 +201,7 @@ fn immutable_snapshot(work: &Workspace, plan: &Plan, shape: &[Utf8PathBuf]) -> O
     paths.sort();
     // #[gamma::skip(iter.remove_dedup, tag = "equivalent", reason = "Retaining the same duplicate immutable paths in sealing and revalidation changes only opaque identity encoding.")]
     paths.dedup();
-    paths.into_iter().map(|path| Some((path.clone(), content(&path).ok()?))).collect()
+    Some(paths)
 }
 
 fn mutable_sources(work: &Workspace, plan: &Plan) -> Vec<Utf8PathBuf> {
@@ -235,7 +244,9 @@ fn seal_context(work: &Workspace, plan: &Plan, args: &[String], stdout: &str) ->
     if args.first().map(String::as_str) != Some("check") {
         return None;
     }
+    let _outputs = super::rustc_replay::metadata_outputs(stdout)?;
     let shape = tree(&work.root, &work.target)?;
+    closed_sources(&shape, &NativeSnapshot, Some(work.compiler_runtime()))?;
     let cargo_command = work.cargo();
     // #[gamma::skip(try.propagate_to_unwrap, tag = "equivalent", reason = "Workspace::cargo constructs its program from cargo_binary's UTF-8 String.")]
     let cargo = Utf8PathBuf::from(cargo_command.get_program().to_str()?);
@@ -243,8 +254,8 @@ fn seal_context(work: &Workspace, plan: &Plan, args: &[String], stdout: &str) ->
     if !cargo.is_absolute() || cargo.file_stem()? != "cargo" || !super::rustc_replay::unambiguous_path(&cargo) {
         return None;
     }
-    let cargo_hash = content(&cargo).ok()??;
-    let mut command = work.cargo();
+    let fingerprint = command_fingerprint(&cargo_command, env::vars_os())?;
+    let mut command = cargo_command;
     let _command = command
         .args(args)
         .env("CARGO_TERM_PROGRESS_WHEN", "always")
@@ -258,13 +269,21 @@ fn seal_context(work: &Workspace, plan: &Plan, args: &[String], stdout: &str) ->
     // #[gamma::skip(try.propagate_to_unwrap, tag = "equivalent", reason = "seal already obtained the same owned capture directory; this build sequence does not change capture readiness.")]
     let directory = work.rustc_captures()?.join("replay").join(generation);
     let source = source_only_context(&directory, stdout, &work.root, &work.target, work.compiler_runtime())?;
-    closed_sources(&shape, &NativeSnapshot, source.runtime.as_deref())?;
+    if source.runtime.is_none() {
+        closed_sources(&shape, &NativeSnapshot, None)?;
+    }
+    let cargo_hash = source
+        .toolchain
+        .iter()
+        .find(|(path, _)| path == &cargo)
+        .map(|(_, hash)| *hash)
+        .or_else(|| content(&cargo).ok().flatten())?;
     let runtime = match &source.runtime {
         Some(root) => Some((root.clone(), tree(root, &work.target)?)),
         None => None,
     };
     Some(Context {
-        command: command_fingerprint(&work.cargo(), env::vars_os())?, // #[gamma::skip(try.propagate_to_unwrap, tag = "equivalent", reason = "The preceding successful configure_compiler_replay fingerprint validated the same Cargo program, working directory, and inherited environment.")]
+        command: fingerprint,
         args: args.to_vec(),
         immutable: immutable_snapshot(work, plan, &shape)?,
         shape,
@@ -292,13 +311,16 @@ pub(super) fn identity(work: &Workspace, plan: &Plan) -> Option<[u8; 32]> {
         return None;
     }
     let shape = tree(&work.root, &work.target)?;
-    let immutable = immutable_snapshot(work, plan, &shape)?;
+    let immutable = immutable_paths(work, plan, &shape)?;
+    if !immutable.iter().eq(context.immutable.iter().map(|(path, _)| path)) {
+        return None;
+    }
     context_identity(
         &context,
         command_fingerprint(&work.cargo(), env::vars_os())?,
         &serde_json::to_vec(&work.cargo).ok()?, // #[gamma::skip(try.propagate_to_unwrap, tag = "equivalent", reason = "Cargo options contain only strings, booleans, and vectors with derived JSON serialization.")]
         &shape,
-        &immutable,
+        &context.immutable,
         &work.target,
         &NativeSnapshot,
     )
@@ -319,13 +341,31 @@ fn context_identity(
     if context.options != options {
         return None;
     }
-    if snapshot.content(&context.cargo.0).ok()? != Some(context.cargo.1) {
-        return None;
-    }
     if shape != context.shape || immutable != context.immutable {
         return None;
     }
-    closed_sources(shape, snapshot, context.runtime.as_ref().map(|(root, _)| root.as_path()))?;
+    let mut stamps = BTreeMap::new();
+    for (path, expected) in immutable {
+        let actual = snapshot.content(path).ok()?;
+        if actual != *expected {
+            return None;
+        }
+        let _previous = stamps.insert(path.as_path(), actual);
+    }
+    let cargo_hash = match stamps.get(context.cargo.0.as_path()) {
+        Some(stamp) => *stamp,
+        None => snapshot.content(&context.cargo.0).ok()?,
+    }?;
+    if cargo_hash != context.cargo.1 {
+        return None;
+    }
+    let _previous = stamps.insert(context.cargo.0.as_path(), Some(cargo_hash));
+    for path in shape {
+        // #[gamma::skip(logical.and_remove_right, tag = "equivalent", reason = "The mutable inventory contains only discovered Rust source paths, already ending in rs.")]
+        if context.mutable.binary_search(path).is_ok() && path.extension() == Some("rs") {
+            closed_source(path, snapshot)?;
+        }
+    }
     if let Some((root, expected)) = &context.runtime
         && snapshot.tree(root, target)? != *expected
     {
@@ -342,17 +382,21 @@ fn context_identity(
         .update(&context.cargo.1);
     for path in shape {
         let _hash = hash.update(path.as_str().as_bytes());
-        if !context.mutable.contains(path) {
-            let _hash = hash.update(&snapshot.content(path).ok()??);
-        }
     }
     for (path, expected) in &context.toolchain {
-        let actual = snapshot.content(path).ok()??;
+        let actual = if let Some(stamp) = stamps.get(path.as_path()) {
+            *stamp
+        } else {
+            let actual = snapshot.content(path).ok()?;
+            let _previous = stamps.insert(path.as_path(), actual);
+            actual
+        }?;
         if actual != *expected {
             return None;
         }
         let _hash = hash.update(path.as_str().as_bytes()).update(&actual);
     }
+    let expected: BTreeSet<_> = context.toolchain.iter().map(|(path, _)| path.clone()).collect();
     for (compiler, _) in context.toolchain.iter().filter(|(path, _)| path.file_stem() == Some("rustc")) {
         // #[gamma::skip(try.propagate_to_unwrap, tag = "equivalent", reason = "Every emitted toolchain path is absolute; a selected rustc filename cannot be a parentless filesystem root.")]
         let bin = compiler.parent()?;
@@ -364,7 +408,6 @@ fn context_identity(
         let toolchain = bin.parent()?;
         let mut paths = snapshot.tree(bin, target)?;
         paths.extend(snapshot.tree(&toolchain.join("lib"), target)?);
-        let expected: BTreeSet<_> = context.toolchain.iter().map(|(path, _)| path.clone()).collect();
         if paths.into_iter().any(|path| !expected.contains(&path)) {
             return None;
         }
@@ -373,8 +416,99 @@ fn context_identity(
 }
 
 #[cfg(test)]
+pub(super) use tests::{Operation, with_operations};
+
+#[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests;
 
 #[cfg(test)]
-pub(super) use tests::{Operation, with_operations};
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod compiler_campaign_tests {
+    use super::super::rustc_replay::compiler_campaign_tests::with_metadata;
+    use super::super::rustc_replay::snapshot_io::{self, Script};
+    use super::*;
+
+    fn plan(work: &Workspace) -> Plan {
+        Plan {
+            root: work.root.clone(),
+            ..crate::fixtures::plan(Vec::new())
+        }
+    }
+
+    #[test]
+    fn nov21_sealing_requires_metadata_and_a_still_readable_selected_cargo_binary() {
+        with_metadata(false, |work, args, stdout| {
+            assert!(seal_context(work, &plan(work), args, stdout).is_some());
+            assert!(seal_context(work, &plan(work), args, "invalid JSON").is_none());
+            let cargo = Utf8PathBuf::from(work.cargo().get_program().to_str().unwrap());
+            snapshot_io::remove_file(cargo).unwrap();
+            assert!(seal_context(work, &plan(work), args, stdout).is_none());
+        });
+    }
+
+    #[test]
+    fn nov21_runtime_path_dependencies_require_provenance_but_do_not_require_dependency_free_revalidation() {
+        with_metadata(true, |work, args, stdout| {
+            let context = seal_context(work, &plan(work), args, stdout).unwrap();
+            assert_eq!(
+                context.runtime.as_ref().map(|(root, _)| root.as_path()),
+                Some(work.compiler_runtime())
+            );
+        });
+        with_metadata(false, |work, args, stdout| {
+            snapshot_io::write(
+                work.compiler_runtime().join("Cargo.toml"),
+                b"[package]\nname='cargo-gamma-rt'\nversion='0.1.0'\n[lib]\nname='gamma_rt'\n",
+            )
+            .unwrap();
+            snapshot_io::write(
+                work.compiler_runtime().join("src").join("lib.rs"),
+                b"pub fn selected() -> bool { false }",
+            )
+            .unwrap();
+            snapshot_io::write(work.root.join("Cargo.toml"), format!(
+                "[package]\nname='subject'\nversion='0.1.0'\n[dependencies]\ngamma_rt={{path={},package='cargo-gamma-rt',optional=true}}\n",
+                serde_json::to_string(work.compiler_runtime().as_str()).unwrap(),
+            )).unwrap();
+            let captures = work.rustc_captures().unwrap();
+            let record_path = super::super::rustc_replay::snapshot_paths(&captures, Utf8Path::new(""))
+                .unwrap()
+                .into_iter()
+                .find(|path| path.file_name() == Some("unit.json"))
+                .unwrap();
+            let mut record: serde_json::Value = serde_json::from_slice(&snapshot_io::read(&record_path).unwrap()).unwrap();
+            record["inventory"] = serde_json::to_value(snapshot_io::inventory(&work.root, &work.target).unwrap()).unwrap();
+            snapshot_io::write(record_path, serde_json::to_vec(&record).unwrap()).unwrap();
+            assert!(seal_context(work, &plan(work), args, stdout).is_none());
+        });
+    }
+
+    #[test]
+    fn nov21_identity_rejects_a_truncated_immutable_inventory_and_newly_ambiguous_controls() {
+        with_metadata(false, |work, args, stdout| {
+            let plan = plan(work);
+            seal(work, &plan, args, stdout);
+            assert!(identity(work, &plan).is_some());
+            let context_path = work.rustc_captures().unwrap().join("proof-context");
+            let bytes = snapshot_io::read(&context_path).unwrap();
+            let mut malformed: Context = serde_json::from_slice(&bytes).unwrap();
+            malformed.immutable.retain(|(path, _)| path.file_name() != Some("Cargo.toml"));
+            snapshot_io::write(&context_path, serde_json::to_vec(&malformed).unwrap()).unwrap();
+            assert_eq!(identity(work, &plan), None);
+            snapshot_io::write(&context_path, bytes).unwrap();
+
+            let paths = super::super::rustc_replay::snapshot_paths(work.root.parent().unwrap(), Utf8Path::new("")).unwrap();
+            let mut script = Script::from_files(paths.into_iter().map(|path| {
+                let bytes = snapshot_io::read(&path).unwrap();
+                (path.into_std_path_buf(), bytes)
+            }));
+            script.environment = env::vars_os().collect();
+            let home = Utf8PathBuf::from_path_buf(env::var_os("USERPROFILE").unwrap().into()).unwrap();
+            script
+                .symlinks
+                .insert(home.join(".cargo").join("config.toml").into_std_path_buf(), Ok(true));
+            snapshot_io::with(script, || assert_eq!(identity(work, &plan), None));
+        });
+    }
+}

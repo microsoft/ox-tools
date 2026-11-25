@@ -4,8 +4,9 @@
 //! Whether a proposed replacement would leave the program as it was.
 
 use rustc_lexer::{LiteralKind, TokenKind};
+use syn::ext::IdentExt as _;
 use syn::punctuated::Punctuated;
-use syn::{Expr, ItemFn, PatIdent, ReturnType, Type};
+use syn::{Attribute, Block, Expr, Ident, Item, ItemFn, Macro, PatIdent, ReturnType, Type};
 
 use super::super::defaults::DefaultPaths;
 use super::indexes::ScopePath;
@@ -26,12 +27,56 @@ pub(super) struct LocalCalls {
     imported_names: HashSet<String>,
 }
 
+/// Proves only the unused, effect-free primitive part of omitting a parameter shadow.
+/// Callers must separately prove standard `Default` resolution and no body-transforming attributes.
+pub(super) fn unused_primitive_parameter(ident: &PatIdent, ty: &Type, body: &Block, types: &Types<'_>) -> bool {
+    struct Uses<'a> {
+        name: &'a Ident,
+        possible: bool,
+    }
+    impl<'ast> syn::visit::Visit<'ast> for Uses<'_> {
+        fn visit_ident(&mut self, i: &'ast Ident) {
+            self.possible |= i.unraw() == self.name.unraw();
+        }
+
+        // Macros and attributes may introduce uses absent from their input tokens; local
+        // declarations can also shadow the inserted type or Default name.
+        fn visit_macro(&mut self, _: &'ast Macro) {
+            self.possible = true;
+        }
+
+        fn visit_attribute(&mut self, _: &'ast Attribute) {
+            self.possible = true;
+        }
+
+        fn visit_item(&mut self, _: &'ast Item) {
+            self.possible = true;
+        }
+    }
+    if
+    // #[gamma::skip(logical.or_remove_left, tag = "equivalent", reason = "The remaining primitive-kind gate and body-use scan still prove an unused, effect-free shadow. Primitive subpatterns and parsed identifier metadata cannot make that shadow observable; transforming function attributes are rejected by the caller.")]
+    (
+        // #[gamma::skip(logical.or_remove_right, logical.or_to_and, tag = "equivalent", reason = "Only these preliminary syntactic checks change; the outer primitive-kind gate and conservative body-use scan remain. An unused primitive shadow has no observable effect.")]
+        ident.subpat.is_some() || !ident.attrs.is_empty() || !matches!(ty, Type::Path(_))
+    ) || !matches!(
+        types.supported_primitive_kind(ty),
+        Some(Kind::Bool | Kind::Signed | Kind::Unsigned | Kind::Float)
+    ) {
+        return false;
+    }
+    let mut uses = Uses {
+        name: &ident.ident,
+        possible: false,
+    };
+    syn::visit::Visit::visit_block(&mut uses, body);
+    !uses.possible
+}
+
 /// Recognizes standard type constructors, not same-named inherent methods on local types.
 pub(super) fn is_standard_default_constructor(expression: &Expr, expected: &Type, types: &Types<'_>, defaults: &DefaultPaths) -> bool {
     if types.abstracts.iter().chain(types.defaulted).any(|name| name == "Default")
         || !defaults.is_standard_default_segments(&["Default".into(), "default".into()])
     {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
         return false;
     }
     let expression = match expression {
@@ -40,31 +85,25 @@ pub(super) fn is_standard_default_constructor(expression: &Expr, expected: &Type
         expression => expression,
     };
     let Expr::Call(call) = expression else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
         return false;
     };
     let Expr::Path(callee) = &*call.func else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
         return false;
     };
     if !call.attrs.is_empty() || !call.args.is_empty() || callee.qself.is_some() {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
         return false;
     }
     let mut path = callee.path.clone();
     let Some(method) = path.segments.pop() else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
         return false;
     };
     if !matches!(method.arguments, syn::PathArguments::None) || !matches!(method.ident.to_string().as_str(), "new" | "default") {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
         return false;
     }
     let _separator = path.segments.pop_punct();
     if
     // #[gamma::skip(cond.always_false, reason = "After removing the empty constructor-path guard, constructor_argument_count still returns None for an empty path before the later last-segment expect is reached.", tag = "equivalent")]
     path.segments.is_empty() {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
         return false;
     }
     let constructor_path = syn::TypePath {
@@ -73,7 +112,6 @@ pub(super) fn is_standard_default_constructor(expression: &Expr, expected: &Type
         path,
     };
     let Some(arguments) = constructor_argument_count(&constructor_path.path) else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
         return false;
     };
     let first = constructor_path
@@ -87,7 +125,6 @@ pub(super) fn is_standard_default_constructor(expression: &Expr, expected: &Type
         || types.defaulted.contains(&first)
         || types.aliases.is_some_and(|aliases| aliases.contains_key(&first))
     {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
         return false;
     }
     let expected = types.resolve_alias(expected);
@@ -95,7 +132,6 @@ pub(super) fn is_standard_default_constructor(expression: &Expr, expected: &Type
     if
     // #[gamma::skip(cond.always_false, logical.or_remove_left, logical.or_remove_right, logical.or_to_and, tag = "equivalent", reason = "Every accepting branch below independently requires genuine empty-constructor, primitive, or Option APIs for both types; those checks also reject shadowed roots.")]
     !types.standard_constructor_root(&constructor) || !types.standard_constructor_root(expected) {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
         return false;
     }
     if method.ident == "new" {
@@ -149,11 +185,9 @@ fn is_resolved_trait_default_with(expression: &Expr, types: &Types<'_>, on_paren
         _ => {}
     }
     let Expr::Call(call) = expression else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
         return false;
     };
     if !call.args.is_empty() || !call.attrs.is_empty() {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
         return false;
     }
     let mut callee = &*call.func;
@@ -162,20 +196,16 @@ fn is_resolved_trait_default_with(expression: &Expr, types: &Types<'_>, on_paren
         callee = &paren.expr;
     }
     let Expr::Path(callee) = callee else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
         return false;
     };
     if callee.qself.is_some() {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
         return false;
     }
     let mut path = callee.path.clone();
     let Some(method) = path.segments.pop() else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
         return false;
     };
     if method.ident != "default" || !matches!(method.arguments, syn::PathArguments::None) {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
         return false;
     }
     let _separator = path.segments.pop_punct();
@@ -215,15 +245,12 @@ impl LocalCalls {
             match attribute.path().get_ident().map(ToString::to_string).as_deref() {
                 Some("cfg_attr") => {
                     let syn::Meta::List(list) = attribute else {
-                        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
                         return false;
                     };
                     let Ok(nested) = list.parse_args_with(Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated) else {
-                        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
                         return false;
                     };
                     if nested.len() < 2 {
-                        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
                         return false;
                     }
                     pending.extend(nested.into_iter().skip(1));
@@ -232,7 +259,6 @@ impl LocalCalls {
                     "cfg" | "doc" | "allow" | "expect" | "warn" | "deny" | "forbid" | "inline" | "cold" | "track_caller" | "must_use"
                     | "coverage",
                 ) => {}
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
                 _ => return false,
             }
         }
@@ -335,18 +361,15 @@ impl LocalCalls {
 
     pub(super) fn returns_unit(&self, callee: &Expr, scope: &ScopePath, visible_imports: &HashMap<String, Option<Vec<String>>>) -> bool {
         let Expr::Path(path) = callee else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         };
         if
         // #[gamma::skip(cond.always_false, logical.or_remove_left, logical.or_to_and, reason = "These sites independently require Path::get_ident/is_ident after the qself guard. On parsed syn paths, <Owner>::Name has a leading_colon, so get_ident/is_ident rejects it independently; <Owner as Trait>::Name contains at least two segments and is also rejected independently. The prior simple qualified-name negative assertions therefore never distinguished this guard. The proof is for parsed production inputs, not artificially inconsistent manually constructed paths.", tag = "equivalent")]
         // #[gamma::skip(logical.or_remove_right, reason = "syn::Path::get_ident independently returns None for ::local; the local-unit-call regression checks that exact dependency behavior. Removing the earlier leading-colon guard cannot make an absolute path pass get_ident.", tag = "equivalent")]
         path.qself.is_some() || path.path.leading_colon.is_some() {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         let Some(ident) = path.path.get_ident() else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         };
         let name = ident.to_string();
@@ -355,7 +378,6 @@ impl LocalCalls {
             || visible_imports.contains_key("*")
             || !self.scope_is_transparent(scope)
         {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         self.declarations.get(&name).and_then(Option::as_ref).is_some_and(|declaration| {
@@ -420,12 +442,10 @@ pub(super) fn is_same_leak(replacement: &str, original: &str, defaults: &Default
     // passes below for the overwhelming majority of candidates.
     // #[gamma::skip(cond.always_false, logical.or_remove_left, logical.or_remove_right, logical.or_to_and, literal.str_to_empty, reason = "both parsed calls must end in Box::leak; weakening this substring prefilter only performs extra parsing before the same answer")]
     if !replacement.contains("leak") || !original.contains("leak") {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
         return false;
     }
 
     let (Some(replacement), Some(original)) = (leaked_value(replacement), leaked_value(original)) else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
         return false;
     };
 
@@ -475,7 +495,6 @@ fn call_argument<'a>(text: &'a str, expression: &[Lexeme<'a>], qualifier: &str, 
     if
     // #[gamma::skip(logical.or_remove_right, reason = "The balanced-parenthesis scan accepts only when the first depth-zero closing parenthesis is the final token; otherwise it returns failure or the unchanged token slice. The redundant final CloseParen guard changes no accepted parse.", tag = "equivalent")]
     !path_ends_with(callee, qualifier, name) || call.last()?.kind != TokenKind::CloseParen {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
 
@@ -488,12 +507,10 @@ fn call_argument<'a>(text: &'a str, expression: &[Lexeme<'a>], qualifier: &str, 
                 // #[gamma::skip(try.propagate_to_unwrap, reason = "the call starts with an opener and returns at the first zero depth, before any unmatched closer can underflow")]
                 depth = depth.checked_sub(1)?;
                 if depth == 0 && index + 1 != call.len() {
-                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                     return None;
                 }
             }
             TokenKind::Comma if depth == 1 => {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
             _ => {}
@@ -502,7 +519,6 @@ fn call_argument<'a>(text: &'a str, expression: &[Lexeme<'a>], qualifier: &str, 
 
     // #[gamma::skip(logical.or_remove_right, literal.int_decrement, literal.int_to_one, literal.int_to_zero, reason = "a two-token empty call yields an empty argument slice and first returns None; relaxing this size check cannot create an argument")]
     if depth != 0 || call.len() < 3 {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
 
@@ -514,7 +530,6 @@ fn call_argument<'a>(text: &'a str, expression: &[Lexeme<'a>], qualifier: &str, 
 
 fn path_ends_with(path: &[Lexeme<'_>], qualifier: &str, name: &str) -> bool {
     let Some(segments) = path_segments(path) else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
         return false;
     };
 
@@ -531,7 +546,6 @@ fn path_segments<'a>(path: &[Lexeme<'a>]) -> Option<Vec<&'a str>> {
     loop {
         let token = path.get(index)?;
         if !matches!(token.kind, TokenKind::Ident | TokenKind::RawIdent) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         segments.push(token.text);
@@ -548,7 +562,6 @@ fn path_segments<'a>(path: &[Lexeme<'a>]) -> Option<Vec<&'a str>> {
             != TokenKind::Colon
             || path.get(index + 1)?.kind != TokenKind::Colon
         {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         index += 2;
@@ -590,21 +603,17 @@ fn strip_parentheses<'slice, 'text>(mut expression: &'slice [Lexeme<'text>]) -> 
 
 fn is_default_call(text: &str, defaults: &DefaultPaths, defaulted_types: &[String]) -> bool {
     let Some(tokens) = lexemes(text) else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
         return false;
     };
     let expression = strip_parentheses(&tokens);
     let Some(open) = expression.iter().position(|token| token.kind == TokenKind::OpenParen) else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
         return false;
     };
     let (callee, call) = expression.split_at(open);
     if !matches!(call, [open, close] if open.kind == TokenKind::OpenParen && close.kind == TokenKind::CloseParen) {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
         return false;
     }
     let Some(segments) = path_segments(callee) else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
         return false;
     };
     let segments: Vec<String> = segments.into_iter().map(str::to_owned).collect();
@@ -615,7 +624,6 @@ fn is_default_call(text: &str, defaults: &DefaultPaths, defaulted_types: &[Strin
 
 fn same_tokens(left: &str, right: &str) -> bool {
     let (Some(left), Some(right)) = (lexemes(left), lexemes(right)) else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
         return false;
     };
 
@@ -625,7 +633,6 @@ fn same_tokens(left: &str, right: &str) -> bool {
             left.kind == right.kind && left.text == right.text
         })
     {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
         return false;
     }
 
@@ -658,7 +665,6 @@ fn lexemes(text: &str) -> Option<Vec<Lexeme<'_>>> {
                 end: at,
             }),
             _invalid => {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
         }

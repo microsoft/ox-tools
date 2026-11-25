@@ -185,6 +185,9 @@ pub struct SuppressArgs {
     /// being killed part-way through it. A committed file needs no journal of its own, because
     /// version control already is one; a file with uncommitted changes has nothing to be put back
     /// from, so it is refused rather than edited.
+    ///
+    /// Applying edits requires Git to confirm cleanliness, except in a recognized non-work-tree
+    /// directory. This flag bypasses that check, including when Git is unavailable or fails.
     #[arg(long, help_heading = "Suppressing")]
     pub allow_dirty: bool,
 }
@@ -211,6 +214,9 @@ pub struct UnsuppressArgs {
     /// reason nobody can reconstruct. A committed file needs no journal of its own, because version
     /// control already is one; a file with uncommitted changes has nothing to be put back from, so
     /// it is refused rather than edited.
+    ///
+    /// Applying edits requires Git to confirm cleanliness, except in a recognized non-work-tree
+    /// directory. This flag bypasses that check, including when Git is unavailable or fails.
     #[arg(long, help_heading = "Suppressing")]
     pub allow_dirty: bool,
 }
@@ -932,21 +938,17 @@ impl Default for SelectArgs {
 
 impl SelectArgs {
     /// Resolves the `--mutators` selector list into a concrete set of mutators.
-    // #[gamma::skip(all, reason = "the CLI rejects either kind of selector error before this adapter; the conjunction only distinguishes impossible partially-valid parser states")]
     pub fn selection(&self) -> crate::Result<Selection> {
         let mut selection = self
             .mutators
             .as_deref()
             .map_or_else(|| Ok(Selection::default_preset()), Selection::parse)?;
 
-        // An explicit `--mutators` list is the whole set, so `--error` must not smuggle a mutator into
-        // it. Dropping the values silently would be worse still, so say so.
-        if self.mutators.is_some() && !self.errors.is_empty() && !selection.contains("fn_value.err_with") {
-            selection.drop_errors();
-            return Ok(selection);
+        // Setting error values must not widen an explicit mutator selection.
+        if selection.contains("fn_value.err_with") {
+            selection.set_errors(self.errors.clone());
         }
 
-        selection.set_errors(self.errors.clone());
         Ok(selection)
     }
 

@@ -24,7 +24,14 @@
 
 use std::env;
 use std::ffi::OsString;
+use std::io::{Read as _, Write};
+use std::net::{TcpListener, TcpStream};
 use std::process::Command;
+use std::time::Duration;
+
+use tick::SimpleClock;
+
+use crate::error::error;
 
 /// Marks a process as already being the relaunched one.
 ///
@@ -32,6 +39,8 @@ use std::process::Command;
 /// a flag would have to be appended to a command line that is otherwise forwarded verbatim, and
 /// anything appended can land after a `--` and be read as a value rather than as an option.
 const MARKER: &str = "CARGO_GAMMA_SCOPE";
+const STARTED: &str = "CARGO_GAMMA_SCOPE_STARTED";
+const ACKNOWLEDGEMENT_LEN: usize = blake3::OUT_LEN * 2;
 
 /// The command that asks the systemd user manager for a scope.
 const SYSTEMD_RUN: &str = "systemd-run";
@@ -61,9 +70,53 @@ pub(crate) enum Refusal {
 
 /// Whether this process is the result of a relaunch.
 #[cfg_attr(coverage_nightly, coverage(off))]
-// #[gamma::skip(all, reason = "This adapter reads process-wide environment state; the recursion guard is mutation-tested through relaunch_unless without changing shared environment.", tag = "native-boundary")]
+// #[gamma::skip(all, reason = "Reads the inherited recursion marker; relaunch_unless tests recursion prevention without changing process-wide environment.", tag = "native-boundary")]
 pub(crate) fn relaunched() -> bool {
     env::var_os(MARKER).is_some()
+}
+
+/// Acknowledges a scoped child's startup before any command work can run.
+#[cfg_attr(coverage_nightly, coverage(off))]
+// #[gamma::skip(all, reason = "Reads inherited startup markers and connects over loopback; acknowledge_start_with covers validation and delivery failures without native I/O.", tag = "native-boundary")]
+pub(crate) fn acknowledge_start() -> crate::Result<()> {
+    if !relaunched() {
+        return Ok(());
+    }
+
+    let started = env::var_os(STARTED)
+        .map(|value| {
+            value
+                .into_string()
+                .map_err(|_value| error!("the scoped startup acknowledgement is not UTF-8"))
+        })
+        .transpose()?;
+    acknowledge_start_with(started.as_deref(), |address, timeout| {
+        let stream = TcpStream::connect_timeout(&address, timeout)?;
+        stream.set_write_timeout(Some(timeout))?;
+        Ok(stream)
+    })
+    .map_err(|error| error!("cannot acknowledge the scoped startup before running commands: {error}"))
+}
+
+/// Keeps the inherited recursion guard without asking descendants to acknowledge our startup.
+pub(crate) fn for_child(command: &mut Command) {
+    _ = command.env_remove(STARTED);
+}
+
+fn acknowledge_start_with<W: Write>(
+    started: Option<&str>,
+    connect: impl FnOnce(std::net::SocketAddr, Duration) -> std::io::Result<W>,
+) -> std::io::Result<()> {
+    let Some(started) = started else {
+        return Ok(());
+    };
+    let invalid = || std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid scoped startup acknowledgement");
+    let (address, token) = started.split_once('/').ok_or_else(invalid)?;
+    let address = address.parse::<std::net::SocketAddr>().map_err(|_invalid_address| invalid())?;
+    if !address.ip().is_loopback() || token.len() != ACKNOWLEDGEMENT_LEN || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(invalid());
+    }
+    connect(address, Duration::from_secs(1))?.write_all(token.as_bytes())
 }
 
 /// Builds the command that would re-run this process inside a delegated scope.
@@ -142,13 +195,39 @@ fn relaunch_in_scope() -> Result<Option<i32>, Refusal> {
     // part of the arguments and has to be forwarded with the rest.
     let args: Vec<OsString> = env::args_os().skip(1).collect();
 
-    match scope_command(exe.into_os_string(), args).status() {
-        // A scope that could not be started leaves the run exactly where it was, so this is a
-        // refusal rather than a failure: the caller degrades or errors on its own terms.
-        Err(_cause) => Err(Refusal::Unavailable),
+    let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|_unavailable| Refusal::Unavailable)?;
+    listener.set_nonblocking(true).map_err(|_unavailable| Refusal::Unavailable)?;
+    let address = listener.local_addr().map_err(|_unavailable| Refusal::Unavailable)?;
+    let token = blake3::hash(format!("{}-{:?}", std::process::id(), SimpleClock::new_system().system_time()).as_bytes()).to_hex();
+    let mut command = scope_command(exe.into_os_string(), args);
+    let _command = command.env(STARTED, format!("{address}/{token}"));
+    scope_status(
+        &mut command,
+        |command| command.status().map(|status| status.code()),
+        || {
+            while let Ok((mut stream, _)) = listener.accept() {
+                let _timeout = stream.set_read_timeout(Some(Duration::from_secs(1)));
+                let mut received = [0; ACKNOWLEDGEMENT_LEN];
+                if stream.read_exact(&mut received).is_ok() && received == token.as_bytes() {
+                    return true;
+                }
+            }
+            false
+        },
+    )
+}
 
-        Ok(status) => Ok(Some(status.code().unwrap_or(crate::commands::EXIT_CANNOT_PROCEED))),
+/// Attributes launcher status to Gamma only after the child independently acknowledges startup.
+fn scope_status(
+    command: &mut Command,
+    run: impl FnOnce(&mut Command) -> std::io::Result<Option<i32>>,
+    started: impl FnOnce() -> bool,
+) -> Result<Option<i32>, Refusal> {
+    let status = run(command).map_err(|_unavailable| Refusal::Unavailable)?;
+    if !started() {
+        return Err(Refusal::Unavailable);
     }
+    Ok(Some(status.unwrap_or(crate::commands::EXIT_CANNOT_PROCEED)))
 }
 
 /// Finds an executable on `PATH`.
@@ -169,6 +248,84 @@ fn which(program: &str) -> Option<std::path::PathBuf> {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_scope_start_failure_is_not_the_campaigns_exit_status() {
+        let mut command = scope_command("never-launched".into(), Vec::new());
+        for code in [Some(0), Some(1), None] {
+            assert_eq!(scope_status(&mut command, |_| Ok(code), || false), Err(Refusal::Unavailable));
+            assert_eq!(
+                scope_status(&mut command, |_| Ok(code), || true),
+                Ok(Some(code.unwrap_or(crate::commands::EXIT_CANNOT_PROCEED)))
+            );
+        }
+        assert_eq!(
+            scope_status(
+                &mut command,
+                |_| Err(std::io::Error::other("spawn refused")),
+                || panic!("no child started")
+            ),
+            Err(Refusal::Unavailable)
+        );
+    }
+
+    #[test]
+    fn startup_acknowledgement_uses_only_the_private_loopback_token() {
+        let token = blake3::hash(b"scope-start-regression").to_hex();
+        let address = "127.0.0.1:42".parse().unwrap();
+        let mut received = Vec::new();
+        acknowledge_start_with(Some(&format!("{address}/{token}")), |actual, timeout| {
+            assert_eq!(actual, address);
+            assert_eq!(timeout, Duration::from_secs(1));
+            Ok(&mut received)
+        })
+        .unwrap();
+        assert_eq!(received, token.as_bytes());
+        for invalid in [
+            format!("not-an-address/{token}"),
+            format!("192.0.2.1:42/{token}"),
+            "127.0.0.1:1/short".into(),
+            format!("127.0.0.1:1/{}", &token.as_str()[..63]),
+            format!("127.0.0.1:1/{token}0"),
+            format!("127.0.0.1:1/z{}", &token.as_str()[1..]),
+            format!("127.0.0.1:1/{}", "z".repeat(64)),
+            "no-separator".into(),
+        ] {
+            let error = acknowledge_start_with(Some(&invalid), |_, _| -> std::io::Result<Vec<u8>> {
+                panic!("invalid startup acknowledgement must not connect")
+            })
+            .unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+            assert!(error.to_string().contains("startup acknowledgement"), "{error}");
+        }
+    }
+
+    #[test]
+    fn startup_acknowledgement_propagates_connection_and_write_failures() {
+        let started = format!("127.0.0.1:42/{}", blake3::hash(b"scope-start-regression").to_hex());
+        let error = acknowledge_start_with(Some(&started), |_, _| -> std::io::Result<std::io::Sink> {
+            Err(std::io::Error::from(std::io::ErrorKind::ConnectionRefused))
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::ConnectionRefused);
+
+        let mut closed: &mut [u8] = &mut [];
+        let error = acknowledge_start_with(Some(&started), |_, _| Ok(&mut closed)).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::WriteZero);
+    }
+
+    #[test]
+    fn descendant_commands_preserve_the_guard_without_repeating_startup_delivery() {
+        let mut command = Command::new("not-launched");
+        _ = command.env(MARKER, "1").env(STARTED, "parent-only-address-and-token");
+        for_child(&mut command);
+        assert_eq!(
+            command.get_envs().find(|(name, _)| *name == MARKER).unwrap().1,
+            Some(std::ffi::OsStr::new("1"))
+        );
+        assert_eq!(command.get_envs().find(|(name, _)| *name == STARTED).unwrap().1, None);
+        acknowledge_start_with::<std::io::Sink>(None, |_, _| panic!("descendants do not repeat startup delivery")).unwrap();
+    }
 
     /// Every property the relaunch depends on lives in this command line, and getting any of them
     /// wrong fails in a way that looks like the host being at fault rather than the command.

@@ -329,16 +329,6 @@ impl Hints {
         replace || hints.generalized.supported().is_some()
     }
 
-    /// Whether this workspace has never had a checked-in hints artifact.
-    ///
-    /// An unreadable, corrupt or foreign-version file is present even though it cannot provide
-    /// hints, so it must not trigger advice to create the file that is already there.
-    #[must_use]
-    #[cfg(test)]
-    pub(crate) fn is_missing(root: &Utf8Path) -> bool {
-        matches!(fs::metadata(path(root).as_std_path()), Err(cause) if cause.kind() == ErrorKind::NotFound)
-    }
-
     /// Reads and validates the artifact at `path`, or nothing when it cannot be trusted.
     fn read(path: &Utf8Path) -> Option<Self> {
         Self::read_with(path, |path| input::text(File::open(path.as_std_path())?))
@@ -2082,7 +2072,6 @@ mod tests {
         let (_dir, root) = workspace("hints-absent-");
 
         assert!(Hints::load(&root).is_empty());
-        assert!(Hints::is_missing(&root));
     }
 
     #[test]
@@ -2468,7 +2457,6 @@ mod tests {
         fs::write(path(&root).as_std_path(), "{ not json").expect("the artifact should be writable");
 
         assert!(Hints::load(&root).is_empty());
-        assert!(!Hints::is_missing(&root));
 
         fs::write(
             path(&root).as_std_path(),
@@ -2566,7 +2554,6 @@ mod tests {
         .expect("writable");
 
         assert!(Hints::load(&root).is_empty());
-        assert!(!Hints::is_missing(&root));
     }
 
     #[test]
@@ -3141,7 +3128,6 @@ mod tests {
         assert_eq!(promotion.probes, 1);
         assert_eq!(promotion.ordering, 1);
         assert_eq!(Hints::load(&root), hints);
-        assert!(!Hints::is_missing(&root));
     }
 
     #[test]

@@ -71,8 +71,9 @@ mod identity {
     /// The identity of a site pins the whole normalization-plus-hash pipeline, not just the hash.
     ///
     /// `identifiers_are_stable_across_versions` pins ids over already-normalized text, so it proves
-    /// nothing about `normalize_site_text` — the function whose entire job is to make an id survive
-    /// a `cargo fmt`. If someone taught normalization to lowercase identifiers, to keep comments,
+    /// nothing about `normalize_site_text`, which collapses whitespace runs and removes comments,
+    /// but preserves separator presence and punctuation. Arbitrary `cargo fmt` changes are not
+    /// identity-preserving. If someone taught normalization to lowercase identifiers, to keep comments,
     /// or to collapse whitespace differently, `"a + b"` would still hash to the same bytes and that
     /// test would stay green while every real-world id silently moved. This one closes that gap: it
     /// feeds *raw*, un-normalized site text — one case per normalization branch — through the same

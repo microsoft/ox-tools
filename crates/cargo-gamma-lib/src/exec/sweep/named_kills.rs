@@ -3,14 +3,13 @@
 
 //! Global distinct-mutant kill counts for inferred named-test selection.
 
-use core::cmp::Reverse;
-
 use super::{Judgement, Killer, Killers, Outcome, Plan, TestBinary};
 use crate::HashMap;
+use crate::exec::sweep::binary_kills::TargetCounts;
 
 #[derive(Debug, Default)]
 pub(super) struct NamedKills {
-    counts: HashMap<Killer, usize>,
+    counts: TargetCounts<HashMap<String, usize>>,
     credited: HashMap<u32, Killer>,
 }
 
@@ -18,7 +17,11 @@ impl NamedKills {
     pub(super) fn new(plan: &Plan, killers: &Killers) -> Self {
         let mut result = Self::default();
         for (_, killer) in killers.iter() {
-            *result.counts.entry(killer.clone()).or_default() += 1;
+            *result
+                .counts
+                .entry(&killer.package, &killer.target)
+                .entry(killer.test.clone())
+                .or_default() += 1;
         }
         for mutant in plan.mutants.iter().filter(|mutant| mutant.ordinal > 0) {
             if let Some(killer) = killers.hint(&mutant.id) {
@@ -40,34 +43,48 @@ impl NamedKills {
             }
             let count = self
                 .counts
-                .get_mut(&previous)
+                .get_mut(&previous.package, &previous.target)
+                .and_then(|tests| tests.get_mut(&previous.test))
                 .expect("each credited mutant contributes to its named test's count");
             *count = count.checked_sub(1).expect("a credited mutant contributes at least one kill");
         }
-        *self.counts.entry(killer.clone()).or_default() += 1;
+        *self
+            .counts
+            .entry(&killer.package, &killer.target)
+            .entry(killer.test.clone())
+            .or_default() += 1;
     }
 
     pub(super) fn rank(&self, selections: &mut [(usize, &str)], reachable: &[&TestBinary]) {
-        selections.sort_by_cached_key(|(index, test)| {
-            let binary = reachable[*index];
-            (
-                Reverse(self.count(binary, test)),
-                binary.package.as_str(),
-                binary.killer_target(),
-                *test,
-            )
+        let mut ranked = selections
+            .iter()
+            .map(|&(index, test)| ((index, test), self.count(reachable[index], test)))
+            .collect::<Vec<_>>();
+        ranked.sort_by(|((left, left_test), left_count), ((right, right_test), right_count)| {
+            let left = reachable[*left];
+            let right = reachable[*right];
+            right_count
+                .cmp(left_count)
+                .then_with(|| left.package.cmp(&right.package))
+                .then_with(|| target_bytes(left).cmp(target_bytes(right)))
+                .then_with(|| left_test.cmp(right_test))
         });
+        for (selection, (ranked, _count)) in selections.iter_mut().zip(ranked) {
+            *selection = ranked;
+        }
     }
 
     fn count(&self, binary: &TestBinary, test: &str) -> usize {
-        let mut killer = super::staged::killer_for(binary, test);
-        let qualified = self.counts.get(&killer).copied().unwrap_or(0);
-        if killer.target == binary.target {
-            return qualified;
-        }
-        killer.target.clone_from(&binary.target);
-        qualified + self.counts.get(&killer).copied().unwrap_or(0)
+        self.counts.for_binary(binary).filter_map(|tests| tests.get(test)).sum()
     }
+}
+
+fn target_bytes(binary: &TestBinary) -> impl Iterator<Item = u8> + '_ {
+    binary
+        .target_kind
+        .bytes()
+        .chain((!binary.target_kind.is_empty()).then_some(b':'))
+        .chain(binary.target.bytes())
 }
 
 #[cfg(test)]
@@ -78,6 +95,21 @@ mod tests {
     use crate::exec::sweep::staged::killer_for;
     use crate::exec::sweep::tests::{ranked_binaries, unreachable_harness};
     use crate::fixtures;
+
+    #[test]
+    fn borrowed_target_order_matches_the_persisted_qualified_target_bytes() {
+        // The kinds straddle the inserted ':' delimiter; an empty kind omits it entirely.
+        let binaries = ["bin", "binZ", "", "bin-target"].map(|kind| TestBinary {
+            package: "package".into(),
+            target: "same".into(),
+            target_kind: kind.into(),
+            ..crate::testing::test_binary("unused")
+        });
+        let reachable = binaries.iter().collect::<Vec<_>>();
+        let mut selections = [(0, "test"), (2, "test"), (1, "test"), (3, "test")];
+        NamedKills::default().rank(&mut selections, &reachable);
+        assert_eq!(selections, [(3, "test"), (0, "test"), (1, "test"), (2, "test")]);
+    }
 
     #[test]
     fn recovered_missing_legacy_named_credit_is_exactly_zero_after_a_qualified_hit() {

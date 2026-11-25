@@ -45,7 +45,6 @@ impl CachePrefix {
             || !fallible_verdict(&function.sig.output)
             || !shadow_free(&function.block)
         {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let mut parameters = HashMap::with_capacity_and_hasher(function.sig.inputs.len(), FxBuildHasher);
@@ -59,7 +58,6 @@ impl CachePrefix {
                     if
                     // #[gamma::skip(cond.always_false, reason = "Supported Rust signatures permit at most one receiver, and typed arguments never set this flag.", tag = "equivalent")]
                     receiver {
-                        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                         return None;
                     }
                     receiver = true;
@@ -71,47 +69,37 @@ impl CachePrefix {
                         && !scope.copy_record(&argument.ty)
                     {
                         // Unused owned arguments can still run a destructor at a cache-hit return.
-                        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                         return None;
                     }
                     let name = ident(&argument.pat)?;
                     parameter_order.push(name.clone());
                     if matches!(name.as_str(), "Ok" | "Some" | "None") || parameters.insert(name, &*argument.ty).is_some() {
-                        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                         return None;
                     }
                 }
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 _ => return None,
             }
         }
         if !receiver {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let mut statements = function.block.stmts.iter();
         let mut statement = statements.next()?;
         let empty_guard = if let Stmt::Expr(Expr::If(branch), _) = statement {
             if !branch.attrs.is_empty() || branch.else_branch.is_some() {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             let Expr::Unary(negation) = &*branch.cond else { return None };
             if !negation.attrs.is_empty() || !matches!(negation.op, UnOp::Not(_)) {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             let Expr::MethodCall(empty) = &*negation.expr else { return None };
             if !method_call(empty, "is_empty", 0) || !returns(&branch.then_branch, &syn::parse_quote!(Ok(None))) {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
             let path = place(&empty.receiver)?;
             let ty = scope.field_type(&parameters, &path)?;
             if !standard_map(ty).is_some_and(|(key, _)| primitive(key, "u32")) {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
             statement = statements.next()?;
@@ -119,31 +107,24 @@ impl CachePrefix {
         } else {
             None
         };
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         let Stmt::Local(key) = statement else { return None };
         if !key.attrs.is_empty() {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let key_name = ident(&key.pat)?;
         if
         // #[gamma::skip(logical.or_remove_right, reason = "The preceding shadow_free traversal independently rejects bindings named Ok, Some or None.", tag = "equivalent")]
         parameters.contains_key(&key_name) || matches!(key_name.as_str(), "Ok" | "Some" | "None") {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let initialization = key.init.as_ref()?;
         if initialization.diverge.is_some() {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         let Expr::Call(call) = &*initialization.expr else { return None };
         if !call.attrs.is_empty() || call.args.len() != 1 {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         let Expr::Path(path) = &*call.func else { return None };
         if (
             // #[gamma::skip(logical.or_remove_right, reason = "A qualified trait call cannot resolve to the closed local inherent method table; inherent qself retains a leading colon rejected here.", tag = "equivalent")]
@@ -151,12 +132,10 @@ impl CachePrefix {
         ) || path.path.leading_colon.is_some()
             || path.path.segments.len() != 2
         {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let parts = path.path.segments.iter().collect::<Vec<_>>();
         if parts.iter().any(|part| !matches!(part.arguments, syn::PathArguments::None)) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let key_owner = parts[0].ident.to_string();
@@ -167,52 +146,40 @@ impl CachePrefix {
         let ordinal = scope.key_projection(key_function, &element)?;
 
         let Stmt::Expr(Expr::If(branch), _) = statements.next()? else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         };
         if !branch.attrs.is_empty() || branch.else_branch.is_some() {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         let Expr::Let(binding) = &*branch.cond else { return None };
         if !binding.attrs.is_empty() {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         let Pat::TupleStruct(pattern) = &*binding.pat else { return None };
         if (
             // #[gamma::skip(logical.or_remove_left, reason = "Pinned Syn parses if-let tuple-struct patterns with empty attributes; expression attributes belong to ExprLet instead.", tag = "equivalent")]
             !pattern.attrs.is_empty() || !pattern.path.is_ident("Some")
         ) || pattern.elems.len() != 1
         {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let cached = ident(&pattern.elems[0])?;
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         let Expr::MethodCall(get) = &*binding.expr else { return None };
         if !method_call(get, "get", 1) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         let Expr::Reference(reference) = &get.args[0] else { return None };
         if !reference.attrs.is_empty() || reference.mutability.is_some() || bare(&reference.expr)? != key_name {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let cache = place(&get.receiver)?;
         let (key_type, value_type) = standard_map(scope.field_type(&parameters, &cache)?)?;
         if !vector_u32(key_type) || !option_bool(value_type) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         // #[gamma::skip(try.propagate_to_unwrap, reason = "cached is a parsed identifier, including any raw prefix, so this interpolation always parses.", tag = "equivalent")]
         let returned: Expr = syn::parse_str(&format!("Ok(*{cached})")).ok()?;
         if !returns(&branch.then_branch, &returned) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         Some(Self {
@@ -254,7 +221,6 @@ impl CachePrefix {
         budget: &mut usize,
     ) -> Option<Option<bool>> {
         if ordinals.len() > 32 || entries.len() > 32 || entries.iter().any(|(key, _)| key.len() > 32) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         // #[gamma::skip(try.propagate_to_unwrap, reason = "The preceding length guards bound the total by 33 + 32 * 33, which cannot overflow usize.", tag = "equivalent")]
@@ -267,7 +233,6 @@ impl CachePrefix {
                 return Some(None);
             }
         } else if guard_empty.is_some() {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let mut key = ordinals.to_vec();
@@ -278,7 +243,6 @@ impl CachePrefix {
         for (known, verdict) in entries {
             // HashMap snapshots cannot contain two entries for an equal key.
             if !seen.insert(known) {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
             if known == &key {
@@ -297,7 +261,6 @@ struct Scope<'a> {
 impl<'a> Scope<'a> {
     fn new(file: &'a syn::File) -> Option<Self> {
         if !file.attrs.is_empty() || file.items.len() > 64 {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let mut scope = Self {
@@ -306,11 +269,10 @@ impl<'a> Scope<'a> {
         };
         let mut cost = 0_usize;
         for item in &file.items {
-            use syn::spanned::Spanned as _;
+            use crate::parse::Extent as _;
             // #[gamma::skip(try.propagate_to_unwrap, reason = "Prior cost is at most 65536 and a parsed item span is bounded by the source String length, at most isize::MAX.", tag = "equivalent")]
-            cost = cost.checked_add(item.span().byte_range().len())?;
+            cost = cost.checked_add(item.extent().byte_range().len())?;
             if cost > 65536 {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
             let unannotated_inherent_impl =
@@ -345,7 +307,6 @@ impl<'a> Scope<'a> {
                             | "HashSet"
                     ) || scope.records.insert(name, record).is_some()
                     {
-                        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                         return None;
                     }
                 }
@@ -356,23 +317,19 @@ impl<'a> Scope<'a> {
                     ) && implementation.generics.params.is_empty()
                         && implementation.generics.where_clause.is_none() =>
                 {
-                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                     let Type::Path(owner) = &*implementation.self_ty else { return None };
                     if
                     // #[gamma::skip(cond.always_false, reason = "The following get_ident independently rejects qualified paths through its singleton/no-leading-colon requirements.", tag = "equivalent")]
                     owner.qself.is_some() {
-                        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                         return None;
                     }
                     let owner = owner.path.get_ident()?.to_string();
                     if
                     // #[gamma::skip(cond.always_false, literal.str_to_empty, reason = "Final owner validation requires a local struct; neither Self nor an empty string can name a parsed struct.", tag = "equivalent")]
                     owner == "Self" {
-                        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                         return None;
                     }
                     for item in &implementation.items {
-                        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                         let syn::ImplItem::Fn(function) = item else { return None };
                         if scope.methods.len() >= 64
                             || scope
@@ -380,7 +337,6 @@ impl<'a> Scope<'a> {
                                 .insert((owner.clone(), function.sig.ident.to_string()), function)
                                 .is_some()
                         {
-                            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                             return None;
                         }
                     }
@@ -395,7 +351,6 @@ impl<'a> Scope<'a> {
                     if import.attrs.is_empty()
                         && import.leading_colon.is_none()
                         && import.tree == syn::parse_quote!(std::collections::HashSet) => {}
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 _ => return None,
             }
         }
@@ -407,19 +362,16 @@ impl<'a> Scope<'a> {
     }
 
     fn copy_record(&self, ty: &Type) -> bool {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
         let Type::Path(path) = ty else { return false };
         if (
             // #[gamma::skip(logical.or_remove_left, reason = "The retained leading-colon and singleton checks reject parsed inherent and trait-qualified self paths respectively.", tag = "equivalent")]
             path.qself.is_some() || path.path.leading_colon.is_some()
         ) || path.path.segments.len() != 1
         {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         // #[gamma::skip(iter.first_to_last, reason = "The preceding exact singleton check makes first and last identical.", tag = "equivalent")]
         let Some(segment) = path.path.segments.first() else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false; // #[gamma::skip(literal.bool_flip, reason = "The preceding exact singleton check guarantees this segment exists.", tag = "equivalent")]
         };
         self.records.get(&segment.ident.to_string()).is_some_and(|record| {
@@ -434,18 +386,14 @@ impl<'a> Scope<'a> {
     }
 
     fn field_type(&self, parameters: &HashMap<String, &Type>, path: &[String]) -> Option<&'a Type> {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         let [base, field] = path else { return None };
         let Type::Reference(reference) = *parameters.get(base)? else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         };
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         let Type::Path(record) = &*reference.elem else { return None };
         if
         // #[gamma::skip(cond.always_false, reason = "The following path.get_ident independently rejects parsed qualified-self paths.", tag = "equivalent")]
         record.qself.is_some() {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
 
@@ -459,24 +407,19 @@ impl<'a> Scope<'a> {
 
     fn key_projection(&self, function: &syn::ImplItemFn, element: &str) -> Option<String> {
         if !function.attrs.is_empty() || !plain_signature(&function.sig) || function.sig.inputs.len() != 1 {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let FnArg::Typed(parameter) = &function.sig.inputs[0] else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         };
         if !parameter.attrs.is_empty() || population_element(&parameter.ty)? != element {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let parameter_name = ident(&parameter.pat)?;
         let syn::ReturnType::Type(_, output) = &function.sig.output else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         };
         if !vector_u32(output) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let [
@@ -485,26 +428,21 @@ impl<'a> Scope<'a> {
             Stmt::Expr(tail, None),
         ] = function.block.stmts.as_slice()
         else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         };
         if !local.attrs.is_empty() {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let name = ident(&local.pat)?;
         if name == parameter_name || !method_call(sort, "sort_unstable", 0) || bare(&sort.receiver)? != name || bare(tail)? != name {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         // #[gamma::skip(try.propagate_to_unwrap, reason = "The exact remaining body immediately sorts and returns this local; without initialization that supported Rust body cannot type-check.", tag = "equivalent")]
         let initialization = local.init.as_ref()?;
         if initialization.diverge.is_some() {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let Expr::MethodCall(collect) = &*initialization.expr else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         };
         if (
@@ -512,33 +450,25 @@ impl<'a> Scope<'a> {
             !collect.attrs.is_empty() || collect.method != "collect"
         ) || !collect.args.is_empty()
         {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         if let Some(types) = &collect.turbofish {
             let [syn::GenericArgument::Type(ty)] = types.args.iter().collect::<Vec<_>>().as_slice() else {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             };
             let arguments = arguments(ty, "Vec", "std::vec::Vec")?;
             if !matches!(arguments.as_slice(), [element] if matches!(element, Type::Infer(_)) || primitive(element, "u32")) {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
         }
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         let Expr::MethodCall(map) = &*collect.receiver else { return None };
         if !method_call(map, "map", 1) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         let Expr::MethodCall(iter) = &*map.receiver else { return None };
         if !method_call(iter, "iter", 0) || bare(&iter.receiver)? != parameter_name {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         let Expr::Closure(projection) = &map.args[0] else { return None };
         let unsupported_projection = (
             // #[gamma::skip(logical.or_remove_right, reason = "The supported standard map pipeline requires a unary callback.", tag = "equivalent")]
@@ -553,13 +483,11 @@ impl<'a> Scope<'a> {
             || projection.lifetimes.is_some()
             || !matches!(projection.output, syn::ReturnType::Default)
         {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let projection_name = ident(&projection.inputs[0])?;
         let [base, field]: [String; 2] = place(&projection.body)?.try_into().ok()?;
         if base != projection_name {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let record = self.records.get(element)?;
@@ -630,13 +558,11 @@ fn plain_signature(signature: &syn::Signature) -> bool {
 }
 
 fn ident(pattern: &Pat) -> Option<String> {
-    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
     let Pat::Ident(pattern) = pattern else { return None };
     (pattern.attrs.is_empty() && pattern.by_ref.is_none() && pattern.subpat.is_none()).then(|| pattern.ident.to_string())
 }
 
 fn bare(expression: &Expr) -> Option<String> {
-    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
     let Expr::Path(path) = expression else { return None };
     // #[gamma::skip(logical.and_remove_right, reason = "The following get_ident independently rejects parsed qself paths by their segment count or leading colon.", tag = "equivalent")]
     (path.attrs.is_empty() && path.qself.is_none())
@@ -648,17 +574,13 @@ fn place(expression: &Expr) -> Option<Vec<String>> {
     if let Some(name) = bare(expression) {
         return Some(vec![name]);
     }
-    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
     let Expr::Field(field) = expression else { return None };
-    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
     let syn::Member::Named(name) = &field.member else { return None };
     if !field.attrs.is_empty() {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
     let mut path = place(&field.base)?;
     if path.len() >= 2 {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
     path.push(name.to_string());
@@ -679,10 +601,8 @@ fn primitive(ty: &Type, name: &str) -> bool {
 }
 
 fn arguments<'a>(ty: &'a Type, short: &str, qualified: &str) -> Option<Vec<&'a Type>> {
-    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
     let Type::Path(path) = ty else { return None };
     if path.qself.is_some() || path.path.leading_colon.is_some() {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
     let names = path
@@ -693,7 +613,6 @@ fn arguments<'a>(ty: &'a Type, short: &str, qualified: &str) -> Option<Vec<&'a T
         .collect::<Vec<_>>()
         .join("::");
     if names != short && names != qualified {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
     if path
@@ -704,12 +623,10 @@ fn arguments<'a>(ty: &'a Type, short: &str, qualified: &str) -> Option<Vec<&'a T
         .take(path.path.segments.len().checked_sub(1)?)
         .any(|segment| !matches!(segment.arguments, syn::PathArguments::None))
     {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None; // #[gamma::skip(option.none_to_some, reason = "Every caller requires one or two generic type arguments, so an empty result rejects just like None.", tag = "equivalent")]
     }
     // #[gamma::skip(try.propagate_to_unwrap, reason = "The already-matched nonempty standard type spelling guarantees a final path segment.", tag = "equivalent")]
     let syn::PathArguments::AngleBracketed(arguments) = &path.path.segments.last()?.arguments else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     };
     arguments
@@ -733,32 +650,25 @@ fn option_bool(ty: &Type) -> bool {
 fn standard_map(ty: &Type) -> Option<(&Type, &Type)> {
     // #[gamma::skip(literal.str_to_empty, reason = "These accepted spellings are identical; changing either one to an impossible empty path leaves the other exact spelling.", tag = "equivalent")]
     let arguments = arguments(ty, "std::collections::HashMap", "std::collections::HashMap")?;
-    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
     let [key, value] = arguments.as_slice() else { return None };
     Some((*key, *value))
 }
 
 fn population_element(ty: &Type) -> Option<String> {
-    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
     let Type::Reference(reference) = ty else { return None };
-    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
     let Type::Slice(slice) = &*reference.elem else { return None };
-    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
     let Type::Reference(element) = &*slice.elem else { return None };
-    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
     let Type::Path(record) = &*element.elem else { return None };
     let mutable = reference.mutability.is_some() || element.mutability.is_some();
     if
     // #[gamma::skip(logical.or_remove_right, reason = "The final get_ident independently rejects every parsed qualified-self record path.", tag = "equivalent")]
     mutable || record.qself.is_some() {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
     record.path.get_ident().map(ToString::to_string)
 }
 
 fn fallible_verdict(output: &syn::ReturnType) -> bool {
-    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
     let syn::ReturnType::Type(_, ty) = output else { return false };
     arguments(ty, "Result", "std::result::Result")
         .is_some_and(|arguments| matches!(arguments.as_slice(), [value, error] if option_bool(value) && primitive(error, "u32")))

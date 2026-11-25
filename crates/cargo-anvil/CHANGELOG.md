@@ -2,7 +2,11 @@
 
 ## [Unreleased]
 
-## [0.29.0] - 2026-11-24
+## [0.29.0] - 2026-11-25
+
+- ✨ Features
+
+  - cargo-anvil: add cargo-unused-deps check ([#378](https://github.com/microsoft/ox-tools/pull/378))
 
 - 📚 Documentation
 
@@ -17,6 +21,20 @@
 
   - cargo-anvil: retain advisory-independent deny checks in PRs
   - cargo-anvil: move cargo-deny to scheduled checks
+
+- 🧩 Miscellaneous
+
+  - Merge main and reconcile cargo-anvil 0.29.0 catalog
+
+## [0.28.1] - 2026-11-24
+
+- ✨ Features
+
+  - cargo-anvil: add cargo-unused-deps check ([#378](https://github.com/microsoft/ox-tools/pull/378))
+
+- 🐛 Bug Fixes
+
+  - harden cargo-gamma and require 0.7.0 for Anvil mutation checks
 
 ## [0.28.0] - 2026-11-23
 

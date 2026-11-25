@@ -81,7 +81,7 @@ const fn thread_identifier(thread: u32) -> u32 {
 impl NativeCalls for SystemCalls {
     fn thread_snapshot(&self) -> HANDLE {
         // SAFETY: the arguments are a flag word and a process id, and no caller memory is touched.
-        // #[gamma::skip(all, reason = "Windows accepts reserved or irrelevant flag/process-id bits for a thread-only system snapshot, so altered arguments are not reliably observable across supported Windows versions")]
+        // #[gamma::skip(all, tag = "native-boundary", reason = "Windows accepts reserved or irrelevant flag/process-id bits for a thread-only system snapshot, so altered arguments are not reliably observable across supported Windows versions")]
         unsafe { CreateToolhelp32Snapshot(THREAD_SNAPSHOT_FLAGS, SNAPSHOT_PROCESS_ID) }
     }
 
@@ -100,11 +100,11 @@ impl NativeCalls for SystemCalls {
 
     fn open_thread(&self, thread: u32) -> HANDLE {
         // SAFETY: the arguments are an access mask, an inheritance flag and a thread identifier.
-        // #[gamma::skip(all, reason = "nonzero BOOL encodings all request inheritance and Windows may normalize them identically, while inheriting this short-lived internal handle is not observable because no child is spawned before it closes")]
+        // #[gamma::skip(all, tag = "native-boundary", reason = "nonzero BOOL encodings all request inheritance and Windows may normalize them identically, while inheriting this short-lived internal handle is not observable because no child is spawned before it closes")]
         unsafe { OpenThread(THREAD_SUSPEND_RESUME, INHERIT_THREAD_HANDLE, thread_identifier(thread)) }
     }
 
-    // #[gamma::skip(all, reason = "returning without calling ResumeThread reports a still-suspended child as released, so its owner waits for a process that can never run")]
+    // #[gamma::skip(all, tag = "timeout", reason = "returning without calling ResumeThread reports a still-suspended child as released, so its owner waits for a process that can never run")]
     fn resume_thread(&self, thread: HANDLE) -> u32 {
         // SAFETY: the handle was opened with `THREAD_SUSPEND_RESUME`.
         unsafe { ResumeThread(thread) }
@@ -117,7 +117,7 @@ impl NativeCalls for SystemCalls {
 
     fn create_completion_port(&self) -> HANDLE {
         // SAFETY: these documented sentinel arguments request a new completion port.
-        // #[gamma::skip(all, reason = "the completion key is ignored when creating a fresh port, and Windows may normalize supported concurrency hints without exposing the chosen scheduler policy")]
+        // #[gamma::skip(all, tag = "native-boundary", reason = "the completion key is ignored when creating a fresh port, and Windows may normalize supported concurrency hints without exposing the chosen scheduler policy")]
         unsafe { CreateIoCompletionPort(INVALID_HANDLE_VALUE, core::ptr::null_mut(), COMPLETION_KEY, COMPLETION_CONCURRENCY) }
     }
 
@@ -167,7 +167,7 @@ impl NativeCalls for SystemCalls {
         })
     }
 
-    // #[gamma::skip(all, reason = "claiming an empty queue produced a message loops forever; decrementing zero waits forever, while a one-millisecond wait at every high-volume poll exceeded the four-minute mutation budget without changing any result")]
+    // #[gamma::skip(all, tag = "timeout", reason = "claiming an empty queue produced a message loops forever; decrementing zero waits forever, while a one-millisecond wait at every high-volume poll exceeded the four-minute mutation budget without changing any result")]
     fn completion_status(&self, completion: HANDLE, message: &mut u32, key: &mut usize, overlapped: &mut *mut OVERLAPPED) -> bool {
         // SAFETY: the completion port is live, output references are writable, and the zero timeout
         // makes the operation non-blocking.
@@ -496,7 +496,7 @@ fn valid_handle(handle: HANDLE) -> bool {
 ///
 /// The handle is still owned by the caller, so the failure a test injects here leaves it to be
 /// closed on the way out exactly as a real failure would.
-// #[gamma::skip(all, reason = "replacing the ResumeThread call with a count reports success without releasing the child, so the owner waits indefinitely")]
+// #[gamma::skip(all, tag = "timeout", reason = "replacing the ResumeThread call with a count reports success without releasing the child, so the owner waits indefinitely")]
 fn previous_suspension_count(handle: &OwnedHandle) -> u32 {
     NATIVE_CALLS.resume_thread(handle.as_raw_handle())
 }
@@ -683,7 +683,7 @@ fn memory_limit_was_hit_with(
         let (mut message, mut key, mut overlapped) = (u32::default(), usize::default(), core::ptr::null_mut());
         let received = completion_status(completion, &mut message, &mut key, &mut overlapped);
 
-        // #[gamma::skip(all, reason = "continuing after a non-blocking completion-port read reports an empty queue spins forever")]
+        // #[gamma::skip(all, tag = "timeout", reason = "continuing after a non-blocking completion-port read reports an empty queue spins forever")]
         if !received {
             break *hit;
         }

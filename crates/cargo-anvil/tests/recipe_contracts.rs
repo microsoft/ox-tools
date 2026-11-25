@@ -208,7 +208,7 @@ fn released_domain_tool_versions_are_pinned() {
         "cargo_coverage_gate_version := \"0.7.5\"",
         "cargo_delta_version := \"0.5.0\"",
         "cargo_each_version := \"0.8.0\"",
-        "cargo_gamma_version := \"0.6.0\"",
+        "cargo_gamma_version := \"0.7.0\"",
     ] {
         assert!(recipes.contains(pin), "missing released tool pin: {pin}");
     }

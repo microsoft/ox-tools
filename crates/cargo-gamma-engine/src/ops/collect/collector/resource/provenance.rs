@@ -4,13 +4,13 @@
 //! Exact declaration provenance for inferred loop-state bindings.
 
 use quote::ToTokens as _;
-use syn::spanned::Spanned as _;
 use syn::visit::{self, Visit};
 use syn::{Expr, Lit, Type};
 
 use super::super::Collector;
 use super::{Binding, Primitive, StableCall, scalar_sources};
 use crate::HashMap;
+use crate::parse::Extent as _;
 
 struct Calls {
     sites: Vec<syn::ExprPath>,
@@ -36,13 +36,10 @@ impl<'ast> Visit<'ast> for Calls {
 }
 
 fn vector_length(expression: &Expr, bindings: &HashMap<String, Binding>) -> bool {
-    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
     let Expr::MethodCall(length) = expression else { return false };
     if !length.attrs.is_empty() || length.method != "len" || !length.args.is_empty() || length.turbofish.is_some() {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
         return false;
     }
-    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
     let Expr::Path(receiver) = &*length.receiver else { return false };
     receiver.path.get_ident().is_some_and(|name| {
         matches!(
@@ -82,7 +79,7 @@ impl Collector<'_> {
         if calls.remaining == 0 {
             return result;
         }
-        let Some(shadows) = super::enclosing_pattern_shadows(&self.file.ast, &expression.span().byte_range()) else {
+        let Some(shadows) = super::enclosing_pattern_shadows(&self.file.ast, &expression.extent().byte_range()) else {
             return result;
         };
         for callee in calls.sites {
@@ -138,7 +135,7 @@ impl Collector<'_> {
         reason = "one bounded provenance pass handles direct initializer forms without widening inference"
     )]
     pub(in super::super) fn resource_source_bindings(&self, expression: &Expr, bindings: &mut HashMap<String, Binding>) {
-        let Some(sources) = scalar_sources(&self.file.ast, &expression.span().byte_range()) else {
+        let Some(sources) = scalar_sources(&self.file.ast, &expression.extent().byte_range()) else {
             return;
         };
         for (name, initializer) in sources.locals {

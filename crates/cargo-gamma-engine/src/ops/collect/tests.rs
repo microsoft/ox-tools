@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+use core::num::NonZeroUsize;
 use core::ops::Range;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use std::env::{current_dir, var_os};
@@ -24,6 +25,107 @@ fn candidates(source: &str, ops: &str) -> Vec<Candidate> {
     let defaults = Defaults::of(&file.ast);
 
     collect_with(&file, &selection, &CfgSet::unconditional(), &defaults)
+}
+
+#[test]
+fn doc_heavy_attributes_preserve_the_collected_population() {
+    let plain = "fn f(value: u8) -> u8 { value + 7 }";
+    let documented = format!("{}{}", "/// a line of documentation\n".repeat(256), plain);
+    let selection = Selection::parse("arith,expr,fn_value").unwrap();
+    let cfg = CfgSet::parse("").with_test();
+    let definitions = |source: &str| {
+        let file = SourceFile::parse("fixture.rs", source.to_owned()).unwrap();
+        let candidates = collect_with(&file, &selection, &cfg, &Defaults::of_in(&file.ast, &cfg));
+        into_definitions(&file, candidates)
+            .into_iter()
+            .map(|definition| {
+                (
+                    definition.id,
+                    definition.mutator,
+                    definition.replacement,
+                    definition.site.original.clone(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let expected = definitions(plain);
+    assert!(!expected.is_empty(), "the fixture must produce mutant definitions: {expected:?}");
+    assert_eq!(definitions(&documented), expected);
+}
+
+#[test]
+fn spine_extents_preserve_mutant_ids_and_ranges_over_nested_corpus() {
+    let binary = format!("fn f(a: i32) -> i32 {{ {} }}", vec!["a"; 64].join(" + "));
+    let nested = format!("fn f(a: i32) -> i32 {{ {}a{} }}", "(".repeat(24), ")".repeat(24));
+    let loops = format!(
+        "fn f(a: i32) {{ {} }}",
+        "while a > 0 { for i in 0..a { if i > 0 { continue; } } }".repeat(24)
+    );
+    // Fixed fingerprints retain the legacy IDs, ranges, and replacement text without an alternate collector mode.
+    let expected = [
+        "5249e30ab4d0704aa6818c688707002d83ff950af6e254623e91032d7bf4718b",
+        "ff550bae87dd06c52a33dad9e01f900e48bd7e15e76123fe92b0379549c415aa",
+        "b71b419f740a6bbd7b7c830fd16c9a7c97b32fd99fc05083b1f78b6286c9a00d",
+        "6fda6fa754116149639af6c1e0d824e252f91d7675064a3cd3346736775094c6",
+    ];
+    for (source, expected) in [binary.as_str(), nested.as_str(), loops.as_str(), EVERY_FAMILY_FIXTURE]
+        .into_iter()
+        .zip(expected)
+    {
+        let file = SourceFile::parse("fixture.rs", source.to_owned()).unwrap();
+        let selection = Selection::parse("all").unwrap();
+        let optimized = into_definitions(&file, collect(&file, &selection))
+            .into_iter()
+            .map(|definition| (definition.id.clone(), definition.span().clone(), definition.replacement))
+            .collect::<Vec<_>>();
+        assert!(!optimized.is_empty(), "{source}");
+        assert_eq!(
+            blake3::hash(format!("{optimized:?}").as_bytes()).to_hex().as_str(),
+            expected,
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn prepared_schema_syntax_preserves_exact_nested_and_identifier_heavy_output() {
+    let mut body = "if flag { match value { 0 => 1, _ => 2 } } else { 3 } + 7".to_owned();
+    for _ in 0..8 {
+        body = format!("if flag {{ ({body}) }} else {{ match value {{ 0 => 4, _ => 5 }} }} + 9");
+    }
+    // These fingerprints pin the complete legacy-rendered source and guard mappings for each fixed input.
+    let expected = [
+        "3b301fe290e7495679368c6dd0dfbd9e1c6dbf406b67aace78ff3a0e37f303e7",
+        "b49d9fa610c176771952378e5fed48965f8acff0649fc6e3bd06d75894f3e759",
+        "1a419f3f9186be9000e60fb52c69c58c2040cf53c763e058601d9774f7453d99",
+    ];
+    for (source, expected) in [
+        format!("fn f(flag: bool, value: u8) -> u8 {{ ({body}) }}"),
+        "fn f(if_value: u8, match_value: u8, for_value: u8, loop_value: u8) -> u8 { if_value + match_value + for_value + loop_value }"
+            .to_owned(),
+        "fn f(flag: bool) -> impl Iterator<Item = u8> { if flag { return 0..7; } 0..9 }".to_owned(),
+    ]
+    .into_iter()
+    .zip(expected)
+    {
+        let file = SourceFile::parse("fixture.rs", source).unwrap();
+        let definitions = into_definitions(
+            &file,
+            collect(
+                &file,
+                &Selection::parse("cond.negate,arith,range,fn_value.empty_collection").unwrap(),
+            ),
+        );
+        assert!(!definitions.is_empty());
+        let assigned = definitions
+            .iter()
+            .enumerate()
+            .map(|(index, definition)| AssignedMutant::new(Ordinal::new(u32::try_from(index + 1).unwrap()), definition))
+            .collect::<Vec<_>>();
+        let prepared = instrument_with_guards(file.text(), &assigned).unwrap();
+        assert_eq!(blake3::hash(format!("{prepared:?}").as_bytes()).to_hex().as_str(), expected);
+        syn::parse_file(&prepared.0).unwrap();
+    }
 }
 
 #[test]
@@ -143,7 +245,7 @@ fn compile_fixture(directory: &Path, rustc: &std::ffi::OsStr, stem: &str, source
     result
 }
 
-fn assert_candidates_compile(source: &str, ops: &str) {
+fn assert_candidates_compile(source: &str, ops: &str, expected_count: NonZeroUsize) {
     let directory = CompileFixtureDir::new();
     let rustc = var_os("RUSTC").unwrap_or_else(|| "rustc".into());
     let fixtures: Vec<_> = candidates(source, ops)
@@ -163,6 +265,11 @@ fn assert_candidates_compile(source: &str, ops: &str) {
             (candidate, mutated)
         })
         .collect();
+    assert_eq!(
+        fixtures.len(),
+        expected_count.get(),
+        "compile fixture selection {ops:?} changed population"
+    );
 
     let batch = fixtures
         .iter()
@@ -5475,6 +5582,7 @@ fn representative_emitted_candidates_compile_after_direct_replacement() {
     assert_candidates_compile(
         "pub fn arithmetic(a: i32, b: i32) -> i32 { a + b }",
         "arith.add_to_mul,expr.increment,expr.decrement",
+        NonZeroUsize::new(3).unwrap(),
     );
     assert_candidates_compile(
         r#"
@@ -5486,19 +5594,21 @@ fn representative_emitted_candidates_compile_after_direct_replacement() {
             pub fn assign(mut value: String) { value = String::from("x"); drop(value); }
         "#,
         "option.none_to_some,result.ok_to_err,result.err_to_ok,assign_value.default",
+        NonZeroUsize::new(4).unwrap(),
     );
     assert_candidates_compile(
         r#"
             use std::collections::HashMap;
             use std::sync::Arc;
             type Map = HashMap<u8, u8, std::collections::hash_map::RandomState>;
-            pub fn vector() -> Vec<u8> { vec![1] }
-            pub fn map() -> Map { HashMap::default() }
+            pub fn vector() -> Vec<u8> { vec![7] }
+            pub fn map() -> Map { HashMap::from([(7, 8)]) }
             pub fn text() -> Arc<str> { Arc::from("x") }
-            pub fn tuple() -> (u8, bool) { (1, true) }
-            pub fn shared() -> &'static [u8] { &[1] }
+            pub fn tuple() -> (u8, bool) { (7, true) }
+            pub fn shared() -> &'static [u8] { &[7] }
         "#,
         "fn_value",
+        NonZeroUsize::new(12).unwrap(),
     );
 }
 
@@ -7139,6 +7249,15 @@ fn every_registry_entry_produces_at_least_one_candidate_against_the_composite_fi
             mutator.description,
             found.iter().map(|candidate| candidate.mutator).collect::<Vec<_>>(),
         );
+        let definitions = into_definitions(&file, found);
+        let assigned = definitions
+            .iter()
+            .enumerate()
+            .map(|(index, definition)| AssignedMutant::new(Ordinal::new(u32::try_from(index + 1).unwrap()), definition))
+            .collect::<Vec<_>>();
+        let instrumented = instrument(file.text(), &assigned).unwrap();
+        syn::parse_file(&instrumented)
+            .unwrap_or_else(|cause| panic!("{} produced invalid schema syntax: {cause}\n{instrumented}", mutator.name));
     }
 }
 
@@ -7187,6 +7306,14 @@ fn the_fused_pass_produces_the_same_candidates_as_check_stated_then_collect_with
     check_stated(&file).expect("the composite fixture states nothing that cannot be honoured");
     let separately = collect_with(&file, &selection, &cfg, &defaults);
     let fused = check_stated_and_collect_with(&file, &selection, &cfg, &defaults).expect("the composite fixture has no fault to report");
+    let definitions = into_definitions(&file, fused.clone());
+    let assigned = definitions
+        .iter()
+        .enumerate()
+        .map(|(index, definition)| AssignedMutant::new(Ordinal::new(u32::try_from(index + 1).unwrap()), definition))
+        .collect::<Vec<_>>();
+    let instrumented = instrument(file.text(), &assigned).unwrap();
+    syn::parse_file(&instrumented).unwrap_or_else(|cause| panic!("full registry schema is invalid: {cause}\n{instrumented}"));
 
     assert!(
         !fused.is_empty(),
