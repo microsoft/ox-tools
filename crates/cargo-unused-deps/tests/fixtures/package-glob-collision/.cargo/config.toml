@@ -1,0 +1,8 @@
+[source.crates-io]
+replace-with = "collision-registry"
+
+[source.collision-registry]
+directory = "registry"
+
+[net]
+offline = true

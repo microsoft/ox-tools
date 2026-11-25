@@ -63,6 +63,19 @@ pub struct Package {
     pub has_doctests: bool,
 }
 
+impl Package {
+    /// Cargo package pattern that selects only this workspace member.
+    pub fn cargo_spec(&self) -> String {
+        let first = self
+            .name
+            .chars()
+            .next()
+            .expect("Cargo metadata guarantees workspace package names are nonempty");
+        let rest = &self.name[first.len_utf8()..];
+        format!("[{first}]{rest}")
+    }
+}
+
 /// Judge every declaration of every package against the evidence.
 ///
 /// Two runs are needed, and they answer different questions. `plain` built
@@ -175,6 +188,12 @@ mod tests {
             allowed: BTreeSet::new(),
             has_doctests: false,
         }
+    }
+
+    #[test]
+    fn cargo_specs_are_exact_workspace_patterns() {
+        assert_eq!(package("fixture", Vec::new()).cargo_spec(), "[f]ixture");
+        assert_eq!(package("café", Vec::new()).cargo_spec(), "[c]afé");
     }
 
     #[test]
