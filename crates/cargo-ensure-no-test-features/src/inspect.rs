@@ -2,49 +2,12 @@
 // Licensed under the MIT License.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
+use cargo_metadata::{DependencyKind, Metadata, Package};
 use ohno::AppError;
-use serde::Deserialize;
 
 use crate::policy::Policy;
-
-#[derive(Deserialize)]
-struct Metadata {
-    workspace_root: PathBuf,
-    workspace_members: Vec<String>,
-    packages: Vec<Package>,
-}
-
-#[derive(Deserialize)]
-struct Package {
-    id: String,
-    name: String,
-    manifest_path: PathBuf,
-    #[serde(deserialize_with = "Deserialize::deserialize")] // Cargo must emit the field, even when null.
-    publish: Option<Vec<String>>,
-    features: BTreeMap<String, Vec<String>>,
-    dependencies: Vec<Dependency>,
-}
-
-#[derive(Deserialize)]
-struct Dependency {
-    name: String,
-    rename: Option<String>,
-    #[serde(deserialize_with = "Deserialize::deserialize")] // Cargo must emit the field, even when null.
-    kind: Option<Kind>,
-    target: Option<String>,
-    features: Vec<String>,
-    optional: bool,
-}
-
-#[derive(Deserialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
-enum Kind {
-    Normal,
-    Build,
-    Dev,
-}
 
 pub(crate) fn check(json: &[u8], policy: &Policy) -> Result<BTreeSet<String>, AppError> {
     let metadata =
@@ -55,7 +18,7 @@ pub(crate) fn check(json: &[u8], policy: &Policy) -> Result<BTreeSet<String>, Ap
 fn inspect(metadata: &Metadata, policy: &Policy) -> Result<BTreeSet<String>, AppError> {
     let mut packages = BTreeMap::new();
     for package in &metadata.packages {
-        if packages.insert(package.id.as_str(), package).is_some() {
+        if packages.insert(&package.id, package).is_some() {
             return Err(AppError::new(format!("duplicate package ID '{}' in cargo metadata", package.id)));
         }
     }
@@ -63,34 +26,37 @@ fn inspect(metadata: &Metadata, policy: &Policy) -> Result<BTreeSet<String>, App
     let mut violations = BTreeSet::new();
     for id in &metadata.workspace_members {
         let package = packages
-            .get(id.as_str())
+            .get(id)
             .ok_or_else(|| AppError::new(format!("missing package for workspace member '{id}' in cargo metadata")))?;
         if !package.publish.as_ref().is_some_and(Vec::is_empty) {
-            inspect_package(package, &metadata.workspace_root, policy, &mut violations);
+            inspect_package(package, metadata.workspace_root.as_std_path(), policy, &mut violations)?;
         }
     }
     Ok(violations)
 }
 
-fn inspect_package(package: &Package, workspace: &Path, policy: &Policy, violations: &mut BTreeSet<String>) {
-    let name = &package.name;
+fn inspect_package(package: &Package, workspace: &Path, policy: &Policy, violations: &mut BTreeSet<String>) -> Result<(), AppError> {
+    let name = package.name.as_str();
     let manifest = package
         .manifest_path
+        .as_std_path()
         .strip_prefix(workspace)
-        .unwrap_or(&package.manifest_path)
+        .unwrap_or(package.manifest_path.as_std_path())
         .display();
     let mut dependencies = HashSet::new();
     let mut optional = HashSet::new();
     for dep in &package.dependencies {
-        if dep.kind == Some(Kind::Dev) {
-            continue;
-        }
+        let kind = match dep.kind {
+            DependencyKind::Development => continue,
+            DependencyKind::Normal => "normal",
+            DependencyKind::Build => "build",
+            _ => return Err(AppError::new(format!("{manifest}: unknown dependency kind for '{}'", dep.name))),
+        };
         let key = dep.rename.as_deref().unwrap_or(&dep.name);
         dependencies.insert(key);
         if dep.optional {
             optional.insert(key);
         }
-        let kind = if dep.kind == Some(Kind::Build) { "build" } else { "normal" };
         for feature in &dep.features {
             if policy.denies(name, Some(key), feature) {
                 let target = dep.target.as_ref().map_or_else(String::new, |target| format!(", target {target}"));
@@ -127,6 +93,7 @@ fn inspect_package(package: &Package, workspace: &Path, policy: &Policy, violati
             }
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -144,19 +111,19 @@ mod tests {
     #[test]
     fn finds_only_production_requests_and_reachable_defaults() -> Result<(), AppError> {
         let json = br#"{
-          "workspace_root":"workspace","workspace_members":["app","private"],
+          "version":1,"target_directory":"target","workspace_root":"workspace","workspace_members":["app","private"],
           "packages":[
-            {"id":"app","name":"app","manifest_path":"workspace/Cargo.toml","publish":["internal"],
+            {"id":"app","name":"app","version":"0.1.0","targets":[],"manifest_path":"workspace/Cargo.toml","publish":["internal"],
              "features":{"default":["alias","dep:wire","wire/fakes","test-dev/test-util"],
                          "alias":["other","test-util","wire?/insecure"],"other":["alias","wire/fakes"],
                          "test-util":[],"not-default":["wire/test-util"]},
              "dependencies":[
-               {"name":"transport","rename":"wire","kind":"build","target":"cfg(unix)","features":["insecure","Test-Util"],"optional":true},
-               {"name":"dev","rename":"test-dev","kind":"dev","features":["test-util"],"optional":false},
-               {"name":"explicit","kind":null,"features":["test-util"],"optional":false}]},
-            {"id":"private","name":"private","manifest_path":"private/Cargo.toml","publish":[],
+               {"name":"transport","req":"*","uses_default_features":true,"rename":"wire","kind":"build","target":"cfg(unix)","features":["insecure","Test-Util"],"optional":true},
+               {"name":"dev","req":"*","uses_default_features":true,"rename":"test-dev","kind":"dev","features":["test-util"],"optional":false},
+               {"name":"explicit","req":"*","uses_default_features":true,"kind":null,"features":["test-util"],"optional":false}]},
+            {"id":"private","name":"private","version":"0.1.0","targets":[],"manifest_path":"private/Cargo.toml","publish":[],
              "features":{"default":["fakes"],"fakes":[]},"dependencies":[]},
-            {"id":"external","name":"external","manifest_path":"other/Cargo.toml","publish":null,
+            {"id":"external","name":"external","version":"0.1.0","targets":[],"manifest_path":"other/Cargo.toml","publish":null,
              "features":{"default":["fakes"],"fakes":[]},"dependencies":[]}
           ]
         }"#;
@@ -191,9 +158,9 @@ mod tests {
 
     #[test]
     fn unrestricted_members_are_checked_and_absent_defaults_are_not() -> Result<(), AppError> {
-        let json = br#"{"workspace_root":".","workspace_members":["member"],"packages":[
-            {"id":"member","name":"member","manifest_path":"Cargo.toml","publish":null,"features":{},
-             "dependencies":[{"name":"dep","kind":"normal","features":["fakes"],"optional":false}]}
+        let json = br#"{"version":1,"target_directory":"target","workspace_root":".","workspace_members":["member"],"packages":[
+            {"id":"member","name":"member","version":"0.1.0","targets":[],"manifest_path":"Cargo.toml","publish":null,"features":{},
+             "dependencies":[{"name":"dep","req":"*","uses_default_features":true,"kind":"normal","features":["fakes"],"optional":false}]}
         ]}"#;
         let active = load(Some(r#"{"features":["fakes","default"]}"#))?;
         assert_eq!(
@@ -217,10 +184,10 @@ mod tests {
             ("transport/std", false, &[][..]),
         ] {
             let json = format!(
-                r#"{{"workspace_root":".","workspace_members":["app"],"packages":[
-                    {{"id":"app","name":"app","manifest_path":"Cargo.toml","publish":null,
+                r#"{{"version":1,"target_directory":"target","workspace_root":".","workspace_members":["app"],"packages":[
+                    {{"id":"app","name":"app","version":"0.1.0","targets":[],"manifest_path":"Cargo.toml","publish":null,
                       "features":{{"default":["{request}"],"transport":["insecure"],"insecure":[]}},
-                      "dependencies":[{{"name":"serde","rename":"transport","kind":null,"features":[],"optional":{optional}}}]}}
+                      "dependencies":[{{"name":"serde","req":"*","uses_default_features":true,"rename":"transport","kind":null,"features":[],"optional":{optional}}}]}}
                 ]}}"#
             );
             assert_eq!(
@@ -235,33 +202,30 @@ mod tests {
     #[test]
     fn rejects_inconsistent_or_invalid_metadata() -> Result<(), AppError> {
         let active = load(None)?;
-        let missing = br#"{"workspace_root":".","workspace_members":["missing"],"packages":[]}"#;
+        let missing = br#"{"version":1,"target_directory":"target","workspace_root":".","workspace_members":["missing"],"packages":[]}"#;
         assert_eq!(
             check(missing, &active)
                 .expect_err("every member ID must resolve to a package")
                 .to_string(),
             "missing package for workspace member 'missing' in cargo metadata"
         );
-        let duplicates = br#"{"workspace_root":".","workspace_members":["app"],"packages":[
-            {"id":"app","name":"app","manifest_path":"Cargo.toml","publish":null,"features":{},"dependencies":[]},
-            {"id":"app","name":"app","manifest_path":"Cargo.toml","publish":null,"features":{},"dependencies":[]}
+        let duplicates = br#"{"version":1,"target_directory":"target","workspace_root":".","workspace_members":["app"],"packages":[
+            {"id":"app","name":"app","version":"0.1.0","targets":[],"manifest_path":"Cargo.toml","publish":null,"features":{},"dependencies":[]},
+            {"id":"app","name":"app","version":"0.1.0","targets":[],"manifest_path":"Cargo.toml","publish":null,"features":{},"dependencies":[]}
         ]}"#;
         assert_eq!(
             check(duplicates, &active).expect_err("package IDs must be unique").to_string(),
             "duplicate package ID 'app' in cargo metadata"
         );
         for (malformed, field) in [
-            ("{}", "workspace_root"),
             (
-                r#"{"workspace_root":".","workspace_members":["app"],"packages":[
-                {"id":"app","name":"app","manifest_path":"Cargo.toml","features":{},"dependencies":[]}
-            ]}"#,
-                "publish",
+                r#"{"version":1,"target_directory":"target","workspace_members":[],"packages":[]}"#,
+                "workspace_root",
             ),
             (
-                r#"{"workspace_root":".","workspace_members":["app"],"packages":[
-                {"id":"app","name":"app","manifest_path":"Cargo.toml","publish":null,"features":{},
-                 "dependencies":[{"name":"dep","features":[],"optional":false}]}
+                r#"{"version":1,"target_directory":"target","workspace_root":".","workspace_members":["app"],"packages":[
+                {"id":"app","name":"app","version":"0.1.0","targets":[],"manifest_path":"Cargo.toml","publish":null,"features":{},
+                 "dependencies":[{"name":"dep","req":"*","uses_default_features":true,"features":[],"optional":false}]}
             ]}"#,
                 "kind",
             ),
@@ -274,6 +238,16 @@ mod tests {
                 "{malformed}"
             );
         }
+        let unknown_kind = br#"{"version":1,"target_directory":"target","workspace_root":".","workspace_members":["app"],"packages":[
+            {"id":"app","name":"app","version":"0.1.0","targets":[],"manifest_path":"Cargo.toml","publish":null,"features":{},
+             "dependencies":[{"name":"dep","req":"*","uses_default_features":true,"kind":"unknown","features":[],"optional":false}]}
+        ]}"#;
+        assert_eq!(
+            check(unknown_kind, &active)
+                .expect_err("unknown dependency kinds cannot be classified")
+                .to_string(),
+            "Cargo.toml: unknown dependency kind for 'dep'"
+        );
         Ok(())
     }
 }

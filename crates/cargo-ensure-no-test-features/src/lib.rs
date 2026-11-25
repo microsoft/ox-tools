@@ -54,6 +54,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Output};
 use std::{env, io};
 
+use cargo_metadata::MetadataCommand;
 use clap::{Parser, Subcommand};
 use ohno::AppError;
 
@@ -127,13 +128,13 @@ fn check(
     let CargoCommand::EnsureNoTestFeatures { manifest_path, policy } = args;
     let policy = policy::load(policy.as_deref(), read)?;
     // Use the invoking Cargo executable so its toolchain is preserved.
-    let cargo = env("CARGO").unwrap_or_else(|| "cargo".into());
-    let mut command = Command::new(cargo);
-    command.args(["metadata", "--no-deps", "--format-version", "1"]);
+    let cargo = PathBuf::from(env("CARGO").unwrap_or_else(|| "cargo".into()));
+    let mut command = MetadataCommand::new();
+    command.cargo_path(cargo).no_deps();
     if let Some(path) = manifest_path {
-        command.arg("--manifest-path").arg(path);
+        command.manifest_path(path);
     }
-    let output = output(&mut command).map_err(|error| AppError::new(format!("could not run cargo metadata: {error}")))?;
+    let output = output(&mut command.cargo_command()).map_err(|error| AppError::new(format!("could not run cargo metadata: {error}")))?;
     if !output.status.success() {
         return Err(AppError::new(format!(
             "cargo metadata failed ({}): {}",
@@ -156,9 +157,9 @@ mod tests {
 
     use super::*;
 
-    const CLEAN: &[u8] = br#"{"workspace_root":".","workspace_members":[],"packages":[]}"#;
-    const FINDING: &[u8] = br#"{"workspace_root":".","workspace_members":["app"],"packages":[
-        {"id":"app","name":"app","manifest_path":"Cargo.toml","publish":null,
+    const CLEAN: &[u8] = br#"{"version":1,"target_directory":"target","workspace_root":".","workspace_members":[],"packages":[]}"#;
+    const FINDING: &[u8] = br#"{"version":1,"target_directory":"target","workspace_root":".","workspace_members":["app"],"packages":[
+        {"id":"app","name":"app","version":"0.1.0","targets":[],"manifest_path":"Cargo.toml","publish":null,
          "features":{"default":["test-util"],"test-util":[]},"dependencies":[]}
     ]}"#;
 
@@ -205,9 +206,9 @@ mod tests {
                     command.get_args().collect::<Vec<_>>(),
                     [
                         "metadata",
-                        "--no-deps",
                         "--format-version",
                         "1",
+                        "--no-deps",
                         "--manifest-path",
                         "member/Cargo.toml"
                     ]
@@ -276,7 +277,7 @@ mod tests {
                     assert_eq!(command.get_program(), "cargo");
                     assert_eq!(
                         command.get_args().collect::<Vec<_>>(),
-                        ["metadata", "--no-deps", "--format-version", "1"]
+                        ["metadata", "--format-version", "1", "--no-deps"]
                     );
                     result
                 },

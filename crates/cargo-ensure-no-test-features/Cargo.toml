@@ -21,6 +21,7 @@ repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-ensur
 catalog-tool = "cargo-ensure-no-test-features"
 
 [dependencies]
+cargo_metadata = { workspace = true }
 clap = { workspace = true, features = ["std", "derive", "help", "error-context", "usage"] }
 ohno = { workspace = true, features = ["app-err"] }
 serde = { workspace = true, features = ["derive"] }
