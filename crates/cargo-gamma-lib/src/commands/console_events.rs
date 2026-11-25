@@ -458,6 +458,70 @@ mod tests {
         assert!(err.contains("test `unstable` also failed without a mutant"), "{err}");
     }
 
+    #[test]
+    fn exceptional_outcomes_clear_the_active_dashboard_before_their_announcement() {
+        for (outcome, label, note) in [
+            (Outcome::Survived, "SURVIVED", None),
+            (Outcome::Flaky, "FLAKY", Some("test `unstable` also failed without a mutant")),
+            (Outcome::Timeout, "TIMEOUT", Some("stalled in `slow`")),
+            (Outcome::OutOfMemory, "OUTOFMEM", Some("peaked above the memory ceiling")),
+        ] {
+            let mut host = Sink::default().terminal(160);
+            let mut events = ConsoleEvents {
+                host: &mut host,
+                progress: Progress::new(true, Styler::new(false), Some(160)),
+                dashboard: Dashboard::new(true, Some(160), Styler::new(false), tick::ClockControl::new().to_simple_clock()),
+                styler: Styler::new(false),
+                show_build: false,
+                verdict_log: VerdictLog::default(),
+            };
+            events.dashboard.start_testing(events.host, 2, "executing mutants".into());
+            assert!(events.host.err().contains("executing mutants"));
+            events.host.err.clear();
+
+            events.mutant(&mutant(outcome, note));
+
+            let output = events.host.err();
+            let (before_label, announcement) = output.split_once(label).expect("the exceptional verdict is announced");
+            assert!(
+                before_label.contains("\x1b[J"),
+                "the dashboard must be erased before {label}: {output:?}"
+            );
+            assert!(announcement.contains("a < b"), "{output:?}");
+            if let Some(note) = note {
+                assert!(announcement.contains(note), "{output:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn warnings_clear_the_active_dashboard_before_their_first_line() {
+        let mut host = Sink::default().terminal(160);
+        let mut events = ConsoleEvents {
+            host: &mut host,
+            progress: Progress::new(true, Styler::new(false), Some(160)),
+            dashboard: Dashboard::new(true, Some(160), Styler::new(false), tick::ClockControl::new().to_simple_clock()),
+            styler: Styler::new(false),
+            show_build: false,
+            verdict_log: VerdictLog::default(),
+        };
+        events.dashboard.start_testing(events.host, 2, "executing mutants".into());
+        assert!(events.host.err().contains("executing mutants"));
+        events.host.err.clear();
+
+        events.warn("selection evidence is stale\nrebuilding the reachability index");
+
+        let output = events.host.err();
+        let (before_label, warning) = output.split_once("warning").expect("the warning is announced");
+        assert!(
+            before_label.contains("\x1b[J"),
+            "the dashboard must be erased before the warning: {output:?}"
+        );
+        assert!(warning.contains("selection evidence is stale\n"), "{output:?}");
+        assert!(warning.contains("rebuilding the reachability index\n"), "{output:?}");
+        assert_eq!(output.matches("warning").count(), 1, "{output:?}");
+    }
+
     /// A timeout says how long the mutant was given, alongside whatever the note already said.
     ///
     /// Without the figure a genuine hang and a budget calibrated too tightly print the same line,

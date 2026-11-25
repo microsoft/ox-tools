@@ -288,6 +288,7 @@ thread_local! {
 
 /// The cursor publishes only indices, so its modification order needs no synchronization of other state.
 /// Claims before cancellation may finish; later claims receive an out-of-range index.
+// #[gamma::skip(fn_value.none, tag = "timeout", reason = "Returning no claim for a nonempty queue prevents observers from reaching the worker-coordination barriers, leaving the other participant waiting indefinitely.")]
 fn claim_binary<'a>(next: &AtomicUsize, binaries: &'a [TestBinary]) -> Option<(usize, &'a TestBinary)> {
     let index = next.fetch_add(
         // #[gamma::skip(literal.int_decrement, tag = "timeout", reason = "Zero leaves the atomic cursor unchanged, assigning the first binary forever. Direct claim tests check advancement, but worker tests can stall before reaching their assertions.")]
