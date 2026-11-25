@@ -122,8 +122,13 @@ pub(super) fn configure_loader(command: &mut Command, launch: &Launch) {
 fn stack_floor(inherited: Option<&str>) -> String {
     let inherited = inherited.and_then(|value| value.trim().parse::<usize>().ok());
 
-    // #[gamma::skip(all, reason = "the value controls scheduling, accounting, identity, or a conservative bound whose one-step perturbation has no safely deterministic external observation here")]
-    inherited.unwrap_or(0).max(STACK_FLOOR).to_string()
+    inherited
+        .unwrap_or(
+            // #[gamma::skip(literal.int_increment, tag = "equivalent", reason = "Both zero and one are below the independently enforced stack floor.")]
+            0,
+        )
+        .max(STACK_FLOOR)
+        .to_string()
 }
 
 /// Joins the toolchain's directories ahead of whatever search path the caller inherited.
@@ -168,7 +173,7 @@ pub(super) fn toolchain_libraries(root: &Utf8Path, target: &Utf8Path) -> Vec<Utf
         && output.status.success()
         && let Ok(printed) = String::from_utf8(output.stdout)
     {
-        // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
+        // #[gamma::skip(all, reason = "This forwards stdout from the compiler selected by process-wide RUSTC; pure two-line output parsing is covered without replacing that shared override.", tag = "native-boundary")]
         append_toolchain_libraries(&mut libraries, &printed);
     }
 

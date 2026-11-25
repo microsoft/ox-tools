@@ -4,12 +4,12 @@
 //! Bounded ownership evidence for straight-line continuations and collection elements.
 
 use syn::punctuated::Punctuated;
-use syn::spanned::Spanned as _;
 use syn::visit::{self, Visit};
 use syn::{Expr, Generics, Macro, Type, TypeParamBound, WherePredicate};
 
 use super::{Collector, ScopePath, values};
 use crate::HashMap;
+use crate::parse::Extent as _;
 
 pub(super) fn unbounded_parameters(generics: &Generics) -> Vec<String> {
     struct Mentions<'a> {
@@ -59,26 +59,6 @@ pub(super) fn unbounded_parameters(generics: &Generics) -> Vec<String> {
         .collect()
 }
 
-pub(super) fn format_macro_shadowed(file: &syn::File) -> bool {
-    struct Shadows(bool);
-    impl<'ast> Visit<'ast> for Shadows {
-        fn visit_item_macro(&mut self, i: &'ast syn::ItemMacro) {
-            self.0 |= i.ident.as_ref().is_none_or(|name| name == "format");
-        }
-
-        fn visit_stmt_macro(&mut self, _: &'ast syn::StmtMacro) {
-            self.0 = true;
-        }
-
-        fn visit_item_extern_crate(&mut self, i: &'ast syn::ItemExternCrate) {
-            self.0 |= i.attrs.iter().any(|attribute| attribute.path().is_ident("macro_use"));
-        }
-    }
-    let mut shadows = Shadows(false);
-    shadows.visit_file(file);
-    shadows.0
-}
-
 impl Collector<'_> {
     pub(super) fn ownership_noncopy_type(
         &self,
@@ -88,7 +68,6 @@ impl Collector<'_> {
         imports: &HashMap<String, Option<Vec<String>>>,
     ) -> bool {
         if remaining == 0 {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         if let Type::Path(path) = values::strip(ty)
@@ -130,14 +109,14 @@ impl Collector<'_> {
     }
 
     pub(super) fn ownership_known_place(&self, expression: &Expr) -> Option<bool> {
-        let (ty, scope, imports) = if let Some(ty) = self.numeric_evidence.returned_types.get(&expression.span().byte_range()) {
+        let (ty, scope, imports) = if let Some(ty) = self.numeric_evidence.returned_types.get(&expression.extent().byte_range()) {
             (ty, &self.parameter_scope, self.imports_in_scope(&self.parameter_scope))
         } else {
             self.type_of_place_in_scope(expression, &self.scope_path)?
         };
         let types = self.types_with_in_scope(scope, imports);
         if let Type::Reference(reference) = values::strip(types.resolve_alias(ty)) {
-            return Some(reference.mutability.is_some() && !self.numeric_evidence.reborrowable.contains(&expression.span().byte_range()));
+            return Some(reference.mutability.is_some() && !self.numeric_evidence.reborrowable.contains(&expression.extent().byte_range()));
         }
         // Eight nested fields/containers bound recursive non-Copy inspection. This conservative
         // default is not a Rust type limit: exhaustion proves no ownership invalidity.
@@ -153,7 +132,6 @@ impl Collector<'_> {
             .type_of_place_in_scope(receiver, &self.scope_path)
             .or_else(|| fallback.as_ref().map(|ty| (ty, &self.scope_path, self.current_imports())))
         else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         };
         let types = self.types_with_in_scope(scope, imports);
@@ -178,7 +156,6 @@ impl Collector<'_> {
 
     pub(super) fn ownership_falls_through(&self, expression: &Expr, remaining: usize) -> bool {
         if remaining == 0 {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         let next = remaining - 1;
@@ -253,7 +230,6 @@ impl Collector<'_> {
             _ => false,
         };
         if !standard {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let literal = syn::parse2::<syn::LitStr>(mac.tokens.clone()).ok()?;
@@ -265,7 +241,6 @@ impl Collector<'_> {
         // and 64 expression levels per fall-through check. Neither is a measured capacity;
         // exhaustion keeps the reversal eligible instead of claiming an invalid move.
         if elements.len() > 32 || !elements.iter().all(|element| self.ownership_falls_through(element, 64)) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         let mut all_effects = Vec::with_capacity(elements.len());
@@ -282,7 +257,6 @@ impl Collector<'_> {
                 effects.moves.push(element.clone());
             }
             if !effects.supported {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
                 return false;
             }
             all_effects.push(effects);
@@ -383,7 +357,6 @@ fn captured_places(format: &str) -> Option<Vec<Expr>> {
                 match characters.next()? {
                     '}' => break,
                     '{' => {
-                        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                         return None;
                     }
                     character => capture.push(character),
@@ -393,23 +366,19 @@ fn captured_places(format: &str) -> Option<Vec<Expr>> {
             let name = capture.split(':').next()?;
             let expression = syn::parse_str::<Expr>(name).ok()?;
             if !matches!(&expression, Expr::Path(path) if path.path.get_ident().is_some()) {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
             // Dynamic format widths introduce further captures; leave those formats unknown.
             if capture.contains('$') {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
             captures.push(expression);
         } else if character == '}' && characters.next() != Some('}') {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         // Bound separately parsed capture expressions to 32, a conservative analysis default.
         // An oversized format stays unknown, so it cannot prove an ownership-invalid reversal.
         if captures.len() > 32 {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
     }
@@ -673,7 +642,7 @@ mod ownership_regressions {
     fn ownership_known_place_distinguishes_unknown_shared_mutable_and_reborrowed() {
         with_collector("", |collector| {
             let value = expression("value");
-            let span = value.span().byte_range();
+            let span = value.extent().byte_range();
             assert_eq!(collector.ownership_known_place(&value), None);
             for (ty, expected) in [("String", true), ("u32", false), ("&String", false), ("&mut String", true)] {
                 collector.declared_types.insert("value".into(), Some(syn::parse_str(ty).unwrap()));

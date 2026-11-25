@@ -481,6 +481,22 @@ pub enum OutputError {
     Io(io::Error),
 }
 
+impl OutputError {
+    /// Returns the original status and bounded streams when capture exceeded a byte limit.
+    ///
+    /// Other I/O and containment failures return `None`. To inspect an error from
+    /// [`ProcessTree::wait_with_output_bounded`], first convert it with [`Self::from`].
+    #[inline]
+    #[must_use]
+    pub fn captured_output(&self) -> Option<&Output> {
+        let Self::Io(cause) = self else { return None };
+        cause
+            .get_ref()?
+            .downcast_ref::<CaptureLimitExceeded>()
+            .map(|overflow| &overflow.output.0)
+    }
+}
+
 impl fmt::Display for OutputError {
     #[expect(clippy::renamed_function_params, reason = "`f` is less clear than `formatter`")]
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -512,10 +528,44 @@ impl From<io::Error> for OutputError {
     }
 }
 
-/// Runs a command inside a process-tree boundary and captures its complete output.
+#[ohno::error]
+#[display("{output}")]
+pub(crate) struct CaptureLimitExceeded {
+    output: CapturedOutput,
+}
+
+struct CapturedOutput(Output);
+
+impl fmt::Debug for CapturedOutput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CapturedOutput")
+            .field("status", &self.0.status)
+            .field("stdout_bytes", &self.0.stdout.len())
+            .field("stderr_bytes", &self.0.stderr.len())
+            .finish()
+    }
+}
+
+impl fmt::Display for CapturedOutput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        const PREVIEW_BYTES: usize = 1024;
+        let omitted = self.0.stderr.len().saturating_sub(PREVIEW_BYTES);
+        write!(
+            f,
+            "child output exceeded its capture limit ({}); stderr tail:\n{}",
+            self.0.status,
+            if omitted == 0 { "" } else { "[earlier stderr omitted]\n" },
+        )?;
+        f.write_str(&String::from_utf8_lossy(&self.0.stderr[omitted..]))
+    }
+}
+
+/// Runs a command inside a process-tree boundary with bounded output capture.
 ///
 /// This is the contained equivalent of [`Command::output`]. Standard input is disconnected and
-/// both output streams are captured. The streams are drained concurrently while the child runs,
+/// stdout retains at most 64 MiB and stderr its last 64 KiB. Exceeding either limit returns an
+/// error recoverable through [`OutputError::captured_output`], never successful truncated output.
+/// The streams are drained concurrently while the child runs,
 /// so either one may exceed the operating system's pipe capacity without deadlocking the other.
 /// Once the leader exits, its descendants are terminated before their inherited pipe handles are
 /// drained to end of file.
@@ -529,10 +579,34 @@ pub fn output(command: Command, request: MemoryRequest) -> Result<Output, Output
     output_with(command, request, prepare)
 }
 
+/// Captures a contained command with caller-selected byte limits.
+///
+/// Stdout retains a prefix and stderr a tail. Both streams continue draining after their limits
+/// are reached so the child can exit normally.
+///
+/// # Errors
+///
+/// Returns the same failures as [`output`], including recoverable bounded output inside
+/// [`OutputError::Io`] when either stream exceeds its limit.
+#[inline]
+pub fn output_bounded(command: Command, request: MemoryRequest, stdout_limit: usize, stderr_limit: usize) -> Result<Output, OutputError> {
+    output_with_limits(command, request, prepare, stdout_limit, stderr_limit)
+}
+
 fn output_with(
+    command: Command,
+    request: MemoryRequest,
+    prepare_command: impl FnOnce(Command, MemoryRequest) -> Result<PreparedCommand, PlatformError>,
+) -> Result<Output, OutputError> {
+    output_with_limits(command, request, prepare_command, STDOUT_CAPTURE_LIMIT, STDERR_CAPTURE_LIMIT)
+}
+
+fn output_with_limits(
     mut command: Command,
     request: MemoryRequest,
     prepare_command: impl FnOnce(Command, MemoryRequest) -> Result<PreparedCommand, PlatformError>,
+    stdout_limit: usize,
+    stderr_limit: usize,
 ) -> Result<Output, OutputError> {
     let _ = command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
 
@@ -544,7 +618,9 @@ fn output_with(
     })?;
     let subtree = ProcessTree::adopt(spawned)?;
 
-    subtree.wait_with_output().map_err(OutputError::Io)
+    subtree
+        .wait_with_output_bounded(stdout_limit, stderr_limit)
+        .map_err(OutputError::Io)
 }
 
 /// Arranges for a child's descendants to be killable along with it, and accounted for.
@@ -1030,17 +1106,42 @@ impl ProcessTree {
     /// stream could not be read, the platform's subtree boundary or Unix process group could not
     /// be terminated, or the child could not be observed or reaped. A reader-thread panic is
     /// reported as [`io::ErrorKind::Other`].
+    #[inline]
     pub fn wait_with_output(self) -> io::Result<Output> {
-        self.wait_with_output_using(
-            |pipe| output_reader(pipe, STDOUT_READER_THREAD),
-            |pipe| output_reader(pipe, STDERR_READER_THREAD),
+        self.wait_with_output_bounded(STDOUT_CAPTURE_LIMIT, STDERR_CAPTURE_LIMIT)
+    }
+
+    /// Waits with explicit stdout-prefix and stderr-tail byte limits.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same failures as [`Self::wait_with_output`]. If either limit is exceeded,
+    /// converting the I/O error to [`OutputError`] allows [`OutputError::captured_output`]
+    /// to recover the original exit status and bounded diagnostic output.
+    pub fn wait_with_output_bounded(self, stdout_limit: usize, stderr_limit: usize) -> io::Result<Output> {
+        self.wait_with_output_using_limits(
+            |pipe| output_reader_bounded(pipe, STDOUT_READER_THREAD, stdout_limit, false),
+            |pipe| output_reader_bounded(pipe, STDERR_READER_THREAD, stderr_limit, true),
+            stdout_limit,
+            stderr_limit,
         )
     }
 
+    #[cfg(test)]
     fn wait_with_output_using(
+        self,
+        start_stdout: impl FnOnce(Option<ChildStdout>) -> io::Result<Option<OutputReader>>,
+        start_stderr: impl FnOnce(Option<ChildStderr>) -> io::Result<Option<OutputReader>>,
+    ) -> io::Result<Output> {
+        self.wait_with_output_using_limits(start_stdout, start_stderr, STDOUT_CAPTURE_LIMIT, STDERR_CAPTURE_LIMIT)
+    }
+
+    fn wait_with_output_using_limits(
         mut self,
         start_stdout: impl FnOnce(Option<ChildStdout>) -> io::Result<Option<OutputReader>>,
         start_stderr: impl FnOnce(Option<ChildStderr>) -> io::Result<Option<OutputReader>>,
+        stdout_limit: usize,
+        stderr_limit: usize,
     ) -> io::Result<Output> {
         let stdout = start_stdout(self.take_stdout())?;
         #[cfg(any(test, feature = "fault-injection"))]
@@ -1084,11 +1185,18 @@ impl ProcessTree {
         let stdout = join_output_reader(stdout, STDOUT_STREAM);
         let stderr = join_output_reader(stderr, STDERR_STREAM);
 
-        Ok(Output {
+        let mut output = Output {
             status: status?,
             stdout: stdout?,
             stderr: stderr?,
-        })
+        };
+        if output.stdout.len() > stdout_limit || output.stderr.len() > stderr_limit {
+            output.stdout.truncate(stdout_limit);
+            let discarded = output.stderr.len().saturating_sub(stderr_limit);
+            output.stderr.drain(..discarded);
+            return Err(io::Error::other(CaptureLimitExceeded::new(CapturedOutput(output))));
+        }
+        Ok(output)
     }
 
     /// Whether this subtree is contained across process-group/session changes.
@@ -1570,19 +1678,31 @@ const STDOUT_READER_THREAD: &str = "cargo-gamma-process-stdout";
 const STDERR_READER_THREAD: &str = "cargo-gamma-process-stderr";
 const STDOUT_STREAM: &str = "stdout";
 const STDERR_STREAM: &str = "stderr";
+/// Allows large workspace metadata/listings without allowing unbounded repository-controlled output.
+const STDOUT_CAPTURE_LIMIT: usize = 64 * 1024 * 1024;
+/// Keeps the most recent setup failure diagnostics without retaining a verbose helper's history.
+const STDERR_CAPTURE_LIMIT: usize = 64 * 1024;
 /// Amortizes reads and capture locking while bounding each reader's stack buffer to 8 KiB.
 const OUTPUT_READ_CHUNK_SIZE: usize = 8192;
 /// Trades exit-observation latency for less busy polling by pausing between checks.
 const OUTPUT_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(1);
 
+#[cfg(test)]
 fn output_reader<R>(pipe: Option<R>, name: &'static str) -> io::Result<Option<OutputReader>>
+where
+    R: io::Read + Send + 'static,
+{
+    output_reader_bounded(pipe, name, STDOUT_CAPTURE_LIMIT, false)
+}
+
+fn output_reader_bounded<R>(pipe: Option<R>, name: &'static str, limit: usize, tail: bool) -> io::Result<Option<OutputReader>>
 where
     R: io::Read + Send + 'static,
 {
     output_reader_with_spawn(pipe, |pipe, captured, capture_enabled| {
         thread::Builder::new()
             .name(name.to_owned())
-            .spawn(move || read_output(pipe, &captured, &capture_enabled))
+            .spawn(move || read_output(pipe, &captured, &capture_enabled, limit, tail))
     })
 }
 
@@ -1605,7 +1725,11 @@ where
     .transpose()
 }
 
-fn read_output<R>(mut pipe: R, captured: &Mutex<Vec<u8>>, capture_enabled: &AtomicBool) -> io::Result<()>
+/// Retains a bounded prefix or tail while draining to EOF, even when retention is disabled.
+///
+/// The limit bounds retained bytes, not reading. Overflow detection and caller-side cleanup
+/// remain separate responsibilities.
+fn read_output<R>(mut pipe: R, captured: &Mutex<Vec<u8>>, capture_enabled: &AtomicBool, limit: usize, tail: bool) -> io::Result<()>
 where
     R: io::Read,
 {
@@ -1617,18 +1741,26 @@ where
     loop {
         let read = match pipe.read(&mut chunk) {
             Ok(read) => read,
-            // #[gamma::skip(all, reason = "retrying every read error spins forever instead of terminating the output reader")]
             Err(cause) if cause.kind() == io::ErrorKind::Interrupted => continue,
             Err(cause) => return Err(cause),
         };
-        // #[gamma::skip(all, reason = "failing to recognize EOF leaves the output reader blocked or spinning after the child exits")]
         if read == 0 {
             return Ok(());
         }
 
         let mut captured = captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if capture_enabled.load(Ordering::Acquire) {
-            captured.extend_from_slice(&chunk[..read]);
+            // One sentinel byte records overflow without retaining the rest of the stream.
+            let capacity = limit.saturating_add(1);
+            if tail {
+                let keep = read.min(capacity);
+                let discard = captured.len().saturating_add(keep).saturating_sub(capacity);
+                captured.drain(..discard);
+                captured.extend_from_slice(&chunk[read - keep..read]);
+            } else {
+                let keep = read.min(capacity.saturating_sub(captured.len()));
+                captured.extend_from_slice(&chunk[..keep]);
+            }
         }
     }
 }
@@ -1672,12 +1804,11 @@ fn wait_for_output(subtree: &mut ProcessTree) -> io::Result<ExitStatus> {
             return Err(io::Error::other("output wait failed as requested by a test"));
         }
 
-        // #[gamma::skip(try.propagate_to_unwrap, reason = "This wrapper polls native Child observation; injecting a failure here without spawning needs the deferred process lifecycle backend.", tag = "native-boundary")]
         if let Some(status) = subtree.observe()? {
             return Ok(status);
         }
 
-        // #[gamma::skip(all, reason = "this positive delay only throttles polling; zero or deletion busy-spins, while one or two milliseconds has the same result")]
+        // #[gamma::skip(all, tag = "non-contract", reason = "The output-wait sleep throttles polling only; removing it changes CPU usage but not captured bytes or termination status.")]
         thread::sleep(OUTPUT_WAIT_POLL_INTERVAL);
     }
 }
@@ -2026,10 +2157,15 @@ mod tests {
     use std::fs;
     #[cfg(unix)]
     use std::io::{BufRead as _, Write as _};
+    #[cfg(unix)]
+    use std::os::unix::process::ExitStatusExt as _;
+    #[cfg(windows)]
+    use std::os::windows::process::ExitStatusExt as _;
     use std::sync::PoisonError;
     use std::time::Instant;
 
     use camino::Utf8Path;
+    use ohno::ErrorExt as _;
 
     use super::*;
     use crate::testing;
@@ -2099,6 +2235,39 @@ mod tests {
         };
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         assert_eq!(error.to_string(), "scripted thread-spawn refusal");
+    }
+
+    #[test]
+    fn concurrent_readers_bound_retained_bytes_before_output_is_assembled() {
+        let readers = (0..4)
+            .flat_map(|_| {
+                [false, true].map(|tail| {
+                    let mut text = vec![b'x'; OUTPUT_READ_CHUNK_SIZE * 3];
+                    text.extend_from_slice(b"diagnostic-tail");
+                    let reader = output_reader_bounded(Some(io::Cursor::new(text)), "bounded-reader", 64, tail)
+                        .expect("reader starts")
+                        .expect("present pipe");
+                    (reader, tail)
+                })
+            })
+            .collect::<Vec<_>>();
+        for (reader, tail) in readers {
+            let bytes = join_output_reader(Some(reader), "bounded-reader").expect("complete read");
+            assert_eq!(bytes.len(), 65, "the reader retains only the bound plus an overflow sentinel");
+            if tail {
+                assert!(bytes.ends_with(b"diagnostic-tail"));
+            } else {
+                assert!(bytes.iter().all(|byte| *byte == b'x'));
+            }
+        }
+    }
+
+    #[test]
+    fn zero_byte_capture_limits_retain_only_the_overflow_sentinel() {
+        for tail in [false, true] {
+            let reader = output_reader_bounded(Some(io::Cursor::new(b"abc")), "zero-bound", 0, tail).unwrap();
+            assert_eq!(join_output_reader(reader, "zero-bound").unwrap(), if tail { b"c" } else { b"a" });
+        }
     }
 
     #[test]
@@ -2206,12 +2375,138 @@ mod tests {
         );
     }
 
+    struct ScriptedReader<I>(I);
+
+    impl<I: Iterator<Item = io::Result<Vec<u8>>>> io::Read for ScriptedReader<I> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let bytes = self.0.next().expect("EOF and hard failures must terminate before another read")?;
+            buf[..bytes.len()].copy_from_slice(&bytes);
+            Ok(bytes.len())
+        }
+    }
+
+    #[test]
+    fn output_reader_stops_at_eof_and_propagates_hard_failures_without_retrying() {
+        let captured = Mutex::new(Vec::new());
+        let retaining = AtomicBool::new(true);
+        let reader = ScriptedReader(vec![Err(io::Error::from(io::ErrorKind::Interrupted)), Ok(vec![b'x']), Ok(Vec::new())].into_iter());
+        read_output(reader, &captured, &retaining, 4, false).unwrap();
+        assert_eq!(*captured.lock().unwrap(), b"x");
+        let reader = ScriptedReader(vec![Err(io::Error::new(io::ErrorKind::BrokenPipe, "hard failure"))].into_iter());
+        let cause = read_output(reader, &captured, &retaining, 4, false).unwrap_err();
+        assert_eq!(cause.kind(), io::ErrorKind::BrokenPipe);
+        assert_eq!(cause.to_string(), "hard failure");
+    }
+
+    #[test]
+    #[cfg(any(unix, windows))]
+    fn capture_diagnostics_bound_valid_and_invalid_utf8_without_changing_recoverable_bytes() {
+        struct RefusingWriter;
+        impl fmt::Write for RefusingWriter {
+            fn write_str(&mut self, _: &str) -> fmt::Result {
+                Err(fmt::Error)
+            }
+        }
+        crate::unwind_contracts::assert_unwind_safe::<CapturedOutput>();
+        for byte in [b'x', 0xff] {
+            let stdout = vec![byte; 128 * 1024];
+            let mut stderr = vec![byte; 16 * 1024];
+            stderr.extend_from_slice(b"diagnostic-tail");
+            let overflow = CaptureLimitExceeded::new(CapturedOutput(Output {
+                status: ExitStatus::from_raw(0),
+                stdout: stdout.clone(),
+                stderr: stderr.clone(),
+            }));
+            assert!(format!("{:?}", overflow.output).len() < 256);
+            let debug = format!("{overflow:?}");
+            assert!(debug.contains("stdout_bytes: 131072"), "{debug}");
+            assert!(debug.contains("stderr_bytes: 16399"), "{debug}");
+            assert!(fmt::write(&mut RefusingWriter, format_args!("{}", overflow.output)).is_err());
+            let diagnostic = overflow.message();
+            assert!(diagnostic.len() < 4096);
+            assert!(diagnostic.contains("child output exceeded its capture limit"), "{diagnostic}");
+            assert!(diagnostic.contains("[earlier stderr omitted]"), "{diagnostic}");
+            assert!(diagnostic.ends_with("diagnostic-tail"), "{diagnostic}");
+            if byte == 0xff {
+                assert!(diagnostic.contains(char::REPLACEMENT_CHARACTER), "{diagnostic}");
+            }
+            let failure = OutputError::from(io::Error::other(overflow));
+            let captured = failure.captured_output().unwrap();
+            assert!(captured.status.success());
+            assert_eq!(captured.stdout, stdout);
+            assert_eq!(captured.stderr, stderr);
+        }
+    }
+
+    #[test]
+    #[cfg(any(unix, windows))]
+    fn capture_diagnostics_retain_exactly_the_last_kibibyte_at_the_preview_boundary() {
+        let mut stderr = vec![b'x'; 1025];
+        stderr[0] = b'!';
+        let output = CapturedOutput(Output {
+            status: ExitStatus::from_raw(0),
+            stdout: Vec::new(),
+            stderr,
+        });
+        let diagnostic = output.to_string();
+        let (_, tail) = diagnostic.split_once("stderr tail:\n").unwrap();
+        assert_eq!(tail, format!("[earlier stderr omitted]\n{}", "x".repeat(1024)));
+    }
+
+    #[test]
+    fn capture_recovery_does_not_replace_other_error_causes() {
+        for failure in [
+            OutputError::from(io::Error::from(io::ErrorKind::NotFound)),
+            OutputError::from(io::Error::other("foreign I/O failure")),
+            OutputError::from(PlatformError::new_static(Situation::Refused, "native containment failure")),
+        ] {
+            let original = failure.source().unwrap().to_string();
+            assert!(failure.captured_output().is_none());
+            assert_eq!(failure.to_string(), original);
+        }
+    }
+
+    #[test]
+    #[cfg(not(miri))]
+    fn generated_read_partitions_preserve_bounded_capture_and_drain_to_eof() {
+        bolero::check!()
+            .with_type::<([u8; 256], [u8; 32], u16, u16)>()
+            .for_each(|(bytes, partitions, length, limit)| {
+                let mut remaining = &bytes[..usize::from(*length) % (bytes.len() + 1)];
+                let mut script = Vec::new();
+                for partition in partitions.iter().cycle() {
+                    if remaining.is_empty() {
+                        break;
+                    }
+                    let count = (usize::from(*partition) + 1).min(remaining.len());
+                    script.push(remaining[..count].to_vec());
+                    remaining = &remaining[count..];
+                }
+                let complete = script.concat();
+                let limit = usize::from(*limit) % (complete.len() + 2);
+                for tail in [false, true] {
+                    let reads = script.iter().cloned().map(Ok).chain(core::iter::once(Ok(Vec::new())));
+                    let mut reader = ScriptedReader(reads);
+                    let captured = Mutex::new(Vec::new());
+                    read_output(&mut reader, &captured, &AtomicBool::new(true), limit, tail).unwrap();
+                    let captured = captured.into_inner().unwrap();
+                    let count = complete.len().min(limit + 1);
+                    let expected = if tail {
+                        &complete[complete.len() - count..]
+                    } else {
+                        &complete[..count]
+                    };
+                    assert_eq!(captured, expected);
+                    assert_eq!(captured.len() > limit, complete.len() > limit);
+                    assert!(reader.0.next().is_none(), "every scripted read, including EOF, must be consumed");
+                }
+            });
+    }
+
     #[test]
     fn captured_streams_keep_distinct_thread_and_error_names() {
-        assert_eq!(STDOUT_READER_THREAD, "cargo-gamma-process-stdout");
-        assert_eq!(STDERR_READER_THREAD, "cargo-gamma-process-stderr");
-        assert_eq!(STDOUT_STREAM, "stdout");
-        assert_eq!(STDERR_STREAM, "stderr");
+        assert!(STDOUT_READER_THREAD.starts_with("cargo-gamma-process-"));
+        assert!(STDERR_READER_THREAD.starts_with("cargo-gamma-process-"));
         assert_ne!(STDOUT_READER_THREAD, STDERR_READER_THREAD);
         assert_ne!(STDOUT_STREAM, STDERR_STREAM);
     }
@@ -2992,7 +3287,15 @@ mod tests {
             },
         ) {
             Ok(_guard) => crate::support().expect("metering succeeded, so it is supported"),
-            Err(reason) => assert!(!reason.to_string().is_empty(), "a refusal has to say why"),
+            Err(reason) => {
+                let expected = if crate::support().is_err() {
+                    Situation::Unsupported
+                } else {
+                    Situation::Refused
+                };
+                assert_eq!(reason.situation(), expected);
+                assert!(!reason.to_string().is_empty(), "a refusal has to say why");
+            }
         }
     }
 
@@ -3150,53 +3453,41 @@ mod tests {
     }
 
     #[cfg(windows)]
-    fn delayed_marker_child(prefix: &str) -> (tempfile::TempDir, camino::Utf8PathBuf, Child) {
+    fn delayed_marker_child(prefix: &str) -> (tempfile::TempDir, std::net::TcpStream, Child) {
         let work = testing::workdir(prefix);
-        let base = Utf8Path::from_path(work.path()).expect("the temporary path is UTF-8");
-        let (started, finished) = (base.join("started"), base.join("finished"));
-        let mut child = Command::new(testing::helper_binary_path().as_std_path())
+        let listener = testing::listener();
+        let child = Command::new(testing::helper_binary_path().as_std_path())
             .args([
-                testing::directive(format_args!("touch:{started}")),
-                testing::directive("sleep:500"),
-                testing::directive(format_args!("touch:{finished}")),
+                testing::directive(format_args!("connect:{}", listener.local_addr().expect("bound address"))),
+                testing::directive("sleep:30000"),
             ])
             .spawn()
             .expect("spawn");
-
-        for _attempt in 0..600 {
-            if started.exists() {
-                return (work, finished, child);
-            }
-
-            thread::sleep(Duration::from_millis(10));
-        }
-
-        let _killed = child.kill();
-        let _reaped = child.wait();
-        panic!("the delayed-marker child never started");
+        let connection = testing::accepted(&listener);
+        (work, connection, child)
     }
 
     /// Even the test-only jobless state retains cleanup-on-drop as a final safety net.
     #[cfg(windows)]
     #[test]
     fn dropping_a_jobless_spawned_command_stops_its_child() {
-        let (_work, finished, child) = delayed_marker_child("gamma-jobless-spawned-drop");
+        let (_work, connection, child) = delayed_marker_child("gamma-jobless-spawned-drop");
         let spawned = SpawnedCommand {
             child: Some(child),
             guard: Some(SpawnGuard { job: None, metered: false }),
         };
 
-        drop(spawned);
-        thread::sleep(Duration::from_secs(1));
-
-        assert!(!finished.exists(), "the dropped spawned state left its child running");
+        testing::within(Duration::from_secs(10), "dropping a jobless spawned child", move || {
+            drop(spawned);
+            testing::assert_closed(connection);
+        });
     }
 
     /// `ProcessTree::drop` directly kills a child when no job handle can do it by ownership.
     #[cfg(windows)]
     #[test]
     fn dropping_a_jobless_subtree_stops_its_child() {
-        let (_work, finished, child) = delayed_marker_child("gamma-jobless-subtree-drop");
+        let (_work, connection, child) = delayed_marker_child("gamma-jobless-subtree-drop");
         let subtree = ProcessTree {
             child: Some(child),
             output_cleanup_unproven: false,
@@ -3204,10 +3495,10 @@ mod tests {
             metered: false,
         };
 
-        drop(subtree);
-        thread::sleep(Duration::from_secs(1));
-
-        assert!(!finished.exists(), "the dropped subtree left its child running");
+        testing::within(Duration::from_secs(10), "dropping a jobless subtree", move || {
+            drop(subtree);
+            testing::assert_closed(connection);
+        });
     }
 
     /// A contained child is inside a job object, which is what a later kill reaches through.
@@ -3427,49 +3718,29 @@ mod tests {
     /// harness. The grandchild deliberately outlives its parent, which is the shape that leaves an
     /// orphan holding the scratch tree and the caller's pipe.
     ///
-    /// Written against files rather than against pids, so that it says the same thing on Unix,
-    /// where a survivor would be found with signal zero, and on Windows, where the equivalent is a
-    /// handle query. It is also the stronger claim of the two: a killed process that had already
-    /// done its work is not contained in any sense that matters, and a liveness check would not
-    /// notice.
+    /// The grandchild holds a readiness connection until it dies; EOF positively observes cleanup.
     #[test]
     fn killing_the_subtree_reaches_a_grandchild() {
-        let work = testing::workdir("gamma-grandchild");
-        let base = Utf8Path::from_path(work.path()).expect("the temporary path is UTF-8");
-        let (started, finished) = (base.join("started"), base.join("finished"));
+        let listener = testing::listener();
+        let address = listener.local_addr().expect("bound address");
 
         let mut command = Command::new(testing::helper_binary_path().as_std_path());
-        let _ = command.arg(testing::directive(format_args!(
-            "spawn:touch:{started}|sleep:2000|touch:{finished}"
-        )));
+        let _ = command.arg(testing::directive(format_args!("spawn:connect:{address}|sleep:30000")));
         let _ = command.arg(testing::directive("sleep:30000"));
 
         let prepared = prepare(command, MemoryRequest::default()).expect("containment");
         let spawned = prepared.spawn().expect("spawn");
         let mut subtree = ProcessTree::adopt(spawned).expect("adoption");
 
-        // Waited for rather than assumed: killing before the grandchild exists would pass without
-        // containment reaching anything at all.
-        let mut running = false;
-
-        for _attempt in 0..600 {
-            if started.exists() {
-                running = true;
-                break;
-            }
-
-            thread::sleep(Duration::from_millis(10));
-        }
-
-        assert!(running, "the grandchild never started, so the kill proves nothing");
-
-        let _reaped = subtree.terminate();
-
-        // Past the grandchild's own sleep with margin, so an unreached one has had every chance to
-        // finish its work and say so.
-        thread::sleep(Duration::from_secs(4));
-
-        assert!(!finished.exists(), "the grandchild kept working after the subtree was killed");
+        let connection = testing::accepted(&listener);
+        testing::within(Duration::from_secs(10), "terminating a leader and grandchild", move || {
+            let reaped = subtree.terminate().expect("subtree cleanup");
+            assert!(
+                reaped.is_some_and(|status| !status.success()),
+                "cleanup must kill the sleeping leader"
+            );
+            testing::assert_closed(connection);
+        });
     }
 
     /// Killing a subtree reaches a grandchild that left the process group.
@@ -3492,12 +3763,11 @@ mod tests {
     fn killing_the_subtree_reaches_a_grandchild_that_left_the_process_group() {
         demand_containment();
 
-        let work = testing::workdir("gamma-escapee");
-        let base = Utf8Path::from_path(work.path()).expect("the temporary path is UTF-8");
-        let (started, finished) = (base.join("started"), base.join("finished"));
+        let listener = testing::listener();
+        let address = listener.local_addr().expect("bound address");
 
         let mut command = Command::new(testing::helper_binary_path().as_std_path());
-        let _ = command.arg(testing::directive(format_args!("flee:touch:{started}|sleep:2000|touch:{finished}")));
+        let _ = command.arg(testing::directive(format_args!("flee:connect:{address}|sleep:30000")));
         let _ = command.arg(testing::directive("sleep:30000"));
 
         let prepared = prepare(command, MemoryRequest::default()).expect("containment");
@@ -3512,27 +3782,15 @@ mod tests {
 
         assert!(subtree.sealed(), "the adopted subtree gave up the boundary its guard carried");
 
-        let mut running = false;
-
-        for _attempt in 0..600 {
-            if started.exists() {
-                running = true;
-                break;
-            }
-
-            thread::sleep(Duration::from_millis(10));
-        }
-
-        assert!(running, "the escapee never started, so the kill proves nothing");
-
-        let _reaped = subtree.terminate();
-
-        thread::sleep(Duration::from_secs(4));
-
-        assert!(
-            !finished.exists(),
-            "a grandchild that left the process group survived the subtree being killed"
-        );
+        let connection = testing::accepted(&listener);
+        testing::within(Duration::from_secs(10), "terminating an escaped grandchild", move || {
+            let reaped = subtree.terminate().expect("subtree cleanup");
+            assert!(
+                reaped.is_some_and(|status| !status.success()),
+                "cleanup must kill the sleeping leader"
+            );
+            testing::assert_closed(connection);
+        });
     }
 
     /// An unmetered launch is still sealed, and still reports no measurement.
@@ -3601,33 +3859,23 @@ mod tests {
 
     #[test]
     fn dropping_an_unreleased_subtree_reaps_its_leader_and_grandchild() {
-        let work = testing::workdir("gamma-drop-grandchild");
-        let base = Utf8Path::from_path(work.path()).expect("the temporary path is UTF-8");
-        let (started, finished) = (base.join("started"), base.join("finished"));
+        let listener = testing::listener();
+        let address = listener.local_addr().expect("bound address");
 
         let mut command = Command::new(testing::helper_binary_path().as_std_path());
         let _ = command
-            .arg(testing::directive(format_args!(
-                "spawn:touch:{started}|sleep:2000|touch:{finished}"
-            )))
+            .arg(testing::directive(format_args!("spawn:connect:{address}|sleep:30000")))
             .arg(testing::directive("sleep:30000"));
 
         let prepared = prepare(command, MemoryRequest::default()).expect("containment");
         let spawned = prepared.spawn().expect("spawn");
         let subtree = ProcessTree::adopt(spawned).expect("adoption");
 
-        for _attempt in 0..600 {
-            if started.exists() {
-                break;
-            }
-
-            thread::sleep(Duration::from_millis(10));
-        }
-
-        assert!(started.exists(), "the grandchild never started");
-        drop(subtree);
-        thread::sleep(Duration::from_secs(3));
-        assert!(!finished.exists(), "the dropped subtree left its grandchild alive");
+        let connection = testing::accepted(&listener);
+        testing::within(Duration::from_secs(10), "dropping a leader and grandchild", move || {
+            drop(subtree);
+            testing::assert_closed(connection);
+        });
     }
 
     /// The fixture the test above rests on really does outlive its parent and really does finish.
@@ -3650,31 +3898,11 @@ mod tests {
 
         assert!(child.wait().expect("wait").success());
 
-        let mut grandchild_started = false;
-        for _attempt in 0..600 {
-            if started.exists() {
-                grandchild_started = true;
-                break;
-            }
-
-            thread::sleep(Duration::from_millis(10));
-        }
+        testing::wait_until("the grandchild after its parent exits", || started.exists());
 
         assert!(!finished.exists(), "the grandchild ignored the release gate");
         fs::write(release.as_std_path(), "").expect("release the orphaned grandchild");
-        assert!(grandchild_started, "the grandchild never started after its parent exited");
-
-        let mut finished_in_time = false;
-        for _attempt in 0..600 {
-            if finished.exists() {
-                finished_in_time = true;
-                break;
-            }
-
-            thread::sleep(Duration::from_millis(10));
-        }
-
-        assert!(finished_in_time, "the orphaned grandchild never finished its work");
+        testing::wait_until("the orphaned grandchild's released work", || finished.exists());
     }
 
     /// Runs one of the self-interrupting inner tests below, and reports the pid it spawned.
@@ -4490,57 +4718,36 @@ mod tests {
         );
     }
 
-    fn captured_gated_subtree() -> (ProcessTree, tempfile::TempDir, camino::Utf8PathBuf, camino::Utf8PathBuf) {
+    fn captured_gated_subtree() -> (ProcessTree, tempfile::TempDir, std::net::TcpStream) {
         let work = testing::workdir("gamma-process-output-cleanup");
         let root = Utf8Path::from_path(work.path()).expect("the test-work path is UTF-8");
-        let ready = root.join("ready");
         let gate = root.join("gate");
-        let completed = root.join("completed");
+        let listener = testing::listener();
+        let address = listener.local_addr().expect("bound address");
         let mut command = Command::new(testing::helper_binary_path().as_std_path());
         let _ = command
             .args([
-                testing::directive(format!("touch:{ready}")),
+                testing::directive(format!("connect:{address}")),
                 testing::directive(format!("wait:{gate}")),
-                testing::directive(format!("touch:{completed}")),
             ])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         let prepared = prepare(command, MemoryRequest::default()).expect("containment");
         let spawned = prepared.spawn().expect("spawn");
         let subtree = ProcessTree::adopt(spawned).expect("adoption");
-        let deadline = Instant::now() + Duration::from_secs(5);
-
-        while !ready.exists() {
-            assert!(Instant::now() < deadline, "the live child did not reach its gate");
-            thread::yield_now();
-        }
-
-        (subtree, work, gate, completed)
-    }
-
-    fn assert_gated_child_was_cleaned(gate: &Utf8Path, completed: &Utf8Path) {
-        fs::write(gate, b"release").expect("the gate should be writable");
-        let deadline = Instant::now() + Duration::from_millis(250);
-
-        while Instant::now() < deadline && !completed.exists() {
-            thread::yield_now();
-        }
-
-        assert!(
-            !completed.exists(),
-            "the supposedly cleaned child remained live and crossed its gate"
-        );
+        let connection = testing::accepted(&listener);
+        (subtree, work, connection)
     }
 
     #[test]
     fn stderr_reader_start_failure_cleans_up_and_preserves_its_reason() {
-        let (subtree, _work, gate, completed) = captured_gated_subtree();
+        let (subtree, _work, connection) = captured_gated_subtree();
         let _armed = faults::arm(faults::Fault::StderrReader);
 
         let reason = subtree.wait_with_output().expect_err("the stderr reader fault is reported");
 
         assert!(reason.to_string().contains("stderr reader creation failed"), "{reason}");
-        assert_gated_child_was_cleaned(&gate, &completed);
+        testing::assert_closed(connection);
     }
 
     #[test]
@@ -4556,13 +4763,13 @@ mod tests {
 
     #[test]
     fn output_wait_failure_cleans_up_and_preserves_its_reason() {
-        let (subtree, _work, gate, completed) = captured_gated_subtree();
+        let (subtree, _work, connection) = captured_gated_subtree();
         let _armed = faults::arm(faults::Fault::OutputWait);
 
         let reason = subtree.wait_with_output().expect_err("the output wait fault is reported");
 
         assert!(reason.to_string().contains("output wait failed"), "{reason}");
-        assert_gated_child_was_cleaned(&gate, &completed);
+        testing::assert_closed(connection);
     }
 
     #[test]
@@ -4610,6 +4817,14 @@ mod tests {
         assert!(reason.to_string().contains("child status failed"), "{reason}");
         assert!(subtree.child.is_some(), "the failed status query lost the live child");
         subtree.terminate().expect("the restored child remains cleanable");
+    }
+
+    #[test]
+    fn output_wait_propagates_observation_errors_instead_of_panicking() {
+        let mut subtree = captured_no_op_subtree();
+        subtree.terminate().expect("the fixture is reaped before observing it again");
+        let error = wait_for_output(&mut subtree).expect_err("an already-reaped leader cannot be observed again");
+        assert!(error.to_string().contains("already reaped"), "{error}");
     }
 
     #[test]
@@ -4804,7 +5019,7 @@ mod tests {
             .env(INNER, "1");
 
         let captured = testing::within(testing::WATCHDOG, "contained output draining both full pipes", move || {
-            output(command, MemoryRequest::default()).expect("capture")
+            output_bounded(command, MemoryRequest::default(), BYTES * 2, BYTES * 2).expect("capture")
         });
 
         assert!(captured.status.success(), "{:?}", captured.status);

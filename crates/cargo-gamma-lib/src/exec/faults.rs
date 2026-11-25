@@ -22,6 +22,7 @@
 
 use core::cell::RefCell;
 use core::time::Duration;
+use std::rc::Rc;
 use std::time::Instant;
 
 /// A place a test can ask for a failure that the host would otherwise have to produce.
@@ -81,9 +82,10 @@ pub(super) fn arm_late(fault: Fault, after: Duration) -> Armed {
 
 /// Records `fault` as armed from `ripe` onwards.
 fn ripe_at(fault: Fault, ripe: Instant) -> Armed {
-    ARMED.with_borrow_mut(|armed| armed.push((fault, ripe)));
+    let token = Rc::new(());
+    ARMED.with_borrow_mut(|armed| armed.push((fault, ripe, Rc::clone(&token))));
 
-    Armed(fault)
+    Armed(token)
 }
 
 /// Whether `fault` is armed on this thread, disarming it if it is.
@@ -97,19 +99,16 @@ pub(super) fn fired(fault: Fault) -> bool {
     ARMED.with_borrow_mut(|armed| {
         armed
             .iter()
-            .position(|&(candidate, ripe)| candidate == fault && ripe <= now)
+            .position(|(candidate, ripe, _token)| *candidate == fault && *ripe <= now)
             .map(|at| armed.remove(at))
             .is_some()
     })
 }
 
-/// Takes one arming of `fault` away, whether or not it was ever due to fire.
-///
-/// One rather than all of them, so that two guards for the same fault are spent one apiece and
-/// dropping the first does not silently disarm the second.
-fn disarm(fault: Fault) {
+/// Takes this guard's arming away, whether or not it was ever due to fire.
+fn disarm(token: &Rc<()>) {
     ARMED.with_borrow_mut(|armed| {
-        if let Some(at) = armed.iter().position(|&(candidate, _ripe)| candidate == fault) {
+        if let Some(at) = armed.iter().position(|(_candidate, _ripe, candidate)| Rc::ptr_eq(candidate, token)) {
             let _spent = armed.remove(at);
         }
     });
@@ -117,17 +116,17 @@ fn disarm(fault: Fault) {
 
 /// Keeps a fault armed for as long as a test wants it, and takes it away afterwards.
 #[derive(Debug)]
-pub(super) struct Armed(Fault);
+pub(super) struct Armed(Rc<()>);
 
 impl Drop for Armed {
     fn drop(&mut self) {
-        disarm(self.0);
+        disarm(&self.0);
     }
 }
 
 thread_local! {
     /// What this thread has asked to fail, most recently armed last, each with the moment it is due.
-    static ARMED: RefCell<Vec<(Fault, Instant)>> = const { RefCell::new(Vec::new()) };
+    static ARMED: RefCell<Vec<(Fault, Instant, Rc<()>)>> = const { RefCell::new(Vec::new()) };
 }
 
 #[cfg(test)]
@@ -144,6 +143,16 @@ mod tests {
         assert!(!fired(Fault::Wait), "and firing it must have taken it away");
 
         drop(armed);
+    }
+
+    #[test]
+    fn dropping_a_spent_guard_preserves_a_second_arming_of_the_same_fault() {
+        let first = arm(Fault::Wait);
+        let _second = arm(Fault::Wait);
+        assert!(fired(Fault::Wait));
+        drop(first);
+        assert!(fired(Fault::Wait));
+        assert!(!fired(Fault::Wait));
     }
 
     /// Nothing fires that was not asked for, which is what keeps the production check inert.

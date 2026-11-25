@@ -36,6 +36,8 @@
 //! counters flushed. The unit-test module is excluded as a whole so test implementation is not
 //! counted as production coverage.
 
+use core::any::type_name;
+use core::fmt;
 #[cfg(not(loom))]
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use core::time::Duration;
@@ -52,7 +54,8 @@ use loom::lazy_static;
 #[cfg(loom)]
 use loom::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use crate::{PlatformError, Situation, interrupt};
+use crate::interrupt::CgroupWatch;
+use crate::{PlatformError, Situation};
 
 /// Where the unified hierarchy is mounted, on every distribution that uses it.
 const MOUNT: &str = "/sys/fs/cgroup";
@@ -129,13 +132,18 @@ const NAME_ATTEMPTS: u64 = 64;
 /// the sequence restarts when a replacement process receives the same pid. `EEXIST` is therefore
 /// retried with another sequence value; exhausting the finite retry budget is safer than sharing
 /// an old cgroup's accounting.
-#[cfg_attr(coverage_nightly, coverage(off))]
-// #[gamma::skip(all, reason = "Directory creation and EEXIST retries use native filesystem state; deterministic fault coverage requires an injected creation boundary.", tag = "native-boundary")]
-fn create_child_with(root: &Path, kind: &str, pid: u32, generation: u64, mut next: impl FnMut() -> u64) -> io::Result<PathBuf> {
+fn create_child_with(
+    root: &Path,
+    kind: &str,
+    pid: u32,
+    generation: u64,
+    mut next: impl FnMut() -> u64,
+    mut create: impl FnMut(&Path) -> io::Result<()>,
+) -> io::Result<PathBuf> {
     for _attempt in 0..NAME_ATTEMPTS {
         let path = root.join(format!("{kind}.{pid}.{generation}.{}", next()));
 
-        match fs::create_dir(&path) {
+        match create(&path) {
             Ok(()) => return Ok(path),
             Err(cause) if cause.kind() == io::ErrorKind::AlreadyExists => {}
             Err(cause) => return Err(cause),
@@ -192,9 +200,12 @@ fn start_time_from(stat: &str) -> Option<u64> {
 }
 
 /// The kernel generation of one process identifier.
-// #[gamma::skip(all, reason = "This adapter reads the live proc filesystem; malformed stat parsing remains mutation-tested through start_time_from.", tag = "native-boundary")]
 fn process_generation(pid: u32) -> io::Result<u64> {
-    let stat = fs::read_to_string(format!("/proc/{pid}/stat"))?;
+    process_generation_with(pid, |path| fs::read_to_string(path))
+}
+
+fn process_generation_with(pid: u32, read: impl FnOnce(&Path) -> io::Result<String>) -> io::Result<u64> {
+    let stat = read(Path::new(&format!("/proc/{pid}/stat")))?;
 
     start_time_from(&stat).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "process stat has no start time"))
 }
@@ -203,10 +214,8 @@ fn process_generation(pid: u32) -> io::Result<u64> {
 ///
 /// An error other than `NotFound` is deliberately treated as live: permission and namespace
 /// boundaries must not turn a leaf belonging to another running invocation into one we remove.
-#[cfg_attr(coverage_nightly, coverage(off))]
-// #[gamma::skip(all, reason = "Creator liveness depends on live proc entries and permission failures; scripting it requires the deferred process-generation I/O seam.", tag = "native-boundary")]
-fn owner_is_live(owner: LeafOwner) -> bool {
-    match process_generation(owner.pid) {
+fn owner_is_live(owner: LeafOwner, read_generation: impl FnOnce(u32) -> io::Result<u64>) -> bool {
+    match read_generation(owner.pid) {
         Ok(generation) => owner.generation.is_none_or(|owned| generation == owned),
         Err(cause) => cause.kind() != io::ErrorKind::NotFound,
     }
@@ -218,48 +227,68 @@ fn owner_is_live(owner: LeafOwner) -> bool {
 /// registered before it can be observed here, so only one dropped after foreground removal gave up
 /// can be removed. A failed `rmdir` normally means an orphan still occupies the cgroup; returning
 /// `true` asks the background reaper to try again after it exits.
-#[cfg_attr(coverage_nightly, coverage(off))]
-// #[gamma::skip(all, reason = "Stale-leaf cleanup combines directory inventory, live process generations and the shared reaper registry; deterministic coverage requires the deferred owned-state and I/O refactor.", tag = "native-boundary")]
 fn reap_owned_leaves(root: &Path) -> bool {
-    let Ok(entries) = fs::read_dir(root) else {
+    let entries = fs::read_dir(root).map(|entries| {
+        entries.map(|entry| {
+            entry.map(|entry| {
+                let directory = entry.file_type().is_ok_and(|kind| kind.is_dir());
+                (entry.path(), directory)
+            })
+        })
+    });
+    reap_owned_with(
+        entries,
+        || {
+            let pid = process::id();
+            process_generation(pid).map(|generation| LeafOwner {
+                pid,
+                generation: Some(generation),
+            })
+        },
+        process_generation,
+        |path| reaper().active.iter().any(|active| active == path),
+        |path| fs::remove_dir(path),
+    )
+}
+
+fn reap_owned_with(
+    entries: io::Result<impl IntoIterator<Item = io::Result<(PathBuf, bool)>>>,
+    current: impl FnOnce() -> io::Result<LeafOwner>,
+    mut read_generation: impl FnMut(u32) -> io::Result<u64>,
+    mut active: impl FnMut(&Path) -> bool,
+    mut remove: impl FnMut(&Path) -> io::Result<()>,
+) -> bool {
+    let Ok(entries) = entries else {
         return true;
     };
-    let current_pid = process::id();
-    let Ok(current_generation) = process_generation(current_pid) else {
+    let Ok(current) = current() else {
         return true;
-    };
-    let current = LeafOwner {
-        pid: current_pid,
-        generation: Some(current_generation),
     };
     let mut pending = false;
 
     for entry in entries {
-        let Ok(entry) = entry else {
+        let Ok((path, directory)) = entry else {
             pending = true;
             continue;
         };
 
-        if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+        if !directory {
             continue;
         }
 
-        let Some(owner) = leaf_owner(&entry.file_name()) else {
+        let Some(owner) = path.file_name().and_then(leaf_owner) else {
             continue;
         };
 
-        if owner != current && owner_is_live(owner) {
+        if owner != current && owner_is_live(owner, &mut read_generation) {
             continue;
         }
 
-        let path = entry.path();
-        let active = reaper().active.iter().any(|active| active == &path);
-
-        if active {
+        if active(&path) {
             continue;
         }
 
-        if fs::remove_dir(path).is_err() {
+        if remove(&path).is_err() {
             pending = true;
         }
     }
@@ -303,46 +332,57 @@ fn release_reaper_claim(running: &AtomicBool) {
 }
 
 /// Starts the bounded, shared background reaper after foreground cleanup gives up.
+// The native worker never returns; ensure_reaper_with covers ownership and spawn refusal.
 #[cfg_attr(coverage_nightly, coverage(off))]
-// #[gamma::skip(all, reason = "Starting the shared background worker mutates process-global state and spawns a thread; claim and failed-start release policy remain mutation-tested on owned atomics.", tag = "native-boundary")]
 fn ensure_reaper() {
-    if !claim_reaper(&REAPER_RUNNING) {
+    ensure_reaper_with(&REAPER_RUNNING, || {
+        thread::Builder::new()
+            .name("gamma-cgroup-reaper".to_owned())
+            .spawn(reaper_loop)
+            .map(drop)
+    });
+}
+
+fn ensure_reaper_with(running: &AtomicBool, spawn: impl FnOnce() -> io::Result<()>) {
+    if !claim_reaper(running) {
         return;
     }
 
-    match thread::Builder::new().name("gamma-cgroup-reaper".to_owned()).spawn(reaper_loop) {
-        Ok(worker) => drop(worker),
-        Err(_cause) => release_reaper_claim(&REAPER_RUNNING),
+    if spawn().is_err() {
+        release_reaper_claim(running);
     }
 }
 
 /// Reaps leaves that become empty after their owning run has moved on.
 #[cfg_attr(coverage_nightly, coverage(off))]
-// #[gamma::skip(all, reason = "The infinite worker couples shared reaper generations, native directory cleanup and sleeping; deterministic coverage requires extracting an owned single-iteration driver.", tag = "native-boundary")]
+// #[gamma::skip(all, reason = "The never-returning native worker supplies the process-global mutex and sleep; reap_pending_with exercises each iteration, including work scheduled during a scan.", tag = "native-boundary")]
 fn reaper_loop() -> ! {
     loop {
-        let task = {
-            let state = reaper();
-
-            if state.pending {
-                state.root.clone().map(|root| (root, state.generation))
-            } else {
-                None
-            }
-        };
-
-        if let Some((root, generation)) = task {
-            let pending = reap_owned_leaves(&root);
-            let mut state = reaper();
-
-            // A drop can schedule new work while this scan is in progress. Do not clear that
-            // newer request merely because the older scan happened to finish cleanly.
-            if state.generation == generation {
-                state.pending = pending;
-            }
-        }
-
+        reap_pending_with(REAPER.get_or_init(|| Mutex::new(Reaper::default())), reap_owned_leaves);
         thread::sleep(REAPER_PAUSE);
+    }
+}
+
+/// Scans outside the mutex so slow cleanup can consult reaper state without blocking publication.
+/// A matching generation is required to publish the result without overwriting newer requests.
+fn reap_pending_with(state: &Mutex<Reaper>, reap: impl FnOnce(&Path) -> bool) {
+    let task = {
+        let state = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.pending {
+            state.root.clone().map(|root| (root, state.generation))
+        } else {
+            None
+        }
+    };
+
+    if let Some((root, generation)) = task {
+        let pending = reap(&root);
+        let mut state = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        // A drop can schedule new work while this scan is in progress.
+        if state.generation == generation {
+            state.pending = pending;
+        }
     }
 }
 
@@ -448,8 +488,16 @@ fn unified_entry(listed: &str) -> Option<&str> {
 }
 
 /// Ensures children of `own` will have the memory controller, moving this process if it must.
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn delegate(own: &Path) -> Result<PathBuf, String> {
+    delegate_with(own, enable, |path| fs::create_dir_all(path), vacate)
+}
+
+fn delegate_with(
+    own: &Path,
+    mut enable: impl FnMut(&Path) -> io::Result<()>,
+    create: impl FnOnce(&Path) -> io::Result<()>,
+    vacate: impl FnOnce(&Path, &Path) -> Result<(), String>,
+) -> Result<PathBuf, String> {
     if lists(own, "cgroup.subtree_control", "memory") {
         return Ok(own.to_owned());
     }
@@ -472,8 +520,7 @@ fn delegate(own: &Path) -> Result<PathBuf, String> {
     // to do, and it leaves the delegation boundary itself free to distribute controllers.
     let supervisor = own.join(SUPERVISOR);
 
-    // #[gamma::skip(try.propagate_to_unwrap, reason = "This failure requires a live delegation that needs migration but refuses supervisor creation; testing it needs the deferred cgroup I/O seam.", tag = "native-boundary")]
-    fs::create_dir_all(&supervisor).map_err(|cause| {
+    create(&supervisor).map_err(|cause| {
         format!(
             "`{}` could not be created: {cause}. Creating a cgroup there needs one delegated to this \
              process, as `systemd-run --user --scope -p Delegate=yes` provides",
@@ -481,10 +528,8 @@ fn delegate(own: &Path) -> Result<PathBuf, String> {
         )
     })?;
 
-    // #[gamma::skip(try.propagate_to_unwrap, reason = "Native process migration failure in the delegation recovery path cannot be scripted without the deferred cgroup I/O seam.", tag = "native-boundary")]
     vacate(own, &supervisor)?;
 
-    // #[gamma::skip(try.propagate_to_unwrap, reason = "This second controller-enable attempt follows real process migration; reproducing its failure needs the deferred cgroup I/O seam.", tag = "native-boundary")]
     enable(own).map_err(|cause| {
         format!(
             "the memory controller could not be delegated to the children of `{}`: {cause}. \
@@ -493,7 +538,6 @@ fn delegate(own: &Path) -> Result<PathBuf, String> {
         )
     })?;
 
-    // #[gamma::skip(result.ok_to_err, reason = "this recovery succeeds only after the live cgroup kernel refuses enabling a controller, processes are migrated, and the same write then succeeds; an ordinary directory cannot reproduce that state transition")]
     Ok(own.to_owned())
 }
 
@@ -541,16 +585,13 @@ fn lists(path: &Path, file: &str, wanted: &str) -> bool {
 /// Both files are checked because they answer different questions and fail on different hosts:
 /// `memory.max` is what bounds a mutant, and `memory.peak` — which arrived in Linux 5.19 — is what
 /// the baseline measures in order to choose that bound.
-// #[gamma::skip(all, reason = "This wrapper supplies the real process identity and global naming sequence to native cgroup creation; it cannot be exercised with fabricated identities.", tag = "native-boundary")]
 fn probe(root: &Path) -> Result<(), String> {
     probe_with(root, process::id(), || next_name_ticket(&SEQUENCE))
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
-// #[gamma::skip(all, reason = "Probing creates a real cgroup whose interface files are supplied by the kernel; deterministic creation and cleanup faults need the deferred I/O seam.", tag = "native-boundary")]
 fn probe_with(root: &Path, pid: u32, next: impl FnMut() -> u64) -> Result<(), String> {
     let generation = process_generation(pid).map_err(|cause| format!("process generation could not be read: {cause}"))?;
-    let path = create_child_with(root, "gamma.probe", pid, generation, next).map_err(|cause| {
+    let path = create_child_with(root, "gamma.probe", pid, generation, next, |path| fs::create_dir(path)).map_err(|cause| {
         format!(
             "a unique child cgroup could not be created under `{}`: {cause}. Creating one needs a \
              delegated cgroup, as `systemd-run --user --scope -p Delegate=yes` provides",
@@ -604,27 +645,26 @@ pub struct Cgroup {
     /// An already-open kill switch that the interrupt handler can write without resolving a path.
     kill: Option<File>,
 
-    /// Whether this leaf was registered with the shared reaper.
-    tracked: bool,
+    /// The reaper that owns this leaf's active registration.
+    tracked: Option<ReaperWatch>,
 
     /// The interrupt-registry slot this leaf's kill descriptor was published to, if any.
     ///
-    /// Recorded by [`interrupt::Spawning::watch_cgroup`] as it publishes the descriptor, and
+    /// Recorded by [`crate::interrupt::Spawning::watch_cgroup`] as it publishes the descriptor, and
     /// discharged by this type's own `Drop` — which is what makes the registration impossible for
     /// a safe caller to outlive. Nothing outside this crate can create, observe, or clear it.
     watch: Option<CgroupWatch>,
 }
 
-/// Where a live cgroup's kill descriptor is published in the process-wide interrupt registry.
-///
-/// The descriptor has a registry slot independent of the leader's process-group slot. Retaining
-/// the descriptor lets `Drop` clear the slot only while it still holds this cgroup's registration.
-#[derive(Debug)]
-pub(crate) struct CgroupWatch {
-    slot: usize,
-    descriptor: RawFd,
-    #[cfg(all(test, not(miri)))]
-    registry: Option<interrupt::TestRegistry>,
+struct ReaperWatch {
+    state: &'static Mutex<Reaper>,
+    start: fn(),
+}
+
+impl fmt::Debug for ReaperWatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct(type_name::<Self>()).finish_non_exhaustive()
+    }
 }
 
 /// An open cgroup kill switch, valid while its owning [`Cgroup`] remains alive.
@@ -674,7 +714,7 @@ impl Cgroup {
     /// backtrace-bearing [`PlatformError`]. Per-launch failures remain [`Situation::Refused`]
     /// errors because a supported host failed to create this particular boundary.
     #[cfg_attr(coverage_nightly, coverage(off))]
-    // #[gamma::skip(all, reason = "The supported/unsupported decision uses cached host delegation and native leaf creation; scripting both requires the deferred owned cgroup backend.", tag = "native-boundary")]
+    // #[gamma::skip(all, reason = "This wrapper reads cached host delegation; create_at_with tests owning creation and open failures without changing the process-wide capability cache.", tag = "native-boundary")]
     pub fn create_unmetered_if_supported() -> Result<Option<Self>, PlatformError> {
         let Ok(root) = root() else {
             return Ok(None);
@@ -683,36 +723,53 @@ impl Cgroup {
         Self::create_at(root, None).map(Some)
     }
 
+    // Uses the process-global native reaper; create_at_with covers owning registration.
     #[cfg_attr(coverage_nightly, coverage(off))]
-    // #[gamma::skip(all, reason = "Leaf creation, owning kill-file opening and active registration must share one critical section; testing this path without native state requires the deferred lifecycle refactor.", tag = "native-boundary")]
     fn create_at(root: &Path, limit: Option<u64>) -> Result<Self, PlatformError> {
+        Self::create_at_with(
+            root,
+            limit,
+            REAPER.get_or_init(|| Mutex::new(Reaper::default())),
+            ensure_reaper,
+            Self::create_under,
+            |path| OpenOptions::new().write(true).open(path),
+        )
+    }
+
+    fn create_at_with(
+        root: &Path,
+        limit: Option<u64>,
+        state: &'static Mutex<Reaper>,
+        start: fn(),
+        create: impl FnOnce(&Path, Option<u64>) -> Result<Self, String>,
+        open: impl FnOnce(&Path) -> io::Result<File>,
+    ) -> Result<Self, PlatformError> {
         let (group, start_reaper) = {
             // Creation and registration are one critical section. A reaper never sees a
             // successfully created leaf as inactive between these two steps.
-            let mut reaper = reaper();
-            let mut group = Self::create_under(root, limit).map_err(refused)?;
+            let mut reaper = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut group = create(root, limit).map_err(refused)?;
             let kill_path = group.path.join("cgroup.kill");
-            group.kill = Some(OpenOptions::new().write(true).open(&kill_path).map_err(|cause| {
+            group.kill = Some(open(&kill_path).map_err(|cause| {
                 PlatformError::because(Situation::Refused, format!("`{}` could not be opened", kill_path.display()), cause)
             })?);
 
             reaper.root = Some(root.to_path_buf());
             reaper.active.push(group.path.clone());
 
-            group.tracked = true;
+            group.tracked = Some(ReaperWatch { state, start });
 
             (group, reaper.pending)
         };
 
         if start_reaper {
-            ensure_reaper();
+            start();
         }
 
         Ok(group)
     }
 
     /// Creates and configures a leaf beneath an already selected cgroup root.
-    // #[gamma::skip(all, reason = "This native wrapper supplies process identity and the shared naming sequence; injected generation/configuration helpers remain in mutation scope.", tag = "native-boundary")]
     fn create_under(root: &Path, limit: Option<u64>) -> Result<Self, String> {
         Self::create_under_with(root, limit, process::id(), process_generation, || next_name_ticket(&SEQUENCE))
     }
@@ -724,20 +781,29 @@ impl Cgroup {
         read_generation: impl FnOnce(u32) -> io::Result<u64>,
         next: impl FnMut() -> u64,
     ) -> Result<Self, String> {
+        Self::create_under_using(root, limit, pid, read_generation, next, Self::configure)
+    }
+
+    fn create_under_using(
+        root: &Path,
+        limit: Option<u64>,
+        pid: u32,
+        read_generation: impl FnOnce(u32) -> io::Result<u64>,
+        next: impl FnMut() -> u64,
+        configure: impl FnOnce(&Self, Option<u64>) -> Result<(), String>,
+    ) -> Result<Self, String> {
         let generation = read_generation(pid).map_err(|cause| format!("process generation could not be read: {cause}"))?;
-        let path = create_child_with(root, "gamma", pid, generation, next)
+        let path = create_child_with(root, "gamma", pid, generation, next, |path| fs::create_dir(path))
             .map_err(|cause| format!("a unique child cgroup could not be created under `{}`: {cause}", root.display()))?;
 
         let group = Self {
             path,
             kill: None,
-            // #[gamma::skip(literal.bool_flip, reason = "Changing initial tracking state touches the process-global reaper on drop; testing that ownership transition needs the deferred owned lifecycle state.", tag = "native-boundary")]
-            tracked: false,
+            tracked: None,
             watch: None,
         };
 
-        // #[gamma::skip(try.propagate_to_unwrap, reason = "A just-created kernel cgroup must refuse configuration to reach this error; deterministic coverage needs injected creation and interface writes.", tag = "native-boundary")]
-        group.configure(limit)?;
+        configure(&group, limit)?;
 
         Ok(group)
     }
@@ -825,28 +891,20 @@ impl Cgroup {
     /// # Errors
     ///
     /// Returns the operating system's reason when the cgroup kill switch could not be written.
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    // #[gamma::skip(all, reason = "The pre-opened kill descriptor uses native short writes and EINTR retry; recording those outcomes without real descriptors requires the deferred owning-handle backend.", tag = "native-boundary")]
     pub fn kill(&self) -> io::Result<()> {
         if let Some(kill) = self.kill.as_ref() {
             let fd = kill.as_raw_fd();
-            loop {
+            return kill_with(|| {
                 // SAFETY: the descriptor is owned by `self`, remains open for this call, and the
                 // byte is static initialized storage whose exact length is supplied.
                 let written = unsafe { libc::write(fd, b"1".as_ptr().cast(), 1) };
 
-                if written == 1 {
-                    return Ok(());
+                if written < 0 {
+                    Err(io::Error::last_os_error())
+                } else {
+                    Ok(written)
                 }
-                if written >= 0 {
-                    return Err(io::Error::new(io::ErrorKind::WriteZero, "the cgroup kill switch accepted no byte"));
-                }
-
-                let cause = io::Error::last_os_error();
-                if cause.kind() != io::ErrorKind::Interrupted {
-                    return Err(cause);
-                }
-            }
+            });
         }
         fs::write(self.path.join("cgroup.kill"), "1")
     }
@@ -869,26 +927,12 @@ impl Cgroup {
 
     /// Records where this leaf's kill descriptor was published, so its drop can take it back.
     ///
-    /// Called by [`interrupt::Spawning::watch_cgroup`] as the descriptor is published. The unique
+    /// Called by [`crate::interrupt::Spawning::watch_cgroup`] as the descriptor is published. The unique
     /// cgroup borrow keeps the owning file live until this reminder is stored, and this cgroup
     /// retains ownership of the descriptor until `Drop` removes the registry entry.
     #[cfg_attr(coverage_nightly, coverage(off))]
-    pub(crate) const fn watched_at(&mut self, slot: usize, descriptor: RawFd) {
-        self.watch = Some(CgroupWatch {
-            slot,
-            descriptor,
-            #[cfg(all(test, not(miri)))]
-            registry: None,
-        });
-    }
-
-    #[cfg(all(test, not(miri)))]
-    pub(crate) const fn watched_at_for_test(&mut self, slot: usize, descriptor: RawFd, registry: interrupt::TestRegistry) {
-        self.watch = Some(CgroupWatch {
-            slot,
-            descriptor,
-            registry: Some(registry),
-        });
+    pub(crate) const fn watched_at(&mut self, watch: CgroupWatch) {
+        self.watch = Some(watch);
     }
 
     /// Whether the kernel reported killing this workload for reaching its ceiling.
@@ -927,7 +971,6 @@ impl Cgroup {
 
 impl Drop for Cgroup {
     #[cfg_attr(coverage_nightly, coverage(off))]
-    // #[gamma::skip(all, reason = "Teardown couples descriptor quiescence, native removal and the shared reaper; replacing this with deterministic operations requires the deferred owning-resource lifecycle refactor.", tag = "native-boundary")]
     fn drop(&mut self) {
         // Discharged first, and unconditionally once a registration was ever made. The registry
         // holds a raw descriptor this leaf owns, and the `kill` field below closes it as this
@@ -937,15 +980,7 @@ impl Drop for Cgroup {
         // up again. Doing it here rather than asking the caller to is what makes the pairing
         // impossible to get wrong: there is no safe way to drop a watched cgroup without it.
         if let Some(watch) = self.watch.take() {
-            #[cfg(all(test, not(miri)))]
-            if let Some(registry) = watch.registry {
-                registry.release_cgroup(watch.slot, watch.descriptor);
-            } else {
-                interrupt::release_watched_cgroup(watch.slot, watch.descriptor);
-            }
-
-            #[cfg(any(not(test), miri))]
-            interrupt::release_watched_cgroup(watch.slot, watch.descriptor);
+            watch.release();
         }
 
         // A cgroup that still holds a process cannot be removed. Foreground cleanup stays bounded
@@ -953,25 +988,35 @@ impl Drop for Cgroup {
         // method returns and removes the leaf once the orphan exits.
         let removed = remove_with_retry(|| fs::remove_dir(&self.path).is_ok(), || thread::sleep(REMOVAL_PAUSE));
 
-        if !self.tracked {
+        let Some(tracked) = self.tracked.take() else {
             return;
-        }
-
-        let start_reaper = {
-            let mut reaper = reaper();
-
-            reaper.active.retain(|active| active != &self.path);
-
-            if !removed {
-                reaper.pending = true;
-                reaper.generation = reaper.generation.wrapping_add(1);
-            }
-
-            !removed
         };
 
-        if start_reaper {
-            ensure_reaper();
+        if retire_leaf(tracked.state, &self.path, removed) {
+            (tracked.start)();
+        }
+    }
+}
+
+fn retire_leaf(state: &Mutex<Reaper>, path: &Path, removed: bool) -> bool {
+    let mut reaper = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    reaper.active.retain(|active| active != path);
+
+    if !removed {
+        reaper.pending = true;
+        reaper.generation = reaper.generation.wrapping_add(1);
+    }
+
+    !removed
+}
+
+fn kill_with(mut write: impl FnMut() -> io::Result<isize>) -> io::Result<()> {
+    loop {
+        match write() {
+            Ok(1) => return Ok(()),
+            Ok(_) => return Err(io::Error::new(io::ErrorKind::WriteZero, "the cgroup kill switch accepted no byte")),
+            Err(cause) if cause.kind() == io::ErrorKind::Interrupted => {}
+            Err(cause) => return Err(cause),
         }
     }
 }
@@ -988,6 +1033,81 @@ fn remove_with_retry(mut remove: impl FnMut() -> bool, mut pause: impl FnMut()) 
     false
 }
 
+#[cfg(all(test, not(loom)))]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod policy_tests {
+    use std::sync::mpsc::channel;
+
+    use super::*;
+
+    #[test]
+    fn a_reaper_scan_cannot_clear_a_competing_failed_removal() {
+        let state = Mutex::new(Reaper::default());
+        reap_pending_with(&state, |_| panic!("an idle reaper must not scan"));
+        let leaf = Path::new("owned-root").join("leaf");
+        {
+            let mut state = state.lock().unwrap();
+            state.root = Some(PathBuf::from("owned-root"));
+            state.active.push(leaf.clone());
+            state.pending = true;
+        }
+        let (scanning, started) = channel();
+        let (resume, resumed) = channel();
+        thread::scope(|scope| {
+            scope.spawn({
+                let state = &state;
+                move || {
+                    reap_pending_with(state, |root| {
+                        assert_eq!(root, Path::new("owned-root"));
+                        scanning.send(()).unwrap();
+                        resumed.recv().unwrap();
+                        false
+                    });
+                }
+            });
+            started.recv().unwrap();
+            assert!(retire_leaf(&state, &leaf, false));
+            {
+                let state = state.lock().unwrap();
+                assert_eq!(state.active, [] as [PathBuf; 0]);
+                assert_eq!(state.generation, 1);
+            }
+            resume.send(()).unwrap();
+        });
+        assert!(state.lock().unwrap().pending, "the older clean scan lost a newer cleanup request");
+        reap_pending_with(&state, |_| true);
+        assert!(state.lock().unwrap().pending, "failed removal must request another scan");
+        reap_pending_with(&state, |_| false);
+        assert!(!state.lock().unwrap().pending);
+    }
+
+    #[test]
+    fn exhausted_creation_names_refuse_without_reusing_a_stale_leaf() {
+        let root = Path::new("owned-root");
+        let mut tickets = 0..NAME_ATTEMPTS;
+        let mut attempted = Vec::new();
+        let error = create_child_with(
+            root,
+            "gamma",
+            41,
+            7,
+            || tickets.next().expect("creation must stop after the bounded candidate sequence"),
+            |path| {
+                attempted.push(path.to_path_buf());
+                Err(io::Error::from(io::ErrorKind::AlreadyExists))
+            },
+        )
+        .expect_err("all candidate names already belong to stale leaves");
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            attempted,
+            (0..NAME_ATTEMPTS)
+                .map(|ticket| root.join(format!("gamma.41.7.{ticket}")))
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
 #[cfg(all(test, not(miri)))]
 // Test implementation is excluded from production coverage; remove this annotation only if the
 // package intentionally changes its metric to include test-source lines.
@@ -997,6 +1117,7 @@ mod tests {
     use std::error::Error as _;
 
     use super::*;
+    use crate::interrupt;
 
     #[test]
     fn process_generation_uses_field_22_after_the_complete_command_name() {
@@ -1005,6 +1126,170 @@ mod tests {
         assert_eq!(start_time_from("not a process stat"), None);
         assert_eq!(start_time_from("41 (worker) S 1"), None);
         assert_eq!(start_time_from(&stat.replace("123456", "invalid")), None);
+    }
+
+    #[test]
+    fn process_generation_read_failures_and_unknown_owners_are_conservative() {
+        let error = process_generation_with(41, |path| {
+            assert_eq!(path, Path::new("/proc/41/stat"));
+            Err(io::Error::new(io::ErrorKind::PermissionDenied, "stat denied"))
+        })
+        .expect_err("a denied stat is not a process generation");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            process_generation_with(41, |_| Ok("invalid stat".into())).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        let owner = LeafOwner {
+            pid: 41,
+            generation: Some(7),
+        };
+        assert!(owner_is_live(owner, |_| Err(io::Error::from(io::ErrorKind::PermissionDenied))));
+        assert!(!owner_is_live(owner, |_| Err(io::Error::from(io::ErrorKind::NotFound))));
+        assert!(owner_is_live(owner, |_| Ok(7)));
+        assert!(!owner_is_live(owner, |_| Ok(8)));
+        assert!(owner_is_live(LeafOwner { generation: None, ..owner }, |_| Ok(8)));
+    }
+
+    #[test]
+    fn reaper_inventory_identity_and_removal_failures_keep_cleanup_pending() {
+        let current = LeafOwner {
+            pid: 41,
+            generation: Some(7),
+        };
+        let no_entries = || Vec::<io::Result<(PathBuf, bool)>>::new();
+        assert!(reap_owned_with(
+            Err::<Vec<_>, _>(io::Error::from(io::ErrorKind::PermissionDenied)),
+            || panic!("a failed inventory must not inspect process identity"),
+            |_| panic!("no foreign owner"),
+            |_| panic!("no active lookup"),
+            |_| panic!("no removal"),
+        ));
+        assert!(reap_owned_with(
+            Ok(no_entries()),
+            || Err(io::Error::from(io::ErrorKind::NotFound)),
+            |_| panic!("no foreign owner"),
+            |_| panic!("no active lookup"),
+            |_| panic!("no removal"),
+        ));
+        assert!(reap_owned_with(
+            Ok(vec![Err(io::Error::from(io::ErrorKind::PermissionDenied))]),
+            || Ok(current),
+            |_| panic!("no foreign owner"),
+            |_| panic!("no active lookup"),
+            |_| panic!("no removal"),
+        ));
+        let path = PathBuf::from("gamma.41.7.0");
+        let removed = core::cell::Cell::new(false);
+        assert!(reap_owned_with(
+            Ok(vec![Ok((path.clone(), true))]),
+            || Ok(current),
+            |_| panic!("the current creator needs no liveness lookup"),
+            |_| false,
+            |candidate| {
+                assert_eq!(candidate, path);
+                removed.set(true);
+                Err(io::Error::from(io::ErrorKind::PermissionDenied))
+            },
+        ));
+        assert!(removed.get());
+        assert!(!reap_owned_with(
+            Ok(vec![Ok((path, true))]),
+            || Ok(current),
+            |_| panic!("the current creator needs no liveness lookup"),
+            |_| true,
+            |_| panic!("an active leaf must not be removed"),
+        ));
+    }
+
+    #[test]
+    fn reaper_skips_non_leaves_live_foreign_owners_and_active_registrations() {
+        let current = LeafOwner {
+            pid: 41,
+            generation: Some(7),
+        };
+        let live = PathBuf::from("gamma.42.8.0");
+        let abandoned = PathBuf::from("gamma.43.9.0");
+        let active = PathBuf::from("gamma.41.7.0");
+        let inspected = RefCell::new(Vec::new());
+        let removed = RefCell::new(Vec::new());
+        assert!(!reap_owned_with(
+            Ok(vec![
+                Ok((PathBuf::from("ordinary-file"), false)),
+                Ok((PathBuf::from("unrelated-directory"), true)),
+                Ok((live, true)),
+                Ok((abandoned.clone(), true)),
+                Ok((active.clone(), true)),
+            ]),
+            || Ok(current),
+            |pid| {
+                inspected.borrow_mut().push(pid);
+                match pid {
+                    42 => Ok(8),
+                    43 => Err(io::Error::from(io::ErrorKind::NotFound)),
+                    _ => panic!("non-leaves and the current creator need no foreign lookup"),
+                }
+            },
+            |path| path == active,
+            |path| {
+                removed.borrow_mut().push(path.to_path_buf());
+                Ok(())
+            },
+        ));
+        assert_eq!(*inspected.borrow(), [42, 43]);
+        assert_eq!(*removed.borrow(), [abandoned]);
+    }
+
+    #[test]
+    fn a_failed_reaper_spawn_releases_ownership_for_the_next_request() {
+        let running = AtomicBool::new(false);
+        ensure_reaper_with(&running, || Err(io::Error::from(io::ErrorKind::WouldBlock)));
+        assert!(!running.load(Ordering::Relaxed));
+        let started = core::cell::Cell::new(false);
+        ensure_reaper_with(&running, || {
+            started.set(true);
+            Ok(())
+        });
+        assert!(started.get());
+        assert!(running.load(Ordering::Relaxed));
+        ensure_reaper_with(&running, || panic!("the existing worker owns this request"));
+    }
+
+    #[test]
+    fn kill_switch_writes_retry_interrupts_but_propagate_real_and_short_write_failures() {
+        let writes = core::cell::Cell::new(0);
+        kill_with(|| {
+            writes.set(writes.get() + 1);
+            if writes.get() == 1 {
+                Err(io::Error::from(io::ErrorKind::Interrupted))
+            } else {
+                Ok(1)
+            }
+        })
+        .expect("an interrupted write must be retried");
+        assert_eq!(writes.get(), 2);
+        assert_eq!(kill_with(|| Ok(0)).unwrap_err().kind(), io::ErrorKind::WriteZero);
+        assert_eq!(
+            kill_with(|| Err(io::Error::from(io::ErrorKind::PermissionDenied)))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        let directory = tempfile::tempdir_in(".").expect("owned test root");
+        let leaf = directory.path().join("leaf");
+        fs::create_dir(&leaf).expect("owned leaf");
+        let switch = directory.path().join("owned-kill-switch");
+        let mut group = over(&leaf);
+        group.kill = Some(File::create(&switch).expect("owning kill switch"));
+        group.kill().expect("the real descriptor accepts its kill byte");
+        assert_eq!(fs::read(&switch).unwrap(), b"1");
+        group.kill = Some(File::open(&switch).expect("the existing switch can be opened read-only"));
+        assert_eq!(group.kill().unwrap_err().raw_os_error(), Some(libc::EBADF));
+        assert_eq!(
+            fs::read(&switch).unwrap(),
+            b"1",
+            "a refused descriptor write must not change the switch"
+        );
     }
 
     #[test]
@@ -1109,6 +1394,121 @@ mod tests {
         spawning.finish();
     }
 
+    #[test]
+    fn owning_creation_and_open_failures_never_publish_an_active_leaf() {
+        let directory = tempfile::tempdir_in(".").expect("owned test root");
+        let state: &'static Mutex<Reaper> = Box::leak(Box::new(Mutex::new(Reaper::default())));
+        let refusal = Cgroup::create_at_with(
+            directory.path(),
+            Some(123),
+            state,
+            || panic!("a failed creation cannot request a reaper"),
+            |_root, limit| {
+                assert_eq!(limit, Some(123));
+                Err("creation refused".into())
+            },
+            |_| panic!("a failed creation cannot open its kill switch"),
+        )
+        .expect_err("creation is refused");
+        assert_eq!(refusal.situation(), Situation::Refused);
+
+        let path = directory.path().join("leaf");
+        let refusal = Cgroup::create_at_with(
+            directory.path(),
+            None,
+            state,
+            || panic!("a failed open cannot request a reaper"),
+            |_, _| {
+                fs::create_dir(&path).expect("owned leaf");
+                Ok(over(&path))
+            },
+            |kill_path| {
+                assert_eq!(kill_path, path.join("cgroup.kill"));
+                Err(io::Error::from(io::ErrorKind::PermissionDenied))
+            },
+        )
+        .expect_err("the owning kill switch is refused");
+        assert_eq!(refusal.situation(), Situation::Refused);
+        assert!(!path.exists(), "failed opening must drop the newly owned leaf");
+        let state = state.lock().unwrap();
+        assert_eq!(state.active, [] as [PathBuf; 0]);
+        assert!(state.root.is_none(), "a failed leaf must not publish reaper state");
+        assert!(!state.pending);
+    }
+
+    #[test]
+    fn owning_drop_retires_its_exact_reaper_registration_and_schedules_failed_removal() {
+        thread_local! {
+            static STARTS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+        }
+        for (occupied, pending) in [(false, false), (true, false), (false, true), (true, true)] {
+            STARTS.set(0);
+            let directory = tempfile::tempdir_in(".").expect("owned test root");
+            let path = directory.path().join("leaf");
+            let state: &'static Mutex<Reaper> = Box::leak(Box::new(Mutex::new(Reaper {
+                pending,
+                ..Reaper::default()
+            })));
+            let group = Cgroup::create_at_with(
+                directory.path(),
+                None,
+                state,
+                || STARTS.set(STARTS.get() + 1),
+                |_, _| {
+                    fs::create_dir(&path).expect("owned leaf");
+                    if occupied {
+                        fs::write(path.join("occupied"), "").expect("simulated occupant");
+                    }
+                    Ok(over(&path))
+                },
+                |_| File::create(directory.path().join("owned-kill-switch")),
+            )
+            .expect("an owning file can be registered");
+            {
+                let state = state.lock().unwrap();
+                assert_eq!(state.root.as_deref(), Some(directory.path()));
+                assert_eq!(state.active.as_slice(), std::slice::from_ref(&path));
+                assert_eq!(state.pending, pending);
+                assert!(group.tracked.is_some());
+                _ = format!("{group:?}");
+            }
+            drop(group);
+            let state = state.lock().unwrap();
+            assert!(state.active.is_empty(), "owning Drop left an active registration");
+            assert_eq!(state.pending, pending || occupied);
+            assert_eq!(state.generation, u64::from(occupied));
+            assert_eq!(path.exists(), occupied);
+            assert_eq!(STARTS.get(), usize::from(pending) + usize::from(occupied));
+        }
+    }
+
+    #[test]
+    fn exhausted_descriptor_slots_refuse_registration_and_release_the_process_group_slot() {
+        let directory = tempfile::tempdir_in(".").expect("owned test directory");
+        let path = directory.path().join("leaf");
+        fs::create_dir(&path).expect("created");
+        let mut group = watchable(&path);
+        let descriptor = group.kill_handle().expect("the owning file is open").raw();
+        let spawning = RecordedRegistry::new();
+        let slots = (0..interrupt::capacity())
+            .map(|_| spawning.registry.claim_cgroup(descriptor).expect("free descriptor slot"))
+            .collect::<Vec<_>>();
+        assert_eq!(spawning.watch_cgroup(WATCHED_PROCESS_GROUP, &mut group), None);
+        assert!(!group.is_watched(), "refused registration must not publish ownership");
+        let replacement = spawning
+            .registry
+            .watch(REPLACEMENT_PROCESS_GROUP, &|_| panic!("a calm claim must not kill"))
+            .expect("released group slot");
+        assert_eq!(replacement, 0);
+        spawning.forget(replacement, REPLACEMENT_PROCESS_GROUP);
+        for slot in slots {
+            spawning.registry.release_cgroup(slot, descriptor);
+        }
+        drop(group);
+        assert!(!path.exists(), "the refused cgroup still owns normal teardown");
+        spawning.finish();
+    }
+
     /// A cgroup standing over a plain directory whose kill switch a signal handler can be given.
     ///
     /// The switch is unlinked as soon as it is opened, so the leaf's directory is still removable
@@ -1128,7 +1528,7 @@ mod tests {
         Cgroup {
             path: path.to_path_buf(),
             kill: Some(kill),
-            tracked: false,
+            tracked: None,
             watch: None,
         }
     }
@@ -1155,6 +1555,7 @@ mod tests {
             .watch_cgroup(watched, &mut group)
             .expect("a free slot, since a fresh registry has a thousand");
         let cgroup_slot = group.watch.as_ref().expect("the cgroup owns its registry watch").slot;
+        _ = format!("{:?}", group.watch.as_ref().unwrap());
 
         assert_eq!(spawning.registry.watched(slot), watched, "the process group was never published");
         assert_eq!(
@@ -1261,7 +1662,7 @@ mod tests {
         Cgroup {
             path: path.to_path_buf(),
             kill: None,
-            tracked: false,
+            tracked: None,
             watch: None,
         }
     }
@@ -1315,6 +1716,100 @@ mod tests {
         assert_eq!(error, "process generation could not be read: generation denied");
         assert_eq!(fs::read_dir(root.path()).expect("the root remains readable").count(), 0);
     }
+
+    #[test]
+    fn configuration_refusal_drops_the_newly_owned_leaf() {
+        let root = tempfile::tempdir_in(".").expect("owned test root");
+        let error = Cgroup::create_under_using(
+            root.path(),
+            Some(123),
+            41,
+            |_| Ok(7),
+            || 0,
+            |group, limit| {
+                assert!(group.path.is_dir());
+                assert_eq!(limit, Some(123));
+                Err("ceiling write refused".into())
+            },
+        )
+        .expect_err("a refused ceiling cannot create an unbounded leaf");
+        assert_eq!(error, "ceiling write refused");
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0, "the failed leaf was leaked");
+    }
+
+    #[test]
+    fn delegation_recovery_propagates_each_failure_before_the_next_operation() {
+        let root = tempfile::tempdir_in(".").expect("owned test root");
+        fs::write(root.path().join("cgroup.controllers"), "memory").expect("offered controller");
+        for failure in ["create", "vacate", "enable", "none"] {
+            let calls = RefCell::new(Vec::new());
+            let result = delegate_with(
+                root.path(),
+                |_| {
+                    let mut calls = calls.borrow_mut();
+                    let first = calls.is_empty();
+                    calls.push("enable");
+                    if first || failure == "enable" {
+                        Err(io::Error::from(io::ErrorKind::PermissionDenied))
+                    } else {
+                        Ok(())
+                    }
+                },
+                |path| {
+                    assert_eq!(path, root.path().join(SUPERVISOR));
+                    calls.borrow_mut().push("create");
+                    if failure == "create" {
+                        Err(io::Error::from(io::ErrorKind::PermissionDenied))
+                    } else {
+                        Ok(())
+                    }
+                },
+                |own, supervisor| {
+                    assert_eq!(own, root.path());
+                    assert_eq!(supervisor, root.path().join(SUPERVISOR));
+                    calls.borrow_mut().push("vacate");
+                    if failure == "vacate" {
+                        Err("migration refused".into())
+                    } else {
+                        Ok(())
+                    }
+                },
+            );
+            let expected: &[&str] = match failure {
+                "create" => &["enable", "create"],
+                "vacate" => &["enable", "create", "vacate"],
+                _ => &["enable", "create", "vacate", "enable"],
+            };
+            assert_eq!(calls.borrow().as_slice(), expected);
+            match failure {
+                "create" => assert!(result.unwrap_err().contains("could not be created")),
+                "vacate" => assert_eq!(result.unwrap_err(), "migration refused"),
+                "enable" => assert!(result.unwrap_err().contains("could not be delegated")),
+                _ => assert_eq!(result.unwrap(), root.path()),
+            }
+        }
+    }
+
+    #[test]
+    fn probe_identity_and_creation_failures_leave_the_root_unchanged() {
+        let root = tempfile::tempdir().expect("a temporary directory");
+        let refusal = probe_with(root.path(), u32::MAX, || panic!("a missing process cannot create a probe"))
+            .expect_err("Linux process identifiers do not include u32::MAX");
+        assert!(refusal.starts_with("process generation could not be read:"), "{refusal}");
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+
+        let missing = root.path().join("missing");
+        let refusal = probe_with(&missing, process::id(), || 0).expect_err("a probe cannot create its missing parent");
+        assert!(
+            refusal.starts_with(&format!(
+                "a unique child cgroup could not be created under `{}`:",
+                missing.display()
+            )),
+            "{refusal}"
+        );
+        assert!(!missing.exists());
+    }
+
     /// A crashed process can leave the probe directory matching a reused pid and reset sequence.
     #[test]
     fn a_stale_probe_directory_is_skipped_for_a_distinct_name() {
@@ -1794,7 +2289,7 @@ mod tests {
         drop(Cgroup {
             path: path.clone(),
             kill: None,
-            tracked: false,
+            tracked: None,
             watch: None,
         });
 
@@ -1825,7 +2320,7 @@ mod tests {
         drop(Cgroup {
             path: path.clone(),
             kill: None,
-            tracked: false,
+            tracked: None,
             watch: None,
         });
 

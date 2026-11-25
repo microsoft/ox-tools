@@ -114,6 +114,25 @@ fn generated_recipes_are_split_by_responsibility() {
 }
 
 #[test]
+fn unused_deps_keeps_scope_and_fixes_explicit() {
+    let generated = generated();
+    assert!(generated.checks.contains(r#"[arg("fix", long, value="true")]"#));
+    assert!(generated.checks.contains(r#"anvil-unused-deps fix="false":"#));
+    assert!(generated.checks.contains(r#"anvil_impact_input_dir + "/required.packages""#));
+    assert!(generated.checks.contains("$pkg += @('--package', $spec)"));
+    assert!(generated.checks.contains("Where-Object { -not [string]::IsNullOrWhiteSpace($_) }"));
+    assert!(generated.setup.contains("cargo_unused_deps_version"));
+    assert!(generated.setup.contains("anvil-tool-cargo-unused-deps-validate-prereqs"));
+}
+
+#[test]
+fn unused_deps_rejects_whitespace_only_package_files() {
+    let generated = generated();
+    assert!(generated.checks.contains("IsNullOrWhiteSpace($packageText)"));
+    assert!(generated.checks.contains("contains whitespace but no package specs"));
+}
+
+#[test]
 fn common_checks_are_direct_cargo_each_invocations() {
     let recipes = generated().checks;
     for command in [
@@ -189,7 +208,7 @@ fn released_domain_tool_versions_are_pinned() {
         "cargo_coverage_gate_version := \"0.7.5\"",
         "cargo_delta_version := \"0.5.0\"",
         "cargo_each_version := \"0.8.0\"",
-        "cargo_gamma_version := \"0.6.0\"",
+        "cargo_gamma_version := \"0.7.0\"",
     ] {
         assert!(recipes.contains(pin), "missing released tool pin: {pin}");
     }

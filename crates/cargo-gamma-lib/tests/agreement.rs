@@ -194,6 +194,32 @@ fn the_two_nesting_guards_agree_on_else_if_ladders() {
 }
 
 #[test]
+fn labelled_break_chains_share_the_exact_cumulative_budget() {
+    let budget = NESTING_LIMIT * CHAIN_FACTOR;
+    for prefix in [
+        "break ",
+        "break 'out ",
+        "break /* label */ 'out /* value */ ",
+        "break 'r#a ",
+        "break 'r#out ",
+    ] {
+        for operand in ["1", "'q'", "{}"] {
+            let boundary = budget - if operand == "{}" { CHAIN_FACTOR } else { 0 };
+            for (count, exceeds) in [(boundary, false), (boundary + 1, true)] {
+                let source = format!("{}{operand}", prefix.repeat(count));
+                let tokens = source.parse().expect("the labelled chain contains balanced tokens");
+                assert_eq!(attrs_exceeds_nesting_limit(&tokens, NESTING_LIMIT), exceeds, "{source}");
+                assert_eq!(engine_exceeds_nesting_limit(&source), exceeds, "{source}");
+            }
+        }
+        let siblings = format!("{}1;", prefix.repeat(8)).repeat(budget);
+        let tokens = siblings.parse().expect("the sibling expressions contain balanced tokens");
+        assert!(!attrs_exceeds_nesting_limit(&tokens, NESTING_LIMIT), "{prefix}");
+        assert!(!engine_exceeds_nesting_limit(&siblings), "{prefix}");
+    }
+}
+
+#[test]
 fn generated_mixed_syntax_agrees_at_the_public_cumulative_boundary() {
     bolero::check!().with_type::<[u8; 16]>().for_each(|choices| {
         let source = corpus::mixed_nesting(choices);

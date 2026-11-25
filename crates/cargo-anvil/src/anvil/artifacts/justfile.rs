@@ -105,6 +105,7 @@ macro_rules! check_functions {
                 (readme_check, "readme-check"),
                 (spellcheck, "spellcheck"),
                 (udeps, "udeps"),
+                (unused_deps, "unused-deps"),
             ]
         );
     };
@@ -212,6 +213,7 @@ const CHECK_FILES: &[(&str, &str)] = split_recipe_files!(
         "readme-check",
         "spellcheck",
         "udeps",
+        "unused-deps",
     ]
 );
 const CHECK_SETUP_FILES: &[(&str, &str)] = split_recipe_files!(
@@ -248,6 +250,7 @@ const CHECK_SETUP_FILES: &[(&str, &str)] = split_recipe_files!(
         "readme-check",
         "spellcheck",
         "udeps",
+        "unused-deps",
     ]
 );
 /// Check-specific private helpers.

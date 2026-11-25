@@ -406,6 +406,31 @@ mod tests {
     use crate::testing::test_binary;
 
     #[test]
+    fn resource_name_alphabets_agree_across_macro_and_scheduler() {
+        for (name, accepted) in [
+            ("a", true),
+            ("A0", true),
+            ("a.b", true),
+            ("a_b", true),
+            ("a-b", true),
+            ("0a", false),
+            (".a", false),
+            ("_a", false),
+            ("-a", false),
+            ("café", false),
+            ("", false),
+            ("two words", false),
+        ] {
+            let attr = format!("{name:?}").parse().expect("a quoted string tokenizes");
+            let item = "#[test] fn annotated() {}".parse().expect("the fixture is valid Rust");
+            let expanded = cargo_gamma_attrs_impl::resource(attr, item).to_string();
+            let macro_accepts = !expanded.contains("compile_error");
+            assert_eq!(macro_accepts, accepted, "macro accepted {name:?}: {expanded}");
+            assert_eq!(ResourceLimit::new(name, 1).is_ok(), accepted, "scheduler accepted {name:?}");
+        }
+    }
+
+    #[test]
     fn an_unconfigured_required_resource_has_one_slot_and_returns_it_without_waiting() {
         let binary = test_binary("default-capacity");
         let mut resources = Resources::fake_tests(&binary, &[("selected", "io")]);
@@ -750,23 +775,25 @@ mod tests {
 
     #[test]
     fn proc_macro_markers_are_understood_by_resource_discovery() {
-        let expanded = cargo_gamma_attrs_impl::resource(
-            "\"cargo-subprocess\"".parse().expect("resource argument"),
-            "#[test] fn resolves_metadata() {}".parse().expect("annotated test"),
-        )
-        .to_string();
-        let marker_name = expanded
-            .split_ascii_whitespace()
-            .find(|token| token.starts_with(MARKER_PREFIX))
-            .expect("the expansion carries a resource marker");
+        for (spelling, decoded) in [("resolves_metadata", "resolves_metadata"), ("r#type", "type"), ("café", "café")] {
+            let expanded = cargo_gamma_attrs_impl::resource(
+                "\"cargo-subprocess\"".parse().expect("resource argument"),
+                format!("#[test] fn {spelling}() {{}}").parse().expect("annotated test"),
+            )
+            .to_string();
+            let marker_name = expanded
+                .split_ascii_whitespace()
+                .find(|token| token.starts_with(MARKER_PREFIX))
+                .expect("the expansion carries a resource marker");
 
-        assert_eq!(
-            marker(marker_name),
-            Some(Marker::Test {
-                test: "resolves_metadata".to_owned(),
-                resource: "cargo-subprocess".to_owned(),
-            })
-        );
+            assert_eq!(
+                marker(marker_name),
+                Some(Marker::Test {
+                    test: decoded.to_owned(),
+                    resource: "cargo-subprocess".to_owned(),
+                })
+            );
+        }
     }
 
     #[test]

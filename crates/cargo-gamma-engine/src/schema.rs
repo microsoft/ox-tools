@@ -46,6 +46,8 @@ use crate::model::MutantDefinition;
 use crate::ops::collect::Shape;
 use crate::{HashMap, Result};
 
+mod syntax;
+
 /// The crate path of the guard predicate, as it appears in instrumented source.
 pub const GUARD_PATH: &str = "::gamma_rt::a";
 
@@ -220,7 +222,7 @@ struct Slots {
 /// every guard in one ascending sweep instead makes the total character-counting work proportional
 /// to the text once, with the sweep never re-reading a byte it has already counted.
 fn positions(text: &str, spans: &HashMap<u32, (Range<usize>, Range<usize>)>) -> HashMap<u32, Guard> {
-    // #[gamma::skip(all, reason = "capacity affects allocation behavior only; line starts are unchanged")]
+    // #[gamma::skip(all, tag = "equivalent", reason = "Only the line-index vector's initial capacity changes; the same newline offsets are appended independently of capacity.")]
     let mut starts: Vec<usize> = Vec::with_capacity(text.len() / 32);
 
     // The first-line sweep already starts at byte zero; this entry supplies the line-number slot,
@@ -229,7 +231,7 @@ fn positions(text: &str, spans: &HashMap<u32, (Range<usize>, Range<usize>)>) -> 
     starts.push(0);
     starts.extend(text.match_indices('\n').map(|(at, _matched)| at + 1));
 
-    // #[gamma::skip(all, reason = "capacity affects allocation behavior only; slot requests are unchanged")]
+    // #[gamma::skip(all, tag = "equivalent", reason = "Only the slot-request vector's initial capacity changes; its appended entries and sort order are independent of capacity.")]
     let mut requests: Vec<(usize, u32, Slot)> = Vec::with_capacity(spans.len() * 4);
 
     for (ordinal, (site, mutated)) in spans {
@@ -349,14 +351,15 @@ pub fn instrument_with_guards(text: &str, mutants: &[AssignedMutant<'_>]) -> Res
     });
 
     let roots = build_tree(&sites)?;
-    // #[gamma::skip(all, reason = "capacity affects allocation behavior only; instrumented text is unchanged")]
+    let syntax = syntax::Syntax::of(text);
+    // #[gamma::skip(all, tag = "equivalent", reason = "Only the output buffer's initial capacity changes; every emitted byte is appended independently of capacity.")]
     let mut out = String::with_capacity(text.len() + text.len() / 4);
     let mut spans = HashMap::default();
     let mut cursor = 0;
 
     for root in &roots {
         out.push_str(copy(text, cursor..root.span.start));
-        render(text, root, &mut out, &mut spans, None);
+        render(text, root, &mut out, &mut spans, None, &syntax);
         cursor = root.span.end;
     }
 
@@ -462,41 +465,9 @@ fn attach<'a>(node: Node<'a>, stack: &mut [Node<'a>], roots: &mut Vec<Node<'a>>)
     }
 }
 
+#[cfg(test)]
 fn block_leading_expression(source: &str) -> bool {
-    fn leading(expression: &syn::Expr) -> bool {
-        match expression {
-            syn::Expr::Binary(binary) => leading(&binary.left),
-            syn::Expr::Cast(cast) => leading(&cast.expr),
-            syn::Expr::Block(_)
-            | syn::Expr::Unsafe(_)
-            | syn::Expr::Const(_)
-            | syn::Expr::If(_)
-            | syn::Expr::Match(_)
-            | syn::Expr::Loop(_)
-            | syn::Expr::While(_)
-            | syn::Expr::ForLoop(_)
-            | syn::Expr::TryBlock(_) => true,
-            _ => false,
-        }
-    }
-    let source = source.trim_start();
-    if
-    // #[gamma::skip(cond.always_false, tag = "equivalent", reason = "This is only a parser-work prefilter. A parsed Binary/Cast whose leftmost expression is block-like necessarily starts with one of these delimiters, comments, attributes, labels or keywords. The following parsed structural predicate rejects every other expression independently.")]
-    !source.starts_with(
-        // #[gamma::skip(collection.reverse_array, tag = "equivalent", reason = "starts_with with a char array tests membership; reversing these distinct prefix characters changes no boolean result.")]
-        ['{', '/', '#', '\''],
-    ) && !
-        // #[gamma::skip(collection.reverse_array, tag = "equivalent", reason = "This prefix array is consumed only through side-effect-free iter().any; reversing its order preserves the membership result.")]
-        // #[gamma::skip(literal.str_to_empty, tag = "equivalent", reason = "Any empty prefix makes starts_with(\"\") true, disabling only this parser-work prefilter. The subsequent parsed Binary/Cast-and-leading predicate still makes exactly the same structural decision.")]
-        ["unsafe", "const", "if", "match", "loop", "while", "for", "try"]
-            .iter()
-            .any(|prefix| source.starts_with(prefix))
-    {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
-        return false;
-    }
-    syn::parse_str::<syn::Expr>(source)
-        .is_ok_and(|expression| matches!(expression, syn::Expr::Binary(_) | syn::Expr::Cast(_)) && leading(&expression))
+    syn::parse_str::<syn::Expr>(source.trim_start()).is_ok_and(|expression| syntax::block_leading(&expression))
 }
 
 /// Writes the instrumented form of one node, recording the output each guard covers.
@@ -506,10 +477,11 @@ fn render(
     out: &mut String,
     spans: &mut HashMap<u32, (Range<usize>, Range<usize>)>,
     returns: Option<&Returns>,
+    syntax: &syntax::Syntax<'_>,
 ) {
-    let own_returns = iterator_returns(text, node);
+    let own_returns = iterator_returns(node, syntax);
     let returns = own_returns.as_ref().or(returns);
-    let group_original = node.shape == Shape::Expr && block_leading_expression(copy(text, node.span.clone()));
+    let group_original = node.shape == Shape::Expr && syntax.block_leading(&node.span);
     let start = out.len();
     let mut mutated = Vec::with_capacity(node.mutants.len());
 
@@ -582,12 +554,12 @@ fn render(
     let mut cursor = node.span.start;
 
     for child in &node.children {
-        write_return_text(text, cursor..child.span.start, out, returns);
-        render(text, child, out, spans, returns);
+        write_return_text(text, cursor..child.span.start, out, returns.map(Returns::view));
+        render(text, child, out, spans, returns, syntax);
         cursor = child.span.end;
     }
 
-    write_return_text(text, cursor..node.span.end, out, returns);
+    write_return_text(text, cursor..node.span.end, out, returns.map(Returns::view));
     if own_returns.is_some() {
         out.push_str(" }");
     }
@@ -606,6 +578,16 @@ fn render(
         }
     }
 
+    close_guards(node, out);
+
+    let end = out.len();
+
+    for (ordinal, region) in mutated {
+        let _ = spans.insert(ordinal, (start..end, region));
+    }
+}
+
+fn close_guards(node: &Node<'_>, out: &mut String) {
     let wrapped_close;
     let close = match node.shape {
         Shape::Expr => " })",
@@ -628,12 +610,6 @@ fn render(
     for _ in 0..node.mutants.len() {
         out.push_str(close);
     }
-
-    let end = out.len();
-
-    for (ordinal, region) in mutated {
-        let _ = spans.insert(ordinal, (start..end, region));
-    }
 }
 
 fn iterator_maps(out: &mut String, depth: NonZeroU8, variant: &str) {
@@ -647,32 +623,35 @@ fn iterator_maps(out: &mut String, depth: NonZeroU8, variant: &str) {
 }
 
 fn render_replacement(replacement: &str, node: &Node<'_>, own: Option<&Returns>, inherited: Option<&Returns>, out: &mut String) {
-    let returns = if let Some(own) = own {
-        let sites = return_sites(replacement);
-        (!sites.is_empty()).then(|| Returns {
-            label: own.label.clone(),
-            sites,
+    // Non-iterator children can inherit a return context when their original span fully contains
+    // one of its return sites. Other replacements need no return parsing.
+    let context = own.or_else(|| {
+        inherited.filter(|returns| {
+            returns
+                .sites
+                .iter()
+                .any(|site| site.start >= node.span.start && site.end <= node.span.end)
         })
-    } else {
-        inherited
-            .filter(|returns| {
-                returns
-                    .sites
-                    .iter()
-                    .any(|site| site.start >= node.span.start && site.end <= node.span.end)
-            })
-            .map(|returns| Returns {
-                label: returns.label.clone(),
-                sites: return_sites(replacement),
-            })
+    });
+    let Some(context) = context else {
+        out.push_str(replacement);
+        return;
     };
-    if own.is_some()
-        && let Some(returns) = &returns
-    {
-        let _ = write!(out, "'{}: {{ ", returns.label);
+    let sites = return_sites(replacement);
+    if sites.is_empty() {
+        out.push_str(replacement);
+        return;
     }
-    write_return_text(replacement, 0..replacement.len(), out, returns.as_ref());
-    if own.is_some() && returns.is_some() {
+    if own.is_some() {
+        let _ = write!(out, "'{}: {{ ", context.label);
+    }
+    // Replacement sites are relative to this replacement, not the original source.
+    let returns = ReturnView {
+        label: &context.label,
+        sites: &sites,
+    };
+    write_return_text(replacement, 0..replacement.len(), out, Some(returns));
+    if own.is_some() {
         out.push_str(" }");
     }
 }
@@ -682,18 +661,28 @@ struct Returns {
     sites: Vec<Range<usize>>,
 }
 
-fn iterator_returns(text: &str, node: &Node<'_>) -> Option<Returns> {
+impl Returns {
+    fn view(&self) -> ReturnView<'_> {
+        ReturnView {
+            label: &self.label,
+            sites: &self.sites,
+        }
+    }
+}
+
+struct ReturnView<'a> {
+    label: &'a str,
+    sites: &'a [Range<usize>],
+}
+
+fn iterator_returns(node: &Node<'_>, syntax: &syntax::Syntax<'_>) -> Option<Returns> {
     if !matches!(node.shape, Shape::IterBlock | Shape::IterWrappedBlock { .. }) {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
-    let sites = return_sites(copy(text, node.span.clone()));
+    let sites = syntax.returns(&node.span);
     (!sites.is_empty()).then(|| Returns {
         label: format!("__gamma_return_{}", node.mutants[0].0),
-        sites: sites
-            .into_iter()
-            .map(|site| site.start + node.span.start..site.end + node.span.start)
-            .collect(),
+        sites,
     })
 }
 
@@ -723,10 +712,10 @@ fn return_sites(source: &str) -> Vec<Range<usize>> {
     walk.0
 }
 
-fn write_return_text(text: &str, range: Range<usize>, out: &mut String, returns: Option<&Returns>) {
+fn write_return_text(text: &str, range: Range<usize>, out: &mut String, returns: Option<ReturnView<'_>>) {
     let mut cursor = range.start;
     if let Some(returns) = returns {
-        for site in &returns.sites {
+        for site in returns.sites {
             if site.start >= cursor && site.end <= range.end {
                 out.push_str(copy(text, cursor..site.start));
                 let _ = write!(out, "break '{}", returns.label);
@@ -788,19 +777,20 @@ mod tests {
 
     #[test]
     fn nested_return_sites_are_all_shifted_to_absolute_iterator_block_offsets() {
-        let text = "prefix { return return 1; } suffix";
+        let text = "fn f() { return return 1; }";
         let mut node = Node {
-            span: 7..27,
+            span: 7..text.len(),
             shape: Shape::IterBlock,
             mutants: vec![(19, "unused")],
             children: Vec::new(),
         };
-        let actual = iterator_returns(text, &node).unwrap();
+        let syntax = super::syntax::Syntax::of(text);
+        let actual = iterator_returns(&node, &syntax).unwrap();
         assert_eq!(actual.label, "__gamma_return_19");
         assert_eq!(actual.sites, [9..15, 16..22]);
         assert_eq!(return_sites("{ return return 1; }"), [2..8, 9..15]);
         node.shape = Shape::Expr;
-        assert!(iterator_returns(text, &node).is_none());
+        assert!(iterator_returns(&node, &syntax).is_none());
     }
 
     #[test]
@@ -810,13 +800,13 @@ mod tests {
             sites: vec![0..6, 7..13],
         };
         let mut actual = String::new();
-        write_return_text("return return", 7..13, &mut actual, Some(&returns));
+        write_return_text("return return", 7..13, &mut actual, Some(returns.view()));
         assert_eq!(actual, "break 'target");
         actual.clear();
-        write_return_text("return return", 0..6, &mut actual, Some(&returns));
+        write_return_text("return return", 0..6, &mut actual, Some(returns.view()));
         assert_eq!(actual, "break 'target");
         actual.clear();
-        write_return_text("return return", 0..5, &mut actual, Some(&returns));
+        write_return_text("return return", 0..5, &mut actual, Some(returns.view()));
         assert_eq!(actual, "retur");
         actual.clear();
         write_return_text("return return", 7..13, &mut actual, None);
@@ -836,6 +826,10 @@ mod tests {
         );
         let nested_text = "return Some(Some(1..3))";
         let start = text.find(nested_text).unwrap();
+        assert_eq!(
+            return_sites(text),
+            core::iter::once(start..start + "return".len()).collect::<Vec<_>>()
+        );
         let child = mutant(start..start + nested_text.len(), 2, "return Some(Some(7..9))", Shape::Expr);
         let output = instrument(text, &[&outer, &child]).unwrap();
         let _parsed: syn::Expr = syn::parse_str(&output).unwrap();
@@ -1366,6 +1360,8 @@ mod tests {
             "unsafe { read() } as usize",
             "'value: { break 'value 1 } == 1",
             "#[allow(unused_braces)] { value } + 1",
+            "if condition { match flag { true => 1, false => 2 } } else { 3 } + 1",
+            "match flag { true => if condition { 1 } else { 2 }, false => 3 } + 1",
         ] {
             let text = format!("fn f() {{ consume({expression}); }}");
             let out = apply(&text, &[mutant(span_of(&text, expression), 1, "other", Shape::Expr)]);
@@ -1381,6 +1377,21 @@ mod tests {
         let out = apply(text, &[mutant(span_of(text, "a < b"), 1, "(a) <= (b)", Shape::Expr)]);
 
         _ = parse_file(&out).expect("the instrumented source does not parse");
+    }
+
+    #[test]
+    fn keyword_prefixed_identifiers_do_not_trigger_block_grouping() {
+        for expression in [
+            "if_value + match_value",
+            "loop_value + const_value",
+            "for_value + while_value",
+            "unsafe_value as usize",
+        ] {
+            let text = format!("fn f() {{ consume({expression}); }}");
+            let out = apply(&text, &[mutant(span_of(&text, expression), 1, "other", Shape::Expr)]);
+            assert!(out.contains(&format!("else {{ {expression} }}")), "{out}");
+            assert!(parse_file(&out).is_ok(), "{out}");
+        }
     }
 
     #[test]

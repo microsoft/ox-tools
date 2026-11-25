@@ -89,19 +89,30 @@ verifies both termination and the already-gone result.
 The exhaustive mutation gate still requires every retained mutant to be killed.
 It does not claim that every native adapter is mutation-covered. Site-specific
 `gamma::skip` comments identify native boundaries that cannot be exercised by the
-current owned, in-memory seams: process-global registry wiring, owning cgroup
-construction and release, background reaping, credential/proc reads, and actual
-signal or kill-descriptor writes. Reasons and tags distinguish these from
+current owned seams: process-global registry wiring and capability discovery,
+the never-returning background worker, credential reads, and actual
+signal-handler writes. Reasons and tags distinguish these from
 equivalent mutations and measured no-progress timeouts.
 
-The deferred alternative is an owning-resource/I/O backend, not fabricated
-descriptors, process identifiers, mutable globals, or additional host-dependent
-fixtures. Exclusions leave the existing injected decision cores in scope:
-identifier rejection, proc-field parsing, discovery error propagation, registry
-slot identity, atomic reaper ownership, leaf-name uniqueness, and removal retry
-policy. Existing native acceptance, Miri-compatible policy tests, and Loom
-ownership models remain; they provide different evidence, not proof that the
-excluded native mutations would be killed.
+Callbacks inject failures at selected native cgroup setup and cleanup operations
+while retaining ordinary ownership and production cleanup. The reaper's single-iteration
+driver checks that a completed scan cannot clear work scheduled during that
+scan. These callbacks retain real owning files and production cleanup rather than
+fabricating descriptors or signalling test process identifiers. Existing native
+acceptance, Miri-compatible policy tests, and Loom ownership models remain; they
+provide different evidence, not proof that excluded native mutations would be
+killed.
+
+Cgroup registration and release use the same owning-file path in production
+and deterministic tests. A cgroup retains the exact registry that accepted its
+descriptor; `Drop` clears that registration and waits for in-flight sweeps before
+closing the file. Tests can supply an isolated registry with recording killers
+and saturate descriptor slots without signalling unrelated processes. A scripted
+release test and a Loom model check that a sweep never writes after close/reuse.
+The cgroup also retains its exact reaper state and wake callback. Owning-creation
+tests inject configuration and open refusals before active publication; owning
+drop tests verify deregistration and rescheduling after removal failure against
+an isolated reaper.
 
 ## Portability
 

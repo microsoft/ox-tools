@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use cargo_metadata::{DependencyKind, Metadata, Package, PackageId};
+use cargo_metadata::{DependencyKind, Metadata, Node, Package, PackageId};
 
 use crate::ops::collect::ResourceDependency;
 use crate::{HashMap, HashSet};
@@ -27,36 +27,40 @@ pub(super) fn extend_roots(roots: &mut HashSet<String>, dependencies: &[Dependen
 }
 
 pub(super) fn of(metadata: &Metadata) -> Vec<Dependency> {
-    let Some(resolve) = &metadata.resolve else { return Vec::new() };
+    // #[gamma::skip(cond.always_false, tag = "equivalent", reason = "Absent resolve metadata also leaves the dependency node inventory empty.")]
+    if metadata.resolve.is_none() {
+        return Vec::new();
+    }
+    let inventory = Inventory::new(metadata);
+    let mut templates: HashMap<&PackageId, Option<DependencyTemplate>> = HashMap::default();
     let mut dependencies = Vec::new();
     for owner in metadata.workspace_packages() {
-        let Some(node) = resolve.nodes.iter().find(|node| node.id == owner.id) else {
+        let Some(node) = inventory.nodes.get(&owner.id) else {
             continue;
         };
         for edge in &node.deps {
             if !edge.dep_kinds.iter().any(|kind| kind.kind != DependencyKind::Build) {
                 continue;
             }
-            let Some(package) = metadata.packages.iter().find(|package| package.id == edge.pkg) else {
+            let Some(package) = inventory.packages.get(&edge.pkg) else {
                 continue;
             };
+            let mut aliases = vec![(edge.name.clone(), *package)];
+            if let Some(node) = inventory.nodes.get(&package.id) {
+                aliases.extend(node.deps.iter().filter_map(|nested| {
+                    inventory
+                        .packages
+                        .get(&nested.pkg)
+                        .map(|&package| (format!("{}::{}", edge.name, nested.name), package))
+                }));
+            }
+            for (_, package) in &aliases {
+                templates.entry(&package.id).or_insert_with(|| inventory.dependency(package));
+            }
             for target in &owner.targets {
-                if let Some(dependency) = dependency(metadata, target.src_path.as_str(), &edge.name, package) {
-                    dependencies.push(dependency);
-                }
-                if let Some(node) = resolve.nodes.iter().find(|node| node.id == package.id) {
-                    for nested in &node.deps {
-                        let Some(package) = metadata.packages.iter().find(|package| package.id == nested.pkg) else {
-                            continue;
-                        };
-                        if let Some(dependency) = dependency(
-                            metadata,
-                            target.src_path.as_str(),
-                            &format!("{}::{}", edge.name, nested.name),
-                            package,
-                        ) {
-                            dependencies.push(dependency);
-                        }
+                for (alias, package) in &aliases {
+                    if let Some(Some(template)) = templates.get(&package.id) {
+                        dependencies.push(template.materialize(target.src_path.as_str(), alias));
                     }
                 }
                 // This conservative record-count default bounds inventory growth and matches the
@@ -75,66 +79,134 @@ pub(super) fn of(metadata: &Metadata) -> Vec<Dependency> {
     dependencies
 }
 
-fn dependency(metadata: &Metadata, root: &str, alias: &str, package: &Package) -> Option<Dependency> {
-    let node = metadata.resolve.as_ref()?.nodes.iter().find(|node| node.id == package.id)?;
-    let library_root = if
-    // #[gamma::skip(logical.and_remove_left, reason = "Valid-producer-domain proof: dependency is private to resource_dependencies::of, fed by Cargo Metadata. A workspace member is a local manifest package, with Package.source=None; registry/git packages cannot be Cargo workspace members. Hence workspace_members.contains(package.id) implies package.source.is_none(), making the left conjunction redundant for all valid Cargo-produced metadata. Arbitrarily forged internally inconsistent Metadata is not asserted equivalent.", tag = "equivalent")]
-    package.source.is_none() && metadata.workspace_members.contains(&package.id) {
-        let mut libraries = package
-            .targets
-            .iter()
-            .filter(|target| target.kind.iter().any(|kind| matches!(kind, cargo_metadata::TargetKind::Lib)));
-        match (libraries.next(), libraries.next()) {
-            (Some(library), None) => Some(library.src_path.to_string()),
-            _ => None,
-        }
-    } else {
-        None
-    };
-    Some(ResourceDependency {
-        crate_root: root.to_owned(),
-        import_name: alias.to_owned(),
-        package_id: package.id.to_string(),
-        package_name: package.name.to_string(),
-        version: package.version.to_string(),
-        source: package.source.as_ref().map_or_else(String::new, ToString::to_string),
-        features: node.features.iter().map(ToString::to_string).collect(),
-        registry_closure: registry_closure(metadata, &package.id),
-        library_root,
-    })
+struct DependencyTemplate {
+    package_id: String,
+    package_name: String,
+    version: String,
+    source: String,
+    features: Vec<String>,
+    registry_closure: bool,
+    library_root: Option<String>,
 }
 
-fn registry_closure(metadata: &Metadata, start: &PackageId) -> bool {
-    let Some(resolve) = &metadata.resolve else { return false };
-    let mut pending = vec![start];
-    let mut seen = HashSet::default();
-    while let Some(id) = pending.pop() {
-        // #[gamma::skip(cond.always_false, reason = "revisited packages must stop before their cyclic edges are queued again")]
-        if !seen.insert(id) {
-            // #[gamma::skip(loop.delete_continue, reason = "revisiting a package must not traverse its dependency edges again")]
-            continue;
+impl DependencyTemplate {
+    fn materialize(&self, crate_root: &str, import_name: &str) -> Dependency {
+        ResourceDependency {
+            crate_root: crate_root.to_owned(),
+            import_name: import_name.to_owned(),
+            package_id: self.package_id.clone(),
+            package_name: self.package_name.clone(),
+            version: self.version.clone(),
+            source: self.source.clone(),
+            features: self.features.clone(),
+            registry_closure: self.registry_closure,
+            library_root: self.library_root.clone(),
         }
-        // Separate conservative traversal default, not a registry-validity or measured cost limit.
-        // An oversized closure supplies no provenance evidence.
-        if seen.len() > 256 {
-            return false;
-        }
-        let Some(package) = metadata.packages.iter().find(|package| &package.id == id) else {
-            return false;
-        };
-        if package
-            .source
-            .as_ref()
-            .is_none_or(|source| source.to_string() != "registry+https://github.com/rust-lang/crates.io-index")
-        {
-            return false;
-        }
-        let Some(node) = resolve.nodes.iter().find(|node| &node.id == id) else {
-            return false;
-        };
-        pending.extend(node.deps.iter().map(|dependency| &dependency.pkg));
     }
-    true
+}
+
+/// Resolved-graph evidence keyed by package identity, reusable across import aliases.
+///
+/// Combines package and node data to identify workspace library roots and prove that the entire
+/// transitive dependency closure stays in the configured registry.
+struct Inventory<'a> {
+    packages: HashMap<&'a PackageId, &'a Package>,
+    nodes: HashMap<&'a PackageId, &'a Node>,
+    workspace: HashSet<&'a PackageId>,
+    traversal_steps: usize,
+}
+
+impl<'a> Inventory<'a> {
+    fn new(metadata: &'a Metadata) -> Self {
+        Self {
+            packages: metadata.packages.iter().map(|package| (&package.id, package)).collect(),
+            nodes: metadata
+                .resolve
+                .iter()
+                .flat_map(|resolve| &resolve.nodes)
+                .map(|node| (&node.id, node))
+                .collect(),
+            workspace: metadata.workspace_members.iter().collect(),
+            // A deduplicated walk pops at most one root plus every dependency edge.
+            traversal_steps: metadata.resolve.iter().flat_map(|resolve| &resolve.nodes).fold(
+                // #[gamma::skip(literal.int_increment, tag = "equivalent", reason = "The deduplicated traversal already needs at most one root plus every dependency edge; one extra step only observes an empty pending stack.")]
+                1_usize,
+                |steps, node| steps.saturating_add(node.deps.len()),
+            ),
+        }
+    }
+
+    fn dependency(&self, package: &Package) -> Option<DependencyTemplate> {
+        let node = self.nodes.get(&package.id)?;
+        // #[gamma::skip(logical.and_remove_left, tag = "equivalent", reason = "Cargo metadata guarantees a null package source for every workspace member.")]
+        let library_root = if package.source.is_none() && self.workspace.contains(&package.id) {
+            let mut libraries = package
+                .targets
+                .iter()
+                .filter(|target| target.kind.iter().any(|kind| matches!(kind, cargo_metadata::TargetKind::Lib)));
+            match (libraries.next(), libraries.next()) {
+                (Some(library), None) => Some(library.src_path.to_string()),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        Some(DependencyTemplate {
+            package_id: package.id.to_string(),
+            package_name: package.name.to_string(),
+            version: package.version.to_string(),
+            source: package.source.as_ref().map_or_else(String::new, ToString::to_string),
+            features: node.features.iter().map(ToString::to_string).collect(),
+            registry_closure: self.registry_closure(&package.id),
+            library_root,
+        })
+    }
+
+    fn registry_closure(&self, start: &PackageId) -> bool {
+        let mut pending = vec![start];
+        let mut seen = HashSet::default();
+        for _step in
+            // #[gamma::skip(range.exclusive_to_inclusive, tag = "equivalent", reason = "One root plus every dependency edge bounds all pending pops, including duplicates; an extra empty pop cannot change the closure verdict.")]
+            0..self.traversal_steps
+        {
+            let Some(id) = pending.pop() else {
+                return true;
+            };
+            if !seen.insert(id) {
+                continue;
+            }
+            // A conservative traversal default, not a registry-validity or measured-cost limit:
+            // oversized closures withhold provenance rather than guessing that every input is locked.
+            if seen.len() > 256 {
+                return false;
+            }
+            let Some(package) = self.packages.get(id) else {
+                return false;
+            };
+            if package
+                .source
+                .as_ref()
+                .is_none_or(|source| source.to_string() != "registry+https://github.com/rust-lang/crates.io-index")
+            {
+                return false;
+            }
+            let Some(node) = self.nodes.get(id) else {
+                return false;
+            };
+            pending.extend(node.deps.iter().map(|dependency| &dependency.pkg));
+        }
+        pending.is_empty()
+    }
+}
+
+#[cfg(test)]
+fn dependency(metadata: &Metadata, root: &str, alias: &str, package: &Package) -> Option<Dependency> {
+    Some(Inventory::new(metadata).dependency(package)?.materialize(root, alias))
+}
+
+#[cfg(test)]
+fn registry_closure(metadata: &Metadata, start: &PackageId) -> bool {
+    Inventory::new(metadata).registry_closure(start)
 }
 
 #[cfg(test)]
@@ -233,6 +305,44 @@ mod tests {
             let (metadata, root) = registry_chain(count);
             assert_eq!(registry_closure(&metadata, &root), expected, "{count} packages");
         }
+    }
+
+    #[test]
+    fn a_registry_cycle_finishes_without_reprocessing_its_dependencies() {
+        let (mut metadata, root) = registry_chain(2);
+        let nodes = &mut metadata.resolve.as_mut().unwrap().nodes;
+        let mut back = nodes[0].deps[0].clone();
+        back.pkg.clone_from(&root);
+        nodes[1].deps.push(back);
+        assert!(registry_closure(&metadata, &root));
+    }
+
+    #[test]
+    fn revisiting_a_registry_package_does_not_abandon_pending_registry_branches() {
+        let (mut metadata, root) = registry_chain(4);
+        let nodes = &mut metadata.resolve.as_mut().unwrap().nodes;
+        let edge = nodes[0].deps[0].clone();
+        let ids = nodes.iter().map(|node| node.id.clone()).collect::<Vec<_>>();
+        // Visit the shared branch through package 1 twice while package 3 remains pending;
+        // its later nonregistry status must still be inspected after the duplicate.
+        nodes[0].deps = [3, 1, 2]
+            .map(|index| {
+                let mut edge = edge.clone();
+                edge.pkg.clone_from(&ids[index]);
+                edge.name = format!("branch_{index}");
+                edge
+            })
+            .to_vec();
+        nodes[1].deps.clear();
+        nodes[2].deps = vec![edge];
+        nodes[3].deps.clear();
+        for node in nodes {
+            node.dependencies = node.deps.iter().map(|dependency| dependency.pkg.clone()).collect();
+        }
+        assert!(registry_closure(&metadata, &root));
+
+        metadata.packages[3].source = None;
+        assert!(!registry_closure(&metadata, &root));
     }
 
     #[test]

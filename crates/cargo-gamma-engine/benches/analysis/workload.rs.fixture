@@ -1,0 +1,30 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+pub struct Packet {
+    bytes: Vec<u8>,
+    threshold: usize,
+}
+
+impl Packet {
+    pub fn score(&self, seed: usize) -> usize {
+        let mut total = seed + 7;
+        for byte in &self.bytes {
+            total = total.wrapping_add(usize::from(*byte));
+        }
+        match self.bytes.first() {
+            Some(byte) if total > self.threshold => total + usize::from(*byte),
+            Some(_) => total + 3,
+            None => total + 11,
+        }
+    }
+
+    pub fn adjusted(&self) -> impl Iterator<Item = u8> + '_ {
+        self.bytes.iter().copied().map(|value| {
+            if value > 5 {
+                return value + 1;
+            }
+            value + 2
+        })
+    }
+}

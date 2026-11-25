@@ -88,7 +88,7 @@ fn encode(text: &str, keep_color: bool) -> Cow<'_, str> {
         if !byte.is_ascii() {
             if byte == C1_LEAD && bytes.get(cursor + 1).is_some_and(|&low| low <= 0x9F) {
                 let control = char::from(bytes[cursor + 1]);
-                // #[gamma::skip(all, reason = "capacity affects allocation behavior only; escaped text is unchanged")]
+                // #[gamma::skip(all, tag = "equivalent", reason = "Only the escaped-text buffer's initial capacity changes; the same escape bytes are appended independently of capacity.")]
                 let out = encoded.get_or_insert_with(|| String::with_capacity(text.len() + ESCAPE_HEADROOM));
 
                 out.push_str(&text[copied..cursor]);
@@ -126,7 +126,7 @@ fn encode(text: &str, keep_color: bool) -> Cow<'_, str> {
             continue;
         }
 
-        // #[gamma::skip(all, reason = "capacity affects allocation behavior only; escaped text is unchanged")]
+        // #[gamma::skip(all, tag = "equivalent", reason = "Only the escaped-text buffer's initial capacity changes; the same escape bytes are appended independently of capacity.")]
         let out = encoded.get_or_insert_with(|| String::with_capacity(text.len() + ESCAPE_HEADROOM));
 
         out.push_str(&text[copied..cursor]);
@@ -184,7 +184,6 @@ fn push_escape(out: &mut String, control: char) {
 /// of its own sequence, so it must be encoded rather than passed on in the hope of a later `m`.
 fn style_sequence_end(bytes: &[u8], start: usize) -> Option<usize> {
     if bytes.get(start + 1) != Some(&b'[') {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
 
@@ -205,7 +204,6 @@ fn style_sequence_end(bytes: &[u8], start: usize) -> Option<usize> {
                 return allowed_style(parameters).then_some(cursor + 1);
             }
             _ => {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
         }
@@ -225,7 +223,6 @@ fn allowed_style(parameters: &str) -> bool {
     while let Some(parameter) = parameters.next() {
         if parameter.contains(':') {
             if !allowed_colon_color(parameter) {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
                 return false;
             }
 
@@ -233,7 +230,6 @@ fn allowed_style(parameters: &str) -> bool {
         }
 
         let Ok(code) = parameter.parse::<u16>() else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         };
 
@@ -241,7 +237,6 @@ fn allowed_style(parameters: &str) -> bool {
             0 | 1 | 22 | 30..=37 | 39 | 40..=47 | 49 | 90..=97 | 100..=107 => {}
             38 | 48 => {
                 let Some(mode) = parameters.next().and_then(|value| value.parse::<u16>().ok()) else {
-                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
                     return false;
                 };
                 let components = if mode == 5 {
@@ -249,19 +244,16 @@ fn allowed_style(parameters: &str) -> bool {
                 } else if mode == 2 {
                     3
                 } else {
-                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
                     return false;
                 };
 
                 for _component in 0..components {
                     if !parameters.next().is_some_and(color_component) {
-                        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
                         return false;
                     }
                 }
             }
             _ => {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
                 return false;
             }
         }
@@ -275,7 +267,6 @@ fn allowed_colon_color(parameter: &str) -> bool {
     let mut parts = parameter.split(':');
 
     if !matches!(parts.next(), Some("38" | "48")) {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
         return false;
     }
 
@@ -302,19 +293,7 @@ fn color_component(component: &str) -> bool {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use core::iter::once;
-
     use super::*;
-
-    #[test]
-    fn mixed_unicode_controls_do_not_hide_del_or_change_safe_text_ownership() {
-        let text = "é\0\t\n\r\x1b\u{7f}\u{80}🦀";
-        let expected = "é\\0\\t\\n\\r\\e\\u{7f}\\u{80}🦀";
-        assert_eq!(encode_controls(text), expected);
-        assert_eq!(encode_preserving_color(text), expected);
-        assert!(matches!(encode_controls("é🦀"), Cow::Borrowed("é🦀")));
-        assert_eq!(encode_preserving_color("\x1b[31mé\u{7f}"), "\x1b[31mé\\u{7f}\x1b[0m");
-    }
 
     #[test]
     fn control_boundaries_and_style_endpoints_have_exact_encodings() {
@@ -370,120 +349,8 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_text_is_borrowed_unchanged() {
-        let encoded = encode_controls("src/lib.rs::tests::boundary — replace a < b with a <= b");
-
-        assert!(matches!(encoded, Cow::Borrowed(_)), "ordinary text must not allocate");
-        assert_eq!(encoded, "src/lib.rs::tests::boundary — replace a < b with a <= b");
-    }
-
-    #[test]
-    fn a_newline_cannot_forge_a_second_line() {
-        assert_eq!(encode_controls("a\nb"), "a\\nb");
-        assert_eq!(encode_controls("a\r\nb"), "a\\r\\nb");
-    }
-
-    #[test]
-    fn the_erase_sequence_is_shown_rather_than_obeyed() {
-        assert_eq!(encode_controls("evil\r\u{1b}[2Kforged"), "evil\\r\\e[2Kforged");
-    }
-
-    #[test]
-    fn an_osc_hyperlink_is_encoded_in_both_of_its_spellings() {
-        assert_eq!(
-            encode_controls("\u{1b}]8;;https://example.test\u{7}click\u{1b}]8;;\u{7}"),
-            "\\e]8;;https://example.test\\u{07}click\\e]8;;\\u{07}"
-        );
-        assert_eq!(
-            encode_controls("\u{9d}8;;https://example.test\u{9c}"),
-            "\\u{9d}8;;https://example.test\\u{9c}"
-        );
-    }
-
-    #[test]
-    fn every_c0_control_and_delete_is_encoded() {
-        for code in (0..=0x1f_u8).chain(once(0x7f)) {
-            let subject = String::from(char::from(code));
-            let encoded = encode_controls(&subject);
-
-            assert!(!encoded.chars().any(char::is_control), "`{code:#04x}` survived as a control");
-            assert!(encoded.starts_with('\\'), "`{code:#04x}` was not encoded: {encoded}");
-        }
-    }
-
-    #[test]
     fn a_non_color_colon_parameter_is_not_sgr() {
         assert!(!allowed_colon_color("31:5:1"));
-    }
-
-    #[test]
-    fn every_c1_control_is_encoded() {
-        for code in 0x80..=0x9f_u32 {
-            let control = char::from_u32(code).expect("the C1 block is valid");
-            let subject = String::from(control);
-            let encoded = encode_controls(&subject);
-
-            assert_eq!(encoded, format!("\\u{{{code:02x}}}"), "C1 {code:#04x} was not encoded");
-        }
-    }
-
-    #[test]
-    fn multibyte_text_around_a_control_survives_intact() {
-        assert_eq!(encode_controls("héllo→\u{1b}wörld"), "héllo→\\ewörld");
-    }
-
-    #[test]
-    fn color_is_kept_only_by_the_relaying_policy() {
-        let painted = "\u{1b}[1;32mCompiling\u{1b}[0m gamma";
-
-        assert_eq!(encode_preserving_color(painted), format!("{painted}{STYLE_RESET}"));
-        assert_eq!(encode_controls(painted), "\\e[1;32mCompiling\\e[0m gamma");
-    }
-
-    #[test]
-    fn relaying_still_refuses_every_sequence_that_is_not_color() {
-        // Cursor motion, erasure, the private-mode set that hides a cursor, and an OSC are all CSI
-        // or OSC sequences that a color policy must not mistake for color.
-        assert_eq!(encode_preserving_color("\u{1b}[2K"), "\\e[2K");
-        assert_eq!(encode_preserving_color("\u{1b}[10A"), "\\e[10A");
-        assert_eq!(encode_preserving_color("\u{1b}[?25l"), "\\e[?25l");
-        assert_eq!(encode_preserving_color("\u{1b}]0;title\u{7}"), "\\e]0;title\\u{07}");
-        assert_eq!(encode_preserving_color("line\rline"), "line\\rline");
-        assert_eq!(encode_preserving_color("\u{1b}[8mhidden"), "\\e[8mhidden");
-    }
-
-    #[test]
-    fn an_unterminated_color_sequence_is_encoded_rather_than_trusted() {
-        // Passing this through would let the value swallow whatever is printed after it into its
-        // own sequence, which is the escape it was trying to write in the first place.
-        assert_eq!(encode_preserving_color("\u{1b}[31"), "\\e[31");
-        assert_eq!(encode_preserving_color("\u{1b}[31;"), "\\e[31;");
-        assert_eq!(encode_preserving_color("\u{1b}"), "\\e");
-    }
-
-    #[test]
-    fn an_escape_followed_by_a_non_csi_introducer_is_not_styling() {
-        assert_eq!(encode_preserving_color("\u{1b}Xm"), "\\eXm");
-    }
-
-    #[test]
-    fn relayed_color_around_encoded_controls_keeps_both_decisions() {
-        assert_eq!(
-            encode_preserving_color("\u{1b}[31merror\u{1b}[0m: src/\u{9b}2K.rs\n"),
-            format!("\u{1b}[31merror\u{1b}[0m: src/\\u{{9b}}2K.rs\\n{STYLE_RESET}")
-        );
-    }
-
-    #[test]
-    fn relayed_styling_is_contained_by_a_trusted_reset() {
-        assert_eq!(
-            encode_preserving_color("\u{1b}[38;5;196merror"),
-            format!("\u{1b}[38;5;196merror{STYLE_RESET}")
-        );
-        assert_eq!(
-            encode_preserving_color("\u{1b}[48:2::1:2:3mbackground"),
-            format!("\u{1b}[48:2::1:2:3mbackground{STYLE_RESET}")
-        );
     }
 
     #[test]

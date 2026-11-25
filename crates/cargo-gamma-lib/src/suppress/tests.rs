@@ -134,6 +134,32 @@ fn condition_resource_directives_leave_nested_and_sibling_gaps_mutable() {
 }
 
 #[test]
+fn a_grouped_equivalent_guard_leaves_the_enclosing_guard_mutable() {
+    let source = r#"fn f(missing: bool, absolute: bool, outside: bool) -> bool {
+    (
+        // #[gamma::skip(logical.and_remove_left, tag = "equivalent", reason = "the inner guard is the reviewed policy boundary")]
+        missing && absolute
+    ) && outside
+}"#;
+    let (parsed, mut mutants) = mutants_of(source, "logical.and_remove_left");
+    let found = directives(&parsed).unwrap();
+    assert_eq!(suppress(&mut mutants, &found), 1);
+    assert_eq!(mutants.len(), 2);
+    for mutant in &mutants {
+        assert_eq!(
+            mutant.outcome,
+            if &*mutant.original == "missing && absolute" {
+                Outcome::Ignored
+            } else {
+                Outcome::Pending
+            },
+            "{}",
+            mutant.original
+        );
+    }
+}
+
+#[test]
 fn the_reason_reaches_the_suppressed_mutant() {
     let source = "// #[gamma::skip(arith, reason = \"why not\")]\nfn f(a: i32) -> i32 { a + 1 }";
     let (parsed, mut mutants) = mutants_of(source, "arith");

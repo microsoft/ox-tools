@@ -197,7 +197,6 @@ fn type_size(ty: &Type, substitutions: Option<&HashMap<String, Type>>, limit: us
             ) || self.depth == 64
             {
                 self.exceeded = true;
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
                 return false;
             }
             self.remaining -= 1;
@@ -258,7 +257,6 @@ fn type_size(ty: &Type, substitutions: Option<&HashMap<String, Type>>, limit: us
 
 pub(super) fn reserve_type(ty: &Type, remaining: &mut usize) -> bool {
     let Some(size) = type_size(ty, None, *remaining) else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
         return false;
     };
     *remaining -= size;
@@ -296,13 +294,11 @@ pub(super) struct Types<'a> {
 impl Types<'_> {
     fn source_path(&self, ty: &Type) -> Option<(&str, &[String], Vec<String>)> {
         if matches!(strip(ty), Type::Path(path) if path.path.leading_colon.is_some()) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let path = resolved_type_path(ty, self.imports)?;
         // A glob cannot replace an explicit local root or an explicit named import.
         if self.imports.contains_key("*") && !matches!(path.first().map(String::as_str), Some("crate" | "self" | "super")) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         if self
@@ -311,7 +307,6 @@ impl Types<'_> {
             .and_then(Option::as_ref)
             .is_some_and(|names| path.first().is_some_and(|name| names.contains(name)))
         {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let source = self.imports.get(SOURCE_FILE)?.as_ref()?.first()?.as_str();
@@ -344,11 +339,9 @@ impl Types<'_> {
         let left = as_type(left);
         let right = as_type(right);
         let Some((source, inline, left)) = self.source_path(&left) else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         };
         let Some((_, _, right)) = self.source_path(&right) else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         };
         self.defaults.source_same_type(source, inline, &left, &right)
@@ -361,7 +354,6 @@ impl Types<'_> {
     /// distinguish declarations in different modules with the same final identifier.
     fn package_type_name(&self, ty: &Type) -> Option<String> {
         if self.imports.contains_key("*") || self.block_type(ty) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
 
@@ -385,7 +377,6 @@ impl Types<'_> {
 
     fn package_has_default(&self, ty: &Type) -> bool {
         if self.block_type(ty) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         if self.defaults.has_labeled_sources() {
@@ -397,7 +388,6 @@ impl Types<'_> {
 
     fn package_declares_default(&self, ty: &Type) -> bool {
         if self.block_type(ty) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         if self.defaults.has_labeled_sources() {
@@ -441,7 +431,6 @@ impl Types<'_> {
                 Some("super") => {
                     while path.first().is_some_and(|name| name == "super") {
                         if module.pop().is_none() {
-                            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
                             return false;
                         }
                         let _parent = path.remove(0);
@@ -470,7 +459,6 @@ impl Types<'_> {
             }
         }
         if self.defaults.has_single_source_evidence() {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         let name = self.package_type_name(ty);
@@ -513,7 +501,6 @@ impl Types<'_> {
                 return changed.then_some(resolved);
             }
             if !visited.insert(resolved.clone()) {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
             let Some(alias) = aliases.get(&name).and_then(Option::as_ref) else {
@@ -673,10 +660,7 @@ impl Types<'_> {
 
     fn prelude_path(&self, ty: &Type, names: &[String]) -> Option<Vec<String>> {
         let Some(name) = names.last() else {
-            return
-            // #[gamma::skip(option.none_to_some, reason = "This fallback is reached only for empty resolved names. Its sole consumer source_type_at then parses names.join(\"::\"), which is empty and cannot be a Path. Returning Some(Vec::default()) leaves those names empty too; the absolute flag is only applied after a successful parse, so both versions preserve the same cloned input type.", tag = "equivalent")]
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
-            None;
+            return None; // #[gamma::skip(option.none_to_some, reason = "This fallback is reached only for empty resolved names. Its sole consumer source_type_at then parses names.join(\"::\"), which is empty and cannot be a Path. Returning Some(Vec::default()) leaves those names empty too; the absolute flag is only applied after a successful parse, so both versions preserve the same cloned input type.", tag = "equivalent")]
         };
         let (module, roots) = match name.as_str() {
             "String" => ("string", &["std", "alloc"]),
@@ -685,12 +669,10 @@ impl Types<'_> {
             "Option" => ("option", &["std", "core"]),
             "Result" => ("result", &["std", "core"]),
             _ => {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
         };
         if !self.supports_standard_type(ty, name, module, roots) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let root = roots.iter().find(|root| self.standard_absolute_root(root))?;
@@ -838,7 +820,6 @@ impl Types<'_> {
                         Some([marker, target]) if marker == ABSOLUTE_ROOT && target == "crate"))
         {
             "crate".clone_into(root);
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         absolute
@@ -920,15 +901,12 @@ impl Types<'_> {
             Kind::Array => {
                 let array = array_type(concrete);
                 let syn::Expr::Lit(length) = &array.len else {
-                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
                     return false;
                 };
                 let syn::Lit::Int(length) = &length.lit else {
-                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
                     return false;
                 };
                 let Ok(length) = length.base10_parse::<usize>() else {
-                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
                     return false;
                 };
 
@@ -939,11 +917,9 @@ impl Types<'_> {
             }
             Kind::Unknown => {
                 let Type::Path(path) = strip(concrete) else {
-                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
                     return false;
                 };
                 if path.path.is_ident("str") {
-                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
                     return false;
                 }
                 if resolved_type_path(concrete, self.imports).is_some_and(|segments| {
@@ -981,7 +957,6 @@ impl Types<'_> {
             return true;
         }
         if self.has_generic_root(concrete) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         let kind = self.value_kind(concrete);
@@ -996,7 +971,6 @@ impl Types<'_> {
             .package_type_name(concrete)
             .is_some_and(|name| self.defaults.generic_default_is_unproven(&name))
         {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         if self.package_declares_default(concrete) || self.local_generic_default(concrete) {
@@ -1004,7 +978,6 @@ impl Types<'_> {
         }
         if matches!(kind, Kind::Collection | Kind::Map) && !self.supports_collection_api(concrete) {
             let Some(path) = resolved_type_path(concrete, self.imports) else {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
                 return false;
             };
 
@@ -1042,15 +1015,12 @@ impl Types<'_> {
             Kind::Array => {
                 let array = array_type(concrete);
                 let syn::Expr::Lit(length) = &array.len else {
-                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
                     return false;
                 };
                 let syn::Lit::Int(length) = &length.lit else {
-                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
                     return false;
                 };
                 let Ok(length) = length.base10_parse::<usize>() else {
-                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
                     return false;
                 };
 
@@ -1088,22 +1058,22 @@ impl Types<'_> {
     }
 
     pub(super) fn supports_primitive_kind(&self, ty: &Type, expected: Kind) -> bool {
-        self.supports_primitive_kind_with(ty, expected, &mut HashSet::default())
+        self.supported_primitive_kind(ty) == Some(expected)
     }
 
-    fn supports_primitive_kind_with(&self, ty: &Type, expected: Kind, visited: &mut HashSet<*const Type>) -> bool {
+    pub(super) fn supported_primitive_kind(&self, ty: &Type) -> Option<Kind> {
+        self.supported_primitive_kind_with(ty, &mut HashSet::default())
+    }
+
+    fn supported_primitive_kind_with(&self, ty: &Type, visited: &mut HashSet<*const Type>) -> Option<Kind> {
         if !visited.insert(core::ptr::from_ref(ty)) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
-            return false;
+            return None;
         }
         let ty = self.resolve_alias(ty);
         if let Type::Reference(reference) = strip(ty) {
-            return self.supports_primitive_kind_with(&reference.elem, expected, visited);
+            return self.supported_primitive_kind_with(&reference.elem, visited);
         }
-        let Some(path) = resolved_type_path(ty, self.imports) else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
-            return false;
-        };
+        let path = resolved_type_path(ty, self.imports)?;
         let name = match path.as_slice() {
             [name] if !self.defaults.defines(name) && !self.imports.contains_key("*") => name,
             [root, module, name]
@@ -1112,12 +1082,11 @@ impl Types<'_> {
                 name
             }
             _ => {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
-                return false;
+                return None;
             }
         };
 
-        primitive_kind(name) == Some(expected)
+        primitive_kind(name)
     }
 
     pub(super) fn import_changes_name(&self, ty: &Type) -> bool {
@@ -1131,12 +1100,10 @@ impl Types<'_> {
     pub(super) fn supports_collection_api(&self, ty: &Type) -> bool {
         let ty = self.resolve_alias(ty);
         if self.package_defines(ty) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
 
         let Some(path) = resolved_type_path(ty, self.imports) else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         };
         let collection_kind = |name: &str| match name {
@@ -1207,7 +1174,6 @@ impl Types<'_> {
 
     fn primitive_path(&self, names: &[String], external: bool) -> Option<Vec<String>> {
         if !external && names.len() == 3 && !self.primitive_external_root(&names[0]) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let name = names
@@ -1221,7 +1187,6 @@ impl Types<'_> {
 
     pub(super) fn supports_collection_constructor(&self, ty: &Type) -> bool {
         if !self.supports_collection_api(ty) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
 
@@ -1251,7 +1216,6 @@ impl Types<'_> {
 
     fn collection_key_proven(&self, ty: &Type, remaining: usize) -> bool {
         if remaining == 0 {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         let instantiated = self.instantiate_alias(ty);
@@ -1342,14 +1306,12 @@ impl Types<'_> {
 
     fn supports_peekable_chars_with(&self, ty: &Type, visited: &mut HashSet<*const Type>) -> bool {
         if !visited.insert(core::ptr::from_ref(ty)) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         if matches!(strip(ty), Type::Path(path) if path.path.segments.first().is_some_and(|segment| {
             let name = segment.ident.to_string();
             self.abstracts.contains(&name) || self.defaulted.contains(&name)
         })) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         let ty = self.resolve_alias(ty);
@@ -1357,18 +1319,15 @@ impl Types<'_> {
             return reference.mutability.is_some() && self.supports_peekable_chars_with(&reference.elem, visited);
         }
         let Type::Path(path) = strip(ty) else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         };
         let Some(resolved) = resolved_type_path(ty, self.imports) else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         };
         if !self.standard_root_unshadowed(&resolved)
             || !matches!(resolved.as_slice(), [root, module, name]
                 if matches!(root.as_str(), "std" | "core") && module == "iter" && name == "Peekable")
         {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         let segment = path
@@ -1377,11 +1336,9 @@ impl Types<'_> {
             .last()
             .expect("the resolved source path matched std/core::iter::Peekable above");
         let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         };
         if arguments.args.len() != 1 {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         let Some(GenericArgument::Type(element)) =
@@ -1394,11 +1351,9 @@ impl Types<'_> {
             let name = segment.ident.to_string();
             self.abstracts.contains(&name) || self.defaulted.contains(&name)
         })) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         let Some(resolved) = resolved_type_path(element, self.imports) else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         };
         self.standard_root_unshadowed(&resolved)
@@ -1409,7 +1364,6 @@ impl Types<'_> {
     pub(super) fn supports_char_api(&self) -> bool {
         let ty: Type = syn::parse_quote!(char);
         let Some(path) = resolved_type_path(&ty, self.imports) else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         };
         !self.abstracts.iter().chain(self.defaulted).any(|name| name == "char")
@@ -1428,11 +1382,9 @@ impl Types<'_> {
             let name = segment.ident.to_string();
             self.abstracts.contains(&name) || self.defaulted.contains(&name)
         })) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         let Type::Reference(reference) = strip(self.resolve_alias(ty)) else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         };
         self.supports_primitive_type(&reference.elem, "str")
@@ -1449,21 +1401,17 @@ impl Types<'_> {
     /// Constructors whose empty value has the same allocation and state as their trait default.
     pub(super) fn supports_empty_default_constructor(&self, ty: &Type) -> bool {
         let Type::Path(path) = strip(ty) else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         };
         if
         // #[gamma::skip(cond.always_false, reason = "After either removed qself guard, resolved_type_path still rejects every qself path before the package name or empty-constructor result can be produced.", tag = "equivalent")]
         path.qself.is_some() {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         let Some(first) = path.path.segments.first() else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         };
         let Some((resolved, absolute)) = resolved_type_path_with_root(ty, self.imports) else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         };
         let name = first.ident.to_string();
@@ -1473,24 +1421,20 @@ impl Types<'_> {
                 || self.defaults.defines(&name)
                 || self.aliases.is_some_and(|aliases| aliases.contains_key(&name)))
         {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         if
         // #[gamma::skip(cond.always_false, tag = "equivalent", reason = "The only accepting branches below call supports_string_api or supports_collection_api, which independently require the same genuine external root. Relative opaque roots already fail path resolution; canonical import maps cannot retain expanding self-prefixes.")]
         !self.standard_path_unshadowed(&resolved, absolute) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         let name = resolved
             .last()
             .expect("standard_root_unshadowed rejected an empty resolved path above");
         if resolved.len() == 1 && !matches!(name.as_str(), "Vec" | "String") {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         let Some(arguments) = constructor_argument_count(&path.path) else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         };
         if name == "String" {
@@ -1525,7 +1469,6 @@ impl Types<'_> {
 
     fn unshadowed_path(&self, ty: &Type) -> Option<Vec<String>> {
         if self.has_generic_root(ty) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let (path, absolute, external) = resolved_type_path_with_origin(ty, self.imports)?;
@@ -1534,7 +1477,6 @@ impl Types<'_> {
             || !absolute && (self.abstracts.contains(first) || self.defaulted.contains(first))
             || path.len() == 1 && (self.defaults.defines(first) || self.imports.contains_key("*"))
         {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         Some(path)
@@ -1542,7 +1484,6 @@ impl Types<'_> {
 
     pub(super) fn supports_default_trait(&self, ty: &Type) -> bool {
         let Type::Path(written) = ty else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         };
         if written
@@ -1552,15 +1493,12 @@ impl Types<'_> {
             .any(|segment| !matches!(segment.arguments, PathArguments::None))
             || self.has_generic_root(ty)
         {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         let Some((path, absolute)) = resolved_type_path_with_root(ty, self.imports) else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         };
         if !self.standard_path_unshadowed(&path, absolute) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         matches!(path.as_slice(), [name]
@@ -1608,7 +1546,6 @@ impl Types<'_> {
 
     fn standard_root_unshadowed(&self, path: &[String]) -> bool {
         let Some(root) = path.first() else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         };
         if !matches!(root.as_str(), "std" | "core" | "alloc") {
@@ -1626,11 +1563,9 @@ impl Types<'_> {
     pub(super) fn supports_nonzero_api(&self, ty: &Type) -> bool {
         let ty = self.resolve_alias(ty);
         if self.package_defines(ty) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         let Some(path) = resolved_type_path(ty, self.imports) else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         };
         let is_nonzero = |name: &str| {
@@ -1665,12 +1600,10 @@ impl Types<'_> {
     fn supports_standard_type(&self, ty: &Type, expected_name: &str, expected_module: &str, roots: &[&str]) -> bool {
         let ty = self.resolve_alias(ty);
         if self.package_defines(ty) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
 
         let Some((path, absolute, external)) = resolved_type_path_with_origin(ty, self.imports) else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         };
 
@@ -1691,7 +1624,6 @@ impl Types<'_> {
 
     fn supports_iterator_trait_with(&self, ty: &Type, iterator_bounded: &[String], visited: &mut HashSet<*const Type>) -> bool {
         if !visited.insert(core::ptr::from_ref(ty)) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         let ty = self.resolve_alias(ty);
@@ -1704,7 +1636,6 @@ impl Types<'_> {
             return true;
         }
         let Type::ImplTrait(implementation) = strip(ty) else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         };
 
@@ -1719,12 +1650,10 @@ impl Types<'_> {
     pub(super) fn supports_range_iterator(&self, ty: &Type) -> bool {
         let ty = self.resolve_alias(ty);
         if !self.supports_standard_type(ty, "Range", "ops", &["std", "core"]) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         let arguments = type_argument_values(ty);
         let [element] = arguments.as_slice() else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         };
 
@@ -1746,7 +1675,6 @@ impl Types<'_> {
 
     pub(super) fn collection_hasher_index(&self, ty: &Type) -> Option<usize> {
         if !self.supports_collection_api(ty) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         match
@@ -1761,11 +1689,9 @@ impl Types<'_> {
     pub(super) fn supports_wrapper_api(&self, ty: &Type) -> bool {
         let ty = self.resolve_alias(ty);
         if self.package_defines(ty) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         let Some(path) = resolved_type_path(ty, self.imports) else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         };
 
@@ -1870,7 +1796,6 @@ impl Types<'_> {
 
     fn renamed_collection_has_default(&self, ty: &Type) -> bool {
         let Some(path) = resolved_type_path(ty, self.imports) else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         };
 
@@ -1893,7 +1818,6 @@ impl Types<'_> {
 
     fn local_generic_default(&self, ty: &Type) -> bool {
         let Some(name) = self.package_type_name(ty) else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         };
 
@@ -2002,7 +1926,6 @@ impl Types<'_> {
 
     fn concrete_self_type<'a>(&'a self, ty: &Type) -> Option<&'a Type> {
         let Type::Path(path) = strip(ty) else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         };
 
@@ -2016,12 +1939,10 @@ impl Types<'_> {
 
     fn concrete_self_associated_type<'a>(&'a self, ty: &Type) -> Option<&'a Type> {
         let Type::Path(path) = strip(ty) else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         };
         let mut segments = path.path.segments.iter();
         let (Some(root), Some(name), None) = (segments.next(), segments.next(), segments.next()) else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         };
 
@@ -2044,7 +1965,6 @@ pub(super) fn constructor_argument_count(path: &Path) -> Option<usize> {
     while let Some(segment) = segments.next() {
         if segments.peek().is_some() {
             if !matches!(segment.arguments, PathArguments::None) {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
             continue;
@@ -2072,11 +1992,9 @@ fn resolved_type_path_with_root(ty: &Type, imports: &HashMap<String, Option<Vec<
 
 fn resolved_type_path_with_origin(ty: &Type, imports: &HashMap<String, Option<Vec<String>>>) -> Option<(Vec<String>, bool, bool)> {
     let Type::Path(path) = strip(ty) else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     };
     if path.qself.is_some() {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
 
@@ -2106,7 +2024,6 @@ fn resolved_type_path_with_origin(ty: &Type, imports: &HashMap<String, Option<Ve
                 break;
             };
             let Some(prefix) = imported else {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             };
             // #[gamma::skip(iter.first_to_last, reason = "the comparison is reached only for a one-element prefix, whose first and last element are identical")]
@@ -2139,7 +2056,6 @@ fn resolved_type_path_with_origin(ty: &Type, imports: &HashMap<String, Option<Ve
 /// An arbitrary dependency type ending in `Error` is not negative evidence.
 pub(super) fn is_foreign_error(ty: &Type, imports: &HashMap<String, Option<Vec<String>>>) -> bool {
     let Some(resolved) = resolved_type_path(ty, imports) else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
         return false;
     };
 
@@ -2163,16 +2079,13 @@ pub(super) fn is_foreign_error(ty: &Type, imports: &HashMap<String, Option<Vec<S
 /// is close to universal in real Rust, the alias is resolved through the workspace index.
 pub(super) fn returns_undefaultable_error(output: &ReturnType, types: &Types<'_>) -> bool {
     let ReturnType::Type(_arrow, ty) = output else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
         return false;
     };
 
     let Type::Path(path) = strip(ty) else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
         return false;
     };
     if resolve_type(ty) != Kind::Result {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
         return false;
     }
 
@@ -2209,7 +2122,6 @@ pub(super) fn is_abstract_type(ty: &Type, abstracts: &[String]) -> bool {
 
         Type::Path(path) if path.qself.is_none() => {
             let Some(last) = path.path.segments.last() else {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
                 return false;
             };
 

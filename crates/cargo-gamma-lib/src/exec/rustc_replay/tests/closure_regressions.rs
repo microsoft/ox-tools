@@ -238,19 +238,39 @@ fn source_context_checks_nonmetadata_artifacts_and_build_scripts_after_valid_met
 
 #[test]
 fn source_context_and_dependency_closure_decline_unreadable_capture_inventory_and_records() {
-    let (files, unit, dependency, _) = super::regressions::dependency_fixture();
-    for (directory, file) in [
-        (Some(unit.captures.as_path()), None),
-        (None, Some(dependency.captures.join("dependency.json"))),
-    ] {
+    let (files, unit) = fixture("unit");
+    let record = unit.borrowed().snapshot(&files, Vec::new(), Vec::new()).unwrap();
+    files.put(unit.captures.join("unit.json"), serde_json::to_vec(&record).unwrap());
+    let stdout = serde_json::json!({"reason":"compiler-artifact","filenames":[unit.target.join("libunit-hash.rmeta")]}).to_string();
+    assert!(source_only_context_with(&files, &unit.captures, &stdout, &unit.root, &unit.target, None).is_some());
+    for (directory, file) in [(Some(unit.captures.as_path()), None), (None, Some(unit.captures.join("unit.json")))] {
         let failed = Unavailable {
             files: &files,
             directory,
             file: file.as_deref(),
         };
-        assert!(unit.borrowed().snapshot(&failed, Vec::new(), Vec::new()).is_none());
-        let stdout = serde_json::json!({"reason":"compiler-artifact","filenames":[unit.target.join("libconsumer-hash.rmeta")]}).to_string();
         assert!(source_only_context_with(&failed, &unit.captures, &stdout, &unit.root, &unit.target, None).is_none());
+    }
+    let (files, unit, dependency, _) = super::regressions::dependency_fixture();
+    let no_inventory = Unavailable {
+        files: &files,
+        directory: Some(unit.captures.as_path()),
+        file: None,
+    };
+    assert!(
+        unit.borrowed().snapshot(&no_inventory, Vec::new(), Vec::new()).is_some(),
+        "an indexed dependency needs its specific record, not a scan of unrelated captures"
+    );
+    for path in [
+        dependency.captures.join("dependency.json"),
+        output_index(&unit.captures, &dependency.target.join("libdependency-hash.rmeta")),
+    ] {
+        let failed = Unavailable {
+            files: &files,
+            directory: None,
+            file: Some(&path),
+        };
+        assert!(unit.borrowed().snapshot(&failed, Vec::new(), Vec::new()).is_none(), "{path}");
     }
 }
 
@@ -505,17 +525,17 @@ fn source_context_rechecks_advertised_outputs_and_immutable_inputs_before_public
         .join("host")
         .join("lib")
         .join("libstd.rlib");
-    for (path, successful_reads) in [(&artifact, 1), (&library, 2), (&unit.compiler, 3)] {
-        let failed = DisappearingFile {
-            files: &files,
-            path,
-            remaining: Cell::new(successful_reads),
-        };
+    for path in [&artifact, &library, &unit.compiler] {
+        let bytes = files.0.borrow_mut().remove(path).unwrap();
         assert!(
-            source_only_context_with(&failed, &unit.captures, &stdout, &unit.root, &unit.target, None).is_none(),
+            source_only_context_with(&files, &unit.captures, &stdout, &unit.root, &unit.target, None).is_none(),
             "{path}"
         );
-        assert_eq!(failed.remaining.get(), 0, "the interruption must reach {path}");
+        files.put(path, bytes);
+        assert!(
+            source_only_context_with(&files, &unit.captures, &stdout, &unit.root, &unit.target, None).is_some(),
+            "stamps must be observed again for each publication attempt"
+        );
     }
 }
 
@@ -608,13 +628,19 @@ fn snapshots_decline_externs_that_disappear_after_provenance_validation() {
     let (files, unit, dependency, _) = super::regressions::dependency_fixture();
     let _record = unit.borrowed().snapshot(&files, Vec::new(), Vec::new()).unwrap();
     let artifact = dependency.target.join("libdependency-hash.rmeta");
-    let failed = DisappearingFile {
-        files: &files,
-        path: &artifact,
-        remaining: Cell::new(2),
-    };
-    assert!(unit.borrowed().snapshot(&failed, Vec::new(), Vec::new()).is_none());
-    assert_eq!(failed.remaining.get(), 0);
+    execute(
+        &unit.borrowed(),
+        &files,
+        None,
+        || {
+            assert!(files.0.borrow_mut().remove(&artifact).is_some());
+            Ok(success())
+        },
+        |_| panic!("an extern lost during compilation must not publish replay data"),
+        |_, _| Ok(()),
+    )
+    .unwrap();
+    assert!(unit.borrowed().snapshot(&files, Vec::new(), Vec::new()).is_none());
 }
 
 #[test]

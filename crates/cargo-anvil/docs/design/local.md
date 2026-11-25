@@ -163,8 +163,9 @@ Local runs with tracked edits, staged edits, deletions, renames, or non-ignored
 untracked files snapshot the current filesystem and compute fresh package
 selections. These selections match the tiers produced if that filesystem state
 were committed. Dirty results are isolated from the clean cache and are never
-published. An empty impact set skips scoped checks successfully; unscoped
-checks still run.
+published. An empty impact set skips scoped package work successfully; unscoped
+checks still run, including the unused-deps workspace dependency inheritance
+check.
 
 GitHub Actions and Azure Pipelines impact jobs require clean checkouts and fail
 if tracked or non-ignored untracked content is present. `consume` mode continues
@@ -254,6 +255,7 @@ just anvil-build --package my-crate
 just anvil-doc-build --open
 just anvil-examples --package my-crate --example basic
 just anvil-fmt --fix
+just anvil-unused-deps --fix
 just anvil-miri --package my-crate --test test_name
 just anvil-miri --package my-crate --example basic
 just anvil-readme --fix
@@ -262,6 +264,14 @@ just anvil-readme --fix
 `anvil` aliases `anvil-pr`. `anvil-build` builds all workspace targets with all
 features and the lockfile; it is a development command, not a check-group member.
 `anvil-readme` checks by default and regenerates with `--fix`.
+
+### Unused dependencies
+
+`anvil-unused-deps` is check-only by default, including in groups and CI.
+Explicit `--fix` removes uninherited workspace catalog entries, never package
+dependency declarations. Compiler-backed package analysis uses the required
+impact set; workspace dependency inheritance is checked even when that set is
+empty. Disabling impact analyzes every workspace package.
 
 ### Examples
 
@@ -315,15 +325,18 @@ managed import regions have different update behavior; see
 
 ## 9. Mutation testing with cargo-gamma
 
-`anvil-mutants-diff` and `anvil-mutants-full` use cargo-gamma 0.6.0+ with a
+`anvil-mutants-diff` and `anvil-mutants-full` use cargo-gamma 0.7.0+ with a
 100% assertion-killed score requirement and zero unresolved flaky outcomes.
 Timeouts and out-of-memory outcomes do not count as assertion kills.
 
 The PR recipe selects mutation sites from changed lines against the resolved
 base, including uncommitted changes. The full recipe covers the workspace.
-An empty impact set skips the PR campaign. A diff campaign with no mutation
-sites succeeds; an empty full campaign or wholly ungradeable nonempty population
-fails its gates. Infrastructure and baseline failures still fail.
+An empty impact set skips the PR campaign. Gamma 0.7.0 accepts an empty diff
+selection, but an empty full campaign fails its score gate. The Gamma changes
+in this source tree also accept empty full campaigns; that behavior requires
+a release containing those changes and is not guaranteed by Anvil's 0.7.0 pin.
+Wholly ungradeable nonempty populations fail their gates. Infrastructure and
+baseline failures still fail.
 
 Gamma reads native `gamma.toml` configuration. Mutators, Cargo features, build
 profile, tests, concurrency, and memory policy follow Gamma's settings and

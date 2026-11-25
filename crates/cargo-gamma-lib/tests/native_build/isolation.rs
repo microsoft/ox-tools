@@ -28,6 +28,15 @@ fn marked_proof_plan(work: &Workspace, mutants: usize, separate_items: bool) -> 
     plan
 }
 
+fn proof_error(file: &str, package: &str) -> String {
+    let mut diagnostic: Value =
+        serde_json::from_str(&unpositioned_native_context("lib")).expect("the context fixture serializes a compiler diagnostic");
+    diagnostic["package_id"] = format!("{package} 0.0.0").into();
+    diagnostic["target"] = serde_json::json!({"name": package, "kind": ["lib"]});
+    diagnostic["message"]["spans"][0]["file_name"] = file.into();
+    diagnostic.to_string()
+}
+
 fn native_proof_script<T>(
     work: &Workspace,
     population: usize,
@@ -57,7 +66,12 @@ fn native_proof_script<T>(
                 if failure_at == Some(attempted.len()) {
                     return Err(error!("scripted proof failure {}", attempted.len()));
                 }
-                Ok(Some(scripted_output(!failed, "proof stdout", "")))
+                let stdout = if failed {
+                    proof_error("src/lib.rs", "trivial")
+                } else {
+                    String::new()
+                };
+                Ok(Some(scripted_output(!failed, &stdout, "")))
             }
         },
         body,
@@ -213,11 +227,16 @@ fn proof_diagnostics_batch_independent_failures_using_the_actual_subset_guards()
                         .filter(|ordinal| source.contains(&format!("regression_marker_{ordinal}_end")))
                         .collect::<Vec<_>>();
                     let failed = active.contains(&2) || active.contains(&6);
-                    let messages = [2, 6]
+                    // The full batch needs a file-localized error, but direct guard spans must
+                    // wait until shrinking so they cannot bypass the isolation path under test.
+                    let mut messages = [2, 6]
                         .into_iter()
                         .filter(|ordinal| active.contains(ordinal) && (!shrink_first || active.len() < 6))
                         .map(|ordinal| native_marker_diagnostic(work, ordinal))
                         .collect::<Vec<_>>();
+                    if failed && messages.is_empty() {
+                        messages.push(proof_error("src/lib.rs", "trivial"));
+                    }
                     attempted.borrow_mut().push(active);
                     Ok(Some(scripted_output(!failed, &messages.join("\n"), "")))
                 }
@@ -405,7 +424,12 @@ fn proof_order_preserves_shared_dependencies_and_frozen_cargo_context() {
                         .collect::<Vec<_>>();
                     let failed = active.contains(&3);
                     attempted.borrow_mut().push(active);
-                    Ok(Some(scripted_output(!failed, "", "")))
+                    let stdout = if failed {
+                        proof_error("src/shared.rs", "z-shared")
+                    } else {
+                        String::new()
+                    };
+                    Ok(Some(scripted_output(!failed, &stdout, "")))
                 }
             },
             || {
@@ -458,7 +482,12 @@ fn later_contexts_keep_the_failed_schemas_item_coordinates_after_proofs_replace_
                     .collect::<Vec<_>>();
                 let failed = active.contains(&if second { 3 } else { 1 });
                 attempted.borrow_mut().push((second, active));
-                Ok(Some(scripted_output(!failed, "", "")))
+                let stdout = if failed {
+                    unpositioned_native_context(if second { "second" } else { "first" })
+                } else {
+                    String::new()
+                };
+                Ok(Some(scripted_output(!failed, &stdout, "")))
             }
         },
         || {
@@ -515,7 +544,12 @@ fn identical_proof_commands_share_exact_subsets_only_within_one_failed_invocatio
                     .collect::<Vec<_>>();
                 let failed = active.contains(&1);
                 observed.borrow_mut().push(active);
-                Ok(Some(scripted_output(!failed, "", "")))
+                let stdout = if failed {
+                    proof_error("src/first.rs", "trivial")
+                } else {
+                    String::new()
+                };
+                Ok(Some(scripted_output(!failed, &stdout, "")))
             }
         },
         || {
@@ -601,7 +635,12 @@ fn scoped_native_proofs_prefer_file_then_package_tiers_and_check_remaining_conte
                             let mut attempted = attempted.borrow_mut();
                             attempted.push(active);
                             assert!(attempted.len() <= 8, "a three-mutant tier proof must remain bounded");
-                            Ok(Some(scripted_output(!failed, "", "")))
+                            let stdout = if failed {
+                                proof_error("src/first.rs", "trivial")
+                            } else {
+                                String::new()
+                            };
+                            Ok(Some(scripted_output(!failed, &stdout, "")))
                         }
                     },
                     || {
@@ -724,7 +763,12 @@ fn minimization_uses_the_exact_bounded_native_query_order_for_prefix_competing_a
                     let mut attempted = attempted.borrow_mut();
                     attempted.push(active);
                     assert!(attempted.len() <= MAX_ISOLATION_PROOFS);
-                    Ok(Some(scripted_output(!failed, "", "")))
+                    let stdout = if failed {
+                        proof_error("src/lib.rs", "trivial")
+                    } else {
+                        String::new()
+                    };
+                    Ok(Some(scripted_output(!failed, &stdout, "")))
                 }
             },
             || {
@@ -902,7 +946,14 @@ fn native_proof_adapter_preserves_limits_population_written_files_and_all_termin
             move |_, arguments, budget, _| {
                 assert_eq!(arguments[0], "check");
                 assert_eq!(budget, limits.timeout);
-                Ok(output.map(|success| scripted_output(success, "proof stdout", "")))
+                Ok(output.map(|success| {
+                    let stdout = if success {
+                        String::new()
+                    } else {
+                        proof_error("src/lib.rs", "trivial")
+                    };
+                    scripted_output(success, &stdout, "")
+                }))
             },
             || {
                 converger.run_proof(

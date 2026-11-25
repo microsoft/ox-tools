@@ -1,0 +1,4 @@
+name_r#"// visible
+'ab// visible
+'// not a comment' // visible
+"unterminated // not a comment

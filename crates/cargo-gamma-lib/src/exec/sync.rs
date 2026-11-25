@@ -9,6 +9,7 @@
 //! place with their original mtimes — preserving Cargo's fingerprint validity for inputs that did
 //! not change.
 
+use core::convert::identity;
 use std::collections::HashSet;
 use std::fs::{self, File, FileTimes};
 use std::io::{BufRead, BufReader, ErrorKind, Read};
@@ -107,6 +108,20 @@ pub fn sync_or_copy_using(
     clear: impl FnOnce(&Utf8Path) -> std::io::Result<()>,
     copy: impl Fn(&Utf8Path, &Utf8Path, &Utf8Path, CopyOptions, &Reflinks) -> Result<()>,
 ) -> Result<SyncOutcome> {
+    sync_or_copy_with_sentinel((source, root, skip), options, synchronize, clear, copy, clear_sentinel)
+}
+
+/// Invalidates a trusted scratch tree before changing it, stopping if invalidation fails.
+///
+/// Consistency is restored only after the complete synchronization or replacement copy succeeds.
+fn sync_or_copy_with_sentinel(
+    (source, root, skip): (&Utf8Path, &Utf8Path, &Utf8Path),
+    options: CopyOptions,
+    synchronize: impl FnOnce(&Utf8Path, &Utf8Path, &Utf8Path, CopyOptions, &Reflinks) -> Result<()>,
+    clear: impl FnOnce(&Utf8Path) -> std::io::Result<()>,
+    copy: impl Fn(&Utf8Path, &Utf8Path, &Utf8Path, CopyOptions, &Reflinks) -> Result<()>,
+    invalidate: impl FnOnce(&Utf8Path) -> Result<()>,
+) -> Result<SyncOutcome> {
     // Taken once for the whole operation and shared by both the delta path and the fresh copy it
     // may fall back to: they write to the same tree, so what one of them learns about cloning there
     // is exactly what the other needs to know.
@@ -129,8 +144,7 @@ pub fn sync_or_copy_using(
     }
 
     // The tree looks consistent — attempt delta sync.
-    // #[gamma::skip(try.propagate_to_unwrap, reason = "The sentinel is still removed through the native filesystem, outside the injected copy/sync callbacks; failure injection requires the deferred complete filesystem backend.", tag = "native-boundary")]
-    clear_sentinel(root)?;
+    invalidate(root)?;
 
     match synchronize(source, root, skip, options, &reflinks) {
         Ok(()) => {
@@ -158,22 +172,22 @@ pub fn sync_or_copy_using(
 ///
 /// Walks the source tree (with the same ignore/selection semantics as the full copy) to discover
 /// what should be in the scratch tree, then:
-/// 1. Copies new entries and replaces changed entries.
-/// 2. Removes stale entries that no longer exist in the source.
+/// 1. Removes stale entries that no longer exist in the source.
+/// 2. Copies new entries and replaces changed entries.
 /// 3. Leaves unchanged entries untouched (preserving their mtimes for Cargo).
 pub fn delta_sync(source: &Utf8Path, root: &Utf8Path, skip: &Utf8Path, options: CopyOptions, reflinks: &Reflinks) -> Result<()> {
     // Collect the set of relative paths the source tree produces.
     let expected = collect_source_entries(source, skip, options)?;
+
+    // Remove old spellings before copying: on case-insensitive filesystems, the new spelling may
+    // otherwise compare equal to the old file and then be deleted by stale cleanup.
+    remove_stale(root, &expected)?;
 
     sync_entries_in_order(expected.iter(), |relative| {
         let src = source.join(relative);
         let dst = root.join(relative);
         sync_entry(&src, &dst, reflinks)
     })?;
-
-    // Remove stale entries from the scratch tree.
-    // #[gamma::skip(try.propagate_to_unwrap, reason = "This orchestration performs native stale-entry inventory and removal; in-memory stale_inventory and ordering helpers retain policy coverage.", tag = "native-boundary")]
-    remove_stale(root, &expected)?;
 
     Ok(())
 }
@@ -280,7 +294,6 @@ pub fn collect_source_entries_with(
                 return WalkState::Continue;
             };
 
-            // #[gamma::skip(call.replace_with_default, call_result.default, cond.always_false, reason = "The parallel walker supplies actual directory entries; observing inclusion of its native root requires the deferred entry-inventory backend.", tag = "native-boundary")]
             if is_walk_root(relative) {
                 return WalkState::Continue;
             }
@@ -350,7 +363,6 @@ pub fn sync_entry(source: &Utf8Path, destination: &Utf8Path, reflinks: &Reflinks
         return sync_directory(destination, || fs::symlink_metadata(destination.as_std_path()));
     }
 
-    // #[gamma::skip(cond.always_false, reason = "This dispatch branch needs native symlink Metadata; constructing it in memory requires the deferred metadata backend.", tag = "native-boundary")]
     if src_meta.is_symlink() {
         return sync_symlink(source, destination);
     }
@@ -390,47 +402,85 @@ fn sync_directory_with(
 
 /// Synchronizes a regular file, preserving mtime for unchanged files.
 #[cfg_attr(coverage_nightly, coverage(off))]
-// #[gamma::skip(all, reason = "This adapter inspects native Metadata and removes/copies filesystem entries; deterministic fault coverage requires the deferred metadata and file-operation backend.", tag = "native-boundary")]
 pub fn sync_file(source: &Utf8Path, destination: &Utf8Path, src_meta: &fs::Metadata, reflinks: &Reflinks) -> Result<()> {
-    let needs_copy = match fs::symlink_metadata(destination.as_std_path()) {
-        Err(_) => true, // Destination does not exist.
-        Ok(dst_meta) => {
-            if dst_meta.is_symlink() || dst_meta.is_dir() {
-                // Type mismatch — remove and recopy.
-                if metadata_is_directory(&dst_meta) {
-                    fs::remove_dir_all(destination.as_std_path())
-                        .map_err(|cause| error!("could not remove stale directory at `{destination}`").caused_by(cause))?;
-                } else {
-                    fs::remove_file(destination.as_std_path())
-                        .map_err(|cause| error!("could not remove stale entry at `{destination}`").caused_by(cause))?;
-                }
-                true
-            } else {
-                file_differs(source, destination, src_meta, &dst_meta)?
-            }
+    sync_file_with(
+        destination,
+        || inspect_destination(destination, identity),
+        |metadata| file_differs(source, destination, src_meta, metadata),
+        |_directory| remove_destination(destination),
+        || {
+            prepare_parent(destination)?;
+            // Reflinks require an absent destination; ordinary copying can still overwrite a
+            // writable file when the containing directory does not permit deleting it.
+            let _removed = fs::remove_file(destination);
+            copy_file_for_sync(source, destination, reflinks)
+        },
+    )
+}
+
+enum FileDestination<M> {
+    File(M),
+    Directory,
+    Link,
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn inspect_destination<M>(destination: &Utf8Path, file: impl FnOnce(fs::Metadata) -> M) -> std::io::Result<FileDestination<M>> {
+    fs::symlink_metadata(destination).map(|metadata| {
+        if metadata.is_symlink() {
+            FileDestination::Link
+        } else if metadata.is_dir() {
+            FileDestination::Directory
+        } else {
+            FileDestination::File(file(metadata))
+        }
+    })
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn remove_destination(destination: &Utf8Path) -> std::io::Result<()> {
+    if matches!(inspect_destination(destination, drop)?, FileDestination::Directory) {
+        fs::remove_dir_all(destination)
+    } else {
+        remove_stale_entry(destination)
+    }
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn prepare_parent(destination: &Utf8Path) -> Result<()> {
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent).map_err(|cause| error!("could not create `{parent}`").caused_by(cause))?;
+    }
+    Ok(())
+}
+
+fn sync_file_with<M>(
+    destination: &Utf8Path,
+    inspect: impl FnOnce() -> std::io::Result<FileDestination<M>>,
+    differs: impl FnOnce(&M) -> Result<bool>,
+    remove: impl FnOnce(bool) -> std::io::Result<()>,
+    copy: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    let needs_copy = match inspect() {
+        Err(cause) if is_not_found(&cause) => true,
+        Err(cause) => return Err(error!("could not inspect `{destination}`").caused_by(cause)),
+        Ok(FileDestination::File(metadata)) => differs(&metadata)?,
+        Ok(kind) => {
+            let directory = matches!(kind, FileDestination::Directory);
+            remove(directory).map_err(|cause| {
+                let kind = if directory { "directory" } else { "entry" };
+                error!("could not remove stale {kind} at `{destination}`").caused_by(cause)
+            })?;
+            true
         }
     };
-
     if needs_copy {
-        // Ensure parent exists.
-        if let Some(parent) = destination.parent()
-            && missing_directory(parent)
-        {
-            fs::create_dir_all(parent.as_std_path()).map_err(|cause| error!("could not create `{parent}`").caused_by(cause))?;
-        }
-
-        // Remove existing destination before copying (reflink requires no existing file).
-        let _removed = fs::remove_file(destination.as_std_path());
-        copy_file_for_sync(source, destination, reflinks)?;
+        copy()?;
     }
-    // Unchanged files are left in place — their mtime stays as it was, preserving Cargo
-    // fingerprints.
-
     Ok(())
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
-// #[gamma::skip(all, reason = "Length, mode and readonly comparisons receive native Metadata that tests cannot construct in memory; byte-stream comparison remains mutation-tested through readers_have_same_contents.", tag = "native-boundary")]
 pub fn file_differs(source: &Utf8Path, destination: &Utf8Path, src: &fs::Metadata, dst: &fs::Metadata) -> Result<bool> {
     if different_lengths(src, dst) {
         return Ok(true);
@@ -460,10 +510,16 @@ fn same_contents(left: &Utf8Path, right: &Utf8Path) -> Result<bool> {
 }
 
 fn readers_have_same_contents(left: impl Read, right: impl Read) -> std::io::Result<bool> {
-    // #[gamma::skip(all, reason = "buffer capacity changes only how identical byte streams are chunked; fill_buf/consume explicitly aligns independent chunk boundaries")]
-    let mut left = BufReader::with_capacity(16 * 1024, left);
-    // #[gamma::skip(all, reason = "buffer capacity changes only how identical byte streams are chunked; fill_buf/consume explicitly aligns independent chunk boundaries")]
-    let mut right = BufReader::with_capacity(16 * 1024, right);
+    let mut left = BufReader::with_capacity(
+        // #[gamma::skip(arith.mul_to_add, literal.int_decrement, literal.int_increment, literal.int_to_one, tag = "equivalent", reason = "These capacities stay positive; comparing and consuming the shared prefix makes file equality independent of chunk size.")]
+        16 * 1024,
+        left,
+    );
+    let mut right = BufReader::with_capacity(
+        // #[gamma::skip(arith.mul_to_add, literal.int_decrement, literal.int_increment, literal.int_to_one, tag = "equivalent", reason = "These capacities stay positive; comparing and consuming the shared prefix makes file equality independent of chunk size.")]
+        16 * 1024,
+        right,
+    );
 
     loop {
         let (compared, left_eof, right_eof, equal) = {
@@ -498,52 +554,56 @@ pub fn sync_symlink(source: &Utf8Path, destination: &Utf8Path) -> Result<()> {
     sync_symlink_with(source, destination, super::copy::create_symlink)
 }
 
-// #[gamma::skip(all, reason = "Only link creation is injected: inventory, metadata, read_link and removal are native. Covering their failure combinations requires the deferred filesystem backend.", tag = "native-boundary")]
 pub fn sync_symlink_with(
     source: &Utf8Path,
     destination: &Utf8Path,
     create: impl FnOnce(&std::path::Path, &std::path::Path, bool) -> std::io::Result<()>,
 ) -> Result<()> {
-    let src_target = fs::read_link(source.as_std_path()).map_err(|cause| error!("could not read the link `{source}`").caused_by(cause))?;
+    sync_link(
+        destination,
+        || fs::read_link(source).map_err(|cause| error!("could not read the link `{source}`").caused_by(cause)),
+        || inspect_destination(destination, drop),
+        || fs::read_link(destination),
+        |_directory| remove_destination(destination),
+        |target| {
+            prepare_parent(destination)?;
+            #[cfg(windows)]
+            let directory = source_link_targets_directory(source, target);
+            #[cfg(not(windows))]
+            let directory = false;
+            create(target, destination.as_std_path(), directory)
+                .map_err(|cause| error!("could not recreate the link `{destination}`").caused_by(cause))
+        },
+    )
+}
 
-    let needs_recreate = match fs::symlink_metadata(destination.as_std_path()) {
-        Err(_) => true,
-        Ok(dst_meta) => {
-            if metadata_is_symlink(&dst_meta) {
-                // Both are symlinks — compare targets.
-                link_target_differs(destination, &src_target)
-            } else {
-                // Type mismatch — remove what is there.
-                if metadata_is_directory(&dst_meta) {
-                    fs::remove_dir_all(destination.as_std_path())
-                        .map_err(|cause| error!("could not remove stale directory at `{destination}`").caused_by(cause))?;
-                } else {
-                    fs::remove_file(destination.as_std_path())
-                        .map_err(|cause| error!("could not remove stale entry at `{destination}`").caused_by(cause))?;
-                }
-                true
+fn sync_link(
+    destination: &Utf8Path,
+    source_target: impl FnOnce() -> Result<std::path::PathBuf>,
+    inspect: impl FnOnce() -> std::io::Result<FileDestination<()>>,
+    destination_target: impl FnOnce() -> std::io::Result<std::path::PathBuf>,
+    remove: impl FnOnce(bool) -> std::io::Result<()>,
+    create: impl FnOnce(&std::path::Path) -> Result<()>,
+) -> Result<()> {
+    let target = source_target()?;
+    let previous = match inspect() {
+        Err(cause) if is_not_found(&cause) => None,
+        Err(cause) => return Err(error!("could not inspect `{destination}`").caused_by(cause)),
+        Ok(FileDestination::Link) => {
+            if destination_target().is_ok_and(|previous| previous == target) {
+                return Ok(());
             }
+            Some(false)
         }
+        Ok(kind) => Some(matches!(kind, FileDestination::Directory)),
     };
-
-    if should_recreate_link(needs_recreate) {
-        let _removed = fs::remove_file(destination.as_std_path());
-
-        if let Some(parent) = destination.parent()
-            && !parent.as_std_path().exists()
-        {
-            fs::create_dir_all(parent.as_std_path()).map_err(|cause| error!("could not create `{parent}`").caused_by(cause))?;
-        }
-
-        #[cfg(windows)]
-        let directory = source_link_targets_directory(source, &src_target);
-        #[cfg(not(windows))]
-        let directory = false;
-        create(&src_target, destination.as_std_path(), directory)
-            .map_err(|cause| error!("could not recreate the link `{destination}`").caused_by(cause))?;
+    if let Some(directory) = previous {
+        remove(directory).map_err(|cause| {
+            let kind = if directory { "directory" } else { "entry" };
+            error!("could not remove stale {kind} at `{destination}`").caused_by(cause)
+        })?;
     }
-
-    Ok(())
+    create(&target)
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -612,24 +672,31 @@ pub fn remove_stale<S: std::hash::BuildHasher>(root: &Utf8Path, expected: &HashS
     remove_stale_with_directory(root, expected, |path| fs::remove_dir(path.as_std_path()))
 }
 
-// #[gamma::skip(try.propagate_to_unwrap, match_guard.always_true, reason = "This adapter still walks and removes real entries; scripting these failures requires injected inventory and file removal. stale_inventory retains in-memory decision coverage.", tag = "native-boundary")]
 pub fn remove_stale_with_directory<S: std::hash::BuildHasher>(
     root: &Utf8Path,
     expected: &HashSet<Utf8PathBuf, S>,
+    remove_directory: impl FnMut(&Utf8Path) -> std::io::Result<()>,
+) -> Result<()> {
+    let entries = WalkDir::new(root.as_std_path()).into_iter().map(|entry| {
+        let entry = entry.map_err(|cause| error!("could not read the scratch tree at `{root}`").caused_by(cause))?;
+        let directory = walk_entry_is_directory(&entry);
+        Ok((entry.into_path(), directory))
+    });
+    remove_stale_with(root, expected, entries, remove_stale_entry, remove_directory)
+}
+
+fn remove_stale_with<S: std::hash::BuildHasher>(
+    root: &Utf8Path,
+    expected: &HashSet<Utf8PathBuf, S>,
+    entries: impl IntoIterator<Item = Result<(std::path::PathBuf, bool)>>,
+    mut remove_file: impl FnMut(&Utf8Path) -> std::io::Result<()>,
     mut remove_directory: impl FnMut(&Utf8Path) -> std::io::Result<()>,
 ) -> Result<()> {
-    let entries = WalkDir::new(root.as_std_path())
-        .into_iter()
-        .filter_map(core::result::Result::ok)
-        .map(|entry| {
-            let directory = walk_entry_is_directory(&entry);
-            (entry.into_path(), directory)
-        });
-    let (stale_files, mut stale_dirs) = stale_inventory(root, expected, entries);
+    let (stale_files, mut stale_dirs) = stale_inventory(root, expected, entries)?;
 
     // Remove stale files first.
     for file in &stale_files {
-        fs::remove_file(file.as_std_path())
+        remove_file(file)
             .or_else(ignore_not_found)
             .map_err(|cause| error!("could not remove stale file `{file}`").caused_by(cause))?;
     }
@@ -657,11 +724,12 @@ pub fn remove_stale_with_directory<S: std::hash::BuildHasher>(
 fn stale_inventory<S: std::hash::BuildHasher>(
     root: &Utf8Path,
     expected: &HashSet<Utf8PathBuf, S>,
-    entries: impl IntoIterator<Item = (std::path::PathBuf, bool)>,
-) -> (Vec<Utf8PathBuf>, Vec<Utf8PathBuf>) {
+    entries: impl IntoIterator<Item = Result<(std::path::PathBuf, bool)>>,
+) -> Result<(Vec<Utf8PathBuf>, Vec<Utf8PathBuf>)> {
     let mut files = Vec::new();
     let mut directories = Vec::new();
-    'entries: for (path, directory) in entries {
+    'entries: for entry in entries {
+        let (path, directory) = entry?;
         let Ok(path) = Utf8PathBuf::from_path_buf(path) else {
             continue 'entries;
         };
@@ -679,7 +747,7 @@ fn stale_inventory<S: std::hash::BuildHasher>(
             }
         }
     }
-    (files, directories)
+    Ok((files, directories))
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -742,13 +810,8 @@ pub fn metadata_is_directory(metadata: &fs::Metadata) -> bool {
 }
 
 #[must_use]
-// #[gamma::skip(fn_value.bool_false, reason = "This thin native Metadata adapter needs a real symlink to distinguish false; no in-memory Metadata constructor exists.", tag = "native-boundary")]
 pub fn metadata_is_symlink(metadata: &fs::Metadata) -> bool {
     metadata.is_symlink()
-}
-
-fn missing_directory(path: &Utf8Path) -> bool {
-    !path.as_std_path().exists()
 }
 
 fn different_lengths(left: &fs::Metadata, right: &fs::Metadata) -> bool {
@@ -757,16 +820,11 @@ fn different_lengths(left: &fs::Metadata, right: &fs::Metadata) -> bool {
 
 #[cfg_attr(coverage_nightly, coverage(off))]
 #[must_use]
-// #[gamma::skip(fn_value.bool_true, reason = "This adapter reads an actual symlink target; deterministic target observations need the deferred filesystem seam.", tag = "native-boundary")]
 pub fn link_target_differs(destination: &Utf8Path, source_target: &std::path::Path) -> bool {
     match fs::read_link(destination.as_std_path()) {
         Ok(target) => target != source_target,
         Err(_) => true,
     }
-}
-
-const fn should_recreate_link(needs_recreate: bool) -> bool {
-    needs_recreate
 }
 
 #[cfg(any(windows, feature = "internals", all(test, not(miri))))]
@@ -837,6 +895,297 @@ fn record(failure: &Mutex<Option<Error>>, cause: Error) {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     #[test]
+    fn ordered_sync_stops_at_the_first_io_refusal_and_stale_directory_errors_are_not_silenced() {
+        let entries = ["b", "a"].map(Utf8PathBuf::from);
+        let mut visited = Vec::new();
+        let failure = sync_entries_in_order(&entries, |path| {
+            visited.push(path.to_owned());
+            Err(error!("owned sync refusal"))
+        })
+        .unwrap_err();
+        assert_eq!(failure.message(), "owned sync refusal");
+        assert_eq!(visited, [Utf8PathBuf::from("a")]);
+
+        let root = Utf8Path::new("scratch");
+        for kind in [ErrorKind::PermissionDenied, ErrorKind::Other] {
+            let failure = remove_stale_with(
+                root,
+                &HashSet::<Utf8PathBuf>::new(),
+                [Ok((root.join("stale").into_std_path_buf(), true))],
+                |_| panic!("there is no stale file"),
+                |_| Err(io::Error::new(kind, "owned directory refusal")),
+            )
+            .unwrap_err();
+            assert!(failure.to_string().contains("owned directory refusal"), "{failure}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn delta_sync_returns_a_locked_destination_error_without_panicking_or_losing_the_file() {
+        use std::os::windows::fs::OpenOptionsExt as _;
+
+        let (_directory, from, to) = tree();
+        fs::write(from.join("input.rs"), "new").unwrap();
+        fs::create_dir_all(&to).unwrap();
+        let destination = to.join("input.rs");
+        fs::write(&destination, "old").unwrap();
+        let locked = File::options().read(true).share_mode(0).open(&destination).unwrap();
+        let failure = delta_sync(&from, &to, &to, CopyOptions::default(), &Reflinks::new()).unwrap_err();
+        assert_ne!(failure.message(), "");
+        drop(locked);
+        assert_eq!(fs::read_to_string(destination).unwrap(), "old");
+    }
+
+    #[test]
+    fn a_failed_sentinel_invalidation_stops_sync_before_any_copy_or_removal() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = Utf8Path::from_path(directory.path()).unwrap().join("scratch");
+        fs::create_dir(&root).unwrap();
+        mark_consistent(&root);
+        let failure = sync_or_copy_with_sentinel(
+            (Utf8Path::new("source"), &root, Utf8Path::new("excluded")),
+            CopyOptions::default(),
+            |_, _, _, _, _| panic!("the consistency marker must be invalidated before synchronizing"),
+            |_| panic!("invalidation refusal cannot trigger destructive fallback"),
+            |_, _, _, _, _| panic!("invalidation refusal cannot copy"),
+            |path| {
+                assert_eq!(path, root);
+                Err(error!("sentinel removal refused"))
+            },
+        )
+        .unwrap_err();
+        assert_eq!(failure.message(), "sentinel removal refused");
+        assert!(is_consistent(&root));
+    }
+
+    #[test]
+    fn source_collection_excludes_the_native_walk_root() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = Utf8Path::from_path(directory.path()).unwrap();
+        fs::write(root.join("lib.rs"), "").unwrap();
+        let entries = collect_source_entries(root, &root.join("excluded"), CopyOptions::default()).unwrap();
+        assert_eq!(entries, HashSet::from([Utf8PathBuf::from("lib.rs")]));
+    }
+
+    #[test]
+    fn file_sync_propagates_inspection_comparison_removal_and_copy_failures() {
+        let destination = Utf8Path::new("scratch-file");
+        let failure = sync_file_with::<()>(
+            destination,
+            || Err(io::Error::from(ErrorKind::PermissionDenied)),
+            |()| panic!("inspection did not authorize comparison"),
+            |_| panic!("inspection did not authorize removal"),
+            || panic!("inspection did not authorize copying"),
+        )
+        .unwrap_err();
+        assert!(failure.to_string().contains("could not inspect"));
+        for directory in [false, true] {
+            let failure = sync_file_with::<()>(
+                destination,
+                || {
+                    Ok(if directory {
+                        FileDestination::Directory
+                    } else {
+                        FileDestination::Link
+                    })
+                },
+                |()| panic!("a type mismatch is not a regular file"),
+                |actual| {
+                    assert_eq!(actual, directory);
+                    Err(io::Error::other("removal refused"))
+                },
+                || panic!("failed removal must not be followed by copying"),
+            )
+            .unwrap_err();
+            assert!(failure.to_string().contains(if directory {
+                "could not remove stale directory"
+            } else {
+                "could not remove stale entry"
+            }));
+        }
+        let failure = sync_file_with(
+            destination,
+            || Ok(FileDestination::File(())),
+            |()| Err(error!("comparison refused")),
+            |_| panic!(),
+            || panic!(),
+        )
+        .unwrap_err();
+        assert_eq!(failure.message(), "comparison refused");
+        for missing in [false, true] {
+            let failure = sync_file_with(
+                destination,
+                || {
+                    if missing {
+                        Err(io::Error::from(ErrorKind::NotFound))
+                    } else {
+                        Ok(FileDestination::File(()))
+                    }
+                },
+                |()| Ok(true),
+                |_| panic!("regular or absent entries need no type-mismatch removal"),
+                || Err(error!("copy refused")),
+            )
+            .unwrap_err();
+            assert_eq!(failure.message(), "copy refused");
+        }
+        sync_file_with(
+            destination,
+            || Ok(FileDestination::File(())),
+            |()| Ok(false),
+            |_| panic!(),
+            || panic!("unchanged bytes retain their mtime"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn link_sync_injects_read_metadata_and_removal_failures_without_touching_storage() {
+        let destination = Utf8Path::new("scratch-link");
+        let failure = sync_link(
+            destination,
+            || Err(error!("source link refused")),
+            || panic!(),
+            || panic!(),
+            |_| panic!(),
+            |_| panic!(),
+        )
+        .unwrap_err();
+        assert_eq!(failure.message(), "source link refused");
+        let failure = sync_link(
+            destination,
+            || Ok("target".into()),
+            || Err(io::Error::from(ErrorKind::PermissionDenied)),
+            || panic!(),
+            |_| panic!(),
+            |_| panic!(),
+        )
+        .unwrap_err();
+        assert!(failure.to_string().contains("could not inspect"));
+        sync_link(
+            destination,
+            || Ok("target".into()),
+            || Ok(FileDestination::Link),
+            || Ok("target".into()),
+            |_| panic!("unchanged links are retained"),
+            |_| panic!(),
+        )
+        .unwrap();
+        let failure = sync_link(
+            destination,
+            || Ok("target".into()),
+            || Ok(FileDestination::Link),
+            || Err(io::Error::from(ErrorKind::PermissionDenied)),
+            |directory| {
+                assert!(!directory, "directory links use link removal, not recursive directory removal");
+                Err(io::Error::other("removal refused"))
+            },
+            |_| panic!("failed removal must not create a replacement"),
+        )
+        .unwrap_err();
+        assert!(failure.to_string().contains("could not remove stale entry"));
+        let failure = sync_link(
+            destination,
+            || Ok("target".into()),
+            || Err(io::Error::from(ErrorKind::NotFound)),
+            || panic!(),
+            |_| panic!(),
+            |target| {
+                assert_eq!(target, std::path::Path::new("target"));
+                Err(error!("link creation refused"))
+            },
+        )
+        .unwrap_err();
+        assert_eq!(failure.message(), "link creation refused");
+    }
+
+    #[test]
+    fn stale_walk_and_file_removal_failures_stop_delta_cleanup() {
+        let root = Utf8Path::new("scratch");
+        let expected = HashSet::<Utf8PathBuf>::new();
+        let entries = [Ok((root.join("stale").into_std_path_buf(), false)), Err(error!("walk refused"))];
+        let failure = remove_stale_with(
+            root,
+            &expected,
+            entries,
+            |_| panic!("an incomplete walk cannot remove entries"),
+            |_| panic!(),
+        )
+        .unwrap_err();
+        assert_eq!(failure.message(), "walk refused");
+        let failure = remove_stale_with(
+            root,
+            &expected,
+            [Ok((root.join("stale").into_std_path_buf(), false))],
+            |_| Err(io::Error::from(ErrorKind::PermissionDenied)),
+            |_| panic!("failed file removal must not advance to directory cleanup"),
+        )
+        .unwrap_err();
+        assert!(failure.to_string().contains("could not remove stale file"));
+    }
+
+    #[test]
+    fn a_case_only_source_rename_keeps_the_new_spelling_and_contents_in_the_scratch_tree() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let base = Utf8Path::from_path(directory.path()).unwrap();
+        let source = base.join("source");
+        let scratch = base.join("scratch");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("Foo.rs"), "unchanged bytes").unwrap();
+        let skip = base.join("excluded");
+        assert_eq!(
+            sync_or_copy(&source, &scratch, &skip, CopyOptions::default()).unwrap(),
+            SyncOutcome::FreshCopy
+        );
+        fs::rename(source.join("Foo.rs"), source.join("foo.rs")).unwrap();
+        assert_eq!(
+            sync_or_copy(&source, &scratch, &skip, CopyOptions::default()).unwrap(),
+            SyncOutcome::Synchronized
+        );
+        assert_eq!(fs::read_to_string(scratch.join("foo.rs")).unwrap(), "unchanged bytes");
+        assert_eq!(fs::read_dir(scratch).unwrap().next().unwrap().unwrap().file_name(), "foo.rs");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn stale_and_type_changed_windows_directory_links_do_not_force_a_fresh_copy() {
+        for type_changed in [false, true] {
+            let directory = tempfile::tempdir_in(".").unwrap();
+            let base = Utf8Path::from_path(directory.path()).unwrap().canonicalize_utf8().unwrap();
+            let source = base.join("source");
+            let scratch = base.join("scratch");
+            let target = base.join("outside");
+            fs::create_dir(&source).unwrap();
+            fs::create_dir(&scratch).unwrap();
+            fs::create_dir(&target).unwrap();
+            fs::write(target.join("keep"), "outside bytes").unwrap();
+            if let Err(cause) = std::os::windows::fs::symlink_dir(&target, scratch.join("entry")) {
+                assert_eq!(
+                    cause.kind(),
+                    ErrorKind::PermissionDenied,
+                    "only lack of native link privilege may skip this case"
+                );
+                return;
+            }
+            if type_changed {
+                fs::write(source.join("entry"), "replacement file").unwrap();
+            }
+            mark_consistent(&scratch);
+            assert_eq!(
+                sync_or_copy(&source, &scratch, &base.join("excluded"), CopyOptions::default()).unwrap(),
+                SyncOutcome::Synchronized
+            );
+            assert_eq!(fs::read_to_string(target.join("keep")).unwrap(), "outside bytes");
+            if type_changed {
+                assert_eq!(fs::read_to_string(scratch.join("entry")).unwrap(), "replacement file");
+            } else {
+                assert!(!scratch.join("entry").exists());
+            }
+        }
+    }
+
+    #[test]
     fn oct25_delta_sync_orders_parents_before_children_and_equal_depths_lexically() {
         let entries = ["z/child/leaf.rs", "z/child", "a/file.rs", "z", "a"].map(Utf8PathBuf::from);
         let mut visited = Vec::new();
@@ -861,8 +1210,10 @@ mod tests {
                 ("outside/ignored.rs".into(), false),
                 ("workspace/stale.rs".into(), false),
                 ("workspace/old".into(), true),
-            ],
-        );
+            ]
+            .map(Ok),
+        )
+        .unwrap();
         assert_eq!(files, [Utf8PathBuf::from("workspace/stale.rs")]);
         assert_eq!(directories, [Utf8PathBuf::from("workspace/old")]);
     }
@@ -884,7 +1235,10 @@ mod tests {
             (file.clone().into_std_path_buf(), false),
             (directory.clone().into_std_path_buf(), true),
         ];
-        assert_eq!(stale_inventory(root, &expected, entries), (vec![file], vec![directory]));
+        assert_eq!(
+            stale_inventory(root, &expected, entries.map(Ok)).unwrap(),
+            (vec![file], vec![directory])
+        );
     }
 
     #[test]
@@ -1204,8 +1558,6 @@ mod tests {
         assert!(!is_walk_root(Utf8Path::new("file")));
         assert!(source_entry_exists(&from.join("file")));
         assert!(!source_entry_exists(&from.join("missing")));
-        assert!(missing_directory(&to.join("missing")));
-        assert!(!missing_directory(&to));
 
         let same = fs::metadata(to.join("same")).unwrap();
         let longer = fs::metadata(to.join("longer")).unwrap();
@@ -1215,8 +1567,6 @@ mod tests {
         assert!(metadata_is_directory(&directory));
         assert!(!metadata_is_directory(&same));
         assert!(!metadata_is_symlink(&same));
-        assert!(should_recreate_link(true));
-        assert!(!should_recreate_link(false));
         assert!(is_not_found(&io::Error::from(ErrorKind::NotFound)));
         assert!(!is_not_found(&io::Error::other("other")));
         ignore_not_found(io::Error::from(ErrorKind::NotFound)).unwrap();
@@ -1386,6 +1736,9 @@ mod tests {
 
         let _ = sync_or_copy(&from, &to, skip, CopyOptions::default()).unwrap();
         assert!(fs::symlink_metadata(to.join("link").as_std_path()).unwrap().is_symlink());
+        assert!(metadata_is_symlink(&fs::symlink_metadata(to.join("link")).unwrap()));
+        assert!(!link_target_differs(&to.join("link"), std::path::Path::new("target.txt")));
+        assert!(link_target_differs(&to.join("link"), std::path::Path::new("different.txt")));
         assert_eq!(
             fs::read_link(to.join("link").as_std_path()).unwrap().to_str().unwrap(),
             "target.txt"
@@ -1409,6 +1762,9 @@ mod tests {
         std::os::windows::fs::symlink_file("target.txt", from.join("link")).expect("source link");
 
         let _ = sync_or_copy(&from, &to, skip, CopyOptions::default()).expect("initial copy");
+        assert!(metadata_is_symlink(&fs::symlink_metadata(to.join("link")).unwrap()));
+        assert!(!link_target_differs(&to.join("link"), std::path::Path::new("target.txt")));
+        assert!(link_target_differs(&to.join("link"), std::path::Path::new("different.txt")));
         assert_eq!(
             fs::read_link(to.join("link")).expect("copied link"),
             std::path::PathBuf::from("target.txt")
@@ -1422,6 +1778,27 @@ mod tests {
             fs::read_link(to.join("link")).expect("updated link"),
             std::path::PathBuf::from("other.txt")
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_sync_replaces_a_file_symlink_without_overwriting_its_target() {
+        let (_directory, from, to) = tree();
+        fs::create_dir_all(&to).unwrap();
+        let source = from.join("input.rs");
+        let target = from.join("external.rs");
+        let destination = to.join("input.rs");
+        fs::write(&source, "new source contents").unwrap();
+        fs::write(&target, "unrelated target contents").unwrap();
+        std::os::windows::fs::symlink_file(target.canonicalize().unwrap(), &destination).unwrap();
+        assert!(fs::symlink_metadata(&destination).unwrap().is_symlink());
+
+        sync_entry(&source, &destination, &Reflinks::new()).unwrap();
+
+        assert!(fs::symlink_metadata(&destination).unwrap().is_file());
+        assert!(!fs::symlink_metadata(&destination).unwrap().is_symlink());
+        assert_eq!(fs::read_to_string(&destination).unwrap(), "new source contents");
+        assert_eq!(fs::read_to_string(&target).unwrap(), "unrelated target contents");
     }
 
     #[cfg(windows)]

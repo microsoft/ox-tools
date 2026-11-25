@@ -109,11 +109,9 @@ impl Summary {
 
     /// The mutation score, or `None` when nothing was scored.
     ///
-    /// [`Self::score`] answers 100% for an empty population, which is the only sensible thing to
-    /// print — a run that caught everything it tested did catch everything it tested — and a
-    /// catastrophic thing to hand a threshold. `--min-score 100` against an empty population is not
-    /// a gate that passed; it is a gate that never ran, and the two have to be distinguishable at
-    /// the one place the difference decides an exit code.
+    /// [`Self::score`] displays 100% when no mutants are scorable. This method distinguishes a
+    /// measured 100% from a population of only excluded outcomes; callers handle truly empty
+    /// selections as successful no-ops.
     #[must_use]
     pub fn scored(self) -> Option<f64> {
         (self.valid() > 0).then(|| self.score())

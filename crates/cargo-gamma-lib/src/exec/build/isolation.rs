@@ -12,6 +12,7 @@ use super::{
     BuildScope, CompilerReason, Converger, Events, HashMap, HashSet, Isolation, Mutant, Plan, Result, Workspace, blame,
     compiles_test_harnesses, isolation_candidate, retain_blamed,
 };
+use crate::error::error;
 use crate::exec::cargo_options::BuildLimits;
 
 pub(super) mod proof_cache;
@@ -609,7 +610,7 @@ fn extend_affected_packages(affected: &mut HashSet<String>, reach: &HashMap<Stri
                 affected.extend(dependencies.iter().cloned());
             }
         }
-        // #[gamma::skip(all, reason = "this fixed-point exit is the only bound once affected packages stop changing")]
+        // #[gamma::skip(all, tag = "timeout", reason = "Without the fixed-point exit, isolation repeatedly scans the unchanged affected-package closure forever.")]
         if affected.len() == before {
             break;
         }
@@ -1245,17 +1246,126 @@ impl Converger {
                 &evidence.failed_targets,
             );
         }
-        Ok(outcome.stdout.map(|_stdout| !outcome.succeeded))
+        proof_result(&outcome, plan, work, verb, active)
     }
+}
+
+#[ohno::error]
+#[display("compile isolation stopped because its proof failed without attributable compiler errors:\n{failure_context}\n{stderr}")]
+struct UnattributableProof {
+    failure_context: String,
+    stderr: String,
+}
+
+/// `None` means missing stdout; `Some(false)` means success; `Some(true)` means an active file
+/// has attributable compiler errors. `Err` means a failed build supplied no such attribution.
+fn proof_result(
+    outcome: &super::invoke::Compiled,
+    plan: &Plan,
+    work: &Workspace,
+    verb: &[&str],
+    active: &HashSet<u32>,
+) -> Result<Option<bool>> {
+    let Some(stdout) = outcome.stdout.as_deref() else {
+        return Ok(None);
+    };
+    if outcome.succeeded {
+        return Ok(Some(false));
+    }
+    let contexts = failure_contexts(stdout, plan, &work.root, verb);
+    if !contexts.iter().any(|context| {
+        plan.mutants.iter().any(|mutant| {
+            active.contains(&mutant.ordinal)
+                && context
+                    .files
+                    .iter()
+                    .any(|file| super::blame::matches_reported_file(Utf8Path::new(file), mutant.file.as_ref(), &work.root))
+        })
+    }) {
+        let cause = UnattributableProof::new(outcome.failure_context.clone(), outcome.stderr.clone());
+        return Err(error!("{cause}").caused_by(cause));
+    }
+    Ok(Some(true))
 }
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use core::error::Error as _;
+
     use serde_json::{Value, from_str, from_value, json};
 
     use super::*;
     use crate::error::error;
+
+    #[test]
+    fn noncompiler_and_unrelated_proof_failures_never_convict_a_subset() {
+        let root = Utf8Path::new("workspace");
+        let work = Workspace::adopt(root.to_owned(), root.join("target"));
+        let mut plan = plan(root, 2);
+        plan.mutants[1].file = Utf8Path::new("src/other.rs").into();
+        let mut outcome = super::super::invoke::Compiled {
+            succeeded: false,
+            failure_context: "Cargo finished with signal 9".into(),
+            stdout: Some(String::new()),
+            stderr: "linker failed: disk full".into(),
+        };
+        let noncompiler = proof_result(&outcome, &plan, &work, &["check", "--lib"], &HashSet::from_iter([1])).unwrap_err();
+        let cause = noncompiler.source().unwrap().downcast_ref::<UnattributableProof>().unwrap();
+        assert_eq!(cause.failure_context, outcome.failure_context);
+        assert_eq!(cause.stderr, outcome.stderr);
+        outcome.stdout = Some(error_stream());
+        assert_eq!(
+            proof_result(&outcome, &plan, &work, &["check", "--lib"], &HashSet::from_iter([1])).unwrap(),
+            Some(true)
+        );
+        let unrelated = proof_result(&outcome, &plan, &work, &["check", "--lib"], &HashSet::from_iter([2])).unwrap_err();
+        let cause = unrelated.source().unwrap().downcast_ref::<UnattributableProof>().unwrap();
+        assert_eq!(cause.failure_context, outcome.failure_context);
+        assert_eq!(cause.stderr, outcome.stderr);
+        outcome.succeeded = true;
+        assert_eq!(
+            proof_result(&outcome, &plan, &work, &["check", "--lib"], &HashSet::from_iter([1])).unwrap(),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn proof_result_uses_component_suffixes_only_for_absolute_paths_outside_the_workspace() {
+        let root = Utf8Path::new(if cfg!(windows) { "C:\\prepared" } else { "/prepared" });
+        let work = Workspace::adopt(root.to_owned(), root.join("target"));
+        let mut plan = plan(root, 1);
+        plan.mutants[0].file = Utf8Path::new("crates/pkg/src/lib.rs").into();
+        let outside = if cfg!(windows) { "C:\\elsewhere" } else { "/elsewhere" };
+        for (file, allowed) in [
+            ("crates/pkg/src/lib.rs".to_owned(), true),
+            (root.join("crates/pkg/src/lib.rs").to_string(), true),
+            (format!("{outside}/crates/pkg/src/lib.rs"), true),
+            ("elsewhere/crates/pkg/src/lib.rs".to_owned(), false),
+            (root.join("other/crates/pkg/src/lib.rs").to_string(), false),
+            (format!("{outside}/src/lib.rs"), false),
+            (format!("{outside}/crates/other/src/lib.rs"), false),
+        ] {
+            let mut diagnostic: Value = from_str(&error_stream()).unwrap();
+            diagnostic["message"]["spans"][0]["file_name"] = file.clone().into();
+            let outcome = super::super::invoke::Compiled {
+                succeeded: false,
+                failure_context: "compiler failed".into(),
+                stdout: Some(diagnostic.to_string()),
+                stderr: "compiler stderr".into(),
+            };
+            let actual = proof_result(&outcome, &plan, &work, &["check", "--lib"], &HashSet::from_iter([1]));
+            if allowed {
+                assert_eq!(actual.unwrap(), Some(true), "{file}");
+            } else {
+                assert_eq!(
+                    actual.unwrap_err().message(),
+                    "compile isolation stopped because its proof failed without attributable compiler errors:\ncompiler failed\ncompiler stderr",
+                    "{file}"
+                );
+            }
+        }
+    }
 
     #[derive(Debug, Default, PartialEq, Eq)]
     pub(super) struct CostWork {
@@ -1782,7 +1892,8 @@ mod tests {
                         if compiler_calls.get() == 1 {
                             compiler_identity.set(after_first);
                         }
-                        Ok(Some(super::super::tests::scripted_output(succeeded, "{}", "")))
+                        let stdout = if succeeded { String::new() } else { error_stream() };
+                        Ok(Some(super::super::tests::scripted_output(succeeded, &stdout, "")))
                     },
                     || {
                         with_operations(
@@ -1854,7 +1965,9 @@ mod tests {
             super::super::with_compiler(
                 move |_, _, _, _| {
                     compiler_calls.set(compiler_calls.get() + 1);
-                    Ok(Some(super::super::tests::scripted_output(compiler_calls.get() != 1, "{}", "")))
+                    let succeeded = compiler_calls.get() != 1;
+                    let stdout = if succeeded { String::new() } else { error_stream() };
+                    Ok(Some(super::super::tests::scripted_output(succeeded, &stdout, "")))
                 },
                 || {
                     with_operations(
@@ -1989,6 +2102,8 @@ mod tests {
         };
         let diagnostic = json!({
             "reason": "compiler-message",
+            "package_id": "subject 0.0.0",
+            "target": {"name": "subject", "kind": ["lib"]},
             "message": {
                 "level": "error", "message": "independent type error", "code": {"code": "E0308"},
                 "spans": [{"file_name": "src/lib.rs", "is_primary": true,
@@ -2222,6 +2337,8 @@ mod tests {
             .map(|ordinal| {
                 json!({
                     "reason": "compiler-message",
+                    "package_id": "subject 0.0.0",
+                    "target": {"name": "subject", "kind": ["lib"]},
                     "message": {
                         "level": "error", "message": "independent type error", "code": {"code": "E0308"},
                         "spans": [{
@@ -2353,6 +2470,8 @@ mod tests {
         };
         let diagnostics = json!({
             "reason": "compiler-message",
+            "package_id": "subject 0.0.0",
+            "target": {"name": "subject", "kind": ["lib"]},
             "message": {
                 "level": "error", "message": "type error enclosing a deleted assignment", "code": {"code": "E0308"},
                 "spans": [{

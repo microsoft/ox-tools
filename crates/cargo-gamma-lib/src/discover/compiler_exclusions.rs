@@ -10,7 +10,7 @@ use std::io::ErrorKind;
 
 use camino::Utf8Path;
 
-use super::{Hints, RunRecord};
+use super::RunRecord;
 use crate::error::error;
 use crate::model::{Mutant, Outcome};
 use crate::ops::collect::Shape;
@@ -39,22 +39,30 @@ pub struct CompilerExclusions {
 
 impl CompilerExclusions {
     /// Loads the authoritative inventory, importing historical evidence only on initialization.
-    pub fn load(base: &Utf8Path, root: &Utf8Path) -> Result<Self> {
+    pub fn load(base: &Utf8Path, _root: &Utf8Path) -> Result<Self> {
+        Self::load_with(
+            base,
+            |path| fs::read_to_string(path),
+            || {
+                let completed = RunRecord::load(base);
+                let incomplete = RunRecord::load_incomplete(base);
+                let mutants = completed.ordering().into_iter().chain(incomplete.ordering()).map(str::to_owned);
+                Self::from_historical(mutants)
+            },
+        )
+    }
+
+    fn load_with(
+        base: &Utf8Path,
+        read: impl FnOnce(&Utf8Path) -> std::io::Result<String>,
+        historical: impl FnOnce() -> Self,
+    ) -> Result<Self> {
         let path = base.join(FILE);
-        match fs::read_to_string(&path) {
+        match read(&path) {
             Ok(text) => Self::from_saved(&text, &path, |saved| saved.store(base)),
             Err(cause) if cause.kind() == ErrorKind::NotFound => {
                 // Reimporting into an existing inventory would undo the user's explicit removals.
-                let completed = RunRecord::load(base);
-                let incomplete = RunRecord::load_incomplete(base);
-                let hints = Hints::load(root);
-                let mutants = completed
-                    .ordering()
-                    .into_iter()
-                    .chain(incomplete.ordering())
-                    .chain(hints.ordering())
-                    .map(str::to_owned);
-                Ok(Self::from_historical(mutants))
+                Ok(historical())
             }
             Err(cause) => Err(error!("could not read compiler exclusion inventory `{path}`").caused_by(cause)),
         }
@@ -157,7 +165,7 @@ impl CompilerExclusions {
         crate::elements::write(&base.join(FILE), &text)
     }
 
-    /// Applies historical exclusions before executable numbering, without changing scorable results.
+    /// Applies historical compiler evidence before executable numbering.
     pub(crate) fn exclude(&self, mutants: &mut [Mutant]) -> usize {
         let mut excluded = 0;
         for mutant in mutants.iter_mut().filter(|mutant| mutant.outcome == Outcome::Pending) {
@@ -278,6 +286,29 @@ mod tests {
                 Some("historical compiler exclusion imported from earlier campaign evidence")
             );
         }
+    }
+
+    #[test]
+    fn absent_inventory_and_history_leave_a_fresh_candidate_pending() {
+        let root = Utf8Path::new("project");
+        let mut population = [candidate(1)];
+        let base = root.join("fresh-campaign");
+        let inventory = CompilerExclusions::load_with(
+            &base,
+            |path| {
+                assert_eq!(path, base.join(FILE));
+                Err(std::io::ErrorKind::NotFound.into())
+            },
+            || CompilerExclusions::from_historical(std::iter::empty()),
+        )
+        .unwrap();
+        assert_eq!(inventory.exclude(&mut population), 0);
+        assert_eq!(population[0].outcome, Outcome::Pending);
+        assert_eq!(
+            population[0].ordinal, 1,
+            "the current compiler and test executor must still see this candidate"
+        );
+        assert!(inventory.reason(&population[0]).is_none());
     }
 
     #[test]

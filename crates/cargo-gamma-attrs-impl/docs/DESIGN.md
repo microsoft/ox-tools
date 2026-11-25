@@ -23,10 +23,12 @@ metadata.
   logic outside rustc makes it directly testable and mutation-testable.
 - It accepts exactly one Rust expression where an attribute promises an
   expression and rejects unsupported keys or malformed selectors.
-- Delimiter depth and the combined chain of operators, casts, postfix links,
-  and `else` arms are bounded before input reaches `syn`. The chain categories
+- Delimiter depth and the combined chain of operators, operand-prefix keywords
+  (`return`, `break`, `yield`, `become`), casts, postfix links, and `else` arms
+  are bounded before input reaches `syn`. The chain categories
   share one budget, matching the engine guard rather than allowing mixed syntax
-  to evade each independent limit.
+  to evade each independent limit. An optional `break` label belongs to its
+  prefix and does not reset the accumulated path.
   The budget is cumulative along a token path across nested groups: each
   delimiter level costs four links and children inherit the enclosing path.
   Completed children retain their peak for subsequent postfix links, including
