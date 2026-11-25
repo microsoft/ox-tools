@@ -47,6 +47,7 @@ cargo-gamma-unsafe = { path = "crates/cargo-gamma-unsafe", default-features = fa
 # external dependencies
 cargo-platform = { version = "0.3.3", default-features = false }
 cargo_metadata = { version = "0.23.1", default-features = false }
+cc = { version = "1.10.0", default-features = false }
 cel = { version = "0.15.0", default-features = false }
 chrono = { version = "0.4.45", default-features = false }
 clap = { version = "4.6.7", default-features = false }
@@ -55,6 +56,7 @@ command-group = { version = "5.0.1", default-features = false }
 compact_str = { version = "0.10.0", default-features = false }
 csv = { version = "1.4.0", default-features = false }
 duct = { version = "1.1.2", default-features = false }
+elf = { version = "0.8.0", default-features = false }
 env_logger = { version = "0.11.11", default-features = false }
 fakeable = { version = "0.2.2", default-features = false }
 fetch = { version = "0.19.0", default-features = false }
@@ -64,6 +66,7 @@ futures = { version = "0.3.34", default-features = false }
 futures-util = { version = "0.3.34", default-features = false }
 glob = { version = "0.3.4", default-features = false }
 http-body-util = { version = "0.1.5", default-features = false }
+hunspell-dictgen = { path = "crates/hunspell-dictgen", default-features = false, version = "0.1.0" }
 ignore = { version = "0.4.34", default-features = false }
 indicatif = { version = "0.18.6", default-features = false }
 insta = { version = "1.49.0", default-features = false }
@@ -72,6 +75,7 @@ jsonc-parser = { version = "0.34", default-features = false }
 layered = { version = "0.3.8", default-features = false }
 lcov = { version = "0.8.2", default-features = false }
 libc = { version = "0.2.191", default-features = false }
+libloading = { version = "0.8.9", default-features = false }
 log = { version = "0.4.35", default-features = false }
 loom = { version = "0.7.2", default-features = false }
 mimalloc = { version = "0.1.52", default-features = false }
