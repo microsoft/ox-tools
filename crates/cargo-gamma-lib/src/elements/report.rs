@@ -499,7 +499,6 @@ fn reason_for(mutant: &Mutant) -> Option<String> {
 /// source-location rendering, which embedding it requires. The read and parse happen after the run
 /// rather than during it, so a file the repository deleted, made unreadable, made invalid Rust, or
 /// nested beyond the supported parser limit in the meantime fails here.
-// #[gamma::skip(all, reason = "report metadata, root identity, and mutant-id schema are asserted by schema and golden artifact tests; mutations here duplicate those report contracts")]
 pub fn build(plan: &Plan, thresholds: Thresholds, run: Option<RunInfo>) -> Result<Report> {
     build_from(plan, None, thresholds, run)
 }
@@ -694,7 +693,10 @@ fn validate_schema_version(value: &Value, path: &str) -> SchemaResult<()> {
     if supported_schema_version(version) {
         Ok(())
     } else {
-        Err(format!("schema version `{version}` at {path} must match the supported pattern"))
+        Err(format!(
+            "schema version `{}` at {path} must match the supported pattern",
+            crate::report::encode_controls(version)
+        ))
     }
 }
 
@@ -765,7 +767,11 @@ fn validate_mutant(value: &Value, path: &str) -> SchemaResult<()> {
         status,
         "Killed" | "Survived" | "NoCoverage" | "CompileError" | "RuntimeError" | "Timeout" | "Ignored" | "Pending"
     ) {
-        return Err(format!("{path} mutant `{id}` has unknown schema status `{status}`"));
+        return Err(format!(
+            "{path} mutant `{}` has unknown schema status `{}`",
+            crate::report::encode_controls(id),
+            crate::report::encode_controls(status)
+        ));
     }
 
     for name in ["description", "replacement", "statusReason"] {
@@ -920,24 +926,15 @@ fn is_uri(value: &str) -> bool {
         return false;
     }
 
-    let bytes = rest.as_bytes();
-    let mut index = 0;
-
-    while let Some(&byte) = bytes.get(index) {
+    let mut bytes = rest.bytes();
+    while let Some(byte) = bytes.next() {
         if byte == b'%' {
-            if !bytes.get(index + 1).is_some_and(u8::is_ascii_hexdigit) || !bytes.get(index + 2).is_some_and(u8::is_ascii_hexdigit) {
+            if !bytes.next().is_some_and(|digit| digit.is_ascii_hexdigit()) || !bytes.next().is_some_and(|digit| digit.is_ascii_hexdigit())
+            {
                 return false;
             }
-
-            // #[gamma::skip(all, reason = "these mutations stop the URI scanner from advancing past a valid percent escape, so it loops until the mutation-test budget expires")]
-            index += 3;
-        } else {
-            if byte.is_ascii_control() || matches!(byte, b' ' | b'"' | b'<' | b'>' | b'\\' | b'^' | b'`' | b'{' | b'|' | b'}') {
-                return false;
-            }
-
-            // #[gamma::skip(all, reason = "these mutations make the URI scanner repeat the same ordinary byte forever, so the mutation-test budget is the only termination")]
-            index += 1;
+        } else if byte.is_ascii_control() || matches!(byte, b' ' | b'"' | b'<' | b'>' | b'\\' | b'^' | b'`' | b'{' | b'|' | b'}') {
+            return false;
         }
     }
 
@@ -994,7 +991,6 @@ fn render(mutant: &Mutant, source: &SourceFile) -> MutantResult {
     clippy::cast_precision_loss,
     reason = "the interchange schema represents durations as JSON numbers, while a run measures milliseconds in u64"
 )]
-// #[gamma::skip(all, reason = "source rendering, summary presence, and line offsets are asserted by exact report fixtures; mutating this private adapter duplicates that contract")]
 fn render_with_first_line_offset(mutant: &Mutant, source: &SourceFile, first_line_offset: usize) -> MutantResult {
     let (start_line, start_column) = source.location(mutant.span.start);
     let (end_line, end_column) = source.location(mutant.span.end);
@@ -1581,7 +1577,15 @@ mod tests {
 
     #[test]
     fn survivor_uri_first_byte_escapes_and_control_bytes_are_checked() {
-        for uri in ["https://x/%g0", "https://x/\n", "https://x/\u{7f}", "https://x/\0", "https://x/%0g"] {
+        for uri in [
+            "https://x/%g0",
+            "https://x/\n",
+            "https://x/\u{7f}",
+            "https://x/\0",
+            "https://x/%0g",
+            "x:%20\n",
+            "x:a\0",
+        ] {
             assert!(!is_uri(uri), "{uri:?}");
         }
         assert!(is_uri("x:"));
@@ -2054,6 +2058,26 @@ mod tests {
         timed.elapsed_ms = 12;
 
         assert_eq!(render(&timed, &source).duration, Some(12.0));
+    }
+
+    #[test]
+    fn even_a_one_millisecond_verdict_keeps_its_duration_and_description() {
+        let source = SourceFile::parse("src/lib.rs", "fn f() {}".to_owned()).unwrap();
+        let mut subject = mutant(Outcome::Killed, 0..1);
+        subject.elapsed_ms = 1;
+        let rendered = render_with_first_line_offset(&subject, &source, 0);
+        assert_eq!(rendered.duration, Some(1.0));
+        assert_eq!(rendered.description, Some(subject.summary()));
+    }
+
+    #[test]
+    fn uri_percent_escapes_consume_exactly_two_digits_before_resuming_validation() {
+        for uri in ["x:%20", "x:%20%2F", "x:abc%2Fdef"] {
+            assert!(is_uri(uri), "{uri:?}");
+        }
+        for uri in ["x:%", "x:%2", "x:%2x", "x:%20|", "x:%20%2G", "x:%20%", "x:abc%20\0"] {
+            assert!(!is_uri(uri), "{uri:?}");
+        }
     }
 
     #[test]

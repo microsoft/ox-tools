@@ -51,6 +51,8 @@ enum Previous {
     Expression,
     Operator,
     Prefix,
+    Break,
+    BreakLabel,
 }
 
 impl Previous {
@@ -102,7 +104,7 @@ pub(super) fn beyond(text: &str, comments: &[Comment], limit: usize) -> Option<u
             && comment.span.start <= at
         {
             at = at.max(comment.span.end);
-            // #[gamma::skip(all, reason = "not advancing the comment index repeatedly revisits it until timeout")]
+            // #[gamma::skip(all, tag = "timeout", reason = "The comment cursor must leave this already-ended comment before the scan can reach the current source byte.")]
             next += 1;
             continue;
         }
@@ -112,7 +114,7 @@ pub(super) fn beyond(text: &str, comments: &[Comment], limit: usize) -> Option<u
                 let inherited = base.get(depth).copied().unwrap_or_default();
                 set(&mut path, depth, inherited);
             }
-            // #[gamma::skip(all, reason = "not advancing past a literal retries it forever")]
+            // #[gamma::skip(all, tag = "timeout", reason = "Without this endpoint update the syntax guard repeatedly scans the same literal opener.")]
             at = end;
             previous = Previous::Expression;
             continue;
@@ -123,7 +125,10 @@ pub(super) fn beyond(text: &str, comments: &[Comment], limit: usize) -> Option<u
                 .get(at..end)
                 .expect("identifier_end returns an ordered UTF-8-boundary range in this text");
 
-            if identifier == "else"
+            if previous == Previous::BreakLabel {
+                // A break label belongs to its existing prefix, so it spends no extra link.
+                previous = Previous::Prefix;
+            } else if identifier == "else"
                 && awaiting_else.get(depth).copied().unwrap_or(
                     // #[gamma::skip(literal.bool_flip, reason = "awaiting_else starts with a root entry and both opening-delimiter branches set an entry at every new depth; closers only lower depth with saturation. Its get(depth) is always Some, so changing the unwrap_or fallback is unobservable.", tag = "equivalent")]
                     false,
@@ -145,6 +150,19 @@ pub(super) fn beyond(text: &str, comments: &[Comment], limit: usize) -> Option<u
                     return Some(at);
                 }
                 previous = Previous::Other;
+            } else if matches!(identifier, "return" | "break" | "yield" | "become") {
+                if awaiting_else.get(depth).copied().unwrap_or_default() {
+                    // #[gamma::skip(literal.int_increment, tag = "equivalent", reason = "The keyword adds a path link retained by closers; every later else link reaches the limit no later than a ladder reset to one.")]
+                    set(&mut ladders, depth, 0);
+                    set_bool(&mut awaiting_else, depth, false);
+                }
+                if previous == Previous::Expression {
+                    set(&mut path, depth, base.get(depth).copied().unwrap_or_default());
+                }
+                if link(&mut path, &mut peak, depth, path_limit) {
+                    return Some(at);
+                }
+                previous = if identifier == "break" { Previous::Break } else { Previous::Prefix };
             } else if identifier == "as" {
                 set_bool(&mut awaiting_else, depth, false);
                 previous = Previous::Other;
@@ -167,7 +185,7 @@ pub(super) fn beyond(text: &str, comments: &[Comment], limit: usize) -> Option<u
                 previous = Previous::Expression;
             }
 
-            // #[gamma::skip(all, reason = "not advancing past an identifier retries it forever")]
+            // #[gamma::skip(all, tag = "timeout", reason = "Without this endpoint update the syntax guard repeatedly scans the same identifier.")]
             at = end;
             continue;
         }
@@ -217,7 +235,11 @@ pub(super) fn beyond(text: &str, comments: &[Comment], limit: usize) -> Option<u
             }
 
             b'{' => {
-                let enclosing = if previous == Previous::Prefix { &path } else { &base };
+                let enclosing = if matches!(previous, Previous::Prefix | Previous::Break) {
+                    &path
+                } else {
+                    &base
+                };
                 let inherited = enclosing.get(depth).copied().unwrap_or_default().saturating_add(CHAIN_FACTOR);
                 depth += 1;
 
@@ -262,6 +284,10 @@ pub(super) fn beyond(text: &str, comments: &[Comment], limit: usize) -> Option<u
                 previous = Previous::Other;
             }
 
+            b'\'' if previous == Previous::Break => {
+                previous = Previous::BreakLabel;
+            }
+
             b':' | b'#' | b'@' | b'$' | b'\'' => {
                 previous = Previous::Other;
             }
@@ -277,13 +303,13 @@ pub(super) fn beyond(text: &str, comments: &[Comment], limit: usize) -> Option<u
             }
 
             _ => {
-                // #[gamma::skip(all, reason = "not advancing over a non-ASCII character leaves the scan on it forever")]
+                // #[gamma::skip(all, tag = "timeout", reason = "This character-width update is the non-ASCII branch's only progress to the next UTF-8 character.")]
                 at += text.get(at..).and_then(|rest| rest.chars().next()).map_or(1, char::len_utf8);
                 continue;
             }
         }
 
-        // #[gamma::skip(all, reason = "moving backward or not advancing makes the byte scan non-progressing")]
+        // #[gamma::skip(all, tag = "timeout", reason = "This byte update is the remaining punctuation branch's only progress toward EOF.")]
         at += 1;
     }
 
@@ -317,7 +343,7 @@ fn raise(path: &mut Vec<usize>, depth: usize, value: usize) {
 
 /// Makes `depth` a valid index, which an unbalanced closer can otherwise leave it short of.
 fn grow(chain: &mut Vec<usize>, depth: usize) {
-    // #[gamma::skip(all, reason = "reversing the growth condition appends without approaching termination and exhausts memory")]
+    // #[gamma::skip(all, tag = "outofmem", reason = "Reversing this stack-growth condition appends entries while moving farther from the requested depth, exhausting memory.")]
     while chain.len() <= depth {
         // #[gamma::skip(stmt.delete_call, reason = "removing the only growth operation makes this loop infinite")]
         chain.push(0);
@@ -348,12 +374,12 @@ const fn is_operator(byte: u8) -> bool {
 /// The end of the Rust identifier beginning at `at`.
 // #[gamma::skip(parameter.default_shadow, tag = "timeout", reason = "resetting at returns endpoints from the beginning of the text and repeatedly revisits identifiers")]
 fn identifier_end(text: &str, at: usize) -> Option<usize> {
+    let at = at + if text.get(at..)?.starts_with("r#") { 2 } else { 0 };
     let mut characters = text.get(at..)?.char_indices();
     let (_, first) = characters.next()?;
 
     if !rustc_lexer::is_id_start(first) {
         // #[gamma::skip(option.none_to_some, reason = "claiming punctuation starts a zero-width identifier leaves the outer scanner non-progressing")]
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     }
 
@@ -361,7 +387,7 @@ fn identifier_end(text: &str, at: usize) -> Option<usize> {
         characters
             .take_while(|(_, character)| rustc_lexer::is_id_continue(*character))
             .last()
-            // #[gamma::skip(all, reason = "corrupting the endpoint can move the outer scanner backward or leave it non-progressing")]
+            // #[gamma::skip(all, tag = "timeout", reason = "Returning a reset endpoint here rewinds the outer nesting scanner to the same literal opener.")]
             .map_or_else(
                 || at + first.len_utf8(),
                 |(offset, character)| {
@@ -384,6 +410,70 @@ mod tests {
     use super::super::comment::scan_comments;
     use super::super::source_file::line_starts;
     use super::*;
+
+    #[test]
+    fn macro_keyword_prefixes_clear_pending_else_markers_and_stale_ladders() {
+        for keyword in ["return", "break", "yield", "become"] {
+            for text in [
+                format!("m!{{if a {{}} {keyword} ----  else {{}} else {{}} else {{}}}}"),
+                format!(
+                    "m!{{if a {{}} else if a {{}} else if a {{}} else if a {{}} else if a {{}} else if a {{}} {keyword}  else {{}} else {{}} else {{}} else {{}}}}"
+                ),
+            ] {
+                syn::parse_file(&text).unwrap();
+                assert_eq!(beyond(&text, &[], 3), None, "{text}");
+            }
+        }
+    }
+
+    #[test]
+    fn macro_keyword_prefixes_preserve_ladders_that_are_not_awaiting_else() {
+        for keyword in ["return", "break", "yield", "become"] {
+            let text = format!(
+                "m!{{if a {{}} else if a {{}} else if a {{}} else if a {{}} else if a {{}} else {keyword} else  else {{}} else {{}} else {{}} else {{}}}}"
+            );
+            syn::parse_file(&text).unwrap();
+            assert_eq!(beyond(&text, &[], 3), text.rfind("else"), "{text}");
+        }
+    }
+
+    #[test]
+    fn macro_keyword_operands_inherit_prefix_cost_at_the_next_block() {
+        for keyword in ["return", "break", "yield", "become"] {
+            let text = format!("m!{{if a {{}} else {keyword} {{}} else }}");
+            syn::parse_file(&text).unwrap();
+            assert_eq!(beyond(&text, &[], 3), text.rfind('{'), "{text}");
+        }
+    }
+
+    #[test]
+    fn keyword_prefixes_share_the_operand_budget_but_restart_after_siblings() {
+        for keyword in ["return", "break", "yield", "become"] {
+            let at_limit = format!("{keyword} value.a.b.c");
+            let over_limit = format!("{keyword} value.a.b.c.d");
+            assert_eq!(beyond(&at_limit, &[], 1), None, "{at_limit}");
+            assert!(beyond(&over_limit, &[], 1).is_some(), "{over_limit}");
+            let sibling = format!("if value.a.b.c.d {{}} {at_limit}");
+            assert_eq!(beyond(&sibling, &[], 1), None, "{sibling}");
+        }
+    }
+
+    #[test]
+    fn labels_are_only_consumed_after_break_and_keep_single_character_raw_names() {
+        for keyword in ["return", "yield", "become"] {
+            let source = format!("!!!!!!!{keyword} 'out value +");
+            assert_eq!(beyond(&source, &[], 2), None, "{source}");
+        }
+        for label in ["out", "r#a", "r#out"] {
+            let prefix = format!("break '{label} ");
+            let boundary = format!("{}1", prefix.repeat(4));
+            let overflow = format!("{prefix}{boundary}");
+            assert_eq!(beyond(&boundary, &[], 1), None, "{boundary}");
+            assert_eq!(beyond(&overflow, &[], 1), Some(prefix.len() * 4), "{overflow}");
+        }
+        assert_eq!(beyond("break + break + 1", &[], 1), None);
+        assert_eq!(beyond("break + break + break 1", &[], 1), Some(16));
+    }
 
     #[test]
     fn postfix_operator_markers_preserve_the_exact_last_link_before_an_open_delimiter() {

@@ -8,10 +8,6 @@
     reason = "raw platform calls stay in `cargo-gamma-unsafe`; the source engine has no reason to use them"
 )]
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
-#![allow(
-    clippy::redundant_pub_crate,
-    reason = "this non-published crate exposes implementation types only so workspace crates can compose the engine"
-)]
 
 //! This crate is an internal implementation detail of
 //! [`cargo-gamma`](https://crates.io/crates/cargo-gamma). It contains the Rust source parsing,

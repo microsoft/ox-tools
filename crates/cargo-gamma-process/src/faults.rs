@@ -5,6 +5,7 @@
 
 use core::cell::RefCell;
 use core::time::Duration;
+use std::rc::Rc;
 use std::time::Instant;
 
 /// A process lifecycle operation a test can ask to fail once on its own thread.
@@ -79,9 +80,10 @@ pub fn arm_late(fault: Fault, delay: Duration) -> Armed {
 }
 
 fn ripe_at(fault: Fault, ripe: Instant) -> Armed {
-    ARMED.with_borrow_mut(|armed| armed.push((fault, ripe)));
+    let token = Rc::new(());
+    ARMED.with_borrow_mut(|armed| armed.push((fault, ripe, Rc::clone(&token))));
 
-    Armed(fault)
+    Armed(token)
 }
 
 pub(crate) fn fired(fault: Fault) -> bool {
@@ -92,15 +94,15 @@ fn fired_at(fault: Fault, now: Instant) -> bool {
     ARMED.with_borrow_mut(|armed| {
         armed
             .iter()
-            .position(|&(candidate, ripe)| candidate == fault && ripe <= now)
+            .position(|(candidate, ripe, _token)| *candidate == fault && *ripe <= now)
             .map(|at| armed.remove(at))
             .is_some()
     })
 }
 
-fn disarm(fault: Fault) {
+fn disarm(token: &Rc<()>) {
     ARMED.with_borrow_mut(|armed| {
-        if let Some(at) = armed.iter().position(|&(candidate, _ripe)| candidate == fault) {
+        if let Some(at) = armed.iter().position(|(_candidate, _ripe, candidate)| Rc::ptr_eq(candidate, token)) {
             let _spent = armed.remove(at);
         }
     });
@@ -108,16 +110,16 @@ fn disarm(fault: Fault) {
 
 /// Keeps one fault armed until it fires or this guard is dropped.
 #[derive(Debug)]
-pub struct Armed(Fault);
+pub struct Armed(Rc<()>);
 
 impl Drop for Armed {
     fn drop(&mut self) {
-        disarm(self.0);
+        disarm(&self.0);
     }
 }
 
 thread_local! {
-    static ARMED: RefCell<Vec<(Fault, Instant)>> = const { RefCell::new(Vec::new()) };
+    static ARMED: RefCell<Vec<(Fault, Instant, Rc<()>)>> = const { RefCell::new(Vec::new()) };
 }
 
 #[cfg(test)]
@@ -133,6 +135,16 @@ mod tests {
         assert!(!fired(Fault::Adopt));
 
         drop(armed);
+    }
+
+    #[test]
+    fn dropping_a_spent_guard_preserves_a_second_arming_of_the_same_fault() {
+        let first = arm(Fault::Prepare);
+        let _second = arm(Fault::Prepare);
+        assert!(fired(Fault::Prepare));
+        drop(first);
+        assert!(fired(Fault::Prepare));
+        assert!(!fired(Fault::Prepare));
     }
 
     #[test]

@@ -8,7 +8,7 @@ use std::collections::hash_map::Entry;
 use super::default_identity::{Identities, Pending};
 use crate::{HashMap, HashSet};
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(super) struct Sources {
     pending: HashMap<String, Pending>,
     duplicates: HashSet<String>,
@@ -129,11 +129,9 @@ impl Sources {
 
     pub(super) fn same_type(&self, source: &str, inline: &[String], left: &[String], right: &[String]) -> bool {
         let Some((identities, left)) = self.resolve(source, inline, left) else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         };
         let Some((_, right)) = self.resolve(source, inline, right) else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         };
         identities

@@ -7,6 +7,7 @@ use unicode_width::{UnicodeWidthChar as _, UnicodeWidthStr as _};
 
 /// Width of the status verb column, matching cargo.
 pub(super) const VERB_WIDTH: usize = 12;
+/// Keep tiny nonzero score gaps visible without printing insignificant floating-point digits.
 const MAX_SCORE_PRECISION: usize = 12;
 
 /// The empty status column, for a line that continues the one above it.

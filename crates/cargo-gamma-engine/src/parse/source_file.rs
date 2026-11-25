@@ -4,12 +4,14 @@
 //! Parsed source text and byte-offset navigation over it.
 
 use core::ops::Range;
+use std::borrow::Cow;
 use std::fs;
 
 use camino::{Utf8Path, Utf8PathBuf};
+use rustc_lexer::{TokenKind, tokenize};
 use syn::File;
 
-use super::comment::{self, Comment};
+use super::comment::{self, Comment, CommentKind};
 use super::nesting;
 use crate::Result;
 use crate::error::error;
@@ -25,7 +27,7 @@ pub struct SourceFile {
     /// than a bare field assignment, but every other read stays inside this crate.
     pub(crate) path: Utf8PathBuf,
 
-    /// The exact bytes that were parsed. All spans index into this.
+    /// Source bytes indexed by every syntax span, retaining any interpreter line.
     pub(crate) text: String,
 
     /// Whether the input had a leading UTF-8 byte-order mark before parsing normalized it away.
@@ -49,10 +51,43 @@ pub struct SourceFile {
 #[doc(hidden)]
 #[must_use]
 pub fn exceeds_nesting_limit(text: &str) -> bool {
+    let text = strip_bom(text);
+    let parsed = shebang_as_whitespace(text);
     let lines = line_starts(text);
-    let comments = comment::scan_comments(text, &lines);
+    let comments = comment::scan_comments(&parsed, &lines);
 
-    nesting::beyond(text, &comments, nesting::NESTING_LIMIT).is_some()
+    nesting::beyond(&parsed, &comments, nesting::NESTING_LIMIT).is_some()
+}
+
+/// Keeps the parser's byte offsets aligned while hiding a script's interpreter line.
+pub(crate) fn shebang_as_whitespace(text: &str) -> Cow<'_, str> {
+    let Some(rest) = text.strip_prefix("#!") else {
+        return Cow::Borrowed(text);
+    };
+    // Find the first significant token to distinguish an inner attribute from an interpreter
+    // line. Whitespace and terminated ordinary comments are trivia; doc comments are significant.
+    let mut at = 0;
+    for token in tokenize(rest) {
+        let raw = &rest[at..at + token.len];
+        let ordinary_comment = match token.kind {
+            TokenKind::LineComment => comment::line_comment_kind(raw) == CommentKind::Line,
+            TokenKind::BlockComment { terminated: true } => comment::block_comment_kind(raw) == CommentKind::Block,
+            _ => false,
+        };
+        if token.kind != TokenKind::Whitespace && !ordinary_comment {
+            break;
+        }
+        at += token.len;
+    }
+    if rest[at..].starts_with('[') {
+        return Cow::Borrowed(text);
+    }
+
+    let end = text.find('\n').unwrap_or(text.len());
+    let mut parsed = String::with_capacity(text.len());
+    parsed.extend(core::iter::repeat_n(' ', end));
+    parsed.push_str(&text[end..]);
+    Cow::Owned(parsed)
 }
 
 impl SourceFile {
@@ -70,12 +105,13 @@ impl SourceFile {
         let path = path.into();
         let had_bom = text.starts_with(BOM);
         let text = without_bom(text);
+        let parsed = shebang_as_whitespace(&text);
         let lines = line_starts(&text);
-        let comments = comment::scan_comments(&text, &lines);
+        let comments = comment::scan_comments(&parsed, &lines);
 
         // Before `syn`, deliberately. The parser is the first of the recursive descents over this
         // text and the guard is worth nothing after one of them has already run out of stack.
-        if let Some(at) = nesting::beyond(&text, &comments, nesting::NESTING_LIMIT) {
+        if let Some(at) = nesting::beyond(&parsed, &comments, nesting::NESTING_LIMIT) {
             let line = lines.partition_point(|start| *start <= at);
 
             // Skippable, because this is the one parse failure that says nothing about whether the
@@ -92,7 +128,7 @@ impl SourceFile {
             .skippable());
         }
 
-        let ast = syn::parse_file(&text).map_err(|cause| {
+        let mut ast = syn::parse_file(&parsed).map_err(|cause| {
             let start = cause.span().start();
 
             // The path is repository-controlled and this message is printed to a terminal, so it is
@@ -106,6 +142,10 @@ impl SourceFile {
                 encode_controls(&cause.to_string())
             )
         })?;
+
+        if let Cow::Owned(_) = parsed {
+            ast.shebang = Some(text[..text.find('\n').unwrap_or(text.len())].to_owned());
+        }
 
         Ok(Self {
             path,
@@ -262,6 +302,57 @@ pub(super) fn line_starts(text: &str) -> Vec<usize> {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shebang_disambiguation_skips_only_ordinary_comment_trivia() {
+        for (trivia, inner_attribute) in [
+            (" // ordinary\n ", true),
+            (" //// ordinary\n ", true),
+            (" // ordinary //!\n ", true),
+            (" // ordinary ///\n ", true),
+            (" // ordinary ////\n ", true),
+            (" //! inner doc\n ", false),
+            (" /// outer doc\n ", false),
+            (" /* ordinary */ ", true),
+            (" /**/ ", true),
+            (" /*** ordinary */ ", true),
+            (" /*! inner doc */ ", false),
+            (" /** outer doc */ ", false),
+            (" /* first */ /* second */ ", true),
+        ] {
+            let text = format!("#!{trivia}[allow(unused)]\nfn f() {{}}\n");
+            let parsed = shebang_as_whitespace(&text);
+            assert_eq!(matches!(parsed, Cow::Borrowed(_)), inner_attribute, "{text:?}");
+            if inner_attribute {
+                assert_eq!(parsed, text);
+                let file = SourceFile::parse("attribute.rs", text).unwrap();
+                assert_eq!(file.ast.attrs.len(), 1);
+                assert_eq!(file.ast.shebang, None);
+            } else {
+                let first_line_end = text.find('\n').unwrap();
+                assert_eq!(&parsed[..first_line_end], " ".repeat(first_line_end), "{text:?}");
+                assert_eq!(&parsed[first_line_end..], &text[first_line_end..], "{text:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn interpreter_lines_retain_exact_bytes_with_and_without_a_newline() {
+        for (text, shebang) in [
+            ("#!/usr/bin/rustx\nfn f() {}\n", "#!/usr/bin/rustx"),
+            ("#!/usr/bin/rustx\r\nfn f() {}\n", "#!/usr/bin/rustx\r"),
+            ("#!/usr/bin/rustx", "#!/usr/bin/rustx"),
+        ] {
+            let parsed = shebang_as_whitespace(text);
+            let end = text.find('\n').unwrap_or(text.len());
+            assert_eq!(&parsed[..end], " ".repeat(end));
+            assert_eq!(&parsed[end..], &text[end..]);
+            let file = SourceFile::parse("script.rs", text.to_owned()).unwrap();
+            assert_eq!(file.ast.shebang.as_deref(), Some(shebang));
+            assert_eq!(file.text, text);
+            assert_eq!(file.ast.items.len(), usize::from(text.contains("fn f")));
+        }
+    }
 
     #[test]
     fn public_nesting_precheck_keeps_multiline_comment_locations_and_ignored_literal_contents() {

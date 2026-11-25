@@ -58,6 +58,7 @@ pub(super) struct Baseline {
 /// measurement every later budget is derived from. It only ever fires on a suite that has hung.
 const BASELINE_BUDGET: Duration = Duration::from_mins(10);
 const MIN_MEASURED_DURATION: Duration = Duration::from_nanos(1);
+/// Bound failure artifacts while retaining a useful sample; excess failures are counted separately.
 const MAX_RECORDED_FAILED_TESTS: usize = 64;
 
 #[derive(Clone, Copy)]
@@ -108,6 +109,8 @@ fn measure_baseline_with(
         observer,
         failed,
         completed,
+        |_worker| Ok(()),
+        || {},
     )
 }
 
@@ -146,6 +149,8 @@ fn measure_within_reporting(
         observe_baseline,
         None,
         completed,
+        |_worker| Ok(()),
+        || {},
     )
 }
 
@@ -173,6 +178,8 @@ where
         observer,
         None,
         completed,
+        |_worker| Ok(()),
+        || {},
     )
 }
 
@@ -183,24 +190,19 @@ fn measure_within_reporting_retaining<O>(
     observer: O,
     failed: Option<&mut Option<Baseline>>,
     completed: impl FnMut(),
+    admit: impl FnMut(usize) -> std::io::Result<()>,
+    cancelled: impl FnMut(),
 ) -> Result<Baseline>
 where
     O: Fn(&Workspace, &TestBinary, Attempt<'_>) -> Observation + Sync,
 {
-    let Measurement {
-        work,
-        budget,
-        request,
-        jobs,
-    } = measurement;
+    let Measurement { work, budget, .. } = measurement;
     let started = Instant::now();
-    // #[gamma::skip(all, reason = "worker width affects wall-clock scheduling only; each binary is observed once and results are folded positionally")]
-    let measured = sweep_binaries_with(work, binaries, budget, request, jobs, &observer, completed);
+    let measured = sweep_binaries_admitting(measurement, binaries, &observer, completed, admit, cancelled)?;
     let wall = started.elapsed();
     let mut elapsed = Duration::ZERO;
     let mut quiet = Duration::ZERO;
     let mut tests: Option<usize> = None;
-    // #[gamma::skip(all, reason = "the optional state is observed only through higher-level process orchestration that cannot be isolated safely here")]
     let mut peak: Option<u64> = None;
 
     let mut baseline_failure = Error::new(String::new());
@@ -222,7 +224,6 @@ where
         quiet = quiet.max(observation.quiet);
 
         if let Some(measured) = observation.peak {
-            // #[gamma::skip(all, reason = "the value controls scheduling, accounting, identity, or a conservative bound whose one-step perturbation has no safely deterministic external observation here")]
             peak = Some(peak.unwrap_or(0).max(measured));
         }
 
@@ -285,6 +286,18 @@ thread_local! {
     static BASELINE_WORKERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+/// The cursor publishes only indices, so its modification order needs no synchronization of other state.
+/// Claims before cancellation may finish; later claims receive an out-of-range index.
+fn claim_binary<'a>(next: &AtomicUsize, binaries: &'a [TestBinary]) -> Option<(usize, &'a TestBinary)> {
+    let index = next.fetch_add(
+        // #[gamma::skip(literal.int_decrement, tag = "timeout", reason = "Zero leaves the atomic cursor unchanged, assigning the first binary forever. Direct claim tests check advancement, but worker tests can stall before reaching their assertions.")]
+        1,
+        Ordering::Relaxed,
+    );
+    binaries.get(index).map(|binary| (index, binary))
+}
+
+#[cfg(all(test, not(miri)))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn sweep_binaries_with<O>(
     work: &Workspace,
@@ -293,19 +306,52 @@ fn sweep_binaries_with<O>(
     request: MemoryRequest,
     jobs: usize,
     observer: O,
-    mut completed: impl FnMut(),
-) -> Vec<Option<(Duration, Observation)>>
+    completed: impl FnMut(),
+) -> Result<Vec<Option<(Duration, Observation)>>>
 where
     O: Fn(&Workspace, &TestBinary, Attempt<'_>) -> Observation + Sync,
 {
+    sweep_binaries_admitting(
+        Measurement {
+            work,
+            budget,
+            request,
+            jobs,
+        },
+        binaries,
+        observer,
+        completed,
+        |_worker| Ok(()),
+        || {},
+    )
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn sweep_binaries_admitting<O>(
+    measurement: Measurement<'_>,
+    binaries: &[TestBinary],
+    observer: O,
+    mut completed: impl FnMut(),
+    mut admit: impl FnMut(usize) -> std::io::Result<()>,
+    mut cancelled: impl FnMut(),
+) -> Result<Vec<Option<(Duration, Observation)>>>
+where
+    O: Fn(&Workspace, &TestBinary, Attempt<'_>) -> Observation + Sync,
+{
+    let Measurement {
+        work,
+        budget,
+        request,
+        jobs,
+    } = measurement;
     let mut measured: Vec<Option<(Duration, Observation)>> = (0..binaries.len()).map(|_index| None).collect();
     let next = AtomicUsize::new(0);
     let (sender, receiver) = mpsc::channel::<(usize, Duration, Observation)>();
     let notes = crate::notes::current();
 
+    let mut spawn_error = None;
     thread::scope(|scope| {
-        // #[gamma::skip(all, reason = "the worker count changes parallelism only; atomic indexing assigns every binary exactly once and positional collection makes the returned observations identical")]
-        for _worker in 0..jobs.max(1) {
+        for worker in 0..jobs.max(1) {
             #[cfg(test)]
             BASELINE_WORKERS.set(BASELINE_WORKERS.get() + 1);
             let sender = sender.clone();
@@ -313,38 +359,49 @@ where
             let notes = notes.clone();
             let observer = &observer;
 
-            let _handle = scope.spawn(move || {
-                let _notes = crate::notes::enter(notes.as_ref());
+            let spawned = admit(worker).and_then(|()| {
+                thread::Builder::new()
+                    .name(
+                        // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, tag = "non-contract", reason = "This diagnostic worker label does not affect scheduling or baseline results.")]
+                        "gamma-baseline".into(),
+                    )
+                    .spawn_scoped(scope, move || {
+                        let _notes = crate::notes::enter(notes.as_ref());
 
-                loop {
-                    let index = next.fetch_add(1, Ordering::Relaxed);
+                        while let Some((index, binary)) = claim_binary(next, binaries) {
+                            // Keep the permit alive through observation. Acquisition precedes the timer so
+                            // waiting for a shared resource is not charged as test execution.
+                            let _resources = work.acquire_resources(binary, Only::All);
+                            let began = Instant::now();
+                            let observation = observer(
+                                work,
+                                binary,
+                                Attempt {
+                                    active: None,
+                                    timeout: Some(budget),
+                                    stall: Stall::NONE,
+                                    request,
+                                    only: Only::All,
+                                },
+                            );
 
-                    let Some(binary) = binaries.get(index) else {
-                        break;
-                    };
-
-                    // Keep the permit alive through observation. Acquisition precedes the timer so
-                    // waiting for a shared resource is not charged as test execution.
-                    let _resources = work.acquire_resources(binary, Only::All);
-                    let began = Instant::now();
-                    let observation = observer(
-                        work,
-                        binary,
-                        Attempt {
-                            active: None,
-                            timeout: Some(budget),
-                            stall: Stall::NONE,
-                            request,
-                            only: Only::All,
-                        },
-                    );
-
-                    // A closed receiver means the calling thread is gone, which cannot happen while
-                    // the scope is open.
-                    let took = measured_duration(began.elapsed());
-                    let _sent = sender.send((index, took, observation));
-                }
+                            // A closed receiver means the calling thread is gone, which cannot happen while
+                            // the scope is open.
+                            let took = measured_duration(began.elapsed());
+                            let _sent = sender.send((index, took, observation));
+                        }
+                    })
             });
+            if let Err(cause) = spawned {
+                spawn_error = Some(cause);
+                next.store(
+                    // #[gamma::skip(expr.increment, tag = "equivalent", reason = "Workers stop on binaries.get returning None; len and len+1 both prevent further work. An allocated binary vector cannot reach usize::MAX.")]
+                    binaries.len(),
+                    Ordering::Relaxed,
+                );
+                cancelled();
+                break;
+            }
         }
 
         // The workers hold the only remaining senders, so the drain ends when the last one finishes.
@@ -359,7 +416,10 @@ where
         }
     });
 
-    measured
+    if let Some(cause) = spawn_error {
+        return Err(Error::new("could not start a baseline worker").caused_by(cause));
+    }
+    Ok(measured)
 }
 
 /// Zero means no baseline was measured, so a completed observation is always positive even when
@@ -562,8 +622,11 @@ fn set_omitted_failed_test_count(failure: &mut Error, omitted: usize) {
     }
 }
 
+/// Reserve room for nested artifact directories beneath a caller-selected cache root.
 const ARTIFACT_COMPONENT_CAP: usize = 32;
+/// Test names get more readable context while keeping the complete artifact path short.
 const TEST_COMPONENT_CAP: usize = 56;
+/// Start with a short hex suffix; collisions extend it before a filename is reused.
 const INITIAL_DIGEST_LEN: usize = 8;
 
 fn baseline_artifact_directory(binary: &TestBinary, kind: &str, test: Option<&str>) -> String {
@@ -765,10 +828,130 @@ const fn runner_name(nextest: bool) -> &'static str {
 }
 
 #[cfg(test)]
-#[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod claim_tests {
+    use super::*;
+
+    #[test]
+    fn binary_claims_advance_once_and_stop_at_the_inventory_end() {
+        let binaries = [crate::testing::test_binary("first"), crate::testing::test_binary("second")];
+        let next = AtomicUsize::new(0);
+        for (expected, binary) in binaries.iter().enumerate() {
+            let (index, claimed) = claim_binary(&next, &binaries).unwrap();
+            assert_eq!(index, expected);
+            assert_eq!(claimed.path, binary.path);
+        }
+        assert!(claim_binary(&next, &binaries).is_none());
+        assert!(claim_binary(&AtomicUsize::new(0), &[]).is_none());
+    }
+}
+
+#[cfg(all(test, not(miri)))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use core::cell::Cell;
+
     use super::*;
+
+    #[test]
+    fn an_empty_baseline_has_no_observations() {
+        let work = Workspace::adopt("unused-empty-baseline".into(), "unused-empty-baseline-target".into());
+        let baseline = measure_baseline(&work, &mut [], MemoryRequest::default(), 1, None, || {
+            panic!("an empty inventory must not report any observation");
+        })
+        .unwrap();
+        assert_eq!(baseline.tests, None);
+        assert_eq!(baseline.elapsed, Duration::ZERO);
+    }
+
+    #[test]
+    fn a_spawn_refusal_cancels_unassigned_binaries_before_joining_the_running_worker() {
+        use std::sync::Barrier;
+
+        // Queue one completion before blocking a second observation. Completion releases the worker
+        // independently of cancellation, so a missing cancellation callback fails without deadlocking.
+        let entered = Barrier::new(2);
+        let release = Barrier::new(2);
+        let cancelled = Cell::new(false);
+        let work = Workspace::adopt("unused-cancelled-baseline".into(), "unused-cancelled-baseline-target".into());
+        let binaries = vec![crate::testing::test_binary("unused"); 3];
+        let observations = AtomicUsize::new(0);
+        let mut completions = 0;
+        let failure = sweep_binaries_admitting(
+            Measurement {
+                work: &work,
+                budget: Duration::from_secs(30),
+                request: MemoryRequest::default(),
+                jobs: 2,
+            },
+            &binaries,
+            |_, _, _| {
+                if observations.fetch_add(1, Ordering::Relaxed) == 1 {
+                    entered.wait();
+                    release.wait();
+                }
+                Observation {
+                    verdict: Verdict::Passed,
+                    reach: super::super::verdict::ReachObservation::Unknown,
+                    failure: None,
+                    quiet: Duration::ZERO,
+                    tests: Some(1),
+                    peak: None,
+                }
+            },
+            || {
+                if completions == 0 {
+                    release.wait();
+                }
+                completions += 1;
+                assert!(
+                    cancelled.get(),
+                    "admission failure must cancel before collecting completed observations"
+                );
+            },
+            |worker| {
+                if worker == 1 {
+                    entered.wait();
+                    Err(std::io::Error::other("baseline worker spawn refused by a test"))
+                } else {
+                    Ok(())
+                }
+            },
+            || {
+                cancelled.set(true);
+            },
+        )
+        .unwrap_err();
+        assert_eq!(failure.message(), "could not start a baseline worker");
+        assert_eq!(observations.load(Ordering::Relaxed), 2);
+        assert_eq!(completions, 2);
+    }
+
+    #[test]
+    fn refused_baseline_admission_returns_an_error_without_publishing_a_measurement() {
+        let work = Workspace::adopt("unused-refused-baseline".into(), "unused-refused-baseline-target".into());
+        let mut binaries = [crate::testing::test_binary("unused")];
+        let mut failed = None;
+        let cancelled = Cell::new(false);
+        let failure = measure_within_reporting_retaining(
+            Measurement {
+                work: &work,
+                budget: Duration::from_secs(30),
+                request: MemoryRequest::default(),
+                jobs: 1,
+            },
+            &mut binaries,
+            |_, _, _| panic!("refused admission must not observe a binary"),
+            Some(&mut failed),
+            || panic!("refused admission has no completed binary"),
+            |_worker| Err(std::io::Error::other("baseline admission refused")),
+            || cancelled.set(true),
+        )
+        .unwrap_err();
+        assert_eq!(failure.message(), "could not start a baseline worker");
+        assert!(failed.is_none());
+        assert!(cancelled.get());
+    }
 
     #[test]
     fn recovered_native_baseline_wrapper_launches_exactly_the_requested_worker_width_even_for_an_empty_inventory() {
@@ -810,7 +993,8 @@ mod tests {
                     }
                 },
                 || {},
-            );
+            )
+            .expect("the baseline worker starts");
 
             assert_eq!(measured.len(), 1);
             assert!(
@@ -1807,6 +1991,32 @@ mod tests {
         assert_eq!(retained.elapsed, binaries[0].baseline);
         assert_eq!(failure.artifacts().len(), 1);
         assert_eq!(failure.artifacts()[0].value["test"], "subject::broken");
+        assert_eq!(failure.artifacts()[0].value["observedFailedTestsOmitted"], 0);
+    }
+
+    #[test]
+    fn a_reported_zero_peak_is_not_replaced_with_a_nonzero_default() {
+        let work = scripted_workspace();
+        let mut binaries = [crate::testing::test_binary("subject")];
+        let baseline = measure_baseline_with(
+            &work,
+            &mut binaries,
+            MemoryRequest::default(),
+            1,
+            None,
+            || {},
+            |_, _, _| Observation {
+                verdict: Verdict::Passed,
+                reach: crate::exec::verdict::ReachObservation::Unknown,
+                failure: None,
+                quiet: Duration::ZERO,
+                tests: Some(0),
+                peak: Some(0),
+            },
+        )
+        .unwrap();
+        assert_eq!(baseline.peak, Some(0));
+        assert_eq!(binaries[0].peak, Some(0));
     }
 
     #[test]
@@ -1837,6 +2047,7 @@ mod tests {
                     let mut count = entered.lock().unwrap();
                     *count += 1;
                 }
+
                 Observation {
                     verdict: Verdict::Passed,
                     reach: crate::exec::verdict::ReachObservation::Unknown,
@@ -1847,7 +2058,8 @@ mod tests {
                 }
             },
             || completed.set(completed.get() + 1),
-        );
+        )
+        .expect("both baseline workers start");
         let entered = *entered.lock().unwrap();
         assert_eq!(BASELINE_WORKERS.get() - before, 2);
         assert_eq!(completed.get(), 2);
@@ -1857,6 +2069,100 @@ mod tests {
             assert_eq!(observation.tests, Some(index + 1));
             assert!(matches!(observation.verdict, Verdict::Passed));
         }
+    }
+
+    #[test]
+    fn a_second_worker_spawn_refusal_returns_an_error_after_joining_started_workers() {
+        let work = scripted_workspace();
+        let before = BASELINE_WORKERS.get();
+        let mut admitted = Vec::new();
+        let error = sweep_binaries_admitting(
+            Measurement {
+                work: &work,
+                budget: Duration::from_secs(1),
+                request: MemoryRequest::default(),
+                jobs: 3,
+            },
+            &[],
+            |_, _, _| panic!("the empty population has no observations"),
+            || {},
+            |worker| {
+                admitted.push(worker);
+                if worker == 1 {
+                    Err(std::io::Error::other("baseline worker spawn refused by a test"))
+                } else {
+                    Ok(())
+                }
+            },
+            || {},
+        )
+        .expect_err("the second worker cannot be started");
+        assert_eq!(error.message(), "could not start a baseline worker");
+        assert!(error.to_string().contains("baseline worker spawn refused"), "{error}");
+        assert_eq!(admitted, [0, 1]);
+        assert_eq!(BASELINE_WORKERS.get() - before, 2, "a refused launch stops further launch attempts");
+    }
+
+    #[test]
+    fn zero_jobs_still_measures_each_binary_once() {
+        let work = scripted_workspace();
+        let mut binaries = ["first", "second", "third"].map(|target| TestBinary {
+            target: target.into(),
+            ..crate::testing::test_binary("unused")
+        });
+        let seen = std::sync::Mutex::new(Vec::new());
+        let before = BASELINE_WORKERS.get();
+        let baseline = measure_within_reporting_with(
+            &work,
+            &mut binaries,
+            Duration::from_secs(1),
+            MemoryRequest::default(),
+            0,
+            |_, binary, _| {
+                let mut seen = seen.lock().unwrap();
+                assert!(!seen.contains(&binary.target), "one binary cannot consume multiple baseline slots");
+                seen.push(binary.target.clone());
+                Observation {
+                    verdict: Verdict::Passed,
+                    reach: super::super::verdict::ReachObservation::Unknown,
+                    failure: None,
+                    quiet: Duration::ZERO,
+                    tests: Some(1),
+                    peak: None,
+                }
+            },
+            || {},
+        )
+        .unwrap();
+        assert_eq!(BASELINE_WORKERS.get() - before, 1);
+        assert_eq!(*seen.lock().unwrap(), ["first", "second", "third"]);
+        assert_eq!(baseline.tests, Some(3));
+    }
+
+    #[test]
+    fn a_first_worker_refusal_is_returned_without_panicking() {
+        let work = scripted_workspace();
+        let mut admitted = Vec::new();
+        let error = sweep_binaries_admitting(
+            Measurement {
+                work: &work,
+                budget: Duration::from_secs(1),
+                request: MemoryRequest::default(),
+                jobs: 1,
+            },
+            &[],
+            |_, _, _| panic!("a refused worker cannot observe a binary"),
+            || panic!("a refused worker cannot complete a measurement"),
+            |worker| {
+                admitted.push(worker);
+                Err(std::io::Error::other("baseline worker spawn refused by a test"))
+            },
+            || {},
+        )
+        .unwrap_err();
+        assert_eq!(error.message(), "could not start a baseline worker");
+        assert!(error.to_string().contains("baseline worker spawn refused"), "{error}");
+        assert_eq!(admitted, [0]);
     }
 
     fn scripted_workspace() -> Workspace {
@@ -2089,6 +2395,8 @@ mod tests {
             },
             Some(&mut failed),
             || completed += 1,
+            |_worker| Ok(()),
+            || {},
         )
         .expect_err("a non-passing baseline retains its measurement");
         assert_eq!(completed, 1);
@@ -2132,6 +2440,8 @@ mod tests {
                 }
             },
             None,
+            || {},
+            |_worker| Ok(()),
             || {},
         )
         .expect_err("failed-test cap is campaign-wide");

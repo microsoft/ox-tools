@@ -15,6 +15,12 @@ authors.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-gamma-engine"
+exclude = [
+    "tests/identity.rs",
+    "tests/source.rs",
+    "tests/text.rs",
+    "tests/text_corpus/**",
+]
 
 [package.metadata.docs.rs]
 all-features = true
@@ -45,6 +51,10 @@ syn = { workspace = true, features = ["full", "parsing", "printing", "visit", "e
 bolero = { workspace = true }
 tempfile = { workspace = true }
 walkdir = { workspace = true }
+
+[[bench]]
+name = "analysis"
+harness = false
 
 # >>> anvil-managed: anvil-lints
 [lints]

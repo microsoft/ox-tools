@@ -325,15 +325,18 @@ managed import regions have different update behavior; see
 
 ## 9. Mutation testing with cargo-gamma
 
-`anvil-mutants-diff` and `anvil-mutants-full` use cargo-gamma 0.6.0+ with a
+`anvil-mutants-diff` and `anvil-mutants-full` use cargo-gamma 0.7.0+ with a
 100% assertion-killed score requirement and zero unresolved flaky outcomes.
 Timeouts and out-of-memory outcomes do not count as assertion kills.
 
 The PR recipe selects mutation sites from changed lines against the resolved
 base, including uncommitted changes. The full recipe covers the workspace.
-An empty impact set skips the PR campaign. A diff campaign with no mutation
-sites succeeds; an empty full campaign or wholly ungradeable nonempty population
-fails its gates. Infrastructure and baseline failures still fail.
+An empty impact set skips the PR campaign. Gamma 0.7.0 accepts an empty diff
+selection, but an empty full campaign fails its score gate. The Gamma changes
+in this source tree also accept empty full campaigns; that behavior requires
+a release containing those changes and is not guaranteed by Anvil's 0.7.0 pin.
+Wholly ungradeable nonempty populations fail their gates. Infrastructure and
+baseline failures still fail.
 
 Gamma reads native `gamma.toml` configuration. Mutators, Cargo features, build
 profile, tests, concurrency, and memory policy follow Gamma's settings and

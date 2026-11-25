@@ -61,13 +61,7 @@ fn merge_reports_at<H: Host>(
         window,
     );
 
-    if merged.unpresentable_filtered > 0 {
-        return Err(error!(
-            "{} name-filtered {} cannot be rendered in the selected source; include an unfiltered listing from the current source before merging so the verdicts are preserved",
-            merged.unpresentable_filtered,
-            if merged.unpresentable_filtered == 1 { "mutant" } else { "mutants" }
-        ));
-    }
+    validate_merged_publication(args, &merged)?;
 
     if now.is_none() {
         // #[gamma::skip(stmt.delete_assign, reason = "These counter assignments occur only inside now.is_none(), which always sets freshness_unavailable=true. report_merge then takes its unavailable branch and never reads fresh or stale; later gates read score/completeness/flaky fields, and the serialized Report was already built independently of these counters. Deleting these resets or assigning1 cannot affect command bytes, published report, exit code or retained state.", tag = "equivalent")]
@@ -176,7 +170,49 @@ fn merge_reports_at<H: Host>(
     Ok(EXIT_OK)
 }
 
+/// JSON is a reusable merge stage and must preserve verdicts; console and HTML are informational.
+///
+/// Name-filtered results that cannot be rendered are never publishable. Validate before any writes
+/// so refusal cannot overwrite existing files or publish a partial set.
+fn validate_merged_publication(args: &MergeArgs, merged: &crate::merge::Merged) -> crate::Result<()> {
+    if merged.unpresentable_filtered > 0 {
+        return Err(error!(
+            "{} name-filtered {} cannot be rendered in the selected source; include an unfiltered listing from the current source before merging so the verdicts are preserved",
+            merged.unpresentable_filtered,
+            if merged.unpresentable_filtered == 1 { "mutant" } else { "mutants" }
+        ));
+    }
+
+    let incompatible = merged.incompatible();
+    if args.json_report.is_some() && incompatible > 0 {
+        return Err(error!(
+            "cannot publish merged JSON: {} cannot be rendered in the selected source; include a current unfiltered listing so the verdicts are preserved",
+            quantity(incompatible, "incompatible verdict")
+        ));
+    }
+
+    Ok(())
+}
+
 fn report_incomplete_gate<H: Host>(host: &mut H, merged: &crate::merge::Merged, gate: &str, styler: Styler) -> crate::Result<bool> {
+    let incompatible = merged.incompatible();
+    if incompatible > 0 {
+        let files = merged
+            .incompatible_files
+            .keys()
+            .map(|path| encode_controls(path))
+            .collect::<Vec<_>>()
+            .join(", ");
+        writeln!(
+            host.error(),
+            "{} {} incompatible {} excluded in {files}, so the {gate} cannot evaluate the complete requested population; include a current unfiltered listing",
+            styler.error("error:"),
+            incompatible,
+            if incompatible == 1 { "verdict was" } else { "verdicts were" }
+        )?;
+        return Ok(true);
+    }
+
     if !merged.identity_incompatible.is_empty() {
         writeln!(
             host.error(),
@@ -410,12 +446,13 @@ fn report_merge<H: Host>(host: &mut H, args: &MergeArgs, merged: &crate::merge::
         )?;
     }
 
-    if merged.incompatible > 0 {
+    let incompatible = merged.incompatible();
+    if incompatible > 0 {
         writeln!(
             stream,
             "{} {} excluded because their source presentation is incompatible with the selected source",
             styler.verb("Incompatible"),
-            quantity(merged.incompatible, "verdict")
+            quantity(incompatible, "verdict")
         )?;
     }
 
@@ -486,6 +523,23 @@ mod tests {
     use crate::fixtures;
     use crate::fixtures::mutant_result_at as mutant;
     use crate::testing::{Sink, fails_at_every_line, workdir};
+
+    #[test]
+    fn incomplete_gate_lists_every_incompatible_file_and_returns_writer_errors() {
+        let merged = crate::merge::Merged {
+            incompatible_files: [("a.rs".into(), 2), ("z.rs".into(), 1)].into(),
+            ..crate::merge::Merged::default()
+        };
+        let mut host = Sink::default();
+        assert!(report_incomplete_gate(&mut host, &merged, "strict gate", Styler::new(false)).unwrap());
+        assert_eq!(
+            host.err(),
+            "error: 3 incompatible verdicts were excluded in a.rs, z.rs, so the strict gate cannot evaluate the complete requested population; include a current unfiltered listing\n"
+        );
+        fails_at_every_line(1, |host| {
+            report_incomplete_gate(host, &merged, "strict gate", Styler::new(false)).map(|_| ())
+        });
+    }
 
     #[test]
     fn oct29_merge_refuses_one_or_many_unpresentable_filtered_verdicts_before_publication() {
@@ -833,7 +887,7 @@ mod tests {
             fresh: 2,
             stale: 1,
             withdrawn: 1,
-            incompatible: 1,
+            incompatible_files: [("src/lib.rs".into(), 1)].into(),
             unchecked: 1,
             shard_count: Some(2),
             inconsistent: vec!["inconsistent.json".into()],
@@ -919,6 +973,7 @@ mod tests {
             if let Some(message) = message {
                 assert!(host.err().contains(message), "{}", host.err());
             }
+
             fails_at_every_line(host.err().lines().count(), |host| {
                 merge_reports_at(host, &args, Styler::new(false), Some(20), &inputs).map(|_| ())
             });
@@ -941,6 +996,72 @@ mod tests {
         fails_at_every_line(host.err().lines().count(), |host| {
             merge_reports_at(host, &args, Styler::new(false), Some(20), &inputs).map(|_| ())
         });
+    }
+
+    #[test]
+    fn incompatible_source_verdicts_cannot_pass_gates_or_publish_staged_json() {
+        let mut inputs = Vec::new();
+        for (index, at, id, status, source) in [
+            (0, 100, "old", "Survived", "pub fn old() {}\n"),
+            (1, 200, "new", "Killed", "pub fn new() {}\n"),
+        ] {
+            let mut report = fixtures::report_with(Some((index, 2)), at, vec![fixtures::mutant_result_at(id, 1, status)]);
+            report.files.get_mut("src/lib.rs").unwrap().source = source.into();
+            inputs.push((format!("{id}.json"), report));
+        }
+        for (gate, minimum, flaky) in [("--min-score", Some(100.0), None), ("--max-flaky", None, Some(0))] {
+            let mut args = survivor_args("in-memory-input".into());
+            args.min_score = minimum;
+            args.max_flaky = flaky;
+            let mut host = Sink::default();
+            assert_eq!(
+                merge_reports_at(&mut host, &args, Styler::new(false), Some(300), &inputs).unwrap(),
+                EXIT_GATE_FAILED
+            );
+            assert_eq!(
+                host.err(),
+                format!(
+                    "      Merged 1 detected, 0 not detected, score 100.0%\n\
+                     \x20  Freshness 1 fresh, 0 older than 1 days, 0 never tested\n\
+                     Incompatible 1 verdict excluded because their source presentation is incompatible with the selected source\n\
+                     \x20       Note withdrawals unchecked for 1 file: no input supplied a complete population\n\
+                     \x20   Rotation 2 of 2 shards seen, 100% of the rotation\n\
+                     error: 1 incompatible verdict was excluded in src/lib.rs, so the `{gate}` gate cannot evaluate \
+                     the complete requested population; include a current unfiltered listing\n"
+                )
+            );
+        }
+        let mut host = Sink::default();
+        assert_eq!(
+            merge_reports_at(
+                &mut host,
+                &survivor_args("in-memory-input".into()),
+                Styler::new(false),
+                Some(300),
+                &inputs,
+            )
+            .unwrap(),
+            EXIT_OK
+        );
+
+        let directory = workdir("merge-incompatible-stage-");
+        let root = Utf8Path::from_path(directory.path()).unwrap();
+        let staged = root.join("stage.json");
+        fs::write(&staged, "previous report").unwrap();
+        let html = root.join("must-not-publish.html");
+        let mut args = survivor_args("in-memory-input".into());
+        args.json_report = Some(staged.clone());
+        args.html_report = Some(html.clone());
+        let mut host = Sink::default();
+        let failure = merge_reports_at(&mut host, &args, Styler::new(false), Some(300), &inputs)
+            .expect_err("a staged report must not erase the incompatible survivor");
+        assert_eq!(
+            failure.message(),
+            "cannot publish merged JSON: 1 incompatible verdict cannot be rendered in the selected source; include a current unfiltered listing so the verdicts are preserved"
+        );
+        assert_eq!(fs::read_to_string(staged).unwrap(), "previous report");
+        assert!(!html.exists());
+        assert_eq!(host.err(), "");
     }
 
     #[test]
@@ -1154,7 +1275,7 @@ mod tests {
             let merged = crate::merge::Merged {
                 detected,
                 valid: 10_000,
-                incompatible: 1,
+                incompatible_files: [("src/lib.rs".into(), 1)].into(),
                 ..crate::merge::Merged::default()
             };
             let mut host = Sink::default();

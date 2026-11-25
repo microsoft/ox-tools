@@ -3,6 +3,7 @@
 
 //! Restricting a run to the lines a unified diff touches.
 
+use std::borrow::Cow;
 #[cfg(test)]
 use std::fs;
 use std::fs::File;
@@ -28,6 +29,8 @@ struct PathSource {
     raw: Utf8PathBuf,
     /// A fallback can find candidates but cannot establish an exact path for the skip rule.
     exact: bool,
+    /// False when the displayed path contains replacement characters for invalid filename bytes.
+    utf8: bool,
 }
 
 impl Diff {
@@ -157,12 +160,13 @@ impl Diff {
                 current = new_file_path(rest, dst_prefix.as_deref(), pre_image.as_deref(), destination.take()).map(|(path, mut source)| {
                     if let Some(previous) = sources.get(&path) {
                         source.exact &= previous.exact;
+                        source.utf8 &= previous.utf8;
                     }
                     let _replaced = sources.insert(path.clone(), source);
                     path
                 });
             } else if let Some(rest) = line.strip_prefix("--- ") {
-                pre_image = header_path(rest).map(ToOwned::to_owned);
+                pre_image = header_path(rest).map(Cow::into_owned);
             } else if let Some(rest) = line.strip_prefix("@@") {
                 if let Some((start, old_count, new_count)) = hunk_header(rest) {
                     line_number = start;
@@ -240,6 +244,11 @@ impl Diff {
         for (mut path, lines) in named {
             let source = sources.get(&path);
             let raw = source.map_or(&path, |source| &source.raw).clone();
+
+            if source.is_some_and(|source| !source.utf8) {
+                unresolved.push(raw);
+                continue;
+            }
 
             if let Some(workspace) = workspace.as_mut() {
                 if let Ok(relative) = path.strip_prefix(".") {
@@ -354,11 +363,50 @@ fn normalize_lines(touched: &mut HashMap<Utf8PathBuf, Vec<u32>>) {
 }
 
 /// Extracts the path from a `---` or `+++` header, rejecting the one that means "no such file".
-fn header_path(rest: &str) -> Option<&str> {
+fn header_path(rest: &str) -> Option<Cow<'_, str>> {
     // Trailing tab-separated metadata is part of the format, and git writes a timestamp there.
     let path = rest.split('\t').next().unwrap_or(rest).trim();
 
+    let path = unquote_path(path)?;
     if path.is_empty() || path == "/dev/null" { None } else { Some(path) }
+}
+
+/// Git quotes path bytes, not Unicode scalar values; octal escapes must be decoded before UTF-8.
+fn unquote_path(path: &str) -> Option<Cow<'_, str>> {
+    decode_path(path)?.ok()
+}
+
+fn decode_path(path: &str) -> Option<std::result::Result<Cow<'_, str>, std::string::FromUtf8Error>> {
+    let Some(quoted) = path.strip_prefix('"') else {
+        return Some(Ok(Cow::Borrowed(path)));
+    };
+    let quoted = quoted.strip_suffix('"')?;
+    let mut decoded = Vec::with_capacity(quoted.len());
+    let mut bytes = quoted.bytes();
+    while let Some(byte) = bytes.next() {
+        if byte != b'\\' {
+            decoded.push(byte);
+            continue;
+        }
+        let escape = bytes.next()?;
+        decoded.push(match escape {
+            b'\\' | b'"' => escape,
+            b'a' => 7,
+            b'b' => 8,
+            b't' => b'\t',
+            b'n' => b'\n',
+            b'v' => 11,
+            b'f' => 12,
+            b'r' => b'\r',
+            b'0'..=b'3' => {
+                let second = bytes.next()?.checked_sub(b'0').filter(|digit| *digit < 8)?;
+                let third = bytes.next()?.checked_sub(b'0').filter(|digit| *digit < 8)?;
+                (escape - b'0') * 64 + second * 8 + third
+            }
+            _ => return None,
+        });
+    }
+    Some(String::from_utf8(decoded).map(Cow::Owned))
 }
 
 /// Extracts the destination path and records whether the diff establishes its spelling.
@@ -369,7 +417,27 @@ fn new_file_path(
     pre_image: Option<&str>,
     destination: Option<&str>,
 ) -> Option<(Utf8PathBuf, PathSource)> {
-    let raw = Utf8Path::new(header_path(rest)?);
+    let raw = rest.split('\t').next().unwrap_or(rest).trim();
+    let raw = match decode_path(raw)? {
+        Ok(raw) => raw,
+        Err(cause) => {
+            let raw = Utf8PathBuf::from(String::from_utf8_lossy(cause.as_bytes()).into_owned());
+            return Some((
+                raw.clone(),
+                PathSource {
+                    raw,
+                    exact:
+                    // #[gamma::skip(literal.bool_flip, tag = "equivalent", reason = "Invalid UTF-8 paths stay utf8=false through header merges and are rejected before exactness can affect resolution.")]
+                    false,
+                    utf8: false,
+                },
+            ));
+        }
+    };
+    if raw == "/dev/null" {
+        return None;
+    }
+    let raw = Utf8Path::new(raw.as_ref());
 
     if let Some(destination) = destination
         .map(Utf8Path::new)
@@ -380,6 +448,7 @@ fn new_file_path(
             PathSource {
                 raw: raw.to_owned(),
                 exact: true,
+                utf8: true,
             },
         ));
     }
@@ -397,6 +466,7 @@ fn new_file_path(
         PathSource {
             raw: raw.to_owned(),
             exact,
+            utf8: true,
         },
     ))
 }
@@ -424,7 +494,10 @@ fn git_prefix(rest: &str) -> Option<String> {
             continue;
         }
 
-        if let Some(prefix) = derived_prefix(left, right) {
+        let (Some(left), Some(right)) = (unquote_path(left), unquote_path(right)) else {
+            continue;
+        };
+        if let Some(prefix) = derived_prefix(&left, &right) {
             return Some(prefix.to_owned());
         }
     }
@@ -698,7 +771,7 @@ mod survivor_tests {
 #[cfg(not(miri))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod fuzz {
-    use camino::Utf8Path;
+    use camino::Utf8PathBuf;
 
     use super::Diff;
     use crate::testing::token;
@@ -732,9 +805,25 @@ mod fuzz {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn an_added_line_survives_surrounding_prose() {
         bolero::check!()
-            .with_type::<(Vec<String>, String, u16)>()
-            .for_each(|(noise, name, start)| {
-                let name = token(name);
+            .with_type::<(Vec<String>, String, [u8; 8], u16)>()
+            .for_each(|(noise, name, segments, start)| {
+                let name: String = token(name).chars().take(24).collect();
+                let mut encoded = name.clone();
+                let mut decoded = name;
+                for segment in segments {
+                    let (quoted, plain) = match segment % 8 {
+                        0 => ("text", "text"),
+                        1 => (" ", " "),
+                        2 => (r#"\""#, "\""),
+                        3 => (r"\\", "\\"),
+                        4 => (r"\303\251", "é"),
+                        5 => (r"\057", "/"),
+                        6 => (r"\t", "\t"),
+                        _ => (r"\n", "\n"),
+                    };
+                    encoded.push_str(quoted);
+                    decoded.push_str(plain);
+                }
                 let start = u32::from(*start).max(1);
 
                 // Nothing generated may look like a header, or it would open a hunk of its own and
@@ -746,13 +835,16 @@ mod fuzz {
                     return;
                 }
 
-                let patch = format!("diff --git a/{name}.rs b/{name}.rs\n--- a/{name}.rs\n+++ b/{name}.rs\n@@ -1 +{start} @@\n+let x = 1;");
+                let patch = format!(
+                    "diff --git \"a/{encoded}.rs\" \"b/{encoded}.rs\"\n--- \"a/{encoded}.rs\"\n+++ \"b/{encoded}.rs\"\n@@ -0,0 +{start} @@\n+let x = 1;"
+                );
                 let text = format!("{}\n{patch}\n{}", noise.join("\n"), noise.join("\n"));
 
                 let diff = Diff::parse(&text);
-                let touched = Utf8Path::new(name.as_str()).with_extension("rs");
+                let touched = Utf8PathBuf::from(format!("{decoded}.rs"));
 
                 assert!(diff.touches(&touched, start, start), "the added line was lost in {text:?}");
+                assert_eq!(diff.touched.len(), 1, "the hunk was attributed to another path in {text:?}");
             });
     }
 }
@@ -763,6 +855,21 @@ mod tests {
     use std::io;
 
     use super::*;
+
+    #[test]
+    fn quoted_paths_reject_incomplete_escapes_and_non_octal_digits() {
+        for path in [r#""tail\""#, r#""\0""#, r#""\00""#, r#""\080""#, r#""\008""#] {
+            assert_eq!(unquote_path(path), None, "{path:?}");
+            assert_eq!(header_path(path), None, "{path:?}");
+        }
+        assert_eq!(header_path("\"unfinished"), None);
+        assert_eq!(unquote_path(r#""\077""#).as_deref(), Some("?"));
+    }
+
+    #[test]
+    fn prefix_inference_keeps_searching_after_empty_and_incomplete_quoted_halves() {
+        assert_eq!(git_prefix(r#" "old/a b.rs" "new/a b.rs""#), Some("new/".to_owned()));
+    }
 
     #[test]
     fn recovered_diff_reader_routes_dash_only_to_its_supplied_stream_and_files_only_to_the_named_opener() {
@@ -794,6 +901,79 @@ mod tests {
         let diff = Diff::parse("--- old/source.rs\n+++ new/source.rs\n@@ -1 +1 @@\n+changed\n");
         assert!(diff.touches(Utf8Path::new("source.rs"), 1, 1));
         assert!(!diff.touches_file(Utf8Path::new("new/source.rs")));
+    }
+
+    #[test]
+    fn git_c_quoted_paths_decode_before_prefix_inference_and_rust_resolution() {
+        for (encoded, decoded) in [
+            (r"caf\303\251.rs", "café.rs"),
+            (r#"a\"b.rs"#, "a\"b.rs"),
+            (r"a\\b.rs", "a\\b.rs"),
+            (r"a\tb\nc.rs", "a\tb\nc.rs"),
+            (r"a\ab\bc\vd\fe\rf.rs", "a\u{7}b\u{8}c\u{b}d\u{c}e\rf.rs"),
+        ] {
+            let text = format!(
+                "diff --git \"old/{encoded}\" \"new/{encoded}\"\n--- \"old/{encoded}\"\n+++ \"new/{encoded}\"\n@@ -1 +1 @@\n-old\n+new\n"
+            );
+            let diff = Diff::parse(&text);
+            assert!(diff.touches(Utf8Path::new(decoded), 1, 1), "{encoded:?}: {:?}", diff.touched);
+            assert_eq!(git_prefix(&format!("\"old/{encoded}\" \"new/{encoded}\"")), Some("new/".to_owned()));
+            let without_git_header = Diff::parse(&format!("--- \"old/{encoded}\"\n+++ \"new/{encoded}\"\n@@ -1 +1 @@\n+new\n"));
+            assert!(without_git_header.touches_file(Utf8Path::new(decoded)), "{encoded:?}");
+        }
+
+        let directory = crate::testing::workdir("diff-quoted-rust-");
+        let root = Utf8Path::from_path(directory.path()).unwrap();
+        fs::write(root.join("README.md"), "changed").unwrap();
+        let text = "diff --git \"a/caf\\303\\251.rs\" \"b/caf\\303\\251.rs\"\n--- \"a/caf\\303\\251.rs\"\n+++ \"b/caf\\303\\251.rs\"\n@@ -1 +1 @@\n+new\n--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n+changed\n";
+        let mut diff = Diff::parse(text);
+        let failure = diff
+            .resolve(root, &[])
+            .expect_err("a resolved non-Rust file cannot hide an unresolved quoted Rust source");
+        assert!(failure.to_string().contains("café.rs"), "{failure}");
+        let mut diff = Diff::parse(text);
+        diff.resolve(root, &[Utf8PathBuf::from("café.rs")])
+            .expect("the decoded candidate can be resolved");
+        assert!(diff.touches(Utf8Path::new("café.rs"), 1, 1));
+    }
+
+    #[test]
+    fn malformed_git_escapes_are_not_reinterpreted_as_valid_path_tokens() {
+        for path in [r#""unfinished"#, r#""a\q.rs""#, r#""a\4.rs""#, r#""a\08x.rs""#, r#""a\0""#] {
+            assert!(unquote_path(path).is_none(), "{path:?}");
+        }
+        assert_eq!(unquote_path(r#""a\377.rs""#), None);
+    }
+
+    #[test]
+    fn non_utf8_diff_paths_cannot_resolve_to_replacement_character_filenames() {
+        let candidates = [Utf8PathBuf::from("a\u{fffd}.rs"), Utf8PathBuf::from("z\u{fffd}.rs")];
+        for prefix in ["", "b/"] {
+            let text = format!("+++ \"{prefix}a\\377.rs\"\n@@ -0,0 +7 @@\n+changed\n+++ \"{prefix}z\\376.rs\"\n@@ -0,0 +9 @@\n+changed\n");
+            let mut diff = Diff::parse(&text);
+            let failure = diff.resolve(Utf8Path::new("."), &candidates).unwrap_err();
+            assert!(failure.is_usage(), "{failure}");
+            assert!(failure.message().starts_with("the diff names 2 paths of Rust source"), "{failure}");
+            for candidate in &candidates {
+                assert!(failure.message().contains(&format!("{prefix}{candidate}")), "{failure}");
+                assert!(!diff.touches_file(candidate));
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_filename_bytes_cannot_be_rehabilitated_by_a_later_utf8_header() {
+        let candidate = Utf8PathBuf::from("a\u{fffd}.rs");
+        for later in ["", "+++ \"a\\357\\277\\275.rs\"\n@@ -0,0 +9 @@\n+later\n"] {
+            let mut diff = Diff::parse(&format!("+++ \"a\\377.rs\"\n@@ -0,0 +7 @@\n+changed\n{later}"));
+            let failure = diff
+                .resolve_for_workspace(Utf8Path::new("."), std::slice::from_ref(&candidate), &[], || {
+                    panic!("an inventoried target needs no ownership lookup")
+                })
+                .unwrap_err();
+            assert!(failure.is_usage(), "{failure}");
+            assert!(failure.message().contains(candidate.as_str()), "{failure}");
+        }
     }
 
     #[test]
@@ -863,7 +1043,7 @@ index 1234567..89abcde 100644
             ("/dev/null", None),
             ("src/a.rs\tstamp", Some("src/a.rs")),
         ] {
-            assert_eq!(header_path(text), expected, "{text:?}");
+            assert_eq!(header_path(text).as_deref(), expected, "{text:?}");
         }
         for (source, destination, expected) in [
             ("a/a.rs", "b/a.rs", Some("b/")),
@@ -884,13 +1064,17 @@ index 1234567..89abcde 100644
         assert_eq!(git_prefix(" "), None);
         assert_eq!(git_prefix(" a/file.rs b/file.rs "), Some("b/".to_owned()));
         assert_eq!(new_file_path("b/", None, None, None), None);
+        for path in ["", "\"\"", "/dev/null", "\"/dev/null\""] {
+            assert_eq!(new_file_path(path, None, None, None), None, "{path:?}");
+        }
         assert_eq!(
             new_file_path("after/a.rs", None, Some("before/a.rs"), None),
             Some((
                 Utf8PathBuf::from("a.rs"),
                 PathSource {
                     raw: Utf8PathBuf::from("after/a.rs"),
-                    exact: true
+                    exact: true,
+                    utf8: true
                 }
             ))
         );
@@ -1209,10 +1393,10 @@ diff --git before/old.rs next/a.rs
     #[test]
     fn unsupported_rename_destinations_do_not_establish_an_exact_path() {
         assert!(new_file_path("b/", None, None, Some("")).is_none());
+        assert!(new_file_path(r#""scripts/shared.rs"#, None, None, Some(r#""scripts/shared.rs"#)).is_none());
 
         for (raw, destination) in [
             (r#""scripts/shared\tfile.rs""#, r#""scripts/shared\tfile.rs""#),
-            (r#""scripts/shared.rs"#, r#""scripts/shared.rs"#),
             ("b/../scripts/shared.rs", "../scripts/shared.rs"),
         ] {
             let (_, source) = new_file_path(raw, None, None, Some(destination)).unwrap();
@@ -1405,6 +1589,22 @@ diff --git b/scripts/publish-gh-release.rs b/scripts/publish-gh-release.rs
         .unwrap();
 
         assert!(diff.touches(&target, 2, 2));
+    }
+
+    #[test]
+    fn resolving_an_inventoried_target_does_not_drop_the_other_changed_targets() {
+        let targets = [Utf8PathBuf::from("first.rs"), Utf8PathBuf::from("second.rs")];
+        let mut diff = Diff::parse(concat!(
+            "+++ first.rs\n@@ -0,0 +7 @@\n+changed\n",
+            "+++ second.rs\n@@ -0,0 +9 @@\n+changed\n"
+        ));
+        diff.resolve_for_workspace(Utf8Path::new("."), &targets, &[], || {
+            panic!("inventoried targets need no ownership lookup")
+        })
+        .unwrap();
+        for (path, line) in targets.iter().zip([7, 9]) {
+            assert!(diff.touches(path, line, line), "{path}");
+        }
     }
 
     #[test]

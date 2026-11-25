@@ -11,6 +11,7 @@ use camino::{Utf8Component, Utf8Path, Utf8PathBuf};
 use crate::Result;
 use crate::error::error;
 
+/// Match Linux's link-follow ceiling so cycles fail promptly without rejecting ordinary chains.
 const MAX_SYMLINKS: usize = 40;
 
 /// Resolves every extant symlink in `path`, including a dangling final link's target spelling.

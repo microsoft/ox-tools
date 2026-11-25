@@ -3,11 +3,13 @@
 
 use core::ops::Range;
 
+#[cfg(test)]
 use syn::spanned::Spanned as _;
 use syn::visit::{self, Visit};
 use syn::{Expr, PatIdent};
 
 use crate::HashSet;
+use crate::parse::Extent as _;
 
 pub(in super::super) fn supported_match(expression: &syn::ExprMatch) -> bool {
     expression.arms.iter().any(|arm| matches!(&arm.pat, syn::Pat::Lit(pattern) if matches!(pattern.lit, syn::Lit::Char(_))))
@@ -28,7 +30,7 @@ struct Enclosing<'a> {
 #[expect(clippy::renamed_function_params, reason = "syn names all visitor parameters i")]
 impl<'ast> Visit<'ast> for Enclosing<'_> {
     fn visit_block(&mut self, block: &'ast syn::Block) {
-        if !block.span().byte_range().contains(&self.target.start) {
+        if !block.extent().byte_range().contains(&self.target.start) {
             return;
         }
         if block.stmts.iter().any(|statement| {
@@ -52,7 +54,7 @@ impl<'ast> Visit<'ast> for Enclosing<'_> {
     }
 
     fn visit_expr(&mut self, expression: &'ast Expr) {
-        let span = expression.span().byte_range();
+        let span = expression.extent().byte_range();
         if !span.contains(&self.target.start) || span == *self.target || self.remaining == 0 {
             return;
         }
@@ -60,7 +62,8 @@ impl<'ast> Visit<'ast> for Enclosing<'_> {
         if let Expr::Match(expression) = expression {
             self.visit_expr(&expression.expr);
             for arm in &expression.arms {
-                if arm.body.span().byte_range().contains(&self.target.start) || arm.pat.span().byte_range().contains(&self.target.start) {
+                if arm.body.extent().byte_range().contains(&self.target.start) || arm.pat.extent().byte_range().contains(&self.target.start)
+                {
                     let collecting = self.collecting;
                     self.collecting = true;
                     self.visit_pat(&arm.pat);

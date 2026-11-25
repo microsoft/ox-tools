@@ -13,6 +13,7 @@
 //! beside it are unaffected.
 
 use core::cell::RefCell;
+use std::rc::Rc;
 use std::thread;
 
 /// A Win32 call a test can ask to fail once on its own thread.
@@ -61,9 +62,10 @@ pub(crate) enum NativeCall {
 /// Arms `call` on this thread until the returned value is dropped.
 #[must_use = "the fault is disarmed as soon as this is dropped"]
 pub(crate) fn arm(call: NativeCall) -> Armed {
-    ARMED.with_borrow_mut(|armed| armed.push(call));
+    let token = Rc::new(());
+    ARMED.with_borrow_mut(|armed| armed.push((call, Rc::clone(&token))));
 
-    Armed(call)
+    Armed(token)
 }
 
 /// Whether a test asked this call to fail, spending the request if so.
@@ -71,15 +73,15 @@ pub(crate) fn fired(call: NativeCall) -> bool {
     ARMED.with_borrow_mut(|armed| {
         armed
             .iter()
-            .position(|candidate| *candidate == call)
+            .position(|(candidate, _token)| *candidate == call)
             .map(|at| armed.remove(at))
             .is_some()
     })
 }
 
-fn disarm(call: NativeCall) {
+fn disarm(token: &Rc<()>) {
     ARMED.with_borrow_mut(|armed| {
-        if let Some(at) = armed.iter().position(|candidate| *candidate == call) {
+        if let Some(at) = armed.iter().position(|(_call, candidate)| Rc::ptr_eq(candidate, token)) {
             let _spent = armed.remove(at);
         }
     });
@@ -87,16 +89,16 @@ fn disarm(call: NativeCall) {
 
 /// Keeps one fault armed until it fires or this guard is dropped.
 #[derive(Debug)]
-pub(crate) struct Armed(NativeCall);
+pub(crate) struct Armed(Rc<()>);
 
 impl Drop for Armed {
     fn drop(&mut self) {
-        disarm(self.0);
+        disarm(&self.0);
     }
 }
 
 thread_local! {
-    static ARMED: RefCell<Vec<NativeCall>> = const { RefCell::new(Vec::new()) };
+    static ARMED: RefCell<Vec<(NativeCall, Rc<()>)>> = const { RefCell::new(Vec::new()) };
 }
 
 #[cfg(test)]
@@ -112,6 +114,16 @@ mod tests {
         assert!(!fired(NativeCall::CreateJob));
 
         drop(armed);
+    }
+
+    #[test]
+    fn dropping_a_spent_guard_preserves_a_second_arming_of_the_same_call() {
+        let first = arm(NativeCall::CreateJob);
+        let _second = arm(NativeCall::CreateJob);
+        assert!(fired(NativeCall::CreateJob));
+        drop(first);
+        assert!(fired(NativeCall::CreateJob));
+        assert!(!fired(NativeCall::CreateJob));
     }
 
     #[test]

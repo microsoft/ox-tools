@@ -32,6 +32,12 @@ Rendering receives the selected mutations with campaign-assigned ordinals.
 It returns instrumented text and guard locations that the coordinator can use
 to relate compiler diagnostics to replacements.
 
+Each instrumentation prepares one syntax index borrowing the original source.
+Recursive rendering uses its source extents, grouping facts, and return scopes
+without reparsing each nested original mutation site. Replacement return-token
+offsets are computed only after the replacement qualifies for an owned or
+inherited return context, and rendering borrows those offsets without copying.
+
 For a fixed source, configuration, and selection, discovery and rendering are
 deterministic. A change to the build configuration can legitimately change the
 population even when the file bytes are unchanged.
@@ -49,6 +55,40 @@ population even when the file bytes are unchanged.
 Discovery excludes code disabled by the supplied configuration and test-only
 code. Runtime guards are not inserted into const contexts or patterns.
 Evaluated match guards remain ordinary mutation sites.
+
+Parsing removes a leading UTF-8 byte-order mark and retains it separately.
+A script's shebang stays in the source text; an equal-byte-length whitespace
+mask hides it from the parser so every span still indexes the original text
+and instrumentation preserves the interpreter line. The nesting guard counts
+expression-operand keywords as well as symbolic prefix operators. An optional
+`break` label belongs to its prefix and preserves the accumulated path cost.
+The standalone nesting precheck removes the BOM before shebang masking, just
+like parsing. Comment discovery recognizes raw C strings as single literals,
+including embedded quotes, so their contents cannot hide following source
+directives or create spurious directives.
+
+Source extents follow syntax boundary tokens instead of quoting the expression
+subtrees used by the main collector and resource-proof containment checks.
+Declaration builders reuse their root import/default paths and nominal identities;
+inline modules are indexed through borrowed item iterators. Per-file declaration
+outcomes remain available after package merging, keyed by source-content digest
+and configuration rather than physical path. Collection shares a matching outcome;
+different source or configuration builds fresh evidence. Keys come from original
+source spans, not re-serialized syntax, and retain no AST or source-text copy.
+
+Syntax checks record attribute ranges, uses of temporary values, and possible
+`format!` macro shadowing even in configuration-disabled code or regions that
+lexical analysis skips. Those observations supply no lexical facts and do not
+make excluded code eligible for mutation. Finalized evidence contains only
+consumer-facing maps and flags, separate from the traversal accumulator.
+The syntax checks and flow-sensitive
+lexical analysis share a traversal; skipped subtrees receive only the syntax
+checks. Immutable configuration sets share their owned tables across
+clones; builder updates detach only the changed table.
+
+Non-configuration attributes, including documentation attributes, pass the
+configuration gates without cloning metadata or allocating an effective-attribute
+list. Expanded `cfg_attr` metadata is owned; unchanged metadata is borrowed.
 
 Configuration gating applies to declarations, fields, parameters, statements,
 expressions, and match arms. Return-tail and expected-type analysis use the
@@ -77,6 +117,10 @@ and an unresolved question.
 | `Proven` | Positive source-visible evidence supports the replacement. |
 | `Optimistic` | Compilation depends on a semantic fact discovery cannot establish. |
 | `Explicit` | The replacement value was supplied by the user. |
+
+Fallback-method rewrites are `Proven` only with evidence for the corresponding
+standard `Option` or `Result` receiver API. A same-named custom inherent method
+remains an optimistic candidate rather than borrowing that standard contract.
 
 Confidence is diagnostic evidence, not a blanket admission filter, and does
 not participate in identity. The default selection withholds only designated
@@ -199,6 +243,11 @@ source path, containing item, mutator, normalized site, occurrence, and
 replacement alternative. They are not line numbers or runtime guard ordinals.
 Unrelated source edits should not transfer one mutant's history to another.
 
+Site normalization collapses whitespace runs and removes comments while
+preserving whether a separator exists, literal contents, and punctuation.
+Adding inter-token whitespace or a trailing comma can therefore change an ID;
+arbitrary `cargo fmt` changes are not identity-preserving.
+
 Replacement content is included where alternative ordering alone is
 insufficient, including stated values and composed synthesized results.
 Stated expressions are token-normalized: changing the expression changes its
@@ -262,3 +311,15 @@ to the implementation itself.
 
 Traversal structure, concrete analysis allowances, text encoding, and test
 mechanics are recorded in the [implementation guide](IMPLEMENTATION.md).
+
+### Analysis-cost benchmarks
+
+Run `cargo bench --locked -p cargo-gamma-engine --bench analysis` to measure
+candidate collection and `instrument_with_guards` independently. The immutable
+workload includes structs, methods, loops, matches, iterator closures, and early
+returns. Replicating it into 32, 128, and 512 modules scales source size and
+mutant count; each result reports both, with one warmup and ten measured
+iterations. Parsing and candidate preparation stay outside the rendering timer.
+The benchmark has no extra dependencies and sets no machine-speed pass threshold.
+Its timings are observations, not proof of a performance improvement without
+comparable before-and-after measurements on the same host and profile.

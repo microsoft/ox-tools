@@ -44,7 +44,6 @@ impl<H: Host> ConsoleEvents<'_, H> {
     }
 }
 
-// #[gamma::skip(all, reason = "this impl is a thin terminal/event adapter whose observable behavior is covered deterministically through the Host sink; mutating individual forwarding operations duplicates those end-to-end contracts without exposing additional production logic")]
 impl<H: Host> crate::exec::Events for ConsoleEvents<'_, H> {
     fn testing_log(&mut self, scratch: &Utf8Path) -> crate::Result<()> {
         self.verdict_log.start(scratch)
@@ -134,7 +133,7 @@ impl<H: Host> crate::exec::Events for ConsoleEvents<'_, H> {
         self.progress.update_phase(self.host, &detail);
     }
 
-    fn convergence_activity(&mut self, _round: u32, unviable: usize, _proof: usize) {
+    fn convergence_activity(&mut self, _: u32, unviable: usize, _: usize) {
         // Both displays report monotonic confirmed exclusions, never check rounds, proof subset
         // sizes, or interaction-only exclusions that do not establish individual unviability.
         self.convergence_progress(unviable);
@@ -325,6 +324,9 @@ pub(super) fn mutant_detail(mutant: &crate::model::Mutant) -> String {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use core::time::Duration;
+    use std::fs;
+
     use camino::Utf8PathBuf;
 
     use super::super::verdict_log::TESTING_PROGRESS_LOG;
@@ -414,10 +416,13 @@ mod tests {
         assert!(rendered.contains("    Planning 0/1 mutants planned"), "{rendered}");
 
         events.begin("Testing", "Tested", "executing mutants");
+        assert_eq!(events.dashboard.testing_status_for_test(), "Testing executing mutants");
         events.phase_progress(2, 10, "tests");
+        assert_eq!(events.dashboard.testing_status_for_test(), "2/10 tests");
         events.population_progress(2);
         assert_eq!(events.dashboard.testing_status_for_test(), "Mutating the workspace (2 packages)");
         events.end(", 4 killed");
+        assert_eq!(events.dashboard.testing_status_for_test(), "Planning 4 killed");
         events.complete("reachability index ready");
 
         assert_eq!(
@@ -847,9 +852,6 @@ mod tests {
             }
             events.begin("Excluding", "Excluded", "unviable mutants");
             for (confirmed, retained, round, proof) in [(0, 0, 2, 7), (3, 3, 3, 0), (10, 10, 4, 2), (0, 10, 5, 0)] {
-                if confirmed > 0 {
-                    events.convergence_progress(confirmed);
-                }
                 events.convergence_activity(round, confirmed, proof);
                 events.build_finished();
                 let expected = format!("Excluding unviable mutants ({retained} found)");
@@ -869,29 +871,7 @@ mod tests {
 
     #[test]
     fn file_only_sweep_telemetry_never_changes_either_console_display() {
-        use core::time::Duration;
-
-        let mut session = crate::exec::Session {
-            baseline: Duration::ZERO,
-            baseline_wall: Duration::ZERO,
-            tests: None,
-            quiet: Duration::ZERO,
-            stall: None,
-            build: Duration::ZERO,
-            peak: None,
-            metered: false,
-            unbounded: None,
-            withdrawn: 0,
-            census: Vec::new(),
-            rounds: 0,
-            rounds_taken: Vec::new(),
-            binaries: Vec::new(),
-            scratch: Utf8PathBuf::from("unused"),
-            filtered: 0,
-            widened: false,
-            ordering: crate::exec::OrderingHints::default(),
-            phases: crate::exec::Phases::default(),
-        };
+        let mut session = empty_session();
         let render = |dashboard, session: &crate::exec::Session| {
             let mut host = Sink::default().terminal(160);
             let mut events = ConsoleEvents {
@@ -1104,5 +1084,353 @@ mod tests {
         let length = events.host.err.len();
         events.abandon();
         assert_eq!(events.host.err.len(), length);
+    }
+
+    fn console<'host>(host: &'host mut Sink, dashboard: bool, clock: &tick::ClockControl) -> ConsoleEvents<'host, Sink> {
+        let styler = Styler::new(false);
+        let width = host.terminal_width();
+        ConsoleEvents {
+            host,
+            progress: Progress::new(true, styler, width),
+            dashboard: Dashboard::new(dashboard, width, styler, clock.to_simple_clock()),
+            styler,
+            show_build: false,
+            verdict_log: VerdictLog::default(),
+        }
+    }
+
+    fn empty_session() -> crate::exec::Session {
+        crate::exec::Session {
+            baseline: Duration::ZERO,
+            baseline_wall: Duration::ZERO,
+            tests: None,
+            quiet: Duration::ZERO,
+            stall: None,
+            build: Duration::ZERO,
+            peak: None,
+            metered: false,
+            unbounded: None,
+            withdrawn: 0,
+            census: Vec::new(),
+            rounds: 0,
+            rounds_taken: Vec::new(),
+            binaries: Vec::new(),
+            scratch: Utf8PathBuf::from("unused"),
+            filtered: 0,
+            widened: false,
+            ordering: crate::exec::OrderingHints::default(),
+            phases: crate::exec::Phases::default(),
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "writes the filesystem-backed progress journals")]
+    fn selection_callbacks_persist_the_attempt_and_update_the_hint_dashboard() {
+        use crate::exec::{SelectionAttempt, SelectionResult, SelectionTier};
+
+        let directory = crate::testing::workdir("console-selection-journal-");
+        let scratch = Utf8Path::from_path(directory.path()).unwrap();
+        let clock = tick::ClockControl::new();
+        let mut host = Sink::default().terminal(80);
+        let mut events = console(&mut host, true, &clock);
+        events.testing_log(scratch).unwrap();
+        events.dashboard.start_testing(events.host, 2, "testing".into());
+        events.selection_attempt(&SelectionAttempt {
+            ordinal: 1,
+            tier: SelectionTier::Exact,
+            package: "subject".into(),
+            target: "lib".into(),
+            test: Some("rejects_bad_input".into()),
+            rank: 1,
+            result: SelectionResult::Hit,
+            all_tests: false,
+            elapsed_ms: 2,
+            fallback_ms: 10,
+        });
+        events.finish_verdict_log().unwrap();
+        clock.advance(Duration::from_secs(1));
+        events.host.err.clear();
+        events.heartbeat();
+        assert!(events.host.err().contains("explicit 1"), "{}", events.host.err());
+        let journal = fs::read_to_string(scratch.join(super::super::verdict_log::TEST_SELECTION_LOG)).unwrap();
+        let rows: Vec<serde_json::Value> = journal.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["ordinal"], 1);
+        assert_eq!(rows[0]["package"], "subject");
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "writes the filesystem-backed progress journal")]
+    fn measurement_restores_counts_and_replays_only_non_pending_verdicts() {
+        let directory = crate::testing::workdir("console-prepared-journal-");
+        let scratch = Utf8Path::from_path(directory.path()).unwrap();
+        let clock = tick::ClockControl::new();
+        let mut host = Sink::default().terminal(160);
+        let mut events = console(&mut host, true, &clock);
+        events.testing_log(scratch).unwrap();
+        events.sweep_planning(&empty_plan(), 3, 2);
+        let mut plan = empty_plan();
+        plan.mutants = vec![
+            mutant(Outcome::Killed, None),
+            mutant(Outcome::Survived, None),
+            mutant(Outcome::Pending, None),
+        ];
+        events.measured(&plan, &empty_session());
+        let work = [crate::estimate::MutationWork::new(crate::estimate::WorkKind::Whole, Duration::ZERO)];
+        events.sweep_planned(&work, 2);
+        assert!(events.dashboard.testing_status_for_test().contains("2/3 mutants evaluated"));
+        let counts = events
+            .host
+            .err()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_ascii_lowercase();
+        assert!(counts.contains("killed 1"), "{counts}");
+        assert!(counts.contains("survived 1"), "{counts}");
+        assert!(counts.contains("pending 1"), "{counts}");
+        events.finish_verdict_log().unwrap();
+        let journal = fs::read_to_string(scratch.join(TESTING_PROGRESS_LOG)).unwrap();
+        assert_eq!(journal.lines().count(), 2, "{journal}");
+        assert!(journal.contains("killed"), "{journal}");
+        assert!(journal.contains("SURVIVED"), "{journal}");
+        assert!(!journal.contains("pending"), "{journal}");
+    }
+
+    #[test]
+    fn dashboard_phase_callbacks_publish_each_update_before_the_next_callback() {
+        let clock = tick::ClockControl::new();
+        let mut host = Sink::default().terminal(80);
+        let mut events = console(&mut host, true, &clock);
+        events.sweep_planning(&empty_plan(), 3, 2);
+
+        events.phase("Rendering", "the report");
+        assert_eq!(events.dashboard.testing_status_for_test(), "Rendering the report");
+        events.end(",, \t4 records \t");
+        assert_eq!(events.dashboard.testing_status_for_test(), "Planning 4 records");
+        events.outcome(",, \t7 results \t");
+        assert_eq!(events.dashboard.testing_status_for_test(), "Planning 7 results");
+        events.phase_progress(4, 9, "tests");
+        assert_eq!(events.dashboard.testing_status_for_test(), "4/9 tests");
+        events.sweep_plan_progress(3, 8);
+        assert_eq!(events.dashboard.testing_status_for_test(), "3/8 mutants planned");
+    }
+
+    #[test]
+    fn ordinary_phase_callbacks_preserve_their_counts_and_completion_line() {
+        let clock = tick::ClockControl::new();
+        let mut host = Sink::default().terminal(160);
+        let mut events = console(&mut host, false, &clock);
+        events.begin("Preparing", "Prepared", "the suite");
+        events.host.err.clear();
+        events.phase_progress(4, 9, "tests");
+        assert!(events.host.err().contains("4/9 tests"), "{}", events.host.err());
+        events.host.err.clear();
+        events.end(", 7 results");
+        assert!(
+            events.host.err().ends_with("Prepared the suite, 7 results\n"),
+            "{}",
+            events.host.err()
+        );
+    }
+
+    #[test]
+    fn a_new_excluding_phase_does_not_reuse_the_previous_confirmed_count() {
+        for dashboard in [false, true] {
+            let clock = tick::ClockControl::new();
+            let mut host = Sink::default().terminal(80);
+            let mut events = console(&mut host, dashboard, &clock);
+            if dashboard {
+                events.sweep_planning(&empty_plan(), 1, 2);
+            }
+            events.begin("Excluding", "Excluded", "unused");
+            events.convergence_activity(1, 7, 12);
+            events.begin("Excluding", "Excluded", "unused");
+            events.convergence_activity(2, 2, 10);
+            if dashboard {
+                assert_eq!(events.dashboard.testing_status_for_test(), "Excluding unviable mutants (2 found)");
+            } else {
+                assert!(
+                    events.host.err().ends_with("Excluding unviable mutants (2 found)"),
+                    "{}",
+                    events.host.err()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn build_finished_restores_a_phase_retracted_by_visible_cargo_progress() {
+        let clock = tick::ClockControl::new();
+        let mut host = Sink::default().terminal(80);
+        let mut events = console(&mut host, false, &clock);
+        events.show_build = true;
+        events.begin("Excluding", "Excluded", "unused");
+        events.convergence_activity(1, 4, 9);
+        events.build_progress("cargo is working");
+        events.host.err.clear();
+        events.build_finished();
+        assert!(
+            events.host.err().ends_with("Excluding unviable mutants (4 found)"),
+            "{}",
+            events.host.err()
+        );
+    }
+
+    #[test]
+    fn active_dashboard_warnings_preserve_every_detail_line() {
+        let clock = tick::ClockControl::new();
+        let mut host = Sink::default().terminal(80);
+        let mut events = console(&mut host, true, &clock);
+        events.sweep_planning(&empty_plan(), 1, 2);
+        events.host.err.clear();
+        events.warn("first warning\nsecond warning");
+        let rendered = events.host.err();
+        assert!(rendered.contains("first warning"), "{rendered}");
+        assert!(rendered.contains("second warning"), "{rendered}");
+    }
+
+    #[test]
+    fn dashboard_verdict_callbacks_announce_record_and_redraw_each_outcome() {
+        for outcome in [
+            Outcome::Killed,
+            Outcome::Survived,
+            Outcome::Flaky,
+            Outcome::Timeout,
+            Outcome::OutOfMemory,
+        ] {
+            let clock = tick::ClockControl::new();
+            let mut host = Sink::default().terminal(160);
+            let mut events = console(&mut host, true, &clock);
+            let mut plan = empty_plan();
+            plan.mutants = vec![mutant(Outcome::Pending, None); 2];
+            events.sweep_planning(&plan, 1, 3);
+            events.progress.set_total(2);
+            events.dashboard.start_testing(events.host, 3, "stale status".into());
+            clock.advance(Duration::from_secs(1));
+            events.host.err.clear();
+            events.mutant(&mutant(outcome, Some("verdict note")));
+            let rendered = events.host.err();
+            assert!(events.progress.render().contains("1/2 mutants evaluated"));
+            assert_eq!(events.dashboard.testing_status_for_test(), events.progress.render());
+            let counts = rendered.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_lowercase();
+            assert!(counts.contains("pending 1"), "{rendered}");
+            if outcome != Outcome::Killed {
+                assert!(
+                    rendered.contains(&mutant_detail(&mutant(outcome, Some("verdict note")))),
+                    "{rendered}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_ordinary_verdict_draws_the_updated_progress_without_a_dashboard() {
+        let clock = tick::ClockControl::new();
+        let mut host = Sink::default().terminal(80);
+        let mut events = console(&mut host, false, &clock);
+        events.progress.set_total(2);
+        events.mutant(&mutant(Outcome::Killed, None));
+        assert!(events.host.err().contains("1/2 mutants evaluated"), "{}", events.host.err());
+    }
+
+    #[test]
+    fn worker_callbacks_publish_activity_and_new_status_in_the_same_frame() {
+        for started in [false, true] {
+            let clock = tick::ClockControl::new();
+            let mut host = Sink::default().terminal(80);
+            let mut events = console(&mut host, true, &clock);
+            events.progress.set_total(9);
+            events.progress.record(Outcome::Survived);
+            events.dashboard.start_testing(events.host, 3, "stale status".into());
+            clock.advance(Duration::from_secs(1));
+            events.host.err.clear();
+            if started {
+                events.mutant_started();
+            } else {
+                events.mutant_activity(true);
+            }
+            assert!(events.dashboard.testing_status_for_test().contains("1/9 mutants evaluated"));
+            assert!(events.host.err().contains("1/3 busy"), "{}", events.host.err());
+            events.progress.record(Outcome::Survived);
+            clock.advance(Duration::from_secs(1));
+            events.host.err.clear();
+            events.mutant_activity(false);
+            assert!(events.dashboard.testing_status_for_test().contains("2/9 mutants evaluated"));
+            assert!(events.host.err().contains("0/3 busy"), "{}", events.host.err());
+        }
+    }
+
+    #[test]
+    fn heartbeat_resizes_and_redraws_only_an_active_dashboard() {
+        for active in [false, true] {
+            let clock = tick::ClockControl::new();
+            let mut host = Sink::default().terminal(160);
+            let mut events = console(&mut host, true, &clock);
+            events.progress = Progress::new(true, events.styler, Some(20));
+            events.progress.set_total(7);
+            events.progress.record(Outcome::Killed);
+            if active {
+                events.dashboard.start_testing(events.host, 2, "stale status".into());
+            }
+            let before = events.progress.render();
+            clock.advance(Duration::from_secs(1));
+            events.host.err.clear();
+            events.heartbeat();
+            if active {
+                assert!(events.dashboard.testing_status_for_test().contains("1/7 mutants evaluated"));
+                assert_ne!(events.host.err, [] as [u8; 0]);
+            } else {
+                assert_eq!(events.progress.render(), before);
+                assert_eq!(events.host.err, [] as [u8; 0]);
+            }
+        }
+    }
+
+    #[test]
+    fn sweep_transitions_finish_the_old_line_and_keep_job_and_viewport_information() {
+        let clock = tick::ClockControl::new();
+        let mut host = Sink::default().terminal(80);
+        let mut events = console(&mut host, true, &clock);
+        events.begin("Preparing", "Prepared", "the suite");
+        events.progress.borrowed(events.host, "prior Cargo preparation");
+        events.host.err.clear();
+        let mut plan = empty_plan();
+        plan.mutants = vec![mutant(Outcome::Pending, None); 2];
+        events.sweep_planning(&plan, 3, 4);
+        assert!(events.host.err().starts_with("\r\x1b[2K"), "{}", events.host.err());
+        assert!(events.host.err().contains("3 binaries"), "{}", events.host.err());
+        assert!(events.host.err().contains("0/4 busy"), "{}", events.host.err());
+
+        events.dashboard.finish(events.host);
+        let mut host = Sink::default().terminal(80);
+        let mut events = console(&mut host, true, &clock);
+        events.begin("Preparing", "Prepared", "the work");
+        events.progress.borrowed(events.host, "prior sweep preparation");
+        events.progress.resize(Some(20));
+        events.progress.restore_outcomes([Outcome::Survived]);
+        let work = vec![crate::estimate::MutationWork::new(crate::estimate::WorkKind::Whole, Duration::ZERO); 2];
+        events.host.err.clear();
+        events.sweep_planned(&work, 3);
+        assert!(events.host.err().starts_with("\r\x1b[2K"), "{}", events.host.err());
+        assert!(!events.host.err().contains("Prepared"), "{}", events.host.err());
+        assert!(events.dashboard.is_active());
+        assert!(events.dashboard.testing_status_for_test().contains("1/3 mutants evaluated"));
+        assert!(events.host.err().contains("0/3 busy"), "{}", events.host.err());
+    }
+
+    #[test]
+    fn ordinary_sweep_planning_counts_only_pending_mutants_and_spells_one_binary() {
+        let clock = tick::ClockControl::new();
+        let mut host = Sink::default().terminal(160);
+        let mut events = console(&mut host, false, &clock);
+        let mut plan = empty_plan();
+        plan.mutants = vec![mutant(Outcome::Pending, None), mutant(Outcome::Killed, None)];
+        events.sweep_planning(&plan, 1, 3);
+        assert!(
+            events.host.err().contains("0/1 mutants across 1 test binary using 3 jobs"),
+            "{}",
+            events.host.err()
+        );
     }
 }

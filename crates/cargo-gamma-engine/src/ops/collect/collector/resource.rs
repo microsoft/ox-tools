@@ -8,10 +8,12 @@ use core::ops::Range;
 use proc_macro2::{Delimiter, Group, Ident, Literal, Punct, Spacing, TokenStream, TokenTree};
 use quote::ToTokens as _;
 use rustc_lexer::{LiteralKind, TokenKind};
+#[cfg(test)]
 use syn::spanned::Spanned as _;
 use syn::{BinOp, Block, Expr, Lit, Stmt, UnOp};
 
 use crate::HashMap;
+use crate::parse::Extent as _;
 
 mod cursor;
 mod effects;
@@ -84,11 +86,10 @@ struct Iteration {
 
 impl LoopProof {
     pub(super) fn new(expression: &Expr, bindings: HashMap<String, Binding>, standard_char: bool) -> Option<Self> {
-        let span = expression.span().byte_range();
+        let span = expression.extent().byte_range();
         // Conservative defaults bound cloned loop syntax, abstract-state entries, and name storage.
         // These are not measured capacities or semantic limits; exhaustion retains the candidate.
         if span.len() > 4096 || bindings.len() > 64 || bindings.keys().any(|name| name.len() > 256) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let mut proof = Self {
@@ -156,17 +157,14 @@ impl LoopProof {
 
     pub(super) fn omits(&self, source: &str, span: &Range<usize>, replacement: &str) -> bool {
         if span.start < self.span.start || span.end > self.span.end {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         let Some(original) = source.get(self.span.clone()) else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         };
         let mut mutated = original.to_owned();
         mutated.replace_range(span.start - self.span.start..span.end - self.span.start, replacement);
         let Some(tokens) = Self::proof_tokens(&mutated, &self.literals) else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         };
         syn::parse2::<Expr>(tokens).is_ok_and(|expression| {
@@ -236,7 +234,6 @@ impl LoopProof {
                         || (spelling.starts_with("/**") && !spelling.starts_with("/***"))
                         || spelling.starts_with("/*!")
                     {
-                        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                         return None;
                     }
                     continue;
@@ -256,14 +253,12 @@ impl LoopProof {
                     // #[gamma::skip(literal.int_decrement, reason = "Comparing with zero only disables the base-frame guard; popping that frame still fails the concrete-delimiter comparison below and returns None.", tag = "equivalent")]
                     1
                     {
-                        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                         return None;
                     }
                     let (opened, tokens) =
                         // #[gamma::skip(try.propagate_to_unwrap, tag = "equivalent", reason = "The groups.len() == 1 guard above rejects the base frame, so this pop always has an opening group to remove.")]
                         groups.pop()?;
                     if Some(opened) != delimiter {
-                        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                         return None;
                     }
                     TokenTree::Group(Group::new(opened, tokens))
@@ -297,7 +292,6 @@ impl LoopProof {
                     {
                         Literal::u128_unsuffixed(value)
                     } else {
-                        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                         return None;
                     };
                     TokenTree::Literal(literal)
@@ -315,7 +309,6 @@ impl LoopProof {
                         .is_some_and(|next| "~!@#$%^&*-=+|;:,<>./?'".contains(next));
                     TokenTree::Punct(Punct::new(character, if joint { Spacing::Joint } else { Spacing::Alone }))
                 }
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 _ => return None,
             };
             // #[gamma::skip(try.propagate_to_unwrap, reason = "Lexer byte boundaries and terminated-char quotes are valid; the guarded token stack retains its base frame.", tag = "equivalent")]
@@ -328,7 +321,6 @@ impl LoopProof {
         let (condition, body) = match expression {
             Expr::While(node) if node.attrs.is_empty() => (Some(&*node.cond), &node.body),
             Expr::Loop(node) if node.attrs.is_empty() => (None, &node.body),
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             _ => return None,
         };
         if let Some(condition) = condition {
@@ -343,7 +335,6 @@ impl LoopProof {
         if let Some(condition) = condition
             && (self.scalar(condition) != Some(Binding::Bool) || literal_bool(condition) == Some(false))
         {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         // Every supported body operation preserves scalar bindings. The condition is therefore
@@ -361,7 +352,6 @@ impl LoopProof {
         let mut grows = false;
         for statement in &block.stmts {
             let Stmt::Expr(expression, _) = statement else {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             };
             match expression {
@@ -381,11 +371,9 @@ impl LoopProof {
                         Some(self.block(&node.then_branch)?)
                     } else if let Some((_, otherwise)) = &node.else_branch {
                         let Expr::Block(otherwise) = &**otherwise else {
-                            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                             return None;
                         };
                         if !otherwise.attrs.is_empty() || otherwise.label.is_some() {
-                            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                             return None;
                         }
                         Some(self.block(&otherwise.block)?)
@@ -413,7 +401,6 @@ impl LoopProof {
                 if !matches!(kind, Binding::Bool | Binding::Integer | Binding::Primitive(_))
                     || bare_name(&node.right).as_ref() != Some(&name)
                 {
-                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                     return None;
                 }
                 Some(false)
@@ -425,7 +412,6 @@ impl LoopProof {
                     Some(Binding::Integer | Binding::Primitive(Primitive::Signed(_) | Primitive::Unsigned(_)))
                 ) || !integer_zero(&node.right)
                 {
-                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                     return None;
                 }
                 Some(false)
@@ -433,15 +419,12 @@ impl LoopProof {
             Expr::MethodCall(node) if node.attrs.is_empty() && node.turbofish.is_none() && node.args.len() == 1 => {
                 let name = bare_name(&node.receiver)?;
                 if self.bindings.get(&name) != Some(&Binding::String) {
-                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                     return None;
                 }
                 let Expr::Lit(argument) = &node.args[0] else {
-                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                     return None;
                 };
                 if !argument.attrs.is_empty() {
-                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                     return None;
                 }
                 match (&*node.method.to_string(), &argument.lit) {
@@ -467,7 +450,6 @@ impl LoopProof {
                     kind => kind,
                 };
                 if !matches!(kind, Binding::Bool | Binding::Integer) {
-                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                     return None;
                 }
                 Some(kind)
@@ -498,20 +480,16 @@ impl LoopProof {
 
     fn peek_predicate(&self, node: &syn::ExprMethodCall) -> Option<String> {
         if !node.attrs.is_empty() || node.turbofish.is_some() {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let Expr::MethodCall(peek) = &*node.receiver else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         };
         if !peek.attrs.is_empty() || peek.turbofish.is_some() || !peek.args.is_empty() || peek.method != "peek" {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let name = bare_name(&peek.receiver)?;
         if self.bindings.get(&name) != Some(&Binding::PeekableChars) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         match node.method.to_string().as_str() {
@@ -531,11 +509,9 @@ impl LoopProof {
             }
             Expr::Closure(node) if node.attrs.is_empty() && node.asyncness.is_none() && node.inputs.len() == 1 => {
                 let syn::Pat::Ident(parameter) = &node.inputs[0] else {
-                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
                     return false;
                 };
                 if parameter.by_ref.is_some() || parameter.subpat.is_some() {
-                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
                     return false;
                 }
                 let body = match &*node.body {
@@ -571,12 +547,10 @@ impl LoopProof {
                 Stmt::Local(local) if local.attrs.is_empty() && matches!(local.pat, syn::Pat::Wild(_)) => {
                     let init = local.init.as_ref()?;
                     if init.diverge.is_some() {
-                        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                         return None;
                     }
                     &*init.expr
                 }
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 _ => return None,
             };
             if matches!(expression, Expr::MethodCall(call)

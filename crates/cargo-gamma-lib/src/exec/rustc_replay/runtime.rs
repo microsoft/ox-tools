@@ -57,7 +57,7 @@ pub(super) fn capture(command: &Command, environment: &BTreeMap<String, String>)
     let directory = environment.get(CAPTURE_DIR_VAR)?;
     // #[gamma::skip(try.propagate_to_unwrap, tag = "equivalent", reason = "Runtime derives Serialize over UTF-8 paths, strings, arrays and integers; serialization into a Vec cannot fail.")]
     let bytes = serde_json::to_vec(&capture).ok()?;
-    fs::write(Utf8Path::new(directory).join(FILE), bytes).ok()
+    publish_atomic(&Utf8Path::new(directory).join(FILE), &bytes).ok()
 }
 
 pub(super) fn capture_with(
@@ -66,6 +66,7 @@ pub(super) fn capture_with(
     environment: &BTreeMap<String, String>,
     cwd: &Utf8Path,
 ) -> Option<Runtime> {
+    let files = &SnapshotFiles::new(files);
     let root = Utf8PathBuf::from(environment.get(RUNTIME_VAR)?);
     let target = Utf8PathBuf::from(environment.get(TARGET_VAR)?);
     let manifest = Utf8PathBuf::from(environment.get("CARGO_MANIFEST_DIR")?);
@@ -145,7 +146,9 @@ pub(super) fn capture_with(
     Some(Runtime {
         root: root.clone(),
         files: paths,
-        shape: inventory(files, &root, Utf8Path::new(""))?, // #[gamma::skip(literal.str_to_xyzzy, tag = "equivalent", reason = "Native runtime paths are absolute and cannot start with the relative normal component xyzzy.")]
+        shape:
+        // #[gamma::skip(try.propagate_to_unwrap, tag = "equivalent", reason = "The earlier runtime listing memoized this same root and exclusion key successfully.")]
+        inventory(files, &root, Utf8Path::new(""))?, // #[gamma::skip(literal.str_to_xyzzy, tag = "equivalent", reason = "Native runtime paths are absolute and cannot start with the relative normal component xyzzy.")]
         artifacts,
         compiler: (compiler.clone(), digest(files, &compiler)?),
         context: command_fingerprint(&identity, environment.iter().map(|(name, value)| (name.into(), value.into())))?, // #[gamma::skip(try.propagate_to_unwrap, tag = "equivalent", reason = "metadata_arguments validated every actual argument as UTF-8; program, working directory, and environment are already UTF-8.")]

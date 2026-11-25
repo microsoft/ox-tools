@@ -141,13 +141,13 @@ fn native_target_discovery(work: &mut Workspace) -> String {
     fs::create_dir(&captures).expect("each fixture uses a fresh root with no prior capture generation");
     let source = root.join("tests/integration.rs");
     fs::write(
-        output.join("integration-native.d"),
+        output.join("integration-0123456789abcdef.d"),
         format!("artifact: {source} {}\n", root.join("src/lib.rs")),
     )
     .expect("the fixture created the native output directory immediately above");
     let capture = serde_json::json!({
         "crate_name": "integration", "crate_types": ["bin"], "test": true,
-        "source": source, "out_dir": output, "extra_filename": "-native",
+        "source": source, "out_dir": output, "extra_filename": "-0123456789abcdef",
         "externs": [], "opaque_extern": false,
     });
     fs::write(
@@ -156,7 +156,7 @@ fn native_target_discovery(work: &mut Workspace) -> String {
     )
     .expect("the fresh fixture capture directory is writable");
     work.test_set_rustc_captures(captures.into());
-    let executable = output.join(format!("integration-native{}", std::env::consts::EXE_SUFFIX));
+    let executable = output.join(format!("integration-0123456789abcdef{}", std::env::consts::EXE_SUFFIX));
     serde_json::json!({
         "reason":"compiler-artifact", "package_id":"path+file:///fixture#trivial@0.0.0",
         "profile":{"test":true},
@@ -228,6 +228,8 @@ fn span(file: &str, line_start: u32, column_start: u32, line_end: u32, column_en
 fn reason_message(code: Option<&str>, message: &str, spans: &[Value], notes: &[Value]) -> String {
     serde_json::json!({
         "reason": "compiler-message",
+        "package_id": "path+file:///fixture#trivial@0.0.0",
+        "target": {"name": "trivial", "kind": ["lib"]},
         "message": {
             "level": "error",
             "message": message,
