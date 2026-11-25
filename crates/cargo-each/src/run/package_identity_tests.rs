@@ -477,6 +477,25 @@ fn cargo_specs_preserve_selection_policy_and_mixed_input_order() {
 }
 
 #[test]
+fn exact_metadata_id_selections_continue_through_all_inputs() {
+    let id = "path+file:///checkout/alpha#alpha@0.1.0";
+    for (options, contents) in [
+        (vec!["-p", id, "-p", "literal-root-id", "--once"], String::new()),
+        (
+            vec!["--package-file", "selection.txt", "--once"],
+            format!("literal-root-id\n{id}\n"),
+        ),
+    ] {
+        let invocations = dispatch_source_selection("checkout", id, &options, &contents, &["cargo", "check", "{cargo-specs}"])
+            .expect("all exact metadata IDs resolve");
+        assert_eq!(
+            invocations[0].argv,
+            ["cargo", "check", "--package", id, "--package", "literal-root-id"],
+        );
+    }
+}
+
+#[test]
 fn source_selection_rejects_registry_and_stale_checkout_identities() {
     let id = "path+file:///original/alpha#alpha@0.1.0";
     for invalid in [

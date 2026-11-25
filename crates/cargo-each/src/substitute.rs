@@ -225,6 +225,7 @@ pub(crate) fn validate_placeholders(args: &[String], mode: Mode) -> Result<(), E
                 )
                 .into());
             }
+            // #[gamma::skip(collection.reverse_array, reason = "Both standalone-only tokens are checked independently; either order rejects the same invalid command templates.", tag = "equivalent")]
             for token in [PACKAGES_TOKEN, CARGO_SPECS_TOKEN] {
                 if arg != token && arg.contains(token) {
                     return Err(PlaceholderMisuseError::new(
@@ -235,6 +236,7 @@ pub(crate) fn validate_placeholders(args: &[String], mode: Mode) -> Result<(), E
                 }
             }
         } else {
+            // #[gamma::skip(collection.reverse_array, reason = "Both once-only tokens are checked independently; either order rejects the same invalid command templates.", tag = "equivalent")]
             for token in [PACKAGES_TOKEN, CARGO_SPECS_TOKEN] {
                 if arg.contains(token) {
                     return Err(PlaceholderMisuseError::new(token.to_owned(), "only valid in --once mode".to_owned()).into());

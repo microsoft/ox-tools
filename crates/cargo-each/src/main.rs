@@ -63,7 +63,7 @@
 //! fail rather than falling back to names.
 //! Use `{cargo-spec}` per package/target or `{cargo-specs}` in once mode for
 //! child Cargo commands that must distinguish the local package from a
-//! registry copy. Both copy Cargo metadata's opaque package IDs without
+//! registry copy. Both copy opaque package IDs from Cargo metadata without
 //! parsing or reconstruction. Portable name/version inputs still resolve
 //! against the current checkout.
 //!

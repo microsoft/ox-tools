@@ -208,9 +208,6 @@ fn resolve_selectors<'w>(workspace: &'w Workspace, selectors: &[String]) -> Resu
             matched.insert(member.name.as_str());
             continue;
         }
-        if selector.contains("://") {
-            return Err(UnknownSelectorError::new(selector.clone()).into());
-        }
         // A `name@version` spec matches on the name (glob) *and*, when a
         // version is supplied, on the version per cargo's package-id-spec:
         // the qualifier may be partial, so `alpha@0.1` matches member `0.1.0`

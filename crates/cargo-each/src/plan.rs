@@ -213,11 +213,7 @@ impl Plan {
                 })
                 .collect::<Vec<_>>(),
             Mode::Once => {
-                let cargo_specs = if command.iter().any(|arg| arg == "{cargo-specs}") {
-                    packages_flags(members, packages, Member::cargo_spec)
-                } else {
-                    Vec::new()
-                };
+                let cargo_specs = packages_flags(members, packages, Member::cargo_spec);
                 let packages = packages_flags(members, packages, Member::spec);
                 let placeholders = Placeholders::Once {
                     packages,
