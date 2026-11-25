@@ -4,6 +4,7 @@
 //! One mutant's most recent verdict, and when it was earned.
 
 use crate::elements::MutantResult;
+use crate::merge::lineage::Lineage;
 
 /// One mutant's most recent verdict, and when it was earned.
 ///
@@ -30,7 +31,7 @@ pub(super) struct Verdict<'reports> {
     pub(super) origin: &'reports str,
 
     /// A deterministic identity retained through staged merges.
-    pub(super) lineage: String,
+    pub(super) lineage: Lineage<'reports>,
 
     /// Whether the winning verdict came from a name-filtered source.
     pub(super) name_filtered: bool,
@@ -45,5 +46,5 @@ pub(super) struct Verdict<'reports> {
     pub(super) presentation: Option<&'reports MutantResult>,
 
     /// The source generation carrying [`Self::presentation`].
-    pub(super) presentation_rank: Option<(u64, &'reports str, String)>,
+    pub(super) presentation_rank: Option<(u64, &'reports str, Lineage<'reports>)>,
 }

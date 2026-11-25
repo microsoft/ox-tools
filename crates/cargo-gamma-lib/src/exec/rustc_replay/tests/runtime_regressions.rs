@@ -58,6 +58,10 @@ fn runtime_capture_declines_an_inventory_lost_after_reading_its_sources() {
         [Ok(()), Err(io::ErrorKind::PermissionDenied)].into(),
     );
     snapshot_io::with(script, || {
+        assert!(
+            runtime::capture_with(&NativeFiles, &command, &environment, &unit.cwd).is_some(),
+            "one capture hashes and inventories each input once"
+        );
         assert!(runtime::capture_with(&NativeFiles, &command, &environment, &unit.cwd).is_none());
     });
 }

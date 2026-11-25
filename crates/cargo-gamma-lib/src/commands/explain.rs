@@ -11,6 +11,7 @@ use super::host::Host;
 use crate::error::error;
 use crate::model::MUTANT_ID_VERSION;
 use crate::ops::registry;
+use crate::report::encode_controls;
 
 /// Implements `explain`.
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -145,14 +146,14 @@ fn explain_mutant_with<H: Host>(
 
     if current.is_none() && historical.is_none() {
         let report_hint = if args.report.is_some() {
-            format!("; `{report_path}` does not contain it either")
+            format!("; `{}` does not contain it either", encode_controls(report_path.as_str()))
         } else {
             "; pass `--report <PATH>` to inspect a retained CI report".to_owned()
         };
         return Err(error!(
             "mutant ID `{}` is not produced by current discovery{report_hint}. The source site may \
              have changed, the current selection may exclude it, or the report may use another identity version.",
-            args.subject
+            encode_controls(&args.subject)
         )
         .usage());
     }
@@ -166,18 +167,24 @@ fn explain_mutant_with<H: Host>(
             .identity_version()
     };
     let mut stream = host.results();
-    writeln!(stream, "mutant {}", args.subject)?;
+    writeln!(stream, "mutant {}", encode_controls(&args.subject))?;
     writeln!(stream, "  identity version: {identity_version}")?;
 
     if let Some(mutant) = current {
         writeln!(stream, "  current: yes")?;
-        writeln!(stream, "  package: {}", mutant.package)?;
-        writeln!(stream, "  location: {}:{}:{}", mutant.file, mutant.line, mutant.column)?;
-        writeln!(stream, "  item: {}", mutant.item_path)?;
-        writeln!(stream, "  mutator: {}", mutant.mutator)?;
-        writeln!(stream, "  original: {}", mutant.original)?;
-        writeln!(stream, "  replacement: {}", mutant.replacement)?;
-        writeln!(stream, "  suppress with: // #[gamma::skip({})]", mutant.mutator)?;
+        writeln!(stream, "  package: {}", encode_controls(&mutant.package))?;
+        writeln!(
+            stream,
+            "  location: {}:{}:{}",
+            encode_controls(mutant.file.as_str()),
+            mutant.line,
+            mutant.column
+        )?;
+        writeln!(stream, "  item: {}", encode_controls(&mutant.item_path))?;
+        writeln!(stream, "  mutator: {}", encode_controls(&mutant.mutator))?;
+        writeln!(stream, "  original: {}", encode_controls(&mutant.original))?;
+        writeln!(stream, "  replacement: {}", encode_controls(&mutant.replacement))?;
+        writeln!(stream, "  suppress with: // #[gamma::skip({})]", encode_controls(&mutant.mutator))?;
     } else {
         writeln!(stream, "  current: no (the current discovery no longer produces this mutant)")?;
     }
@@ -185,20 +192,25 @@ fn explain_mutant_with<H: Host>(
     if let Some((path, file, mutant)) = historical {
         let line = mutant.location.start.line;
         let source = file.source.lines().nth(line.saturating_sub(1)).unwrap_or("").trim();
-        writeln!(stream, "  report: {report_path}")?;
-        writeln!(stream, "  reported location: {path}:{line}:{}", mutant.location.start.column)?;
-        writeln!(stream, "  reported source: {source}")?;
+        writeln!(stream, "  report: {}", encode_controls(report_path.as_str()))?;
+        writeln!(
+            stream,
+            "  reported location: {}:{line}:{}",
+            encode_controls(path),
+            mutant.location.start.column
+        )?;
+        writeln!(stream, "  reported source: {}", encode_controls(source))?;
         writeln!(
             stream,
             "  reported replacement: {}",
-            mutant.replacement.as_deref().unwrap_or("<not recorded>")
+            encode_controls(mutant.replacement.as_deref().unwrap_or("<not recorded>"))
         )?;
-        writeln!(stream, "  verdict: {}", mutant.status)?;
+        writeln!(stream, "  verdict: {}", encode_controls(&mutant.status))?;
         if let Some(reason) = mutant.status_reason.as_deref() {
-            writeln!(stream, "  reason: {reason}")?;
+            writeln!(stream, "  reason: {}", encode_controls(reason))?;
         }
         if let Some(killers) = mutant.killed_by.as_deref() {
-            writeln!(stream, "  killed by: {}", killers.join(", "))?;
+            writeln!(stream, "  killed by: {}", encode_controls(&killers.join(", ")))?;
         }
     }
 
@@ -319,7 +331,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "system-tests")]
     fn source_plan(root: &Utf8Path) -> crate::discover::Plan {
         let parsed = crate::parse::SourceFile::parse("src/lib.rs", "pub fn answer() -> i32 { 42 }\n".to_owned()).unwrap();
         let candidates = crate::ops::collect_candidates(&parsed, &crate::ops::Selection::everything());
@@ -335,6 +346,76 @@ mod tests {
             skipped: Vec::new(),
             reach: crate::HashMap::default(),
             specs: crate::HashMap::default(),
+        }
+    }
+
+    #[test]
+    fn hostile_report_and_current_values_are_encoded_without_flattening_explanation_layout() {
+        let directory = crate::testing::workdir("explain-hostile-controls-");
+        let root = Utf8Path::from_path(directory.path()).unwrap();
+        let hostile = "value\u{1b}[2K\r\u{1b}]8;;https://invalid.example\u{7}text\u{1b}]8;;\u{7}";
+        let mut plan = source_plan(root);
+        let current = &mut plan.mutants[0];
+        current.file = Utf8PathBuf::from(format!("src/{hostile}.rs")).into();
+        current.package = format!("package {hostile}").into();
+        current.item_path = format!("item {hostile}\nforged").into();
+        current.original = format!("original {hostile}\nforged").into();
+        current.replacement = format!("replacement {hostile}\nforged").into();
+        let subject = current.id.to_string();
+        let mut historical = crate::fixtures::report_with(None, 0, vec![crate::fixtures::mutant_result_at(&subject, 1, "Survived")]);
+        let mut file = historical.files.remove("src/lib.rs").unwrap();
+        file.source = format!("source {hostile}");
+        file.mutants[0].replacement = Some(format!("replacement {hostile}\nforged").into());
+        file.mutants[0].status_reason = Some(format!("reason {hostile}\nforged"));
+        file.mutants[0].killed_by = Some(vec![format!("killer {hostile}\nforged")]);
+        let _ = historical.files.insert(format!("src/{hostile}.rs"), file);
+        let report_path = root.join("report.json");
+        crate::elements::write_json(&historical, &report_path).unwrap();
+        let mut selected = args(subject, root.to_owned());
+        selected.report = Some(report_path);
+        let mut host = Sink::default();
+        explain_mutant_with(&mut host, &selected, |_, _, _| Ok(plan)).unwrap();
+        let text = host.out();
+        assert!(!text.contains(['\u{1b}', '\r', '\u{7}']), "{text:?}");
+        assert!(text.contains(r"\e[2K\r\e]8;;"), "{text}");
+        assert!(text.contains(r"\nforged"), "{text}");
+        assert!(text.contains("\n  verdict: Survived\n  reason: "), "{text}");
+        for field in [
+            "package:",
+            "location:",
+            "item:",
+            "original:",
+            "replacement:",
+            "reported location:",
+            "reported source:",
+            "killed by:",
+        ] {
+            assert!(text.contains(field), "{field}: {text}");
+        }
+    }
+
+    #[test]
+    fn hostile_unknown_report_status_is_safe_in_both_command_errors() {
+        let directory = crate::testing::workdir("explain-hostile-status-");
+        let root = Utf8Path::from_path(directory.path()).unwrap();
+        let path = root.join("invalid.json");
+        let mut value = serde_json::to_value(crate::fixtures::report_with(
+            None,
+            0,
+            vec![crate::fixtures::mutant_result_at("deadbeefcafe", 1, "Survived")],
+        ))
+        .unwrap();
+        value["files"]["src/lib.rs"]["mutants"][0]["status"] = "Survived\u{1b}[2K\r\u{1b}]8;;bad\u{7}\nforged".into();
+        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        for arguments in [
+            vec!["cargo-gamma", "explain", "deadbeefcafe", "--report", path.as_str()],
+            vec!["cargo-gamma", "merge", path.as_str()],
+        ] {
+            let mut host = Sink::default();
+            assert_ne!(super::super::dispatch::run(&mut host, arguments), EXIT_OK);
+            let text = host.err();
+            assert!(!text.contains(['\u{1b}', '\r', '\u{7}']), "{text:?}");
+            assert!(text.contains(r"\e[2K\r\e]8;;bad\u{07}\nforged"), "{text:?}");
         }
     }
 

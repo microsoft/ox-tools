@@ -420,8 +420,9 @@ The authoritative `compiler-exclusions.json` inventory in the effective campaign
 independently, by stable mutant ID, including with incremental mode `no`; it does not require
 matching input or context digests.
 To reconsider an excluded identity, remove its entry from that inventory. Removing the entire
-inventory can reimport earlier compiler failures from retained campaign records and checked-in hints,
-so it is not itself a cold-run guarantee.
+inventory can reimport earlier compiler failures from retained campaign records,
+so it is not itself a cold-run guarantee. Checked-in compiler hints only affect build ordering;
+they do not initialize exclusions or withdraw fresh candidates.
 
 Set it below where you are today and ratchet upwards. A gate set above the current score turns every
 build red on the day it lands, and a gate that is red by default gets switched off within a week.

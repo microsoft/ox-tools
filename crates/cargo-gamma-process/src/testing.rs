@@ -2,183 +2,18 @@
 // Licensed under the MIT License.
 
 use core::fmt;
-#[cfg(unix)]
 use core::panic::AssertUnwindSafe;
-#[cfg(unix)]
 use core::time::Duration;
 use std::fs;
+use std::io::{self, ErrorKind, Read as _};
 use std::path::Path;
 use std::process::Command;
-use std::sync::OnceLock;
-#[cfg(unix)]
 use std::sync::mpsc;
 
-use camino::{Utf8Path, Utf8PathBuf};
-
-const HELPER_SOURCE: &str = r#"
-#[cfg(unix)]
-use std::os::unix::process::CommandExt as _;
-
-thread_local! {
-    static HELD: std::cell::RefCell<Vec<Vec<u8>>> = const { std::cell::RefCell::new(Vec::new()) };
-}
-
-fn main() {
-    let mut code = 0;
-
-    for argument in std::env::args().skip(1) {
-        let Some(directive) = argument.strip_prefix("--gamma-step=") else {
-            continue;
-        };
-
-        if let Some(status) = step(directive) {
-            code = status;
-            break;
-        }
-    }
-
-    std::process::exit(code);
-}
-
-fn step(directive: &str) -> Option<i32> {
-    let (name, payload) = directive.split_once(':').unwrap_or((directive, ""));
-
-    match name {
-        "sleep" => {
-            let ms = payload.parse().unwrap_or(0);
-            std::thread::sleep(std::time::Duration::from_millis(ms));
-            None
-        }
-        "exit" => Some(payload.parse().unwrap_or(0)),
-        "touch" => {
-            let _ = std::fs::write(payload, b"");
-            None
-        }
-        "wait" => {
-            if payload.is_empty() {
-                return Some(98);
-            }
-
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-            while !std::path::Path::new(payload).exists() {
-                if std::time::Instant::now() >= deadline {
-                    return Some(98);
-                }
-
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            None
-        }
-        "spawn" => {
-            launch(payload, false);
-            None
-        }
-        "flee" => {
-            launch(payload, true);
-            None
-        }
-        "eat" => {
-            let mib: usize = payload.parse().unwrap_or(0);
-            let mut held: Vec<Vec<u8>> = Vec::new();
-
-            for _ in 0..mib {
-                let mut block = vec![0_u8; 1024 * 1024];
-
-                for at in (0..block.len()).step_by(4096) {
-                    block[at] = 1;
-                }
-
-                held.push(block);
-            }
-
-            HELD.with(|slot| slot.borrow_mut().extend(held));
-            None
-        }
-        _ => Some(97),
-    }
-}
-
-fn launch(payload: &str, own_group: bool) {
-    let executable = if cfg!(target_os = "linux") {
-        std::path::PathBuf::from("/proc/self/exe")
-    } else {
-        std::env::current_exe().expect("the helper knows its own path")
-    };
-    let mut child = std::process::Command::new(executable);
-
-    for inner in payload.split('|') {
-        let _ = child.arg(format!("--gamma-step={inner}"));
-    }
-
-    // Starting a new process group removes this child from the parent's group, so later signals to
-    // that group no longer reach it. The same call cannot remove a child from its cgroup leaf or
-    // Windows job object.
-    #[cfg(unix)]
-    if own_group {
-        let _ = child.process_group(0);
-    }
-
-    #[cfg(not(unix))]
-    let _ = own_group;
-
-    let _spawned = child.spawn().expect("the helper can start another copy of itself");
-}
-"#;
+use camino::Utf8Path;
 
 pub fn helper_binary_path() -> &'static Utf8Path {
-    static BUILT: OnceLock<Utf8PathBuf> = OnceLock::new();
-
-    // The suffix is the helper cache generation. Advance it whenever `HELPER_SOURCE` changes,
-    // because `build_or_reuse_helper` deliberately trusts an existing binary with this name.
-    BUILT.get_or_init(|| build_or_reuse_helper("gamma-process-helper-6")).as_path()
-}
-
-/// Builds the helper binary under `name`, or reuses one already there.
-///
-/// Separate from [`helper_binary_path`] so a test can drive the build path with a name of its own
-/// that nothing else on the host is using, rather than racing every other test process that shares
-/// the cached name `helper_binary_path` hands out.
-fn build_or_reuse_helper(name: &str) -> Utf8PathBuf {
-    let work =
-        Utf8PathBuf::from_path_buf(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-work")).expect("the target path is UTF-8");
-
-    fs::create_dir_all(work.as_std_path()).expect("the test work directory should be creatable");
-
-    let suffix = if cfg!(windows) { ".exe" } else { "" };
-    let helper = work.join(format!("{name}{suffix}"));
-
-    if helper.exists() {
-        return helper;
-    }
-
-    let staging = tempfile::Builder::new()
-        .prefix("gamma-process-helper-build")
-        .tempdir_in(work.as_std_path())
-        .expect("the staging directory should be creatable");
-    let source = staging.path().join("helper.rs");
-    let staged = staging.path().join(format!("helper{suffix}"));
-
-    fs::write(&source, HELPER_SOURCE).expect("the helper source should be writable");
-
-    let built = Command::new("rustc")
-        .arg("--edition")
-        .arg("2024")
-        .arg("-C")
-        .arg("debuginfo=0")
-        .arg("-o")
-        .arg(&staged)
-        .arg(&source)
-        .output()
-        .expect("rustc should be available to the test suite");
-    let stderr = String::from_utf8_lossy(&built.stderr);
-
-    assert!(built.status.success(), "the test helper should compile: {stderr}");
-
-    let _moved = fs::rename(&staged, helper.as_std_path());
-
-    assert!(helper.exists(), "the test helper should be in place at {helper}");
-
-    helper
+    Utf8Path::new(cargo_gamma_process_test_helper::PATH)
 }
 
 pub fn directive(step: impl fmt::Display) -> String {
@@ -195,10 +30,54 @@ pub fn workdir(prefix: &str) -> tempfile::TempDir {
         .expect("the temporary directory should be creatable")
 }
 
+pub fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + core::time::Duration::from_secs(6);
+    while !ready() {
+        assert!(std::time::Instant::now() < deadline, "{what} did not become ready");
+        std::thread::sleep(core::time::Duration::from_millis(10));
+    }
+}
+
+pub fn listener() -> std::net::TcpListener {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("a local readiness listener");
+    listener.set_nonblocking(true).expect("readiness accepts must be bounded");
+    listener
+}
+
+pub fn accepted(listener: &std::net::TcpListener) -> std::net::TcpStream {
+    let mut connection = None;
+    wait_until("the helper's readiness connection", || {
+        match listener.accept() {
+            Ok((stream, _peer)) => connection = Some(stream),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(error) => panic!("readiness accept failed: {error}"),
+        }
+        connection.is_some()
+    });
+    connection.expect("the successful readiness probe stored its connection")
+}
+
+pub fn assert_closed(mut connection: std::net::TcpStream) {
+    connection
+        .set_nonblocking(true)
+        .expect("the readiness oracle owns a valid TCP connection");
+    wait_until("the killed helper's connection closure", || closed(connection.read(&mut [0_u8])));
+}
+
+// The helper owns the readiness socket. EOF, reset, and abort all prove its release;
+// pending reads do not, and unrelated observation failures must remain visible.
+fn closed(outcome: io::Result<usize>) -> bool {
+    match outcome {
+        Ok(0) => true,
+        Err(error) if matches!(error.kind(), ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted) => true,
+        Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) => false,
+        outcome => panic!("the killed helper must release its connection, got {outcome:?}"),
+    }
+}
+
 #[cfg(unix)]
 pub const WATCHDOG: Duration = Duration::from_mins(1);
 
-#[cfg(unix)]
 pub fn within<T: Send + 'static>(budget: Duration, what: &str, body: impl FnOnce() -> T + Send + 'static) -> T {
     let (sender, receiver) = mpsc::channel();
 
@@ -213,7 +92,6 @@ pub fn within<T: Send + 'static>(budget: Duration, what: &str, body: impl FnOnce
 /// The decision behind [`within`], taking the receive outcome rather than racing a real thread for
 /// it, so a test can drive every arm — including the panic, timeout, and disconnect cases that a
 /// real race can only produce by chance — with a value it constructed directly.
-#[cfg(unix)]
 fn finish_within<T>(what: &str, budget: Duration, received: Result<std::thread::Result<T>, mpsc::RecvTimeoutError>) -> T {
     match received {
         Ok(Ok(value)) => value,
@@ -228,29 +106,40 @@ fn finish_within<T>(what: &str, budget: Duration, received: Result<std::thread::
 mod tests {
     use super::*;
 
-    /// The helper is built the first time a name is asked for, and reused after that.
-    ///
-    /// Uses a name of its own — unique to this process — rather than the shared name
-    /// `helper_binary_path` hands out, so this does not race every other test process on the host
-    /// that may already be relying on that shared cache existing.
-    #[test]
-    fn a_fresh_name_is_built_and_then_reused() {
-        let name = format!("gamma-process-helper-build-test-{}", std::process::id());
-
-        let built = build_or_reuse_helper(&name);
-
-        assert!(built.exists(), "the helper should have been built at {built}");
-
-        let reused = build_or_reuse_helper(&name);
-
-        assert_eq!(built, reused, "a second call should reuse rather than rebuild");
-
-        let _removed = fs::remove_file(built.as_std_path());
-    }
-
     #[test]
     fn a_directive_is_formatted_for_the_helper_binary() {
         assert_eq!(directive("exit:0"), "--gamma-step=exit:0");
+    }
+
+    #[test]
+    fn the_closure_oracle_retries_pending_io_until_eof() {
+        let mut reads = [Err(ErrorKind::WouldBlock.into()), Err(ErrorKind::Interrupted.into()), Ok(0)].into_iter();
+
+        assert!(reads.by_ref().any(closed));
+
+        assert!(reads.next().is_none(), "pending reads must not count as closure");
+    }
+
+    #[test]
+    #[should_panic = "the killed helper must release its connection"]
+    fn the_closure_oracle_does_not_accept_received_data_as_eof() {
+        let _closed = closed(Ok(1));
+    }
+
+    #[test]
+    fn the_closure_oracle_accepts_terminal_socket_errors_but_not_observation_failures() {
+        for kind in [ErrorKind::ConnectionReset, ErrorKind::ConnectionAborted] {
+            assert!(closed(Err(kind.into())));
+        }
+        for kind in [ErrorKind::WouldBlock, ErrorKind::Interrupted] {
+            assert!(!closed(Err(kind.into())));
+        }
+    }
+
+    #[test]
+    #[should_panic = "the killed helper must release its connection"]
+    fn the_closure_oracle_rejects_an_unrelated_read_failure() {
+        let _closed = closed(Err(ErrorKind::PermissionDenied.into()));
     }
 
     #[test]

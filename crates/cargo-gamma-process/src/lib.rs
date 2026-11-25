@@ -87,7 +87,9 @@ pub use memory_request::MemoryRequest;
 #[doc(inline)]
 pub use memory_usage::MemoryUsage;
 #[doc(inline)]
-pub use process_tree::{OutputError, PreparedCommand, ProcessTree, SpawnFailure, SpawnedCommand, capacity, containment, output, prepare};
+pub use process_tree::{
+    OutputError, PreparedCommand, ProcessTree, SpawnFailure, SpawnedCommand, capacity, containment, output, output_bounded, prepare,
+};
 
 #[cfg(target_os = "macos")]
 mod descendants;
@@ -111,7 +113,7 @@ mod unwind_contracts {
 
     use super::{ProcessTree, SpawnedCommand};
 
-    fn assert_unwind_safe<T: UnwindSafe + RefUnwindSafe>() {}
+    pub(super) fn assert_unwind_safe<T: UnwindSafe + RefUnwindSafe>() {}
 
     #[test]
     fn public_launch_states_are_unwind_safe() {

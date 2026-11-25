@@ -3,9 +3,10 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 use core::time::Duration;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
+use tick::Clock;
 use tokio::sync::{Notify, Semaphore};
 
 /// Limits concurrency and supports temporary pausing of work dispatch.
@@ -22,6 +23,8 @@ pub struct Throttler {
     semaphore: Arc<Semaphore>,
     paused: AtomicBool,
     resume: Notify,
+    // Lazy initialization keeps construction and unpaused acquisition independent of Tokio.
+    clock: OnceLock<Clock>,
     /// Tracks when the current pause should expire. Used to ensure the longest
     /// pause wins when multiple `pause_for` calls overlap.
     resume_at: std::sync::Mutex<Option<Instant>>,
@@ -37,8 +40,19 @@ impl Throttler {
             // #[gamma::skip(literal.bool_flip, tag = "timeout", reason = "a throttler initialized as paused has no task scheduled to resume it")]
             paused: AtomicBool::new(false),
             resume: Notify::new(),
+            clock: OnceLock::new(),
             resume_at: std::sync::Mutex::new(None),
         })
+    }
+
+    #[cfg(test)]
+    fn with_clock(max_concurrent: usize, clock: Clock) -> Arc<Self> {
+        let throttler = Self::new(max_concurrent);
+        throttler
+            .clock
+            .set(clock)
+            .expect("a newly constructed throttler has not initialized its clock");
+        throttler
     }
 
     /// Wait until unpaused, then acquire a concurrency slot.
@@ -99,14 +113,25 @@ impl Throttler {
     /// will remain parked until the duration elapses. If a pause with a similar
     /// or longer duration is already active, this call is a no-op and returns `false`.
     /// Returns `true` only when a new pause is actually established.
-    #[expect(clippy::significant_drop_tightening, reason = "paused must be set inside the lock for correctness")]
     pub fn pause_for(self: &Arc<Self>, duration: Duration) -> bool {
-        let new_resume_at = Instant::now() + duration;
+        let Some(resume) = self.prepare_pause(duration) else {
+            return false;
+        };
+        drop(tokio::spawn(resume));
+        true
+    }
+
+    /// Installs a pause synchronously on `Some`; the caller must drive the returned future
+    /// to resume dispatch and notify waiters.
+    #[expect(clippy::significant_drop_tightening, reason = "paused must be set inside the lock for correctness")]
+    fn prepare_pause(self: &Arc<Self>, duration: Duration) -> Option<impl Future<Output = ()> + use<>> {
+        let clock = self.clock.get_or_init(Clock::new_tokio);
+        let new_resume_at = clock.instant() + duration;
 
         {
             let mut guard = self.resume_at.lock().expect("lock not poisoned");
             if guard.is_some_and(|existing| pause_is_equivalent_or_longer(existing, new_resume_at)) {
-                return false; // an equivalent or longer pause is already active
+                return None;
             }
             *guard = Some(new_resume_at);
             // Set paused inside the lock so that resume_at and paused are always
@@ -114,17 +139,16 @@ impl Throttler {
             self.paused.store(true, Ordering::Release);
         }
         let this = Arc::clone(self);
-        drop(tokio::spawn(async move {
-            tokio::time::sleep(duration).await;
+        let delay = clock.delay(duration);
+        Some(async move {
+            delay.await;
 
             // #[gamma::skip(cond.always_false, cond.always_true, cond.negate, tag = "timeout", reason = "the resume condition must both clear paused state and notify only for the current pause")]
             if Self::try_resume(&this) {
                 // #[gamma::skip(stmt.delete_call, tag = "timeout", reason = "tasks parked for a pause require notification after paused state is cleared")]
                 this.resume.notify_waiters();
             }
-        }));
-
-        true
+        })
     }
 
     /// Attempt to resume after a pause expires. Returns `true` if the pause was
@@ -135,7 +159,7 @@ impl Throttler {
     )]
     fn try_resume(this: &Arc<Self>) -> bool {
         let mut guard = this.resume_at.lock().expect("lock not poisoned");
-        if guard.is_some_and(|t| pause_has_expired(Instant::now(), t)) {
+        if guard.is_some_and(|t| pause_has_expired(this.clock.get_or_init(Clock::new_tokio).instant(), t)) {
             *guard = None;
             // Clear paused inside the lock so that resume_at and paused
             // are always consistent when observed together.
@@ -161,12 +185,24 @@ fn pause_has_expired(now: Instant, resume_at: Instant) -> bool {
 mod tests {
     use core::sync::atomic::AtomicUsize;
 
+    use tick::ClockControl;
+
     use super::*;
 
     async fn acquire_with_timeout(throttler: &Arc<Throttler>, timeout: Duration) -> tokio::sync::OwnedSemaphorePermit {
         tokio::time::timeout(timeout, throttler.acquire())
             .await
             .expect("acquire should complete before the test timeout")
+    }
+
+    #[test]
+    fn construction_and_unpaused_acquisition_do_not_need_a_runtime() {
+        let throttler = Throttler::new(1);
+        let mut acquire = std::pin::pin!(throttler.acquire());
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        let std::task::Poll::Ready(_permit) = acquire.as_mut().poll(&mut context) else {
+            panic!("an unpaused concurrency slot must be available without a runtime");
+        };
     }
 
     #[tokio::test]
@@ -233,26 +269,26 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg_attr(miri, ignore = "Miri cannot call CreateIoCompletionPort on Windows")]
     async fn no_work_dispatched_during_pause() {
-        // Verifies that acquire() does not return a permit until the pause has
-        // mostly elapsed.
-        let throttler = Throttler::new(5);
+        let control = ClockControl::new();
+        let throttler = Throttler::with_clock(5, control.to_clock());
+        let resume = throttler
+            .prepare_pause(Duration::from_millis(200))
+            .expect("no existing pause can prevent the first pause");
+        let mut resume = std::pin::pin!(resume);
+        let mut acquire = std::pin::pin!(throttler.acquire());
 
-        let _ = throttler.pause_for(Duration::from_millis(200));
-
-        let t = Arc::clone(&throttler);
-        let task = tokio::spawn(async move {
-            let start = tokio::time::Instant::now();
-            let _permit = t.acquire().await;
-            start.elapsed()
-        });
-
-        let elapsed = tokio::time::timeout(Duration::from_secs(2), task)
-            .await
-            .expect("worker should complete after the pause")
-            .expect("worker task must not panic");
-        assert!(elapsed >= Duration::from_millis(150), "work should not run while paused");
+        assert!(futures_util::poll!(&mut resume).is_pending());
+        assert!(futures_util::poll!(&mut acquire).is_pending());
+        control.advance(Duration::from_millis(199));
+        assert!(futures_util::poll!(&mut resume).is_pending());
+        assert!(futures_util::poll!(&mut acquire).is_pending());
+        control.advance(Duration::from_millis(1));
+        assert!(futures_util::poll!(&mut resume).is_ready());
+        let std::task::Poll::Ready(_permit) = futures_util::poll!(&mut acquire) else {
+            panic!("acquisition must become ready at the pause deadline");
+        };
+        assert!(!throttler.is_paused());
     }
 
     #[tokio::test]

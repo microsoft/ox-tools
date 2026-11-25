@@ -26,15 +26,12 @@ use toml::{Table, Value};
 
 use crate::HashMap;
 
-/// Resolves whether Cargo Gamma can safely interpose outside Cargo's outer rustc wrapper.
-///
 /// A compiler-wrapper configuration and whether Cargo Gamma may safely interpose around it.
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum RustcWrapperChain {
-    /// A configuration-file wrapper may be relative to the declaring file, so interposition must
-    /// stand down rather than risk launching a different executable from the workspace root.
+    /// Leave malformed configuration to Cargo rather than select a different executable.
     StandDown,
-    /// Interposition is safe, with the environment-provided outer wrapper when one exists.
+    /// The resolved outer wrapper, retaining bare executable names for Cargo's PATH lookup.
     Interpose(Option<std::ffi::OsString>),
 }
 
@@ -52,34 +49,44 @@ fn rustc_wrapper_chain_using(
 }
 
 fn environment_wrapper(mut get: impl FnMut(&str) -> Option<std::ffi::OsString>) -> Option<std::ffi::OsString> {
-    get("RUSTC_WRAPPER")
-        .filter(|path| !path.is_empty())
-        .or_else(|| get("CARGO_BUILD_RUSTC_WRAPPER").filter(|path| !path.is_empty()))
+    get("RUSTC_WRAPPER").or_else(|| get("CARGO_BUILD_RUSTC_WRAPPER"))
 }
 
 fn rustc_wrapper_chain_in(root: &Utf8Path, outer: Option<std::ffi::OsString>, environment: &Environment) -> RustcWrapperChain {
-    if outer.is_some() {
-        return RustcWrapperChain::Interpose(outer);
-    }
-
-    let config = CargoConfig::load(root, environment);
-    let configured_environment = config
-        .keys(&["env"])
-        .iter()
-        .any(|name| name == "RUSTC_WRAPPER" || name == "CARGO_BUILD_RUSTC_WRAPPER");
-
-    if configured_environment || has_configured_wrapper(&config) {
-        RustcWrapperChain::StandDown
-    } else {
-        RustcWrapperChain::Interpose(None)
-    }
+    configured_wrapper_chain(outer, || CargoConfig::load(root, environment).tables)
 }
 
-fn has_configured_wrapper(config: &CargoConfig) -> bool {
-    // #[gamma::skip(collection.reverse_array, reason = "Array is consumed only by any() over pure string membership predicates; reversing evaluation order changes neither existential result nor state.", tag = "equivalent")]
-    ["rustc-wrapper", "rustc-workspace-wrapper"]
-        .into_iter()
-        .any(|key| config.string(&["build", key]).is_some())
+fn configured_wrapper_chain(outer: Option<std::ffi::OsString>, tables: impl FnOnce() -> Vec<(Table, Utf8PathBuf)>) -> RustcWrapperChain {
+    if let Some(outer) = outer {
+        return RustcWrapperChain::Interpose((!outer.is_empty()).then_some(outer));
+    }
+
+    // Cargo selects wrappers from its original environment/configuration, not its child-only
+    // [env] table. Its workspace wrapper stays in the forwarded argv, inside this outer wrapper.
+    for (table, origin) in &tables() {
+        let Some(value) = lookup(table, &["build", "rustc-wrapper"]) else {
+            continue;
+        };
+        let Some(value) = value.as_str() else {
+            return RustcWrapperChain::StandDown;
+        };
+        if value.is_empty() {
+            return RustcWrapperChain::Interpose(None);
+        }
+        // #[gamma::skip(collection.reverse_array, tag = "equivalent", reason = "contains treats both separators as unordered, pure membership alternatives.")]
+        let program = if value.contains(['/', '\\']) {
+            // Cargo anchors relative paths to the parent of the config directory; bare names use PATH.
+            // https://doc.rust-lang.org/cargo/reference/config.html#config-relative-paths
+            let Some(directory) = origin.parent().and_then(|path| path.parent()) else {
+                return RustcWrapperChain::StandDown;
+            };
+            directory.join(value).into_std_path_buf().into_os_string()
+        } else {
+            value.into()
+        };
+        return RustcWrapperChain::Interpose(Some(program));
+    }
+    RustcWrapperChain::Interpose(None)
 }
 
 /// How many `inherits` hops a profile chain may take before it is called malformed.
@@ -268,7 +275,7 @@ impl Build {
         // kept the winner could not see that it had.
         let manifest = read_table(&root.join("Cargo.toml"));
 
-        for table in config.tables.iter().chain(manifest.as_ref()) {
+        for table in config.tables.iter().map(|(table, _origin)| table).chain(manifest.as_ref()) {
             if let Some(profiles) = table.get("profile") {
                 parts.push(format!("profile={profiles}"));
             }
@@ -411,9 +418,12 @@ impl Environment {
 /// Cargo reads `.cargo/config.toml` from the directory it runs in and every directory above it,
 /// then the user-wide file. A setting from a nearer file wins, and array-valued settings are
 /// joined, which is what this preserves by keeping the files in order rather than merging them.
+///
+/// Each directory contributes only its first matching file: Cargo gives `config` precedence over
+/// `config.toml` in both the project hierarchy and Cargo home.
 #[derive(Debug, Default)]
 struct CargoConfig {
-    tables: Vec<Table>,
+    tables: Vec<(Table, Utf8PathBuf)>,
     sources: Vec<String>,
 }
 
@@ -423,7 +433,7 @@ impl CargoConfig {
         let mut at = Some(dir);
 
         while let Some(directory) = at {
-            for name in ["config.toml", "config"] {
+            for name in ["config", "config.toml"] {
                 let path = directory.join(".cargo").join(name);
                 if config.include(&path) {
                     break;
@@ -437,7 +447,7 @@ impl CargoConfig {
         if let Some(home) = environment.cargo_home.as_ref()
             && !cargo_home_was_walked(dir, home)
         {
-            for name in ["config.toml", "config"] {
+            for name in ["config", "config.toml"] {
                 let path = home.join(name);
                 if config.include(&path) {
                     break;
@@ -467,7 +477,7 @@ impl CargoConfig {
         if let Ok(text) = core::str::from_utf8(&bytes)
             && let Ok(table) = toml::from_str(text)
         {
-            self.tables.push(table);
+            self.tables.push((table, path.to_owned()));
         }
 
         true
@@ -475,7 +485,7 @@ impl CargoConfig {
 
     /// The nearest file's value for a dotted key, when it is a string.
     fn string(&self, path: &[&str]) -> Option<&str> {
-        self.tables.iter().find_map(|table| lookup(table, path)?.as_str())
+        self.tables.iter().find_map(|(table, _origin)| lookup(table, path)?.as_str())
     }
 
     /// Every file's value for a dotted key, as the list of strings cargo would join them into.
@@ -485,7 +495,7 @@ impl CargoConfig {
     fn strings(&self, path: &[&str]) -> Vec<String> {
         self.tables
             .iter()
-            .filter_map(|table| lookup(table, path))
+            .filter_map(|(table, _origin)| lookup(table, path))
             .flat_map(|value| match value {
                 Value::String(one) => vec![one.clone()],
                 Value::Array(many) => many.iter().filter_map(|entry| entry.as_str().map(ToOwned::to_owned)).collect(),
@@ -499,7 +509,7 @@ impl CargoConfig {
         let mut names: Vec<String> = self
             .tables
             .iter()
-            .filter_map(|table| lookup(table, path)?.as_table())
+            .filter_map(|(table, _origin)| lookup(table, path)?.as_table())
             .flat_map(|table| table.keys().cloned())
             .collect();
 
@@ -988,7 +998,7 @@ fn lookup_bool(config: &CargoConfig, manifest: Option<&Table>, profile: &str, ke
     config
         .tables
         .iter()
-        .find_map(|table| lookup(table, &path)?.as_bool())
+        .find_map(|(table, _origin)| lookup(table, &path)?.as_bool())
         .or_else(|| lookup(manifest?, &path)?.as_bool())
 }
 
@@ -1039,11 +1049,12 @@ mod tests {
     fn recovered_hyphenated_debug_assertions_take_precedence_over_the_legacy_alias() {
         for (preferred, legacy) in [(true, false), (false, true)] {
             let config = CargoConfig {
-                tables: vec![
+                tables: vec![(
                     format!("[profile.survivor]\ndebug-assertions = {preferred}\ndebug_assertions = {legacy}\n")
                         .parse()
                         .unwrap(),
-                ],
+                    "synthetic/.cargo/config.toml".into(),
+                )],
                 ..CargoConfig::default()
             };
             assert_eq!(profile_assertions_with_manifest(&config, Some("survivor"), None), Some(preferred));
@@ -1085,11 +1096,12 @@ mod tests {
     #[test]
     fn survivor_ambient_rustflags_leave_overridden_target_table_predicates_undecided() {
         let config = CargoConfig {
-            tables: vec![
+            tables: vec![(
                 toml::from_str("[target.fixture-target]\nrustflags = ['--cfg', 'from_table', '-Cpanic=abort']\n")
                     .expect("valid Cargo configuration"),
-            ],
-            sources: Vec::new(),
+                "synthetic/.cargo/config.toml".into(),
+            )],
+            ..CargoConfig::default()
         };
         for encoded in [false, true] {
             let environment = Environment {
@@ -1174,7 +1186,7 @@ mod tests {
 
         let config = CargoConfig {
             tables: Vec::new(),
-            sources: Vec::new(),
+            ..CargoConfig::default()
         };
         let consulted = Cell::new(false);
         assert_eq!(
@@ -1346,40 +1358,96 @@ mod tests {
 
     #[test]
     fn an_ambient_wrapper_is_interposed_without_consulting_cargo_configuration() {
-        let (_directory, root) = tree(&[(".cargo/config.toml", "[build]\nrustc-wrapper = \"configured\"\n")]);
         let outer = std::ffi::OsString::from("ambient");
 
         assert_eq!(
-            rustc_wrapper_chain_in(&root, Some(outer.clone()), &empty(&root)),
+            configured_wrapper_chain(Some(outer.clone()), || panic!("an ambient wrapper bypasses configuration")),
             RustcWrapperChain::Interpose(Some(outer))
         );
     }
 
     #[test]
-    fn wrapper_configuration_requires_interposition_to_stand_down() {
-        for key in ["rustc-wrapper", "rustc-workspace-wrapper"] {
-            let text = format!("[build]\n{key} = \"relative-wrapper\"\n");
-            let files = [(".cargo/config.toml", text.as_str())];
-            let (_directory, root) = tree(&files);
-
+    fn configured_outer_wrappers_are_resolved_without_replacing_cargos_workspace_wrapper() {
+        for value in ["wrapper", "tools/wrapper", ""] {
+            let text = format!("[build]\nrustc-wrapper = {value:?}\nrustc-workspace-wrapper = 'tools/workspace-wrapper'\n");
+            let root = Utf8Path::new("wrapper-inputs");
+            let expected = match value {
+                "" => None,
+                "wrapper" => Some("wrapper".into()),
+                _ => Some(root.join(value).into_std_path_buf().into_os_string()),
+            };
             assert_eq!(
-                rustc_wrapper_chain_in(&root, None, &empty(&root)),
-                RustcWrapperChain::StandDown,
-                "{key} was not recognized"
+                configured_wrapper_chain(None, || vec![(toml::from_str(&text).unwrap(), root.join(".cargo/config.toml"),)]),
+                RustcWrapperChain::Interpose(expected)
             );
         }
 
         for key in ["RUSTC_WRAPPER", "CARGO_BUILD_RUSTC_WRAPPER"] {
-            let text = format!("[env]\n{key} = \"relative-wrapper\"\n");
-            let files = [(".cargo/config.toml", text.as_str())];
-            let (_directory, root) = tree(&files);
-
+            let text = format!(
+                "[build]\nrustc-workspace-wrapper = 'tools/workspace-wrapper'\n[env]\n{key} = {{ value = 'child-only-wrapper', force = true }}\n"
+            );
             assert_eq!(
-                rustc_wrapper_chain_in(&root, None, &empty(&root)),
-                RustcWrapperChain::StandDown,
-                "{key} was not recognized"
+                configured_wrapper_chain(None, || vec![(
+                    toml::from_str(&text).unwrap(),
+                    "wrapper-inputs/.cargo/config.toml".into(),
+                )]),
+                RustcWrapperChain::Interpose(None),
+                "[env].{key} changes child environment, not Cargo's selected wrapper"
             );
         }
+    }
+
+    #[test]
+    fn nov21_backslash_wrapper_paths_are_relative_to_the_declaring_configuration() {
+        let root = Utf8Path::new("wrapper-inputs");
+        assert_eq!(
+            configured_wrapper_chain(None, || vec![(
+                toml::from_str("[build]\nrustc-wrapper = 'tools\\outer-wrapper'\n").unwrap(),
+                root.join(".cargo/config.toml"),
+            )]),
+            RustcWrapperChain::Interpose(Some(root.join(r"tools\outer-wrapper").into_std_path_buf().into_os_string()))
+        );
+    }
+
+    #[test]
+    fn configured_wrappers_keep_the_declaring_directory_and_empty_environment_disables_them() {
+        let root = Utf8Path::new("wrapper-inputs");
+        let mut tables = [
+            (
+                "workspace/.cargo/config.toml",
+                "[build]\nrustc-workspace-wrapper = 'member-wrapper'\n",
+            ),
+            (".cargo/config.toml", "[build]\nrustc-wrapper = 'ancestor/outer-wrapper'\n"),
+            ("home/config.toml", "[build]\nrustc-wrapper = 'bin/home-wrapper'\n"),
+        ]
+        .map(|(origin, contents)| (toml::from_str(contents).unwrap(), root.join(origin)))
+        .to_vec();
+        assert_eq!(
+            configured_wrapper_chain(None, || tables.clone()),
+            RustcWrapperChain::Interpose(Some(root.join("ancestor/outer-wrapper").into_std_path_buf().into_os_string()))
+        );
+        assert_eq!(
+            configured_wrapper_chain(
+                environment_wrapper(|name| match name {
+                    "RUSTC_WRAPPER" => Some("".into()),
+                    "CARGO_BUILD_RUSTC_WRAPPER" => Some("ignored".into()),
+                    _ => None,
+                }),
+                || panic!("an empty environment override must bypass configuration"),
+            ),
+            RustcWrapperChain::Interpose(None)
+        );
+        let _ancestor = tables.remove(1);
+        assert_eq!(
+            configured_wrapper_chain(None, || tables),
+            RustcWrapperChain::Interpose(Some(root.join("bin/home-wrapper").into_std_path_buf().into_os_string()))
+        );
+    }
+
+    #[test]
+    fn malformed_wrapper_configuration_is_left_for_cargo_to_reject() {
+        let (_directory, root) = tree(&[(".cargo/config.toml", "[build]\nrustc-wrapper = true\n")]);
+        assert_eq!(rustc_wrapper_chain_in(&root, None, &empty(&root)), RustcWrapperChain::StandDown);
     }
 
     #[test]
@@ -1460,8 +1528,8 @@ mod tests {
     fn duplicate_configured_targets_still_describe_one_build() {
         let table = toml::from_str("[build]\ntarget = [\"x86_64-pc-windows-msvc\", \"x86_64-pc-windows-msvc\"]\n").unwrap();
         let config = CargoConfig {
-            tables: vec![table],
-            sources: Vec::new(),
+            tables: vec![(table, "synthetic/.cargo/config.toml".into())],
+            ..CargoConfig::default()
         };
 
         assert_eq!(
@@ -1552,8 +1620,11 @@ mod tests {
         ]);
         let config = CargoConfig::load(&root.join("member"), &empty(&root));
 
-        assert_eq!(config.string(&["build", "target"]), Some("near"));
-        assert_eq!(config.strings(&["build", "rustflags"]), vec!["--cfg", "member", "--cfg", "near"]);
+        assert_eq!(config.string(&["build", "target"]), Some("legacy-near"));
+        assert_eq!(
+            config.strings(&["build", "rustflags"]),
+            vec!["--cfg", "legacy-member", "--cfg", "legacy-near"]
+        );
     }
 
     #[test]
@@ -1592,7 +1663,7 @@ mod tests {
 
         assert_eq!(
             CargoConfig::load(&workspace, &outside).strings(&["build", "rustflags"]),
-            vec!["workspace", "home"]
+            vec!["workspace", "legacy-home"]
         );
         assert_eq!(
             CargoConfig::load(&workspace, &inside).strings(&["build", "rustflags"]),
@@ -2071,8 +2142,11 @@ mod tests {
     #[test]
     fn oct25_host_lookup_owns_cache_and_preserves_outer_asked_about_policy() {
         let with_target = CargoConfig {
-            tables: vec![toml::from_str("[target.host]\nrustflags=[]\n").expect("the fixture parses")],
-            sources: Vec::new(),
+            tables: vec![(
+                toml::from_str("[target.host]\nrustflags=[]\n").expect("the fixture parses"),
+                "synthetic/.cargo/config.toml".into(),
+            )],
+            ..CargoConfig::default()
         };
         for (config, asked) in [(&with_target, false), (&CargoConfig::default(), true)] {
             let cache = std::sync::OnceLock::new();

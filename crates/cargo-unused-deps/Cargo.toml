@@ -33,7 +33,7 @@ clap = { workspace = true, features = ["std", "derive", "color", "help", "error-
 ohno = { workspace = true, features = ["app-err"] }
 serde_json = { workspace = true, features = ["std"] }
 tempfile = { workspace = true }
-toml_edit = { workspace = true }
+toml_edit = { workspace = true, features = ["parse", "display"] }
 
 # >>> anvil-managed: anvil-lints
 [lints]

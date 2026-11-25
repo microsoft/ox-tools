@@ -31,6 +31,9 @@ development = ["cargo-gamma-attrs"]
 [package.metadata.coverage-gate]
 min-lines-percent = 0.0
 
+[features]
+system-tests = ["cargo-gamma-lib/system-tests"]
+
 [dependencies]
 cargo-gamma-lib = { workspace = true }
 terminal_size = { workspace = true }

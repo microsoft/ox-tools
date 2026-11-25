@@ -21,13 +21,9 @@ fn survey_metadata_loads_once_with_workspace_targets_features_and_the_required_d
                 assert!(arguments.contains(&expected), "{arguments:?}");
             }
             assert_eq!(arguments.contains(&"--offline"), !cache_inputs, "{arguments:?}");
-            assert_eq!(arguments.contains(&"--no-deps"), cache_inputs, "{arguments:?}");
-            let mut metadata: Metadata =
+            assert!(!arguments.contains(&"--no-deps"), "{arguments:?}");
+            let metadata: Metadata =
                 serde_json::from_str(include_str!("../../../tests/fixtures/correctness/resource-dependencies.json")).unwrap();
-            if cache_inputs {
-                metadata.resolve = None;
-                metadata.packages.retain(|package| metadata.workspace_members.contains(&package.id));
-            }
             Ok(metadata)
         })
         .unwrap();
@@ -43,9 +39,7 @@ fn survey_metadata_loads_once_with_workspace_targets_features_and_the_required_d
             members[0].targets.iter().map(|target| target.name.as_str()).collect::<Vec<_>>(),
             ["alpha", "cli"]
         );
-        if !cache_inputs {
-            assert_eq!(super::super::resource_dependencies::of(&metadata).len(), 7);
-        }
+        assert_eq!(super::super::resource_dependencies::of(&metadata).len(), 7);
     }
 }
 

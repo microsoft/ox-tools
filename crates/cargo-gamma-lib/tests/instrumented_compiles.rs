@@ -19,6 +19,7 @@
 
 use std::env;
 use std::env::consts::{DLL_PREFIX, DLL_SUFFIX};
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::{self, Command};
 use std::sync::OnceLock;
@@ -376,11 +377,20 @@ fn compiles(name: &str, source: &str, mutators: &str) -> usize {
 
 #[track_caller]
 fn compiles_selection(name: &str, source: &str, selection: &Selection) -> usize {
+    compiles_expected(name, source, selection, None)
+}
+
+#[track_caller]
+fn compiles_expected(name: &str, source: &str, selection: &Selection, expected_count: Option<NonZeroUsize>) -> usize {
     let guard = guard_crate();
 
     let file = SourceFile::parse("subject.rs", source.to_owned()).expect("the subject must parse");
     let defaults = collect::Defaults::of(file.ast());
     let candidates = collect::collect_with(&file, selection, &CfgSet::unconditional(), &defaults);
+    assert!(!candidates.is_empty(), "{name}: compile oracle produced no candidates");
+    if let Some(expected_count) = expected_count {
+        assert_eq!(candidates.len(), expected_count.get(), "{name}: fixture population changed");
+    }
     let mutants = collect::into_mutants(&file, "subject", candidates);
     let refs: Vec<&_> = mutants.iter().collect();
 
@@ -416,6 +426,45 @@ fn compiles_selection(name: &str, source: &str, selection: &Selection) -> usize 
     );
 
     mutants.len()
+}
+
+#[test]
+#[cfg(feature = "system-tests")]
+fn previously_uncovered_mutator_families_compile_nonempty_schemas() {
+    let cases = [
+        (
+            "assign.add_to_sub",
+            "pub fn f(mut value: i32, other: i32) { value += other; std::hint::black_box(value); }",
+        ),
+        ("bitwise.and_to_or", "pub fn f(value: u8, other: u8) -> u8 { value & other }"),
+        ("cond.negate", "pub fn f(flag: bool) -> u8 { if flag { 7 } else { 9 } }"),
+        (
+            "fallback.unwrap_or_to_default",
+            "pub fn f(value: Option<u8>) -> u8 { value.unwrap_or(7) }",
+        ),
+        (
+            "match_arm.never_matches",
+            "pub fn f(value: u8) -> u8 { match value { 1 => 7, _ => 9 } }",
+        ),
+        (
+            "match_guard.negate",
+            "pub fn f(value: u8) -> u8 { match value { value if value > 1 => 7, _ => 9 } }",
+        ),
+        (
+            "regex.remove_start_anchor",
+            "struct Regex; impl Regex { fn new(_: &str) -> Self { Self } } pub fn f() { let _ = Regex::new(\"^abc\"); }",
+        ),
+        ("shift.shl_to_shr", "pub fn f(value: u8, count: u32) -> u8 { value << count }"),
+        (
+            "struct_field.omit",
+            "#[derive(Default)] pub struct Record { value: u8 } pub fn f(value: u8) -> Record { Record { value, ..Default::default() } }",
+        ),
+    ];
+    for (selector, source) in cases {
+        let name = selector.replace('.', "_");
+        let selection = Selection::parse(selector).unwrap();
+        assert_eq!(compiles_expected(&name, source, &selection, Some(NonZeroUsize::MIN)), 1);
+    }
 }
 
 /// Instruments `source` and returns what `rustc` said about it, insisting it was rejected.

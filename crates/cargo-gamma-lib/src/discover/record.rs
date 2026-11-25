@@ -843,7 +843,6 @@ impl GeneralizedHints {
                 .filter(|(_, keep)| *keep)
                 .map(|(binary, _)| binary),
         );
-        // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
         if !newer.reach.is_empty() {
             self.test_sets = newer.test_sets;
             self.reach = newer.reach;

@@ -87,7 +87,9 @@ try {
     $singleFolder = Join-Path $fixture 'crates/single'
     $singleSrc = Join-Path $singleFolder 'src'
     $null = New-Item -ItemType Directory -Path $singleSrc -Force
-    "[workspace]`nmembers = [`"crates/single`"]" | Set-Content Cargo.toml
+    $neighbor = 'other = { version  = "9.0.0",  default-features = false } # preserve spacing'
+    "[workspace]`nmembers = [`"crates/single`"]`n[workspace.dependencies]`nsingle = { path = `"crates/single`", version = `"=0.1.0`" }`n$neighbor" |
+        Set-Content Cargo.toml
     "[package]`nname = `"single`"`nversion = `"0.1.0`"`nedition = `"2024`"" | Set-Content (Join-Path $singleFolder 'Cargo.toml')
     'pub fn value() -> u8 { 1 }' | Set-Content (Join-Path $singleSrc 'lib.rs')
     'Single release fixture' | Set-Content (Join-Path $singleFolder 'README.md')
@@ -99,6 +101,10 @@ try {
     Invoke-FixtureGit commit --quiet -m 'fix(single): sole unreleased change'
     & $releaseScript single -Version 0.2.0
     Assert-Contains (Get-Content (Join-Path $singleFolder 'CHANGELOG.md') -Raw) 'sole unreleased change'
+    $manifest = Get-Content Cargo.toml -Raw
+    Assert-Contains $manifest 'single = { path = "crates/single", version = "=0.2.0" }'
+    Assert-Contains $manifest $neighbor
+    $manifest.Replace('version = "=0.2.0"', 'version = "0.2.0"') | Set-Content Cargo.toml -NoNewline
 
     $fakeBin = Join-Path $fixture 'fake-bin'
     $null = New-Item -ItemType Directory -Path $fakeBin
@@ -123,8 +129,10 @@ exit `$LASTEXITCODE
     }
     Assert-Contains $bestEffortOutput "Failed to generate README"
     Assert-Contains $bestEffortOutput "Failed to run 'cargo metadata'"
-
-    Write-Host 'Release checks passed (backfill bounds, single-result handling, and best-effort native failures).'
+    $manifest = Get-Content Cargo.toml -Raw
+    Assert-Contains $manifest 'single = { path = "crates/single", version = "0.3.0" }'
+    Assert-Contains $manifest $neighbor
+    Write-Host 'Release checks passed (backfill bounds, single-result handling, native failures and pinned dependencies).'
 }
 finally {
     Pop-Location

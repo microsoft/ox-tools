@@ -22,7 +22,7 @@ use super::run::{configure, run_session};
 use super::suppress::suppress;
 use super::unsuppress::unsuppress_with_cargo;
 use crate::config::Config;
-use crate::report::Styler;
+use crate::report::{Styler, encode_controls};
 
 /// The multiple of each test binary's baseline duration a mutant is allowed when nothing says otherwise.
 ///
@@ -153,7 +153,7 @@ fn dispatched_with<H: Host>(
             let label = styler.error("error:");
             let mut stream = host.error();
 
-            let _ = writeln!(stream, "{label} {cause}");
+            let _ = writeln!(stream, "{label} {}", encode_controls(&cause.to_string()));
 
             code
         }
@@ -279,36 +279,28 @@ fn subcommand_index_with<'a>(length: usize, mut argument: impl FnMut(usize) -> O
 /// there than an unexpected-argument error from a `run` the user never asked for.
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn implies_run(args: &[OsString]) -> bool {
-    let mut rest = args;
+    let mut rest = args.iter();
 
-    while let Some(first) = rest.first().and_then(|entry| entry.to_str()) {
+    while let Some(first) = rest.next().and_then(|entry| entry.to_str()) {
         if
         // #[gamma::skip(iter.any_to_all, reason = "Both global-option scans iterate the immutable singleton GLOBAL_OPTIONS=[--color]. For exactly one element, any(predicate) and all(predicate) each evaluate that same predicate exactly once and return its result; there is no empty/multiple-element case.", tag = "equivalent")]
         GLOBAL_OPTIONS
             .iter()
             .any(|option| first.strip_prefix(option).is_some_and(|rest| rest.starts_with('=')))
         {
-            // #[gamma::skip(all, reason = "not consuming a `--option=value` argument retries the same argument forever")]
-            rest = &rest[1..];
-        } else if GLOBAL_OPTIONS.contains(&first) {
+            continue;
+        }
+        if GLOBAL_OPTIONS.contains(&first) {
             // The value is skipped along with the option, or a `--color never merge` would look
             // like it begins with the word `never`.
-            // #[gamma::skip(all, reason = "not consuming a global option and its value retries the same arguments forever")]
-            rest = rest.get(2..).unwrap_or_default();
+            let _value = rest.next();
         } else {
-            // #[gamma::skip(all, reason = "continuing without consuming an unrecognized leading argument retries the same slice forever")]
-            break;
+            // Help and version belong to the top-level parser, not the default run.
+            return first.starts_with('-') && !matches!(first, "-h" | "--help" | "-V" | "--version");
         }
     }
 
-    let Some(first) = rest.first().and_then(|entry| entry.to_str()) else {
-        // Nothing at all means a default run, which is the shortest path into the tool.
-        return true;
-    };
-
-    // Help and version are answered by the top-level parser; routing them through `run` would print
-    // that subcommand's page instead of the overview the user asked for.
-    first.starts_with('-') && !matches!(first, "-h" | "--help" | "-V" | "--version")
+    true
 }
 
 /// Re-runs this process inside a delegated cgroup when that is what memory control is missing.
@@ -348,6 +340,11 @@ fn relaunch_for_memory_control<H: Host>(host: &H, args: &super::cli::RunArgs) ->
 /// and exactly one place where the settings that can arrive half from each side are checked.
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub(super) fn dispatch<H: Host>(host: &mut H, cli: Cli, styler: Styler) -> crate::Result<i32> {
+    #[cfg(target_os = "linux")]
+    if host.may_replace_process() {
+        crate::exec::relaunch::acknowledge_start()?;
+    }
+
     match cli.command {
         Command::Run(mut args) => {
             configure(&mut args)?;
@@ -411,7 +408,12 @@ fn finish_run_command<H: Host>(
 ) -> crate::Result<i32> {
     let (code, promotion_error) = finish_campaign(campaign, update_hints, || promote(host))?;
     if let Some(error) = promotion_error {
-        let _ = writeln!(host.error(), "{} could not update hints: {error}", styler.error("error:"));
+        let _ = writeln!(
+            host.error(),
+            "{} could not update hints: {}",
+            styler.error("error:"),
+            encode_controls(&error.to_string())
+        );
     }
     Ok(code)
 }
@@ -746,6 +748,29 @@ mod tests {
         assert!(host.err().contains("\x1b["), "{}", host.err());
         assert_eq!(host.err(), format!("{} leftover report\n", Styler::new(true).warning()));
         assert!(crate::notes::drain().is_empty(), "notes are emitted exactly once");
+    }
+
+    #[test]
+    fn dispatch_encodes_untrusted_error_chains_without_disabling_the_trusted_error_style() {
+        let hostile = "\x1b]8;;https://invalid.example\x07link\x1b]8;;\x07\r\n\x1b[2J";
+        for color in [false, true] {
+            let mut host = crate::testing::Sink::default();
+            let option = if color { "always" } else { "never" };
+            let code = dispatched_with(&mut host, ["cargo-gamma", "--color", option, "clean"], |_, _, _| {
+                Err(crate::error::Error::new(format!("invalid path `{hostile}`"))
+                    .caused_by(std::io::Error::other(format!("underlying {hostile}"))))
+            });
+            assert_eq!(code, EXIT_CANNOT_PROCEED);
+            assert_eq!(
+                host.err(),
+                format!(
+                    "{} invalid path `{}`: underlying {}\n",
+                    Styler::new(color).error("error:"),
+                    encode_controls(hostile),
+                    encode_controls(hostile)
+                )
+            );
+        }
     }
 
     #[test]

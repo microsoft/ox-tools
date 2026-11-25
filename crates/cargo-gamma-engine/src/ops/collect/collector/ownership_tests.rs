@@ -304,8 +304,6 @@ fn ownership_generation_generic_mentions_are_nested_specific_and_trait_bounded()
 
 #[test]
 fn ownership_generation_macro_shadow_detection_visits_statements_and_mixed_attributes() {
-    use super::ownership::format_macro_shadowed;
-
     for (source, expected) in [
         ("", false),
         ("macro_rules! unrelated { () => {} }", false),
@@ -317,6 +315,8 @@ fn ownership_generation_macro_shadow_detection_visits_statements_and_mixed_attri
         ("#[allow(unused)] #[macro_use] extern crate custom;", true),
         ("#[macro_use] #[allow(unused)] extern crate custom;", true),
     ] {
-        assert_eq!(format_macro_shadowed(&syn::parse_file(source).unwrap()), expected, "{source}");
+        let file = syn::parse_file(source).unwrap();
+        let actual = super::lexical::evidence(&file, &CfgSet::parse(""));
+        assert_eq!(actual.read_only.format_macro_shadowed, expected, "{source}");
     }
 }

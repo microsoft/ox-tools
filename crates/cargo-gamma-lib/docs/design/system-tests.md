@@ -28,6 +28,18 @@ The boundary comprises:
   This designation covers only cases whose subject is the real tool
   boundary; their in-process graph, parsing, and policy cases remain
   ordinary tests.
+- The nonempty mutator-family compilation matrix in `tests/instrumented_compiles.rs`
+  requires `system-tests`; it compiles the generated schemas with native rustc.
+- Native module-path resolution and external-input discovery checks in
+  `discover::survey` require `system-tests` and platform link support. Their
+  native filename cases use private system-temporary storage rather than a
+  checkout mount, which can translate unrepresentable Unix filenames.
+- The native cache-generation acceptance case in `tests/discovery/source_generations.rs`
+  requires `system-tests` because it invokes Cargo metadata. Its supplied-source
+  generation checks remain ordinary tests.
+- The ancestor-target lint-cap acceptance case in `cargo-gamma/tests/binary.rs`
+  requires that crate's `system-tests` feature, which forwards to the library's
+  feature of the same name.
 
 The generator's ordinary regressions remain in `tests/project.rs`. Their
 subject is materialization itself: the temporary directory is the output
@@ -152,12 +164,27 @@ hint-selection and verdict-state-machine regressions:
 - `exec::copy` and `exec::sync` check native collision preservation and
   timestamp updates on owned output files, using fixed representable
   timestamps rather than the host date.
+- The new `exec::copy` global-ignore parent/child and external-directory-link
+  acceptance cases require `system-tests`. They need Git and native symlink
+  support (Windows Developer Mode or symlink privileges). The Git case uses
+  a child-only owned home/configuration and a fixed two-command Git probe;
+  neither case changes the developer's repository or global configuration.
+- `exec::workspace`'s native capture-boundary case and child require
+  `system-tests`, native process containment, and the current test executable.
+  Five bounded launches check exact stdout/stderr retention limits, including
+  two roughly 64 MiB stdout captures. Allow several seconds and memory for
+  these buffers; smaller supplied-byte cases cover ordinary retention policy.
 - `exec::killers::tests::completed_records_round_trip_without_incomplete_fallback`
   verifies completed publication, exclusion from incomplete generations and
   exact/generalized knowledge after loading. A separate supplied-record
   case checks staging and hint policy without publication or storage.
 - `exec::testing_state` retains a separate directory-read rejection check;
   bounded JSON size/overflow policy consumes in-memory readers.
+- Its native jj/Mercurial metadata-link acceptance requires `system-tests`;
+  the supplied directory-link policy remains an ordinary test.
+- `exec::baseline` checks empty-inventory measurement with native workers
+  under `system-tests`. Ticket progression and exhaustion are covered by a
+  bounded in-memory claim test, without child-process correctness watchdogs.
 
 Build-budget supervision instead uses a scripted subtree, clock and wait
 callbacks. Those cases verify deadline and cleanup decisions in process rather
@@ -199,11 +226,12 @@ one attempt and unchanged success, exit-code and refusal results.
 
 The exhaustive score remains 100% of the retained population, with no flaky
 verdict allowance. It is not a claim of mutation coverage for native acceptance
-or every storage adapter. Local, reasoned `gamma::skip` comments exclude native
-relaunch/PATH/environment wiring and filesystem/cache paths whose existing
-partial seams still require actual owning files, native metadata or global
-state. Completing that coverage requires the deferred owning-resource and
-filesystem backend; it must not be simulated by tests changing the shared host.
+or every storage adapter. Tests can supply operations that fail during filesystem
+metadata reads, link handling, removal, validation or cache publication. Owning cgroup tests use
+the production registration and Drop lifecycle, with supplied creation, reaping
+and removal operations. These tests exercise failure handling without changing
+shared host state. Local, reasoned `gamma::skip` comments remain for concrete
+native relaunch/PATH/environment and platform syscall boundaries.
 
 Injected policy stays eligible, including the once-only relaunch guard, command
 construction, directory synchronization error handling, executable permissions,

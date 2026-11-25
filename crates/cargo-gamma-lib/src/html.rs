@@ -16,7 +16,10 @@
 
 use std::io;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
 use camino::Utf8Path;
+use sha2::{Digest as _, Sha256};
 
 use crate::Result;
 use crate::elements::Report;
@@ -72,12 +75,15 @@ pub fn write_page(report: &Report, path: &Utf8Path) -> Result<()> {
 /// the page this way is what keeps neither the report JSON nor the page held whole in memory.
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn stream(report: &Report, writer: &mut dyn io::Write) -> io::Result<()> {
+    let viewer_hash = script_hash(VIEWER);
+    let bootstrap_hash = script_hash(BOOTSTRAP_SCRIPT);
     write!(
         writer,
         "<!DOCTYPE html>\n\
          <html lang=\"en\">\n\
          <head>\n\
          <meta charset=\"utf-8\">\n\
+         <meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; script-src 'sha256-{viewer_hash}' 'sha256-{bootstrap_hash}'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'\">\n\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
          <title>cargo-gamma mutation report</title>\n\
          <style>{PAGE_STYLE}</style>\n"
@@ -93,10 +99,7 @@ fn stream(report: &Report, writer: &mut dyn io::Write) -> io::Result<()> {
          <mutation-test-report-app title-postfix=\"cargo-gamma\">\n\
          Your browser does not support custom elements, which this report is built from.\n\
          </mutation-test-report-app>\n\
-         <script>\n\
-         const app = document.querySelector('mutation-test-report-app');\n\
-         {THEME_SCRIPT}\n\
-         app.report = "
+         <script type=\"application/json\" id=\"gamma-report\">"
     )?;
 
     {
@@ -105,7 +108,11 @@ fn stream(report: &Report, writer: &mut dyn io::Write) -> io::Result<()> {
         serde_json::to_writer(&mut escaping, report).map_err(io::Error::from)?;
     }
 
-    write!(writer, ";\n</script>\n</body>\n</html>\n")
+    write!(writer, "</script>\n<script>{BOOTSTRAP_SCRIPT}</script>\n</body>\n</html>\n")
+}
+
+fn script_hash(script: &str) -> String {
+    STANDARD.encode(Sha256::digest(script.as_bytes()))
 }
 
 /// The page's own styling, which is only ever about the area the viewer does not paint.
@@ -135,11 +142,15 @@ const PAGE_STYLE: &str = "\
 ///
 /// Registered before the report is assigned, because assigning it is what starts the update cycle
 /// that ends in the event.
-const THEME_SCRIPT: &str = "\
+// The viewer creates shadow-root styles and style attributes at runtime and embeds SVG icons in
+// CSS data URLs. Neither allowance admits external sources or arbitrary executable scripts.
+const BOOTSTRAP_SCRIPT: &str = "\
+    const app = document.querySelector('mutation-test-report-app');\
     app.addEventListener('theme-changed', (event) => {\
     const color = event.detail.themeBackgroundColor;\
     if (color) { document.body.style.backgroundColor = color; }\
-    });";
+    });\
+    app.report = JSON.parse(document.getElementById('gamma-report').textContent);";
 
 /// A writer that escapes the two angle brackets so a payload cannot terminate the script element
 /// that carries it, applied to the report as it streams into the page.
@@ -220,6 +231,56 @@ mod tests {
         assert!(!head.contains("<link "), "the page must not fetch a stylesheet");
     }
 
+    #[test]
+    fn the_csp_hashes_only_the_embedded_executable_scripts_and_allows_offline_styles() {
+        let page = render(&report()).expect("renders");
+        let policy = page
+            .split("<meta http-equiv=\"Content-Security-Policy\" content=\"")
+            .nth(1)
+            .expect("a CSP is declared before the viewer")
+            .split('"')
+            .next()
+            .unwrap();
+        let scripts = page
+            .split("<script>")
+            .skip(1)
+            .map(|tail| tail.split("</script>").next().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(scripts, [VIEWER, BOOTSTRAP_SCRIPT]);
+        let expected = scripts
+            .iter()
+            .map(|script| format!("'sha256-{}'", STANDARD.encode(Sha256::digest(script.as_bytes()))))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let directives = policy
+            .split(';')
+            .map(|directive| directive.split_whitespace().collect::<Vec<_>>().join(" "))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            directives,
+            [
+                "default-src 'none'",
+                &format!("script-src {expected}"),
+                "style-src 'unsafe-inline'",
+                "img-src data:",
+                "connect-src 'none'",
+                "frame-src 'none'",
+                "object-src 'none'",
+                "base-uri 'none'",
+                "form-action 'none'",
+            ]
+        );
+        let json = page
+            .split("<script type=\"application/json\" id=\"gamma-report\">")
+            .nth(1)
+            .unwrap()
+            .split("</script>")
+            .next()
+            .unwrap();
+        let embedded: Value = serde_json::from_str(json).expect("the inert payload is valid JSON");
+        assert_eq!(embedded, serde_json::to_value(report()).unwrap());
+    }
+
     /// The vendored bundle names the upstream release it came from.
     ///
     /// The version is read from the file the vendoring step writes rather than restated in code, so
@@ -246,8 +307,12 @@ mod tests {
         // Assigning the report is what makes the viewer resolve its theme and emit the event, so a
         // listener added afterwards is racing the very update it exists to hear about.
         let page = render(&report()).expect("renders");
-        let listener = page.find("addEventListener").expect("the listener is present");
-        let assignment = page.find("app.report =").expect("the report is assigned");
+        let bootstrap = page
+            .rsplit("<script>")
+            .next()
+            .expect("the bootstrap script is emitted after the viewer");
+        let listener = bootstrap.find("app.addEventListener").expect("the listener is present");
+        let assignment = bootstrap.find("app.report =").expect("the report is assigned");
 
         assert!(listener < assignment, "{page}");
     }
@@ -338,7 +403,7 @@ mod tests {
         let report = report();
         let page = render(&report).expect("the fixture serializes into memory");
         let viewer_at = page.find("<script>").expect("the page contains the viewer script");
-        let report_at = page.find("app.report = ").expect("the page assigns its report");
+        let report_at = page.find("<script type=\"application/json\"").expect("the page carries its report");
         for remaining in [
             0,
             viewer_at,
@@ -350,6 +415,17 @@ mod tests {
             let cause = stream(&report, &mut FailingWriter { remaining }).expect_err("the byte budget ends before the complete page");
             assert_eq!(cause.kind(), io::ErrorKind::PermissionDenied, "budget {remaining}");
         }
+    }
+
+    #[test]
+    fn report_json_serialization_returns_a_writer_failure_inside_the_json_payload() {
+        let report = report();
+        let page = render(&report).unwrap();
+        let marker = "<script type=\"application/json\" id=\"gamma-report\">";
+        let payload = page.find(marker).unwrap() + marker.len();
+        let cause = stream(&report, &mut FailingWriter { remaining: payload + 8 }).unwrap_err();
+        assert_eq!(cause.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(cause.to_string(), "injected write failure");
     }
 
     /// The streamed page is byte-for-byte the string form, and it is published atomically — so

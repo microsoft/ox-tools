@@ -104,7 +104,6 @@ pub(super) fn values_for(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Repl
     // An `impl Iterator` is the one exception, and only because it is not really a guess: every
     // iterator can be named through `gamma_rt::Either`, whatever concrete type the body chose.
     if kind != Kind::Iterator && is_abstract_type(resolved, types.abstracts) {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "Vec::new() and Vec::default() both return an empty vector.")]
         return Vec::new();
     }
 
@@ -139,7 +138,6 @@ pub(super) fn values_for(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Repl
     if
     // #[gamma::skip(cond.always_false, tag = "equivalent", reason = "For Unknown without proven Default, both the depth-zero path and the final Unknown match arm call pure default_values, which repeats has_proven_default and returns the same empty vector. This is only an early empty-result return.")]
     kind == Kind::Unknown && !types.has_proven_default(resolved) {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "Vec::new() and Vec::default() both return an empty vector.")]
         return Vec::new();
     }
     if types
@@ -147,7 +145,6 @@ pub(super) fn values_for(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Repl
         .and_then(|index| types.payload(resolved, index))
         .is_some_and(|hasher| types.lacks_default(&hasher))
     {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "Vec::new() and Vec::default() both return an empty vector.")]
         return Vec::new();
     }
     // An alias must preserve its declared constructor shape rather than borrowing the standard
@@ -590,7 +587,6 @@ pub(super) fn literal_values(kind: Kind, ty: &Type) -> Vec<ReplacementValue> {
 // #[gamma::skip(parameter.default_shadow, reason = "_depth is deliberately unused and defaulting it cannot affect any reference replacement")]
 pub(super) fn reference_values(ty: &Type, _depth: usize, _types: &Types<'_>) -> Vec<ReplacementValue> {
     let Some(elem) = reference_elem(ty) else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "Vec::new() and Vec::default() both return an empty vector.")]
         return Vec::new();
     };
     match strip(ty) {
@@ -640,7 +636,6 @@ pub(super) fn inner_values(ty: &Type, index: usize, depth: usize, types: &Types<
 /// wrapper infers it from the arm holding the original.
 pub(super) fn iterator_item(ty: &Type) -> Option<&Type> {
     let Type::ImplTrait(imp) = strip(ty) else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     };
 
@@ -668,16 +663,13 @@ pub(super) fn type_argument(ty: &Type, index: usize) -> Option<&Type> {
 /// The type arguments of a path type, ignoring lifetimes and const generics.
 pub(super) fn type_argument_values(ty: &Type) -> Vec<&Type> {
     let Type::Path(path) = strip(ty) else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "Vec::new() and Vec::default() both return an empty vector.")]
         return Vec::new();
     };
 
     let Some(segment) = path.path.segments.last() else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "Vec::new() and Vec::default() both return an empty vector.")]
         return Vec::new();
     };
     let PathArguments::AngleBracketed(args) = &segment.arguments else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "Vec::new() and Vec::default() both return an empty vector.")]
         return Vec::new();
     };
 
@@ -697,7 +689,6 @@ pub(super) fn type_text(ty: &Type) -> String {
 
 pub(super) fn type_name(ty: &Type) -> Option<&syn::Ident> {
     let Type::Path(path) = strip(ty) else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     };
     path.path.segments.last().map(|segment| &segment.ident)
@@ -709,7 +700,6 @@ pub(super) fn type_name(ty: &Type) -> Option<&syn::Ident> {
 /// being named: `Cow<'a, str>` names one type, not two.
 pub(super) fn type_arguments(segment: &PathSegment) -> usize {
     let PathArguments::AngleBracketed(args) = &segment.arguments else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "Zero is already the default value of this integer return type.")]
         return 0;
     };
 
@@ -729,7 +719,6 @@ pub(super) fn wrapper_ctor(ty: &Type) -> String {
 /// The written path of a type, without its generic arguments.
 fn path_text(ty: &Type) -> Option<String> {
     let Type::Path(path) = strip(ty) else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None;
     };
 
@@ -785,7 +774,6 @@ pub(super) enum Kind {
 
 pub(super) fn is_str(ty: &Type) -> bool {
     let Type::Path(path) = strip(ty) else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
         return false;
     };
     let mut segments = path.path.segments.iter();

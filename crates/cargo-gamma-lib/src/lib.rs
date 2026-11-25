@@ -8,10 +8,6 @@
     reason = "every raw platform call in this workspace lives in `cargo-gamma-unsafe`, behind a safe interface; enforcing that here is what makes it a property the compiler checks rather than a convention people remember"
 )]
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
-#![allow(
-    clippy::redundant_pub_crate,
-    reason = "this crate's modules are private, so the lint fires on every pub(crate) item in them; taking its advice and widening them to `pub` is exactly what the private module tree exists to prevent"
-)]
 #![cfg_attr(
     not(feature = "internals"),
     allow(

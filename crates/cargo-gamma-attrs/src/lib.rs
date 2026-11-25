@@ -38,7 +38,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! cargo-gamma-attrs = "0.4"
+//! cargo-gamma-attrs = "0.7"
 //! ```
 //!
 //! The package is `cargo-gamma-attrs` but its library is named `gamma`, which is what lets the
@@ -62,7 +62,7 @@
 //!
 //! ```toml
 //! [dev-dependencies]
-//! cargo-gamma-attrs = "0.4"
+//! cargo-gamma-attrs = "0.7"
 //! ```
 //!
 //! # The vocabulary
@@ -344,9 +344,6 @@
 // tests can call. What is left here is a shim thin enough to read at a glance, and marking it off
 // is the difference between an honest 100% and a figure with an unexplained hole in it.
 #![cfg_attr(coverage_nightly, coverage(off))]
-// A proc-macro crate's exported functions are `TokenStream -> TokenStream`; documenting each
-// individually would be noise given the crate-level docs above.
-#![allow(clippy::missing_const_for_fn, reason = "proc-macro entry points cannot be const")]
 
 use proc_macro::TokenStream;
 
