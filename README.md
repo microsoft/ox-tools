@@ -352,7 +352,9 @@ These focused operations are not substitutes for either verification tier.
   dependencies.
 
 - **Dependency Validation**. We use [`cargo-deny`](https://crates.io/crates/cargo-deny) to ensure our dependencies
-  have acceptable licenses and don't contain known vulnerabilities.
+  satisfy bans, license, and source policies in `pr-fast`, and [`cargo-audit`](https://crates.io/crates/cargo-audit)
+  to check for known vulnerabilities. In `scheduled-advisories`, cargo-deny also checks advisories;
+  cargo-audit runs in both groups.
 
 - **PR Title**. Every PR submitted to this repo must follow
   the [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/)
