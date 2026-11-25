@@ -1414,10 +1414,10 @@ anvil-release-dependencies:
     if ($tempRoot) { $tempArgs = @('--temp-dir', $tempRoot) }
 
     $OutputEncoding = [Text.UTF8Encoding]::new($false)
-    if (Test-Path -LiteralPath 'crates/cargo-anvil/src/release_dependencies.rs' -PathType Leaf) {
-        $report | cargo run --locked --package cargo-anvil --bin cargo-anvil -- anvil release-dependencies @tempArgs
+    if (Test-Path -LiteralPath 'crates/cargo-ark/Cargo.toml' -PathType Leaf) {
+        $report | cargo run --locked --package cargo-ark -- ark release-dependencies @tempArgs
     } else {
-        $report | cargo anvil release-dependencies @tempArgs
+        $report | cargo ark release-dependencies @tempArgs
     }
     exit $LASTEXITCODE
 

@@ -114,6 +114,20 @@ fn generated_recipes_are_split_by_responsibility() {
 }
 
 #[test]
+fn release_dependency_validation_uses_standalone_ark() {
+    let generated = generated();
+    assert!(
+        generated
+            .checks
+            .contains("$report | cargo run --locked --package cargo-ark -- ark release-dependencies @tempArgs")
+    );
+    assert!(generated.checks.contains("$report | cargo ark release-dependencies @tempArgs"));
+    assert!(!generated.checks.contains("cargo anvil release-dependencies"));
+    assert!(!generated.groups.contains("anvil-release-dependencies"));
+    assert!(!generated.setup.contains("cargo-ark"));
+}
+
+#[test]
 fn unused_deps_keeps_scope_and_fixes_explicit() {
     let generated = generated();
     assert!(generated.checks.contains(r#"[arg("fix", long, value="true")]"#));

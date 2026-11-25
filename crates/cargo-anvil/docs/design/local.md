@@ -269,9 +269,10 @@ determine publishing order.
 
 ## Release dependency validation
 
-`just anvil-release-dependencies` runs discovery once and succeeds without
-building anything if the report is empty. For a populated report it uses the
-matching `cargo-anvil` binary (or the local binary source in ox-tools).
+`just anvil-release-dependencies` runs discovery once and succeeds without Ark
+if the report is empty. For a populated report it uses the local `cargo-ark`
+source when present in ox-tools, or an installed `cargo-ark` binary. The
+recipe does not require the `cargo-anvil` binary.
 
 The check runs `cargo package` for exactly the candidates in one batch,
 including Cargo's default verification build. It leaves registry selection
@@ -279,7 +280,7 @@ to Cargo and does not impose additional manifest rules.
 
 Each `.crate` is extracted separately outside the checkout. The Anvil recipe
 passes the CI temp directory when available. Direct callers can set the
-scratch parent with `cargo anvil release-dependencies --temp-dir <DIR>`; if
+scratch parent with `cargo ark release-dependencies --temp-dir <DIR>`; if
 omitted, the validator uses the OS temp directory. The check runs
 `cargo test` separately with `--all-features` and `--no-default-features`
 from the packaged manifests. Cargo resolves dependencies during testing and
