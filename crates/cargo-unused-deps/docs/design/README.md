@@ -452,9 +452,9 @@ The tool runs `cargo +nightly check <selection> --all-targets --all-features
 with its chaining rustc wrapper; the default-target pass uses the sibling `plain`
 directory. The whole run directory is new for every invocation.
 Explicit package selectors are first resolved and deduplicated against the
-workspace metadata. A missing or mismatched `name@version` selector fails before
-Cargo is invoked, and only distinct workspace members are forwarded. Each member
-is sent as an exact workspace-only name pattern: `fixture` becomes `[f]ixture`.
+workspace metadata. A selector that matches no workspace member fails before
+`cargo check` or `cargo test --doc` starts. Only distinct workspace members are
+forwarded, each as an exact workspace-only name pattern: `fixture` becomes `[f]ixture`.
 The one-character class preserves the exact name while forcing Cargo's package
 pattern selection. That selection is workspace-scoped by name and cannot select
 a registry package; any requested version was already checked against workspace
@@ -485,6 +485,8 @@ otherwise to the rustdoc in the active rustc's sysroot, so no rustup is required
 it invokes the real rustc with `--force-warn unused_crate_dependencies`, writes one
 unique capture record, and forwards rustc's diagnostics and exit status. Per-process
 records avoid concurrent append interleaving.
+If `cargo test --doc` exits unsuccessfully, the error names the package rather
+than its Cargo pattern and includes Cargo's stderr.
 
 **4. Aggregate and judge.** The diagnostics are per *unit*, and cargo compiles a
 library or binary twice under `--all-targets` — plainly and with `cfg(test)` — while
@@ -743,9 +745,8 @@ did not happen would send the reviewer hunting for text that is not in the diff.
 
 The complete check is intended to replace both `cargo-udeps` and `cargo-machete`.
 Anvil retains `cargo-udeps` in `pr-fast`. The unused-deps recipe is currently an
-opt-in standalone check until this checker release is available on crates.io.
-Adoption into the mandatory group happens only after that release, as a separate
-follow-up.
+opt-in standalone check. Moving it into `pr-fast` requires `cargo-unused-deps`
+0.2.1 to be available on crates.io and will happen in a separate follow-up.
 
 Generated setup installs the pinned 0.2.0 release from crates.io rather than
 relying on an unpublished local build.

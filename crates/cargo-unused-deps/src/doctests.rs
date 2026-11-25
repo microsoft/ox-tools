@@ -288,7 +288,7 @@ fn gather_package_with(
 
     if !output.status.success() {
         ohno::bail!(
-            "`cargo test --doc` failed while collecting doctest evidence for {package_spec}:\n{}",
+            "`cargo test --doc` failed while collecting doctest evidence for {capture_name}:\n{}",
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
@@ -670,6 +670,27 @@ mod tests {
             |_| panic!("must not run Cargo"),
         )
         .expect_err("capture clear failure must propagate");
+    }
+
+    #[test]
+    fn doctest_failure_names_the_package_not_the_cargo_pattern() {
+        let directory = TempDir::new().expect("the test owns its capture output directory");
+        let error = gather_package_with(
+            Path::new("Cargo.toml"),
+            "[f]ixture",
+            "fixture",
+            directory.path(),
+            Path::new("shim"),
+            "cargo".into(),
+            |path| fs::create_dir(path),
+            || Ok("rustdoc".into()),
+            |_| Ok(compiler_output(false, "", "error: doctest compilation failed\n")),
+        )
+        .expect_err("an unsuccessful Cargo exit must propagate");
+        assert_eq!(
+            error.message(),
+            "`cargo test --doc` failed while collecting doctest evidence for fixture:\nerror: doctest compilation failed"
+        );
     }
 
     #[test]
