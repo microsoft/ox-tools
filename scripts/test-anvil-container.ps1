@@ -323,7 +323,8 @@ Write-Fixture (Join-Path $repo 'rust-toolchain.toml') @'
 [toolchain]
 channel = "1.95"
 profile = "minimal"
-components = ["rustfmt", "clippy"]
+components = ["rust-src"]
+targets = ["wasm32-unknown-unknown"]
 '@
 Write-Fixture (Join-Path $repo 'Justfile') @'
 set unstable
@@ -408,10 +409,15 @@ $checkoutComponents = Invoke-Just -Repo $repo -Arguments @(
     'anvil-container', 'rustup', 'component', 'list', '--toolchain', '1.95', '--installed'
 )
 Assert-Equal 'the checkout toolchain components are queryable' 0 $checkoutComponents.ExitCode
-Assert-That 'the checkout toolchain includes rustfmt' `
-    ($checkoutComponents.StdOut -match '(?m)^rustfmt-') $checkoutComponents.StdOut
-Assert-That 'the checkout toolchain includes clippy' `
-    ($checkoutComponents.StdOut -match '(?m)^clippy-') $checkoutComponents.StdOut
+Assert-That 'the checkout toolchain includes its file-declared rust-src component' `
+    ($checkoutComponents.StdOut -match '(?m)^rust-src-') $checkoutComponents.StdOut
+
+$checkoutTargets = Invoke-Just -Repo $repo -Arguments @(
+    'anvil-container', 'rustup', 'target', 'list', '--toolchain', '1.95', '--installed'
+)
+Assert-Equal 'the checkout toolchain targets are queryable' 0 $checkoutTargets.ExitCode
+Assert-That 'the checkout toolchain includes its file-declared non-host target' `
+    ($checkoutTargets.StdOut -match '(?m)^wasm32-unknown-unknown$') $checkoutTargets.StdOut
 
 $unscopedImpact = Invoke-Just -Repo $repo `
     -Arguments @('anvil-container', 'just', '_anvil-unscoped', 'e2e-impact') `
