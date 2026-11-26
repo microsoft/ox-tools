@@ -433,7 +433,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-anvil"
-version = "0.29.0"
+version = "0.29.1"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -590,7 +590,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-gamma"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "cargo-gamma-attrs",
  "cargo-gamma-lib",
@@ -601,7 +601,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-gamma-attrs"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "cargo-gamma-attrs-impl",
  "cargo_metadata",
@@ -611,7 +611,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-gamma-attrs-impl"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -620,7 +620,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-gamma-engine"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "blake3",
  "bolero",
@@ -640,7 +640,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-gamma-lib"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "base64 0.22.1",
  "blake3",
@@ -682,7 +682,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-gamma-process"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "bolero",
  "camino",
@@ -699,7 +699,7 @@ version = "0.0.0"
 
 [[package]]
 name = "cargo-gamma-rt"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "loom",
  "tempfile",
@@ -707,7 +707,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-gamma-unsafe"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "cargo-gamma-rt",
  "libc",
@@ -752,6 +752,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "cargo-spellcheck-helper"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "clap",
+ "elf",
+ "glob",
+ "hunspell-dictgen",
+ "libloading",
+ "ohno",
+]
+
+[[package]]
 name = "cargo-unique-target-names"
 version = "0.1.0"
 dependencies = [
@@ -762,7 +775,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-unused-deps"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "cargo_metadata",
  "clap",
@@ -1274,6 +1287,12 @@ name = "either"
 version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be"
+
+[[package]]
+name = "elf"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "55dd888a213fc57e957abf2aa305ee3e8a28dbe05687a251f33b637cd46b0070"
 
 [[package]]
 name = "encode_unicode"
@@ -2319,6 +2338,16 @@ name = "libc"
 version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
+
+[[package]]
+name = "libloading"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
+dependencies = [
+ "cfg-if",
+ "windows-link",
+]
 
 [[package]]
 name = "libmimalloc-sys"

@@ -230696,6 +230696,1175 @@ files:
     killer: 0
   - id: dc2f79540b29
     killer: 1
+- path: crates/cargo-spellcheck-helper/src/main.rs
+  killers:
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: tests::cargo_and_direct_invocations_dispatch_dictionary_paths
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: tests::cargo_argument_adaptation_preserves_executable_and_remaining_arguments
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: tests::dictionary_failure_retains_underlying_cause
+  mutants:
+  - id: 02bfb1766fd5
+    killer: 1
+  - id: 13e63a89b692
+    killer: 0
+  - id: 1e2a0be61d47
+    killer: 1
+  - id: 2338a325ff59
+    killer: 1
+  - id: 6c1159f3bbae
+    killer: 2
+  - id: 6e81a431b63d
+    killer: 1
+  - id: 8a613103638d
+    killer: 1
+  - id: 923c46c8242b
+    killer: 1
+  - id: aeaa4eaab18c
+    killer: 1
+  - id: cc4857335bd2
+    killer: 1
+  - id: dbf62232aea4
+    killer: 1
+  - id: f2a864d75d65
+    killer: 1
+  - id: f61dce948d7d
+    killer: 1
+- path: crates/cargo-spellcheck-helper/src/source_deps/elf.rs
+  killers:
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::elf::tests::dynamic_entries_after_null_do_not_change_the_runtime_name
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::elf::tests::file_offset_overflow_is_reported_instead_of_wrapping
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::elf::tests::malformed_dynamic_metadata_and_names_are_rejected
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::elf::tests::metadata_and_name_io_failures_retain_their_typed_cause
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::elf::tests::missing_soname_is_distinct_from_missing_dynamic_metadata
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::elf::tests::runtime_name_length_is_bounded_by_the_linux_path_limit
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::elf::tests::string_table_at_a_load_boundary_uses_the_segment_starting_there
+  mutants:
+  - id: 0806e15de4dd
+    killer: 1
+  - id: 0d4811f8ddf3
+    killer: 3
+  - id: 1270785ca368
+    killer: 4
+  - id: 1b0cd5f21075
+    killer: 3
+  - id: 20e69ab31dac
+    killer: 2
+  - id: 25954af5ceeb
+    killer: 3
+  - id: 2660c37f5b48
+    killer: 3
+  - id: 26e4b3526e93
+    killer: 0
+  - id: 2805004a1377
+    killer: 2
+  - id: 2a4ac4d79798
+    killer: 0
+  - id: 2c186f7f8e60
+    killer: 3
+  - id: 306cc163e48e
+    killer: 3
+  - id: 337ba6efa1a3
+    killer: 2
+  - id: 3b2e5ef56d7e
+    killer: 3
+  - id: 3d7d203f35bb
+    killer: 5
+  - id: 3efb4342bf88
+    killer: 6
+  - id: 41f177272cfb
+    killer: 2
+  - id: 45f813a002e9
+    killer: 3
+  - id: 46a0cd355184
+    killer: 2
+  - id: 488291ad53f8
+    killer: 2
+  - id: 48e9cc9ad21a
+    killer: 3
+  - id: 4a3e1a9b6a36
+    killer: 3
+  - id: 4b6405796a26
+    killer: 2
+  - id: 4e29321f497a
+    killer: 2
+  - id: 4f4d390daff9
+    killer: 2
+  - id: 514277486e52
+    killer: 0
+  - id: 548f184ba77f
+    killer: 2
+  - id: 558615d74097
+    killer: 3
+  - id: 57e652996b9d
+    killer: 2
+  - id: 5d3899e53afd
+    killer: 3
+  - id: 6227bbbe8766
+    killer: 0
+  - id: 635e4e845fab
+    killer: 2
+  - id: 6ade9acfa462
+    killer: 2
+  - id: 6bf781ff51fb
+    killer: 2
+  - id: 6c18115438bc
+    killer: 2
+  - id: 6fa2c1228b7d
+    killer: 3
+  - id: 713f724eff4d
+    killer: 2
+  - id: 744b4ab60482
+    killer: 2
+  - id: 85e455f67b90
+    killer: 2
+  - id: 8f81fccb7b3f
+    killer: 2
+  - id: 9112971c5fe1
+    killer: 0
+  - id: 924f9912cb26
+    killer: 2
+  - id: a0a74100b041
+    killer: 3
+  - id: acc02fdf75a3
+    killer: 2
+  - id: ad08aa1f262d
+    killer: 2
+  - id: b33f7f0f6537
+    killer: 3
+  - id: b950565be532
+    killer: 3
+  - id: ba6eadf99766
+    killer: 3
+  - id: be9e607377b3
+    killer: 2
+  - id: c037a970c87c
+    killer: 0
+  - id: c1b34d3a3f87
+    killer: 2
+  - id: c1e10a4e3eb0
+    killer: 5
+  - id: d2050a81cbda
+    killer: 2
+  - id: d65c17b7cfa9
+    killer: 2
+  - id: d77dd772c66c
+    killer: 2
+  - id: df4144cb05e3
+    killer: 3
+  - id: dfce0f506b41
+    killer: 3
+  - id: e24a344acf01
+    killer: 3
+  - id: e3bed81f8cc8
+    killer: 5
+  - id: e4ac01745abf
+    killer: 3
+  - id: e4d3c497a7b5
+    killer: 3
+  - id: e8489909dbe7
+    killer: 0
+  - id: e84f81d85967
+    killer: 3
+  - id: eaf5ad58c98d
+    killer: 2
+  - id: ec237919a4a2
+    killer: 2
+  - id: ed4fa9d86a56
+    killer: 3
+  - id: ee01f96eaae6
+    killer: 0
+  - id: f10a2ec168d3
+    killer: 2
+  - id: f4e4c3e30c9e
+    killer: 3
+  - id: f6bdcea53543
+    killer: 3
+  - id: f7222c33f762
+    killer: 2
+  - id: f845af651c79
+    killer: 2
+  - id: fd116eaed5e9
+    killer: 0
+  - id: ff4c190a0b40
+    killer: 2
+- path: crates/cargo-spellcheck-helper/src/source_deps/library.rs
+  killers:
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::bootstrap_uses_owned_override_and_path_values_without_host_environment
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::elf_validation_checks_signature_and_both_native_widths
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::loader_and_compiler_failures_are_propagated_in_order
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::malformed_or_inaccessible_headers_are_reported_with_candidate_paths
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::malformed_pe_headers_are_rejected_without_import_or_loader_checks
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::msvc_import_library_can_be_beside_dll_and_inspection_errors_propagate
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::pe_header_read_failures_and_truncation_propagate_without_panicking
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::pe_validation_checks_machine_width_and_accepts_unknown_machine_like_clang_sys
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::pe_validation_rejects_wrong_architecture_and_pointer_width
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::version_selection_compares_components_numerically_and_treats_invalid_parts_as_zero
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::version_selection_uses_highest_valid_version_not_first_candidate
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::windows_gnu_needs_no_msvc_import_library_and_normalizes_path
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::windows_lib_directory_searches_sibling_bin_and_accepts_mingw_import_library
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::windows_path_matching_does_not_confuse_different_directories
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::windows_path_resolution_failures_preserve_cause_and_stop_comparison
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::windows_rejects_missing_import_library_and_missing_path
+  mutants:
+  - id: 0044084c6e55
+    killer: 1
+  - id: 03124578cac2
+    killer: 9
+  - id: 034550aa39ed
+    killer: 0
+  - id: 052e88eaeefb
+    killer: 0
+  - id: 05dc293119a6
+    killer: 11
+  - id: 05fdd0390f12
+    killer: 1
+  - id: 0797f1e54053
+    killer: 0
+  - id: 0871eb104a78
+    killer: 11
+  - id: 096504cbfbf8
+    killer: 0
+  - id: 0c1fc8ffc22c
+    killer: 0
+  - id: 0d123c7cd02b
+    killer: 0
+  - id: 0e8a69d977a3
+    killer: 7
+  - id: 105edf4cb603
+    killer: 1
+  - id: 12d5257c97ec
+    killer: 1
+  - id: 131a7840b12e
+    killer: 0
+  - id: 133533b1dffc
+    killer: 0
+  - id: 139560fd8d5c
+    killer: 0
+  - id: 143ff355d0e4
+    killer: 6
+  - id: 14482f087d14
+    killer: 6
+  - id: 14a92820ef1c
+    killer: 1
+  - id: 15bfd9466b8e
+    killer: 13
+  - id: 162ee0b266f6
+    killer: 9
+  - id: 162f34188631
+    killer: 3
+  - id: 16636244f89d
+    killer: 0
+  - id: 16fe67528b61
+    killer: 6
+  - id: 17676e871e0c
+    killer: 11
+  - id: 19288888ee83
+    killer: 0
+  - id: 1a628f4630a5
+    killer: 0
+  - id: 1a76bd0ab954
+    killer: 0
+  - id: 1cd70da6c2d1
+    killer: 0
+  - id: 2045fc54b74b
+    killer: 0
+  - id: 2395d54455e1
+    killer: 0
+  - id: 23c5391ed0e6
+    killer: 1
+  - id: 23ed93523401
+    killer: 1
+  - id: 2652b2dab189
+    killer: 1
+  - id: 26f72ebda79f
+    killer: 0
+  - id: 2816d6a70b6a
+    killer: 1
+  - id: 28332068c34c
+    killer: 4
+  - id: 285ded6794eb
+    killer: 0
+  - id: 293a1e315b64
+    killer: 15
+  - id: 2969bb434946
+    killer: 0
+  - id: 298d01e6783e
+    killer: 0
+  - id: 2ce2c8a6eefd
+    killer: 0
+  - id: 2cf55d4f5521
+    killer: 1
+  - id: 2ded56e549a7
+    killer: 0
+  - id: 2e364dd65a9c
+    killer: 5
+  - id: 2f8b017984c4
+    killer: 7
+  - id: 30333e2d6bab
+    killer: 0
+  - id: 304d4f585312
+    killer: 0
+  - id: 319675863ad6
+    killer: 0
+  - id: 3353ef9a8e3e
+    killer: 0
+  - id: 33a4d6a7890b
+    killer: 1
+  - id: 348eb48ebbc0
+    killer: 0
+  - id: 374187574ca4
+    killer: 9
+  - id: 3742bb313294
+    killer: 0
+  - id: 383a34466329
+    killer: 1
+  - id: 3b204240154c
+    killer: 1
+  - id: 3c480355cf5b
+    killer: 0
+  - id: 3fb0fbe730b9
+    killer: 5
+  - id: 425fcb49a338
+    killer: 11
+  - id: 42d6e6f422e9
+    killer: 13
+  - id: 43fc5056ee0d
+    killer: 12
+  - id: 474cdba9ec42
+    killer: 0
+  - id: 47fa08685a09
+    killer: 1
+  - id: 48651e3fd670
+    killer: 5
+  - id: 4877de9eb871
+    killer: 0
+  - id: 48a380f43c79
+    killer: 0
+  - id: 491a437b0ed2
+    killer: 0
+  - id: 49294ff22566
+    killer: 0
+  - id: 49d59f8ceed3
+    killer: 8
+  - id: 4b8befdf354f
+    killer: 5
+  - id: 4bf59fe5c310
+    killer: 0
+  - id: 4d45322aab5b
+    killer: 0
+  - id: 4dff3b9cd485
+    killer: 0
+  - id: 4e2264461fa7
+    killer: 0
+  - id: 4f6d3b3a43d4
+    killer: 1
+  - id: 50d71ec12a11
+    killer: 0
+  - id: 52b93f0d5b6e
+    killer: 12
+  - id: 52c1ebbdebf4
+    killer: 0
+  - id: 5507635d55b3
+    killer: 0
+  - id: 55487d307253
+    killer: 1
+  - id: 579b027cdb02
+    killer: 11
+  - id: 5b5b30503411
+    killer: 0
+  - id: 5bedfa0600cf
+    killer: 0
+  - id: 5c89483fa558
+    killer: 0
+  - id: 5cbc26e7bfbb
+    killer: 0
+  - id: 5d53db0cb2eb
+    killer: 2
+  - id: 5eb9ef3c8d3e
+    killer: 15
+  - id: 5f44f8b93b94
+    killer: 1
+  - id: 603bf093f273
+    killer: 0
+  - id: 6116ae8c8a7c
+    killer: 0
+  - id: 6334c5b669da
+    killer: 1
+  - id: 635e67b1f44d
+    killer: 9
+  - id: 677aad1dc472
+    killer: 6
+  - id: 68379babf75c
+    killer: 7
+  - id: 6a7a61347d24
+    killer: 0
+  - id: 6ac1d489056a
+    killer: 0
+  - id: 6c64daf4207a
+    killer: 0
+  - id: 6d6c35e98e68
+    killer: 0
+  - id: 6d789aee2f95
+    killer: 1
+  - id: 6db73747a55c
+    killer: 11
+  - id: 6ee9752229f9
+    killer: 0
+  - id: 6f0f738d773a
+    killer: 1
+  - id: 71eadb185249
+    killer: 0
+  - id: 7395dd5f26ab
+    killer: 1
+  - id: 746d4b6be90b
+    killer: 9
+  - id: 761145b172bf
+    killer: 1
+  - id: 77073a77ff9d
+    killer: 13
+  - id: 77c23187ccae
+    killer: 0
+  - id: 7ad0761c849f
+    killer: 1
+  - id: 7c172d10af54
+    killer: 12
+  - id: 7c5dfd1afa92
+    killer: 0
+  - id: 7cefa2599807
+    killer: 1
+  - id: 7fc7ef3646dc
+    killer: 0
+  - id: 81de2b9e43e2
+    killer: 1
+  - id: 825647d6139b
+    killer: 0
+  - id: 83ce667ef5bb
+    killer: 7
+  - id: 88975d853b1e
+    killer: 7
+  - id: 899b36c7373e
+    killer: 1
+  - id: 8aebf16e9265
+    killer: 11
+  - id: 8dcdf564c689
+    killer: 7
+  - id: 913be87e5f62
+    killer: 12
+  - id: 916192a0c531
+    killer: 0
+  - id: '927945253746'
+    killer: 11
+  - id: 92a557778aea
+    killer: 0
+  - id: 94aa8f53fa83
+    killer: 1
+  - id: 98992afe485b
+    killer: 6
+  - id: 98fb0f214372
+    killer: 1
+  - id: 99fcd3543e21
+    killer: 1
+  - id: 9a65835beefc
+    killer: 0
+  - id: 9af87d8b984e
+    killer: 0
+  - id: 9b0241c66278
+    killer: 7
+  - id: 9e048c02ca97
+    killer: 1
+  - id: 9e8cac481b23
+    killer: 1
+  - id: 9f05f01f59b9
+    killer: 9
+  - id: 9f4e6d4e53c4
+    killer: 7
+  - id: a01f96384973
+    killer: 7
+  - id: a06b059eb0db
+    killer: 0
+  - id: a0ada6f4364d
+    killer: 0
+  - id: a30e11046d87
+    killer: 11
+  - id: a4f173f8ba3c
+    killer: 0
+  - id: a4fb2a137bcb
+    killer: 7
+  - id: a5016e19fb7b
+    killer: 0
+  - id: a57ad2bc780a
+    killer: 7
+  - id: a7b86ad1dbcd
+    killer: 0
+  - id: a96a22ff9fe1
+    killer: 0
+  - id: ab609b9b24b1
+    killer: 11
+  - id: aba31b68e747
+    killer: 14
+  - id: ac714bb15993
+    killer: 0
+  - id: acc0f9588ff1
+    killer: 0
+  - id: ae8d5111c81c
+    killer: 0
+  - id: af7fbc7251e8
+    killer: 0
+  - id: b2c87de009f0
+    killer: 0
+  - id: b3b8fae7ba5a
+    killer: 4
+  - id: b49270d232df
+    killer: 7
+  - id: b606dc2cd581
+    killer: 1
+  - id: b710705448e0
+    killer: 8
+  - id: b809de82bed5
+    killer: 0
+  - id: b899edd17055
+    killer: 0
+  - id: bae17fcba794
+    killer: 0
+  - id: bd806009e42f
+    killer: 1
+  - id: be048040888d
+    killer: 12
+  - id: be6ade5e0237
+    killer: 1
+  - id: bf215fe93dfb
+    killer: 0
+  - id: c1f88bad872c
+    killer: 13
+  - id: c33b15648860
+    killer: 14
+  - id: c3473659c967
+    killer: 0
+  - id: c354efb773f4
+    killer: 0
+  - id: c4ffb0f67133
+    killer: 7
+  - id: c6ed52c901ce
+    killer: 1
+  - id: c6fe28147cf7
+    killer: 5
+  - id: c7eac305eac5
+    killer: 13
+  - id: c87ca3137d3c
+    killer: 0
+  - id: cc092434f700
+    killer: 0
+  - id: cc17edfa7f5d
+    killer: 1
+  - id: cf5f5003cd76
+    killer: 9
+  - id: d1cd0b8a9c22
+    killer: 7
+  - id: d31e6c069341
+    killer: 0
+  - id: d46c29b6fba2
+    killer: 11
+  - id: d53cf7577218
+    killer: 5
+  - id: d64485c7cab1
+    killer: 15
+  - id: dc3ac6c0d400
+    killer: 4
+  - id: dcc6ce4acd79
+    killer: 8
+  - id: de28332da964
+    killer: 0
+  - id: de34dafa6c45
+    killer: 0
+  - id: de97321ce482
+    killer: 10
+  - id: e031a32e8d74
+    killer: 1
+  - id: e202c80498a5
+    killer: 7
+  - id: e555daa62c46
+    killer: 10
+  - id: e7ce5e7f619b
+    killer: 0
+  - id: ea2efb6021d0
+    killer: 0
+  - id: ea81c463e0ec
+    killer: 0
+  - id: eb8423da4151
+    killer: 7
+  - id: ebd3ed77c39e
+    killer: 1
+  - id: eee249a17224
+    killer: 7
+  - id: f0b8bc4d833e
+    killer: 0
+  - id: f0e92c0aa9db
+    killer: 7
+  - id: f4449414da72
+    killer: 0
+  - id: f5616009a197
+    killer: 0
+  - id: f590469e9875
+    killer: 0
+  - id: fa824736137e
+    killer: 11
+  - id: fb79cc2cd60d
+    killer: 0
+  - id: fc65298767eb
+    killer: 5
+  - id: fd47912ac1e2
+    killer: 0
+  - id: fe08234e43dc
+    killer: 0
+- path: crates/cargo-spellcheck-helper/src/source_deps.rs
+  killers:
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::bootstrap_accepts_native_cargo_host_alias
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::bootstrap_cargo_alias_failure_preserves_typed_cause
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::bootstrap_passes_llvm_override_and_loader_paths_to_discovery
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::bootstrap_rejects_cargo_host_alias_if_cargo_and_rustc_hosts_differ
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::bootstrap_rejects_failed_or_missing_cargo_host_output_before_discovery
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::bootstrap_rejects_rustc_failure_and_cross_target_before_discovery
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::bootstrap_uses_owned_override_and_path_values_without_host_environment
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::discovery_errors_remain_fatal_for_overrides_and_are_retained_for_optional_search
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::elf_validation_checks_signature_and_both_native_widths
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::every_discovery_stage_propagates_glob_errors_without_panicking_or_continuing
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::explicit_library_file_does_not_search_other_locations
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::failed_discovery_command_diagnostic_is_retained_when_no_library_is_found
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::linux_runtime_discovery_failures_stop_before_selected_file_load
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::linux_suffix_sonames_and_cpp_library_are_not_link_time_candidates
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::llvm_config_and_ld_library_path_are_used_and_earlier_location_wins_ties
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::loader_and_compiler_failures_are_propagated_in_order
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::macos_uses_xcode_select_when_llvm_config_is_unavailable
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::non_unicode_search_directory_is_rejected_before_any_probe
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::optional_command_failure_allows_platform_glob_discovery
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::optional_discovery_failures_record_one_note_and_never_accept_failed_stdout
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::optional_search_failure_retains_first_typed_cause_when_discovery_fails
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::selected_library_path_resolution_failure_preserves_cause_without_loading
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::target_comes_from_caller_rustc_and_cross_installation_is_rejected
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::target_parsing_accepts_native_widths_and_rejects_unsupported_targets
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::version_selection_compares_components_numerically_and_treats_invalid_parts_as_zero
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::windows_msys_directory_discovery_is_only_enabled_for_gnu
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::windows_rejects_missing_import_library_and_missing_path
+  mutants:
+  - id: 01ac796ac62d
+    killer: 2
+  - id: 01b7bb2bf148
+    killer: 6
+  - id: 02ce2cc9495a
+    killer: 6
+  - id: 03e348a614bd
+    killer: 6
+  - id: 0429525b79c4
+    killer: 6
+  - id: 044743f8bca2
+    killer: 8
+  - id: 06befcdc3716
+    killer: 8
+  - id: 074cc67b8e5f
+    killer: 15
+  - id: 0b7e10ef5599
+    killer: 7
+  - id: 0d91948ded6b
+    killer: 6
+  - id: 0e0cea223f7b
+    killer: 6
+  - id: 0fb971223281
+    killer: 19
+  - id: 0fb9bf55647e
+    killer: 2
+  - id: 0fc74ab5f449
+    killer: 2
+  - id: 11916c79f9a3
+    killer: 6
+  - id: 13ac00bdfe3d
+    killer: 0
+  - id: 144bdcbd2f95
+    killer: 6
+  - id: 145fe84dad64
+    killer: 9
+  - id: 165af10d03e2
+    killer: 2
+  - id: 166c3f66d07f
+    killer: 2
+  - id: 16a212fbab2c
+    killer: 24
+  - id: 18c07f3cffb4
+    killer: 11
+  - id: 1994de110113
+    killer: 7
+  - id: 1a14b1e24af6
+    killer: 6
+  - id: 1b8896fca775
+    killer: 14
+  - id: 1cf3889d35ba
+    killer: 23
+  - id: 1dfa1c12765c
+    killer: 6
+  - id: 21ff1e1a4a52
+    killer: 0
+  - id: 223f896d89e7
+    killer: 12
+  - id: 2327d90ef876
+    killer: 8
+  - id: 2433b3a00641
+    killer: 8
+  - id: 24b07d22754d
+    killer: 5
+  - id: 26bbc3b84733
+    killer: 0
+  - id: 275a981591ae
+    killer: 2
+  - id: 2785bac0a214
+    killer: 2
+  - id: 292fb2a1f4ab
+    killer: 6
+  - id: 2af69725c6c4
+    killer: 23
+  - id: 2b22decf6d80
+    killer: 7
+  - id: 2cd65437c2cd
+    killer: 23
+  - id: 2d595e35cc9d
+    killer: 14
+  - id: 2dda8bf71047
+    killer: 2
+  - id: 2e94f22e7bdf
+    killer: 6
+  - id: 2f1d193bc1b7
+    killer: 4
+  - id: 2f4259e2601f
+    killer: 23
+  - id: 2f999fbcf7c8
+    killer: 2
+  - id: 31008c989713
+    killer: 0
+  - id: 31eeebb30956
+    killer: 9
+  - id: 3674a47ef99c
+    killer: 11
+  - id: 36a57da78259
+    killer: 2
+  - id: 3764e48e277a
+    killer: 23
+  - id: 38a03b1753df
+    killer: 2
+  - id: 38a8a29456b1
+    killer: 0
+  - id: 3903a20a8b7c
+    killer: 13
+  - id: 3a38f53740d8
+    killer: 14
+  - id: 3a401b4e3bd8
+    killer: 2
+  - id: 3b9f4f0ecbb5
+    killer: 6
+  - id: 3d73c49a872a
+    killer: 2
+  - id: 417bbe11c00f
+    killer: 5
+  - id: 421d39b50022
+    killer: 6
+  - id: 424bdbfda322
+    killer: 9
+  - id: 42c137ac473a
+    killer: 6
+  - id: 45cdf8d5e022
+    killer: 18
+  - id: 46dd34030e82
+    killer: 2
+  - id: 470d76464df9
+    killer: 2
+  - id: 471d67b79d85
+    killer: 23
+  - id: 47c787efded2
+    killer: 23
+  - id: 499e30b30a16
+    killer: 22
+  - id: 49b6218fe8d1
+    killer: 23
+  - id: 4c051f7af8c5
+    killer: 6
+  - id: 4d9f14a3b559
+    killer: 21
+  - id: 4df49379050c
+    killer: 5
+  - id: 4ea8fedf5770
+    killer: 10
+  - id: 4fd4dd8c9561
+    killer: 0
+  - id: 508da5853c44
+    killer: 2
+  - id: 50fad0ef4484
+    killer: 10
+  - id: 51488889efff
+    killer: 7
+  - id: 54294def3980
+    killer: 2
+  - id: 54a742cd7f3b
+    killer: 5
+  - id: 57d00c544cbd
+    killer: 23
+  - id: 59340ace6d53
+    killer: 7
+  - id: 5b25647e6ec6
+    killer: 5
+  - id: 5e0acddbecd5
+    killer: 23
+  - id: 5ebaa82ca574
+    killer: 0
+  - id: 5ee38b6956f0
+    killer: 6
+  - id: 5f0b582caf02
+    killer: 6
+  - id: 6254addf9e3b
+    killer: 7
+  - id: 6476c6e40a68
+    killer: 22
+  - id: 650fafa5382f
+    killer: 2
+  - id: 67ab48622586
+    killer: 0
+  - id: 6873b7c718f4
+    killer: 13
+  - id: 6879b2dae8ec
+    killer: 23
+  - id: 697bf827d27c
+    killer: 14
+  - id: 6a44f9c6c56e
+    killer: 2
+  - id: 6c4407f75b10
+    killer: 9
+  - id: 6de5cd4a35b2
+    killer: 7
+  - id: 6e314aa03a09
+    killer: 19
+  - id: 6e957ecd9cac
+    killer: 5
+  - id: 71a7c0c018a2
+    killer: 4
+  - id: 72e6d3642484
+    killer: 6
+  - id: 742b4374dc87
+    killer: 20
+  - id: 74f923b47d36
+    killer: 22
+  - id: 76ec9efe9436
+    killer: 8
+  - id: 781bfb6cfbfb
+    killer: 7
+  - id: 7979d21c87cf
+    killer: 5
+  - id: 79ddab8cc26e
+    killer: 6
+  - id: 7c897b6a8c0c
+    killer: 23
+  - id: 7f4ef709ee9c
+    killer: 2
+  - id: 7f8b92b4920f
+    killer: 2
+  - id: 7fb117a6e514
+    killer: 26
+  - id: 80f016cb0429
+    killer: 25
+  - id: 81734bc83c29
+    killer: 7
+  - id: 83d50d883ec0
+    killer: 23
+  - id: 84972da64376
+    killer: 7
+  - id: 865d3668ce3e
+    killer: 6
+  - id: 86745821e312
+    killer: 5
+  - id: 86aedede595f
+    killer: 6
+  - id: 86c61a75bee8
+    killer: 7
+  - id: 87604c3624d8
+    killer: 2
+  - id: 883421e2a743
+    killer: 23
+  - id: 8dbaac5c86e2
+    killer: 2
+  - id: 8de60ecafcd9
+    killer: 7
+  - id: 8dfe8867e268
+    killer: 2
+  - id: 8e1c32e1fe53
+    killer: 4
+  - id: 8f44852d67c3
+    killer: 6
+  - id: 90ac281b7cc5
+    killer: 6
+  - id: 9463aecac8f3
+    killer: 25
+  - id: 9a382147d621
+    killer: 2
+  - id: 9d16d5b36dba
+    killer: 23
+  - id: 9e32f275de36
+    killer: 14
+  - id: 9f3e66abdfd2
+    killer: 23
+  - id: 9f8cf95960cb
+    killer: 14
+  - id: 9fa98708c6ea
+    killer: 0
+  - id: 9fc1bcdca6af
+    killer: 2
+  - id: a4abad596d15
+    killer: 22
+  - id: a4b5ad12d322
+    killer: 7
+  - id: a617c3f7e20b
+    killer: 7
+  - id: a8c6225265e5
+    killer: 5
+  - id: a95604d07203
+    killer: 2
+  - id: a98618add838
+    killer: 17
+  - id: aa04e4b2df0f
+    killer: 6
+  - id: aa803b965fbc
+    killer: 16
+  - id: ace330f350c3
+    killer: 8
+  - id: ad461d79f566
+    killer: 0
+  - id: ae94f05e4faf
+    killer: 15
+  - id: aec7ac881afd
+    killer: 6
+  - id: af359ca1f93b
+    killer: 2
+  - id: aff17ea8d739
+    killer: 6
+  - id: b003e8886187
+    killer: 2
+  - id: b1d31fb5a825
+    killer: 6
+  - id: b41f7281aaab
+    killer: 2
+  - id: b5e02ee00543
+    killer: 7
+  - id: b5fdd2439a91
+    killer: 7
+  - id: b8bae3a810ab
+    killer: 2
+  - id: b938a2700852
+    killer: 2
+  - id: bca3065fc7da
+    killer: 2
+  - id: bf7cec212c52
+    killer: 11
+  - id: c084ac1d2834
+    killer: 0
+  - id: c0f38a2c2b35
+    killer: 5
+  - id: c18f081c2a0c
+    killer: 2
+  - id: c3a5417c4735
+    killer: 7
+  - id: c53b64132c67
+    killer: 2
+  - id: c5ec62f06aeb
+    killer: 6
+  - id: c656d0b41dfd
+    killer: 5
+  - id: c79fa4b7ca28
+    killer: 0
+  - id: c7d997e18189
+    killer: 6
+  - id: c815916d45e9
+    killer: 6
+  - id: c8d2ae0cd21b
+    killer: 12
+  - id: caa87ad68fb9
+    killer: 7
+  - id: d009c6bd9eda
+    killer: 8
+  - id: d134a44634c3
+    killer: 7
+  - id: d2016f2679e5
+    killer: 2
+  - id: d4cd9cdcf151
+    killer: 7
+  - id: d56cf57dce9e
+    killer: 25
+  - id: d575366e0097
+    killer: 5
+  - id: d5f515d1387e
+    killer: 11
+  - id: d6697cd843e0
+    killer: 23
+  - id: d699782ac2c8
+    killer: 23
+  - id: d861008bbab3
+    killer: 9
+  - id: d952fd7a4b4c
+    killer: 1
+  - id: da4faaaf7a7e
+    killer: 9
+  - id: da524327815d
+    killer: 2
+  - id: daa09fe1da99
+    killer: 7
+  - id: daba7b274d54
+    killer: 7
+  - id: dcf470dfdd95
+    killer: 2
+  - id: e085b2ded16a
+    killer: 2
+  - id: e151da526215
+    killer: 2
+  - id: e375ced6d4ac
+    killer: 9
+  - id: e3d1684c3f55
+    killer: 2
+  - id: e41ac0219b29
+    killer: 2
+  - id: ea14acafe81c
+    killer: 11
+  - id: eaf5532273a7
+    killer: 5
+  - id: ec03cf2146c6
+    killer: 2
+  - id: ec19ad6c16e6
+    killer: 8
+  - id: ed864a47a1f9
+    killer: 3
+  - id: eddb13a565a5
+    killer: 9
+  - id: ef5fc22dcb3a
+    killer: 8
+  - id: f000933c50bf
+    killer: 6
+  - id: f0394a7c82ca
+    killer: 20
+  - id: f0467047890d
+    killer: 9
+  - id: f0f43067bbaa
+    killer: 7
+  - id: f18a951a8837
+    killer: 2
+  - id: f476f0ed9ab7
+    killer: 23
+  - id: f7ab076132c3
+    killer: 2
+  - id: f80b83565868
+    killer: 2
+  - id: fdd9db9cff66
+    killer: 10
+  - id: fdec86a62192
+    killer: 11
+  - id: ff5b599d0091
+    killer: 23
 generalized:
   version: 3
   killers:
@@ -265964,6 +267133,153 @@ generalized:
   - package: hunspell-dictgen
     target: lib:hunspell_dictgen
     test: tests::staging_returns_each_io_failure_without_continuing_or_panicking
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: tests::cargo_argument_adaptation_preserves_executable_and_remaining_arguments
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: tests::cargo_and_direct_invocations_dispatch_dictionary_paths
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: tests::dictionary_failure_retains_underlying_cause
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::elf::tests::file_offset_overflow_is_reported_instead_of_wrapping
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::elf::tests::malformed_dynamic_metadata_and_names_are_rejected
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::elf::tests::missing_soname_is_distinct_from_missing_dynamic_metadata
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::elf::tests::dynamic_entries_after_null_do_not_change_the_runtime_name
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::elf::tests::metadata_and_name_io_failures_retain_their_typed_cause
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::elf::tests::runtime_name_length_is_bounded_by_the_linux_path_limit
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::elf::tests::string_table_at_a_load_boundary_uses_the_segment_starting_there
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::bootstrap_uses_owned_override_and_path_values_without_host_environment
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::loader_and_compiler_failures_are_propagated_in_order
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::msvc_import_library_can_be_beside_dll_and_inspection_errors_propagate
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::windows_gnu_needs_no_msvc_import_library_and_normalizes_path
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::windows_lib_directory_searches_sibling_bin_and_accepts_mingw_import_library
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::windows_rejects_missing_import_library_and_missing_path
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::windows_path_matching_does_not_confuse_different_directories
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::windows_path_resolution_failures_preserve_cause_and_stop_comparison
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::elf_validation_checks_signature_and_both_native_widths
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::malformed_or_inaccessible_headers_are_reported_with_candidate_paths
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::pe_header_read_failures_and_truncation_propagate_without_panicking
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::malformed_pe_headers_are_rejected_without_import_or_loader_checks
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::pe_validation_checks_machine_width_and_accepts_unknown_machine_like_clang_sys
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::pe_validation_rejects_wrong_architecture_and_pointer_width
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::version_selection_compares_components_numerically_and_treats_invalid_parts_as_zero
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::version_selection_uses_highest_valid_version_not_first_candidate
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::bootstrap_passes_llvm_override_and_loader_paths_to_discovery
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::every_discovery_stage_propagates_glob_errors_without_panicking_or_continuing
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::target_parsing_accepts_native_widths_and_rejects_unsupported_targets
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::discovery_errors_remain_fatal_for_overrides_and_are_retained_for_optional_search
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::optional_search_failure_retains_first_typed_cause_when_discovery_fails
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::bootstrap_rejects_rustc_failure_and_cross_target_before_discovery
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::bootstrap_accepts_native_cargo_host_alias
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::bootstrap_cargo_alias_failure_preserves_typed_cause
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::bootstrap_rejects_failed_or_missing_cargo_host_output_before_discovery
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::bootstrap_rejects_cargo_host_alias_if_cargo_and_rustc_hosts_differ
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::selected_library_path_resolution_failure_preserves_cause_without_loading
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::linux_runtime_discovery_failures_stop_before_selected_file_load
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::optional_command_failure_allows_platform_glob_discovery
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::windows_msys_directory_discovery_is_only_enabled_for_gnu
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::explicit_library_file_does_not_search_other_locations
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::llvm_config_and_ld_library_path_are_used_and_earlier_location_wins_ties
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::failed_discovery_command_diagnostic_is_retained_when_no_library_is_found
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::macos_uses_xcode_select_when_llvm_config_is_unavailable
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::target_comes_from_caller_rustc_and_cross_installation_is_rejected
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::optional_discovery_failures_retain_injected_details_and_never_accept_failed_stdout
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::optional_discovery_failures_record_one_note_and_never_accept_failed_stdout
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::linux_suffix_sonames_and_cpp_library_are_not_link_time_candidates
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
+    test: source_deps::tests::non_unicode_search_directory_is_rejected_before_any_probe
   binaryIdentities:
   - package: cargo-anvil
     target: cargo_anvil
@@ -266271,6 +267587,8 @@ generalized:
     target: bin:hunspell-dictgen
   - package: hunspell-dictgen
     target: lib:hunspell_dictgen
+  - package: cargo-spellcheck-helper
+    target: bin:cargo-spellcheck-helper
   items:
   - file: crates/cargo-anvil/src/anvil/artifacts/ado.rs
     item: advisory_comments
@@ -454194,6 +455512,637 @@ generalized:
       measuredMs: 54351
       samples: 47
       order: 2
+  - file: crates/cargo-spellcheck-helper/src/main.rs
+    item: command_args
+    candidates:
+    - candidate: 11755
+      seeds: 1
+      hits: 55
+      misses: 0
+      measuredMs: 30823
+      samples: 55
+      order: 1
+    - candidate: 11756
+      seeds: 1
+      hits: 4
+      misses: 0
+      measuredMs: 2070
+      samples: 4
+      order: 17
+  - file: crates/cargo-spellcheck-helper/src/main.rs
+    item: run_with
+    candidates:
+    - candidate: 11757
+      seeds: 1
+      hits: 4
+      misses: 0
+      measuredMs: 2098
+      samples: 4
+      order: 13
+  - file: crates/cargo-spellcheck-helper/src/source_deps/elf.rs
+    item: soname
+    candidates:
+    - candidate: 11758
+      seeds: 1
+      hits: 5
+      misses: 46
+      measuredMs: 24536
+      samples: 51
+      order: 1
+    - candidate: 11759
+      seeds: 1
+      hits: 94
+      misses: 48
+      measuredMs: 70078
+      samples: 142
+      order: 4
+    - candidate: 11760
+      seeds: 1
+      hits: 2
+      misses: 32
+      measuredMs: 15840
+      samples: 34
+      order: 5
+    - candidate: 11761
+      seeds: 1
+      hits: 26
+      misses: 35
+      measuredMs: 28740
+      samples: 61
+      order: 6
+    - candidate: 11762
+      seeds: 1
+      hits: 77
+      misses: 63
+      measuredMs: 67918
+      samples: 140
+      order: 7
+    - candidate: 11763
+      seeds: 1
+      hits: 8
+      misses: 9
+      measuredMs: 7438
+      samples: 17
+      order: 64
+    - candidate: 11764
+      seeds: 1
+      hits: 0
+      misses: 0
+      measuredMs: 0
+      samples: 0
+      order: 138
+  - file: crates/cargo-spellcheck-helper/src/source_deps/library.rs
+    item: check_link_requirements
+    candidates:
+    - candidate: 11765
+      seeds: 1
+      hits: 139
+      misses: 21
+      measuredMs: 86800
+      samples: 160
+      order: 116
+    - candidate: 11766
+      seeds: 1
+      hits: 4
+      misses: 15
+      measuredMs: 11697
+      samples: 19
+      order: 120
+    - candidate: 11767
+      seeds: 1
+      hits: 32
+      misses: 10
+      measuredMs: 23231
+      samples: 42
+      order: 122
+    - candidate: 11768
+      seeds: 1
+      hits: 4
+      misses: 9
+      measuredMs: 7930
+      samples: 13
+      order: 126
+    - candidate: 11769
+      seeds: 1
+      hits: 25
+      misses: 9
+      measuredMs: 18701
+      samples: 34
+      order: 128
+    - candidate: 11770
+      seeds: 1
+      hits: 13
+      misses: 0
+      measuredMs: 6880
+      samples: 13
+      order: 159
+    - candidate: 11771
+      seeds: 1
+      hits: 5
+      misses: 0
+      measuredMs: 2819
+      samples: 5
+      order: 161
+    - candidate: 11772
+      seeds: 1
+      hits: 5
+      misses: 0
+      measuredMs: 2482
+      samples: 5
+      order: 558
+  - file: crates/cargo-spellcheck-helper/src/source_deps/library.rs
+    item: normalized_path
+    candidates:
+    - candidate: 11771
+      seeds: 1
+      hits: 30
+      misses: 0
+      measuredMs: 17625
+      samples: 30
+      order: 166
+    - candidate: 11768
+      seeds: 1
+      hits: 44
+      misses: 0
+      measuredMs: 22076
+      samples: 44
+      order: 364
+  - file: crates/cargo-spellcheck-helper/src/source_deps/library.rs
+    item: validate
+    candidates:
+    - candidate: 11773
+      seeds: 1
+      hits: 190
+      misses: 72
+      measuredMs: 154093
+      samples: 262
+      order: 1
+    - candidate: 11774
+      seeds: 1
+      hits: 4
+      misses: 13
+      measuredMs: 10246
+      samples: 17
+      order: 2
+    - candidate: 11775
+      seeds: 1
+      hits: 25
+      misses: 17
+      measuredMs: 24504
+      samples: 42
+      order: 41
+    - candidate: 11765
+      seeds: 1
+      hits: 227
+      misses: 29
+      measuredMs: 139862
+      samples: 256
+      order: 42
+    - candidate: 11776
+      seeds: 1
+      hits: 8
+      misses: 3
+      measuredMs: 6150
+      samples: 11
+      order: 71
+    - candidate: 11777
+      seeds: 1
+      hits: 87
+      misses: 2
+      measuredMs: 46207
+      samples: 89
+      order: 72
+    - candidate: 11778
+      seeds: 1
+      hits: 12
+      misses: 0
+      measuredMs: 6022
+      samples: 12
+      order: 74
+  - file: crates/cargo-spellcheck-helper/src/source_deps/library.rs
+    item: version
+    candidates:
+    - candidate: 11779
+      seeds: 1
+      hits: 34
+      misses: 3
+      measuredMs: 19546
+      samples: 37
+      order: 202
+    - candidate: 11780
+      seeds: 1
+      hits: 8
+      misses: 1
+      measuredMs: 4731
+      samples: 9
+      order: 206
+  - file: crates/cargo-spellcheck-helper/src/source_deps/library.rs
+    item: word
+    candidates:
+    - candidate: 11765
+      seeds: 1
+      hits: 94
+      misses: 3
+      measuredMs: 51474
+      samples: 97
+      order: 165
+    - candidate: 11776
+      seeds: 1
+      hits: 4
+      misses: 2
+      measuredMs: 3250
+      samples: 6
+      order: 172
+  - file: crates/cargo-spellcheck-helper/src/source_deps.rs
+    item: Target::parse
+    candidates:
+    - candidate: 11765
+      seeds: 1
+      hits: 47
+      misses: 32
+      measuredMs: 45208
+      samples: 79
+      order: 47
+    - candidate: 11781
+      seeds: 1
+      hits: 21
+      misses: 16
+      measuredMs: 20713
+      samples: 37
+      order: 49
+    - candidate: 11773
+      seeds: 1
+      hits: 38
+      misses: 25
+      measuredMs: 35310
+      samples: 63
+      order: 51
+    - candidate: 11782
+      seeds: 1
+      hits: 9
+      misses: 20
+      measuredMs: 16995
+      samples: 29
+      order: 54
+    - candidate: 11783
+      seeds: 1
+      hits: 86
+      misses: 0
+      measuredMs: 44651
+      samples: 86
+      order: 61
+  - file: crates/cargo-spellcheck-helper/src/source_deps.rs
+    item: append_optional_paths
+    candidates:
+    - candidate: 11781
+      seeds: 1
+      hits: 4
+      misses: 4
+      measuredMs: 10694
+      samples: 8
+      order: 322
+    - candidate: 11784
+      seeds: 1
+      hits: 26
+      misses: 1
+      measuredMs: 25754
+      samples: 27
+      order: 325
+    - candidate: 11785
+      seeds: 1
+      hits: 8
+      misses: 0
+      measuredMs: 4982
+      samples: 8
+      order: 326
+  - file: crates/cargo-spellcheck-helper/src/source_deps.rs
+    item: check_environment
+    candidates:
+    - candidate: 11781
+      seeds: 1
+      hits: 71
+      misses: 6
+      measuredMs: 41367
+      samples: 77
+      order: 89
+    - candidate: 11786
+      seeds: 1
+      hits: 35
+      misses: 2
+      measuredMs: 18950
+      samples: 37
+      order: 92
+    - candidate: 11765
+      seeds: 1
+      hits: 8
+      misses: 0
+      measuredMs: 4079
+      samples: 8
+      order: 196
+    - candidate: 11787
+      seeds: 1
+      hits: 23
+      misses: 0
+      measuredMs: 10780
+      samples: 23
+      order: 452
+    - candidate: 11788
+      seeds: 1
+      hits: 2
+      misses: 0
+      measuredMs: 1002
+      samples: 2
+      order: 458
+    - candidate: 11789
+      seeds: 1
+      hits: 8
+      misses: 0
+      measuredMs: 4061
+      samples: 8
+      order: 461
+    - candidate: 11790
+      seeds: 1
+      hits: 2
+      misses: 0
+      measuredMs: 1084
+      samples: 2
+      order: 466
+  - file: crates/cargo-spellcheck-helper/src/source_deps.rs
+    item: check_with
+    candidates:
+    - candidate: 11781
+      seeds: 1
+      hits: 9
+      misses: 6
+      measuredMs: 7977
+      samples: 15
+      order: 145
+    - candidate: 11766
+      seeds: 1
+      hits: 7
+      misses: 3
+      measuredMs: 4930
+      samples: 10
+      order: 151
+    - candidate: 11770
+      seeds: 1
+      hits: 4
+      misses: 4
+      measuredMs: 4017
+      samples: 8
+      order: 164
+    - candidate: 11791
+      seeds: 1
+      hits: 2
+      misses: 2
+      measuredMs: 1980
+      samples: 4
+      order: 491
+    - candidate: 11765
+      seeds: 1
+      hits: 8
+      misses: 2
+      measuredMs: 4644
+      samples: 10
+      order: 609
+    - candidate: 11792
+      seeds: 1
+      hits: 5
+      misses: 0
+      measuredMs: 2353
+      samples: 5
+      order: 620
+  - file: crates/cargo-spellcheck-helper/src/source_deps.rs
+    item: directory_patterns
+    candidates:
+    - candidate: 11793
+      seeds: 1
+      hits: 4
+      misses: 3
+      measuredMs: 3707
+      samples: 7
+      order: 154
+    - candidate: 11794
+      seeds: 1
+      hits: 12
+      misses: 0
+      measuredMs: 6090
+      samples: 12
+      order: 156
+  - file: crates/cargo-spellcheck-helper/src/source_deps.rs
+    item: find_libclang
+    candidates:
+    - candidate: 11782
+      seeds: 1
+      hits: 45
+      misses: 20
+      measuredMs: 42344
+      samples: 65
+      order: 1
+    - candidate: 11795
+      seeds: 1
+      hits: 19
+      misses: 5
+      measuredMs: 14141
+      samples: 24
+      order: 2
+    - candidate: 11796
+      seeds: 1
+      hits: 21
+      misses: 3
+      measuredMs: 12755
+      samples: 24
+      order: 38
+    - candidate: 11779
+      seeds: 1
+      hits: 4
+      misses: 2
+      measuredMs: 3390
+      samples: 6
+      order: 42
+    - candidate: 11797
+      seeds: 1
+      hits: 14
+      misses: 0
+      measuredMs: 7436
+      samples: 14
+      order: 45
+    - candidate: 11765
+      seeds: 1
+      hits: 40
+      misses: 7
+      measuredMs: 24597
+      samples: 47
+      order: 230
+    - candidate: 11781
+      seeds: 1
+      hits: 53
+      misses: 7
+      measuredMs: 31782
+      samples: 60
+      order: 246
+    - candidate: 11798
+      seeds: 1
+      hits: 4
+      misses: 0
+      measuredMs: 2098
+      samples: 4
+      order: 282
+    - candidate: 11784
+      seeds: 1
+      hits: 26
+      misses: 0
+      measuredMs: 12250
+      samples: 26
+      order: 551
+  - file: crates/cargo-spellcheck-helper/src/source_deps.rs
+    item: installation_target
+    candidates:
+    - candidate: 11786
+      seeds: 1
+      hits: 9
+      misses: 5
+      measuredMs: 7870
+      samples: 14
+      order: 144
+    - candidate: 11799
+      seeds: 1
+      hits: 4
+      misses: 2
+      measuredMs: 3510
+      samples: 6
+      order: 147
+    - candidate: 11765
+      seeds: 1
+      hits: 0
+      misses: 2
+      measuredMs: 1296
+      samples: 2
+      order: 148
+    - candidate: 11781
+      seeds: 1
+      hits: 2
+      misses: 0
+      measuredMs: 1414
+      samples: 2
+      order: 216
+  - file: crates/cargo-spellcheck-helper/src/source_deps.rs
+    item: optional_directory_command
+    candidates:
+    - candidate: 11781
+      seeds: 1
+      hits: 24
+      misses: 6
+      measuredMs: 15697
+      samples: 30
+      order: 134
+    - candidate: 11797
+      seeds: 1
+      hits: 8
+      misses: 2
+      measuredMs: 4788
+      samples: 10
+      order: 140
+    - candidate: 11800
+      seeds: 1
+      hits: 0
+      misses: 2
+      measuredMs: 1186
+      samples: 2
+      order: 142
+    - candidate: 11801
+      seeds: 1
+      hits: 6
+      misses: 0
+      measuredMs: 2661
+      samples: 6
+      order: 437
+  - file: crates/cargo-spellcheck-helper/src/source_deps.rs
+    item: search_directory
+    candidates:
+    - candidate: 11781
+      seeds: 1
+      hits: 9
+      misses: 8
+      measuredMs: 8883
+      samples: 17
+      order: 111
+    - candidate: 11782
+      seeds: 1
+      hits: 17
+      misses: 7
+      measuredMs: 14425
+      samples: 24
+      order: 114
+    - candidate: 11765
+      seeds: 1
+      hits: 16
+      misses: 7
+      measuredMs: 11798
+      samples: 23
+      order: 160
+    - candidate: 11784
+      seeds: 1
+      hits: 20
+      misses: 0
+      measuredMs: 9448
+      samples: 20
+      order: 603
+  - file: crates/cargo-spellcheck-helper/src/source_deps.rs
+    item: search_files
+    candidates:
+    - candidate: 11781
+      seeds: 1
+      hits: 8
+      misses: 6
+      measuredMs: 7841
+      samples: 14
+      order: 112
+    - candidate: 11782
+      seeds: 1
+      hits: 2
+      misses: 4
+      measuredMs: 3579
+      samples: 6
+      order: 118
+    - candidate: 11765
+      seeds: 1
+      hits: 24
+      misses: 2
+      measuredMs: 13280
+      samples: 26
+      order: 127
+    - candidate: 11802
+      seeds: 1
+      hits: 8
+      misses: 1
+      measuredMs: 4427
+      samples: 9
+      order: 133
+    - candidate: 11803
+      seeds: 1
+      hits: 4
+      misses: 1
+      measuredMs: 2382
+      samples: 5
+      order: 161
+    - candidate: 11784
+      seeds: 1
+      hits: 2
+      misses: 0
+      measuredMs: 928
+      samples: 2
+      order: 628
+  - file: crates/cargo-spellcheck-helper/src/source_deps.rs
+    item: version_host
+    candidates:
+    - candidate: 11787
+      seeds: 1
+      hits: 19
+      misses: 0
+      measuredMs: 21414
+      samples: 19
+      order: 323
   binaries:
   - file: crates/cargo-anvil/src/anvil/artifacts/ado.rs
     candidates:
@@ -464110,6 +466059,42 @@ generalized:
       misses: 0
       measuredMs: 0
       samples: 0
+      order: 1
+  - file: crates/cargo-spellcheck-helper/src/main.rs
+    candidates:
+    - candidate: 153
+      seeds: 1
+      hits: 1
+      misses: 0
+      measuredMs: 562
+      samples: 1
+      order: 1
+  - file: crates/cargo-spellcheck-helper/src/source_deps/elf.rs
+    candidates:
+    - candidate: 153
+      seeds: 1
+      hits: 0
+      misses: 0
+      measuredMs: 0
+      samples: 0
+      order: 1
+  - file: crates/cargo-spellcheck-helper/src/source_deps/library.rs
+    candidates:
+    - candidate: 153
+      seeds: 1
+      hits: 0
+      misses: 0
+      measuredMs: 0
+      samples: 0
+      order: 1
+  - file: crates/cargo-spellcheck-helper/src/source_deps.rs
+    candidates:
+    - candidate: 153
+      seeds: 1
+      hits: 2
+      misses: 0
+      measuredMs: 1236
+      samples: 2
       order: 1
   testSets:
   - - 0

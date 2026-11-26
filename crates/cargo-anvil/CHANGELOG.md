@@ -2,15 +2,7 @@
 
 ## [Unreleased]
 
-## [0.29.0] - 2026-11-25
-
-- ✨ Features
-
-  - cargo-anvil: add cargo-unused-deps check ([#378](https://github.com/microsoft/ox-tools/pull/378))
-
-- 🐛 Bug Fixes
-
-  - cargo-gamma: address audit findings ([#381](https://github.com/microsoft/ox-tools/pull/381))
+## [0.29.1] - 2026-11-26
 
 - 📚 Documentation
 
@@ -28,8 +20,15 @@
 
 - 🧩 Miscellaneous
 
+  - Merge main and preserve deny split with disk diagnostics
   - Merge main and preserve cargo-deny advisory split
   - Merge main and reconcile cargo-anvil 0.29.0 catalog
+
+## [0.28.3] - 2026-11-25
+
+- ✨ Features
+
+  - cargo-anvil: run cargo-unused-deps in pr-fast
 
 ## [0.28.2] - 2026-11-25
 

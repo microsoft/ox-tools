@@ -19,5 +19,6 @@ anvil-pr-fast: anvil-pr-fast-validate-prereqs \
     anvil-pr-title \
     (anvil-deny "false") \
     anvil-audit \
+    anvil-unused-deps \
     anvil-udeps \
     anvil-external-types
