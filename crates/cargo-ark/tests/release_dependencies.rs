@@ -56,7 +56,12 @@ fn validates_shipped_tests_and_reports_release_failures() -> io::Result<()> {
     assert!(stdout.contains("archive_all ... ok"), "{stdout}");
     assert!(stdout.contains("archive_none ... ok"), "{stdout}");
 
-    let internal_scratch = run_report(ark_command(&workspace, temp.path())?.arg("--temp-dir").arg(&workspace), BOTH_BUMPED)?;
+    let internal_scratch = run_report(
+        ark_command(&workspace, temp.path())?
+            .arg("--temp-dir")
+            .arg(workspace.join("consumer")),
+        BOTH_BUMPED,
+    )?;
     assert_error(&internal_scratch, "select a temporary directory outside the source workspace");
 
     let nonexistent_parent = temp.path().join("nonexistent");
