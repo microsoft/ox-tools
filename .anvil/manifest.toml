@@ -101,7 +101,7 @@ checksum = "sha256:7b409a9b560c214e10b50f74330fb6f8c0c12c3d83494e0dcf016f2411b50
 [[region]]
 host = ".anvil/container/Dockerfile"
 id = "anvil-container-setup"
-checksum = "sha256:ac0819ec6199ca5de958ff28da9992aa8a2a35aad60ed0cf0e38d6dbc7e17958"
+checksum = "sha256:185a5be46cb7fab9af9694669d893e45e917c6d191a63ecb06ca3bb69bd6d8b5"
 
 [[region]]
 host = ".anvil/container/Dockerfile"
