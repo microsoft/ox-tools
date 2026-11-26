@@ -200,6 +200,8 @@ fn run(command: &mut Command, operation: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsStr;
+
     use super::*;
 
     #[test]
@@ -212,13 +214,61 @@ mod tests {
 
     #[test]
     fn rejects_invalid_candidate_reports() {
-        for report in [
-            "",
-            "{}",
-            r#"[{"name":"peer","old_version":"1.1.0"}]"#,
-            r#"[{"new_version":"1.2.0"}]"#,
-        ] {
+        for report in ["", "{}"] {
             assert!(parse_candidates(report).is_err(), "{report}");
         }
+        for (report, diagnostic) in [
+            (r#"[{"new_version":"1.2.0"}]"#, "candidate is missing its name"),
+            (r#"[{"name":"peer","old_version":"1.1.0"}]"#, "candidate is missing its version"),
+        ] {
+            assert_eq!(parse_candidates(report).unwrap_err().to_string(), diagnostic);
+        }
+    }
+
+    #[test]
+    fn archive_tests_replay_only_configs_cargo_would_not_load_and_keep_builds_in_scratch() {
+        let parent = Path::new("source-parent");
+        let root = parent.join("workspace");
+        let home = root.join(".cargo");
+        let scratch = parent.join("scratch");
+        let patch = scratch.join("patch.toml");
+        let cargo = ReleaseCargo {
+            root,
+            toolchain: "workspace-toolchain\n".into(),
+            home: Some(home.clone()),
+            configs: vec![parent.join(".cargo/config.toml"), home.join("config.toml")],
+        };
+        let command = cargo.archive_command(&scratch, &patch);
+        assert_eq!(command.get_current_dir(), Some(scratch.as_path()));
+        // Cargo already loads the scratch ancestor's config and CARGO_HOME.
+        assert_eq!(command.get_args().collect::<Vec<_>>(), ["--config".as_ref(), patch.as_os_str()]);
+        let env: BTreeMap<_, _> = command.get_envs().collect();
+        assert_eq!(env.get(OsStr::new("CARGO_HOME")), Some(&Some(home.as_os_str())));
+        assert_eq!(
+            env.get(OsStr::new("RUSTUP_TOOLCHAIN")),
+            Some(&Some(OsStr::new("workspace-toolchain")))
+        );
+        for key in ["CARGO_TARGET_DIR", "CARGO_BUILD_BUILD_DIR"] {
+            let directory = env.get(OsStr::new(key)).copied().flatten().map(Path::new).unwrap();
+            assert!(directory.starts_with(&scratch) && directory != scratch);
+        }
+
+        let scratch = Path::new("outside");
+        let patch = scratch.join("patch.toml");
+        let workspace_config = home.join("config.toml");
+        let ancestor_config = parent.join(".cargo/config.toml");
+        let cargo = ReleaseCargo { home: None, ..cargo };
+        let command = cargo.archive_command(scratch, &patch);
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            [
+                "--config".as_ref(),
+                ancestor_config.as_os_str(),
+                "--config".as_ref(),
+                workspace_config.as_os_str(),
+                "--config".as_ref(),
+                patch.as_os_str(),
+            ]
+        );
     }
 }
