@@ -4029,6 +4029,7 @@ jobs:
           path: target/anvil/impact
       - uses: ./.anvil/github/actions/run-group
         env:
+          CARGO_PROFILE_DEV_DEBUG: line-tables-only
           CARGO_PROFILE_TEST_DEBUG: line-tables-only
         with:
           group: pr-test
@@ -4370,6 +4371,7 @@ jobs:
           lfs: true
       - uses: ./.anvil/github/actions/run-group
         env:
+          CARGO_PROFILE_DEV_DEBUG: line-tables-only
           CARGO_PROFILE_TEST_DEBUG: line-tables-only
         with:
           group: scheduled-test
