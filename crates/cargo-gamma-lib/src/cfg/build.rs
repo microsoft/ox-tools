@@ -2389,6 +2389,15 @@ mod tests {
     }
 
     #[test]
+    fn a_non_utf8_manifest_leaves_the_default_profile_assertions_unchanged() {
+        let (mut files, root) = tree(&[]);
+        let _previous = files.0.insert(root.join("Cargo.toml"), vec![0xff]);
+
+        assert_eq!(resolve(&files, &root, None, &[]).debug_assertions, Some(true));
+        assert_eq!(resolve(&files, &root, Some("release"), &[]).debug_assertions, Some(false));
+    }
+
+    #[test]
     fn the_probe_command_line_carries_every_setting() {
         let build = Build {
             target: Some("wasm32-unknown-unknown".to_owned()),
