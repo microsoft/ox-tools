@@ -1405,6 +1405,25 @@ diff --git before/old.rs next/a.rs
     }
 
     #[test]
+    fn an_unclosed_quoted_destination_cannot_establish_exact_rename_or_copy_evidence() {
+        for operation in ["rename", "copy"] {
+            let patch = format!(
+                "diff --git a/old.rs \"b/\\\"scripts/shared.rs\"\n{operation} to \"scripts/shared.rs\n--- a/old.rs\n+++ \"b/\\\"scripts/shared.rs\"\n@@ -0,0 +7 @@\n+new\n"
+            );
+            let diff = Diff::parse(&patch);
+            let target = Utf8Path::new("\"scripts/shared.rs");
+
+            assert!(diff.touches(target, 7, 7), "{diff:?}");
+            let source = diff.sources.get(target).expect("the added line retains its path evidence");
+            assert_eq!(source.raw, Utf8Path::new("b/\"scripts/shared.rs"));
+            assert!(
+                !source.exact,
+                "unsupported quoted metadata must leave the fallback path unconfirmed: {diff:?}"
+            );
+        }
+    }
+
+    #[test]
     fn a_pure_rename_does_not_change_the_next_files_path() {
         let patch = "\
 diff --git old.rs scripts/publish-gh-release.rs

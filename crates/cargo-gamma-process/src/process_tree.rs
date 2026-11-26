@@ -1741,9 +1741,11 @@ where
     loop {
         let read = match pipe.read(&mut chunk) {
             Ok(read) => read,
+            // #[gamma::skip(match_guard.always_true, tag = "timeout", reason = "Retrying every read error instead of only Interrupted repeatedly retries terminal pipe failures indefinitely.")]
             Err(cause) if cause.kind() == io::ErrorKind::Interrupted => continue,
             Err(cause) => return Err(cause),
         };
+        // #[gamma::skip(cond.always_false, literal.int_increment, tag = "timeout", reason = "Removing the zero-byte EOF exit or changing it to one keeps reading an exhausted pipe forever.")]
         if read == 0 {
             return Ok(());
         }

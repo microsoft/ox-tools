@@ -482,6 +482,10 @@ impl Manifest {
 }
 
 pub(crate) fn save_text(repo_root: &Path, text: &str) -> Result<(), AppError> {
+    save_text_with_write(repo_root, text, |path, bytes| std::fs::write(path, bytes))
+}
+
+fn save_text_with_write(repo_root: &Path, text: &str, write: impl FnOnce(&Path, &[u8]) -> std::io::Result<()>) -> Result<(), AppError> {
     let path = Manifest::path_for(repo_root);
     // #[gamma::skip(try.propagate_to_unwrap, reason = "Manifest::path_for always appends .anvil/manifest.toml, which necessarily has the .anvil parent.", tag = "equivalent")]
     let parent = path
@@ -500,7 +504,7 @@ pub(crate) fn save_text(repo_root: &Path, text: &str) -> Result<(), AppError> {
             return Err(e).into_app_err_with(|| format!("failed to clear the temporary file {}", tmp.display()));
         }
     }
-    std::fs::write(&tmp, text.as_bytes()).into_app_err_with(|| format!("failed to write {}", tmp.display()))?;
+    write(&tmp, text.as_bytes()).into_app_err_with(|| format!("failed to write {}", tmp.display()))?;
     std::fs::rename(&tmp, &path).into_app_err_with(|| format!("failed to rename {} -> {}", tmp.display(), path.display()))?;
     let legacy = repo_root.join(LEGACY_MANIFEST_FILE_NAME);
     match std::fs::remove_file(&legacy) {
@@ -906,6 +910,32 @@ mod tests {
         std::fs::create_dir(tmp.path().join(".anvil")).unwrap();
         std::fs::create_dir(Manifest::path_for(tmp.path())).unwrap();
         assert!(sample_manifest().save(tmp.path()).is_err());
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn save_staging_write_failure_returns_context_without_publishing_a_manifest() {
+        let directory = TempDir::new().unwrap();
+        let manifest = Manifest::path_for(directory.path());
+        let error = save_text_with_write(directory.path(), "manifest contents", |path, bytes| {
+            assert_eq!(path, manifest.with_extension("toml.tmp"));
+            assert_eq!(bytes, b"manifest contents");
+            Err(std::io::Error::other("staging write rejected"))
+        })
+        .unwrap_err();
+
+        let diagnostic = error.to_string();
+        assert!(
+            diagnostic.contains(&format!("failed to write {}", manifest.with_extension("toml.tmp").display())),
+            "{diagnostic}"
+        );
+        assert!(diagnostic.contains("staging write rejected"), "{diagnostic}");
+        let cause = error
+            .downcast_ref::<std::io::Error>()
+            .expect("staging write failure retains its typed I/O cause");
+        assert_eq!(cause.kind(), std::io::ErrorKind::Other);
+        assert_eq!(cause.to_string(), "staging write rejected");
+        assert!(!manifest.exists());
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]

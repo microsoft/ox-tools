@@ -769,6 +769,7 @@ pub(super) enum Stream {
     Prose,
 }
 
+// #[gamma::skip(fn_value.continue_default, tag = "timeout", reason = "Returning before draining the bounded output channel leaves reader threads blocked in send while their caller joins them.")]
 fn drain_pending_readers(
     lines: &Receiver<(Stream, String)>,
     events: &mut dyn Events,
@@ -783,6 +784,7 @@ fn drain_pending_readers(
         if expired() {
             return ControlFlow::Break(());
         }
+        // #[gamma::skip(stmt.delete_call, tag = "timeout", reason = "Removing the polling pause busy-spins while output readers are pending and exhausts the campaign's test budget.")]
         pause(BUILD_POLL_INTERVAL);
     }
     ControlFlow::Continue(())

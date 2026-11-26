@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.28.5] - 2026-11-26
+
+- 🐛 Bug Fixes
+
+  - cargo-anvil: align coverage CI dev and test debug profiles
+  - cargo-anvil: reduce coverage CI debug artifact size
+
+- ✔️ Tasks
+
+  - Update anvil to use cargo-gamma 0.8.0
+
 ## [0.28.4] - 2026-11-26
 
 - ♻️ Code Refactoring

@@ -20,6 +20,8 @@
 use std::process::{Command, Output};
 
 use cargo_gamma_lib::internals::commands::{EXIT_OK, EXIT_USAGE};
+#[cfg(feature = "system-tests")]
+use cargo_gamma_lib::testing::private_system_tempdir;
 use cargo_gamma_lib::testing::{workdir, write_project};
 
 /// Runs the built executable with `arguments` and returns everything the process produced.
@@ -124,7 +126,7 @@ fn the_installed_binary_preserves_rustc_wrapper_status() {
 #[test]
 #[cfg(feature = "system-tests")]
 fn the_compiler_wrapper_caps_warnings_after_ancestor_target_flags_without_losing_them() {
-    let directory = workdir("gamma-ancestor-lint-cap-");
+    let directory = private_system_tempdir("gamma-ancestor-lint-cap-");
     let root = directory.path().join("workspace");
     std::fs::create_dir_all(root.join(".cargo")).unwrap();
     std::fs::create_dir_all(directory.path().join(".cargo")).unwrap();
@@ -160,7 +162,11 @@ fn the_compiler_wrapper_caps_warnings_after_ancestor_target_flags_without_losing
         .env_remove("CARGO_GAMMA_ORIGINAL_RUSTC_WRAPPER")
         .env_remove("CARGO_GAMMA_CAP_LINTS");
     let uncapped = cargo.output().unwrap();
-    assert!(!uncapped.status.success(), "target flags must override the build-table cap");
+    assert!(
+        !uncapped.status.success(),
+        "target flags must override the build-table cap: {}",
+        String::from_utf8_lossy(&uncapped.stderr)
+    );
     assert!(String::from_utf8_lossy(&uncapped.stderr).contains("unused_parens"));
     let capped = cargo
         .env("RUSTC_WRAPPER", env!("CARGO_BIN_EXE_cargo-gamma"))
