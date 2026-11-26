@@ -2,12 +2,22 @@
 
 ## [Unreleased]
 
-## [0.28.3] - 2026-11-25
+## [0.28.4] - 2026-11-26
 
 - ♻️ Code Refactoring
 
   - cargo-anvil: delegate impact snapshots to cargo-delta
   - cargo-anvil: use portable spellcheck helpers
+
+- 🎨 Styling
+
+  - cargo-anvil: name the impact skip prefix explicitly
+
+## [0.28.3] - 2026-11-25
+
+- ✨ Features
+
+  - cargo-anvil: run cargo-unused-deps in pr-fast
 
 ## [0.28.2] - 2026-11-25
 
