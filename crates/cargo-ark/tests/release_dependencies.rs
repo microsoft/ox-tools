@@ -3,6 +3,8 @@
 
 //! Offline integration test for Ark and Cargo.
 
+#![cfg(not(miri))] // Requires host filesystem access and child processes.
+
 use std::io::{self, Write};
 use std::path::Path;
 use std::process::{Command, Output, Stdio};

@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -116,6 +117,7 @@ fn patch_config(sources: &BTreeMap<String, PathBuf>) -> Result<DocumentMut> {
 struct ReleaseCargo {
     root: PathBuf,
     toolchain: String,
+    cargo_home: Option<OsString>,
 }
 
 impl ReleaseCargo {
@@ -129,7 +131,12 @@ impl ReleaseCargo {
             .ok_or("workspace manifest has no parent directory")?
             .to_path_buf();
         let toolchain = capture(Command::new("rustc").args(["--print", "sysroot"]), "selecting Rust toolchain")?;
-        Ok(Self { root, toolchain })
+        let cargo_home = std::env::var_os("CARGO_HOME");
+        Ok(Self {
+            root,
+            toolchain,
+            cargo_home,
+        })
     }
 
     fn command(&self, scratch: &Path) -> Command {
@@ -142,7 +149,7 @@ impl ReleaseCargo {
             .env("RUSTUP_TOOLCHAIN", self.toolchain.trim())
             .env("CARGO_BUILD_BUILD_DIR", build);
         // Shipped tests run from the extracted crate, not the workspace.
-        if let Some(home) = std::env::var_os("CARGO_HOME").filter(|home| !home.is_empty()) {
+        if let Some(home) = self.cargo_home.as_deref().filter(|home| !home.is_empty()) {
             command.env("CARGO_HOME", self.root.join(home));
         }
         command
@@ -201,6 +208,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "uses the host filesystem")]
     fn reports_the_candidate_archive_that_could_not_be_extracted() -> Result<()> {
         let scratch = tempfile::tempdir()?;
         let archives = scratch.path().join("package");
@@ -215,6 +223,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "uses the host filesystem")]
     fn reports_a_missing_workspace_when_preparing_scratch() -> Result<()> {
         let parent = tempfile::tempdir()?;
         let error = scratch_directory(&parent.path().join("missing-workspace"), Some(parent.path())).unwrap_err();
@@ -223,11 +232,13 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "uses the host filesystem")]
     fn reports_when_the_candidate_patch_cannot_be_written() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let cargo = ReleaseCargo {
             root: temp.path().to_path_buf(),
             toolchain: String::new(),
+            cargo_home: None,
         };
         let scratch = temp.path().join("missing-scratch");
         let error = test_archives(&cargo, &scratch, &BTreeMap::new()).unwrap_err();
@@ -237,7 +248,7 @@ mod tests {
 
     #[cfg(any(unix, windows))]
     #[test]
-    fn reports_paths_cargo_cannot_represent_in_patch_toml() -> Result<()> {
+    fn reports_paths_cargo_cannot_represent_in_patch_toml() {
         #[cfg(unix)]
         let directory = {
             use std::os::unix::ffi::OsStringExt;
@@ -249,21 +260,21 @@ mod tests {
             std::ffi::OsString::from_wide(&[0xd800])
         };
         let sources = BTreeMap::from([("candidate".into(), directory.into())]);
-        let temp = tempfile::tempdir()?;
         let cargo = ReleaseCargo {
-            root: temp.path().to_path_buf(),
+            root: PathBuf::from("workspace"),
             toolchain: String::new(),
+            cargo_home: None,
         };
+        // The invalid path must fail before Ark tries to write into scratch.
+        let scratch = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
         assert_eq!(
-            test_archives(&cargo, &temp.path().join("scratch"), &sources)
-                .unwrap_err()
-                .to_string(),
+            test_archives(&cargo, &scratch, &sources).unwrap_err().to_string(),
             "candidate archive path must be UTF-8"
         );
-        Ok(())
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "attempts to spawn a host process")]
     fn reports_when_the_required_cargo_process_cannot_start() -> Result<()> {
         let scratch = tempfile::tempdir()?;
         let mut missing = Command::new(scratch.path().join("unavailable-cargo"));
@@ -277,13 +288,15 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(all(miri, windows), ignore = "Windows Command environment uses CompareStringOrdinal")]
     fn archive_commands_use_workspace_config_and_keep_builds_in_scratch() {
         let root = PathBuf::from("workspace");
         let scratch = PathBuf::from("scratch");
         let patch = scratch.join("patch.toml");
-        let cargo = ReleaseCargo {
+        let mut cargo = ReleaseCargo {
             root: root.clone(),
             toolchain: "workspace-toolchain\n".into(),
+            cargo_home: None,
         };
         let command = cargo.archive_command(&scratch, &patch);
         assert_eq!(command.get_current_dir(), Some(root.as_path()));
@@ -297,5 +310,14 @@ mod tests {
             let directory = env.get(OsStr::new(key)).copied().flatten().map(Path::new).unwrap();
             assert!(directory.starts_with(&scratch) && directory != scratch);
         }
+        assert!(!env.contains_key(OsStr::new("CARGO_HOME")));
+
+        cargo.cargo_home = Some(OsString::new());
+        assert!(
+            !cargo
+                .archive_command(&scratch, &patch)
+                .get_envs()
+                .any(|(key, _)| key == "CARGO_HOME")
+        );
     }
 }
