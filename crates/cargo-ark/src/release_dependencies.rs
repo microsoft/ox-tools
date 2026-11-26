@@ -31,8 +31,7 @@ pub(super) fn check(temp_dir: Option<&Path>) -> Result<()> {
     let cargo = ReleaseCargo::new()?;
     let scratch = scratch_directory(&cargo.root, temp_dir)?;
     let archives = package_candidates(&cargo, scratch.path(), &candidates)?;
-    let sources = unpack_candidates(&archives, scratch.path(), candidates)?;
-    test_archives(&cargo, scratch.path(), &sources)
+    validate_packages(&cargo, scratch.path(), &archives, candidates)
 }
 
 fn parse_candidates(json: &str) -> Result<BTreeMap<String, String>> {
@@ -67,6 +66,11 @@ fn package_candidates(cargo: &ReleaseCargo, scratch: &Path, candidates: &BTreeMa
     }
     run(&mut package, "cargo package for release candidates")?;
     Ok(artifacts.join("package"))
+}
+
+fn validate_packages(cargo: &ReleaseCargo, scratch: &Path, archives: &Path, candidates: BTreeMap<String, String>) -> Result<()> {
+    let sources = unpack_candidates(archives, scratch, candidates)?;
+    test_archives(cargo, scratch, &sources)
 }
 
 fn unpack_candidates(archives: &Path, scratch: &Path, candidates: BTreeMap<String, String>) -> Result<BTreeMap<String, PathBuf>> {
@@ -209,15 +213,21 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore = "uses the host filesystem")]
-    fn reports_the_candidate_archive_that_could_not_be_extracted() -> Result<()> {
+    fn validate_packages_reports_the_missing_candidate_archive() -> Result<()> {
         let scratch = tempfile::tempdir()?;
-        let archives = scratch.path().join("package");
-        let candidates = BTreeMap::from([("missing".into(), "1.2.0".into())]);
-        let error = unpack_candidates(&archives, scratch.path(), candidates).unwrap_err();
+        let archives = tempfile::tempdir_in(scratch.path())?;
+        let candidates = BTreeMap::from([("peer".into(), "1.2.0".into())]);
+        let cargo = ReleaseCargo {
+            root: PathBuf::from("workspace"),
+            toolchain: String::new(),
+            cargo_home: None,
+        };
+        let error = validate_packages(&cargo, scratch.path(), archives.path(), candidates)
+            .expect_err("peer was reported as packaged, but its archive is missing");
+        let missing = archives.path().join("peer-1.2.0.crate");
         assert!(
-            error
-                .to_string()
-                .contains(&format!("extracting {}", archives.join("missing-1.2.0.crate").display()))
+            error.to_string().starts_with(&format!("extracting {}:", missing.display())),
+            "{error}"
         );
         Ok(())
     }
