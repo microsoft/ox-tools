@@ -94,8 +94,12 @@ fn validates_shipped_tests_and_reports_release_failures() -> io::Result<()> {
 }
 
 fn ark(workspace: &Path, report: &str, fail_shipped_test: bool) -> io::Result<Output> {
-    let home = tempfile::tempdir()?;
-    let mut command = ark_command(workspace, home.path())?;
+    let parent = workspace
+        .parent()
+        .expect("the fixture workspace is a child of the test temp directory");
+    let home = tempfile::tempdir_in(parent)?;
+    let relative_home = Path::new("..").join(home.path().file_name().expect("tempdir_in creates a named subdirectory"));
+    let mut command = ark_command(workspace, &relative_home)?;
     command.arg("--temp-dir").arg(home.path());
     if fail_shipped_test {
         command.env("ARK_FIXTURE_FAIL_TEST", "1");

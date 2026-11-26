@@ -3,6 +3,8 @@
 
 fn check_archive() {
     assert!(std::path::Path::new("Cargo.toml.orig").is_file());
+    let cargo_home = std::path::PathBuf::from(std::env::var_os("CARGO_HOME").unwrap());
+    assert!(cargo_home.is_absolute() && cargo_home.is_dir(), "Cargo home must still resolve from the archive");
     assert_eq!(ark_fixture_consumer::value(), 42);
 }
 

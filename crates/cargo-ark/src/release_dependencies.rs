@@ -142,6 +142,10 @@ impl ReleaseCargo {
             .current_dir(&self.root)
             .env("RUSTUP_TOOLCHAIN", self.toolchain.trim())
             .env("CARGO_BUILD_BUILD_DIR", build);
+        // Shipped tests run from the extracted crate, not the workspace.
+        if let Some(home) = std::env::var_os("CARGO_HOME").filter(|home| !home.is_empty()) {
+            command.env("CARGO_HOME", self.root.join(home));
+        }
         command
     }
 
