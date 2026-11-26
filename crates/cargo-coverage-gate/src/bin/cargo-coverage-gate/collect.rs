@@ -1487,6 +1487,40 @@ mod tests {
     const RAW_ALL_FEATURES: &str = "TN:all-features\nSF:fixture.rs\nDA:1,1\nend_of_record\n";
     const RAW_NO_DEFAULT: &str = "TN:no-default\nSF:fixture.rs\nDA:1,1\nend_of_record\n";
 
+    /// Verifies that per-configuration target removal leaves every raw report
+    /// available for final publication and evaluation.
+    fn assert_reports_survive_target_cleanup(execution: &CollectionExecution<'_>, collected: &[CollectedReport]) {
+        let evaluated = Cell::new(false);
+        filter_then_evaluate_with(
+            execution,
+            collected,
+            |_, collected| {
+                let paths = collected
+                    .iter()
+                    .map(|report| {
+                        fs::copy(&report.raw_path, &report.stable_path).expect("publish retained raw report");
+                        report.stable_path.clone()
+                    })
+                    .collect();
+                Ok(paths)
+            },
+            |paths| {
+                assert_eq!(
+                    paths
+                        .iter()
+                        .map(|path| fs::read_to_string(path).expect("read published report"))
+                        .collect::<Vec<_>>(),
+                    [RAW_ALL_FEATURES, RAW_NO_DEFAULT]
+                );
+                evaluated.set(true);
+                Ok(ExitCode::SUCCESS)
+            },
+        )
+        .expect("report publication completes")
+        .expect("retained reports reach evaluation");
+        assert!(evaluated.get(), "evaluation must consume both retained reports");
+    }
+
     #[test]
     #[cfg_attr(miri, ignore = "uses temporary directories, which Miri isolation does not support")]
     fn completed_configuration_targets_are_removed_before_the_next_collection_and_reports_survive() {
@@ -1572,36 +1606,7 @@ mod tests {
         for report in &collected {
             assert!(report.raw_path.is_file(), "raw report must survive target cleanup");
         }
-
-        let evaluated = Cell::new(false);
-        filter_then_evaluate_with(
-            &execution,
-            &collected,
-            |_, collected| {
-                let paths = collected
-                    .iter()
-                    .map(|report| {
-                        fs::copy(&report.raw_path, &report.stable_path).expect("publish retained raw report");
-                        report.stable_path.clone()
-                    })
-                    .collect();
-                Ok(paths)
-            },
-            |paths| {
-                assert_eq!(
-                    paths
-                        .iter()
-                        .map(|path| fs::read_to_string(path).expect("read published report"))
-                        .collect::<Vec<_>>(),
-                    [RAW_ALL_FEATURES, RAW_NO_DEFAULT]
-                );
-                evaluated.set(true);
-                Ok(ExitCode::SUCCESS)
-            },
-        )
-        .expect("report publication completes")
-        .expect("retained reports reach evaluation");
-        assert!(evaluated.get(), "evaluation must consume both retained reports");
+        assert_reports_survive_target_cleanup(&execution, &collected);
     }
 
     #[test]
