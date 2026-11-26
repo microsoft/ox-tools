@@ -41,7 +41,6 @@ test-util = []
 
 [dependencies]
 clap = { workspace = true, features = ["derive", "std", "help", "usage", "error-context", "string"] }
-flate2 = { workspace = true, features = ["zlib-rs"] }
 jsonc-parser.workspace = true
 ohno = { workspace = true, features = ["app-err"] }
 saphyr-parser = { workspace = true }
