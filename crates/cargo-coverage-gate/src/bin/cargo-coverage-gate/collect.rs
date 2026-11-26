@@ -96,10 +96,7 @@ pub(crate) fn run(args: &CoverageGateArgs, collection: &CollectionArgs) -> Resul
         quiet: args.quiet,
     };
     let evaluation = (|| {
-        let mut collected = Vec::with_capacity(configurations.len());
-        for configuration in configurations {
-            collected.push(collect_configuration(&execution, configuration)?);
-        }
+        let collected = collect_configurations(&execution, &configurations)?;
         filter_then_evaluate(&execution, &collected, |lcov_paths| {
             crate::run::evaluate_filtered_paths(args, lcov_paths, &selection.gated_names(), Some(&effective_target.triple), |path| {
                 fs::read_to_string(path)
@@ -695,6 +692,42 @@ struct CollectedReport {
     raw_path: PathBuf,
     stable_path: PathBuf,
     configuration: FeatureConfiguration,
+}
+
+/// Collect every configuration while releasing completed build intermediates.
+fn collect_configurations(
+    execution: &CollectionExecution<'_>,
+    configurations: &[FeatureConfiguration],
+) -> Result<Vec<CollectedReport>, AppError> {
+    collect_configurations_with(
+        configurations,
+        |configuration| collect_configuration(execution, configuration),
+        |configuration| cleanup_configuration_target(execution, configuration),
+    )
+}
+
+/// Coordinates configuration collection and cleanup so later builds never
+/// overlap the previous configuration's large target directory.
+fn collect_configurations_with(
+    configurations: &[FeatureConfiguration],
+    mut collect: impl FnMut(FeatureConfiguration) -> Result<CollectedReport, AppError>,
+    mut cleanup: impl FnMut(FeatureConfiguration) -> Result<(), AppError>,
+) -> Result<Vec<CollectedReport>, AppError> {
+    let mut collected = Vec::with_capacity(configurations.len());
+    for &configuration in configurations {
+        let report = collect(configuration)?;
+        cleanup(configuration)?;
+        collected.push(report);
+    }
+    Ok(collected)
+}
+
+/// Removes one completed configuration's target while retaining its raw LCOV.
+fn cleanup_configuration_target(execution: &CollectionExecution<'_>, configuration: FeatureConfiguration) -> Result<(), AppError> {
+    let target_dir = configuration_target_dir(execution, configuration);
+    let result = remove_dir_if_present(&target_dir);
+    let context = cleanup_error_context(&target_dir, result.as_ref().err());
+    result.into_app_err(context)
 }
 
 fn collect_configuration(execution: &CollectionExecution<'_>, configuration: FeatureConfiguration) -> Result<CollectedReport, AppError> {
@@ -1453,6 +1486,149 @@ mod tests {
 
     const RAW_ALL_FEATURES: &str = "TN:all-features\nSF:fixture.rs\nDA:1,1\nend_of_record\n";
     const RAW_NO_DEFAULT: &str = "TN:no-default\nSF:fixture.rs\nDA:1,1\nend_of_record\n";
+
+    #[test]
+    #[cfg_attr(miri, ignore = "uses temporary directories, which Miri isolation does not support")]
+    fn completed_configuration_targets_are_removed_before_the_next_collection_and_reports_survive() {
+        let parent = tempdir().expect("owned collection directory");
+        let scratch_dir = parent.path().join("scratch");
+        let target_root = scratch_dir.join("cargo-target");
+        fs::create_dir_all(&target_root).expect("create target root");
+        let coverage_dir = parent.path().join("coverage");
+        fs::create_dir_all(&coverage_dir).expect("create coverage output directory");
+        let workspace = workspace(parent.path());
+        let selection = Selection {
+            explicit: false,
+            members: workspace.members.clone(),
+        };
+        let args = CollectionArgs {
+            coverage_dir: coverage_dir.clone(),
+            ..collection_args()
+        };
+        let tools = ToolPrograms {
+            cargo: OsString::from("never-invoked"),
+            rustc: OsString::from("never-invoked"),
+        };
+        let execution = CollectionExecution {
+            workspace: &workspace,
+            selection: &selection,
+            args: &args,
+            scratch_dir: &scratch_dir,
+            coverage_target_root: &target_root,
+            target: None,
+            tools: &tools,
+            quiet: false,
+        };
+        let configurations = [FeatureConfiguration::AllFeatures, FeatureConfiguration::NoDefaultFeatures];
+
+        let mut collected_configs = Vec::new();
+        let collected = collect_configurations_with(
+            &configurations,
+            |configuration| {
+                if let Some(previous) = configurations
+                    .iter()
+                    .position(|candidate| *candidate == configuration)
+                    .and_then(|index| index.checked_sub(1))
+                    .map(|index| configuration_target_dir(&execution, configurations[index]))
+                {
+                    assert!(
+                        !previous.exists(),
+                        "the previous target must be released before collecting {}",
+                        configuration.artifact_name()
+                    );
+                }
+                let target_dir = configuration_target_dir(&execution, configuration);
+                fs::create_dir_all(&target_dir).expect("create configuration target");
+                fs::write(target_dir.join("large-intermediate"), b"instrumented build state").expect("create build state");
+                let raw_path = scratch_dir.join(format!("raw-lcov-{}.info", configuration.artifact_name()));
+                let stable_path = coverage_dir.join(format!("lcov-{}.info", configuration.artifact_name()));
+                fs::write(
+                    &raw_path,
+                    if configuration == FeatureConfiguration::AllFeatures {
+                        RAW_ALL_FEATURES
+                    } else {
+                        RAW_NO_DEFAULT
+                    },
+                )
+                .expect("write raw report before target cleanup");
+                collected_configs.push(configuration);
+                Ok(CollectedReport {
+                    raw_path,
+                    stable_path,
+                    configuration,
+                })
+            },
+            |configuration| cleanup_configuration_target(&execution, configuration),
+        )
+        .expect("collect both configurations");
+
+        assert_eq!(collected_configs, configurations);
+        for configuration in configurations {
+            assert!(
+                !configuration_target_dir(&execution, configuration).exists(),
+                "completed configuration target survives batch collection"
+            );
+        }
+        for report in &collected {
+            assert!(report.raw_path.is_file(), "raw report must survive target cleanup");
+        }
+
+        let evaluated = Cell::new(false);
+        filter_then_evaluate_with(
+            &execution,
+            &collected,
+            |_, collected| {
+                let paths = collected
+                    .iter()
+                    .map(|report| {
+                        fs::copy(&report.raw_path, &report.stable_path).expect("publish retained raw report");
+                        report.stable_path.clone()
+                    })
+                    .collect();
+                Ok(paths)
+            },
+            |paths| {
+                assert_eq!(
+                    paths
+                        .iter()
+                        .map(|path| fs::read_to_string(path).expect("read published report"))
+                        .collect::<Vec<_>>(),
+                    [RAW_ALL_FEATURES, RAW_NO_DEFAULT]
+                );
+                evaluated.set(true);
+                Ok(ExitCode::SUCCESS)
+            },
+        )
+        .expect("report publication completes")
+        .expect("retained reports reach evaluation");
+        assert!(evaluated.get(), "evaluation must consume both retained reports");
+    }
+
+    #[test]
+    fn configuration_cleanup_failure_stops_the_next_collection() {
+        let configurations = [FeatureConfiguration::AllFeatures, FeatureConfiguration::NoDefaultFeatures];
+        let collected = Cell::new(0);
+        let cleaned = Cell::new(0);
+        let error = collect_configurations_with(
+            &configurations,
+            |configuration| {
+                collected.set(collected.get() + 1);
+                Ok(CollectedReport {
+                    raw_path: PathBuf::from(format!("raw-{}.info", configuration.artifact_name())),
+                    stable_path: PathBuf::from(format!("stable-{}.info", configuration.artifact_name())),
+                    configuration,
+                })
+            },
+            |_| {
+                cleaned.set(cleaned.get() + 1);
+                Err(app_error("scripted configuration cleanup failure"))
+            },
+        )
+        .expect_err("cleanup failure must stop collection");
+        assert_eq!(error.to_string(), "scripted configuration cleanup failure");
+        assert_eq!(collected.get(), 1);
+        assert_eq!(cleaned.get(), 1);
+    }
 
     #[test]
     #[cfg_attr(miri, ignore = "uses temporary directories, which Miri isolation does not support")]

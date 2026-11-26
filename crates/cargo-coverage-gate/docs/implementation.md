@@ -52,8 +52,14 @@ The optional `run` mode keeps collection and evaluation separated internally:
    machine-readable Cargo messages.
    The instrumented target is unique per configuration beneath a
    per-invocation `target/coverage-gate/` scratch directory and is removed by
-   an RAII guard on every return path. Because every target starts empty, the
-   collector does not run `cargo llvm-cov clean`; it never deletes shared
+   the collector immediately after that configuration's LCOV report is complete.
+   The raw report lives beside the target directories and remains available for
+   filtering and evaluation after cleanup. A later configuration therefore starts
+   without the prior configuration's binaries, dependencies, or raw profiles on
+   disk. The remaining invocation scratch and any targets retained after an
+   earlier operational failure are removed by an RAII guard on every applicable
+   return path. Because every target starts empty, the collector does not run
+   `cargo llvm-cov clean`; it never deletes shared
    cargo-llvm-cov reports, trybuild targets, UI test targets, or ordinary Cargo
    target state. The child also receives `CARGO_TARGET_DIR` pointing at that
    private directory, so metadata-derived trybuild, UI, and report paths do not

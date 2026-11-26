@@ -1133,8 +1133,10 @@ and line classification; explicit `evaluate_unfiltered*` APIs do not inspect
 Rust sources. Evaluation writes only the selected summary file. `run`
 additionally writes beneath
 `--coverage-dir`, executes cargo-llvm-cov, nextest, Cargo, rustc, and LLVM, and
-deletes only temporary response/staging files and its per-invocation coverage
-scratch. It never invokes workspace-wide cargo-llvm-cov cleanup.
+deletes only temporary response/staging files, each completed configuration's
+instrumented target, and its per-invocation coverage scratch. Completed LCOV
+reports remain until filtering and evaluation finish. It never invokes
+workspace-wide cargo-llvm-cov cleanup.
 cargo-coverage-gate itself performs no network calls or privileged operations.
 Its Cargo and nextest children follow the caller's Cargo configuration and may
 fetch locked dependencies when they are not cached.
