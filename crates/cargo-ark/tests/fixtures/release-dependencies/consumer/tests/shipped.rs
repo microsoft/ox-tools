@@ -4,7 +4,13 @@
 fn check_archive() {
     assert!(std::path::Path::new("Cargo.toml.orig").is_file());
     let cargo_home = std::path::PathBuf::from(std::env::var_os("CARGO_HOME").unwrap());
-    assert!(cargo_home.is_absolute() && cargo_home.is_dir(), "Cargo home must still resolve from the archive");
+    assert!(cargo_home.is_absolute(), "Cargo home must still resolve from the archive");
+    let expected_home = std::env::var_os("ARK_FIXTURE_CARGO_HOME").unwrap();
+    assert_eq!(
+        cargo_home.canonicalize().unwrap(),
+        std::fs::canonicalize(expected_home).unwrap(),
+        "Cargo home must resolve relative to Ark's invocation directory"
+    );
     assert_eq!(ark_fixture_consumer::value(), 42);
 }
 

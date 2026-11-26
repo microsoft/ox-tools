@@ -28,7 +28,7 @@ pub(super) fn check(temp_dir: Option<&Path>) -> Result<()> {
         return Ok(());
     }
 
-    let cargo = ReleaseCargo::discover(Command::output)?;
+    let cargo = ReleaseCargo::discover(std::env::var_os("CARGO_HOME"), Command::output)?;
     let scratch = scratch_directory(&cargo.root, temp_dir)?;
     let archives = package_candidates(&cargo, scratch.path(), &candidates)?;
     validate_packages(&cargo, scratch.path(), &archives, candidates)
@@ -121,11 +121,11 @@ fn patch_config(sources: &BTreeMap<String, PathBuf>) -> Result<DocumentMut> {
 struct ReleaseCargo {
     root: PathBuf,
     toolchain: String,
-    cargo_home: Option<OsString>,
+    cargo_home: Option<PathBuf>,
 }
 
 impl ReleaseCargo {
-    fn discover(mut run_output: impl FnMut(&mut Command) -> io::Result<Output>) -> Result<Self> {
+    fn discover(cargo_home: Option<OsString>, mut run_output: impl FnMut(&mut Command) -> io::Result<Output>) -> Result<Self> {
         let manifest = capture(
             Command::new("cargo").args(["locate-project", "--workspace", "--message-format", "plain"]),
             "locating the Cargo workspace",
@@ -140,7 +140,7 @@ impl ReleaseCargo {
             "selecting Rust toolchain",
             run_output,
         )?;
-        let cargo_home = std::env::var_os("CARGO_HOME");
+        let cargo_home = cargo_home.filter(|home| !home.is_empty()).map(std::path::absolute).transpose()?;
         Ok(Self {
             root,
             toolchain,
@@ -157,9 +157,8 @@ impl ReleaseCargo {
             .current_dir(&self.root)
             .env("RUSTUP_TOOLCHAIN", self.toolchain.trim())
             .env("CARGO_BUILD_BUILD_DIR", build);
-        // Shipped tests run from the extracted crate, not the workspace.
-        if let Some(home) = self.cargo_home.as_deref().filter(|home| !home.is_empty()) {
-            command.env("CARGO_HOME", self.root.join(home));
+        if let Some(home) = &self.cargo_home {
+            command.env("CARGO_HOME", home);
         }
         command
     }
@@ -206,7 +205,7 @@ mod tests {
 
     fn discovery_error(probes: impl IntoIterator<Item = (&'static str, Output)>) -> Box<dyn std::error::Error> {
         let mut probes = probes.into_iter();
-        let error = ReleaseCargo::discover(|command| {
+        let error = ReleaseCargo::discover(None, |command| {
             let (program, output) = probes.next().expect("discovery ran a probe beyond the scripted failure");
             assert_eq!(command.get_program(), program);
             Ok(output)
@@ -241,6 +240,19 @@ mod tests {
     fn rejects_non_utf8_probe_output() {
         let error = discovery_error([("cargo", probe_output(ExitStatus::default(), &[0xff]))]);
         assert!(error.is::<std::string::FromUtf8Error>(), "{error}");
+    }
+
+    #[test]
+    fn discovery_leaves_cargo_home_to_cargo_when_unset_or_empty() -> Result<()> {
+        for home in [None, Some(OsString::new())] {
+            let cargo = ReleaseCargo::discover(home, |command| match command.get_program().to_str() {
+                Some("cargo") => Ok(probe_output(ExitStatus::default(), b"workspace/Cargo.toml")),
+                Some("rustc") => Ok(probe_output(ExitStatus::default(), b"workspace-toolchain\n")),
+                _ => panic!("unexpected discovery probe: {command:?}"),
+            })?;
+            assert!(cargo.cargo_home.is_none());
+        }
+        Ok(())
     }
 
     #[test]
@@ -356,7 +368,7 @@ mod tests {
         let root = PathBuf::from("workspace");
         let scratch = PathBuf::from("scratch");
         let patch = scratch.join("patch.toml");
-        let mut cargo = ReleaseCargo {
+        let cargo = ReleaseCargo {
             root: root.clone(),
             toolchain: "workspace-toolchain\n".into(),
             cargo_home: None,
@@ -374,13 +386,5 @@ mod tests {
             assert!(directory.starts_with(&scratch) && directory != scratch);
         }
         assert!(!env.contains_key(OsStr::new("CARGO_HOME")));
-
-        cargo.cargo_home = Some(OsString::new());
-        assert!(
-            !cargo
-                .archive_command(&scratch, &patch)
-                .get_envs()
-                .any(|(key, _)| key == "CARGO_HOME")
-        );
     }
 }

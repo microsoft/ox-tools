@@ -44,7 +44,9 @@ fn handles_discovery_input_before_looking_for_a_workspace() -> io::Result<()> {
 #[test]
 fn validates_shipped_tests_and_reports_release_failures() -> io::Result<()> {
     let temp = tempfile::tempdir()?;
-    let workspace = temp.path().join("workspace");
+    let checkout = temp.path().join("checkout");
+    fs::create_dir(&checkout)?;
+    let workspace = checkout.join("workspace");
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/release-dependencies");
     copy_fixture(&fixture, &workspace)?;
 
@@ -90,13 +92,11 @@ fn validates_shipped_tests_and_reports_release_failures() -> io::Result<()> {
     assert!(stdout.contains("archive_all ... ok"), "{stdout}");
     assert!(stdout.contains("deliberately failing shipped test"), "{stdout}");
 
-    let peer = workspace.join("peer/Cargo.toml");
-    let manifest = fs::read_to_string(&peer)?;
-    fs::write(&peer, manifest.replace("0.1.1", "0.1.0"))?;
     let missing = ark(&workspace, ONLY_CONSUMER_BUMPED, false)?;
     let stderr = String::from_utf8_lossy(&missing.stderr);
     assert_error(&missing, "cargo package for release candidates failed");
-    assert!(stderr.contains("ark-fixture-peer") && stderr.contains("0.1.1"), "{stderr}");
+    assert!(stderr.contains("no matching package named `ark-fixture-peer` found"), "{stderr}");
+    assert!(stderr.contains("location searched: crates.io index"), "{stderr}");
     Ok(())
 }
 
@@ -105,16 +105,21 @@ fn ark(workspace: &Path, report: &str, fail_shipped_test: bool) -> io::Result<Ou
         .parent()
         .expect("the fixture workspace is a child of the test temp directory");
     let home = tempfile::tempdir_in(parent)?;
-    let relative_home = Path::new("..").join(home.path().file_name().expect("tempdir_in creates a named subdirectory"));
-    let mut command = ark_command(workspace, &relative_home)?;
-    command.arg("--temp-dir").arg(home.path());
+    let relative_home = Path::new("..")
+        .join("..")
+        .join(home.path().file_name().expect("tempdir_in creates a named subdirectory"));
+    let mut command = ark_command(&workspace.join("consumer"), &relative_home)?;
+    command
+        .arg("--temp-dir")
+        .arg(home.path())
+        .env("ARK_FIXTURE_CARGO_HOME", home.path());
     if fail_shipped_test {
         command.env("ARK_FIXTURE_FAIL_TEST", "1");
     }
     run_report(&mut command, report)
 }
 
-fn ark_command(workspace: &Path, home: &Path) -> io::Result<Command> {
+fn ark_command(working_dir: &Path, home: &Path) -> io::Result<Command> {
     // Keep using the test's toolchain after leaving its workspace and Cargo home.
     let path = env::join_paths(
         Path::new(env!("CARGO"))
@@ -127,7 +132,7 @@ fn ark_command(workspace: &Path, home: &Path) -> io::Result<Command> {
     let mut command = Command::new(env!("CARGO_BIN_EXE_cargo-ark"));
     command
         .args(["ark", "release-dependencies"])
-        .current_dir(workspace)
+        .current_dir(working_dir)
         .env("PATH", path)
         .env("CARGO_HOME", home)
         .env("CARGO_NET_OFFLINE", "true")
