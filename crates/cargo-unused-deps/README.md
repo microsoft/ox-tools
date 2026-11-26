@@ -53,6 +53,21 @@ impact-scoped pipeline pass its own package list straight through:
 cargo +nightly unused-deps --package my-crate --package other-crate
 ```
 
+Or read the same exact specs from UTF-8 files, one per line:
+
+```bash
+cargo +nightly unused-deps --package-file required.packages
+```
+
+`--package-file` is repeatable and combines with `--package`, but neither can
+be used with `--workspace`. LF and CRLF line endings and one leading UTF-8 BOM
+are accepted. Empty lines are ignored; whitespace, comments, glob patterns,
+and command-line tokens are not supported. Nonempty whitespace-only files,
+missing or unreadable files, invalid UTF-8, and malformed specs fail explicitly.
+Paths are relative to the current directory, not `--manifest-path`.
+Empty files add no selectors, leaving the
+workspace-global catalog check (and `--fix`) active without compiling packages.
+
 Run only the workspace-global catalog check by omitting package selection:
 
 ```bash
@@ -72,8 +87,8 @@ run; `--require-workspace` turns it into an error instead.
 
 Package selection scopes the compiled evidence only. The catalog check always
 reads every member, because “no member inherits this entry” is only true if
-every member was consulted. With no `--package` or `--workspace`, no package
-is compiled and only that catalog check runs.
+every member was consulted. With no package specs or `--workspace`, no
+package is compiled and only that catalog check runs.
 
 ## Configuration
 
