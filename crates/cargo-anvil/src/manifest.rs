@@ -930,6 +930,11 @@ mod tests {
             "{diagnostic}"
         );
         assert!(diagnostic.contains("staging write rejected"), "{diagnostic}");
+        let cause = error
+            .downcast_ref::<std::io::Error>()
+            .expect("staging write failure retains its typed I/O cause");
+        assert_eq!(cause.kind(), std::io::ErrorKind::Other);
+        assert_eq!(cause.to_string(), "staging write rejected");
         assert!(!manifest.exists());
     }
 
