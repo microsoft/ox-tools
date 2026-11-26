@@ -170,7 +170,8 @@ pub(crate) fn with_cache_home_at<T>(home: Utf8PathBuf, operation: impl FnOnce() 
 }
 
 fn owned_cache_home(root: &Utf8Path) -> Utf8PathBuf {
-    crate::exec::absolute_test_path(root).join("target/cargo-gamma-test-cache")
+    // Keep nested runtime-library and linker paths below Windows' legacy path limit.
+    crate::exec::absolute_test_path(root).join("target/g")
 }
 
 /// A deterministic pause at a registered command boundary.
@@ -1047,6 +1048,26 @@ pub fn fails_at_every_line<E: fmt::Display>(lines: usize, run: impl Fn(&mut Flak
 #[cfg(test)]
 #[cfg(not(miri))]
 mod tests {
+
+    #[test]
+    #[cfg(windows)]
+    fn fixture_owned_caches_leave_room_for_nested_runtime_artifacts() {
+        let checkout = Utf8Path::new(r"D:\copilot\copilot-worktrees\ox-tools-gh\long-descriptive-worktree-for-gamma-tests");
+        for prefix in ["run-contradicted-", "run-in-diff-mnemonic-"] {
+            let root = checkout.join("target/test-work").join(format!("{prefix}abcdef"));
+            let home = owned_cache_home(&root);
+            let runtime =
+                gamma_base(&root).join("target/debug/build/cargo-gamma-rt/0123456789abcdef/out/libgamma_rt-0123456789abcdef.rlib");
+
+            assert!(home.starts_with(&root), "the fixture must own its cache: {home}");
+            assert!(runtime.starts_with(&home), "the runtime must stay in the fixture cache: {runtime}");
+            assert!(
+                runtime.as_str().encode_utf16().count() < 260,
+                "nested runtime paths must fit legacy Windows linkers: {runtime}"
+            );
+            assert_ne!(home, owned_cache_home(&root.with_file_name("another-fixture")));
+        }
+    }
 
     /// The watchdog returns what the closure returned, and does it on the closure's own thread.
     #[test]
