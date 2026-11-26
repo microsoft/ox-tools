@@ -321,6 +321,15 @@ impl Workspace {
             remove_tree(&self.root)
         };
 
+        let metadata = if self.leak {
+            Ok(())
+        } else {
+            self.root
+                .parent()
+                .map(|scratch| remove_tree(&scratch.join(GIT_METADATA_DIR)))
+                .unwrap_or(Ok(()))
+        };
+
         // Artifacts are what make the next run incremental, so a run that got far enough to have
         // something to measure leaves them behind on purpose.
         let build = if self.settled.load(Ordering::Relaxed) {
@@ -329,7 +338,7 @@ impl Workspace {
             remove_tree(&self.target)
         };
 
-        tree.and(build)
+        tree.and(metadata).and(build)
     }
 
     /// Says where to look at the tree, for an error that wants the reader to go and read it.
@@ -423,8 +432,9 @@ impl Workspace {
         )?;
 
         if config.cache_dir.is_none() {
-            expose_vcs_metadata(source, &root)?;
+            expose_non_git_vcs_metadata(source, &root)?;
         }
+        prepare_git_metadata(source, &scratch, &root)?;
         vendor_runtime(&runtime)?;
         anchor_manifests(source, &root, &runtime)?;
 
@@ -892,6 +902,7 @@ impl Workspace {
     pub(super) fn cargo(&self) -> Command {
         let mut command = Command::new(cargo_binary());
 
+        clear_git_storage_overrides(&mut command);
         let _ = command.current_dir(self.root.as_std_path());
         let _ = command.env("CARGO_TARGET_DIR", self.target.as_std_path());
         let _ = command.env("CARGO_TERM_COLOR", if self.cargo.color { "always" } else { "never" });
@@ -2138,14 +2149,17 @@ fn ensure_copy_layout_terminates(source: &Utf8Path, scratch: &Utf8Path, excluded
     .usage())
 }
 
-/// Refuses a relocation that would hide VCS metadata a build can currently read.
+/// Refuses a relocation that would hide non-Git metadata a build can currently read.
 ///
 /// The copier omits VCS directories deliberately. A default scratch tree lies below the source
 /// tree and still reaches its ancestor metadata, while a relocated one may not. Letting the two
 /// builds differ turns `--cache-dir` into an undocumented build-input switch, so the unsupported
 /// arrangement is rejected before it creates or copies anything.
 fn ensure_vcs_visibility(source: &Utf8Path, scratch: &Utf8Path) -> Result<()> {
-    let source_metadata = visible_vcs_metadata(source);
+    let source_metadata: Vec<_> = visible_vcs_metadata(source)
+        .into_iter()
+        .filter(|marker| marker.file_name() != Some(".git"))
+        .collect();
 
     if
     // #[gamma::skip(cond.always_false, reason = "ensure_vcs_visibility's empty-source-metadata fast return may be removed: the following hidden vector iterates that same empty immutable vector and is necessarily empty regardless of scratch_metadata. The following hidden.is_empty return still returns Ok; visible_vcs_metadata only performs read-only discovery and returns a vector, not Result.", tag = "equivalent")]
@@ -2161,7 +2175,7 @@ fn ensure_vcs_visibility(source: &Utf8Path, scratch: &Utf8Path) -> Result<()> {
     }
 
     Err(error!(
-        "`--cache-dir` would relocate the cached workspace to `{scratch}`, where build scripts cannot see VCS metadata available from `{source}`: {}. \
+        "`--cache-dir` would relocate the cached workspace to `{scratch}`, where build scripts cannot see non-Git VCS metadata available from `{source}`: {}. \
          Use a cache directory beneath the same repository, or leave `--cache-dir` unset and set \
          `CARGO_TARGET_DIR` (or Cargo's `build.target-dir`) to move only compiler artifacts while \
          preserving the synchronized workspace's version-control context.",
@@ -2170,30 +2184,21 @@ fn ensure_vcs_visibility(source: &Utf8Path, scratch: &Utf8Path) -> Result<()> {
     .usage())
 }
 
-/// Makes source-control metadata visible from an isolated default scratch tree.
-fn expose_vcs_metadata(source: &Utf8Path, scratch: &Utf8Path) -> Result<()> {
-    expose_vcs_metadata_with(source, scratch, |marker, destination, directory| {
+/// Preserves the existing non-Git metadata links for default-cache workspaces.
+fn expose_non_git_vcs_metadata(source: &Utf8Path, scratch: &Utf8Path) -> Result<()> {
+    expose_non_git_vcs_metadata_with(source, scratch, |marker, destination, directory| {
         super::copy::create_symlink(marker.as_std_path(), destination.as_std_path(), directory)
     })
 }
 
-fn expose_vcs_metadata_with(
-    source: &Utf8Path,
-    scratch: &Utf8Path,
-    link: impl FnMut(&Utf8Path, &Utf8Path, bool) -> io::Result<()>,
-) -> Result<()> {
-    expose_vcs_metadata_using(source, scratch, link, |path| fs::read_to_string(path.as_std_path()))
-}
-
-fn expose_vcs_metadata_using(
+fn expose_non_git_vcs_metadata_with(
     source: &Utf8Path,
     scratch: &Utf8Path,
     mut link: impl FnMut(&Utf8Path, &Utf8Path, bool) -> io::Result<()>,
-    mut read: impl FnMut(&Utf8Path) -> io::Result<String>,
 ) -> Result<()> {
     let markers = visible_vcs_metadata(source);
 
-    for name in VCS_DIRS {
+    for name in VCS_DIRS.into_iter().filter(|name| *name != ".git") {
         let Some(marker) = markers
             .iter()
             .filter(|marker| marker.file_name() == Some(name))
@@ -2203,42 +2208,370 @@ fn expose_vcs_metadata_using(
         };
 
         let destination = scratch.join(name);
-
-        if name == ".git" {
-            let git_dir = if marker.as_std_path().is_dir() {
-                marker.clone()
-            } else {
-                let text = read(marker).map_err(|cause| error!("could not read Git metadata pointer `{marker}`").caused_by(cause))?;
-                let relative = text
-                    .trim()
-                    .strip_prefix("gitdir:")
-                    .map(str::trim)
-                    .ok_or_else(|| error!("Git metadata pointer `{marker}` has no `gitdir:` target"))?;
-
-                absolute(
-                    &marker
-                        .parent()
-                        .unwrap_or_else(|| {
-                            Utf8Path::new(
-                                // #[gamma::skip(literal.str_to_xyzzy, reason = "The fallback literal is read only if marker.parent() is None. This private expose_vcs_metadata marker is constructed by find_map over source.ancestors().map(|directory| directory.join(\".git\")); each successful marker necessarily ends in normal component .git and therefore has Some(parent), including a relative .git whose parent is the empty path. The fallback is unreachable regardless of the gitdir file's contents.", tag = "equivalent")]
-                                "",
-                            )
-                        })
-                        .join(relative),
-                )
-            };
-
-            fs::write(destination.as_std_path(), format!("gitdir: {git_dir}\n"))
-                .map_err(|cause| error!("could not expose Git metadata at `{destination}`").caused_by(cause))?;
-
-            continue;
-        }
-
-        let linked = link(marker, &destination, marker.as_std_path().is_dir());
-        linked.map_err(|cause| error!("could not expose VCS metadata at `{destination}`").caused_by(cause))?;
+        let directory = marker.as_std_path().is_dir();
+        link(marker, &destination, directory)
+            .map_err(|cause| error!("could not expose VCS metadata at `{destination}`").caused_by(cause))?;
     }
 
     Ok(())
+}
+
+const GIT_METADATA_DIR: &str = "git-metadata";
+const GIT_STORAGE_ENV: [&str; 9] = [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_OBJECT_DIRECTORY_RELATIVE",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+];
+
+static NEXT_GIT_METADATA_STAGE: AtomicUsize = AtomicUsize::new(1);
+
+trait GitMetadataOperations {
+    fn discover(&mut self, source: &Utf8Path) -> Vec<Utf8PathBuf>;
+    fn run_git(&mut self, command: &mut Command, operation: &str, source: &Utf8Path) -> Result<Vec<u8>>;
+    fn path_exists(&mut self, path: &Utf8Path, description: &str) -> Result<bool>;
+    fn create_stage(&mut self, scratch: &Utf8Path) -> Result<Utf8PathBuf>;
+    fn remove_tree(&mut self, path: &Utf8Path) -> Result<()>;
+    fn copy_file(
+        &mut self,
+        source_file: &Utf8Path,
+        destination: &Utf8Path,
+        source: &Utf8Path,
+        description: &str,
+        missing_ok: bool,
+    ) -> Result<()>;
+    fn split_indexes(&mut self, git_directory: &Utf8Path) -> Result<Vec<Utf8PathBuf>>;
+    fn publish_repository(&mut self, staged: &Utf8Path, destination: &Utf8Path) -> Result<()>;
+    fn remove_marker(&mut self, marker: &Utf8Path) -> Result<()>;
+    fn write_pointer(&mut self, marker: &Utf8Path, repository: &Utf8Path) -> Result<()>;
+}
+
+struct NativeGitMetadataOperations;
+
+impl GitMetadataOperations for NativeGitMetadataOperations {
+    fn discover(&mut self, source: &Utf8Path) -> Vec<Utf8PathBuf> {
+        visible_vcs_metadata(source)
+    }
+
+    fn run_git(&mut self, command: &mut Command, operation: &str, source: &Utf8Path) -> Result<Vec<u8>> {
+        run_git_command(command, operation, source)
+    }
+
+    fn path_exists(&mut self, path: &Utf8Path, description: &str) -> Result<bool> {
+        git_metadata_path_exists_with(path, description, |path| fs::symlink_metadata(path))
+    }
+
+    fn create_stage(&mut self, scratch: &Utf8Path) -> Result<Utf8PathBuf> {
+        create_git_metadata_stage(scratch)
+    }
+
+    fn remove_tree(&mut self, path: &Utf8Path) -> Result<()> {
+        remove_tree(path)
+    }
+
+    fn copy_file(
+        &mut self,
+        source_file: &Utf8Path,
+        destination: &Utf8Path,
+        source: &Utf8Path,
+        description: &str,
+        missing_ok: bool,
+    ) -> Result<()> {
+        copy_git_file(source_file, destination, source, description, missing_ok)
+    }
+
+    fn split_indexes(&mut self, git_directory: &Utf8Path) -> Result<Vec<Utf8PathBuf>> {
+        split_index_files(git_directory)
+    }
+
+    fn publish_repository(&mut self, staged: &Utf8Path, destination: &Utf8Path) -> Result<()> {
+        replace_git_metadata_directory(staged, destination)
+    }
+
+    fn remove_marker(&mut self, marker: &Utf8Path) -> Result<()> {
+        remove_git_marker(marker)
+    }
+
+    fn write_pointer(&mut self, marker: &Utf8Path, repository: &Utf8Path) -> Result<()> {
+        fs::write(marker.as_std_path(), format!("gitdir: {}\n", repository.as_str()))
+            .map_err(|cause| error!("could not publish private Git metadata at `{marker}`").caused_by(cause))
+    }
+}
+
+/// Rebuilds the selected Git metadata as a private scratch-owned repository before any build runs.
+fn prepare_git_metadata(source: &Utf8Path, scratch: &Utf8Path, workspace: &Utf8Path) -> Result<()> {
+    prepare_git_metadata_with(source, scratch, workspace, &mut NativeGitMetadataOperations)
+}
+
+fn prepare_git_metadata_with(
+    source: &Utf8Path,
+    scratch: &Utf8Path,
+    workspace: &Utf8Path,
+    operations: &mut impl GitMetadataOperations,
+) -> Result<()> {
+    let markers = operations.discover(source);
+    let has_git = markers.iter().any(|marker| marker.file_name() == Some(".git"));
+    let workspace_git = workspace.join(".git");
+
+    if !has_git {
+        operations.remove_marker(&workspace_git)?;
+        operations.remove_tree(&scratch.join(GIT_METADATA_DIR))?;
+        return Ok(());
+    }
+
+    let repository_root = git_path_with(source, &["rev-parse", "--show-toplevel"], operations)?;
+    ensure_git_repository_root(source, &repository_root)?;
+
+    let git_directory = git_path_with(source, &["rev-parse", "--absolute-git-dir"], operations)?;
+    let head_path = git_path_with(source, &["rev-parse", "--git-path", "HEAD"], operations)?;
+    let index_path = git_path_with(source, &["rev-parse", "--git-path", "index"], operations)?;
+    let stage = operations.create_stage(scratch)?;
+    let staged_repository = stage.join("repository");
+    let final_repository = scratch.join(GIT_METADATA_DIR);
+
+    let preparation = (|| {
+        let mut clone = clean_git_command();
+        clone
+            .args(["clone", "--mirror", "--local", "--quiet"])
+            .arg(source.as_str())
+            .arg(staged_repository.as_str());
+        operations.run_git(&mut clone, "create a private mirror", source)?;
+
+        let alternates = staged_repository.join("objects").join("info").join("alternates");
+        if operations.path_exists(&alternates, "Git object alternates")? {
+            return Err(error!(
+                "Git repository `{source}` uses object alternates that cannot be detached safely. \
+                 Make the repository self-contained before running cargo-gamma."
+            )
+            .usage());
+        }
+
+        let commondir = staged_repository.join("commondir");
+        if operations.path_exists(&commondir, "private Git common metadata")? {
+            return Err(error!(
+                "Git repository `{source}` produced linked common metadata in its private mirror at `{commondir}`"
+            ));
+        }
+
+        set_private_git_config(&staged_repository, "core.bare", "false", source, operations)?;
+        set_private_git_config(&staged_repository, "core.worktree", workspace.as_str(), source, operations)?;
+        remove_private_git_config_section(&staged_repository, "remote.origin", source, operations)?;
+        operations.copy_file(&head_path, &staged_repository.join("HEAD"), source, "selected Git HEAD", false)?;
+        operations.copy_file(&index_path, &staged_repository.join("index"), source, "selected Git index", true)?;
+        for source_file in operations.split_indexes(&git_directory)? {
+            let destination = staged_repository.join(source_file.file_name().unwrap_or_default());
+            operations.copy_file(&source_file, &destination, source, "split-index dependency", false)?;
+        }
+        let mut status = clean_git_command();
+        status
+            .arg("--git-dir")
+            .arg(staged_repository.as_str())
+            .args(["status", "--porcelain"]);
+        operations.run_git(&mut status, "validate its private index", source)?;
+
+        operations.publish_repository(&staged_repository, &final_repository)?;
+        operations.remove_marker(&workspace_git)?;
+        operations.write_pointer(&workspace_git, &final_repository)?;
+        Ok(())
+    })();
+
+    let cleanup = operations.remove_tree(&stage);
+    match (preparation, cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(failure), Ok(())) => Err(failure),
+        (Ok(()), Err(cause)) => Err(cause),
+        (Err(failure), Err(cleanup)) => Err(error!(
+            "{failure}; additionally, could not remove Git metadata staging directory `{stage}`: {cleanup}"
+        )),
+    }
+}
+
+fn ensure_git_repository_root(source: &Utf8Path, repository_root: &Utf8Path) -> Result<()> {
+    if physical(repository_root) == physical(source) {
+        return Ok(());
+    }
+
+    Err(error!(
+        "cannot isolate Git metadata for workspace `{source}` because its Git worktree root is `{repository_root}`. \
+         Run cargo-gamma from the repository root so the copied workspace and Git index have the same root."
+    )
+    .usage())
+}
+
+fn git_metadata_path_exists_with<T>(
+    path: &Utf8Path,
+    description: &str,
+    inspect: impl FnOnce(&std::path::Path) -> io::Result<T>,
+) -> Result<bool> {
+    match inspect(path.as_std_path()) {
+        Ok(_) => Ok(true),
+        Err(cause) if cause.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(cause) => Err(error!("could not inspect {description} at `{path}`").caused_by(cause)),
+    }
+}
+
+fn clean_git_command() -> Command {
+    let mut command = Command::new("git");
+    for (name, _) in env::vars_os().filter(|(name, _)| name.to_string_lossy().starts_with("GIT_")) {
+        command.env_remove(name);
+    }
+    command
+}
+
+fn clear_git_storage_overrides(command: &mut Command) {
+    for name in GIT_STORAGE_ENV {
+        command.env_remove(name);
+    }
+    let mut config_names: Vec<_> = command
+        .get_envs()
+        .filter(|(name, _)| name.to_string_lossy().starts_with("GIT_CONFIG_"))
+        .map(|(name, _)| name.to_owned())
+        .collect();
+    config_names.extend(
+        env::vars_os()
+            .filter(|(name, _)| name.to_string_lossy().starts_with("GIT_CONFIG_"))
+            .map(|(name, _)| name),
+    );
+    for name in config_names {
+        command.env_remove(name);
+    }
+}
+
+fn git_path(source: &Utf8Path, arguments: &[&str]) -> Result<Utf8PathBuf> {
+    git_path_with(source, arguments, &mut NativeGitMetadataOperations)
+}
+
+fn git_path_with(source: &Utf8Path, arguments: &[&str], operations: &mut impl GitMetadataOperations) -> Result<Utf8PathBuf> {
+    let mut command = clean_git_command();
+    command.arg("-C").arg(source.as_str()).args(arguments);
+    let output = operations.run_git(&mut command, "resolve repository metadata", source)?;
+    let path =
+        String::from_utf8(output).map_err(|cause| error!("Git returned a non-UTF-8 metadata path for `{source}`").caused_by(cause))?;
+    let path = Utf8Path::new(path.trim());
+    Ok(if path.is_absolute() {
+        path.to_owned()
+    } else {
+        physical(&source.join(path))
+    })
+}
+
+fn run_git_command(command: &mut Command, operation: &str, source: &Utf8Path) -> Result<Vec<u8>> {
+    let output = command
+        .output()
+        .map_err(|cause| error!("could not run Git to {operation} for `{source}`").caused_by(cause))?;
+    if !output.status.success() {
+        let tail = &output.stderr[output.stderr.len().saturating_sub(MAX_HELPER_STDERR)..];
+        return Err(error!(
+            "Git could not {operation} for `{source}`:\n{}",
+            crate::report::encode_controls(String::from_utf8_lossy(tail).trim())
+        ));
+    }
+    Ok(output.stdout)
+}
+
+fn create_git_metadata_stage(scratch: &Utf8Path) -> Result<Utf8PathBuf> {
+    loop {
+        let sequence = NEXT_GIT_METADATA_STAGE.fetch_add(1, Ordering::Relaxed);
+        let stage = scratch.join(format!(".cargo-gamma-git-stage-{}-{sequence}", std::process::id()));
+        match fs::create_dir(stage.as_std_path()) {
+            Ok(()) => return Ok(stage),
+            Err(cause) if cause.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(cause) => return Err(error!("could not create Git metadata staging directory `{stage}`").caused_by(cause)),
+        }
+    }
+}
+
+fn set_private_git_config(
+    repository: &Utf8Path,
+    key: &str,
+    value: &str,
+    source: &Utf8Path,
+    operations: &mut impl GitMetadataOperations,
+) -> Result<()> {
+    let mut command = clean_git_command();
+    command
+        .args(["config", "--file"])
+        .arg(repository.join("config").as_str())
+        .args(["--replace-all", key, value]);
+    operations.run_git(&mut command, "configure its private metadata", source)?;
+    Ok(())
+}
+
+fn remove_private_git_config_section(
+    repository: &Utf8Path,
+    section: &str,
+    source: &Utf8Path,
+    operations: &mut impl GitMetadataOperations,
+) -> Result<()> {
+    let mut command = clean_git_command();
+    command
+        .args(["config", "--file"])
+        .arg(repository.join("config").as_str())
+        .args(["--remove-section", section]);
+    operations.run_git(&mut command, "remove source remotes from its private metadata", source)?;
+    Ok(())
+}
+
+fn copy_git_file(source_file: &Utf8Path, destination: &Utf8Path, source: &Utf8Path, description: &str, missing_ok: bool) -> Result<()> {
+    match fs::symlink_metadata(source_file.as_std_path()) {
+        Ok(metadata) if metadata.is_file() => fs::copy(source_file.as_std_path(), destination.as_std_path())
+            .map(|_copied| ())
+            .map_err(|cause| error!("could not copy {description} from `{source_file}` for `{source}`").caused_by(cause)),
+        Ok(_metadata) => Err(error!(
+            "Git {description} at `{source_file}` is not a regular file and cannot be copied safely"
+        )),
+        Err(cause) if cause.kind() == io::ErrorKind::NotFound && missing_ok => Ok(()),
+        Err(cause) => Err(error!("could not inspect Git {description} at `{source_file}`").caused_by(cause)),
+    }
+}
+
+fn split_index_files(git_directory: &Utf8Path) -> Result<Vec<Utf8PathBuf>> {
+    let entries = fs::read_dir(git_directory.as_std_path())
+        .map_err(|cause| error!("could not inspect split-index files in `{git_directory}`").caused_by(cause))?;
+    let mut files = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|cause| error!("could not inspect split-index files in `{git_directory}`").caused_by(cause))?;
+        if !entry.file_name().to_string_lossy().starts_with("sharedindex.") {
+            continue;
+        }
+        let source_file =
+            Utf8PathBuf::from_path_buf(entry.path()).map_err(|path| error!("split-index path `{}` is not valid UTF-8", path.display()))?;
+        files.push(source_file);
+    }
+    Ok(files)
+}
+
+fn replace_git_metadata_directory(staged: &Utf8Path, destination: &Utf8Path) -> Result<()> {
+    match fs::symlink_metadata(destination.as_std_path()) {
+        Ok(metadata) if metadata.is_dir() => {
+            fs::remove_dir_all(destination.as_std_path())
+                .map_err(|cause| error!("could not replace private Git metadata at `{destination}`").caused_by(cause))?;
+        }
+        Ok(_metadata) => {
+            return Err(error!("private Git metadata path `{destination}` is not a directory"));
+        }
+        Err(cause) if cause.kind() == io::ErrorKind::NotFound => {}
+        Err(cause) => return Err(error!("could not inspect private Git metadata at `{destination}`").caused_by(cause)),
+    }
+    fs::rename(staged.as_std_path(), destination.as_std_path())
+        .map_err(|cause| error!("could not publish private Git metadata at `{destination}`").caused_by(cause))
+}
+
+fn remove_git_marker(marker: &Utf8Path) -> Result<()> {
+    match fs::symlink_metadata(marker.as_std_path()) {
+        Ok(metadata) if metadata.is_dir() => {
+            Err(error!("scratch Git metadata marker `{marker}` is a directory; remove it before running cargo-gamma again").usage())
+        }
+        Ok(_metadata) => fs::remove_file(marker.as_std_path())
+            .map_err(|cause| error!("could not replace scratch Git metadata marker `{marker}`").caused_by(cause)),
+        Err(cause) if cause.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(cause) => Err(error!("could not inspect scratch Git metadata marker `{marker}`").caused_by(cause)),
+    }
 }
 
 /// Returns whether the copy's exclusion will match a path the walk actually produces.
@@ -3799,29 +4132,6 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn vcs_pointer_read_refusal_prevents_metadata_publication() {
-        let directory = tempfile::tempdir_in(".").unwrap();
-        let root = absolute(Utf8Path::from_path(directory.path()).unwrap());
-        let source = root.join("source");
-        let scratch = root.join("copy");
-        fs::create_dir(&source).unwrap();
-        fs::create_dir(&scratch).unwrap();
-        fs::write(source.join(".git"), "gitdir: ../git-data").unwrap();
-        let failure = expose_vcs_metadata_using(
-            &source,
-            &scratch,
-            |_, _, _| panic!("unreadable Git metadata cannot be linked"),
-            |path| {
-                assert_eq!(path, source.join(".git"));
-                Err(io::Error::from(io::ErrorKind::PermissionDenied))
-            },
-        )
-        .unwrap_err();
-        assert!(failure.message().contains("could not read Git metadata pointer"));
-        assert!(!scratch.join(".git").exists());
-    }
-
-    #[test]
     fn anchored_manifest_save_refusal_is_propagated_without_touching_the_file() {
         let directory = tempfile::tempdir_in(".").unwrap();
         let root = absolute(Utf8Path::from_path(directory.path()).unwrap());
@@ -4444,50 +4754,6 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn vcs_exposure_preserves_git_pointers_and_returns_each_native_refusal_stage() {
-        for boundary in ["git", "malformed", "write", "hg"] {
-            let directory = private_system_tempdir("workspace-parent-vcs-exposure-");
-            let root = Utf8Path::from_path(directory.path()).unwrap();
-            let source = root.join("source");
-            let scratch = root.join("scratch");
-            fs::create_dir(&source).unwrap();
-            fs::create_dir(&scratch).unwrap();
-            if boundary == "hg" {
-                fs::create_dir(source.join(".hg")).unwrap();
-                fs::create_dir(scratch.join(".hg")).unwrap();
-                let failure = expose_vcs_metadata(&source, &scratch).unwrap_err();
-                assert!(failure.message().starts_with("could not expose VCS metadata at"), "{failure}");
-                continue;
-            }
-            let git = source.join(".git");
-            if boundary == "malformed" {
-                fs::write(&git, "a pointer without its required prefix").unwrap();
-            } else {
-                fs::create_dir(&git).unwrap();
-            }
-            if boundary == "write" {
-                fs::create_dir(scratch.join(".git")).unwrap();
-            }
-            let result = expose_vcs_metadata(&source, &scratch);
-            match boundary {
-                "git" => {
-                    result.unwrap();
-                    assert_eq!(fs::read_to_string(scratch.join(".git")).unwrap(), format!("gitdir: {git}\n"));
-                }
-                "malformed" => assert_eq!(
-                    result.unwrap_err().message(),
-                    format!("Git metadata pointer `{git}` has no `gitdir:` target")
-                ),
-                "write" => assert_eq!(
-                    result.unwrap_err().message(),
-                    format!("could not expose Git metadata at `{}`", scratch.join(".git"))
-                ),
-                _ => unreachable!(),
-            }
-        }
-    }
-
-    #[test]
     fn vcs_exposure_visits_later_kinds_and_selects_native_link_shapes_before_reporting_link_errors() {
         for fail in [false, true] {
             let directory = private_system_tempdir("workspace-parent-vcs-link-kinds-");
@@ -4500,7 +4766,7 @@ pub(super) mod tests {
             fs::create_dir(source.join(".hg")).unwrap();
             fs::write(source.join(".bzr"), "file-shaped metadata").unwrap();
             let mut observations = Vec::new();
-            let result = expose_vcs_metadata_with(&source, &scratch, |marker, destination, directory| {
+            let result = expose_non_git_vcs_metadata_with(&source, &scratch, |marker, destination, directory| {
                 observations.push((marker.file_name().unwrap().to_owned(), directory));
                 assert_eq!(destination.parent(), Some(scratch.as_path()));
                 if fail {
@@ -4509,9 +4775,9 @@ pub(super) mod tests {
                     fs::write(destination, format!("directory={directory}"))
                 }
             });
-            assert_eq!(
-                fs::read_to_string(scratch.join(".git")).unwrap(),
-                format!("gitdir: {}\n", source.join(".git"))
+            assert!(
+                !scratch.join(".git").exists(),
+                "Git metadata is published only by the private mirror path"
             );
             if fail {
                 assert_eq!(observations, [(".hg".to_owned(), true)]);
@@ -4529,39 +4795,274 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn preparation_exposes_metadata_only_for_the_default_cache_and_returns_invalid_git_pointers() {
-        for boundary in ["default", "explicit", "malformed"] {
-            let directory = private_system_tempdir("workspace-parent-vcs-preparation-");
-            let source = absolute(Utf8Path::from_path(directory.path()).unwrap());
-            crate::testing::write_project(
-                source.as_std_path(),
-                &[
-                    ("Cargo.toml", "[package]\nname='vcs'\nversion='0.0.0'\n[workspace]\n"),
-                    ("src/lib.rs", ""),
-                ],
-            );
-            let git = source.join(".git");
-            if boundary == "malformed" {
-                fs::write(&git, "invalid git pointer").unwrap();
-            } else {
-                fs::create_dir(&git).unwrap();
+    fn git_metadata_visibility_ignores_git_and_preserves_non_git_refusals() {
+        let directory = private_system_tempdir("workspace-private-git-visibility-");
+        let root = absolute(Utf8Path::from_path(directory.path()).unwrap());
+        let source = root.join("source");
+        let scratch = root.join("scratch");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(&scratch).unwrap();
+        fs::create_dir(source.join(".git")).unwrap();
+
+        ensure_vcs_visibility(&source, &scratch).expect("Git is isolated by its private mirror");
+        fs::create_dir(source.join(".hg")).unwrap();
+        let failure = ensure_vcs_visibility(&source, &scratch).expect_err("hidden non-Git metadata remains unsupported");
+        assert!(failure.message().contains("non-Git VCS metadata"), "{failure}");
+
+        expose_non_git_vcs_metadata_with(&source, &scratch, |_, destination, _| fs::write(destination, "linked"))
+            .expect("non-Git exposure ignores Git");
+        assert!(!scratch.join(".git").exists());
+        assert!(scratch.join(".hg").exists());
+    }
+
+    #[test]
+    fn git_metadata_refuses_nested_worktree_roots_without_running_git() {
+        let directory = crate::testing::workdir("workspace-private-git-root-");
+        let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("UTF-8 root");
+        let repository = root.join("repository");
+        let source = repository.join("nested");
+        fs::create_dir_all(&source).unwrap();
+
+        let failure = ensure_git_repository_root(&source, &repository).expect_err("nested worktrees cannot be isolated safely");
+        assert!(failure.message().contains("Run cargo-gamma from the repository root"), "{failure}");
+    }
+
+    #[test]
+    fn git_metadata_path_inspection_only_ignores_not_found() {
+        let path = Utf8Path::new("objects/info/alternates");
+        assert!(git_metadata_path_exists_with(path, "Git object alternates", |_| Ok::<(), io::Error>(())).unwrap());
+        assert!(
+            !git_metadata_path_exists_with(path, "Git object alternates", |_| { Err::<(), _>(io::ErrorKind::NotFound.into()) }).unwrap()
+        );
+
+        let failure = git_metadata_path_exists_with(path, "Git object alternates", |_| {
+            Err::<(), _>(io::Error::new(io::ErrorKind::PermissionDenied, "fixture denial"))
+        })
+        .expect_err("metadata read failures must not be treated as absence");
+        assert_eq!(failure.message(), format!("could not inspect Git object alternates at `{path}`"));
+    }
+
+    #[derive(Default)]
+    struct ScriptedGitMetadataOperations {
+        markers: Vec<Utf8PathBuf>,
+        git_paths: std::collections::VecDeque<Utf8PathBuf>,
+        existing_paths: std::collections::HashSet<Utf8PathBuf>,
+        split_indexes: Vec<Utf8PathBuf>,
+        commands: Vec<Vec<String>>,
+        copied_files: Vec<(Utf8PathBuf, Utf8PathBuf)>,
+        removed_paths: Vec<Utf8PathBuf>,
+        published_repository: Option<Utf8PathBuf>,
+        published_pointer: Option<Utf8PathBuf>,
+        fail_discovery: bool,
+        fail_repository_publication: bool,
+        fail_pointer_publication: bool,
+    }
+
+    impl GitMetadataOperations for ScriptedGitMetadataOperations {
+        fn discover(&mut self, _source: &Utf8Path) -> Vec<Utf8PathBuf> {
+            self.markers.clone()
+        }
+
+        fn run_git(&mut self, command: &mut Command, _operation: &str, _source: &Utf8Path) -> Result<Vec<u8>> {
+            let arguments: Vec<_> = command.get_args().map(|argument| argument.to_string_lossy().into_owned()).collect();
+            if self.fail_discovery && arguments.iter().any(|argument| argument == "rev-parse") {
+                return Err(error!("scripted Git metadata discovery failure"));
             }
-            let config = Config {
-                cache_dir: (boundary == "explicit").then(|| source.join("explicit-cache")),
-                ..Config::default()
-            };
-            let result = Workspace::prepare(&source, &source.join("target"), &config, &mut crate::testing::Recorder::default());
-            if boundary == "malformed" {
-                assert_eq!(
-                    result.unwrap_err().message(),
-                    format!("Git metadata pointer `{git}` has no `gitdir:` target")
-                );
+            self.commands.push(arguments.clone());
+            if arguments.iter().any(|argument| argument == "rev-parse") {
+                let path = self.git_paths.pop_front().expect("scripted Git path");
+                Ok(format!("{path}\n").into_bytes())
             } else {
-                let mut work = result.unwrap();
-                assert_eq!(work.root.join(".git").exists(), boundary == "default");
-                work.teardown().unwrap();
+                Ok(Vec::new())
             }
         }
+
+        fn path_exists(&mut self, path: &Utf8Path, _description: &str) -> Result<bool> {
+            Ok(self.existing_paths.contains(path))
+        }
+
+        fn create_stage(&mut self, scratch: &Utf8Path) -> Result<Utf8PathBuf> {
+            Ok(scratch.join(".staging"))
+        }
+
+        fn remove_tree(&mut self, path: &Utf8Path) -> Result<()> {
+            self.removed_paths.push(path.to_owned());
+            Ok(())
+        }
+
+        fn copy_file(
+            &mut self,
+            source_file: &Utf8Path,
+            destination: &Utf8Path,
+            _source: &Utf8Path,
+            _description: &str,
+            _missing_ok: bool,
+        ) -> Result<()> {
+            self.copied_files.push((source_file.to_owned(), destination.to_owned()));
+            Ok(())
+        }
+
+        fn split_indexes(&mut self, _git_directory: &Utf8Path) -> Result<Vec<Utf8PathBuf>> {
+            Ok(self.split_indexes.clone())
+        }
+
+        fn publish_repository(&mut self, _staged: &Utf8Path, destination: &Utf8Path) -> Result<()> {
+            if self.fail_repository_publication {
+                return Err(error!("scripted private repository publication failure"));
+            }
+            self.published_repository = Some(destination.to_owned());
+            Ok(())
+        }
+
+        fn remove_marker(&mut self, _marker: &Utf8Path) -> Result<()> {
+            Ok(())
+        }
+
+        fn write_pointer(&mut self, _marker: &Utf8Path, repository: &Utf8Path) -> Result<()> {
+            if self.fail_pointer_publication {
+                return Err(error!("scripted private pointer publication failure"));
+            }
+            self.published_pointer = Some(repository.to_owned());
+            Ok(())
+        }
+    }
+
+    fn scripted_git_metadata_operations(source: &Utf8Path, git_directory: &Utf8Path) -> ScriptedGitMetadataOperations {
+        ScriptedGitMetadataOperations {
+            markers: vec![source.join(".git")],
+            git_paths: [
+                source.to_owned(),
+                git_directory.to_owned(),
+                git_directory.join("HEAD"),
+                git_directory.join("index"),
+            ]
+            .into(),
+            split_indexes: vec![git_directory.join("sharedindex.fixture")],
+            ..ScriptedGitMetadataOperations::default()
+        }
+    }
+
+    #[test]
+    fn git_metadata_policy_uses_supplied_discovery_commands_and_private_publication() {
+        let directory = private_system_tempdir("workspace-private-git-policy-");
+        let root = Utf8Path::from_path(directory.path()).unwrap();
+        let source = root.join("source");
+        let scratch = root.join("scratch");
+        let workspace = scratch.join("workspace");
+        let selected_git = source.join(".git").join("worktrees").join("selected");
+        fs::create_dir_all(&selected_git).unwrap();
+        fs::create_dir_all(&workspace).unwrap();
+        let mut operations = scripted_git_metadata_operations(&source, &selected_git);
+
+        prepare_git_metadata_with(&source, &scratch, &workspace, &mut operations).unwrap();
+
+        let private_repository = scratch.join(GIT_METADATA_DIR);
+        assert_eq!(operations.published_repository.as_deref(), Some(private_repository.as_path()));
+        assert_eq!(operations.published_pointer.as_deref(), Some(private_repository.as_path()));
+        assert!(operations.commands.iter().any(|arguments| {
+            arguments.windows(3).any(|window| window == ["clone", "--mirror", "--local"])
+                && arguments.iter().any(|argument| argument == source.as_str())
+        }));
+        assert!(
+            operations
+                .copied_files
+                .contains(&(selected_git.join("HEAD"), scratch.join(".staging").join("repository").join("HEAD")))
+        );
+        assert!(operations.copied_files.contains(&(
+            selected_git.join("index"),
+            scratch.join(".staging").join("repository").join("index")
+        )));
+        assert!(operations.copied_files.contains(&(
+            selected_git.join("sharedindex.fixture"),
+            scratch.join(".staging").join("repository").join("sharedindex.fixture")
+        )));
+        assert!(operations.removed_paths.contains(&scratch.join(".staging")));
+    }
+
+    #[test]
+    fn git_metadata_policy_refuses_failed_discovery_alternates_and_pointer_publication() {
+        let directory = private_system_tempdir("workspace-private-git-policy-failure-");
+        let root = Utf8Path::from_path(directory.path()).unwrap();
+        let source = root.join("source");
+        let scratch = root.join("scratch");
+        let workspace = scratch.join("workspace");
+        let git_directory = source.join(".git");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&workspace).unwrap();
+
+        let mut operations = scripted_git_metadata_operations(&source, &git_directory);
+        operations.fail_discovery = true;
+        let failure = prepare_git_metadata_with(&source, &scratch, &workspace, &mut operations).unwrap_err();
+        assert!(failure.message().contains("scripted Git metadata discovery failure"));
+        assert!(operations.published_pointer.is_none());
+        assert!(operations.published_repository.is_none());
+
+        let mut operations = scripted_git_metadata_operations(&source, &git_directory);
+        operations.existing_paths.insert(
+            scratch
+                .join(".staging")
+                .join("repository")
+                .join("objects")
+                .join("info")
+                .join("alternates"),
+        );
+        let failure = prepare_git_metadata_with(&source, &scratch, &workspace, &mut operations).unwrap_err();
+        assert!(failure.message().contains("object alternates"));
+        assert!(operations.published_pointer.is_none());
+        assert!(operations.published_repository.is_none());
+
+        let mut operations = scripted_git_metadata_operations(&source, &git_directory);
+        operations.fail_repository_publication = true;
+        let failure = prepare_git_metadata_with(&source, &scratch, &workspace, &mut operations).unwrap_err();
+        assert!(failure.message().contains("private repository publication failure"));
+        assert!(operations.published_pointer.is_none());
+        assert!(operations.published_repository.is_none());
+
+        let mut operations = scripted_git_metadata_operations(&source, &git_directory);
+        operations.fail_pointer_publication = true;
+        let failure = prepare_git_metadata_with(&source, &scratch, &workspace, &mut operations).unwrap_err();
+        assert!(failure.message().contains("private pointer publication failure"));
+        assert!(operations.published_pointer.is_none());
+        assert!(operations.published_repository.is_some());
+        assert!(operations.removed_paths.contains(&scratch.join(".staging")));
+    }
+
+    #[test]
+    fn git_metadata_policy_rejects_a_selected_worktree_outside_the_copy_root() {
+        let directory = private_system_tempdir("workspace-private-git-policy-root-");
+        let root = Utf8Path::from_path(directory.path()).unwrap();
+        let source = root.join("source");
+        let scratch = root.join("scratch");
+        let workspace = scratch.join("workspace");
+        let mut operations = scripted_git_metadata_operations(&source, &source.join(".git"));
+        operations.git_paths[0] = root.join("repository");
+
+        let failure = prepare_git_metadata_with(&source, &scratch, &workspace, &mut operations).unwrap_err();
+        assert!(failure.message().contains("Run cargo-gamma from the repository root"));
+        assert!(operations.commands.len() == 1, "unsafe routing is refused before cloning");
+        assert!(operations.published_pointer.is_none());
+        assert!(operations.published_repository.is_none());
+    }
+
+    #[test]
+    fn removing_a_legacy_git_pointer_does_not_follow_its_source_target() {
+        let directory = private_system_tempdir("workspace-private-git-pointer-");
+        let root = absolute(Utf8Path::from_path(directory.path()).unwrap());
+        let source = root.join("source");
+        let scratch = root.join("scratch");
+        let workspace = scratch.join("workspace");
+        let source_git = root.join("source-git");
+        fs::create_dir_all(&source_git).unwrap();
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(scratch.join(GIT_METADATA_DIR)).unwrap();
+        let scratch_git = workspace.join(".git");
+        fs::write(&scratch_git, format!("gitdir: {}\n", source_git.as_str())).unwrap();
+
+        prepare_git_metadata(&source, &scratch, &workspace).unwrap();
+        assert!(source_git.is_dir());
+        assert!(!scratch_git.exists());
+        assert!(!scratch.join(GIT_METADATA_DIR).exists());
     }
 
     #[test]
@@ -4597,19 +5098,13 @@ pub(super) mod tests {
 
     #[test]
     #[cfg(windows)]
-    fn native_read_denials_keep_git_pointer_and_cache_owner_failure_stages_distinct() {
+    fn native_cache_owner_read_denials_keep_the_native_failure_stage_distinct() {
         let directory = private_system_tempdir("workspace-parent-native-read-denial-");
         let root = absolute(Utf8Path::from_path(directory.path()).unwrap());
         let source = root.join("source");
         let scratch = root.join("scratch");
         fs::create_dir(&source).unwrap();
         fs::create_dir(&scratch).unwrap();
-        let git = source.join(".git");
-        fs::write(&git, "gitdir: elsewhere").unwrap();
-        let held = File::options().read(true).share_mode(0).open(&git).unwrap();
-        let failure = expose_vcs_metadata(&source, &scratch).unwrap_err();
-        assert_eq!(failure.message(), format!("could not read Git metadata pointer `{git}`"));
-        drop(held);
         let owner = scratch.join(CACHE_OWNER);
         fs::write(&owner, source.as_str()).unwrap();
         let held = File::options().read(true).share_mode(0).open(&owner).unwrap();
@@ -5853,7 +6348,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn cargo_commands_preserve_the_workspace_environment_and_selection() {
+    fn git_metadata_cargo_commands_preserve_the_workspace_environment_and_clear_storage_overrides() {
         let directory = crate::testing::workdir("workspace-command-");
         let root = Utf8PathBuf::from_path_buf(directory.path().join("root")).expect("UTF-8 root");
         let target = Utf8PathBuf::from_path_buf(directory.path().join("target")).expect("UTF-8 target");
@@ -5876,6 +6371,27 @@ pub(super) mod tests {
         assert_eq!(env["CARGO_TERM_COLOR"].as_deref(), Some("always"));
         assert!(env.contains_key(gamma_rt::ACTIVE_VAR));
         assert_eq!(env[gamma_rt::ACTIVE_VAR], None);
+        for name in GIT_STORAGE_ENV {
+            assert_eq!(env.get(name).map(Option::as_deref), Some(None), "{name}");
+        }
+        let mut routed_config = Command::new("git");
+        routed_config
+            .env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", "core.worktree")
+            .env("GIT_CONFIG_VALUE_0", "source");
+        clear_git_storage_overrides(&mut routed_config);
+        let routed_env: BTreeMap<_, _> = routed_config
+            .get_envs()
+            .map(|(name, value)| {
+                (
+                    name.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        for name in ["GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"] {
+            assert_eq!(routed_env.get(name), Some(&None), "{name}");
+        }
 
         work.cargo.color = false;
         let command = work.cargo();
@@ -6394,35 +6910,7 @@ pub(super) mod tests {
         ensure_vcs_visibility(&source, &scratch).expect("there is no metadata to hide");
     }
 
-    #[test]
-    fn git_directories_and_pointer_files_are_exposed_to_the_scratch_tree() {
-        let directory = crate::testing::workdir("workspace-expose-vcs-");
-        let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("UTF-8 root");
-        let source = root.join("source");
-        let scratch = source.join("scratch");
-        let git = source.join(".git");
-        fs::create_dir_all(&git).expect("git directory");
-        fs::create_dir_all(&scratch).expect("scratch");
-
-        expose_vcs_metadata(&source, &scratch).expect("directory metadata");
-        assert_eq!(
-            fs::read_to_string(scratch.join(".git")).expect("git pointer"),
-            format!("gitdir: {}\n", absolute(&git))
-        );
-
-        fs::remove_file(scratch.join(".git")).expect("first pointer");
-        fs::remove_dir_all(&git).expect("git directory");
-        let actual_git = root.join("actual-git");
-        fs::create_dir_all(&actual_git).expect("actual git");
-        fs::write(&git, "gitdir: ../actual-git\n").expect("git pointer source");
-
-        expose_vcs_metadata(&source, &scratch).expect("pointer metadata");
-        assert_eq!(
-            fs::read_to_string(scratch.join(".git")).expect("rewritten pointer"),
-            format!("gitdir: {}\n", absolute(&actual_git))
-        );
-    }
-
+    #[cfg(feature = "system-tests")]
     fn initialize_git_build_fixture(source: &Utf8Path, target: &Utf8Path) -> String {
         crate::testing::write_project(
             source.as_std_path(),
@@ -6433,51 +6921,112 @@ pub(super) mod tests {
                 ),
                 (".cargo/config.toml", &format!("[build]\ntarget-dir = '{}'\n", target.as_str())),
                 ("src/lib.rs", "pub fn present() {}\n"),
+                ("version-input", "initial version input\n"),
                 (
                     "build.rs",
                     r#"fn main() {
-    let output = std::process::Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .output()
-        .expect("git runs");
-    assert!(output.status.success(), "git rev-parse failed");
-    std::fs::write("observed-head", output.stdout).expect("head is recorded");
+    let run = |arguments: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(arguments)
+            .output()
+            .expect("git runs");
+        assert!(output.status.success(), "git command failed");
+        String::from_utf8(output.stdout).expect("git output is UTF-8")
+    };
+    let head = run(&["rev-parse", "HEAD"]);
+    let description = run(&["describe", "--tags", "--dirty"]);
+    let staged = run(&["diff", "--cached", "--", "version-input"]);
+    let unstaged = run(&["diff", "--", "version-input"]);
+    std::fs::write(
+        "observed-version-inputs",
+        format!("{head}{description}{staged}--unstaged--\n{unstaged}"),
+    ).expect("version inputs are recorded");
+    println!("cargo:rerun-if-changed=version-input");
+    println!("cargo:rerun-if-changed=build.rs");
 }
 "#,
                 ),
             ],
         );
 
-        let run_git = |arguments: &[&str]| {
-            let output = Command::new("git")
-                .arg("-C")
-                .arg(source)
-                .args(arguments)
-                .output()
-                .expect("git runs");
-            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-            output
-        };
-        let _ = run_git(&["init", "--quiet"]);
-        let _ = run_git(&["add", "."]);
-        let _ = run_git(&[
-            "-c",
-            "user.name=cargo-gamma test",
-            "-c",
-            "user.email=cargo-gamma@example.invalid",
-            "commit",
-            "--quiet",
-            "-m",
-            "fixture",
-        ]);
+        let _ = git_output(source, &["init", "--quiet"]);
+        let _ = git_output(source, &["add", "."]);
+        let _ = git_output(
+            source,
+            &[
+                "-c",
+                "user.name=cargo-gamma test",
+                "-c",
+                "user.email=cargo-gamma@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "fixture",
+            ],
+        );
+        git_output(source, &["tag", "v1"]);
+        fs::write(source.join("second-commit"), "second\n").expect("second commit input");
+        let _ = git_output(source, &["add", "second-commit"]);
+        let _ = git_output(
+            source,
+            &[
+                "-c",
+                "user.name=cargo-gamma test",
+                "-c",
+                "user.email=cargo-gamma@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "second",
+            ],
+        );
+        git_output(source, &["tag", "v2"]);
 
-        String::from_utf8(run_git(&["rev-parse", "HEAD"]).stdout)
+        String::from_utf8(git_output(source, &["rev-parse", "HEAD"]).stdout)
             .expect("Git hashes are UTF-8")
             .trim()
             .to_owned()
     }
 
-    fn assert_external_target_preserves_git_context(source: &Utf8Path, target: &Utf8Path, expected_head: &str) {
+    #[cfg(feature = "system-tests")]
+    fn git_output(source: &Utf8Path, arguments: &[&str]) -> Output {
+        let mut command = clean_git_command();
+        command.arg("-C").arg(source.as_str()).args(arguments);
+        let output = command.output().expect("Git runs");
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        output
+    }
+
+    #[cfg(feature = "system-tests")]
+    fn git_version_inputs(source: &Utf8Path) -> String {
+        let head = String::from_utf8(git_output(source, &["rev-parse", "HEAD"]).stdout).unwrap();
+        let description = String::from_utf8(git_output(source, &["describe", "--tags", "--dirty"]).stdout).unwrap();
+        let staged = String::from_utf8(git_output(source, &["diff", "--cached", "--", "version-input"]).stdout).unwrap();
+        let unstaged = String::from_utf8(git_output(source, &["diff", "--", "version-input"]).stdout).unwrap();
+        format!("{head}{description}{staged}--unstaged--\n{unstaged}")
+    }
+
+    #[cfg(feature = "system-tests")]
+    fn git_source_state(source: &Utf8Path) -> (Vec<u8>, blake3::Hash, Vec<u8>) {
+        let head = fs::read(git_path(source, &["rev-parse", "--git-path", "HEAD"]).unwrap()).unwrap();
+        let index = fs::read(git_path(source, &["rev-parse", "--git-path", "index"]).unwrap()).unwrap();
+        let refs = git_output(source, &["for-each-ref", "--format=%(refname)=%(objectname)"]).stdout;
+        (head, blake3::hash(&index), refs)
+    }
+
+    #[cfg(feature = "system-tests")]
+    fn assert_private_git_metadata_preserves_inputs(
+        source: &Utf8Path,
+        target: &Utf8Path,
+        cache_dir: Option<Utf8PathBuf>,
+        expected_head: &str,
+    ) {
+        git_output(source, &["update-index", "--split-index"]);
+        fs::write(source.join("version-input"), "staged input\n").unwrap();
+        git_output(source, &["add", "version-input"]);
+        fs::write(source.join("version-input"), "unstaged input\n").unwrap();
+
+        let expected = git_version_inputs(source);
         let survey = crate::discover::Survey::for_build_using(
             &crate::commands::SelectArgs {
                 dir: source.to_owned(),
@@ -6493,54 +7042,134 @@ pub(super) mod tests {
         .expect("Cargo metadata resolves the configured external target");
         assert_eq!(survey.target, target);
 
+        let config = Config {
+            cache_dir: cache_dir.clone(),
+            ..Config::default()
+        };
         let mut events = crate::testing::Recorder::default();
-        let work = Workspace::prepare(&survey.root, &survey.target, &Config::default(), &mut events)
-            .expect("the production preparation path supports an external Cargo target");
+        let mut work =
+            Workspace::prepare(&survey.root, &survey.target, &config, &mut events).expect("the production preparation path prepares");
 
-        let output = work.cargo().arg("build").arg("--quiet").output().expect("cargo runs");
-
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let pointer = fs::read_to_string(work.root.join(".git")).expect("the scratch workspace has a private Git pointer");
+        let private_git = Utf8Path::new(
+            pointer
+                .trim()
+                .strip_prefix("gitdir: ")
+                .expect("the scratch marker is a Git directory pointer"),
+        );
+        assert_eq!(private_git, gamma_base(source, cache_dir.as_deref()).join(GIT_METADATA_DIR));
+        assert!(
+            !private_git.starts_with(&work.root),
+            "the mirror is outside captured workspace inputs"
+        );
+        assert!(!private_git.join("objects/info/alternates").exists());
+        assert!(!private_git.join("commondir").exists());
+        let private_config = fs::read_to_string(private_git.join("config")).unwrap();
+        assert!(
+            !private_config.contains("[remote \"origin\"]"),
+            "the mirror does not retain source remotes"
+        );
         assert_eq!(
-            fs::read_to_string(work.root.join("observed-head"))
-                .expect("the build script recorded the selected commit")
+            String::from_utf8(git_output(&work.root, &["rev-parse", "HEAD"]).stdout)
+                .unwrap()
                 .trim(),
             expected_head
         );
+
+        let output = work.cargo().arg("build").arg("--quiet").output().expect("cargo runs");
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert_eq!(fs::read_to_string(work.root.join("observed-version-inputs")).unwrap(), expected);
+
+        let source_status = git_output(source, &["status", "--porcelain"]).stdout;
+        let source_state = git_source_state(source);
+        fs::write(work.root.join("scratch-only"), "private index\n").unwrap();
+        git_output(&work.root, &["add", "scratch-only"]);
+        git_output(&work.root, &["update-ref", "refs/heads/cargo-gamma-scratch", "HEAD"]);
+        let scratch_index = String::from_utf8(git_output(&work.root, &["diff", "--cached", "--name-only"]).stdout).unwrap();
         assert!(
-            fs::read_dir(work.target.as_std_path())
-                .expect("campaign target directory")
-                .next()
-                .is_some(),
-            "Cargo artifacts must be created beneath the campaign cache rooted at the external target"
+            scratch_index.lines().any(|path| path == "scratch-only"),
+            "scratch index contains the intended write: {scratch_index}"
         );
-        assert!(
-            !work.root.join("target").exists(),
-            "the synchronized workspace must not gain a local target"
+        assert_eq!(
+            String::from_utf8(git_output(&work.root, &["show-ref", "--verify", "refs/heads/cargo-gamma-scratch"]).stdout)
+                .unwrap()
+                .trim()
+                .split_once(' ')
+                .unwrap()
+                .0,
+            expected_head,
+            "scratch ref contains the selected source commit"
         );
+        assert_eq!(
+            git_source_state(source),
+            source_state,
+            "scratch writes cannot change source metadata"
+        );
+        assert_eq!(
+            git_output(source, &["status", "--porcelain"]).stdout,
+            source_status,
+            "scratch writes cannot change source dirtiness"
+        );
+
+        fs::write(source.join("version-input"), "refreshed staged input\n").unwrap();
+        git_output(source, &["add", "version-input"]);
+        fs::write(source.join("version-input"), "refreshed unstaged input\n").unwrap();
+        let refreshed = git_version_inputs(source);
+        let refreshed_status = git_output(source, &["status", "--porcelain"]).stdout;
+        let refreshed_state = git_source_state(source);
+        work.teardown().unwrap();
+        drop(work);
+
+        let mut events = crate::testing::Recorder::default();
+        let mut work = Workspace::prepare(&survey.root, &survey.target, &config, &mut events)
+            .expect("preparation refreshes reusable private Git metadata");
+        let output = work.cargo().arg("build").arg("--quiet").output().expect("cargo runs");
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert_eq!(fs::read_to_string(work.root.join("observed-version-inputs")).unwrap(), refreshed);
+        assert_eq!(git_source_state(source), refreshed_state, "re-preparation remains source-read-only");
+        assert_eq!(
+            git_output(source, &["status", "--porcelain"]).stdout,
+            refreshed_status,
+            "re-preparation preserves source dirtiness"
+        );
+        let mut scratch_ref = clean_git_command();
+        scratch_ref
+            .arg("-C")
+            .arg(work.root.as_str())
+            .args(["show-ref", "--verify", "refs/heads/cargo-gamma-scratch"]);
+        let scratch_ref = scratch_ref.output().expect("Git runs");
+        assert!(!scratch_ref.status.success(), "re-preparation discards scratch-only refs");
+        work.teardown().unwrap();
     }
 
     #[test]
-    fn an_external_target_preserves_git_context_for_a_checkout_and_linked_worktree() {
+    #[cfg(feature = "system-tests")]
+    fn git_metadata_private_mirror_preserves_version_inputs_and_source_state() {
         // Nested self-hosting checkouts can exceed the native linker's output-path limit.
         let directory = private_system_tempdir("git-");
         let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("UTF-8 root");
         let repository = root.join("r");
         let target = root.join("t");
-        let expected_head = initialize_git_build_fixture(&repository, &target);
+        let current_head = initialize_git_build_fixture(&repository, &target);
+        assert_private_git_metadata_preserves_inputs(&repository, &target, None, &current_head);
 
-        assert_external_target_preserves_git_context(&repository, &target, &expected_head);
-
+        let selected_head = String::from_utf8(git_output(&repository, &["rev-parse", "v1^{commit}"]).stdout)
+            .unwrap()
+            .trim()
+            .to_owned();
+        assert_ne!(selected_head, current_head);
         let worktree = root.join("w");
-        let output = Command::new("git")
+        let mut command = clean_git_command();
+        command
             .arg("-C")
-            .arg(&repository)
+            .arg(repository.as_str())
             .args(["worktree", "add", "--quiet", "--detach"])
-            .arg(&worktree)
-            .arg("HEAD")
-            .output()
-            .expect("git worktree runs");
+            .arg(worktree.as_str())
+            .arg(&selected_head);
+        let output = command.output().expect("Git worktree runs");
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-        assert_external_target_preserves_git_context(&worktree, &target, &expected_head);
+        let cache = worktree.join(".gamma-cache");
+        assert_private_git_metadata_preserves_inputs(&worktree, &target, Some(cache), &selected_head);
     }
 
     #[test]
