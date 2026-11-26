@@ -41,7 +41,12 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $nightly = & just --evaluate rust_nightly
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & cargo "+$nightly" run --release --locked --package cargo-coverage-gate --bin cargo-coverage-gate -- coverage-gate run
+          # Successful collection cleans its scratch build before the next configuration.
+          foreach ($configuration in @('all-features', 'no-default-features')) {
+            & cargo "+$nightly" run --release --locked --package cargo-coverage-gate --bin cargo-coverage-gate -- coverage-gate run --collect-only --configuration $configuration
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          & cargo "+$nightly" run --release --locked --package cargo-coverage-gate --bin cargo-coverage-gate -- coverage-gate --lcov target/coverage/lcov-all-features.info --lcov target/coverage/lcov-no-default.info
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Inspect library-test profile initialization
         if: failure()

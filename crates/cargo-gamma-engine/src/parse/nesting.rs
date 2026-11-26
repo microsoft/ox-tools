@@ -375,6 +375,7 @@ const fn is_operator(byte: u8) -> bool {
 // #[gamma::skip(parameter.default_shadow, tag = "timeout", reason = "resetting at returns endpoints from the beginning of the text and repeatedly revisits identifiers")]
 fn identifier_end(text: &str, at: usize) -> Option<usize> {
     let at = at + if text.get(at..)?.starts_with("r#") { 2 } else { 0 };
+    // #[gamma::skip(try.propagate_to_unwrap, tag = "equivalent", reason = "The preceding get(at..) already returned Some. at is unchanged or advanced over the two ASCII bytes of an existing r# prefix, so this slice is always in bounds and on a UTF-8 boundary.")]
     let mut characters = text.get(at..)?.char_indices();
     let (_, first) = characters.next()?;
 
@@ -410,6 +411,22 @@ mod tests {
     use super::super::comment::scan_comments;
     use super::super::source_file::line_starts;
     use super::*;
+
+    #[test]
+    fn raw_identifiers_preserve_byte_offsets_and_reject_incomplete_inputs() {
+        for (text, at, expected) in [
+            ("r#type!", 0, Some(6)),
+            ("xx r#café!", 3, Some(10)),
+            ("r#é", 0, Some(4)),
+            ("r#", 0, None),
+            ("r#🦀", 0, None),
+            ("r#é", 3, None),
+            ("r#é", 4, None),
+            ("r#é", 5, None),
+        ] {
+            assert_eq!(identifier_end(text, at), expected, "{text:?} at {at}");
+        }
+    }
 
     #[test]
     fn macro_keyword_prefixes_clear_pending_else_markers_and_stale_ladders() {

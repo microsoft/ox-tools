@@ -473,7 +473,7 @@ More detailed design and operational guidance is available in the
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbTNbNbpXc4x0bAjHaixWClC0bHyLeRbMqv_QbpG2Y3yWsNWxhZIGDa2NhcmdvLWFudmlsZjAuMjkuMmtjYXJnb19hbnZpbA
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbTNbNbpXc4x0bAjHaixWClC0bHyLeRbMqv_QbpG2Y3yWsNWxhZIGDa2NhcmdvLWFudmlsZjAuMjkuM2tjYXJnb19hbnZpbA
  [__link0]: https://github.com/casey/just
  [__link1]: https://rust-lang.github.io/rustfmt/
  [__link10]: https://www.conventionalcommits.org/
@@ -493,14 +493,14 @@ This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Br
  [__link23]: https://crates.io/crates/cargo-gamma
  [__link24]: https://crates.io/crates/cargo-hack
  [__link25]: https://crates.io/crates/cargo-coverage-gate
- [__link26]: https://docs.rs/cargo-anvil/0.29.2/cargo_anvil/?search=Catalog::anvil
- [__link27]: https://docs.rs/cargo-anvil/0.29.2/cargo_anvil/?search=Artifact
- [__link28]: https://docs.rs/cargo-anvil/0.29.2/cargo_anvil/fn.run_app.html
- [__link29]: https://docs.rs/cargo-anvil/0.29.2/cargo_anvil/?search=update
+ [__link26]: https://docs.rs/cargo-anvil/0.29.3/cargo_anvil/?search=Catalog::anvil
+ [__link27]: https://docs.rs/cargo-anvil/0.29.3/cargo_anvil/?search=Artifact
+ [__link28]: https://docs.rs/cargo-anvil/0.29.3/cargo_anvil/fn.run_app.html
+ [__link29]: https://docs.rs/cargo-anvil/0.29.3/cargo_anvil/?search=update
  [__link3]: https://crates.io/crates/cargo-each
- [__link30]: https://docs.rs/cargo-anvil/0.29.2/cargo_anvil/?search=UpdateOptions
- [__link31]: https://docs.rs/cargo-anvil/0.29.2/cargo_anvil/?search=UpdateIo
- [__link32]: https://docs.rs/cargo-anvil/0.29.2/cargo_anvil/?search=UpdateResult
+ [__link30]: https://docs.rs/cargo-anvil/0.29.3/cargo_anvil/?search=UpdateOptions
+ [__link31]: https://docs.rs/cargo-anvil/0.29.3/cargo_anvil/?search=UpdateIo
+ [__link32]: https://docs.rs/cargo-anvil/0.29.3/cargo_anvil/?search=UpdateResult
  [__link4]: https://crates.io/crates/cargo-sort
  [__link5]: https://crates.io/crates/cargo-heather
  [__link6]: https://crates.io/crates/cargo-ensure-no-cyclic-deps

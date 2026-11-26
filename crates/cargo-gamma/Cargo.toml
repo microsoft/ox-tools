@@ -24,12 +24,10 @@ all-features = true
 [package.metadata.cargo-udeps.ignore]
 development = ["cargo-gamma-attrs"]
 
-# The terminal adapter and entry point already exclude themselves from coverage.
-# Excluding test code leaves no coverage records for this crate.
-# Anvil runs tests through plain nextest for explicit package selections;
-# unscoped workspace runs still use llvm-cov nextest with test code excluded.
+# The cross-platform coverage matrix measures five of six production lines;
+# the uncovered line is the native terminal-detection fallback.
 [package.metadata.coverage-gate]
-min-lines-percent = 0.0
+min-lines-percent = 83.3
 
 [features]
 system-tests = ["cargo-gamma-lib/system-tests"]

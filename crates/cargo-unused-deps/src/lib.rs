@@ -45,6 +45,21 @@
 //! cargo +nightly unused-deps --package my-crate --package other-crate
 //! ```
 //!
+//! Or read the same exact specs from UTF-8 files, one per line:
+//!
+//! ```bash
+//! cargo +nightly unused-deps --package-file required.packages
+//! ```
+//!
+//! `--package-file` is repeatable and combines with `--package`, but neither can
+//! be used with `--workspace`. LF and CRLF line endings and one leading UTF-8 BOM
+//! are accepted. Empty lines are ignored; whitespace, comments, glob patterns,
+//! and command-line tokens are not supported. Nonempty whitespace-only files,
+//! missing or unreadable files, invalid UTF-8, and malformed specs fail explicitly.
+//! Paths are relative to the current directory, not `--manifest-path`.
+//! Empty files add no selectors, leaving the
+//! workspace-global catalog check (and `--fix`) active without compiling packages.
+//!
 //! Run only the workspace-global catalog check by omitting package selection:
 //!
 //! ```bash
@@ -64,8 +79,8 @@
 //!
 //! Package selection scopes the compiled evidence only. The catalog check always
 //! reads every member, because "no member inherits this entry" is only true if
-//! every member was consulted. With no `--package` or `--workspace`, no package
-//! is compiled and only that catalog check runs.
+//! every member was consulted. With no package specs or `--workspace`, no
+//! package is compiled and only that catalog check runs.
 //!
 //! # Configuration
 //!
@@ -187,8 +202,12 @@ enum Commands {
         #[arg(short = 'p', long = "package", value_name = "SPEC")]
         packages: Vec<String>,
 
+        /// Read exact package specs from a UTF-8 file, one per line. Repeatable
+        #[arg(long = "package-file", value_name = "PATH")]
+        package_files: Vec<PathBuf>,
+
         /// Gather compile evidence for every workspace member
-        #[arg(long, conflicts_with = "packages")]
+        #[arg(long, conflicts_with_all = ["packages", "package_files"])]
         workspace: bool,
 
         /// Exclude a member from a --workspace run. Repeatable
@@ -247,7 +266,7 @@ pub fn dispatch(args: &[OsString]) -> std::result::Result<ExitCode, AppError> {
         evidence::wrapper,
         doctests::rustdoc_wrapper,
         doctests::shim,
-        run,
+        || run(Cli::parse()),
     )
 }
 
@@ -278,7 +297,7 @@ fn dispatch_with(
 /// The cargo subcommand this binary answers to.
 const SUBCOMMAND: &str = "unused-deps";
 
-/// Parse the Cargo subcommand arguments and execute the requested checks.
+/// Execute the requested Cargo subcommand checks.
 ///
 /// Returns [`ExitCode::SUCCESS`] when every catalog entry is inherited or
 /// allowed and the selected package checks find no unused or misplaced
@@ -294,12 +313,20 @@ const SUBCOMMAND: &str = "unused-deps";
 /// Returns an error if a manifest cannot be read or parsed, workspace members
 /// cannot be enumerated, compiler or doctest evidence collection fails, package
 /// selectors are invalid, or a fixed manifest cannot be written back.
-fn run() -> Result<ExitCode> {
-    run_with(Cli::parse(), workspace_manifest_of, workspace_of, catalog_check, source_checks)
+fn run(cli: Cli) -> Result<ExitCode> {
+    run_with(
+        cli,
+        |path| fs::read(path),
+        workspace_manifest_of,
+        workspace_of,
+        catalog_check,
+        source_checks,
+    )
 }
 
 fn run_with(
     cli: Cli,
+    read_package_file: impl FnMut(&Path) -> std::io::Result<Vec<u8>>,
     resolve_manifest: impl FnOnce(&Path) -> Result<PathBuf>,
     load_workspace: impl FnOnce(&Path) -> Result<Workspace>,
     check_catalog: impl FnOnce(&Path, bool, bool) -> Result<ExitCode>,
@@ -308,12 +335,14 @@ fn run_with(
     let Commands::UnusedDeps {
         manifest_path,
         packages,
+        package_files,
         workspace,
         exclude,
         checks,
         fix,
         require_workspace,
     } = cli.command;
+    let packages = package_specs(packages, &package_files, read_package_file)?;
     let manifest_path = resolve_manifest(&manifest_path)?;
 
     let package_context = if package_checks_selected(&packages, workspace) {
@@ -344,6 +373,51 @@ fn run_with(
 /// Whether the caller requested compiler-backed package checks.
 fn package_checks_selected(packages: &[String], workspace: bool) -> bool {
     !packages.is_empty() || workspace
+}
+
+fn package_specs(
+    mut packages: Vec<String>,
+    package_files: &[PathBuf],
+    mut read: impl FnMut(&Path) -> std::io::Result<Vec<u8>>,
+) -> Result<Vec<String>> {
+    for path in package_files {
+        let bytes = read(path).into_app_err(format!(
+            "failed to read package file {}; supply a readable UTF-8 file with one package spec per line",
+            path.display()
+        ))?;
+        let contents = String::from_utf8(bytes).into_app_err(format!(
+            "package file {} is not valid UTF-8; save it as UTF-8 with one package spec per line",
+            path.display()
+        ))?;
+        let contents = contents.strip_prefix('\u{feff}').unwrap_or(&contents);
+        let initial_count = packages.len();
+        for (index, line) in contents.lines().enumerate() {
+            if line.is_empty() {
+                continue;
+            }
+            let (name, version) = line.split_once('@').map_or((line, None), |(name, version)| (name, Some(version)));
+            if name.is_empty()
+                || name.starts_with('-')
+                || !name.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+                || line.chars().any(char::is_whitespace)
+                || version.is_some_and(|version| version.is_empty() || version.contains('@'))
+            {
+                ohno::bail!(
+                    "invalid package spec in {} at line {}: {line:?}; expected an exact package name or name@version, without whitespace, comments, glob patterns, or command-line tokens",
+                    path.display(),
+                    index + 1
+                );
+            }
+            packages.push(line.to_owned());
+        }
+        if !contents.is_empty() && packages.len() == initial_count {
+            ohno::bail!(
+                "package file {} contains whitespace but no package specs; use an empty file for catalog-only checks or supply one exact package spec per line",
+                path.display()
+            );
+        }
+    }
+    Ok(packages)
 }
 
 /// Resolve any member manifest to the root manifest Cargo associates with it.
@@ -1062,10 +1136,125 @@ mod source_campaign_tests {
     }
 
     #[test]
+    fn package_file_reader_rejects_malformed_disk_input_before_checks_or_fixing() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let cli = Cli::try_parse_from([
+            OsString::from("cargo"),
+            SUBCOMMAND.into(),
+            "--package-file".into(),
+            path.as_os_str().to_owned(),
+            "--fix".into(),
+        ])
+        .expect("package-file supports --fix");
+        let error = run(cli).expect_err("a Cargo manifest is not a package selection file");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "invalid package spec in {} at line 1: \"# Copyright (c) Microsoft Corporation.\"; expected an exact package name or name@version, without whitespace, comments, glob patterns, or command-line tokens",
+                path.display()
+            )
+        );
+    }
+
+    #[test]
+    fn empty_package_files_preserve_catalog_results_and_fix_without_compiling() {
+        for fix in [false, true] {
+            for status in [ExitCode::SUCCESS, ExitCode::FAILURE] {
+                let mut args = vec!["cargo", SUBCOMMAND, "--package-file", "required.packages", "--require-workspace"];
+                if fix {
+                    args.push("--fix");
+                }
+                let result = run_with(
+                    Cli::try_parse_from(args).expect("package-file supports catalog options"),
+                    |path| {
+                        assert_eq!(path, Path::new("required.packages"));
+                        Ok(Vec::new())
+                    },
+                    |_| Ok("resolved.toml".into()),
+                    |_| panic!("empty package files must not load compiler workspace context"),
+                    |path, actual_fix, require_workspace| {
+                        assert_eq!(path, Path::new("resolved.toml"));
+                        assert_eq!(actual_fix, fix);
+                        assert!(require_workspace);
+                        Ok(status)
+                    },
+                    |_, _, _, _, _| panic!("empty package files must not compile packages"),
+                )
+                .expect("the global catalog check completes");
+                assert_eq!(result, status);
+            }
+        }
+    }
+
+    #[test]
+    fn package_files_combine_with_direct_selectors_and_reject_unknown_members_before_fixing() {
+        for file_spec in ["fixture@1.2.3", "missing"] {
+            let result = run_with(
+                Cli::try_parse_from([
+                    "cargo",
+                    SUBCOMMAND,
+                    "--package",
+                    "fixture",
+                    "--package-file",
+                    "required.packages",
+                    "--fix",
+                ])
+                .expect("direct and file selectors combine"),
+                |_| Ok(format!("{file_spec}\n").into_bytes()),
+                |_| Ok("resolved.toml".into()),
+                |_| Ok(workspace(vec![package("fixture", true)])),
+                |_, fix, _| {
+                    assert_eq!(file_spec, "fixture@1.2.3", "invalid selectors must stop before fixing");
+                    assert!(fix);
+                    Ok(ExitCode::SUCCESS)
+                },
+                |_, flags, workspace, selected, _| {
+                    assert_eq!(flags, ["--package", "fixture", "--package", file_spec].map(OsString::from));
+                    assert_eq!(selected, &BTreeSet::from([workspace.packages[0].manifest_path.clone()]));
+                    Ok(false)
+                },
+            );
+            if file_spec == "missing" {
+                assert!(
+                    result
+                        .expect_err("unknown file selectors must fail")
+                        .to_string()
+                        .contains("missing")
+                );
+            } else {
+                assert_eq!(result.expect("file selection runs source checks"), ExitCode::SUCCESS);
+            }
+        }
+    }
+
+    #[test]
+    fn blank_line_only_package_files_fail_before_any_check_or_fix() {
+        for contents in ["\n", "\r\n\r\n"] {
+            let result = run_with(
+                Cli::try_parse_from(["cargo", SUBCOMMAND, "--package-file", "required.packages", "--fix"])
+                    .expect("package-file supports --fix"),
+                |_| Ok(contents.as_bytes().to_vec()),
+                |_| panic!("invalid package files must stop before reading manifests"),
+                |_| panic!("invalid package files must not load compiler context"),
+                |_, _, _| panic!("invalid package files must not check or fix the catalog"),
+                |_, _, _, _, _| panic!("invalid package files must not compile packages"),
+            );
+            let error = result.expect_err("nonempty whitespace-only files must not become empty selections");
+            assert!(
+                error
+                    .to_string()
+                    .contains("required.packages contains whitespace but no package specs"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
     fn run_preserves_all_error_boundaries_and_combines_catalog_and_source_findings() {
         for failing_stage in 0..5 {
             let result = run_with(
                 cli(if failing_stage == 2 { "missing" } else { "fixture" }),
+                |_| panic!("no package file was supplied"),
                 |_| {
                     if failing_stage == 0 {
                         Err(ohno::app_err!("root failed"))
@@ -1107,6 +1296,7 @@ mod source_campaign_tests {
             for source_failed in [false, true] {
                 let result = run_with(
                     cli("fixture"),
+                    |_| panic!("no package file was supplied"),
                     |_| Ok("resolved.toml".into()),
                     |_| Ok(workspace(vec![package("fixture", true)])),
                     |_, _, _| Ok(if catalog_failed { ExitCode::FAILURE } else { ExitCode::SUCCESS }),
@@ -1563,9 +1753,115 @@ mod source_campaign_tests {
 mod selection_tests {
     use std::collections::BTreeSet;
     use std::ffi::OsString;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
-    use super::{Check, PackageSelection, resolve_selectors, verdict};
+    use clap::Parser;
+
+    use super::{Check, Cli, PackageSelection, package_specs, resolve_selectors, verdict};
+
+    #[test]
+    fn package_files_accept_line_endings_bom_and_multiple_inputs_without_trimming_specs() {
+        let files = ["first.packages", "second.packages"].map(PathBuf::from);
+        let packages = package_specs(vec!["direct".into()], &files, |path| {
+            Ok(if path == files[0] {
+                "\u{feff}alpha\r\n\r\nbeta@1.2.3\r\n".as_bytes().to_vec()
+            } else {
+                assert_eq!(path, files[1]);
+                b"\ngamma-delta\ngamma_delta\n".to_vec()
+            })
+        })
+        .expect("valid file sources combine");
+        assert_eq!(packages, ["direct", "alpha", "beta@1.2.3", "gamma-delta", "gamma_delta"]);
+    }
+
+    #[test]
+    fn package_file_errors_identify_the_input_and_malformed_line() {
+        let files = [PathBuf::from("required.packages")];
+        for spec in [
+            " ",
+            "\t",
+            " alpha",
+            "alpha ",
+            "alpha beta",
+            "#comment",
+            "--workspace",
+            "alpha*",
+            "alpha?",
+            "@1",
+            "alpha@",
+            "alpha@1@2",
+            "alpha@1.2.3 ",
+            "alpha@1. 2.3",
+            "alpha@1.2.3\u{a0}",
+            "alpha\u{a0}",
+            "\u{feff}alpha",
+        ] {
+            let error =
+                package_specs(Vec::new(), &files, |_| Ok(format!("valid\n{spec}\n").into_bytes())).expect_err("malformed lines must fail");
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "invalid package spec in required.packages at line 2: {spec:?}; expected an exact package name or name@version, without whitespace, comments, glob patterns, or command-line tokens"
+                )
+            );
+        }
+        let error = package_specs(Vec::new(), &files, |_| Ok(vec![0xff])).expect_err("invalid UTF-8 must fail");
+        assert_eq!(
+            error.to_string().split(" (at ").next(),
+            Some(
+                "invalid utf-8 sequence of 1 bytes from index 0\n> package file required.packages is not valid UTF-8; save it as UTF-8 with one package spec per line"
+            )
+        );
+        for kind in [std::io::ErrorKind::NotFound, std::io::ErrorKind::PermissionDenied] {
+            let error = package_specs(Vec::new(), &files, |path| {
+                assert_eq!(path, Path::new("required.packages"));
+                Err(std::io::Error::new(kind, "injected read failure"))
+            })
+            .expect_err("missing and unreadable files must fail");
+            assert_eq!(
+                error.to_string().split(" (at ").next(),
+                Some(
+                    "injected read failure\n> failed to read package file required.packages; supply a readable UTF-8 file with one package spec per line"
+                )
+            );
+            assert_eq!(error.message(), "injected read failure");
+        }
+    }
+
+    #[test]
+    fn package_file_cli_preserves_workspace_conflicts_and_requires_a_path() {
+        Cli::try_parse_from([
+            "cargo",
+            "unused-deps",
+            "--package-file",
+            "first.packages",
+            "--package-file",
+            "second.packages",
+            "-p",
+            "direct",
+        ])
+        .expect("package files are repeatable and combine with direct packages");
+        for (args, kind, argument) in [
+            (
+                vec!["--package-file", "required.packages", "--workspace"],
+                clap::error::ErrorKind::ArgumentConflict,
+                "--package-file <PATH>",
+            ),
+            (
+                vec!["--package-file"],
+                clap::error::ErrorKind::InvalidValue,
+                "--package-file <PATH>",
+            ),
+        ] {
+            let error =
+                Cli::try_parse_from(["cargo", "unused-deps"].into_iter().chain(args)).expect_err("invalid selector combinations must fail");
+            assert_eq!(error.kind(), kind);
+            assert_eq!(
+                error.get(clap::error::ContextKind::InvalidArg),
+                Some(&clap::error::ContextValue::String(argument.into()))
+            );
+        }
+    }
 
     #[test]
     fn version_qualified_selectors_resolve_and_errors_are_propagated() {
