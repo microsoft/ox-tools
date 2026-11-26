@@ -3,16 +3,19 @@
 
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
-//! Cargo release utilities.
+//! Anvil Release Kit (ARK) provides tools for Rust release workflows through `cargo ark`.
 //!
-//! From a workspace, pass a JSON array of release candidates on standard input
-//! to test what ships in their `.crate` archives:
+//! # Release dependency validation
+//!
+//! `cargo ark release-dependencies` checks whether the selected packages build and
+//! pass their shipped tests from their `.crate` archives. Run it from the workspace
+//! and pass the candidates as a JSON array on standard input:
 //!
 //! ```sh
 //! echo '[{"name":"my-crate","new_version":"1.2.0"}]' | cargo ark release-dependencies
 //! ```
 //!
-//! Ark runs the shipped tests with all features and with no default features.
+//! The command runs each package's tests with all features and with no default features.
 //! It does not discover candidates or publish packages.
 
 use std::path::PathBuf;
