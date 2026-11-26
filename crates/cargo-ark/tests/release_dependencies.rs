@@ -17,6 +17,26 @@ const ONLY_CONSUMER_BUMPED: &str = r#"[
 ]"#;
 
 #[test]
+fn handles_discovery_input_before_looking_for_a_workspace() -> io::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut command = Command::new(env!("CARGO_BIN_EXE_cargo-ark"));
+    command.arg("release-dependencies").current_dir(temp.path());
+    let empty = run_report(&mut command, "[]")?;
+    assert!(empty.status.success(), "{empty:?}");
+    assert!(
+        String::from_utf8_lossy(&empty.stdout).contains("no release candidates"),
+        "{empty:?}"
+    );
+
+    let invalid = run_report(&mut command, r#"[{"name":"ark-fixture-peer"}]"#)?;
+    assert_error(&invalid, "candidate is missing its version");
+
+    let no_workspace = run_report(&mut command, BOTH_BUMPED)?;
+    assert_error(&no_workspace, "locating the Cargo workspace failed");
+    Ok(())
+}
+
+#[test]
 fn validates_shipped_tests_and_reports_release_failures() -> io::Result<()> {
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().join("workspace");
@@ -33,30 +53,46 @@ fn validates_shipped_tests_and_reports_release_failures() -> io::Result<()> {
     assert!(stdout.contains("archive_all ... ok"), "{stdout}");
     assert!(stdout.contains("archive_none ... ok"), "{stdout}");
 
+    let internal_scratch = run_report(&mut ark_command(&workspace, &workspace)?, BOTH_BUMPED)?;
+    assert_error(&internal_scratch, "select a temporary directory outside the source workspace");
+
+    let stale_report = r#"[{"name":"ark-fixture-peer","new_version":"0.1.0"}]"#;
+    let stale = ark(&workspace, stale_report, false)?;
+    assert_error(&stale, "cargo package for release candidates failed");
+    assert!(
+        String::from_utf8_lossy(&stale.stderr).contains("ark-fixture-peer@0.1.0"),
+        "{stale:?}"
+    );
+
     let failure = ark(&workspace, BOTH_BUMPED, true)?;
     let stdout = String::from_utf8_lossy(&failure.stdout);
-    let stderr = String::from_utf8_lossy(&failure.stderr);
-    assert!(!failure.status.success(), "{stdout}");
+    assert_error(
+        &failure,
+        "ark-fixture-consumer: cargo test --no-default-features from package archive failed",
+    );
     assert!(stdout.contains("archive_all ... ok"), "{stdout}");
     assert!(stdout.contains("deliberately failing shipped test"), "{stdout}");
-    assert!(
-        stderr.contains("cargo test --no-default-features from package archive failed"),
-        "{stderr}"
-    );
 
     let peer = workspace.join("peer/Cargo.toml");
     let manifest = fs::read_to_string(&peer)?;
     fs::write(&peer, manifest.replace("0.1.1", "0.1.0"))?;
     let missing = ark(&workspace, ONLY_CONSUMER_BUMPED, false)?;
     let stderr = String::from_utf8_lossy(&missing.stderr);
-    assert!(!missing.status.success(), "{stderr}");
-    assert!(stderr.contains("cargo package for release candidates failed"), "{stderr}");
+    assert_error(&missing, "cargo package for release candidates failed");
     assert!(stderr.contains("ark-fixture-peer") && stderr.contains("0.1.1"), "{stderr}");
     Ok(())
 }
 
 fn ark(workspace: &Path, report: &str, fail_shipped_test: bool) -> io::Result<Output> {
     let home = tempfile::tempdir()?;
+    let mut command = ark_command(workspace, home.path())?;
+    if fail_shipped_test {
+        command.env("ARK_FIXTURE_FAIL_TEST", "1");
+    }
+    run_report(&mut command, report)
+}
+
+fn ark_command(workspace: &Path, home: &Path) -> io::Result<Command> {
     // Keep using the test's toolchain after leaving its workspace and Cargo home.
     let path = env::join_paths(
         Path::new(env!("CARGO"))
@@ -69,24 +105,29 @@ fn ark(workspace: &Path, report: &str, fail_shipped_test: bool) -> io::Result<Ou
     let mut command = Command::new(env!("CARGO_BIN_EXE_cargo-ark"));
     command
         .args(["ark", "release-dependencies", "--temp-dir"])
-        .arg(home.path())
+        .arg(home)
         .current_dir(workspace)
         .env("PATH", path)
-        .env("CARGO_HOME", home.path())
+        .env("CARGO_HOME", home)
         .env("CARGO_NET_OFFLINE", "true")
         .env("CARGO_TERM_COLOR", "never")
-        .env_remove("ARK_FIXTURE_FAIL_TEST")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    if fail_shipped_test {
-        command.env("ARK_FIXTURE_FAIL_TEST", "1");
-    }
+        .env_remove("ARK_FIXTURE_FAIL_TEST");
+    Ok(command)
+}
+
+fn run_report(command: &mut Command, report: &str) -> io::Result<Output> {
+    command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = command.spawn()?;
     if let Some(mut stdin) = child.stdin.take() {
         stdin.write_all(report.as_bytes())?;
     }
     child.wait_with_output()
+}
+
+fn assert_error(output: &Output, message: &str) {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains(&format!("cargo ark release-dependencies: {message}")), "{stderr}");
 }
 
 fn copy_fixture(source: &Path, destination: &Path) -> io::Result<()> {
