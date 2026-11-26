@@ -400,7 +400,9 @@ Assert-Equal 'anvil-fmt succeeds inside the container' 0 $firstRun.ExitCode
 Assert-That 'the run reported building the image' ($firstRun.StdErr -match 'building .*(inputs changed|first run)')
 Assert-That 'image is present afterwards' (Test-ImagePresent $reference)
 
-$checkoutCompiler = Invoke-Just -Repo $repo -Arguments @('anvil-container', 'rustc', '--version')
+$checkoutCompiler = Invoke-Just -Repo $repo -Arguments @(
+    'anvil-container', 'env', 'RUSTUP_AUTO_INSTALL=0', 'rustc', '--version'
+)
 Assert-Equal 'the checkout toolchain runs with automatic installation disabled' 0 $checkoutCompiler.ExitCode
 Assert-That 'the checkout toolchain overrides the root MSRV' `
     ($checkoutCompiler.StdOut -match 'rustc 1\.95\.\d+') "$($checkoutCompiler.StdOut)$($checkoutCompiler.StdErr)"
