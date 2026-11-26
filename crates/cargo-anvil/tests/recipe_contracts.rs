@@ -127,9 +127,10 @@ fn unused_deps_keeps_scope_and_fixes_explicit() {
 
 #[test]
 fn unused_deps_runs_immediately_before_udeps_in_pr_fast() {
-    let generated = generated();
     assert!(
-        generated.groups.contains("    anvil-unused-deps \\\n    anvil-udeps \\\n"),
+        cargo_anvil::artifacts::justfile::groups::pr_fast()
+            .body()
+            .contains("    anvil-unused-deps \\\n    anvil-udeps \\\n"),
         "execution order must keep unused-deps immediately before udeps"
     );
 }
