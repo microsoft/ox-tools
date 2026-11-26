@@ -18,6 +18,12 @@ effective value. The top-level boundary maps help and success to `0`, usage to
 `1`, failed score or source-expectation gates to `2`, inability to proceed to
 `3`, and an uncaught internal panic to `70`.
 
+The executable integrates `rallocator` on Linux and Windows; other hosts,
+including macOS, use the system allocator without adding another platform
+dependency. This selection affects only the coordinator, not the binaries under
+test. Cargo-gamma maintains no allocator benchmarks or performance comparisons,
+so the platform selection is not a relative-performance claim.
+
 ## Scratch layout
 
 The coordinator synchronizes sources and vendors the dependency-free guard
@@ -53,6 +59,18 @@ Artifact publication is separate from the cache, and `--artifact-dir` moves
 the complete user-facing set.
 
 ## Source evidence
+
+One survey retains declaration evidence for its lifetime, keyed by source path
+and package (whose selected configuration is fixed). Package scans merge this
+evidence rather than repeatedly parsing shared dependency declarations.
+Mutation scans still read their selected source to produce edits; cached
+evidence carries its original digest and is rejected if that source changed.
+Scratch-source validation also compares every participating declaration digest
+before instrumentation. Source-directory inventories and per-scan physical
+path identities are reused without changing population or ordinal order.
+The complete metadata graph supplies both resource dependencies and incremental
+cache provenance; incremental discovery does not load it a second time.
+Non-incremental graph resolution retains its offline requirement.
 
 Nested method inference carries the receiver's frozen type, declaration scope and
 import snapshot together. These facts live only for the current query, and method

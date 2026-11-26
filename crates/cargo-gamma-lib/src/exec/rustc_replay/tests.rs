@@ -17,7 +17,20 @@ struct MemoryFiles(RefCell<BTreeMap<Utf8PathBuf, Vec<u8>>>);
 
 impl MemoryFiles {
     fn put(&self, path: impl Into<Utf8PathBuf>, bytes: impl AsRef<[u8]>) {
-        let _previous = self.0.borrow_mut().insert(path.into(), bytes.as_ref().to_vec());
+        let path = path.into();
+        let mut files = self.0.borrow_mut();
+        if let Ok(record) = serde_json::from_slice::<Record>(bytes.as_ref())
+            && let Some(directory) = path.parent()
+        {
+            let index = OutputIndex {
+                record: path.file_name().unwrap().to_owned(),
+                source: record.source,
+            };
+            for (output, _) in record.outputs {
+                let _previous = files.insert(output_index(directory, &output), serde_json::to_vec(&index).unwrap());
+            }
+        }
+        let _previous = files.insert(path, bytes.as_ref().to_vec());
     }
 }
 
@@ -36,6 +49,129 @@ impl Files for MemoryFiles {
                 .collect(),
         )
     }
+}
+
+struct CountedFiles<'a> {
+    inner: &'a MemoryFiles,
+    reads: RefCell<BTreeMap<Utf8PathBuf, usize>>,
+}
+
+impl Files for CountedFiles<'_> {
+    fn read(&self, path: &Utf8Path) -> Option<Vec<u8>> {
+        *self.reads.borrow_mut().entry(path.to_owned()).or_default() += 1;
+        self.inner.read(path)
+    }
+
+    fn files(&self, root: &Utf8Path, excluded: &Utf8Path) -> Option<Vec<Utf8PathBuf>> {
+        self.inner.files(root, excluded)
+    }
+}
+
+#[test]
+fn each_snapshot_reads_shared_toolchain_sources_and_externs_only_once() {
+    let (files, consumer, _dependency, _record) = regressions::dependency_fixture();
+    files.put(consumer.captures.join("unrelated.json"), b"an interrupted unrelated record");
+    let counted = CountedFiles {
+        inner: &files,
+        reads: RefCell::default(),
+    };
+    assert!(consumer.borrowed().snapshot(&counted, Vec::new(), Vec::new()).is_some());
+    for (path, reads) in counted.reads.borrow().iter() {
+        assert_eq!(*reads, 1, "{path}");
+    }
+    assert!(!counted.reads.borrow().contains_key(&consumer.captures.join("unrelated.json")));
+}
+
+#[test]
+fn a_stale_record_uses_two_snapshots_and_an_unclosable_unit_uses_only_one() {
+    let (files, unit) = fixture("snapshot-count");
+    let mut previous = unit.borrowed().snapshot(&files, Vec::new(), Vec::new()).unwrap();
+    previous.inventory = [99; 32];
+    let counted = CountedFiles {
+        inner: &files,
+        reads: RefCell::default(),
+    };
+    execute(&unit.borrowed(), &counted, Some(&previous), || Ok(success()), |_| {}, |_, _| Ok(())).unwrap();
+    assert_eq!(
+        counted.reads.borrow()[&unit.compiler],
+        2,
+        "one independent observation on each side of rustc"
+    );
+
+    files.put(&unit.invocation.source, b"extern crate unknown;");
+    let counted = CountedFiles {
+        inner: &files,
+        reads: RefCell::default(),
+    };
+    execute(
+        &unit.borrowed(),
+        &counted,
+        None,
+        || Ok(success()),
+        |_| panic!("unclosed input cannot publish"),
+        |_, _| Ok(()),
+    )
+    .unwrap();
+    assert_eq!(
+        counted.reads.borrow()[&unit.invocation.source],
+        1,
+        "there is no pointless after-snapshot"
+    );
+    assert!(!counted.reads.borrow().contains_key(&unit.compiler));
+}
+
+#[test]
+fn dynamic_cargo_output_declines_before_opening_any_capture_or_hashing_any_input() {
+    struct NoFiles;
+    impl Files for NoFiles {
+        fn read(&self, _: &Utf8Path) -> Option<Vec<u8>> {
+            panic!("no captures or input bytes may be opened");
+        }
+        fn files(&self, _: &Utf8Path, _: &Utf8Path) -> Option<Vec<Utf8PathBuf>> {
+            panic!("no capture inventory is needed");
+        }
+    }
+    let (_, unit) = fixture("unsealable");
+    for stdout in [
+        r#"{"reason":"build-script-executed"}"#,
+        r#"{"reason":"compiler-artifact","filenames":["unit.rlib"]}"#,
+        "",
+    ] {
+        assert!(source_only_context_with(&NoFiles, &unit.captures, stdout, &unit.root, &unit.target, None).is_none());
+    }
+}
+
+#[test]
+fn streamed_stamps_keep_short_headers_exact_and_decline_growth_or_read_failure() {
+    struct OneByte<'a>(&'a [u8]);
+    impl io::Read for OneByte<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let count = buf.len().min(self.0.len()).min(1);
+            buf[..count].copy_from_slice(&self.0[..count]);
+            self.0 = &self.0[count..];
+            Ok(count)
+        }
+    }
+    struct Broken;
+    impl io::Read for Broken {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "read failed"))
+        }
+    }
+    for bytes in [&b"rust"[..], &b"!<arch>\narchive"[..], &b""[..]] {
+        assert_eq!(stamp_reader(OneByte(bytes), bytes.len() as u64).unwrap(), FileStamp::of(bytes));
+    }
+    let growth = stamp_reader(OneByte(b"grew"), 3).unwrap_err();
+    assert_eq!(growth.get_ref().unwrap().downcast_ref::<SnapshotLimitExceeded>().unwrap().limit, 3);
+    let read = stamp_reader(Broken, 64).unwrap_err();
+    assert_eq!(read.kind(), io::ErrorKind::BrokenPipe);
+    assert_eq!(read.to_string(), "read failed");
+    let overflow = stamp_reader(Broken, u64::MAX).unwrap_err();
+    assert_eq!(
+        overflow.get_ref().unwrap().downcast_ref::<SnapshotLimitExceeded>().unwrap().limit,
+        u64::MAX,
+        "an unrepresentable lookahead must report the requested limit before reading"
+    );
 }
 
 #[test]

@@ -7,7 +7,9 @@
 //! units. Only successful metadata compilations with an unchanged, closed input snapshot can avoid
 //! starting rustc. Replaying rustc's streams through Cargo preserves Cargo diagnostic attribution.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 use std::ffi::OsString;
 #[cfg(not(test))]
 use std::fs;
@@ -32,10 +34,16 @@ pub(super) const ROOT_VAR: &str = "CARGO_GAMMA_RUSTC_REPLAY_ROOT";
 pub(super) const TARGET_VAR: &str = "CARGO_GAMMA_RUSTC_REPLAY_TARGET";
 /// Cargo writes to a pipe; the display truncates this fixed width to the actual terminal width.
 pub(super) const PROGRESS_WIDTH: usize = 100;
+/// Bounds recursive graph inspection for large workspaces/toolchains; exceeding it declines reuse.
 const MAX_FILES: usize = 100_000;
+/// Bounds one input's capture cost while admitting large compiler libraries; exhaustion declines reuse.
 const MAX_FILE_BYTES: u64 = 512 * 1024 * 1024;
+/// Maximum compiler output retained per stream for replay.
+///
+/// Larger streams are forwarded in full but never published for replay.
 const MAX_STREAM_BYTES: usize = 4 * 1024 * 1024;
 mod runtime;
+
 pub(super) const RUNTIME_VAR: &str = "CARGO_GAMMA_RUSTC_REPLAY_RUNTIME";
 pub(super) const COMMAND_VAR: &str = "CARGO_GAMMA_RUSTC_COMMAND";
 
@@ -51,6 +59,52 @@ pub(super) struct Record {
     source: Utf8PathBuf,
     externs: Vec<Utf8PathBuf>,
     searches: Vec<(Utf8PathBuf, [u8; 32])>,
+}
+
+/// Maps an exact output path to a candidate local capture, not proof it produced that artifact.
+///
+/// Replay must still validate the record, requested output, and current file stamps.
+#[derive(Serialize, Deserialize)]
+struct OutputIndex {
+    record: String,
+    source: Utf8PathBuf,
+}
+
+fn output_index(directory: &Utf8Path, output: &Utf8Path) -> Utf8PathBuf {
+    directory
+        .join("outputs")
+        .join(blake3::hash(output.as_str().as_bytes()).to_hex().as_str())
+}
+
+fn publish_record(directory: &Utf8Path, path: &Utf8Path, record: &Record) -> io::Result<()> {
+    // #[gamma::skip(try.propagate_to_unwrap, tag = "equivalent", reason = "Record serialization contains only UTF-8 paths, strings, integers, byte arrays, vectors, and options.")]
+    let bytes = serde_json::to_vec(record).map_err(io::Error::other)?;
+    // Indexes must never lead their target. A missing index deliberately declines dependency reuse;
+    // a complete record remains usable even if an auxiliary index cannot be published.
+    publish_atomic(path, &bytes)?;
+    let index = OutputIndex {
+        record:
+        // #[gamma::skip(try.propagate_to_unwrap, literal.str_to_empty, literal.str_to_xyzzy, tag = "equivalent", reason = "The caller constructs this path from an owned capture directory and a digest filename.")]
+        path
+            .file_name()
+            .ok_or_else(|| io::Error::other("replay record has no filename"))?
+            .to_owned(),
+        source: record.source.clone(),
+    };
+    // #[gamma::skip(try.propagate_to_unwrap, tag = "equivalent", reason = "OutputIndex serialization contains only UTF-8 paths and strings.")]
+    let bytes = serde_json::to_vec(&index).map_err(io::Error::other)?;
+    for (output, _) in &record.outputs {
+        publish_atomic(&output_index(directory, output), &bytes)?;
+    }
+    Ok(())
+}
+
+fn publish_atomic(path: &Utf8Path, bytes: &[u8]) -> io::Result<()> {
+    #[cfg(test)]
+    if snapshot_io::active() {
+        return snapshot_io::write(path, bytes);
+    }
+    super::rustc_wrapper::publish_atomic(path, bytes)
 }
 
 pub(super) fn unambiguous_path(path: &Utf8Path) -> bool {
@@ -84,27 +138,19 @@ pub(super) fn command_fingerprint(command: &Command, inherited: impl IntoIterato
         }
     }
     let mut hash = blake3::Hasher::new();
-    // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
     part(&mut hash, command.get_program().to_str()?.as_bytes());
-    // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
     part(&mut hash, command.get_current_dir()?.to_str()?.as_bytes());
     // #[gamma::skip(call.replace_with_default, stmt.delete_call, tag = "equivalent", reason = "Length-prefixed arguments and the NUL-bearing native environment count already delimit the argument boundary; exact digest bytes are not a public contract.")]
-    // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
     part(&mut hash, &(command.get_args().count() as u64).to_le_bytes());
     for argument in command.get_args() {
-        // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
         part(&mut hash, argument.to_str()?.as_bytes());
     }
     // #[gamma::skip(call.replace_with_default, stmt.delete_call, tag = "equivalent", reason = "The argument count and length-prefixed name/value pairs already delimit the environment; this fixed marker only changes opaque digest encoding.")]
-    // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
     part(&mut hash, b"environment");
     // #[gamma::skip(call.replace_with_default, stmt.delete_call, tag = "equivalent", reason = "The explicit argument count and length-prefixed environment pairs already delimit all fields without this count.")]
-    // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
     part(&mut hash, &(environment.len() as u64).to_le_bytes());
     for (name, value) in environment {
-        // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
         part(&mut hash, name.as_bytes());
-        // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
         part(&mut hash, value.as_bytes());
     }
     Some(*hash.finalize().as_bytes())
@@ -118,14 +164,148 @@ trait Files {
     fn read(&self, path: &Utf8Path) -> Option<Vec<u8>>;
     /// Returns every regular file recursively, declining symlinks and unreadable entries.
     fn files(&self, root: &Utf8Path, excluded: &Utf8Path) -> Option<Vec<Utf8PathBuf>>;
+
+    fn stamp(&self, path: &Utf8Path) -> Option<FileStamp> {
+        Some(FileStamp::of(&self.read(path)?))
+    }
 }
 
 struct NativeFiles;
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+struct FileStamp {
+    digest: [u8; 32],
+    prefix: [u8; 8],
+    length: u64,
+}
+
+impl FileStamp {
+    fn of(bytes: &[u8]) -> Self {
+        let mut prefix = [0; 8];
+        let length = bytes.len().min(prefix.len());
+        prefix[..length].copy_from_slice(&bytes[..length]);
+        Self {
+            digest: *blake3::hash(bytes).as_bytes(),
+            prefix,
+            length: bytes.len() as u64,
+        }
+    }
+}
+
+#[ohno::error]
+#[display("compiler snapshot exceeds its capture limit of {limit} bytes")]
+struct SnapshotLimitExceeded {
+    limit: u64,
+}
+
+fn stamp_reader(reader: impl io::Read, limit: u64) -> io::Result<FileStamp> {
+    // #[gamma::skip(literal.int_increment, tag = "equivalent", reason = "The production limit permits checked lookahead; either lookahead rejects oversized files at length greater than limit.")]
+    let mut reader = reader.take(
+        limit
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other(SnapshotLimitExceeded::new(limit)))?,
+    );
+    let mut hasher = blake3::Hasher::new();
+    let mut prefix = [0; 8];
+    let mut length = 0_u64;
+    let mut buffer = [
+        // #[gamma::skip(literal.int_increment, tag = "equivalent", reason = "File reads overwrite every buffer byte subsequently included in the prefix or digest.")]
+        0; 16 * 1024
+    ];
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            // #[gamma::skip(loop.break_to_continue, tag = "timeout", reason = "EOF remains EOF; continuing instead of finishing repeats reads forever.")]
+            break;
+        }
+        if
+        // #[gamma::skip(relational.lt_to_le, literal.int_increment, tag = "equivalent", reason = "At length eight the prefix copy has count zero, so including that boundary changes no bytes.")]
+        length < 8 {
+            // #[gamma::skip(try.propagate_to_unwrap, tag = "equivalent", reason = "The guard bounds length below eight, which fits usize on every supported target.")]
+            let offset = usize::try_from(length).map_err(io::Error::other)?;
+            let count = read.min(8 - offset);
+            prefix[offset..offset + count].copy_from_slice(&buffer[..count]);
+        }
+        length += read as u64;
+        if length > limit {
+            return Err(io::Error::other(SnapshotLimitExceeded::new(limit)));
+        }
+        let _hash = hasher.update(&buffer[..read]);
+    }
+    Ok(FileStamp {
+        digest: *hasher.finalize().as_bytes(),
+        prefix,
+        length,
+    })
+}
+
+type DirectoryListings = BTreeMap<(Utf8PathBuf, Utf8PathBuf), Option<Vec<Utf8PathBuf>>>;
+
+/// One observation only: before- and after-build snapshots must never share these stamps.
+struct SnapshotFiles<'a, F> {
+    inner: &'a F,
+    stamps: RefCell<BTreeMap<Utf8PathBuf, Option<FileStamp>>>,
+    listings: RefCell<DirectoryListings>,
+}
+
+impl<'a, F: Files> SnapshotFiles<'a, F> {
+    fn new(inner: &'a F) -> Self {
+        Self {
+            inner,
+            stamps: RefCell::new(BTreeMap::new()),
+            listings: RefCell::new(BTreeMap::new()),
+        }
+    }
+}
+
+impl<F: Files> Files for SnapshotFiles<'_, F> {
+    fn read(&self, path: &Utf8Path) -> Option<Vec<u8>> {
+        let bytes = self.inner.read(path)?;
+        let _previous = self.stamps.borrow_mut().insert(path.to_owned(), Some(FileStamp::of(&bytes)));
+        Some(bytes)
+    }
+
+    fn stamp(&self, path: &Utf8Path) -> Option<FileStamp> {
+        if let Some(stamp) = self.stamps.borrow().get(path) {
+            return *stamp;
+        }
+        let stamp = self.inner.stamp(path);
+        let _previous = self.stamps.borrow_mut().insert(path.to_owned(), stamp);
+        stamp
+    }
+
+    fn files(&self, root: &Utf8Path, excluded: &Utf8Path) -> Option<Vec<Utf8PathBuf>> {
+        let key = (root.to_owned(), excluded.to_owned());
+        if let Some(paths) = self.listings.borrow().get(&key) {
+            return paths.clone();
+        }
+        let paths = self.inner.files(root, excluded);
+        let _previous = self.listings.borrow_mut().insert(key, paths.clone());
+        paths
+    }
+}
 
 pub(super) fn read_snapshot(path: impl AsRef<Utf8Path>) -> io::Result<Vec<u8>> {
     let file = fs::File::open(path.as_ref())?;
     let length = file.metadata()?.len();
     read_snapshot_with(file, length, MAX_FILE_BYTES)
+}
+
+pub(super) fn digest_snapshot(path: &Utf8Path) -> io::Result<[u8; 32]> {
+    snapshot_stamp(path).map(|stamp| stamp.digest)
+}
+
+fn snapshot_stamp(path: &Utf8Path) -> io::Result<FileStamp> {
+    let file = fs::File::open(path)?;
+    let length = file.metadata()?.len();
+    snapshot_stamp_with(file, length)
+}
+
+fn snapshot_stamp_with(reader: impl io::Read, length: u64) -> io::Result<FileStamp> {
+    if length > MAX_FILE_BYTES {
+        return Err(io::Error::other(SnapshotLimitExceeded::new(MAX_FILE_BYTES)));
+    }
+    stamp_reader(reader, MAX_FILE_BYTES)
 }
 
 fn read_snapshot_with(reader: impl io::Read, length: u64, limit: u64) -> io::Result<Vec<u8>> {
@@ -169,6 +349,10 @@ pub(super) fn source_tokens_closed(tokens: proc_macro2::TokenStream) -> bool {
 impl Files for NativeFiles {
     fn read(&self, path: &Utf8Path) -> Option<Vec<u8>> {
         read_snapshot(path).ok()
+    }
+
+    fn stamp(&self, path: &Utf8Path) -> Option<FileStamp> {
+        snapshot_stamp(path).ok()
     }
 
     fn files(&self, root: &Utf8Path, excluded: &Utf8Path) -> Option<Vec<Utf8PathBuf>> {
@@ -244,7 +428,7 @@ fn collect_files<E, I: IntoIterator>(
 }
 
 fn digest(files: &impl Files, path: &Utf8Path) -> Option<[u8; 32]> {
-    Some(*blake3::hash(&files.read(path)?).as_bytes())
+    Some(files.stamp(path)?.digest)
 }
 
 fn absolute(path: &Utf8Path, cwd: &Utf8Path) -> Utf8PathBuf {
@@ -255,7 +439,6 @@ fn absolute(path: &Utf8Path, cwd: &Utf8Path) -> Utf8PathBuf {
 fn inventory(files: &impl Files, root: &Utf8Path, target: &Utf8Path) -> Option<[u8; 32]> {
     let mut hash = blake3::Hasher::new();
     for path in files.files(root, target)? {
-        // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
         part(&mut hash, path.as_str().as_bytes());
     }
     Some(*hash.finalize().as_bytes())
@@ -438,15 +621,11 @@ struct Unit<'a> {
 
 impl Unit<'_> {
     fn snapshot(&self, files: &impl Files, stdout: Vec<u8>, stderr: Vec<u8>) -> Option<Record> {
-        let dependencies = closed_dependencies(
-            files,
-            self.invocation,
-            self.captures,
-            self.root,
-            self.target,
-            self.runtime,
-            self.compiler,
-        )?;
+        let snapshot = SnapshotFiles::new(files);
+        self.snapshot_with(&snapshot, stdout, stderr)
+    }
+
+    fn snapshot_with(&self, files: &impl Files, stdout: Vec<u8>, stderr: Vec<u8>) -> Option<Record> {
         let dep = absolute(
             &self
                 .invocation
@@ -462,6 +641,15 @@ impl Unit<'_> {
                 return None;
             }
         }
+        let dependencies = closed_dependencies(
+            files,
+            self.invocation,
+            self.captures,
+            self.root,
+            self.target,
+            self.runtime,
+            self.compiler,
+        )?;
         outputs.push(dep);
         inputs.push(self.compiler.to_owned());
         // A rustup shim, custom sysroot, or nonstandard compiler layout is not a closed toolchain.
@@ -491,11 +679,16 @@ impl Unit<'_> {
             if !path.starts_with(self.target) || path.components().any(|component| component.as_str() == "..") {
                 return None;
             }
-            let bytes = files.read(&path)?;
+            // #[gamma::skip(try.propagate_to_unwrap, tag = "equivalent", reason = "Dependency validation already memoized a successful stamp for this extern in the same snapshot.")]
+            let stamp = files.stamp(&path)?;
+            let bytes = &stamp.prefix[..stamp.length.min(8) as usize];
             // #[gamma::skip(try.propagate_to_unwrap, tag = "equivalent", reason = "eligible already checked that every extern has an rmeta or rlib extension.")]
             if !match path.extension()? {
                 "rmeta" => bytes.starts_with(b"rust\0"),
-                "rlib" => bytes.starts_with(b"!<arch>\n"),
+                "rlib" => {
+                    // #[gamma::skip(string.starts_with_to_ends_with, tag = "equivalent", reason = "The prefix has at most eight bytes and the archive marker has exactly eight; both predicates are equality.")]
+                    bytes.starts_with(b"!<arch>\n")
+                }
                 // #[gamma::skip(literal.bool_flip, tag = "equivalent", reason = "eligible permits only rmeta and rlib extern extensions, so this wildcard is unreachable.")]
                 _ => false,
             } {
@@ -569,45 +762,46 @@ fn source_only_context_with(
     target: &Utf8Path,
     runtime_root: Option<&Utf8Path>,
 ) -> Option<SourceContext> {
+    let expected = metadata_outputs(stdout)?;
+    let files = &SnapshotFiles::new(files);
     // #[gamma::skip(try.propagate_to_unwrap, tag = "equivalent", reason = "Prepared capture generations are owned under capture-root/replay/digest, so both parents exist structurally.")]
-    let runtime = runtime::load(files, directory.parent()?.parent()?)
-        .filter(|runtime| runtime_root.is_some_and(|root| runtime.valid(files, root, None)));
+    let runtime = runtime::load(files, directory.parent()?.parent()?);
     let mut records = Vec::new();
     // #[gamma::skip(literal.str_to_xyzzy, tag = "equivalent", reason = "Native inventories contain absolute paths, none of which starts with the relative normal component xyzzy.")]
     for path in files.files(directory, Utf8Path::new(""))? {
+        if path.parent() != Some(directory) || path.extension() != Some("json") {
+            continue;
+        }
         let record: Record = serde_json::from_slice(&files.read(&path)?).ok()?;
+        if
+        // #[gamma::skip(logical.or_remove_left, tag = "equivalent", reason = "The later validated-runtime check independently requires every extern's membership and matching digest.")]
+        record.externs.iter().any(|artifact| {
+            !runtime
+                .as_ref()
+                .is_some_and(|runtime| runtime.artifacts.iter().any(|(path, _)| path == artifact))
+        }) || !record.source.starts_with(root)
+        {
+            return None;
+        }
+        records.push(record);
+    }
+    let runtime = runtime.filter(|runtime| runtime_root.is_some_and(|root| runtime.valid(files, root, None)));
+    let mut current = Vec::new();
+    for record in records {
         if record
             .externs
             .iter()
             .any(|artifact| !runtime.as_ref().is_some_and(|runtime| runtime.contains(files, artifact)))
-            || !record.source.starts_with(root)
         {
             return None;
         }
         if !record_current(files, &record, root, target, directory)? {
             continue;
         }
-        records.push(record);
+        current.push(record);
     }
-    let mut expected = Vec::new();
-    for line in stdout.lines() {
-        let message: serde_json::Value = serde_json::from_str(line).ok()?;
-        match message.get("reason")?.as_str()? {
-            "compiler-artifact" => {
-                for path in message.get("filenames")?.as_array()? {
-                    let path = Utf8PathBuf::from(path.as_str()?);
-                    if path.extension() != Some("rmeta") {
-                        return None;
-                    }
-                    expected.push(path);
-                }
-            }
-            "build-script-executed" => return None,
-            _ => {}
-        }
-    }
-    // #[gamma::skip(logical.or_remove_right, tag = "equivalent", reason = "With nonempty expected outputs, the following lookup in an empty records vector independently declines.")]
-    if expected.is_empty() || records.is_empty() {
+    let records = current;
+    if records.is_empty() {
         return None;
     }
     for output in expected {
@@ -615,10 +809,9 @@ fn source_only_context_with(
             continue;
         }
         if !records.iter().any(|record| {
-            record
-                .outputs
-                .iter()
-                .any(|(path, hash)| path == &output && digest(files, path) == Some(*hash))
+            record.outputs.iter().any(|(path, hash)|
+                    // #[gamma::skip(logical.and_remove_right, tag = "equivalent", reason = "record_current already verified every output digest in this same memoized snapshot.")]
+                    path == &output && digest(files, path) == Some(*hash))
         }) {
             return None;
         }
@@ -645,6 +838,7 @@ fn source_only_context_with(
                 stamps.push((path, hash));
             }
         }
+        // #[gamma::skip(try.propagate_to_unwrap, tag = "equivalent", reason = "record_current already verified and memoized this compiler input's digest.")]
         stamps.push((record.compiler.clone(), digest(files, &record.compiler)?));
     }
     stamps.sort();
@@ -656,6 +850,27 @@ fn source_only_context_with(
         units: contexts,
         runtime: runtime.map(|runtime| runtime.root),
     })
+}
+
+pub(super) fn metadata_outputs(stdout: &str) -> Option<Vec<Utf8PathBuf>> {
+    let mut expected = Vec::new();
+    for line in stdout.lines() {
+        let message: serde_json::Value = serde_json::from_str(line).ok()?;
+        match message.get("reason")?.as_str()? {
+            "compiler-artifact" => {
+                for path in message.get("filenames")?.as_array()? {
+                    let path = Utf8PathBuf::from(path.as_str()?);
+                    if path.extension() != Some("rmeta") {
+                        return None;
+                    }
+                    expected.push(path);
+                }
+            }
+            "build-script-executed" => return None,
+            _ => {}
+        }
+    }
+    (!expected.is_empty()).then_some(expected)
 }
 
 fn record_current(files: &impl Files, record: &Record, root: &Utf8Path, target: &Utf8Path, directory: &Utf8Path) -> Option<bool> {
@@ -689,14 +904,12 @@ fn record_current(files: &impl Files, record: &Record, root: &Utf8Path, target: 
         &bin.parent()?.join("lib"),
         target,
     )?);
+    let inputs: BTreeMap<_, _> = record.inputs.iter().map(|(path, hash)| (path, hash)).collect();
     Some(
         !toolchain.is_empty()
-            && toolchain.iter().all(|path| {
-                record
-                    .inputs
-                    .iter()
-                    .any(|(input, hash)| input == path && digest(files, path) == Some(*hash))
-            }),
+            && toolchain
+                .iter()
+                .all(|path| inputs.get(path).is_some_and(|hash| digest(files, path) == Some(**hash))),
     )
 }
 
@@ -711,20 +924,16 @@ fn closed_dependencies(
     runtime_root: Option<&Utf8Path>,
     compiler: &Utf8Path,
 ) -> Option<Vec<Utf8PathBuf>> {
+    // #[gamma::skip(cond.always_false, tag = "equivalent", reason = "An empty extern list also leaves the traversal queue and final dependency vector empty.")]
     if invocation.externs.is_empty() {
         return Some(Vec::new());
     }
-    let records = files
-        .files(directory, Utf8Path::new(""))? // #[gamma::skip(literal.str_to_xyzzy, tag = "equivalent", reason = "Native inventories contain absolute paths, none of which starts with the relative normal component xyzzy.")]
-        .into_iter()
-        .filter(|path| path.extension() == Some("json"))
-        .map(|path| serde_json::from_slice::<Record>(&files.read(&path)?).ok())
-        .collect::<Option<Vec<_>>>()?;
     let mut pending = invocation.externs.clone();
     let mut visited = std::collections::BTreeSet::new();
     // #[gamma::skip(try.propagate_to_unwrap, tag = "equivalent", reason = "Prepared capture generations are owned under capture-root/replay/digest, so both parents exist structurally.")]
-    let runtime = runtime::load(files, directory.parent()?.parent()?)
-        .filter(|runtime| runtime_root.is_some_and(|root| runtime.valid(files, root, Some(compiler))));
+    let runtime = runtime::load(files, directory.parent()?.parent()?);
+    let mut runtime_valid = None;
+    let mut records = BTreeMap::new();
     let mut additional = Vec::new();
     while let Some(artifact) = pending.pop() {
         // #[gamma::skip(logical.or_remove_left, tag = "equivalent", reason = "Prepared targets are absolute, so the remaining target-prefix check independently rejects relative artifacts.")]
@@ -735,30 +944,54 @@ fn closed_dependencies(
             continue;
         }
         if let Some(runtime) = &runtime
-            && runtime.contains(files, &artifact)
+            && runtime.artifacts.iter().any(|(path, _)| path == &artifact)
         {
+            if !*runtime_valid.get_or_insert_with(|| runtime_root.is_some_and(|root| runtime.valid(files, root, Some(compiler))))
+                || !runtime.contains(files, &artifact)
+            {
+                return None;
+            }
             additional.extend(runtime.files.iter().map(|(path, _)| path.clone()));
             continue;
         }
+        let index: OutputIndex = serde_json::from_slice(&files.read(&output_index(directory, &artifact))?).ok()?;
+        if
+        // #[gamma::skip(logical.or_remove_left, tag = "equivalent", reason = "The later record-source root check and equality with index.source enforce the same containment.")]
+        !index.source.starts_with(root) || Utf8Path::new(&index.record).file_name() != Some(index.record.as_str()) {
+            return None;
+        }
+        let record = match records.entry(directory.join(index.record)) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
+                let bytes = files.read(entry.key())?;
+                entry.insert(serde_json::from_slice::<Record>(&bytes).ok()?)
+            }
+        };
+        if record.source != index.source {
+            return None;
+        }
         let expected = digest(files, &artifact)?;
-        let record = records.iter().find(|record| {
+        if !((
+            // #[gamma::skip(logical.and_remove_right, tag = "equivalent", reason = "The earlier index-source root check and equality with record.source enforce the same containment.")]
             record.outputs.iter().any(|(path, hash)| {
                 // #[gamma::skip(logical.and_remove_right, tag = "equivalent", reason = "The later all-inputs-and-outputs digest check independently verifies this same matching artifact hash.")]
                 path == &artifact && *hash == expected
             }) && record.source.starts_with(root)
-                && record.inputs.iter().any(|(path, _)| path == &record.source)
-                && record.inputs.iter().any(|(path, _)| path == &record.compiler)
-                && record
-                    .inputs
-                    .iter()
-                    .chain(&record.outputs)
-                    .all(|(path, hash)| digest(files, path) == Some(*hash))
-                && record
-                    .searches
-                    .iter()
-                    .all(|(path, hash)| inventory(files, path, directory) == Some(*hash))
-                && inventory(files, root, target) == Some(record.inventory)
-        })?;
+        ) && record.inputs.iter().any(|(path, _)| path == &record.source)
+            && record.inputs.iter().any(|(path, _)| path == &record.compiler)
+            && record
+                .inputs
+                .iter()
+                .chain(&record.outputs)
+                .all(|(path, hash)| digest(files, path) == Some(*hash))
+            && record
+                .searches
+                .iter()
+                .all(|(path, hash)| inventory(files, path, directory) == Some(*hash))
+            && inventory(files, root, target) == Some(record.inventory))
+        {
+            return None;
+        }
         pending.extend(record.externs.iter().cloned());
     }
     additional.extend(visited);
@@ -770,17 +1003,21 @@ fn closed_dependencies(
 }
 
 impl Unit<'_> {
+    #[cfg(test)]
     fn reusable(&self, files: &impl Files, record: &Record) -> bool {
         if record.context != self.context {
             return false;
         }
-        self.snapshot(files, Vec::new(), Vec::new()).is_some_and(|current| {
-            current.inventory == record.inventory
-                && current.inputs == record.inputs
-                && current.outputs == record.outputs
-                && current.searches == record.searches
-        })
+        self.snapshot(files, Vec::new(), Vec::new())
+            .is_some_and(|current| same_snapshot(&current, record))
     }
+}
+
+fn same_snapshot(current: &Record, record: &Record) -> bool {
+    current.inventory == record.inventory
+        && current.inputs == record.inputs
+        && current.outputs == record.outputs
+        && current.searches == record.searches
 }
 
 fn stable_inputs(before: &Record, after: &Record) -> bool {
@@ -819,23 +1056,25 @@ fn execute(
     publish: impl FnOnce(&Record),
     mut relay: impl FnMut(&[u8], &[u8]) -> io::Result<()>,
 ) -> io::Result<Option<i32>> {
+    let before = unit.snapshot(files, Vec::new(), Vec::new());
     if let Some(record) = previous
-        && unit.reusable(files, record)
+        && record.context == unit.context
+        && before.as_ref().is_some_and(|current| same_snapshot(current, record))
     {
         relay(&record.stdout, &record.stderr)?;
         return Ok(Some(0));
     }
     // Missing or changed dep-info cannot establish a closed capture until a later invocation has
     // observed the resulting graph both before and after compilation.
-    let before = unit.snapshot(files, Vec::new(), Vec::new());
     let output = run()?;
     if !output.forwarded {
         relay(&output.stdout, &output.stderr)?;
     }
     if output.code == Some(0)
         && output.capturable
+        && let Some(before) = before.as_ref()
         && let Some(record) = unit.snapshot(files, output.stdout, output.stderr)
-        && before.as_ref().is_some_and(|before| stable_inputs(before, &record))
+        && stable_inputs(before, &record)
     {
         publish(&record);
     }
@@ -871,10 +1110,7 @@ pub(super) fn compiler_status(command: &mut Command) -> io::Result<Option<i32>> 
         previous.as_ref(),
         || capture_output(command),
         |record| {
-            if let Ok(bytes) = serde_json::to_vec(record) {
-                // An interrupted write is a cache miss, never a successful compiler result.
-                let _published = fs::create_dir_all(&directory).and_then(|()| fs::write(&path, bytes));
-            }
+            let _published = publish_record(&directory, &path, record);
         },
         |stdout, stderr| {
             io::stdout().write_all(stdout)?;
@@ -1053,6 +1289,495 @@ impl OwnedUnit {
             captures: &self.captures,
             runtime: self.runtime.as_deref(),
         }
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub(in crate::exec) mod compiler_campaign_tests {
+    use super::super::workspace::Workspace;
+    use super::*;
+
+    const SUBJECT_MANIFEST: &[u8] = b"[package]\nname='subject'\nversion='0.1.0'\n";
+    const RUNTIME_MANIFEST: &[u8] = b"[package]\nname='cargo-gamma-rt'\nversion='0.1.0'\n[lib]\nname='gamma_rt'\n";
+    #[cfg(not(miri))]
+    const STANDALONE_RUNTIME_MANIFEST: &[u8] = b"[package]\nname='cargo-gamma-rt'\nversion='0.0.0'\n[lib]\nname='gamma_rt'\n[workspace]\n";
+    const RUNTIME_SOURCE: &[u8] = b"pub fn selected() -> bool { false }";
+
+    fn with_unit<T>(with_runtime: bool, operation: impl FnOnce(&Workspace, OwnedUnit, Record) -> T) -> T {
+        let base = Utf8PathBuf::from_path_buf(std::env::current_dir().unwrap())
+            .unwrap()
+            .join("nov21-injected-compiler");
+        let root = base.join("workspace");
+        let target = root.join("target");
+        let compiler = base.join("toolchain").join("bin").join("rustc.exe");
+        let cargo = base.join("tools").join("cargo.exe");
+        let source = root.join("src").join("lib.rs");
+        let output = target.join("libsubject-unit.rmeta");
+        let dep = target.join("subject-unit.d");
+        let mut work = Workspace::adopt(root.clone(), target.clone());
+        work.set_rustc_captures(Some(target.join("captures")));
+        let runtime_root = work.compiler_runtime();
+        let runtime_manifest = runtime_root.join("Cargo.toml");
+        let runtime_source = runtime_root.join("src").join("lib.rs");
+        let mut initial = vec![
+            (root.join("Cargo.toml").into_std_path_buf(), SUBJECT_MANIFEST.to_vec()),
+            (source.clone().into_std_path_buf(), b"pub fn value() -> u32 { 1 }".to_vec()),
+            (compiler.clone().into_std_path_buf(), b"compiler identity".to_vec()),
+            (cargo.clone().into_std_path_buf(), b"Cargo identity".to_vec()),
+            (
+                base.join("toolchain").join("lib").join("libstd.rlib").into_std_path_buf(),
+                b"sysroot".to_vec(),
+            ),
+            (output.clone().into_std_path_buf(), b"rust\0metadata".to_vec()),
+            (dep.into_std_path_buf(), format!("{output}: {source}\n").into_bytes()),
+            (runtime_manifest.into_std_path_buf(), RUNTIME_MANIFEST.to_vec()),
+            (runtime_source.into_std_path_buf(), RUNTIME_SOURCE.to_vec()),
+        ];
+        let environment = BTreeMap::from([
+            ("CARGO".into(), cargo.into_std_path_buf().into_os_string()),
+            ("USERPROFILE".into(), base.join("home").into_std_path_buf().into_os_string()),
+        ]);
+        let captures = snapshot_io::with(
+            snapshot_io::Script {
+                environment: environment.clone(),
+                ..snapshot_io::Script::default()
+            },
+            || {
+                let args = ["check".to_owned(), "--workspace".to_owned()];
+                let mut command = work.cargo();
+                let _command = command
+                    .args(&args)
+                    .env("CARGO_TERM_PROGRESS_WHEN", "always")
+                    .env("CARGO_TERM_PROGRESS_WIDTH", PROGRESS_WIDTH.to_string());
+                work.configure_compiler_replay(&mut command);
+                let generation = command
+                    .get_envs()
+                    .find_map(|(name, value)| (name == REPLAY_VAR).then_some(value).flatten())
+                    .unwrap()
+                    .to_str()
+                    .unwrap();
+                work.rustc_captures().unwrap().join("replay").join(generation)
+            },
+        );
+        initial.extend([
+            (captures.join(".ready").into_std_path_buf(), Vec::new()),
+            (
+                captures.join("nested").join("interrupted.json").into_std_path_buf(),
+                b"unpublished nested capture".to_vec(),
+            ),
+            (
+                captures.join("interrupted.tmp").into_std_path_buf(),
+                b"unpublished capture".to_vec(),
+            ),
+        ]);
+        let mut script = snapshot_io::Script::from_files(initial);
+        script.environment = environment;
+        snapshot_io::with(script, || {
+            let mut unit = OwnedUnit {
+                context: [1; 32],
+                invocation: RustcInvocation {
+                    crate_name: "subject".into(),
+                    crate_types: vec!["lib".into()],
+                    test: false,
+                    source: source.clone(),
+                    out_dir: target.clone(),
+                    extra_filename: "-unit".into(),
+                    externs: Vec::new(),
+                    opaque_extern: false,
+                },
+                cwd: root.clone(),
+                root: root.clone(),
+                target: target.clone(),
+                compiler: compiler.clone(),
+                searches: Vec::new(),
+                captures: captures.clone(),
+                runtime: None,
+            };
+            if with_runtime {
+                capture_runtime(&work, &mut unit);
+            }
+            let record = unit.borrowed().snapshot(&NativeFiles, Vec::new(), Vec::new()).unwrap();
+            publish_record(&captures, &captures.join("unit.json"), &record).unwrap();
+            operation(&work, unit, record)
+        })
+    }
+
+    fn capture_runtime(work: &Workspace, unit: &mut OwnedUnit) {
+        let runtime_root = work.compiler_runtime();
+        let runtime_source = runtime_root.join("src").join("lib.rs");
+        let artifact = unit.target.join("libgamma_rt-runtime.rmeta");
+        snapshot_io::write(runtime_root.join("Cargo.toml"), RUNTIME_MANIFEST).unwrap();
+        snapshot_io::write(&runtime_source, RUNTIME_SOURCE).unwrap();
+        snapshot_io::write(&artifact, b"rust\0runtime metadata").unwrap();
+        snapshot_io::write(unit.target.join("gamma_rt-runtime.d"), format!("{artifact}: {runtime_source}\n")).unwrap();
+        snapshot_io::write(
+            unit.root.join("Cargo.toml"),
+            format!(
+                "[package]\nname='subject'\nversion='0.1.0'\n[dependencies]\ngamma_rt={{path={},package='cargo-gamma-rt'}}\n",
+                serde_json::to_string(runtime_root.as_str()).unwrap(),
+            ),
+        )
+        .unwrap();
+        let mut command = Command::new(&unit.compiler);
+        let _command = command.current_dir(&unit.root).args([
+            OsString::from("--crate-name=gamma_rt"),
+            OsString::from("--crate-type=lib"),
+            OsString::from("--emit=dep-info,metadata"),
+            OsString::from("--out-dir"),
+            unit.target.clone().into(),
+            OsString::from("-Cextra-filename=-runtime"),
+            runtime_source.into(),
+        ]);
+        let environment = BTreeMap::from([
+            (RUNTIME_VAR.into(), runtime_root.to_string()),
+            (TARGET_VAR.into(), unit.target.to_string()),
+            (COMMAND_VAR.into(), "parent Cargo command".into()),
+            ("CARGO_MANIFEST_DIR".into(), runtime_root.to_string()),
+        ]);
+        let runtime = runtime::capture_with(&NativeFiles, &command, &environment, &unit.root).unwrap();
+        snapshot_io::write(
+            work.rustc_captures().unwrap().join("runtime-provenance"),
+            serde_json::to_vec(&runtime).unwrap(),
+        )
+        .unwrap();
+        unit.runtime = Some(runtime_root.to_owned());
+        unit.invocation.externs.push(artifact);
+    }
+
+    pub(in crate::exec) fn with_metadata<T>(runtime: bool, operation: impl FnOnce(&Workspace, &[String], &str) -> T) -> T {
+        with_unit(runtime, |work, unit, _| {
+            let stdout = serde_json::json!({
+                "reason":"compiler-artifact", "filenames":[unit.target.join("libsubject-unit.rmeta")]
+            })
+            .to_string();
+            operation(work, &["check".to_owned(), "--workspace".to_owned()], &stdout)
+        })
+    }
+
+    fn make_consumer(unit: &mut OwnedUnit) {
+        unit.invocation.crate_name = "consumer".into();
+        unit.context = [2; 32];
+        let output = unit.target.join("libconsumer-unit.rmeta");
+        snapshot_io::write(&output, b"rust\0consumer metadata").unwrap();
+        snapshot_io::write(
+            unit.target.join("consumer-unit.d"),
+            format!("{output}: {}\n", unit.invocation.source),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn nov21_source_context_ignores_nested_json_and_unpublished_top_level_entries() {
+        with_unit(false, |_, unit, _| {
+            let stdout =
+                serde_json::json!({"reason":"compiler-artifact","filenames":[unit.target.join("libsubject-unit.rmeta")]}).to_string();
+            for path in ["nested/interrupted.json", "interrupted.tmp"] {
+                snapshot_io::write(unit.captures.join(path), b"not a published record").unwrap();
+            }
+            let context = source_only_context_with(&NativeFiles, &unit.captures, &stdout, &unit.root, &unit.target, None).unwrap();
+            assert_eq!(context.units, [[1; 32]]);
+        });
+    }
+
+    #[cfg(not(miri))]
+    #[test]
+    fn nov21_a_standalone_runtime_check_cannot_seal_an_uncaptured_workspace() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let base = Utf8PathBuf::from_path_buf(directory.path().canonicalize().unwrap()).unwrap();
+        let root = base.join("workspace");
+        let target = base.join("target");
+        let runtime_root = base.join("rt");
+        let manifest = runtime_root.join("Cargo.toml");
+        let capture_root = target.join("captures");
+        let compiler = base.join(format!("rustc{}", std::env::consts::EXE_SUFFIX));
+        std::fs::copy(cargo_gamma_process_test_helper::PATH, &compiler).unwrap();
+        let output = target.join("libgamma_rt-runtime.rmeta");
+        let source = runtime_root.join("src").join("lib.rs");
+        let mut cargo = Command::new("cargo");
+        let _cargo = cargo
+            .current_dir(&root)
+            .env("CARGO_TARGET_DIR", &target)
+            .env("RUSTC", &compiler)
+            .args([
+                "check",
+                "--keep-going",
+                "--lib",
+                "--message-format=json",
+                "--workspace",
+                "--manifest-path",
+            ])
+            .arg(&manifest);
+        let mut environment = BTreeMap::from([
+            (ROOT_VAR.to_owned(), root.to_string()),
+            (TARGET_VAR.to_owned(), target.to_string()),
+            (RUNTIME_VAR.to_owned(), runtime_root.to_string()),
+            (CAPTURE_DIR_VAR.to_owned(), capture_root.to_string()),
+            ("RUSTC".to_owned(), compiler.to_string()),
+            ("CARGO_MANIFEST_DIR".to_owned(), runtime_root.to_string()),
+        ]);
+        let generation = blake3::Hash::from(
+            command_fingerprint(
+                &cargo,
+                environment
+                    .iter()
+                    .map(|(name, value)| (OsString::from(name), OsString::from(value))),
+            )
+            .unwrap(),
+        )
+        .to_hex()
+        .to_string();
+        let _command = environment.insert(COMMAND_VAR.to_owned(), generation.clone());
+        let _replay = environment.insert(REPLAY_VAR.to_owned(), generation.clone());
+        let captures = capture_root.join("replay").join(generation);
+        let initial = vec![
+            (root.join("Cargo.toml").into_std_path_buf(), SUBJECT_MANIFEST.to_vec()),
+            (root.join("src").join("lib.rs").into_std_path_buf(), b"pub fn value() {}".to_vec()),
+            (manifest.clone().into_std_path_buf(), STANDALONE_RUNTIME_MANIFEST.to_vec()),
+            (source.clone().into_std_path_buf(), RUNTIME_SOURCE.to_vec()),
+            (compiler.clone().into_std_path_buf(), std::fs::read(&compiler).unwrap()),
+            (output.clone().into_std_path_buf(), b"rust\0runtime metadata".to_vec()),
+            (
+                target.join("gamma_rt-runtime.d").into_std_path_buf(),
+                format!("{}: {}\n", output.as_str().replace(' ', r"\ "), source.as_str().replace(' ', r"\ ")).into_bytes(),
+            ),
+            (captures.join(".ready").into_std_path_buf(), Vec::new()),
+        ];
+        for (path, bytes) in &initial {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            if path != compiler.as_std_path() {
+                std::fs::write(path, bytes).unwrap();
+            }
+        }
+        let mut script = snapshot_io::Script::from_files(initial);
+        script.cwd = Some(runtime_root.clone().into_std_path_buf());
+        script.environment = environment.iter().map(|(name, value)| (name.into(), value.into())).collect();
+        let mut command = Command::new(&compiler);
+        let _command = command.current_dir(&runtime_root).args([
+            OsString::from("--crate-name=gamma_rt"),
+            OsString::from("--crate-type=lib"),
+            OsString::from("--emit=dep-info,metadata"),
+            OsString::from("--out-dir"),
+            target.clone().into(),
+            OsString::from("-Cextra-filename=-runtime"),
+            source.into(),
+            OsString::from("--cap-lints=allow"),
+        ]);
+        snapshot_io::with(script, || {
+            assert!(prepare_with(&command, &environment, &runtime_root).is_none());
+            assert_eq!(compiler_status(&mut command).unwrap(), Some(0));
+            let runtime = runtime::load(&NativeFiles, &capture_root).unwrap();
+            assert!(runtime.valid(&NativeFiles, &runtime_root, Some(&compiler)));
+            assert!(runtime.contains(&NativeFiles, &output));
+            assert!(
+                NativeFiles
+                    .files(&captures, Utf8Path::new(""))
+                    .unwrap()
+                    .iter()
+                    .all(|path| path.extension() != Some("json"))
+            );
+            let stdout = runtime_metadata_stdout(&runtime_root, &output);
+            assert!(source_only_context(&captures, &stdout, &root, &target, &runtime_root).is_none());
+        });
+    }
+
+    #[cfg(not(miri))]
+    fn runtime_metadata_stdout(root: &Utf8Path, output: &Utf8Path) -> String {
+        [
+            serde_json::json!({
+                "reason":"compiler-artifact", "package_id":"cargo-gamma-rt 0.0.0",
+                "manifest_path":root.join("Cargo.toml"),
+                "target":{"name":"gamma_rt","kind":["lib"],"src_path":root.join("src").join("lib.rs")},
+                "profile":{"test":false}, "filenames":[output], "fresh":false, "executable":null,
+            })
+            .to_string(),
+            serde_json::json!({"reason":"build-finished","success":true}).to_string(),
+        ]
+        .join("\n")
+    }
+
+    #[test]
+    fn nov21_changed_runtime_artifacts_decline_dependency_closure_and_source_context() {
+        with_unit(true, |work, unit, _| {
+            let stdout =
+                serde_json::json!({"reason":"compiler-artifact","filenames":[unit.target.join("libsubject-unit.rmeta")]}).to_string();
+            assert!(
+                source_only_context_with(
+                    &NativeFiles,
+                    &unit.captures,
+                    &stdout,
+                    &unit.root,
+                    &unit.target,
+                    Some(work.compiler_runtime())
+                )
+                .is_some()
+            );
+            snapshot_io::write(&unit.invocation.externs[0], b"rust\0changed runtime metadata").unwrap();
+            assert!(unit.borrowed().snapshot(&NativeFiles, Vec::new(), Vec::new()).is_none());
+            assert!(
+                source_only_context_with(
+                    &NativeFiles,
+                    &unit.captures,
+                    &stdout,
+                    &unit.root,
+                    &unit.target,
+                    Some(work.compiler_runtime())
+                )
+                .is_none()
+            );
+        });
+    }
+
+    #[test]
+    fn nov21_dependency_indexes_require_a_local_record_matching_the_indexed_source() {
+        for case in ["invalid-json", "nested-record", "mismatched-source"] {
+            with_unit(false, |_, mut unit, record| {
+                let artifact = unit.target.join("libsubject-unit.rmeta");
+                make_consumer(&mut unit);
+                unit.invocation.externs.push(artifact.clone());
+                let index_path = output_index(&unit.captures, &artifact);
+                let mut index: OutputIndex = serde_json::from_slice(&snapshot_io::read(&index_path).unwrap()).unwrap();
+                match case {
+                    "invalid-json" => snapshot_io::write(&index_path, b"truncated").unwrap(),
+                    "nested-record" => {
+                        index.record = "nested/unit.json".into();
+                        snapshot_io::write(unit.captures.join(&index.record), serde_json::to_vec(&record).unwrap()).unwrap();
+                        snapshot_io::write(&index_path, serde_json::to_vec(&index).unwrap()).unwrap();
+                    }
+                    _ => {
+                        index.source = unit.root.join("src").join("another.rs");
+                        snapshot_io::write(&index_path, serde_json::to_vec(&index).unwrap()).unwrap();
+                    }
+                }
+                assert!(unit.borrowed().snapshot(&NativeFiles, Vec::new(), Vec::new()).is_none(), "{case}");
+            });
+        }
+    }
+
+    #[test]
+    fn nov21_equal_artifact_bytes_do_not_prove_that_a_record_produced_the_requested_path() {
+        with_unit(false, |_, mut unit, mut record| {
+            let artifact = unit.target.join("libsubject-unit.rmeta");
+            make_consumer(&mut unit);
+            let other = unit.target.join("libother-unit.rmeta");
+            snapshot_io::write(&other, snapshot_io::read(&artifact).unwrap()).unwrap();
+            for (path, _) in &mut record.outputs {
+                if path == &artifact {
+                    *path = other.clone();
+                }
+            }
+            snapshot_io::write(unit.captures.join("unit.json"), serde_json::to_vec(&record).unwrap()).unwrap();
+            unit.invocation.externs.push(artifact);
+            assert!(unit.borrowed().snapshot(&NativeFiles, Vec::new(), Vec::new()).is_none());
+        });
+    }
+
+    #[test]
+    fn nov21_chunked_file_stamps_preserve_the_first_eight_bytes_and_the_full_length() {
+        struct Chunked<'a> {
+            bytes: &'a [u8],
+            chunks: std::vec::IntoIter<usize>,
+            ended: bool,
+        }
+        impl io::Read for Chunked<'_> {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                assert!(!self.ended, "a snapshot must stop reading after EOF");
+                let count = self.chunks.next().unwrap_or(buf.len()).min(buf.len()).min(self.bytes.len());
+                buf[..count].copy_from_slice(&self.bytes[..count]);
+                self.bytes = &self.bytes[count..];
+                self.ended = count == 0;
+                Ok(count)
+            }
+        }
+        for chunks in [vec![3, 7, 1], vec![1, 1, 1, 1, 1, 1, 1, 1, 3], vec![8, 3], vec![1]] {
+            let bytes = b"!<arch>\nxyz";
+            assert_eq!(
+                stamp_reader(
+                    Chunked {
+                        bytes,
+                        chunks: chunks.into_iter(),
+                        ended: false
+                    },
+                    bytes.len() as u64
+                )
+                .unwrap(),
+                FileStamp::of(bytes),
+            );
+        }
+        let failure = stamp_reader(io::Cursor::new(b"x"), 0).unwrap_err();
+        let limit = failure.get_ref().unwrap().downcast_ref::<SnapshotLimitExceeded>().unwrap();
+        assert_eq!(limit.limit, 0);
+    }
+
+    #[test]
+    fn nov21_snapshot_metadata_and_read_failures_keep_their_distinct_capture_refusals() {
+        use snapshot_io::{FileData, Script};
+
+        let path = Utf8PathBuf::from("snapshot-input");
+        for (length, read_error, expected_kind) in [
+            (Err(io::ErrorKind::PermissionDenied), None, io::ErrorKind::PermissionDenied),
+            (Ok(MAX_FILE_BYTES + 1), Some(io::ErrorKind::PermissionDenied), io::ErrorKind::Other),
+            (
+                Ok(MAX_FILE_BYTES),
+                Some(io::ErrorKind::PermissionDenied),
+                io::ErrorKind::PermissionDenied,
+            ),
+        ] {
+            let mut data = FileData::bytes(b"");
+            data.length = length;
+            data.read_error = read_error;
+            let mut script = Script::default();
+            script.files.insert(path.clone().into_std_path_buf(), Ok(data));
+            snapshot_io::with(script, || {
+                let failure = snapshot_stamp(&path).unwrap_err();
+                assert_eq!(failure.kind(), expected_kind);
+                if expected_kind == io::ErrorKind::Other {
+                    let limit = failure.get_ref().unwrap().downcast_ref::<SnapshotLimitExceeded>().unwrap();
+                    assert_eq!(limit.limit, MAX_FILE_BYTES);
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn nov21_snapshot_capture_cap_admits_the_exact_boundary_and_refuses_growth() {
+        use std::io::Read as _;
+
+        let archive = |length| io::Cursor::new(b"!<arch>\n").chain(io::repeat(0).take(length - 8));
+        let stamp = snapshot_stamp_with(archive(MAX_FILE_BYTES), MAX_FILE_BYTES).unwrap();
+        assert_eq!(stamp.length, MAX_FILE_BYTES);
+        assert_eq!(stamp.prefix, *b"!<arch>\n");
+        let failure = snapshot_stamp_with(archive(MAX_FILE_BYTES + 1), MAX_FILE_BYTES).unwrap_err();
+        let limit = failure.get_ref().unwrap().downcast_ref::<SnapshotLimitExceeded>().unwrap();
+        assert_eq!(limit.limit, MAX_FILE_BYTES);
+    }
+
+    #[test]
+    fn nov21_replay_publication_propagates_record_and_output_index_filesystem_failures() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = Utf8PathBuf::from_path_buf(directory.path().to_owned()).unwrap();
+        let record = Record {
+            context: [1; 32],
+            inputs: Vec::new(),
+            outputs: vec![(root.join("subject.rmeta"), [2; 32])],
+            inventory: [3; 32],
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            compiler: root.join("rustc.exe"),
+            source: root.join("subject.rs"),
+            externs: Vec::new(),
+            searches: Vec::new(),
+        };
+        let blocker = root.join("not-a-directory");
+        std::fs::write(&blocker, b"preserved").unwrap();
+        assert!(publish_record(&root, &blocker.join("record.json"), &record).is_err());
+        assert_eq!(std::fs::read(&blocker).unwrap(), b"preserved");
+        std::fs::write(root.join("outputs"), b"index directory blocked").unwrap();
+        let path = root.join("record.json");
+        assert!(publish_record(&root, &path, &record).is_err());
+        let published: Record = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(published.source, record.source);
+        assert_eq!(published.outputs, record.outputs);
     }
 }
 

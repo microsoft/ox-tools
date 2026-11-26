@@ -626,9 +626,9 @@
 //!
 //! Only a failing assertion increases the numerator. Timeout, out-of-memory, survivor, and
 //! uncovered verdicts increase only the denominator. An excluded verdict changes neither. If
-//! there are no scored mutants at all, the displayed ratio is 100%, but `--min-score` treats the
-//! run as ungraded rather than allowing an empty population to pass a quality gate.
-//! An `--in-diff` run that selects no mutants is a successful no-op, even with score and flaky gates.
+//! there are no scored mutants at all, the displayed ratio is 100%, but `--min-score` treats a
+//! nonempty population of only excluded outcomes as ungraded. A run that selects no mutants is a
+//! successful no-op, even with score and flaky gates, whether it is full or uses `--in-diff`.
 //! `--max-flaky` separately gates recorded flaky outcomes. Ordinary test failures are not rerun
 //! without the mutant, so this gate does not detect intermittent assertion failures after baseline.
 //!
@@ -1584,8 +1584,10 @@
 //! SARIF rule identifiers are the stable mutator names, so GitHub's grouping and dismissal work per
 //! mutator: a team can permanently dismiss every `literal.int_zero` alert without touching anything
 //! else, and that decision keeps applying to code written next year. Results are fingerprinted by the
-//! content-addressed mutant ID, so an alert follows its code through reformatting instead of being
-//! dismissed and resurrected. The level is `note` by default, because a surviving mutant is an
+//! content-addressed mutant ID, so comments, changes to existing whitespace runs, and movement
+//! within a file do not by themselves change the fingerprint. Adding or removing token separators
+//! or trailing commas can change it; arbitrary `cargo fmt` output is not identity-preserving.
+//! The level is `note` by default, because a surviving mutant is an
 //! observation about the test suite rather than a defect in the code, and drowning the security tab is
 //! how a good signal gets turned off; `--sarif-level warning` raises it.
 //!
@@ -1680,7 +1682,8 @@
 //! ```bash
 //! cargo gamma run --shard-count 30 --shard-index $((10#$(date +%j) % 30)) \
 //!     --artifact-dir reports/$(date +%F)
-//! cargo gamma merge reports --window 45 --min-score 70 --html-report merged.html
+//! cargo gamma list mutants --json-report reports/current.json
+//! cargo gamma merge reports/current.json reports/*/gamma-report.json --window 45 --min-score 70 --html-report merged.html
 //! ```
 //!
 //! Merging unions verdicts by mutant identity and keeps the most recent one. Because identity is
@@ -1701,7 +1704,7 @@
 //!
 //! ```bash
 //! cargo gamma list mutants --json-report reports/current.json
-//! cargo gamma merge reports --window 45
+//! cargo gamma merge reports/current.json reports/*/gamma-report.json --window 45
 //! ```
 //!
 //! The summary also reports how fresh the verdicts are and which shards the rotation has yet to visit.

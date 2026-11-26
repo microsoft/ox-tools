@@ -233,17 +233,14 @@ pub(super) fn test_binaries_with_linkage(stdout: &str, root: &Utf8Path, capture_
             continue 'messages;
         };
 
-        // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
+        // #[gamma::skip(cond.always_false, loop.delete_continue, tag = "equivalent", reason = "Cargo non-artifact messages have neither test-artifact profiles nor executable paths; later checks reject them.")]
         if !is_compiler_artifact(&message) {
-            // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
             continue 'messages;
         }
 
         let is_test = is_test_profile(&message);
 
-        // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
         if is_non_test_profile(is_test) {
-            // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
             continue 'messages;
         }
 
@@ -336,9 +333,8 @@ fn artifact_origins(stdout: &str, root: &Utf8Path) -> crate::HashMap<Utf8PathBuf
             continue 'messages;
         };
 
-        // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
+        // #[gamma::skip(cond.always_false, loop.delete_continue, tag = "equivalent", reason = "Cargo non-artifact messages have no artifact paths to contribute to origins.")]
         if !is_compiler_artifact(&message) {
-            // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
             continue 'messages;
         }
 
@@ -346,7 +342,6 @@ fn artifact_origins(stdout: &str, root: &Utf8Path) -> crate::HashMap<Utf8PathBuf
         let manifest = manifest_path(&message);
         let origin = if external_package_id(package_id) {
             ArtifactOrigin::Registry
-        // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
         } else if workspace_manifest(manifest, root) {
             ArtifactOrigin::Workspace
         } else {
@@ -433,10 +428,9 @@ fn linked_sources(
 
         sources.extend(dep_sources(capture, root)?);
 
-        'dependencies: for dependency in &capture.externs {
+        for dependency in &capture.externs {
             match origins.get(dependency) {
-                Some(ArtifactOrigin::Registry) => continue 'dependencies,
-                Some(ArtifactOrigin::Opaque) => return None,
+                Some(ArtifactOrigin::Registry | ArtifactOrigin::Opaque) => return None,
                 Some(ArtifactOrigin::Workspace) | None => {}
             }
 
@@ -509,7 +503,7 @@ fn dep_sources(invocation: &RustcInvocation, root: &Utf8Path) -> Option<Vec<Utf8
 }
 
 fn absolute_source(path: &Utf8Path, root: &Utf8Path) -> Utf8PathBuf {
-    // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
+    // #[gamma::skip(cond.always_false, tag = "equivalent", reason = "Joining an absolute path replaces the base and yields that same path.")]
     if path.is_absolute() { path.to_owned() } else { root.join(path) }
 }
 
@@ -563,9 +557,8 @@ fn external_package_id(package_id: &str) -> bool {
         ["(registry+", "(git+"].iter().any(|marker| package_id.contains(marker))
 }
 
-// #[gamma::skip(all, reason = "the mutation affects internal orchestration state with no safely deterministic observation at this layer")]
 fn pending_mutant(mutant: &Mutant) -> bool {
-    // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
+    // #[gamma::skip(logical.and_remove_left, tag = "equivalent", reason = "Discovery assigns positive ordinals to live pending mutants; resume rejects pending ordinal zero.")]
     mutant.ordinal != 0 && mutant.outcome == Outcome::Pending
 }
 
@@ -601,7 +594,7 @@ fn workspace_relative(path: &Utf8Path, root: &Utf8Path) -> Option<Utf8PathBuf> {
 /// This has to run before the baseline, not after, so the baseline only runs and measures binaries
 /// that will actually decide verdicts.
 pub(super) fn restrict(binaries: &mut Vec<TestBinary>, include: &[String], exclude: &[String]) {
-    // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
+    // #[gamma::skip(call.replace_with_default, call_result.default, cond.always_false, tag = "equivalent", reason = "Empty include and exclude patterns also retain every binary in its original order.")]
     if no_target_patterns(include, exclude) {
         return;
     }
@@ -794,9 +787,8 @@ impl<'binaries> Reachability<'binaries> {
             let key = (Arc::clone(&mutant.package), Arc::clone(&mutant.file));
 
             let vacant = !by_source.contains_key(&key);
-            // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
+            // #[gamma::skip(cond.always_false, loop.delete_continue, tag = "equivalent", reason = "Repeating a package and file key recomputes the identical reachability list from the fixed plan and binaries.")]
             if !vacant {
-                // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
                 continue 'mutants;
             }
 
@@ -891,7 +883,7 @@ pub(super) fn reaching_packages(
 ) -> Option<Vec<String>> {
     // Reach is keyed by every workspace member, so its keys are the population being narrowed from.
     // Without it there is nothing to compare a subset against, so there is no subset.
-    // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
+    // #[gamma::skip(call.replace_with_default, call_result.default, cond.always_false, tag = "equivalent", reason = "Iterating empty reachability still reaches the zero-length subset check and returns None.")]
     if no_reachability(reach) {
         return None;
     }
@@ -1025,6 +1017,55 @@ mod tests {
             assert!(binary.matches_target("expected-package", target));
             assert!(!binary.matches_target("other-package", target));
         }
+    }
+
+    #[test]
+    fn executable_discovery_rejects_an_ordinary_nontest_binary_between_two_test_artifacts() {
+        let stdout = [("first", true), ("ordinary", false), ("last", true)]
+            .map(|(name, test)| {
+                json!({
+                    "reason": "compiler-artifact",
+                    "profile": {"test": test},
+                    "package_id": "subject 0.1.0 (path+file:///workspace)",
+                    "target": {"name": name, "kind": ["bin"]},
+                    "executable": name,
+                })
+                .to_string()
+            })
+            .join("\n");
+        let found = test_binaries(&stdout);
+        assert_eq!(
+            found.iter().map(|binary| binary.target.as_str()).collect::<Vec<_>>(),
+            ["first", "last"]
+        );
+    }
+
+    #[test]
+    fn only_pending_work_contributes_sources_to_the_runtime_linkage_filter() {
+        let mutants = [
+            ("src/pending.rs", 1, Outcome::Pending),
+            ("src/killed.rs", 2, Outcome::Killed),
+            ("src/ignored.rs", 0, Outcome::Ignored),
+        ]
+        .map(|(file, ordinal, outcome)| Mutant {
+            file: Arc::from(Utf8Path::new(file)),
+            ordinal,
+            outcome,
+            ..crate::fixtures::mutant()
+        });
+        let plan = crate::fixtures::plan(mutants.to_vec());
+        let mut binaries = ["src/pending.rs", "src/killed.rs", "src/ignored.rs"]
+            .map(|file| TestBinary {
+                target: file.into(),
+                linked_sources: Some(crate::HashSet::from_iter([Utf8PathBuf::from(file)])),
+                ..crate::testing::test_binary(file)
+            })
+            .to_vec();
+        retain_linked_to_population(&mut binaries, &plan);
+        assert_eq!(
+            binaries.iter().map(|binary| binary.target.as_str()).collect::<Vec<_>>(),
+            ["src/pending.rs"]
+        );
     }
 
     #[test]
@@ -1173,7 +1214,7 @@ mod tests {
     }
 
     #[test]
-    fn linkage_keeps_work_after_a_registry_skip_and_after_a_previously_visited_cycle() {
+    fn registry_intermediates_fail_open_while_previously_visited_cycles_preserve_linkage() {
         let directory = tempfile::tempdir_in(".").unwrap();
         let root = Utf8PathBuf::from_path_buf(fs::canonicalize(directory.path()).unwrap()).unwrap();
         let output = root.join("out");
@@ -1202,7 +1243,7 @@ mod tests {
                     &origins,
                     &root
                 ),
-                Some(expected.clone()),
+                cycle.then(|| expected.clone()),
                 "cycle={cycle}"
             );
         }
@@ -1556,8 +1597,8 @@ mod tests {
 
         assert_eq!(
             linked_sources(executable.as_str(), &capture.source, &[capture.clone()], &origins, &root),
-            Some(std::iter::once(Utf8PathBuf::from("tests/subject.rs")).collect()),
-            "a cycle is visited once and a registry dependency needs no workspace capture"
+            None,
+            "a registry dependency may link a patched workspace member; without its capture exclusion is unproven"
         );
 
         let opaque = out.join("libopaque.rlib");

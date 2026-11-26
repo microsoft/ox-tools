@@ -2,17 +2,24 @@
 // Licensed under the MIT License.
 
 //! Lexical numeric-use and ownership-guard evidence.
+//!
+//! Shared syntax checks record attribute ranges, temporary-value uses, and possible `format!`
+//! macro shadows even in cfg-disabled or otherwise skipped subtrees. These checks supply no
+//! lexical facts and do not make excluded code eligible for mutation.
 
 use core::ops::Range;
 use std::rc::Rc;
 
+#[cfg(test)]
 use syn::spanned::Spanned as _;
 use syn::visit::{self, Visit};
 use syn::{BinOp, Expr, Pat};
 
 use super::predicates::{expr_attrs, is_int_literal, is_numeric_receiver, stmt_attrs};
 use crate::cfg::CfgSet;
+use crate::ops::collect::collector::read_only;
 use crate::ops::collect::defaults::{impl_item_attrs, item_attrs, trait_item_attrs};
+use crate::parse::Extent as _;
 use crate::{HashMap, HashSet};
 
 type Continuation<'ast> = Rc<[&'ast Expr]>;
@@ -27,8 +34,9 @@ const MAX_CONTINUATION_LEN: usize = 32;
 /// full continuation when a narrower prefix cannot be proved.
 const MAX_USE_PREFIX_DEPTH: usize = 64;
 
-#[derive(Default)]
+#[derive(Default, PartialEq, Eq)]
 pub(super) struct Evidence<'ast> {
+    pub(super) read_only: read_only::Evidence,
     pub(super) numeric: HashSet<Range<usize>>,
     pub(super) unsigned: HashSet<Range<usize>>,
     pub(super) reinitializations: HashMap<Range<usize>, Vec<Expr>>,
@@ -45,6 +53,7 @@ pub(super) struct Evidence<'ast> {
 
 pub(super) fn evidence<'ast>(file: &'ast syn::File, cfg: &CfgSet) -> Evidence<'ast> {
     let mut walk = Walk {
+        read_only: read_only::Walk::default(),
         cfg,
         bindings: HashMap::default(),
         binding_undo: Vec::new(),
@@ -88,6 +97,7 @@ pub(super) fn evidence<'ast>(file: &'ast syn::File, cfg: &CfgSet) -> Evidence<'a
     evidence.reborrowable = walk.reborrowable;
     evidence.returned_types = walk.returned_types;
     evidence.receiver_moves = walk.receiver_moves;
+    evidence.read_only = walk.read_only.finish();
     evidence
 }
 
@@ -105,7 +115,7 @@ fn reinitializations<'ast>(walk: &Walk<'ast, '_>, evidence: &mut Evidence<'ast>)
                     let checks = moved
                         .iter()
                         .filter(|(place, _)| !walk.following_invalid(span, context, place))
-                        .map(|(_, expression)| (expression.span().byte_range(), Rc::clone(continuation)))
+                        .map(|(_, expression)| (expression.extent().byte_range(), Rc::clone(continuation)))
                         .collect();
                     let _prior = evidence.ownership_continuations.insert(span.clone(), checks);
                 }
@@ -158,7 +168,7 @@ fn exits<'ast>(walk: &Walk<'ast, '_>, evidence: &mut Evidence<'ast>) {
                         && let Some(prefix) = walk.exit_prefix(exit, place)
                     {
                         invalid.push(expression.clone());
-                        let _prior = continuation_checks.insert(expression.span().byte_range(), prefix);
+                        let _prior = continuation_checks.insert(expression.extent().byte_range(), prefix);
                     }
                 }
                 expression.clone()
@@ -222,6 +232,7 @@ impl Place {
 }
 
 struct Walk<'ast, 'cfg> {
+    read_only: read_only::Walk<'ast>,
     cfg: &'cfg CfgSet,
     bindings: HashMap<String, usize>,
     binding_undo: Vec<(String, Option<usize>)>,
@@ -263,11 +274,9 @@ impl<'ast> Walk<'ast, '_> {
                     // #[gamma::skip(try.propagate_to_unwrap, tag = "equivalent", reason = "The match guard immediately above requires local.init to be Some with no divergence; neither local nor its initializer is mutated between that guard and this access.")]
                     suffix.push(local.init.as_ref()?.expr.as_ref());
                 }
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 _ => return None,
             }
             if suffix.len() + outer.len() > MAX_CONTINUATION_LEN {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
         }
@@ -298,7 +307,7 @@ impl<'ast> Walk<'ast, '_> {
         if self
             .place_sites
             .iter()
-            .any(|(site, used)| *site == expression.span().byte_range() && place.overlaps(used) && !self.writes.contains(site))
+            .any(|(site, used)| *site == expression.extent().byte_range() && place.overlaps(used) && !self.writes.contains(site))
         {
             return Some(Vec::new());
         }
@@ -347,7 +356,7 @@ impl<'ast> Walk<'ast, '_> {
 
     fn move_dominates(&self, expression: &Expr, context: &Context) -> bool {
         self.move_blocks
-            .get(&expression.span().byte_range())
+            .get(&expression.extent().byte_range())
             .is_some_and(|block| block.start <= context.block.start && context.block.end <= block.end)
     }
 
@@ -401,7 +410,6 @@ impl<'ast> Walk<'ast, '_> {
             .any(|region| region.start <= span.start && span.end <= region.end)
             || !self.move_dominates(expression, context)
         {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         if self.following_invalid(span, context, place) {
@@ -412,7 +420,6 @@ impl<'ast> Walk<'ast, '_> {
                 .iter()
                 .any(|expression| matches!(expression, Expr::Break(_) | Expr::Return(_)))
         }) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         context
@@ -513,7 +520,7 @@ impl<'ast> Walk<'ast, '_> {
     fn moved_argument(&mut self, expression: &Expr) {
         if let Some(place) = self.place(expression) {
             if let Some(block) = self.blocks.last() {
-                let _prior = self.move_blocks.insert(expression.span().byte_range(), block.clone());
+                let _prior = self.move_blocks.insert(expression.extent().byte_range(), block.clone());
             }
             let _prior = self.moved.insert(place, expression.clone());
         }
@@ -577,40 +584,54 @@ impl<'ast> Walk<'ast, '_> {
 #[expect(clippy::renamed_function_params, reason = "visitor parameters use descriptive names")]
 impl<'ast> Visit<'ast> for Walk<'ast, '_> {
     fn visit_item(&mut self, node: &'ast syn::Item) {
-        if !self.cfg.skip_gate(item_attrs(node)) {
+        if self.cfg.skip_gate(item_attrs(node)) {
+            self.read_only.visit_item(node);
+        } else {
             visit::visit_item(self, node);
         }
     }
 
     fn visit_impl_item(&mut self, node: &'ast syn::ImplItem) {
-        if !self.cfg.skip_gate(impl_item_attrs(node)) {
+        if self.cfg.skip_gate(impl_item_attrs(node)) {
+            self.read_only.visit_impl_item(node);
+        } else {
             visit::visit_impl_item(self, node);
         }
     }
 
     fn visit_trait_item(&mut self, node: &'ast syn::TraitItem) {
-        if !self.cfg.skip_gate(trait_item_attrs(node)) {
+        if self.cfg.skip_gate(trait_item_attrs(node)) {
+            self.read_only.visit_trait_item(node);
+        } else {
             visit::visit_trait_item(self, node);
         }
     }
 
     fn visit_stmt(&mut self, node: &'ast syn::Stmt) {
-        if !self.cfg.skip_gate(stmt_attrs(node)) {
+        if self.cfg.skip_gate(stmt_attrs(node)) {
+            self.read_only.visit_stmt(node);
+        } else {
             visit::visit_stmt(self, node);
         }
     }
 
     fn visit_expr(&mut self, node: &'ast Expr) {
-        if !self.cfg.skip_gate(expr_attrs(node)) {
+        self.read_only.enter(node);
+        if self.cfg.skip_gate(expr_attrs(node)) {
+            visit::visit_expr(&mut self.read_only, node);
+        } else {
             visit::visit_expr(self, node);
         }
+        self.read_only.leave();
     }
 
     fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+        self.read_only.visit_signature(&node.sig);
         self.function(&node.sig, Some(&node.block));
     }
 
     fn visit_item_struct(&mut self, node: &'ast syn::ItemStruct) {
+        self.read_only.visit_item_struct(node);
         let fields = node
             .fields
             .iter()
@@ -630,32 +651,35 @@ impl<'ast> Visit<'ast> for Walk<'ast, '_> {
     }
 
     fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+        self.read_only.visit_signature(&node.sig);
         self.function(&node.sig, Some(&node.block));
     }
 
     fn visit_trait_item_fn(&mut self, node: &'ast syn::TraitItemFn) {
+        self.read_only.visit_signature(&node.sig);
         self.function(&node.sig, node.default.as_ref());
     }
 
     fn visit_block(&mut self, node: &'ast syn::Block) {
+        self.read_only.block(node);
         let checkpoint = self.binding_undo.len();
-        self.blocks.push(node.span().byte_range());
+        self.blocks.push(node.extent().byte_range());
         let mut exited = false;
         for statement in &node.stmts {
             if self.cfg.skip_gate(stmt_attrs(statement)) {
                 continue;
             }
             if exited {
-                self.unreachable.push(statement.span().byte_range());
+                self.unreachable.push(statement.extent().byte_range());
             }
             exited |= matches!(statement, syn::Stmt::Expr(Expr::Break(_) | Expr::Continue(_) | Expr::Return(_), _));
         }
         for pair in node.stmts.windows(2) {
             if let syn::Stmt::Expr(expression, _) = &pair[0] {
                 let _prior = self.following.insert(
-                    expression.span().byte_range(),
+                    expression.extent().byte_range(),
                     Following {
-                        span: pair[1].span().byte_range(),
+                        span: pair[1].extent().byte_range(),
                         breaks: matches!(&pair[1], syn::Stmt::Expr(Expr::Break(brk), _) if brk.label.is_none()),
                     },
                 );
@@ -675,6 +699,7 @@ impl<'ast> Visit<'ast> for Walk<'ast, '_> {
     }
 
     fn visit_local(&mut self, node: &'ast syn::Local) {
+        self.read_only.visit_pat(&node.pat);
         if let Some(init) = &node.init {
             self.visit_expr(&init.expr);
             self.moved_argument(&init.expr);
@@ -686,6 +711,10 @@ impl<'ast> Visit<'ast> for Walk<'ast, '_> {
     }
 
     fn visit_expr_closure(&mut self, node: &'ast syn::ExprClosure) {
+        for input in &node.inputs {
+            self.read_only.visit_pat(input);
+        }
+        self.read_only.visit_return_type(&node.output);
         let checkpoint = self.binding_undo.len();
         let outer_loops = core::mem::take(&mut self.loops);
         let outer_moved = core::mem::take(&mut self.moved);
@@ -706,7 +735,7 @@ impl<'ast> Visit<'ast> for Walk<'ast, '_> {
         if let Some((_, otherwise)) = &node.else_branch {
             self.alternatives.push(
                 // #[gamma::skip(collection.reverse_vec, tag = "equivalent", reason = "The only consumer compatible finds each span's branch index and compares the two indices for inequality. Reversing this disjoint then/else pair preserves membership and whether the indices differ.")]
-                vec![node.then_branch.span().byte_range(), otherwise.span().byte_range()],
+                vec![node.then_branch.extent().byte_range(), otherwise.extent().byte_range()],
             );
         }
         let checkpoint = self.binding_undo.len();
@@ -721,11 +750,13 @@ impl<'ast> Visit<'ast> for Walk<'ast, '_> {
     }
 
     fn visit_expr_let(&mut self, node: &'ast syn::ExprLet) {
+        self.read_only.visit_pat(&node.pat);
         self.visit_expr(&node.expr);
         self.bind(&node.pat);
     }
 
     fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
+        self.read_only.visit_pat(&node.pat);
         self.visit_expr(&node.expr);
         let checkpoint = self.binding_undo.len();
         self.bind(&node.pat);
@@ -734,7 +765,7 @@ impl<'ast> Visit<'ast> for Walk<'ast, '_> {
         {
             let _inserted = self.numeric.insert(ident.ident.span().byte_range().start);
         }
-        self.loops.push(node.span().byte_range());
+        self.loops.push(node.extent().byte_range());
         let outer_continuation = self.continuation.replace(Rc::default());
         self.visit_block(&node.body);
         let _loop = self.loops.pop();
@@ -744,9 +775,17 @@ impl<'ast> Visit<'ast> for Walk<'ast, '_> {
 
     fn visit_arm(&mut self, node: &'ast syn::Arm) {
         if self.cfg.skip_gate(&node.attrs) {
+            self.read_only.visit_arm(node);
             return;
         }
 
+        if let Pat::Guard(guarded) = &node.pat {
+            // Visit the guard in the combined walk only after registering bindings, preserving
+            // flow-sensitive processing without observing the guard twice.
+            self.read_only.visit_pat(&guarded.pat);
+        } else {
+            self.read_only.visit_pat(&node.pat);
+        }
         let checkpoint = self.binding_undo.len();
         self.bind(&node.pat);
         if let Pat::Guard(guarded) = &node.pat {
@@ -758,7 +797,7 @@ impl<'ast> Visit<'ast> for Walk<'ast, '_> {
 
     fn visit_expr_match(&mut self, node: &'ast syn::ExprMatch) {
         self.alternatives
-            .push(node.arms.iter().map(|arm| arm.span().byte_range()).collect());
+            .push(node.arms.iter().map(|arm| arm.extent().byte_range()).collect());
         visit::visit_expr_match(self, node);
     }
 
@@ -777,10 +816,11 @@ impl<'ast> Visit<'ast> for Walk<'ast, '_> {
     }
 
     fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+        visit::visit_expr_path(&mut self.read_only, node);
         if let Some(binding) = node.path.get_ident().and_then(|name| self.bindings.get(&name.to_string())) {
-            self.sites.push((node.span().byte_range(), *binding));
+            self.sites.push((node.extent().byte_range(), *binding));
             self.place_sites.push((
-                node.span().byte_range(),
+                node.extent().byte_range(),
                 Place {
                     binding: *binding,
                     root: node
@@ -796,7 +836,10 @@ impl<'ast> Visit<'ast> for Walk<'ast, '_> {
 
     fn visit_expr_field(&mut self, node: &'ast syn::ExprField) {
         if let Some(place) = self.place(&Expr::Field(node.clone())) {
-            self.place_sites.push((node.span().byte_range(), place));
+            // Record the complete place once, not its root or field prefixes as extra uses.
+            // The read-only walk still observes nested syntax such as receiver attributes.
+            visit::visit_expr_field(&mut self.read_only, node);
+            self.place_sites.push((node.extent().byte_range(), place));
         } else {
             visit::visit_expr_field(self, node);
         }
@@ -841,7 +884,7 @@ impl<'ast> Visit<'ast> for Walk<'ast, '_> {
         }
         visit::visit_expr_method_call(self, node);
         for argument in &node.args {
-            let _inserted = self.reborrowable.insert(argument.span().byte_range());
+            let _inserted = self.reborrowable.insert(argument.extent().byte_range());
             self.moved_argument(argument);
         }
         let method = node.method.to_string();
@@ -852,8 +895,8 @@ impl<'ast> Visit<'ast> for Walk<'ast, '_> {
             "into_iter" | "into_bytes" | "into_boxed_str" | "into_string" | "into_os_string" | "into_vec"
         ) && self.place(&node.receiver).is_some()
         {
-            let _prior = self.receiver_moves.insert(node.receiver.span().byte_range(), method);
-            let _inserted = self.reborrowable.insert(node.receiver.span().byte_range());
+            let _prior = self.receiver_moves.insert(node.receiver.extent().byte_range(), method);
+            let _inserted = self.reborrowable.insert(node.receiver.extent().byte_range());
             self.moved_argument(&node.receiver);
         }
     }
@@ -861,17 +904,18 @@ impl<'ast> Visit<'ast> for Walk<'ast, '_> {
     fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
         visit::visit_expr_call(self, node);
         for argument in &node.args {
-            let _inserted = self.reborrowable.insert(argument.span().byte_range());
+            let _inserted = self.reborrowable.insert(argument.extent().byte_range());
             self.moved_argument(argument);
         }
     }
 
     fn visit_expr_assign(&mut self, node: &'ast syn::ExprAssign) {
+        self.read_only.assignment(node);
         let assigned = self.place(&node.left);
         if
         // #[gamma::skip(cond.always_true, reason = "writes is consulted only for exact spans in place_sites. A non-place assignment LHS has no place_sites entry for its complete span; only any smaller place children are recorded. Inserting the non-place LHS span cannot exclude any recorded place use. The binding/place analysis, restoration recording and traversal are unchanged.", tag = "equivalent")]
         assigned.is_some() {
-            let _prior = self.writes.insert(node.left.span().byte_range());
+            let _prior = self.writes.insert(node.left.extent().byte_range());
         }
         // Moving and restoring within this assignment is safe; only earlier moves make it load-bearing.
         let restored = assigned
@@ -886,22 +930,22 @@ impl<'ast> Visit<'ast> for Walk<'ast, '_> {
             .unwrap_or_default();
         visit::visit_expr_assign(self, node);
         if let Some(assigned) = assigned {
-            self.restorations.push((node.span().byte_range(), assigned.clone()));
+            self.restorations.push((node.extent().byte_range(), assigned.clone()));
             self.moved.retain(|place, _| !assigned.contains(place));
             if !restored.is_empty() {
                 if let Some(context) = self.context() {
-                    let _prior = self.contexts.insert(node.span().byte_range(), context);
+                    let _prior = self.contexts.insert(node.extent().byte_range(), context);
                 }
-                let _previous = self.reinitializations.insert(node.span().byte_range(), restored);
+                let _previous = self.reinitializations.insert(node.extent().byte_range(), restored);
                 if let Some(continuation) = &self.continuation {
-                    let _prior = self.continuations.insert(node.span().byte_range(), Rc::clone(continuation));
+                    let _prior = self.continuations.insert(node.extent().byte_range(), Rc::clone(continuation));
                 }
             }
         }
     }
 
     fn visit_expr_loop(&mut self, node: &'ast syn::ExprLoop) {
-        self.loops.push(node.span().byte_range());
+        self.loops.push(node.extent().byte_range());
         let outer_continuation = self.continuation.replace(Rc::default());
         visit::visit_expr_loop(self, node);
         let _loop = self.loops.pop();
@@ -909,7 +953,7 @@ impl<'ast> Visit<'ast> for Walk<'ast, '_> {
     }
 
     fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
-        self.loops.push(node.span().byte_range());
+        self.loops.push(node.extent().byte_range());
         let outer_continuation = self.continuation.replace(Rc::default());
         let checkpoint = self.binding_undo.len();
         self.visit_expr(&node.cond);
@@ -920,11 +964,23 @@ impl<'ast> Visit<'ast> for Walk<'ast, '_> {
     }
 
     fn visit_expr_continue(&mut self, node: &'ast syn::ExprContinue) {
-        self.exit(node.span().byte_range(), node.label.is_none(), true);
+        self.exit(node.extent().byte_range(), node.label.is_none(), true);
+    }
+
+    fn visit_item_macro(&mut self, node: &'ast syn::ItemMacro) {
+        self.read_only.item_macro(node);
+    }
+
+    fn visit_stmt_macro(&mut self, _: &'ast syn::StmtMacro) {
+        self.read_only.statement_macro();
+    }
+
+    fn visit_item_extern_crate(&mut self, node: &'ast syn::ItemExternCrate) {
+        self.read_only.extern_crate(node);
     }
 
     fn visit_expr_break(&mut self, node: &'ast syn::ExprBreak) {
-        self.exit(node.span().byte_range(), node.label.is_none(), false);
+        self.exit(node.extent().byte_range(), node.label.is_none(), false);
         visit::visit_expr_break(self, node);
     }
 }
@@ -935,6 +991,104 @@ mod tests {
     use syn::{Block, ExprGroup, parse_file, parse_quote};
 
     use super::*;
+
+    #[test]
+    fn read_only_consumers_survive_cfg_delegation_and_specialized_lexical_visitors() {
+        for source in [
+            "struct S; impl S { #[cfg(any())] fn hidden() { count(bytes().first()); } }",
+            "trait T { #[cfg(any())] fn hidden() { count(bytes().first()); } }",
+            "fn f() { let _: [u8; 0] = [#[cfg(any())] { count(bytes().first()); 1 }]; }",
+            "fn f(value: [u8; count(bytes().first())]) {}",
+            "struct S; impl S { fn f(value: [u8; count(bytes().first())]) {} }",
+            "trait T { fn f(value: [u8; count(bytes().first())]); }",
+            "struct S([u8; count(bytes().first())]);",
+            "fn f() { let value: [u8; count(bytes().first())] = [0]; }",
+            "fn f() { let closure = |value: [u8; count(bytes().first())]| (); }",
+            "fn f() { let closure = || -> [u8; count(bytes().first())] { [0] }; }",
+            "struct Shape<const N: usize>(u8); fn f(shape: Shape<1>) { if let Shape::<{ count(bytes().first()) }>(value) = shape {} }",
+            "struct Shape<const N: usize>(u8); fn f(values: Vec<Shape<1>>) { for Shape::<{ count(bytes().first()) }>(value) in values {} }",
+            "struct Shape<const N: usize>(u8); fn f(shape: Shape<1>) { match shape { Shape::<{ count(bytes().first()) }>(value) => () } }",
+            "struct Shape<const N: usize>(u8); fn f(shape: Shape<1>) { match shape { Shape::<{ count(bytes().first()) }>(value) if value > 0 => (), _ => () } }",
+            "fn target<const N: usize>() {} fn f() { target::<{ count(bytes().first()) }>(); }",
+            "struct Shape<const N: usize>; struct Record { field: u8 } impl<const N: usize> Shape<N> { const VALUE: Record = Record { field: 1 }; } fn f(VALUE: u8) { let _ = <Shape<{ count(bytes().first()) }>>::VALUE.field; }",
+        ] {
+            let file = parse_file(source).unwrap();
+            let actual = evidence(&file, &CfgSet::parse(""));
+            let borrowed = source.find("bytes().first()").unwrap();
+            let consumer = source.find("count(bytes().first())").unwrap();
+            assert_eq!(
+                actual.read_only.temporaries.get(&(borrowed..borrowed + "bytes().first()".len())),
+                Some(&(consumer..consumer + "count(bytes().first())".len())),
+                "{source}"
+            );
+            assert_eq!(actual.read_only, read_only::Evidence::of(&file), "{source}");
+        }
+    }
+
+    #[test]
+    fn field_receivers_preserve_attributes_inside_a_known_place() {
+        for receiver in ["(#[allow(unused)] value)", "((#[allow(unused)] value))"] {
+            let source =
+                format!("#![feature(stmt_expr_attributes)] struct Record {{ field: u8 }} fn f(value: Record) -> u8 {{ {receiver}.field }}");
+            let file = parse_file(&source).unwrap();
+            let actual = evidence(&file, &CfgSet::parse(""));
+            let start = source.find("#[allow(unused)] value").unwrap();
+            let end = start + "#[allow(unused)] value".len();
+            assert_eq!(
+                actual.read_only.expressions.get(&(start..end)),
+                Some(&(start + "#[allow(unused)]".len()..end)),
+                "{source}"
+            );
+            assert_eq!(actual.read_only, read_only::Evidence::of(&file), "{source}");
+        }
+    }
+
+    #[test]
+    fn statement_macro_invocations_shadow_format_even_in_cfg_excluded_bodies() {
+        for gate in ["", "#[cfg(any())]"] {
+            let source = format!("macro_rules! emit {{ () => {{}} }} {gate} fn f() {{ emit!(); }}");
+            let file = parse_file(&source).unwrap();
+            assert!(evidence(&file, &CfgSet::parse("")).read_only.format_macro_shadowed, "{source}");
+        }
+        let file = parse_file("macro_rules! emit { () => {} } fn f() {}").unwrap();
+        assert!(!evidence(&file, &CfgSet::parse("")).read_only.format_macro_shadowed);
+    }
+
+    #[test]
+    fn shared_walk_keeps_ungated_observations_and_lexical_cfg_separate() {
+        let file = parse_file(
+            r"
+            #[cfg(any())] mod hidden {
+                macro_rules! format { () => {} }
+                fn hidden() { consume(make().as_str()); }
+            }
+            mod outer { mod inner {
+                struct S { value: [u8; 1 + 2] }
+                fn f<const N: usize>(mut input: S) {
+                    if true {} #[allow(unused)] { value(); }
+                    #[cfg(any())] consume(disabled().as_str());
+                    let value = make().as_str();
+                    let closure = |[x, y]: [u8; 2]| if true { x } else { y };
+                    input.value[0] = 7;
+                    match input.value {
+                        [value, ..] if value > 0 => consume(make().as_str()),
+                        #[cfg(any())] _ => consume(disabled().as_str()),
+                        _ => (),
+                    }
+                    for x in 0..N { while x > 0 { if x > 2 { continue; } break; } }
+                    let [first, second] = [make(), make()];
+                    [*first, *second] = values();
+                }
+            } }
+        ",
+        )
+        .unwrap();
+        let expected = read_only::Evidence::of(&file);
+        for cfg in [CfgSet::unconditional(), CfgSet::parse("")] {
+            let actual = evidence(&file, &cfg);
+            assert_eq!(actual.read_only, expected);
+        }
+    }
 
     fn copied(continuation: &[&Expr]) -> Vec<Expr> {
         continuation.iter().map(|expression| (*expression).clone()).collect()
@@ -957,6 +1111,7 @@ mod tests {
 
     fn empty_walk<'ast>(cfg: &CfgSet) -> Walk<'ast, '_> {
         Walk {
+            read_only: read_only::Walk::default(),
             cfg,
             bindings: HashMap::default(),
             binding_undo: Vec::new(),

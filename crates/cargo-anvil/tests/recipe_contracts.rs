@@ -114,6 +114,35 @@ fn generated_recipes_are_split_by_responsibility() {
 }
 
 #[test]
+fn unused_deps_keeps_scope_and_fixes_explicit() {
+    let generated = generated();
+    assert!(generated.checks.contains(r#"[arg("fix", long, value="true")]"#));
+    assert!(generated.checks.contains(r#"anvil-unused-deps fix="false":"#));
+    assert!(generated.checks.contains(r#"anvil_impact_input_dir + "/required.packages""#));
+    assert!(generated.checks.contains("$pkg += @('--package', $spec)"));
+    assert!(generated.checks.contains("Where-Object { -not [string]::IsNullOrWhiteSpace($_) }"));
+    assert!(generated.setup.contains("cargo_unused_deps_version"));
+    assert!(generated.setup.contains("anvil-tool-cargo-unused-deps-validate-prereqs"));
+}
+
+#[test]
+fn unused_deps_runs_immediately_before_udeps_in_pr_fast() {
+    assert!(
+        cargo_anvil::artifacts::justfile::groups::pr_fast()
+            .body()
+            .contains("    anvil-unused-deps \\\n    anvil-udeps \\\n"),
+        "execution order must keep unused-deps immediately before udeps"
+    );
+}
+
+#[test]
+fn unused_deps_rejects_whitespace_only_package_files() {
+    let generated = generated();
+    assert!(generated.checks.contains("IsNullOrWhiteSpace($packageText)"));
+    assert!(generated.checks.contains("contains whitespace but no package specs"));
+}
+
+#[test]
 fn common_checks_are_direct_cargo_each_invocations() {
     let recipes = generated().checks;
     for command in [
@@ -158,6 +187,30 @@ fn coverage_is_one_domain_tool_invocation() {
 }
 
 #[test]
+fn spellcheck_uses_portable_helpers_with_validated_setup() {
+    let spellcheck = include_str!("../templates/justfiles/anvil/checks/spellcheck.just");
+    let setup = include_str!("../templates/justfiles/anvil/setup/checks/spellcheck.just");
+    let tools = include_str!("../templates/justfiles/anvil/setup/tools.just");
+    assert!(spellcheck.contains("cargo spellcheck-helper prepare-dictionary --input .spelling --output target/spelling.dic"));
+    assert!(spellcheck.contains("cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} spellcheck"));
+    assert!(!spellcheck.contains("[script(\"pwsh\", \"-NoProfile\")]\nanvil-spellcheck:"));
+    assert!(setup.contains(
+        "anvil-spellcheck-validate-prereqs: anvil-tool-cargo-spellcheck-helper-validate-prereqs anvil-tool-cargo-spellcheck-validate-prereqs anvil-tool-cargo-each-validate-prereqs"
+    ));
+    assert!(
+        tools.contains("anvil-tool-cargo-spellcheck-install installer=\"install\": (anvil-tool-cargo-spellcheck-helper-install installer)")
+    );
+    assert!(tools.contains(
+        "anvil-tool-cargo-spellcheck-helper-install installer=\"install\": (_install-tool \"cargo-spellcheck-helper\" cargo_spellcheck_helper_version installer)"
+    ));
+    assert!(tools.contains(
+        "anvil-tool-cargo-spellcheck-source-deps-check: anvil-tool-cargo-spellcheck-helper-validate-prereqs\n    cargo spellcheck-helper check-source-deps"
+    ));
+    assert!(!setup.contains("[script(\"pwsh\""));
+    assert!(!tools.contains("[script(\"pwsh\""));
+}
+
+#[test]
 fn setup_uses_lazy_inventory_and_exact_install_policy() {
     let generated = generated();
     let recipes = &generated.setup;
@@ -189,7 +242,7 @@ fn released_domain_tool_versions_are_pinned() {
         "cargo_coverage_gate_version := \"0.7.5\"",
         "cargo_delta_version := \"0.5.0\"",
         "cargo_each_version := \"0.8.0\"",
-        "cargo_gamma_version := \"0.6.0\"",
+        "cargo_gamma_version := \"0.7.0\"",
     ] {
         assert!(recipes.contains(pin), "missing released tool pin: {pin}");
     }
@@ -251,6 +304,29 @@ fn mutation_diff_setup_includes_the_impact_driver() {
         "anvil-mutants-diff-validate-prereqs: anvil-tool-cargo-gamma-validate-prereqs \
          anvil-tool-cargo-each-validate-prereqs"
     ));
+}
+
+#[test]
+fn impact_delegates_snapshot_management_to_delta_without_a_shell_script() {
+    let check = include_str!("../templates/justfiles/anvil/checks/impact.just");
+    let helper = include_str!("../templates/justfiles/anvil/helpers/impact.just");
+    for tier in ["modified", "affected", "required"] {
+        assert!(check.contains(&format!(
+            "impact --base-ref {{{{ quote(anvil_base_ref) }}}} --{tier} --format packages --output {{{{ quote(anvil_impact_input_dir + \"/{tier}.packages\") }}}}"
+        )));
+        assert!(check.contains(&format!("(_anvil-impact-consume-file \"{tier}\")")));
+    }
+    assert!(check.contains(r#"[env("RUSTUP_TOOLCHAIN", anvil_impact_toolchain)]"#));
+    assert!(check.contains(r#"[env("GIT_LFS_SKIP_SMUDGE", "1")]"#));
+    assert!(helper.contains(r#"shell("rustc " + anvil_stable_toolchain_arg + " --print sysroot")"#));
+    assert!(helper.contains("cloud impact computation requires a clean working tree"));
+    assert!(helper.contains(r#""target/anvil/impact-invocations/" + ANVIL_IMPACT_INVOCATION_ID"#));
+    assert!(helper.contains(r#"if read(file) == """#));
+    assert!(helper.contains("download a complete impact artifact or correct ANVIL_IMPACT_INPUT_DIR"));
+    for recipes in [check, helper] {
+        assert!(!recipes.contains("[script("));
+        assert!(!recipes.contains("_anvil-impact-snapshot"));
+    }
 }
 
 #[test]

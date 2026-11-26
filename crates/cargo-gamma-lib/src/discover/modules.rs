@@ -223,6 +223,14 @@ pub(super) fn has_include(ast: &syn::File) -> bool {
 /// would quietly shrink the population.
 #[must_use]
 pub fn excluded_files(roots: &[Utf8PathBuf], declared: &[(Utf8PathBuf, Vec<Declaration>)]) -> HashSet<Utf8PathBuf> {
+    excluded_files_with(roots, declared, identity)
+}
+
+pub(super) fn excluded_files_with(
+    roots: &[Utf8PathBuf],
+    declared: &[(Utf8PathBuf, Vec<Declaration>)],
+    mut identity: impl FnMut(&Utf8Path) -> Utf8PathBuf,
+) -> HashSet<Utf8PathBuf> {
     let mut edges: HashMap<Utf8PathBuf, Vec<Declaration>> = HashMap::default();
     for (from, list) in declared {
         edges

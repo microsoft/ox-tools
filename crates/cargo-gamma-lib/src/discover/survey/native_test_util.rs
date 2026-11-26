@@ -20,6 +20,7 @@ pub fn checked_survey(root: Utf8PathBuf) -> Survey {
             source: None,
         }],
         declaration_files: HashMap::default(),
+        declaration_cache: Mutex::default(),
         reach: HashMap::default(),
         selected: vec!["alpha".into()],
         tests: Vec::new(),
@@ -117,5 +118,7 @@ pub fn scan_with_inactive_declaration(
                 incomplete_packages: HashSet::default(),
             })
         },
+        None,
+        |_worker| Ok(()),
     )
 }

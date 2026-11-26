@@ -515,7 +515,6 @@ pub(super) fn nominal_expansion(attributes: &[syn::Attribute], cfg: &CfgSet) -> 
             .parse_args_with(syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated)
             .ok()?;
         if nested.len() < 2 {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let mut nested = nested.into_iter();
@@ -526,7 +525,6 @@ pub(super) fn nominal_expansion(attributes: &[syn::Attribute], cfg: &CfgSet) -> 
             Verdict::Yes => pending.extend(nested.map(|meta| syn::parse_quote!(#[#meta]))),
             Verdict::No => {}
             Verdict::Unknown => {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
         }
@@ -551,7 +549,6 @@ pub(super) fn known_derives(attributes: &[syn::Attribute], paths: &DefaultPaths)
 
 fn nominal_macro(node: &syn::Macro, paths: &DefaultPaths) -> bool {
     if !paths.known_value_macro(&node.path) {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
         return false;
     }
     if node.path.segments.last().is_some_and(|segment| segment.ident == "stringify") {
@@ -570,25 +567,20 @@ fn nominal_macro(node: &syn::Macro, paths: &DefaultPaths) -> bool {
         if
         // #[gamma::skip(cond.always_false, reason = "If this early overflow check is removed, the extra sentinel token still exhausts checked_sub(1) and returns false before any queued group is visited. No state escapes this pure predicate; only inspection work differs.", tag = "resource")]
         tokens.len() > remaining {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         let mut inert_group = None;
         for (index, token) in tokens.iter().enumerate() {
             let Some(next) = remaining.checked_sub(1) else {
-                return
-                // #[gamma::skip(literal.bool_flip, return_value.default, reason = "The per-stream length check guarantees at least one remaining unit for every token in this loop, so this failure arm is unreachable. The unchanged value is also bool::default().", tag = "equivalent")]
-                false;
+                return false; // #[gamma::skip(literal.bool_flip, return_value.default, reason = "The per-stream length check guarantees at least one remaining unit for every token in this loop, so this failure arm is unreachable. The unchanged value is also bool::default().", tag = "equivalent")]
             };
             remaining = next;
             match token {
                 proc_macro2::TokenTree::Group(group) if inert_group != Some(index) => pending.push(group.stream()),
                 proc_macro2::TokenTree::Ident(name) if name == "impl" => {
-                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
                     return false;
                 }
                 proc_macro2::TokenTree::Punct(punct) if matches!(punct.as_char(), '#' | '$') => {
-                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
                     return false;
                 }
                 proc_macro2::TokenTree::Punct(punct)
@@ -611,7 +603,6 @@ fn nominal_macro(node: &syn::Macro, paths: &DefaultPaths) -> bool {
                     let path = tokens[start..index].iter().cloned().collect();
                     if let Ok(path) = syn::parse2::<syn::Path>(path) {
                         if !paths.known_value_macro(&path) {
-                            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
                             return false;
                         }
                         if path.segments.last().is_some_and(|segment| segment.ident == "stringify") {
@@ -686,7 +677,7 @@ impl<'ast> Visit<'ast> for BlockImplementations<'_> {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct Identities {
     declarations: HashMap<Vec<String>, Option<bool>>,
     links: HashMap<Vec<String>, Option<Vec<String>>>,
@@ -708,13 +699,18 @@ pub(super) struct Pending {
 }
 
 impl Pending {
+    #[cfg(test)]
     pub(super) fn of(file: &File, cfg: &CfgSet) -> Self {
+        Self::with_paths(file, cfg, DefaultPaths::of_in(file, cfg))
+    }
+
+    pub(super) fn with_paths(file: &File, cfg: &CfgSet, paths: DefaultPaths) -> Self {
         let mut identities = Identities::default();
         let _inserted = identities.complete_modules.insert(Vec::new());
         let mut walk = Walk {
             identities,
             module: Vec::new(),
-            paths: DefaultPaths::of_in(file, cfg),
+            paths,
             cfg,
             certain: true,
         };
@@ -819,7 +815,6 @@ impl Identities {
         while remaining > 0 {
             *work = work.checked_sub(1)?;
             if path.len() > MODULE_PATH_SEGMENT_LIMIT {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
             remaining -= 1;
@@ -946,6 +941,7 @@ impl Identities {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn of(file: &File, cfg: &CfgSet) -> Self {
         Pending::of(file, cfg).finish()
     }
@@ -983,10 +979,9 @@ impl Identities {
             if
             // #[gamma::skip(logical.or_remove_right, reason = "Identities::resolve_path retains its finite decreasing budget and visited-path guard. Removing the visited check still returns None at the budget for cycles; permitting one extra unchanged iteration after no link matches immediately hits visited (or the budget) and returns the same None. Positive declaration resolutions and chosen link replacements are unchanged.", tag = "equivalent")]
             remaining == 0 || !visited.insert(path.clone()) {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
-            // #[gamma::skip(all, reason = "this decreasing budget bounds alias cycles whose expanded paths never repeat")]
+            // #[gamma::skip(all, tag = "timeout", reason = "This decrement terminates expanding alias cycles such as A = A::Member, whose accumulated paths never repeat and evade the visited-path set.")]
             remaining -= 1;
             if self.declarations.contains_key(&path) {
                 return Some(path);
@@ -1009,7 +1004,6 @@ impl Identities {
             if
             // #[gamma::skip(cond.always_false, reason = "Identities::resolve_path retains its finite decreasing budget and visited-path guard. Removing the visited check still returns None at the budget for cycles; permitting one extra unchanged iteration after no link matches immediately hits visited (or the budget) and returns the same None. Positive declaration resolutions and chosen link replacements are unchanged.", tag = "equivalent")]
             !replaced {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
         }
@@ -1190,9 +1184,7 @@ impl<'ast> Visit<'ast> for Walk<'_> {
             if !self.certain {
                 let _inserted = self.identities.opaque_modules.insert(self.key(node.ident.to_string()));
             }
-            let mut file = syn::parse_file("").expect("empty Rust source always parses");
-            file.items.clone_from(items);
-            let paths = core::mem::replace(&mut self.paths, DefaultPaths::of_in(&file, self.cfg));
+            let paths = core::mem::replace(&mut self.paths, DefaultPaths::default().with_items(items.iter(), self.cfg));
             self.module.push(node.ident.to_string());
             for item in items {
                 self.visit_item(item);

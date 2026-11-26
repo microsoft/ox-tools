@@ -696,6 +696,136 @@ mod final_survivor_tests {
     }
 
     #[test]
+    fn nov21_reordered_converger_withdraws_the_original_file_not_the_reused_vector_position() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = Utf8PathBuf::from_path_buf(directory.path().canonicalize().unwrap()).unwrap();
+        let work = Workspace::adopt(root.clone(), root.join("target"));
+        std::fs::create_dir(root.join("src")).unwrap();
+        let mut plan = plan();
+        plan.root = root.clone();
+        for (ordinal, path) in [(1, "src/a.rs"), (2, "src/b.rs")] {
+            std::fs::write(root.join(path), "fn f(){1;}\n").unwrap();
+            plan.files.push(crate::discover::TargetFile {
+                absolute: root.join(path),
+                path: path.into(),
+                package: "subject".into(),
+                source: None,
+            });
+            plan.mutants.push(Mutant {
+                ordinal,
+                file: Utf8PathBuf::from(path).into(),
+                span: 7..8,
+                original: "1".into(),
+                replacement: "2".into(),
+                ..crate::fixtures::mutant()
+            });
+        }
+        let mut converger = Converger::default();
+        converger.splices.instrument(&work, &plan, &HashSet::default()).unwrap();
+        plan.mutants.reverse();
+        converger.plan_reordered();
+        let instrumented = converger.splices.instrument(&work, &plan, &HashSet::from_iter([1])).unwrap();
+        assert_eq!(std::fs::read_to_string(root.join("src/a.rs")).unwrap(), "fn f(){1;}\n");
+        assert_ne!(std::fs::read_to_string(root.join("src/b.rs")).unwrap(), "fn f(){1;}\n");
+        assert_eq!(instrumented.guards.keys().copied().collect::<HashSet<_>>(), HashSet::from_iter([2]));
+        assert_eq!(instrumented.guards[&2].0, Utf8Path::new("src/b.rs"));
+    }
+
+    #[test]
+    fn nov21_finish_keeps_only_harnesses_with_proven_linkage_to_the_pending_population() {
+        use super::super::rustc_wrapper::RustcInvocation;
+
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = Utf8PathBuf::from_path_buf(directory.path().canonicalize().unwrap()).unwrap();
+        let out_dir = root.join("target").join("deps");
+        let captures = root.join("target").join("captures");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        std::fs::create_dir_all(&captures).unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("tests")).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname='subject'\nversion='1.0.0'\nautolib=false\n\
+             [[test]]\nname='subject'\npath='src/lib.rs'\n\
+             [[test]]\nname='unrelated'\npath='tests/unrelated.rs'\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("src/lib.rs"), "fn f(){1;}\n#[test] fn selected(){f();}\n").unwrap();
+        std::fs::write(root.join("tests/unrelated.rs"), "#[test] fn unrelated() {}\n").unwrap();
+        let mut work = Workspace::adopt(root.clone(), root.join("target"));
+        work.set_rustc_captures(Some(captures.clone()));
+        let mut plan = crate::fixtures::plan(vec![Mutant {
+            ordinal: 1,
+            file: Utf8PathBuf::from("src/lib.rs").into(),
+            span: 7..8,
+            original: "1".into(),
+            replacement: "2".into(),
+            outcome: Outcome::Pending,
+            ..crate::fixtures::mutant()
+        }]);
+        plan.root = root.clone();
+        plan.files.push(crate::discover::TargetFile {
+            absolute: root.join("src/lib.rs"),
+            path: "src/lib.rs".into(),
+            package: "subject".into(),
+            source: None,
+        });
+        // Matching artifact, capture, and dep-info identities retain both candidates with the same
+        // hash suffix and known source linkage; only subject intersects the pending mutation.
+        let mut artifacts = Vec::new();
+        for (name, path) in [("subject", "src/lib.rs"), ("unrelated", "tests/unrelated.rs")] {
+            let invocation = RustcInvocation {
+                crate_name: name.into(),
+                crate_types: vec!["bin".into()],
+                test: true,
+                source: root.join(path),
+                out_dir: out_dir.clone(),
+                extra_filename: "-0123456789abcdef".into(),
+                externs: Vec::new(),
+                opaque_extern: false,
+            };
+            std::fs::write(captures.join(format!("{name}.json")), serde_json::to_vec(&invocation).unwrap()).unwrap();
+            let executable = out_dir.join(format!("{name}-0123456789abcdef{}", std::env::consts::EXE_SUFFIX));
+            std::fs::write(
+                out_dir.join(format!("{name}-0123456789abcdef.d")),
+                format!(
+                    "{}: {}\n",
+                    executable.as_str().replace(' ', r"\ "),
+                    invocation.source.as_str().replace(' ', r"\ "),
+                ),
+            )
+            .unwrap();
+            artifacts.push(
+                json!({
+                    "reason":"compiler-artifact", "package_id":"subject 1.0.0",
+                    "manifest_path":root.join("Cargo.toml"), "profile":{"test":true},
+                    "target":{"name":name,"kind":["test"],"src_path":invocation.source},
+                    "executable":executable,"filenames":[executable],
+                })
+                .to_string(),
+            );
+        }
+        let stdout = artifacts.join("\n");
+        let candidates = test_binaries_with_linkage(&stdout, &work.root, Some(&captures));
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates.iter().all(|binary| binary.linked_sources.is_some()));
+        let finished = with_compiler(
+            move |_, _, _, _| Ok(Some(memory_compiler_output(true, stdout.clone()))),
+            || {
+                Converger {
+                    test_lib: true,
+                    ..Converger::default()
+                }
+                .finish(&work, &mut plan, None, BuildLimits::default(), &mut RecordedConvergence::default())
+            },
+        )
+        .unwrap();
+        assert_eq!(plan.mutants[0].outcome, Outcome::Pending);
+        assert_eq!(finished.binaries.len(), 1);
+        assert_eq!(finished.binaries[0].target, "subject");
+    }
+
+    #[test]
     fn recovered_convergence_withdraws_a_proven_interaction_even_when_an_independent_context_remains_unresolved() {
         let work = Workspace::adopt("never-written-mixed-root".into(), "never-written-mixed-target".into());
         let mut plan = plan();
@@ -1261,7 +1391,6 @@ impl Converger {
     }
 
     /// Invalidates position-based splice indexes after the plan is sorted.
-    // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
     pub(super) fn plan_reordered(&mut self) {
         self.splices.plan_reordered();
     }
@@ -1390,14 +1519,11 @@ impl Converger {
                 );
             }
 
-            // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
             if self.first_round.is_none() {
-                // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
                 self.first_round = Some(elapsed);
             }
 
             if outcome.succeeded {
-                // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
                 self.history.push(build_round(elapsed, plan, []));
 
                 return Ok(Convergence::Built(stdout));
@@ -1611,7 +1737,12 @@ impl Converger {
     /// between, its spans no longer describe the tree this run proved and will test. Those mutants
     /// are explicitly reported as not built rather than either spliced at the wrong offsets or
     /// allowed to reach the missing-guard invariant as an internal error.
-    pub fn instrument_schema(&mut self, work: &Workspace, plan: &Plan, withdrawn: &HashSet<u32>) -> Result<(Guards, Vec<Utf8PathBuf>)> {
+    pub fn instrument_schema(
+        &mut self,
+        work: &Workspace,
+        plan: &Plan,
+        withdrawn: &HashSet<u32>,
+    ) -> Result<(std::sync::Arc<Guards>, Vec<Utf8PathBuf>)> {
         let instrumented = self.splices.instrument(work, plan, withdrawn)?;
 
         self.withdrawn.extend(instrumented.unavailable.iter().copied());
@@ -1684,7 +1815,6 @@ impl Converger {
         } else {
             &["check", "--tests", "--keep-going"][..]
         };
-        // #[gamma::skip(all, reason = "the optional state is observed only through higher-level process orchestration that cannot be isolated safely here")]
         let outcome = run_cargo(work, plan, verb, select, limits, None, events)?;
 
         let Some(stdout) = outcome.stdout else {
@@ -1916,20 +2046,18 @@ impl Converger {
         }
 
         self.settle(plan);
-        // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
+        // #[gamma::skip(stmt.delete_call, tag = "equivalent", reason = "The successful round already recorded these same artifacts; repeating the union adds no paths.")]
         self.remember_compiled(&stdout, &work.root);
 
         // Runs after the withdrawal above so that a mutant which genuinely failed to compile keeps
         // that more specific verdict; see [`withdraw_uncompiled`] for why the set is only trusted
         // when it agrees with the survey at all.
         if let Some(compiled) = &self.compiled {
-            // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
             withdraw_uncompiled(plan, compiled);
         }
 
         let captures = work.rustc_captures();
         let mut binaries = test_binaries_with_linkage(&stdout, &work.root, captures.as_deref());
-        // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
         retain_linked_to_population(&mut binaries, plan);
         let packages = roots.map(|roots| roots.iter().map(|package| plan.spec(&work.root, package)).collect());
 
@@ -1954,7 +2082,6 @@ impl Converger {
     }
 
     /// Adds one successful Cargo invocation's dep-info to the run-wide source inventory.
-    // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
     fn remember_compiled(&mut self, stdout: &str, root: &camino::Utf8Path) {
         if let Some(found) = compiled_sources(stdout, root) {
             self.compiled.get_or_insert_with(HashSet::default).extend(found);

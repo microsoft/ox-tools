@@ -1057,20 +1057,48 @@ mod tests {
         assert_eq!(attempts.load(Ordering::Relaxed), 2);
     }
 
-    #[tokio::test(start_paused = true)]
-    #[cfg_attr(miri, ignore = "requires tokio timers")]
+    #[tokio::test]
     async fn download_honors_a_custom_timeout() {
-        let error = resilient_download("test_download", (), Some(Duration::from_millis(1)), delayed_success)
-            .await
-            .expect_err("every attempt must exceed the custom timeout");
+        let control = tick::ClockControl::new();
+        // Polled on this task only; the counter records calls without publishing shared state.
+        let attempts = Arc::new(AtomicU32::new(0));
+        let download = resilient_download_with_clock(
+            "test_download",
+            (),
+            Some(Duration::from_millis(1)),
+            {
+                let attempts = Arc::clone(&attempts);
+                move |()| {
+                    attempts.fetch_add(1, Ordering::Relaxed);
+                    core::future::pending::<crate::Result<()>>()
+                }
+            },
+            control.to_clock(),
+        );
+        let mut download = std::pin::pin!(download);
+
+        assert!(futures_util::poll!(&mut download).is_pending());
+        assert_eq!(attempts.load(Ordering::Relaxed), 1);
+        let total_attempts = MAX_RETRY_ATTEMPTS + 1;
+        // Poll each deadline so the retry wrapper enters backoff; the next advance starts a
+        // fresh stalled attempt rather than extending the previous attempt's custom timeout.
+        for attempt in 1..=total_attempts {
+            control.advance(Duration::from_millis(1));
+            if attempt < total_attempts {
+                assert!(futures_util::poll!(&mut download).is_pending());
+                assert_eq!(attempts.load(Ordering::Relaxed), attempt, "backoff precedes the next attempt");
+                control.advance(RETRY_BASE_DELAY * 2_u32.pow(attempt));
+                assert!(futures_util::poll!(&mut download).is_pending());
+                assert_eq!(attempts.load(Ordering::Relaxed), attempt + 1);
+            }
+        }
+        let std::task::Poll::Ready(result) = futures_util::poll!(&mut download) else {
+            panic!("the final stalled download must fail at its custom deadline");
+        };
+        let error = result.expect_err("every attempt must exceed the custom timeout");
 
         assert!(error.to_string().contains("download timed out"), "{error}");
-    }
-
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    async fn delayed_success(_unit: ()) -> crate::Result<()> {
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        Ok(())
+        assert_eq!(attempts.load(Ordering::Relaxed), total_attempts);
     }
 
     #[tokio::test]

@@ -40,12 +40,10 @@ pub(in super::super::super::super) struct Effects<'a> {
 impl Effects<'_> {
     pub(in super::super) fn install(&self, machine: &mut Machine<'_>) -> Option<()> {
         if self.calls.len() > MAX_CALLS || self.populations.len() + self.caches.len() > MAX_SNAPSHOTS {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         for (name, population) in &self.populations {
             if population.len() > MAX_POPULATION_LEN || machine.values.get(name)?.kind() != super::super::Binding::Opaque {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
             let _old = machine.values.insert(name.clone(), Value::Population(population.clone()));
@@ -56,14 +54,12 @@ impl Effects<'_> {
                 || machine.values.get(name)?.kind() != super::super::Binding::Opaque
                 || self.populations.contains_key(name)
             {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
             let _old = machine.values.insert(name.clone(), Value::PopulationCache(cache.clone()));
         }
         for (name, count) in &self.counts {
             if *count > MAX_COUNT || !machine.values.contains_key(name) {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
             let _old = machine.values.insert(name.clone(), Value::Count(*count));
@@ -75,7 +71,6 @@ impl Effects<'_> {
         use quote::ToTokens as _;
         let function = self.scalars.get(&call.func.to_token_stream().to_string())?;
         if !call.attrs.is_empty() || call.args.len() != function.sig.inputs.len() {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let mut values = self
@@ -84,10 +79,8 @@ impl Effects<'_> {
             .map(|(name, count)| (name.clone(), Value::Count(*count)))
             .collect::<HashMap<_, _>>();
         for (parameter, argument) in function.sig.inputs.iter().zip(&call.args) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             let syn::FnArg::Typed(parameter) = parameter else { return None };
             if !parameter.attrs.is_empty() {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
             let name = super::ident(&parameter.pat)?;
@@ -99,17 +92,14 @@ impl Effects<'_> {
             // #[gamma::skip(logical.or_remove_left, logical.or_remove_right, logical.or_to_and, reason = "The scalar registry permits only usize or bool parameters; after excluding usize, every well-typed call supplies a Bool to this bool parameter.", tag = "equivalent")]
             if super::primitive(&parameter.ty, "usize") {
                 if !matches!(value, Value::Count(_)) {
-                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                     return None;
                 }
             } else if !super::primitive(&parameter.ty, "bool") || !matches!(value, Value::Bool(_)) {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
             let _old = values.insert(name, value);
         }
         let [syn::Stmt::Expr(tail, None)] = function.block.stmts.as_slice() else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         };
         let output = match &function.sig.output {
@@ -117,7 +107,6 @@ impl Effects<'_> {
             syn::ReturnType::Type(_, ty)
                 // #[gamma::skip(match_guard.always_true, reason = "A non-usize/non-bool return type cannot have a well-typed Bool tail in the closed scalar grammar; the result-kind check still applies.", tag = "equivalent")]
                 if super::primitive(ty, "bool") => super::super::Binding::Bool,
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             _ => return None,
         };
         let closed = Effects {
@@ -161,24 +150,20 @@ impl Effects<'_> {
 
     pub(in super::super) fn hit(&self, machine: &mut Machine<'_>, call: &syn::ExprMethodCall) -> Option<Value> {
         if !call.attrs.is_empty() || call.turbofish.is_some() {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let receiver = place_name(&call.receiver)?;
         if machine.values.get(&receiver)? != &Value::Symbol(receiver.clone(), super::super::Binding::Opaque) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let prefix = self.calls.get(&format!("{receiver}.{}", call.method))?;
         if call.args.len() != prefix.parameters.len() {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let mut arguments = HashMap::default();
         for (parameter, expression) in prefix.parameters.iter().zip(&call.args) {
             let expression = if let Expr::Reference(reference) = expression {
                 if !reference.attrs.is_empty() {
-                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                     return None;
                 }
                 &*reference.expr
@@ -195,13 +180,11 @@ impl Effects<'_> {
         let population = arguments.get(prefix.population().0)?;
         // #[gamma::skip(try.propagate_to_unwrap, reason = "Each forwarded argument place was already required to exist in this unchanged values map.", tag = "equivalent")]
         let Value::Population(ordinals) = machine.values.get(population)? else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         };
         // #[gamma::skip(try.propagate_to_unwrap, reason = "The resolved cache path has exactly base and field, and the arity-checked zip inserted its typed parameter base.", tag = "equivalent")]
         let cache = project(&arguments, prefix.cache())?;
         let Value::PopulationCache(entries) = machine.values.get(&cache)? else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         };
         let guard = if let Some(path) = prefix.empty_guard() {
@@ -210,7 +193,6 @@ impl Effects<'_> {
                 &project(&arguments, path)?,
             )?
             else {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             };
             Some(*empty)
@@ -224,7 +206,6 @@ impl Effects<'_> {
 
 fn project(arguments: &HashMap<String, String>, path: &[String]) -> Option<String> {
     let [base, field] = path else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
         return None; // #[gamma::skip(option.none_to_some, reason = "The only callers supply resolved cache/guard field paths certified to contain exactly base and field.", tag = "equivalent")]
     };
     Some(format!("{}.{field}", arguments.get(base)?))

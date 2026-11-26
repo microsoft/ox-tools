@@ -41,6 +41,7 @@ aprz
 args
 argv
 ARM64
+SONAME
 auth
 AspNet
 async
@@ -965,3 +966,7 @@ precomputed
 subspan
 substrings
 unselected
+libclang
+Xcode
+loadability
+archiver

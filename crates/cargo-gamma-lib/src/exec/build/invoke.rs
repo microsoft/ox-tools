@@ -4,6 +4,7 @@
 //! Running cargo, and turning its two output streams into something a reader can follow.
 
 use core::fmt::Write as _;
+use core::ops::ControlFlow;
 use core::time::Duration;
 use std::io::{self, Read};
 use std::process::{Command, ExitStatus, Output, Stdio};
@@ -75,7 +76,6 @@ fn compile_with_replay(
     let mut command = work.cargo();
 
     let _command = command
-        // #[gamma::skip(all, reason = "this literal belongs to a Cargo process protocol or diagnostic boundary that cannot be isolated deterministically without replacing process-global integration state")]
         .env("CARGO_TERM_PROGRESS_WHEN", CARGO_PROGRESS_WHEN)
         .env("CARGO_TERM_PROGRESS_WIDTH", PROGRESS_WIDTH.to_string())
         .args(args)
@@ -174,9 +174,8 @@ fn supervise_tree(
         .take_stderr()
         .map(|pipe| read_pipe_with_limits(pipe, Stream::Prose, &sender, limits));
 
-    // The senders the reader threads hold are the only ones that matter; this one would keep the
-    // channel open forever after they finish.
-    // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
+    // Release the supervisor's sender after handing narration to the readers.
+    // #[gamma::skip(call.replace_with_default, call_result.default, stmt.delete_call, tag = "equivalent", reason = "Narration uses nonblocking receives and reader joins, not channel disconnection; the call result is unit.")]
     close_narration_channel(sender);
 
     let outcome = wait_for_build(
@@ -321,12 +320,7 @@ pub(super) fn narrate(lines: &Receiver<(Stream, String)>, events: &mut dyn Event
     let wanted = events.wants_build_output();
     let mut narrated = 0;
 
-    // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
-    while narrated < NARRATION_BATCH {
-        let Ok((stream, line)) = lines.try_recv() else {
-            break;
-        };
-
+    for (stream, line) in lines.try_iter().take(NARRATION_BATCH) {
         narrated += 1;
 
         match stream {
@@ -335,7 +329,6 @@ pub(super) fn narrate(lines: &Receiver<(Stream, String)>, events: &mut dyn Event
 
             Stream::Json => {
                 if !wanted {
-                    // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
                     continue;
                 }
 
@@ -389,6 +382,182 @@ pub(super) fn rendered_diagnostic(line: &str) -> Option<String> {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod final_survivor_tests {
     use super::*;
+
+    #[derive(Default)]
+    struct Narration {
+        output: Vec<String>,
+    }
+
+    impl Events for Narration {
+        fn phase(&mut self, _: &str, _: &str) {}
+        fn mutant(&mut self, _: &crate::model::Mutant) {}
+        fn build_output(&mut self, line: &str) {
+            self.output.push(line.to_owned());
+        }
+    }
+
+    #[test]
+    fn nov21_narration_yields_at_the_batch_boundary_without_losing_the_next_line() {
+        let (sender, lines) = mpsc::sync_channel(NARRATION_BATCH + 1);
+        for index in 0..=NARRATION_BATCH {
+            sender.send((Stream::Prose, index.to_string())).unwrap();
+        }
+        close_narration_channel(sender);
+        let mut events = Narration::default();
+        assert_eq!(narrate(&lines, &mut events), NARRATION_BATCH);
+        assert_eq!(events.output.len(), NARRATION_BATCH);
+        assert_eq!(narrate(&lines, &mut events), 1);
+        assert_eq!(events.output.last(), Some(&NARRATION_BATCH.to_string()));
+        assert_eq!(narrate(&lines, &mut events), 0);
+    }
+
+    #[test]
+    fn nov21_an_empty_connected_narration_channel_yields_and_accepts_later_lines() {
+        let (sender, lines) = mpsc::sync_channel(1);
+        let mut events = Narration::default();
+        assert_eq!(narrate(&lines, &mut events), 0);
+        sender.send((Stream::Prose, "later".into())).unwrap();
+        assert_eq!(narrate(&lines, &mut events), 1);
+        assert_eq!(events.output, ["later"]);
+        assert_eq!(narrate(&lines, &mut events), 0);
+        drop(sender);
+        assert_eq!(narrate(&lines, &mut events), 0);
+    }
+
+    #[test]
+    fn pending_reader_deadline_keeps_output_narrated_before_refusing_the_join() {
+        let (sender, lines) = mpsc::sync_channel(1);
+        sender.send((Stream::Prose, "compiler output before deadline".into())).unwrap();
+        let mut events = Narration::default();
+        assert!(
+            drain_pending_readers(
+                &lines,
+                &mut events,
+                || (false, true),
+                || true,
+                |_| panic!("an expired deadline must not back off"),
+            )
+            .is_break()
+        );
+        assert_eq!(events.output, ["compiler output before deadline"]);
+    }
+
+    #[test]
+    fn either_pending_reader_requires_narration_before_the_drain_deadline() {
+        for finished in [(false, true), (true, false), (false, false)] {
+            let (sender, lines) = mpsc::sync_channel(1);
+            sender.send((Stream::Prose, "pending compiler output".into())).unwrap();
+            let mut events = Narration::default();
+            assert!(
+                drain_pending_readers(
+                    &lines,
+                    &mut events,
+                    || finished,
+                    || true,
+                    |_| panic!("an expired drain never joins or pauses a live reader"),
+                )
+                .is_break()
+            );
+            assert_eq!(events.output, ["pending compiler output"]);
+        }
+    }
+
+    #[test]
+    fn nov21_pending_readers_apply_the_exact_deadline_and_one_backoff_per_live_poll() {
+        for before_deadline in [false, true] {
+            let (release, wait) = mpsc::channel::<()>();
+            let (ended, done) = mpsc::channel();
+            let reader = thread::spawn(move || {
+                let _released = wait.recv();
+                let _finished = ended.send(());
+                Pipe {
+                    text: Vec::new(),
+                    complete: true,
+                    within_limits: true,
+                }
+            });
+            let (_sender, lines) = mpsc::sync_channel(1);
+            let mut events = Narration::default();
+            let deadline = Instant::now() + BUILD_POLL_INTERVAL;
+            let mut polls = 0;
+            let mut pauses = Vec::new();
+            let (stdout, stderr) = finish_readers_with(
+                Some(Ok(reader)),
+                None,
+                &lines,
+                &mut events,
+                deadline,
+                || {
+                    polls += 1;
+                    assert!(polls <= 2, "an exact deadline must end draining, not poll indefinitely");
+                    if before_deadline && polls == 1 {
+                        deadline.checked_sub(BUILD_POLL_INTERVAL).unwrap()
+                    } else {
+                        deadline
+                    }
+                },
+                |duration| pauses.push(duration),
+            );
+            drop(release);
+            done.recv().unwrap();
+            assert!(stdout.is_none());
+            assert!(stderr.is_none());
+            assert_eq!(polls, if before_deadline { 2 } else { 1 });
+            assert_eq!(pauses, if before_deadline { vec![BUILD_POLL_INTERVAL] } else { Vec::new() });
+        }
+    }
+
+    #[test]
+    fn nov21_silent_json_does_not_hide_later_prose_and_finished_readers_drain_every_batch() {
+        let (sender, lines) = mpsc::sync_channel(NARRATION_BATCH + 3);
+        sender.send((Stream::Json, r#"{"reason":"compiler-message"}"#.into())).unwrap();
+        for index in 0..NARRATION_BATCH + 2 {
+            sender.send((Stream::Prose, format!("line {index}"))).unwrap();
+        }
+        close_narration_channel(sender);
+        let mut events = Narration::default();
+        let (stdout, stderr) = finish_readers(None, None, &lines, &mut events, Instant::now());
+        assert_eq!(events.output.len(), NARRATION_BATCH + 2);
+        assert_eq!(events.output.first().map(String::as_str), Some("line 0"));
+        assert_eq!(events.output.last(), Some(&format!("line {}", NARRATION_BATCH + 1)));
+        assert!(stdout.unwrap().complete);
+        assert!(stderr.unwrap().complete);
+    }
+
+    #[test]
+    fn nov21_an_expired_drain_budget_still_applies_when_only_stderr_is_pending() {
+        // Keep the reader pending on entry; narration releases it so an incorrect post-narration
+        // join cannot hang this deadline regression.
+        struct ReleaseReader(Option<mpsc::Sender<()>>);
+        impl Events for ReleaseReader {
+            fn phase(&mut self, _: &str, _: &str) {}
+            fn mutant(&mut self, _: &crate::model::Mutant) {}
+            fn build_output(&mut self, _: &str) {
+                self.0.take().unwrap().send(()).unwrap();
+            }
+        }
+        let (release, wait) = mpsc::channel();
+        let (ended, done) = mpsc::channel();
+        let reader = thread::spawn(move || {
+            wait.recv().unwrap();
+            ended.send(()).unwrap();
+            Pipe {
+                text: b"stderr".to_vec(),
+                complete: true,
+                within_limits: true,
+            }
+        });
+        let (sender, lines) = mpsc::sync_channel(1);
+        sender.send((Stream::Prose, "release reader".into())).unwrap();
+        drop(sender);
+        let mut events = ReleaseReader(Some(release));
+        let deadline = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
+        let (stdout, stderr) = finish_readers(None, Some(Ok(reader)), &lines, &mut events, deadline);
+        assert!(events.0.is_none(), "the queued reader output must be narrated before expiry");
+        assert!(stdout.is_none());
+        assert!(stderr.is_none());
+        done.recv().unwrap();
+    }
 
     #[test]
     fn missing_diagnostic_fields_are_absent_not_panics() {
@@ -505,7 +674,7 @@ pub(super) fn read_pipe_with_limits<R: Read + Send + 'static>(
     }
 
     thread::Builder::new()
-        // #[gamma::skip(all, reason = "the private reader thread name is never read and cannot affect scheduling or output")]
+        // #[gamma::skip(all, tag = "non-contract", reason = "The private build-reader name is diagnostic metadata and is never read by supervision or output parsing.")]
         .name("cargo-gamma-build-output".to_owned())
         .spawn(move || {
             let mut text = Vec::new();
@@ -556,8 +725,9 @@ pub(super) fn read_pipe_with_limits<R: Read + Send + 'static>(
                         }
 
                         line.clear();
-                        // #[gamma::skip(all, reason = "this resource mutant prevents the bounded supervision loop from terminating and is suppressed rather than weakening production synchronization or limits")]
-                        line_limited = false;
+                        line_limited =
+                            // #[gamma::skip(assign_value.default, tag = "equivalent", reason = "The default value of bool is exactly false.")]
+                            false;
 
                         continue;
                     }
@@ -574,7 +744,6 @@ pub(super) fn read_pipe_with_limits<R: Read + Send + 'static>(
                 }
             }
 
-            // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
             if !line_limited
                 && !line.is_empty()
                 && let Ok(line) = str::from_utf8(&line)
@@ -600,39 +769,23 @@ pub(super) enum Stream {
     Prose,
 }
 
-/// Waits for one pipe reader to finish with the whole of its stream, but not past `deadline`.
-///
-/// `None` when it did not, which happens two ways. The thread may still be running: the pipe is
-/// held by something that outlived the kill — a descendant that left the process group, or one the
-/// platform could not reach — and the thread is left where it is, blocked in a read on a handle it
-/// owns, with no way to make it return short of closing the pipe underneath it. Or it finished on a
-/// read that failed, having taken only a prefix of what was written.
-///
-/// Both are the same fact to the caller: what came back is not the stream. Abandoning one thread is
-/// the lesser cost, and the caller reports the loss rather than passing off a truncated stream as
-/// the build's output.
-#[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
-pub(super) fn drained(handle: Option<JoinHandle<Pipe>>, deadline: Instant) -> Option<Vec<u8>> {
-    let Some(handle) = handle else {
-        return Some(Vec::new());
-    };
-
-    while !handle.is_finished() {
-        if Instant::now() >= deadline {
-            return None;
+fn drain_pending_readers(
+    lines: &Receiver<(Stream, String)>,
+    events: &mut dyn Events,
+    mut finished: impl FnMut() -> (bool, bool),
+    mut expired: impl FnMut() -> bool,
+    mut pause: impl FnMut(Duration),
+) -> ControlFlow<()> {
+    while !matches!(finished(), (true, true)) {
+        let _narrated =
+            // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This loop ignores the narration count; default_after preserves the narration side effects.")]
+            narrate(lines, events);
+        if expired() {
+            return ControlFlow::Break(());
         }
-
-        thread::sleep(BUILD_POLL_INTERVAL);
+        pause(BUILD_POLL_INTERVAL);
     }
-
-    // A reader that panicked has no bytes at all, and one that stopped on a failed read has only a
-    // prefix; neither is the stream, and the caller's guard treats them alike.
-    let Ok(pipe) = handle.join() else {
-        return None;
-    };
-
-    (pipe.complete && pipe.within_limits).then_some(pipe.text)
+    ControlFlow::Continue(())
 }
 
 /// Narrates while waiting for bounded output readers to finish.
@@ -648,6 +801,18 @@ pub(super) fn finish_readers(
     events: &mut dyn Events,
     deadline: Instant,
 ) -> (Option<Pipe>, Option<Pipe>) {
+    finish_readers_with(stdout, stderr, lines, events, deadline, Instant::now, thread::sleep)
+}
+
+pub(super) fn finish_readers_with(
+    stdout: Option<io::Result<JoinHandle<Pipe>>>,
+    stderr: Option<io::Result<JoinHandle<Pipe>>>,
+    lines: &Receiver<(Stream, String)>,
+    events: &mut dyn Events,
+    deadline: Instant,
+    mut now: impl FnMut() -> Instant,
+    mut pause: impl FnMut(Duration),
+) -> (Option<Pipe>, Option<Pipe>) {
     let finished = |reader: &Option<io::Result<JoinHandle<Pipe>>>| {
         reader
             .as_ref()
@@ -655,18 +820,20 @@ pub(super) fn finish_readers(
             .is_none_or(|reader| reader.as_ref().is_err() || reader.as_ref().is_ok_and(JoinHandle::is_finished))
     };
 
-    // #[gamma::skip(all, reason = "this resource mutant prevents the bounded supervision loop from terminating and is suppressed rather than weakening production synchronization or limits")]
-    while !finished(&stdout) || !finished(&stderr) {
-        let _narrated = narrate(lines, events);
-
-        if Instant::now() >= deadline {
-            return (None, None);
-        }
-
-        thread::sleep(BUILD_POLL_INTERVAL);
+    if drain_pending_readers(
+        lines,
+        events,
+        || (finished(&stdout), finished(&stderr)),
+        || now() >= deadline,
+        &mut pause,
+    )
+    .is_break()
+    {
+        return
+            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "The default of this pair of Options is exactly (None, None).")]
+            (None, None);
     }
 
-    // #[gamma::skip(all, reason = "this resource mutant prevents the bounded supervision loop from terminating and is suppressed rather than weakening production synchronization or limits")]
     while narrate(lines, events) == NARRATION_BATCH {}
 
     let stdout = stdout.map(|handle| {
@@ -780,7 +947,6 @@ fn run_cargo_with_replay<const SELECTIVE: bool>(
         None => args.push("--workspace".to_owned()),
     }
 
-    // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
     extend_build_arguments(work, &mut args);
 
     let output = if SELECTIVE {
@@ -827,7 +993,7 @@ fn finish_build(events: &mut dyn Events) {
     events.build_finished();
 }
 
-// #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
+// #[gamma::skip(fn_value.unit, tag = "equivalent", reason = "The owned sender is dropped on function return even without the explicit drop statement.")]
 fn close_narration_channel(sender: SyncSender<(Stream, String)>) {
     drop(sender);
 }
@@ -865,7 +1031,6 @@ fn complete_pipes(root: &str, stdout: Option<Pipe>, stderr: Option<Pipe>) -> Res
     Ok((stdout, stderr))
 }
 
-// #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
 fn extend_build_arguments(work: &Workspace, args: &mut Vec<String>) {
     work.cargo.extend_build_args(args);
 }
@@ -926,12 +1091,16 @@ mod mutation_tests {
                                 args.iter().map(OsString::from).collect::<Vec<_>>()
                             );
                             let environment = command.get_envs().collect::<std::collections::BTreeMap<_, _>>();
+                            assert_eq!(
+                                environment.get(std::ffi::OsStr::new("CARGO_TERM_PROGRESS_WHEN")).copied().flatten(),
+                                Some(std::ffi::OsStr::new("always"))
+                            );
                             let identity = environment[std::ffi::OsStr::new(COMMAND_VAR)];
                             assert_eq!(identity.is_some(), ready);
                             assert_eq!(environment[std::ffi::OsStr::new(REPLAY_VAR)].is_some(), ready && selective);
-                            assert_eq!(
+                            assert!(
                                 environment.get(std::ffi::OsStr::new("RUSTC_WRAPPER")).copied().flatten().is_some(),
-                                ready
+                                "the lint-capping wrapper is independent of capture readiness"
                             );
                             if ready {
                                 assert_eq!(

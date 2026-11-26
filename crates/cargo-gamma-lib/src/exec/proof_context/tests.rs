@@ -1,7 +1,6 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use std::collections::BTreeMap;
 use std::ffi::OsString;
 
 use super::*;
@@ -110,17 +109,12 @@ fn fixture() -> (Context, MemorySnapshot, Utf8PathBuf, Utf8PathBuf) {
 }
 
 fn identity(context: &Context, snapshot: &MemorySnapshot, root: &Utf8Path, target: &Utf8Path) -> Option<[u8; 32]> {
-    let immutable = context
-        .immutable
-        .iter()
-        .map(|(path, _)| Some((path.clone(), snapshot.content(path).ok()?)))
-        .collect::<Option<Vec<_>>>()?;
     context_identity(
         context,
         context.command,
         &context.options,
         &snapshot.tree(root, target)?,
-        &immutable,
+        &context.immutable,
         target,
         snapshot,
     )
@@ -140,6 +134,64 @@ fn closed_metadata_context_has_a_live_identity_and_ignores_only_workspace_output
         first, second,
         "the caller separately keys frozen mutable sources and the active schema"
     );
+}
+
+#[test]
+fn identity_reuses_the_validated_immutable_stamps_and_rechecks_only_mutable_source_syntax() {
+    struct Observed<'a> {
+        inner: &'a MemorySnapshot,
+        contents: std::cell::RefCell<BTreeMap<Utf8PathBuf, usize>>,
+        texts: std::cell::RefCell<BTreeMap<Utf8PathBuf, usize>>,
+    }
+    impl Snapshot for Observed<'_> {
+        fn content(&self, path: &Utf8Path) -> std::io::Result<Option<[u8; 32]>> {
+            *self.contents.borrow_mut().entry(path.to_owned()).or_default() += 1;
+            self.inner.content(path)
+        }
+        fn text(&self, path: &Utf8Path) -> Option<String> {
+            *self.texts.borrow_mut().entry(path.to_owned()).or_default() += 1;
+            self.inner.text(path)
+        }
+        fn tree(&self, root: &Utf8Path, target: &Utf8Path) -> Option<Vec<Utf8PathBuf>> {
+            self.inner.tree(root, target)
+        }
+    }
+    let (mut context, mut snapshot, root, target) = fixture();
+    let immutable_source = root.join("unchanged.rs");
+    let _previous = snapshot.0.insert(immutable_source.clone(), "fn unchanged() {}".into());
+    context.shape = snapshot.tree(&root, &target).unwrap();
+    context
+        .immutable
+        .push((immutable_source.clone(), snapshot.content(&immutable_source).unwrap()));
+    context.immutable.sort();
+    let observed = Observed {
+        inner: &snapshot,
+        contents: std::cell::RefCell::default(),
+        texts: std::cell::RefCell::default(),
+    };
+    assert!(
+        context_identity(
+            &context,
+            context.command,
+            &context.options,
+            &context.shape,
+            &context.immutable,
+            &target,
+            &observed
+        )
+        .is_some()
+    );
+    for (path, _) in &context.immutable {
+        assert_eq!(observed.contents.borrow()[path], 1, "{path} must be observed live exactly once");
+        assert!(
+            !observed.texts.borrow().contains_key(path),
+            "{path} passed closure validation at seal time"
+        );
+    }
+    assert_eq!(observed.texts.borrow()[&context.mutable[0]], 1);
+    for (path, count) in observed.contents.borrow().iter() {
+        assert_eq!(*count, 1, "{path}");
+    }
 }
 
 #[test]
@@ -373,6 +425,7 @@ impl MetadataFixture {
             record["externs"] = serde_json::json!([metadata]);
             let inputs = record["inputs"].as_array_mut().unwrap();
             inputs.push(serde_json::to_value(stamp(metadata.clone())).unwrap());
+            inputs.sort_by(|left, right| Utf8Path::new(left[0].as_str().unwrap()).cmp(Utf8Path::new(right[0].as_str().unwrap())));
             let context = [6_u8; 32];
             let runtime = serde_json::json!({
                 "root": root,
@@ -477,13 +530,14 @@ fn metadata_fixture() -> MetadataFixture {
     };
     let (directory, record) = snapshot_io::with(fixture.script(&fixture.files), || {
         let directory = fixture.generation_directory();
-        let inputs = [source.clone(), compiler.clone(), cargo.clone(), library]
+        let mut inputs = [source.clone(), compiler.clone(), cargo.clone(), library]
             .into_iter()
             .map(|path| {
                 let hash = NativeSnapshot.content(&path).unwrap().unwrap();
                 (path, hash)
             })
             .collect::<Vec<_>>();
+        inputs.sort();
         let context = [9_u8; 32];
         let record = serde_json::json!({
             "context": context,
@@ -1102,9 +1156,8 @@ fn live_immutable_content_changes_cannot_reuse_an_identity_from_the_earlier_snap
         &context.immutable,
         &target,
         &snapshot,
-    )
-    .unwrap();
-    assert_ne!(current, original);
+    );
+    assert_eq!(current, None, "a live change cannot reuse the sealed immutable stamp {original:?}");
 }
 
 #[test]

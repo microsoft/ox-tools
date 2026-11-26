@@ -23,7 +23,7 @@
 
 - Edit canonical templates under `templates/`, not their generated copies.
   Follow the root version-bump policy for catalog changes, then regenerate
-  repository artifacts, snapshots, and `.anvil.lock` together.
+  repository artifacts, snapshots, and `.anvil/manifest.toml` together.
 - Keep the root-MSRV scanners in `versions.just` and `tools.just` aligned.
   They run before Cargo metadata is available and must agree on accepted
   syntax and workspace-versus-package precedence.

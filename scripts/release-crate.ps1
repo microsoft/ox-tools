@@ -504,8 +504,11 @@ function Update-CrateVersion {
 
     $escapedCrateName = Get-EscapedRegexSpecialChars($crateName)
     $crateNamePattern = $escapedCrateName.Replace('_', '[-_]')
-    $regex = '(?<=' + $crateNamePattern + '\s*=\s*\{[^\}]*?version\s*=\s*")[^"]+'
-    (Get-Content $rootCargoToml -Raw) -replace $regex, $newVersion | Set-Content $rootCargoToml -NoNewline
+    $regex = '(' + $crateNamePattern + '\s*=\s*\{[^\}]*?version\s*=\s*")(?<pin>=?)[^"]+'
+    [regex]::Replace((Get-Content $rootCargoToml -Raw), $regex, {
+        param($match)
+        $match.Groups[1].Value + $match.Groups['pin'].Value + $newVersion
+    }) | Set-Content $rootCargoToml -NoNewline
 
     cargo check -p $crateName --quiet | Write-Host
     if ($LASTEXITCODE -ne 0) {

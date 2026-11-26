@@ -19,71 +19,9 @@ anvil_nightly_rust_src_dir := anvil_nightly_sysroot / "lib/rustlib/src/rust/libr
 anvil_nightly_llvm_profdata := anvil_nightly_sysroot / "lib/rustlib" / anvil_nightly_host / "bin" / (if os() == "windows" { "llvm-profdata.exe" } else { "llvm-profdata" })
 
 # Check cargo-spellcheck source-build prerequisites.
-[script("pwsh", "-NoProfile")]
 [private]
-anvil-tool-cargo-spellcheck-source-deps-check:
-    $ErrorActionPreference = 'Stop'
-    $missing = @()
-    $libclangFiles = @('libclang.dll', 'libclang.so', 'libclang.so.1', 'libclang.dylib')
-    $libclangDir = $null
-    if ($env:LIBCLANG_PATH) {
-        foreach ($file in $libclangFiles) {
-            if (Test-Path (Join-Path $env:LIBCLANG_PATH $file)) { $libclangDir = $env:LIBCLANG_PATH; break }
-        }
-    }
-    if (-not $libclangDir) {
-        $probes = if ($IsWindows) {
-            @('C:\Program Files\LLVM\bin', "$env:USERPROFILE\scoop\apps\llvm\current\bin")
-        } elseif ($IsMacOS) {
-            @('/usr/local/opt/llvm/lib', '/opt/homebrew/opt/llvm/lib')
-        } else {
-            @('/usr/lib/x86_64-linux-gnu', '/usr/lib/aarch64-linux-gnu', '/usr/lib64')
-        }
-        foreach ($directory in $probes) {
-            foreach ($file in $libclangFiles) {
-                if (Test-Path (Join-Path $directory $file)) { $libclangDir = $directory; break }
-            }
-            if ($libclangDir) { break }
-        }
-        if (-not $libclangDir -and -not $IsWindows -and -not $IsMacOS) {
-            $glob = Get-ChildItem -Path '/usr/lib','/usr/lib64','/usr/lib/x86_64-linux-gnu','/usr/lib/aarch64-linux-gnu' -Filter 'libclang*.so*' -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($glob) { $libclangDir = $glob.DirectoryName }
-        }
-    }
-    if (-not $libclangDir) {
-        $missing += [pscustomobject]@{
-            name = 'libclang'
-            why = 'cargo-spellcheck (clang-sys/hunspell-rs) needs libclang at build time'
-            hints = @(
-                'Linux (Ubuntu/Debian):    sudo apt-get install -y libclang-dev'
-                'Linux (Azure Linux/RHEL): sudo tdnf install -y clang-devel'
-                'macOS (homebrew):         brew install llvm'
-                'Windows (scoop):          scoop install llvm'
-                'Windows (winget, admin):  winget install LLVM.LLVM, then add LLVM\bin to PATH'
-            )
-        }
-    } elseif ($IsWindows) {
-        $pathDirs = ($env:PATH -split ';') | ForEach-Object { $_.Trim().TrimEnd('\') } | Where-Object { $_ }
-        if ($pathDirs -notcontains $libclangDir.Trim().TrimEnd('\')) {
-            $missing += [pscustomobject]@{
-                name = 'libclang (present but not on PATH)'
-                why = "libclang.dll exists at '$libclangDir' but that directory is not on PATH"
-                hints = @(
-                    "Set LIBCLANG_PATH to '$libclangDir' and add that directory to PATH"
-                    'Or install via scoop: scoop install llvm'
-                )
-            }
-        }
-    }
-    if ($missing.Count -gt 0) {
-        foreach ($item in $missing) {
-            Write-Host "anvil: missing system dependency '$($item.name)'" -ForegroundColor Yellow
-            Write-Host "  why: $($item.why)"
-            Write-Host '  install:'
-            foreach ($hint in $item.hints) { Write-Host "    $hint" }
-        }
-        exit 1
-    }
+anvil-tool-cargo-spellcheck-source-deps-check: anvil-tool-cargo-spellcheck-helper-validate-prereqs
+    cargo spellcheck-helper check-source-deps
 
 # Install exactly the catalog version when the installed version is too old.
 # A newer local version is accepted. `binstall` prefers a prebuilt binary and
@@ -107,8 +45,8 @@ _binstall-with-source-fallback name minimum prerequisite:
 
 # Fail before a check starts when a required Cargo tool is missing or too old.
 [private]
-_check-tool name minimum extracted=(replace_regex(installed_cargo_tools, ('(?ms)\A.*^' + name + ' v([^:\r\n]+):\r?$.*\z'), '$1')) found=(if extracted == installed_cargo_tools { "false" } else { "true" }) installed=(if found == "true" { extracted } else { "" }) satisfied=(if found == "true" { semver_matches(installed, ">=" + minimum) } else { "false" }):
-    {{ if satisfied == "true" { "# " + name + " " + installed + " satisfies >= " + minimum } else { error(name + " >= " + minimum + " is required; run its setup recipe") } }}
+_check-tool name minimum enabled="true" extracted=(if enabled == "true" { replace_regex(installed_cargo_tools, ('(?ms)\A.*^' + name + ' v([^:\r\n]+):\r?$.*\z'), '$1') } else { "" }) found=(if enabled != "true" { "false" } else if extracted == installed_cargo_tools { "false" } else { "true" }) installed=(if found == "true" { extracted } else { "" }) satisfied=(if found == "true" { semver_matches(installed, ">=" + minimum) } else { "false" }):
+    {{ if enabled != "true" { "# " + name + " is not needed in this mode" } else if satisfied == "true" { "# " + name + " " + installed + " satisfies >= " + minimum } else { error(name + " >= " + minimum + " is required; run its setup recipe") } }}
 
 # Install cargo-each with the Cargo available to the setup caller.
 [group("anvil-setup")]
@@ -328,7 +266,7 @@ anvil-tool-cargo-sort-validate-prereqs: (_check-tool "cargo-sort" cargo_sort_ver
 
 [group("anvil-setup")]
 [private]
-anvil-tool-cargo-spellcheck-install installer="install":
+anvil-tool-cargo-spellcheck-install installer="install": (anvil-tool-cargo-spellcheck-helper-install installer)
     {{ if installer == "install" { just_executable() + " _install-source-tool cargo-spellcheck " + cargo_spellcheck_version + " anvil-tool-cargo-spellcheck-source-deps-check" } else if installer == "binstall" { just_executable() + " _binstall-with-source-fallback cargo-spellcheck " + cargo_spellcheck_version + " anvil-tool-cargo-spellcheck-source-deps-check" } else { error("invalid installer '" + installer + "'; expected install or binstall") } }}
 [group("anvil-setup")]
 [private]
@@ -336,10 +274,24 @@ anvil-tool-cargo-spellcheck-validate-prereqs: (_check-tool "cargo-spellcheck" ca
 
 [group("anvil-setup")]
 [private]
+anvil-tool-cargo-spellcheck-helper-install installer="install": (_install-tool "cargo-spellcheck-helper" cargo_spellcheck_helper_version installer)
+[group("anvil-setup")]
+[private]
+anvil-tool-cargo-spellcheck-helper-validate-prereqs: (_check-tool "cargo-spellcheck-helper" cargo_spellcheck_helper_version)
+
+[group("anvil-setup")]
+[private]
 anvil-tool-cargo-udeps-install installer="install": (_install-tool "cargo-udeps" cargo_udeps_version installer)
 [group("anvil-setup")]
 [private]
 anvil-tool-cargo-udeps-validate-prereqs: (_check-tool "cargo-udeps" cargo_udeps_version)
+
+[group("anvil-setup")]
+[private]
+anvil-tool-cargo-unused-deps-install installer="install": (_install-tool "cargo-unused-deps" cargo_unused_deps_version installer)
+[group("anvil-setup")]
+[private]
+anvil-tool-cargo-unused-deps-validate-prereqs: (_check-tool "cargo-unused-deps" cargo_unused_deps_version)
 
 # Setup installs exact catalog pins; validation accepts equal or newer tools.
 # Change pins in cargo-anvil's catalog and regenerate rather than editing this
@@ -365,12 +317,14 @@ cargo_ensure_no_cyclic_deps_version := "0.2.0"
 cargo_ensure_no_default_features_version := "1.1.1"
 cargo_hack_version := "0.6.45"
 cargo_heather_version := "0.3.0"
-cargo_gamma_version := "0.6.0"
+cargo_gamma_version := "0.7.0"
 cargo_llvm_cov_version := "0.9.1"
 cargo_nextest_version := "0.9.150"
 cargo_sort_version := "2.1.4"
 cargo_spellcheck_version := "0.15.7"
+cargo_spellcheck_helper_version := "0.1.0"
 cargo_udeps_version := "0.1.61"
+cargo_unused_deps_version := "0.2.1"
 
 # Install prerequisites for the `anvil-pr` recipe.
 [private]
@@ -737,7 +691,7 @@ anvil-spellcheck-setup installer="install": (anvil-tool-cargo-spellcheck-install
 # Validate prerequisites for the `anvil-spellcheck` recipe.
 [group("anvil-setup")]
 [private]
-anvil-spellcheck-validate-prereqs: anvil-tool-cargo-spellcheck-validate-prereqs anvil-tool-cargo-each-validate-prereqs
+anvil-spellcheck-validate-prereqs: anvil-tool-cargo-spellcheck-helper-validate-prereqs anvil-tool-cargo-spellcheck-validate-prereqs anvil-tool-cargo-each-validate-prereqs
 
 # Install prerequisites for the `anvil-udeps` recipe.
 [group("anvil-setup")]
@@ -748,6 +702,16 @@ anvil-udeps-setup installer="install": anvil-toolchain-nightly-install (anvil-to
 [group("anvil-setup")]
 [private]
 anvil-udeps-validate-prereqs: anvil-toolchain-nightly-validate-prereqs anvil-tool-cargo-udeps-validate-prereqs anvil-tool-cargo-each-validate-prereqs
+
+# Install prerequisites for the `anvil-unused-deps` recipe.
+[group("anvil-setup")]
+[private]
+anvil-unused-deps-setup installer="install": anvil-toolchain-nightly-install (anvil-tool-cargo-unused-deps-install installer)
+
+# Validate prerequisites for the `anvil-unused-deps` recipe.
+[group("anvil-setup")]
+[private]
+anvil-unused-deps-validate-prereqs: anvil-toolchain-nightly-validate-prereqs anvil-tool-cargo-unused-deps-validate-prereqs
 
 # Install prerequisites for the `anvil-pr-fast` recipe.
 [private]
@@ -765,6 +729,7 @@ anvil-pr-fast-setup installer="install": \
     (anvil-pr-title-setup installer) \
     (anvil-deny-setup installer) \
     (anvil-audit-setup installer) \
+    (anvil-unused-deps-setup installer) \
     (anvil-udeps-setup installer) \
     (anvil-external-types-setup installer)
 
@@ -784,6 +749,7 @@ anvil-pr-fast-validate-prereqs: \
     anvil-pr-title-validate-prereqs \
     anvil-deny-validate-prereqs \
     anvil-audit-validate-prereqs \
+    anvil-unused-deps-validate-prereqs \
     anvil-udeps-validate-prereqs \
     anvil-external-types-validate-prereqs
 

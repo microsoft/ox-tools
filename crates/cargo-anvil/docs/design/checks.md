@@ -11,7 +11,7 @@ that floor universally.
 
 | Group | Checks |
 |-------|--------|
-| `pr-fast` | fmt, clippy, cargo-sort, license-headers, ensure-no-cyclic-deps, ensure-no-default-features, doc-build, readme-check, spellcheck, pr-title, deny, audit, udeps, external-types |
+| `pr-fast` | fmt, clippy, cargo-sort, license-headers, ensure-no-cyclic-deps, ensure-no-default-features, doc-build, readme-check, spellcheck, pr-title, deny, audit, unused-deps, udeps, external-types |
 | `pr-test` | llvm-cov, doc-test, examples |
 | `pr-msrv` | msrv-test |
 | `pr-runtime-analysis` | miri, careful, loom |
@@ -60,8 +60,15 @@ Locally, recipes run on the host OS. See [github.md](./github.md) and
 | `pr-title` | Validates `PR_TITLE`; skips when it is unset or empty. CI retrieves the current title and fails if a known PR's title cannot be read. |
 | `deny` | Enforces cargo-deny policy. |
 | `audit` | Checks the lockfile against security advisories. |
+| `unused-deps` | Always checks workspace dependency inheritance; compiler-backed checks for unused/misplaced package dependencies use the required impact tier and include doctest evidence. Check-only by default; local `--fix` removes uninherited workspace catalog entries only. |
 | `udeps` | Checks unused dependencies with all features, both for default targets and for all targets. This catches unused dev-dependencies and regular dependencies used only by tests, benches, or examples. |
 | `external-types` | Checks exposed dependency types in selected libraries with a schema-matched nightly. Bin-only packages are skipped; tool/nightly incompatibility fails. |
+
+`unused-deps` runs immediately before `udeps` in `pr-fast`, using the catalog's
+`cargo-unused-deps 0.2.1` pin. The checker resolves workspace package selectors
+without ambiguity when a registry dependency has the same name and version.
+`udeps` remains alongside it so the two complementary evidence models continue
+to run in the mandatory PR group.
 
 PR titles accept these forms:
 
@@ -262,13 +269,15 @@ Cargo-delta selects packages from the committed diff against the base.
 |--------|--------|----------|
 | modified | fmt, cargo-sort, license-headers, ensure-no-cyclic-deps, ensure-no-default-features | Skip when empty; otherwise check the tool's normal workspace/input domain. |
 | affected | clippy, check-all-targets, llvm-cov, doc-test, examples, msrv-test, mutants-diff, all Miri profiles, careful, loom, bolero, external-types, bench | Select affected packages; mutation testing further selects changed lines across the workspace. |
-| required | doc-build, udeps, cargo-hack | Include affected packages and their workspace dependencies. |
-| unscoped | pr-title, deny, audit, aprz, mutants-full, readme-check, spellcheck | Run regardless of impact. |
+| required | doc-build, unused-deps (package analysis), udeps, cargo-hack | Include affected packages and their workspace dependencies. |
+| unscoped | readme-check, spellcheck, pr-title, deny, audit, unused-deps (workspace dependency inheritance analysis), aprz, mutants-full | Run regardless of impact. |
 
 README templates and spelling dictionaries can be repository-level inputs, so
-their checks are unscoped. Empty categories skip scoped checks successfully;
-invalid reports, unknown package names, and failed metadata/discovery commands
-fail rather than silently skipping work.
+their checks are unscoped. Empty categories skip package-scoped work
+successfully. For `unused-deps`, `--skip` skips package analysis but still runs
+the workspace dependency inheritance check. Invalid reports, unknown package
+names, and failed metadata/discovery commands fail rather than silently
+skipping work.
 
 Coverage currently receives `name@version` package selectors. A registry
 dependency sharing both a workspace member's name and version can make that

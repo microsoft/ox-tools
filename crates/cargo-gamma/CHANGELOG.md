@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-24
+
+- 🐛 Bug Fixes
+
+  - cargo-gamma: address audit findings ([#381](https://github.com/microsoft/ox-tools/pull/381))
+
 ## [0.7.1] - 2026-11-20
 
 - 🐛 Bug Fixes

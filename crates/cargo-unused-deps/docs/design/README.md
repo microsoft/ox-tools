@@ -436,8 +436,8 @@ half always reads the whole workspace.
 One invocation has four phases, with no alternate static-analysis path.
 
 **1. Read the workspace.** `cargo metadata --no-deps` for the member set and each
-member's declared dependencies by section; the root manifest for the catalog and the
-allow-lists. This phase alone answers question 1, and it always reads *every*
+member's declared dependencies by section; the root manifest for the catalog and
+the allow-lists. This phase alone answers question 1, and it always reads *every*
 member regardless of package selection — see below.
 
 **2. Gather compile evidence.** Twice — once over default targets, once over
@@ -451,6 +451,28 @@ The tool runs `cargo +nightly check <selection> --all-targets --all-features
 --target-dir target/unused-deps/run-<unique>/all-targets --message-format=json`
 with its chaining rustc wrapper; the default-target pass uses the sibling `plain`
 directory. The whole run directory is new for every invocation.
+Explicit package selectors are first resolved and deduplicated against the
+workspace metadata. A selector that matches no workspace member fails before
+`cargo check` or `cargo test --doc` starts. Only distinct workspace members are
+forwarded, each as an exact workspace-only name pattern: `fixture` becomes `[f]ixture`.
+The one-character class preserves the exact name while forcing Cargo's package
+pattern selection. That selection is workspace-scoped by name and cannot select
+a registry package; any requested version was already checked against workspace
+metadata. Workspace-only pattern matching is current
+[Cargo implementation behavior](https://github.com/rust-lang/cargo/blob/df742db36461027c257890d835485e9b7e55d83b/src/ops/cargo_compile/packages.rs#L81-L93),
+not an explicitly documented part of the `--package` glob contract. The
+`cargo_package_globs_keep_evidence_on_the_workspace_member` integration test
+pins the behavior through both compile and doctest evidence so a future Cargo
+change is detected when the tested toolchain advances.
+
+This form is intentionally used for every explicit member rather than switching
+between bare names, URL package IDs, and a special non-ASCII fallback. It uses
+the same mechanism for ASCII and non-ASCII names, avoids Cargo's
+percent-encoding problem for URL package IDs, and keeps nested command lines
+short when many members are selected. The absolute-path portion of a
+source-qualified ID would otherwise be repeated for every `--package` argument
+and could exceed the Windows process command-line limit. `--workspace` and
+`--exclude` retain their Cargo forms.
 The wrapper preserves Cargo's resolved flags and appends the non-overridable lint for
 this run only, never in the workspace lint catalog. Every diagnostic carries the target
 it came from, so the output is a stream of `(target, target kind, extern name, unused)`
@@ -458,14 +480,18 @@ facts.
 
 **3. Gather doctest evidence.**
 
-The tool runs `cargo +nightly test --doc <package> --all-features` with itself as a
-chaining rustdoc executable. That wrapper appends the unstable test-builder options
+The tool runs `cargo +nightly test --doc --package <package-spec> --all-features`
+with itself as a chaining rustdoc executable. The capture directory uses the
+filesystem-safe package name rather than the Cargo pattern. That wrapper
+appends the unstable test-builder options
 without replacing Cargo's active rustdoc flags, and chains to `RUSTDOC` when set or
 otherwise to the rustdoc in the active rustc's sysroot, so no rustup is required.
 `<self>` then acts as the test-builder:
 it invokes the real rustc with `--force-warn unused_crate_dependencies`, writes one
 unique capture record, and forwards rustc's diagnostics and exit status. Per-process
 records avoid concurrent append interleaving.
+If `cargo test --doc` exits unsuccessfully, the error names the package rather
+than its Cargo pattern and includes Cargo's stderr.
 
 **4. Aggregate and judge.** The diagnostics are per *unit*, and cargo compiles a
 library or binary twice under `--all-targets` — plainly and with `cfg(test)` — while
@@ -722,22 +748,29 @@ did not happen would send the reviewer hunting for text that is not in the diff.
 
 ## 7. CI integration
 
-The complete check replaces both `cargo-udeps` and `cargo-machete`, but Anvil cannot
-adopt it in the same change that first publishes the implementation. Generated Anvil
-setup installs the pinned release from crates.io, so the sequence is:
+The complete check is intended to replace both `cargo-udeps` and `cargo-machete`.
+Anvil retains `cargo-udeps` in `pr-fast`. The unused-deps recipe is currently an
+opt-in standalone check. Moving it into `pr-fast` requires `cargo-unused-deps`
+0.2.1 to be available on crates.io and will happen in a separate follow-up.
 
-1. publish `cargo-unused-deps` 0.2.0 with the complete checker;
-2. update Anvil's pin and generated recipes in a follow-up change.
+Generated setup installs the pinned 0.2.0 release from crates.io rather than
+relying on an unpublished local build.
 
-The Anvil recipe always invokes the tool. It obtains the `required` impact tier and
-forwards a nonempty result as Cargo-style package selectors. When impact reports
-`--skip`, the recipe passes no package selector: the workspace-global catalog check
-still runs, while compile-evidence checks have an explicitly empty package set.
-With impact disabled, the recipe passes `--workspace`.
+The Anvil recipe always examines workspace dependencies, even when there are no
+required packages. After `anvil-impact` completes, it obtains the `required` tier
+from the current invocation's `required.packages` file and forwards each exact
+package spec as `--package <spec>`. An empty file produces no package selectors,
+so only the workspace inheritance check runs. A nonempty whitespace-only file is
+malformed and fails rather than silently suppressing package analysis. With
+impact disabled, the recipe passes `--workspace` and checks every workspace package.
+
+Standalone, grouped, and CI invocations are check-only by default. Explicit local
+`just anvil-unused-deps --fix` forwards the catalog-only fix option without
+disabling the selected package checks.
 
 This split is essential. A workspace-root manifest change may be invisible to
-package-level impact analysis, so allowing `--skip` to bypass the process would miss
-an uninherited catalog entry. Conversely, compiling the whole workspace merely to ask
+package-level impact analysis, so skipping the check when no packages are required
+could miss an uninherited catalog entry. Conversely, compiling the whole workspace merely to ask
 the global manifest question would discard the value of impact scoping.
 
 ## 8. Out of scope

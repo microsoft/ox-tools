@@ -17,6 +17,7 @@ use super::measure::{Built, Oracle};
 use super::session::{Phases, Session};
 use crate::discover::{ContextDigest, Plan, RunRecord, WorkspaceSnapshot};
 use crate::error::error;
+use crate::exec::copy::VCS_DIRS;
 use crate::model::{Mutant, Outcome};
 use crate::{Result, elements as publication};
 
@@ -1016,6 +1017,10 @@ fn validate_directory_link_with(
     mut resolve: impl FnMut(&Utf8Path, bool) -> Result<Option<Utf8PathBuf>>,
 ) -> Result<()> {
     if metadata.kind != ArtifactKind::DirectorySymlink {
+        return Ok(());
+    }
+    // Preparation deliberately exposes shared VCS context outside the captured source trees.
+    if path.parent() == output.parent() && path.file_name().is_some_and(|name| name != ".git" && VCS_DIRS.contains(&name)) {
         return Ok(());
     }
     if let Some(target) = resolve(path, false)? {
@@ -3557,6 +3562,80 @@ mod tests {
                 link: Some("new".into()),
             }
         );
+    }
+
+    #[test]
+    fn exposed_vcs_directory_links_do_not_admit_other_external_directory_links() {
+        let root = Utf8PathBuf::from("prepared");
+        let output = root.join("target");
+        let roots = [root.clone()];
+        let metadata = ArtifactMetadata {
+            kind: ArtifactKind::DirectorySymlink,
+            executable: 0,
+            link: Some("external-metadata".into()),
+        };
+        for (relative, allowed) in [
+            (".hg", true),
+            (".jj", true),
+            (".svn", true),
+            (".bzr", true),
+            ("_darcs", true),
+            (".pijul", true),
+            (".git", false),
+            ("fixtures/.hg", false),
+            ("fixtures/.jj", false),
+            ("target/.hg", false),
+            ("ordinary-link", false),
+        ] {
+            let path = root.join(relative);
+            let result = validate_directory_link_with(&path, &metadata, &output, &roots, |seen, require_real| {
+                if seen == path {
+                    assert!(!require_real);
+                    Ok(Some("canonical/external-metadata".into()))
+                } else {
+                    assert_eq!(seen, root);
+                    assert!(require_real);
+                    Ok(Some("canonical/prepared".into()))
+                }
+            });
+            assert_eq!(result.is_ok(), allowed, "{relative}: {result:?}");
+        }
+    }
+
+    #[test]
+    #[cfg(not(miri))]
+    #[cfg(all(feature = "system-tests", any(unix, windows)))]
+    fn jj_and_mercurial_metadata_links_can_be_captured_as_prepared_artifacts() {
+        let directory = crate::testing::workdir("vcs-artifact-capture-");
+        let base = Utf8Path::from_path(directory.path()).unwrap();
+        let source = base.join("source");
+        let root = base.join("prepared");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(&root).unwrap();
+        let output = root.join("target");
+        let roots = [root.clone()];
+        for name in [".jj", ".hg"] {
+            let marker = source.join(name);
+            let link = root.join(name);
+            fs::create_dir(&marker).unwrap();
+            fs::write(marker.join("metadata"), "shared VCS context").unwrap();
+            #[cfg(unix)]
+            super::super::copy::create_symlink(marker.as_std_path(), link.as_std_path(), true).unwrap();
+            #[cfg(windows)]
+            super::super::sync::junction_for_test(&link, &marker);
+            let paths = tree_paths(&roots, &output).unwrap();
+            assert!(paths.contains(&link));
+            assert!(!paths.contains(&link.join("metadata")));
+            let artifact = capture_artifact_with(
+                link,
+                &output,
+                &roots,
+                |path| prepared_artifact_metadata(path, &output, &roots),
+                artifact_digest,
+            )
+            .unwrap();
+            assert_eq!(artifact.metadata.unwrap().kind, ArtifactKind::DirectorySymlink);
+        }
     }
 
     #[test]

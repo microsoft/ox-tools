@@ -4,6 +4,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
+exclude = ["crates/cargo-gamma-process/tests/support/output-helper"]
 
 [workspace.package]
 edition = "2024"
@@ -24,26 +25,29 @@ homepage = "https://github.com/microsoft/ox-tools"
 
 # external dependencies
 assert_cmd = { version = "2.2.2", default-features = false }
+base64 = { version = "0.22.1", default-features = false }
 blake3 = { version = "1.8.7", default-features = false }
 # bolero-libfuzzer 0.13.0 calls bolero_engine::any; bolero/std enables that API for its host build.
 # Newer Bolero releases require a derive crate that pins indexmap 2.11.2,
 # which conflicts with toml_edit's indexmap >=2.13 requirement.
 bolero = { version = "=0.13.4", default-features = false, features = ["std"] }
-bolero-engine = { version = "=0.13.4", default-features = false }
 bytes = { version = "1.12.1", default-features = false }
 camino = { version = "1.2.6", default-features = false }
 # local dependencies
 cargo-aprz-lib = { path = "crates/cargo-aprz-lib", default-features = false, version = "1.2.2" }
-cargo-gamma-attrs = { path = "crates/cargo-gamma-attrs", default-features = false, version = "0.7.0" }
-cargo-gamma-attrs-impl = { path = "crates/cargo-gamma-attrs-impl", default-features = false, version = "0.7.0" }
-cargo-gamma-engine = { path = "crates/cargo-gamma-engine", default-features = false, version = "0.7.0" }
-cargo-gamma-lib = { path = "crates/cargo-gamma-lib", default-features = false, version = "0.7.1" }
-cargo-gamma-process = { path = "crates/cargo-gamma-process", default-features = false, version = "0.7.0" }
-cargo-gamma-rt = { path = "crates/cargo-gamma-rt", default-features = false, version = "0.7.0" }
-cargo-gamma-unsafe = { path = "crates/cargo-gamma-unsafe", default-features = false, version = "0.7.0" }
+cargo-gamma-attrs = { path = "crates/cargo-gamma-attrs", default-features = false, version = "0.8.0" }
+# Internal Gamma crates form one versioned unit: exact pins prevent mixed implementation releases.
+# The public cargo-gamma-attrs crate remains compatible within its release line.
+cargo-gamma-attrs-impl = { path = "crates/cargo-gamma-attrs-impl", default-features = false, version = "=0.8.0" }
+cargo-gamma-engine = { path = "crates/cargo-gamma-engine", default-features = false, version = "=0.8.0" }
+cargo-gamma-lib = { path = "crates/cargo-gamma-lib", default-features = false, version = "=0.8.0" }
+cargo-gamma-process = { path = "crates/cargo-gamma-process", default-features = false, version = "=0.8.0" }
+cargo-gamma-rt = { path = "crates/cargo-gamma-rt", default-features = false, version = "=0.8.0" }
+cargo-gamma-unsafe = { path = "crates/cargo-gamma-unsafe", default-features = false, version = "=0.8.0" }
 # external dependencies
 cargo-platform = { version = "0.3.3", default-features = false }
 cargo_metadata = { version = "0.23.1", default-features = false }
+cc = { version = "1.10.0", default-features = false }
 cel = { version = "0.15.0", default-features = false }
 chrono = { version = "0.4.45", default-features = false }
 clap = { version = "4.6.7", default-features = false }
@@ -52,6 +56,7 @@ command-group = { version = "5.0.1", default-features = false }
 compact_str = { version = "0.10.0", default-features = false }
 csv = { version = "1.4.0", default-features = false }
 duct = { version = "1.1.2", default-features = false }
+elf = { version = "0.8.0", default-features = false }
 env_logger = { version = "0.11.11", default-features = false }
 fakeable = { version = "0.2.2", default-features = false }
 fetch = { version = "0.19.0", default-features = false }
@@ -61,6 +66,7 @@ futures = { version = "0.3.34", default-features = false }
 futures-util = { version = "0.3.34", default-features = false }
 glob = { version = "0.3.4", default-features = false }
 http-body-util = { version = "0.1.5", default-features = false }
+hunspell-dictgen = { path = "crates/hunspell-dictgen", default-features = false, version = "0.1.0" }
 ignore = { version = "0.4.34", default-features = false }
 indicatif = { version = "0.18.6", default-features = false }
 insta = { version = "1.49.0", default-features = false }
@@ -69,6 +75,7 @@ jsonc-parser = { version = "0.34", default-features = false }
 layered = { version = "0.3.8", default-features = false }
 lcov = { version = "0.8.2", default-features = false }
 libc = { version = "0.2.191", default-features = false }
+libloading = { version = "0.8.9", default-features = false }
 log = { version = "0.4.35", default-features = false }
 loom = { version = "0.7.2", default-features = false }
 mimalloc = { version = "0.1.52", default-features = false }
@@ -116,12 +123,12 @@ terminal_size = { version = "0.4.4", default-features = false }
 tick = { version = "0.8.0", default-features = false }
 tokio = { version = "1.54.1", default-features = false }
 toml = { version = "1.1.8", default-features = false }
-toml_edit = { version = "0.25.17", default-features = false, features = ["parse", "display"] }
+toml_edit = { version = "0.25.17", default-features = false }
 toml_parser = { version = "1.1.5", default-features = false }
 tracing = { version = "0.1.44", default-features = false }
 tracing-subscriber = { version = "0.3.23", default-features = false }
 unicode-width = { version = "0.2.3", default-features = false }
-url = { version = "2.5.8", default-features = false }
+url = { version = "2.5.9", default-features = false }
 vu128 = { version = "1.1.0", default-features = false }
 walkdir = { version = "2.5.0", default-features = false }
 windows = { version = "0.62.2", default-features = false }

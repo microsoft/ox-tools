@@ -767,7 +767,7 @@ fn schedule(pending: &mut [usize], plan: &Plan, reach: &Reachability<'_>, killer
 
         // #[gamma::skip(cond.always_false, reason = "suppressing the fixed-point termination condition makes scheduling loop forever")]
         if !moved {
-            // #[gamma::skip(all, reason = "removing the fixed-point exit makes scheduling loop forever")]
+            // #[gamma::skip(all, tag = "timeout", reason = "Without the fixed-point exit, scheduling repeatedly scans the unchanged package-priority closure forever.")]
             break 'interleave;
         }
     }
@@ -1636,7 +1636,7 @@ impl Tally {
 
 #[derive(Default)]
 struct NegativeLearning {
-    binaries: Mutex<crate::HashSet<(SiteIdentity, camino::Utf8PathBuf)>>,
+    binaries: Mutex<crate::HashMap<SiteIdentity, crate::HashSet<camino::Utf8PathBuf>>>,
 }
 
 impl NegativeLearning {
@@ -1644,7 +1644,8 @@ impl NegativeLearning {
         self.binaries
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .contains(&(site.clone(), binary.path.clone()))
+            .get(site)
+            .is_some_and(|binaries| binaries.contains(binary.path.as_path()))
     }
 
     fn record(&self, site: &SiteIdentity, binary: &TestBinary) {
@@ -1652,7 +1653,9 @@ impl NegativeLearning {
             .binaries
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert((site.clone(), binary.path.clone()));
+            .entry(site.clone())
+            .or_default()
+            .insert(binary.path.clone());
     }
 }
 
@@ -1781,7 +1784,7 @@ fn test_all_with_clock(
         return Ok(None);
     }
 
-    // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
+    // #[gamma::skip(call_result.default, tag = "equivalent", reason = "Replacing the unit result retains scheduling and all its side effects.")]
     schedule_pending(&mut pending, plan, reach, killers);
 
     let captured = (!work.has_testing_journal()).then(|| super::session::InitialHints::capture(plan, killers));
@@ -1818,7 +1821,7 @@ fn test_all_with_clock(
             let file = Arc::clone(&plan.mutants[*position].file);
             let next = files.len();
 
-            // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
+            // #[gamma::skip(call_result.default, tag = "equivalent", reason = "Replacing the unit result retains the count update and all its side effects.")]
             increment_item_count(&mut item_counts, Arc::clone(&file), Arc::clone(&plan.mutants[*position].item_path));
             *files.entry(file).or_insert(next)
         })
@@ -1840,8 +1843,11 @@ fn test_all_with_clock(
                     Arc::clone(&plan.mutants[*position].item_path),
                 ))
                 .copied()
-                // #[gamma::skip(all, reason = "the value controls scheduling, accounting, identity, or a conservative bound whose one-step perturbation has no safely deterministic external observation here")]
-                .map_or(0, |count| count.saturating_sub(1))
+                .map_or(
+                    // #[gamma::skip(literal.int_increment, tag = "equivalent", reason = "file_slots construction inserted every pending position's item key before these lookups.")]
+                    0,
+                    |count| count.saturating_sub(1),
+                )
         })
         .collect();
     let planning_total = pending.len();
@@ -1857,7 +1863,6 @@ fn test_all_with_clock(
         .collect();
     let costs: Vec<Duration> = planned.iter().map(|work| work.scheduling_cost()).collect();
     let mut file_paths = files.into_iter().collect::<Vec<_>>();
-    // #[gamma::skip(all, reason = "the ordering or deduplication is retained for deterministic, efficient behavior; the current internal consumer observes the same population")]
     file_paths.sort_by_key(|(_file, slot)| *slot);
     let file_paths = file_paths.into_iter().map(|(file, _slot)| file).collect::<Vec<_>>();
     let file_killers: Vec<FileLearning> = file_paths
@@ -1978,120 +1983,125 @@ fn test_all_with_clock(
                 #[cfg(test)]
                 let shared_runner = shared_runner.clone();
 
-                let _handle = scope.spawn(move || {
-                    #[cfg(test)]
-                    super::verdict::set_shared_runner(shared_runner);
-                    let _notes = notes::enter(notes.as_ref());
-                    ACCOUNTING_SENDER.with_borrow_mut(|slot| *slot = Some(sender.clone()));
+                thread::Builder::new()
+                    .name("gamma-sweep".into())
+                    .spawn_scoped(scope, move || {
+                        #[cfg(test)]
+                        super::verdict::set_shared_runner(shared_runner);
+                        let _notes = notes::enter(notes.as_ref());
+                        ACCOUNTING_SENDER.with_borrow_mut(|slot| *slot = Some(sender.clone()));
 
-                    while abandoned.get().is_none() {
-                        let Some(assignment) = scheduler.assignment_with(abandoned, before_wait) else {
-                            return;
-                        };
-                        let index = assignment.index();
-                        let position = pending[index];
-                        let mut state = lock_pending(states, index);
-                        if
-                        // #[gamma::skip(cond.always_false, reason = "A Scheduler assignment reserves each pending index once. Rebuilding fallback excludes finished PendingState entries, and finishing happens only while holding that same state lock. The already-finished defensive worker branch cannot be entered by the producer; removing or changing its continue is unreachable.", tag = "equivalent")]
-                        state.finished {
-                            // #[gamma::skip(loop.continue_to_break, loop.delete_continue, reason = "A Scheduler assignment reserves each pending index once. Rebuilding fallback excludes finished PendingState entries, and finishing happens only while holding that same state lock. The already-finished defensive worker branch cannot be entered by the producer; removing or changing its continue is unreachable.", tag = "equivalent")]
-                            continue;
-                        }
-
-                        let (ordinal, timeout_multiplier) = ordinals[index];
-                        let active = ordinal;
-                        let first = state.started_ms.is_none();
-                        let first_started_ms = *state.started_ms.get_or_insert_with(|| elapsed_millis(sweep_started.elapsed()));
-                        let started = Stopwatch::new(clock);
-                        let reachable = &reachable[index];
-
-                        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
-                        begin_selection_trace();
-                        INITIAL_KILLER.with_borrow_mut(|initial| initial.clone_from(&initial_killers[index]));
-                        if first {
-                            let _sent = sender.send(SweepEvent::Started);
-                        } else {
-                            let _sent = sender.send(SweepEvent::Activity(true));
-                        }
-                        let judged = judgement(active).map_or_else(
-                            || {
-                                judge_learning_pass(exact, |stage| {
-                                    judge_learning_step(
-                                        work,
-                                        active,
-                                        reachable,
-                                        hints[index].as_ref(),
-                                        &reach_hints[index],
-                                        &file_killers[file_slots[index]],
-                                        &item_paths[index],
-                                        &site_identities[index],
-                                        negative,
-                                        deterministic_reach,
-                                        timeout_multiplier,
-                                        sweep,
-                                        tally,
-                                        stage,
-                                        &mut state.probes,
-                                    )
-                                })
-                            },
-                            Some,
-                        );
-                        let attempts = take_selection_trace();
-                        state.execution_ms = state.execution_ms.saturating_add(elapsed_millis(started.elapsed()));
-                        let Some(judged) = judged else {
-                            let _sent = sender.send(SweepEvent::SelectionAttempts(attempts));
-                            let _sent = sender.send(SweepEvent::Activity(false));
-                            continue;
-                        };
-                        // Restored judgements bypass staged execution; live kills are deduplicated by ordinal.
-                        tally
-                            .named_kills
-                            .lock()
-                            .expect("a kill-count panic can leave counts and credited mutants inconsistent")
-                            .record(active, &judged);
-
-                        let (outcome, killer, note) = match judged {
-                            Judgement::Reached(outcome, killer, note) => (outcome, killer, note),
-                            Judgement::Abandoned(reason) => {
-                                let _sent = sender.send(SweepEvent::SelectionAttempts(attempts));
-                                let _first = abandoned.set(reason);
-                                core::mem::drop(assignment);
-                                scheduler.abandon();
-
+                        while abandoned.get().is_none() {
+                            let Some(assignment) = scheduler.assignment_with(abandoned, before_wait) else {
                                 return;
+                            };
+                            let index = assignment.index();
+                            let position = pending[index];
+                            let mut state = lock_pending(states, index);
+                            if
+                            // #[gamma::skip(cond.always_false, reason = "A Scheduler assignment reserves each pending index once. Rebuilding fallback excludes finished PendingState entries, and finishing happens only while holding that same state lock. The already-finished defensive worker branch cannot be entered by the producer; removing or changing its continue is unreachable.", tag = "equivalent")]
+                            state.finished {
+                                // #[gamma::skip(loop.continue_to_break, loop.delete_continue, reason = "A Scheduler assignment reserves each pending index once. Rebuilding fallback excludes finished PendingState entries, and finishing happens only while holding that same state lock. The already-finished defensive worker branch cannot be entered by the producer; removing or changing its continue is unreachable.", tag = "equivalent")]
+                                continue;
                             }
-                        };
 
-                        let elapsed = state.execution_ms;
-                        state.finished = true;
-                        let settled_ms = elapsed_millis(sweep_started.elapsed());
+                            let (ordinal, timeout_multiplier) = ordinals[index];
+                            let active = ordinal;
+                            let first = state.started_ms.is_none();
+                            let first_started_ms = *state.started_ms.get_or_insert_with(|| elapsed_millis(sweep_started.elapsed()));
+                            let started = Stopwatch::new(clock);
+                            let reachable = &reachable[index];
 
-                        // A closed receiver means the calling thread is gone, which cannot happen while
-                        // the scope is open; there is nothing useful to do about it either way.
-                        let _sent = sender.send(SweepEvent::Completed(Completed {
-                            position,
-                            outcome,
-                            elapsed_ms: elapsed,
-                            killer,
-                            note,
-                            first_started_ms,
-                            settled_ms,
-                            attempts,
-                        }));
+                            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
+                            begin_selection_trace();
+                            INITIAL_KILLER.with_borrow_mut(|initial| initial.clone_from(&initial_killers[index]));
+                            if first {
+                                let _sent = sender.send(SweepEvent::Started);
+                            } else {
+                                let _sent = sender.send(SweepEvent::Activity(true));
+                            }
+                            let judged = judgement(active).map_or_else(
+                                || {
+                                    judge_learning_pass(exact, |stage| {
+                                        judge_learning_step(
+                                            work,
+                                            active,
+                                            reachable,
+                                            hints[index].as_ref(),
+                                            &reach_hints[index],
+                                            &file_killers[file_slots[index]],
+                                            &item_paths[index],
+                                            &site_identities[index],
+                                            negative,
+                                            deterministic_reach,
+                                            timeout_multiplier,
+                                            sweep,
+                                            tally,
+                                            stage,
+                                            &mut state.probes,
+                                        )
+                                    })
+                                },
+                                Some,
+                            );
+                            let attempts = take_selection_trace();
+                            state.execution_ms = state.execution_ms.saturating_add(elapsed_millis(started.elapsed()));
+                            let Some(judged) = judged else {
+                                let _sent = sender.send(SweepEvent::SelectionAttempts(attempts));
+                                let _sent = sender.send(SweepEvent::Activity(false));
+                                continue;
+                            };
+                            // Restored judgements bypass staged execution; live kills are deduplicated by ordinal.
+                            tally
+                                .named_kills
+                                .lock()
+                                .expect("a kill-count panic can leave counts and credited mutants inconsistent")
+                                .record(active, &judged);
 
-                        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
-                        complete_assignment(
-                            assignment,
-                            deterministic_reach,
-                            &file_killers[file_slots[index]],
-                            &item_paths[index],
-                        );
-                    }
-                });
+                            let (outcome, killer, note) = match judged {
+                                Judgement::Reached(outcome, killer, note) => (outcome, killer, note),
+                                Judgement::Abandoned(reason) => {
+                                    let _sent = sender.send(SweepEvent::SelectionAttempts(attempts));
+                                    let _first = abandoned.set(reason);
+                                    core::mem::drop(assignment);
+                                    scheduler.abandon();
+
+                                    return;
+                                }
+                            };
+
+                            let elapsed = state.execution_ms;
+                            state.finished = true;
+                            let settled_ms = elapsed_millis(sweep_started.elapsed());
+
+                            // A closed receiver means the calling thread is gone, which cannot happen while
+                            // the scope is open; there is nothing useful to do about it either way.
+                            let _sent = sender.send(SweepEvent::Completed(Completed {
+                                position,
+                                outcome,
+                                elapsed_ms: elapsed,
+                                killer,
+                                note,
+                                first_started_ms,
+                                settled_ms,
+                                attempts,
+                            }));
+
+                            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
+                            complete_assignment(
+                                assignment,
+                                deterministic_reach,
+                                &file_killers[file_slots[index]],
+                                &item_paths[index],
+                            );
+                        }
+                    })
+                    .map(|_handle| ())
             };
-            // #[gamma::skip(call_result.default, reason = "Worker launching returns (); default_after retains every spawn and changes only unit to unit.", tag = "equivalent")]
-            launch_workers(jobs, spawn);
+            if let Err(cause) = launch_workers(jobs, spawn) {
+                let _first = abandoned.set(format!("could not start a sweep worker: {cause}"));
+                scheduler.abandon();
+            }
 
             // The workers hold the only remaining senders, so the drain ends when the last one finishes.
             core::mem::drop(sender);
@@ -2132,9 +2142,8 @@ fn test_all_with_clock(
     }
 
     let mut generalized = killers.generalized().clone();
-    // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
+    // #[gamma::skip(call_result.default, tag = "equivalent", reason = "Replacing the unit result retains learned hints and all other side effects.")]
     persist_learning(&mut generalized, &file_paths, &file_killers);
-    // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
     killers.replace_generalized(generalized);
 
     abandoned.into_inner().map_or_else(
@@ -2259,12 +2268,11 @@ fn pending_positions(plan: &Plan) -> Vec<usize> {
         .collect()
 }
 
-// #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
 fn schedule_pending(pending: &mut [usize], plan: &Plan, reach: &Reachability<'_>, killers: &Killers) {
+    // #[gamma::skip(call_result.default, tag = "equivalent", reason = "Replacing the unit result retains scheduling and all its side effects.")]
     schedule(pending, plan, reach, killers);
 }
 
-// #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
 fn increment_item_count(counts: &mut crate::HashMap<(Arc<Utf8Path>, Arc<str>), usize>, file: Arc<Utf8Path>, item: Arc<str>) {
     let count = counts.entry((file, item)).or_default();
     *count = count.saturating_add(1);
@@ -2286,10 +2294,23 @@ fn worker_count(jobs: usize) -> usize {
     jobs.max(1)
 }
 
-fn launch_workers(jobs: usize, mut spawn: impl FnMut()) {
+fn launch_workers(jobs: usize, mut spawn: impl FnMut() -> std::io::Result<()>) -> std::io::Result<()> {
     for _ in 0..worker_count(jobs) {
-        spawn();
+        #[cfg(test)]
+        if let Some(remaining) = SWEEP_FAIL_AFTER.get() {
+            SWEEP_FAIL_AFTER.set(remaining.checked_sub(1));
+            if remaining == 0 {
+                return Err(std::io::Error::other("sweep worker spawn refused by a test"));
+            }
+        }
+        spawn()?;
     }
+    Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    static SWEEP_FAIL_AFTER: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
 }
 
 fn lock_pending(states: &[Mutex<PendingState>], index: usize) -> MutexGuard<'_, PendingState> {
@@ -2331,17 +2352,14 @@ fn publish_completed(plan: &mut Plan, killers: &mut Killers, events: &mut impl E
 fn persist_learning(generalized: &mut GeneralizedHints, files: &[Arc<Utf8Path>], learning: &[FileLearning]) {
     let state = generalized;
     state.version = GENERALIZED_HINTS_VERSION;
-    // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
     state.items.retain(|entry| !files.iter().any(|file| entry.file == file.as_ref()));
     state.binaries.retain(|entry| !files.iter().any(|file| entry.file == file.as_ref()));
     for (file, learning) in files.iter().zip(learning) {
         learning.persist(file, state);
     }
-    // #[gamma::skip(all, reason = "the ordering or deduplication is retained for deterministic, efficient behavior; the current internal consumer observes the same population")]
     state
         .items
         .sort_unstable_by(|left, right| left.file.cmp(&right.file).then_with(|| left.item.cmp(&right.item)));
-    // #[gamma::skip(all, reason = "the ordering or deduplication is retained for deterministic, efficient behavior; the current internal consumer observes the same population")]
     state.binaries.sort_unstable_by(|left, right| left.file.cmp(&right.file));
 }
 
@@ -2731,7 +2749,6 @@ fn judge_learning_step(
         reachable,
         exact,
         &candidates,
-        // #[gamma::skip(all, reason = "the optional state is observed only through higher-level process orchestration that cannot be isolated safely here")]
         Some((observed, item_path)),
         Some((negative, site, deterministic_reach)),
         timeout_multiplier,
@@ -2741,7 +2758,6 @@ fn judge_learning_step(
         cached,
     );
 
-    // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
     if let Some(judged) = &judged {
         FileLearning::publish(observed, item_path, judged);
     }
@@ -2941,16 +2957,13 @@ impl FileLearning {
                 .map(|candidate| RankedCandidate::from_hint(candidate, BinaryIdentity::from_hint))
                 .collect();
         }
-        // #[gamma::skip(all, reason = "the alternative changes only internal candidate ordering or tie selection, not the accepted population exposed by this layer")]
         let item_order = state
             .items
             .values()
             .flat_map(|item| item.exact.iter())
             .map(|candidate| candidate.order)
             .max()
-            // #[gamma::skip(all, reason = "the value controls scheduling, accounting, identity, or a conservative bound whose one-step perturbation has no safely deterministic external observation here")]
             .unwrap_or(0);
-        // #[gamma::skip(all, reason = "the alternative changes only internal candidate ordering or tie selection, not the accepted population exposed by this layer")]
         let binary_order = state.binaries.iter().map(|candidate| candidate.order).max().unwrap_or(0);
         state.next_order = item_order.max(binary_order).saturating_add(1);
 
@@ -2960,7 +2973,6 @@ impl FileLearning {
     fn persist(&self, file: &Utf8Path, output: &mut GeneralizedHints) {
         let state = self.locked();
         for (item, learning) in &state.items {
-            // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
             if !learning.exact.is_empty() {
                 output.items.push(ItemHints {
                     file: file.to_path_buf(),
@@ -2969,7 +2981,6 @@ impl FileLearning {
                 });
             }
         }
-        // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
         if !state.binaries.is_empty() {
             output.binaries.push(FileBinaryHints {
                 file: file.to_path_buf(),
@@ -3006,13 +3017,10 @@ impl FileLearning {
         };
 
         exact.sort_by_key(RankedCandidate::score);
-        // #[gamma::skip(all, reason = "the ordering or deduplication is retained for deterministic, efficient behavior; the current internal consumer observes the same population")]
         reached.sort_by_key(RankedCandidate::score);
-        // #[gamma::skip(all, reason = "the ordering or deduplication is retained for deterministic, efficient behavior; the current internal consumer observes the same population")]
         reached_file.sort_by_key(RankedCandidate::score);
         binaries.sort_by_key(RankedCandidate::score);
         reached_file.retain(|candidate| !contains_ranked_identity(&reached, &candidate.identity));
-        // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
         binaries.retain(|candidate| !contains_ranked_identity(&reached, &candidate.identity));
         exact
             .into_iter()
@@ -3200,6 +3208,84 @@ fn published_candidate<T>(identity: T, order: u64) -> RankedCandidate<T> {
         measured: Duration::ZERO,
         samples: u32::from(false),
         order,
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod learning_order_tests {
+    use super::*;
+
+    #[test]
+    fn imported_candidate_orders_place_new_learning_after_every_retained_candidate() {
+        let file = Utf8Path::new("src/subject.rs");
+        let killer = |test: &str| Killer {
+            package: "subject".into(),
+            target: "lib".into(),
+            test: test.into(),
+        };
+        for named in [false, true] {
+            let mut hints = GeneralizedHints::empty_supported();
+            let ranked = |candidate, order| RankedHint {
+                candidate,
+                seeds: 1,
+                hits: 0,
+                misses: 0,
+                measured_ms: 0,
+                samples: 0,
+                order,
+            };
+            if named {
+                hints.items.push(ItemHints {
+                    file: file.to_owned(),
+                    item: "item".into(),
+                    candidates: vec![ranked(killer("first"), 3), ranked(killer("last"), 9)],
+                });
+            } else {
+                hints.binaries.push(FileBinaryHints {
+                    file: file.to_owned(),
+                    candidates: ["first", "last"]
+                        .into_iter()
+                        .zip([3, 9])
+                        .map(|(target, order)| RankedHint {
+                            candidate: BinaryHint {
+                                package: "subject".into(),
+                                target: target.into(),
+                            },
+                            seeds: 1,
+                            hits: 0,
+                            misses: 0,
+                            measured_ms: 0,
+                            samples: 0,
+                            order,
+                        })
+                        .collect(),
+                });
+            }
+            let learning = FileLearning::from_hints(file, &hints);
+            learning.publish(
+                "item",
+                &Judgement::Reached(
+                    Outcome::Killed,
+                    Some(Killer {
+                        package: "subject".into(),
+                        target: "new".into(),
+                        test: "new".into(),
+                    }),
+                    None,
+                ),
+            );
+            let selected = learning.select_candidates("item");
+            let identities: Vec<&str> = selected
+                .iter()
+                .filter_map(|candidate| match candidate {
+                    Candidate::Exact(identity) if named => Some(identity.test.as_str()),
+                    Candidate::FileBinary(identity) if !named => Some(identity.target.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(identities, ["first", "last", "new"]);
+        }
     }
 }
 
@@ -4265,6 +4351,13 @@ mod tests {
     #[test]
     fn persistence_replaces_each_touched_file_without_retaining_stale_binary_candidates_from_either_file() {
         let mut hints = GeneralizedHints::empty_supported();
+        hints.items = ["src/first.rs", "src/second.rs", "src/untouched.rs"]
+            .map(|file| ItemHints {
+                file: file.into(),
+                item: "item".into(),
+                candidates: vec![observed_planning_hint(killer(file), 2)],
+            })
+            .into();
         hints.binaries = ["src/first.rs", "src/second.rs", "src/untouched.rs"]
             .map(|file| FileBinaryHints {
                 file: file.into(),
@@ -4282,6 +4375,237 @@ mod tests {
         assert_eq!(hints.binaries.len(), 1);
         assert_eq!(hints.binaries[0].file, Utf8Path::new("src/untouched.rs"));
         assert_eq!(hints.binaries[0].candidates[0].candidate.target, "src/untouched.rs");
+        assert_eq!(hints.items.len(), 1);
+        assert_eq!(hints.items[0].file, Utf8Path::new("src/untouched.rs"));
+    }
+
+    #[test]
+    fn an_absent_hint_tier_does_not_falsely_update_promoted_item_learning() {
+        use crate::discover::{Hints, RunRecord};
+
+        let mutant = crate::fixtures::mutant();
+        let seed = RankedHint {
+            candidate: killer("seed"),
+            seeds: 1,
+            hits: 0,
+            misses: 0,
+            measured_ms: 0,
+            samples: 0,
+            order: 0,
+        };
+        let mut initial = GeneralizedHints::empty_supported();
+        initial.items.push(ItemHints {
+            file: mutant.file.to_path_buf(),
+            item: "retired-item".into(),
+            candidates: vec![seed.clone()],
+        });
+        initial.binaries.push(FileBinaryHints {
+            file: mutant.file.to_path_buf(),
+            candidates: vec![RankedHint {
+                candidate: BinaryHint {
+                    package: seed.candidate.package.clone(),
+                    target: seed.candidate.target.clone(),
+                },
+                seeds: seed.seeds,
+                hits: seed.hits,
+                misses: seed.misses,
+                measured_ms: seed.measured_ms,
+                samples: seed.samples,
+                order: seed.order,
+            }],
+        });
+        let learned = killed_by(killer("fresh"));
+        let reference = FileLearning::from_hints(&mutant.file, &initial);
+        reference.publish(&mutant.item_path, &learned);
+        let mut reference_hints = GeneralizedHints::empty_supported();
+        reference.persist(&mutant.file, &mut reference_hints);
+        // Compare named-item promotion independently of which binary seeds were retained.
+        reference_hints.binaries.clear();
+        let mut record = RunRecord::default();
+        record.replace_knowledge(HashMap::default(), reference_hints);
+        let reference = Hints::promoted(&record, std::slice::from_ref(&mutant));
+
+        for missing_items in [false, true] {
+            let mut partial = initial.clone();
+            if missing_items {
+                partial.items.clear();
+            } else {
+                partial.binaries.clear();
+            }
+            let learning = FileLearning::from_hints(&mutant.file, &partial);
+            learning.publish(&mutant.item_path, &learned);
+            let mut saved = GeneralizedHints::empty_supported();
+            learning.persist(&mutant.file, &mut saved);
+            saved.binaries.clear();
+            record.replace_knowledge(HashMap::default(), saved);
+            let promoted = Hints::promoted(&record, std::slice::from_ref(&mutant));
+            let changes = promoted.changes_from(&reference);
+            assert!(
+                changes.is_empty(),
+                "removing an optional seed tier must not report changed item knowledge: {changes:?}"
+            );
+            assert_eq!(changes.preserved, 1, "the newly learned item's promotion is unchanged");
+        }
+    }
+
+    #[test]
+    fn reached_candidates_rank_by_observed_cost_in_both_item_and_file_tiers() {
+        let learning = FileLearning::new();
+        let binaries = ["slow", "fast"].map(|target| TestBinary {
+            target: target.into(),
+            ..crate::testing::test_binary("unused")
+        });
+        learning.reached("item", &binaries[0], Duration::from_millis(30));
+        learning.reached("item", &binaries[1], Duration::from_millis(2));
+        let selected = learning.select_candidates("item");
+        assert!(matches!(&selected[0], Candidate::ItemBinary(identity) if identity.target == "fast"));
+        let selected = learning.select_candidates("other-item");
+        assert!(matches!(&selected[0], Candidate::ReachFileBinary(identity) if identity.target == "fast"));
+        let mut persisted = GeneralizedHints::empty_supported();
+        learning.persist(Utf8Path::new("src/subject.rs"), &mut persisted);
+        assert!(persisted.items.is_empty(), "reached binaries are not learned named-test killers");
+    }
+
+    #[test]
+    fn a_clean_reaching_fallback_trains_the_next_items_binary_selection() {
+        let work = Workspace::adopt("unused-training-root".into(), "unused-training-target".into());
+        let binary = TestBinary {
+            package: "subject".into(),
+            ..crate::testing::test_binary("unused")
+        };
+        let learning = FileLearning::new();
+        let site = SiteIdentity::from_mutant(&crate::fixtures::mutant());
+        let runner: super::super::verdict::SharedRunner = Arc::new(|_, attempt| {
+            assert_eq!(attempt.only, Only::All);
+            super::super::verdict::BinaryRun {
+                verdict: Verdict::Passed,
+                reach: ReachObservation::Reached,
+            }
+        });
+        let judged = super::super::verdict::with_shared_runner(runner, || {
+            judge_learning_step(
+                &work,
+                1,
+                &[&binary],
+                None,
+                &[],
+                &learning,
+                "item",
+                &site,
+                &NegativeLearning::default(),
+                true,
+                None,
+                ranked_sweep(),
+                &Tally::default(),
+                Stage::Fallback,
+                &mut ProbeState::default(),
+            )
+        })
+        .unwrap();
+        assert!(matches!(judged, Judgement::Reached(Outcome::Survived, None, _)));
+        let selected = learning.select_candidates("item");
+        assert_eq!(selected.len(), 1);
+        assert!(matches!(&selected[0], Candidate::ItemBinary(identity) if identity.target == binary.killer_target()));
+        let selected = learning.select_candidates("next-item");
+        assert_eq!(selected.len(), 1);
+        assert!(matches!(&selected[0], Candidate::ReachFileBinary(identity) if identity.target == binary.killer_target()));
+    }
+
+    #[test]
+    fn learning_persistence_canonicalizes_untouched_file_and_item_order_too() {
+        let mut hints = GeneralizedHints::empty_supported();
+        hints.items = [("src/z.rs", "z"), ("src/a.rs", "z"), ("src/a.rs", "a")]
+            .map(|(file, item)| ItemHints {
+                file: file.into(),
+                item: item.into(),
+                candidates: vec![observed_planning_hint(killer(item), 2)],
+            })
+            .into();
+        hints.binaries = ["src/z.rs", "src/a.rs"]
+            .map(|file| FileBinaryHints {
+                file: file.into(),
+                candidates: vec![observed_planning_hint(
+                    BinaryHint {
+                        package: "subject".into(),
+                        target: file.into(),
+                    },
+                    2,
+                )],
+            })
+            .into();
+        persist_learning(&mut hints, &[Arc::from(Utf8Path::new("src/touched.rs"))], &[FileLearning::new()]);
+        assert_eq!(
+            hints
+                .items
+                .iter()
+                .map(|item| (item.file.as_str(), item.item.as_str()))
+                .collect::<Vec<_>>(),
+            [("src/a.rs", "a"), ("src/a.rs", "z"), ("src/z.rs", "z")]
+        );
+        assert_eq!(
+            hints.binaries.iter().map(|file| file.file.as_str()).collect::<Vec<_>>(),
+            ["src/a.rs", "src/z.rs"]
+        );
+    }
+
+    #[test]
+    fn launch_refusals_propagate_without_attempting_another_worker() {
+        let mut launches = 0;
+        let error = launch_workers(3, || {
+            launches += 1;
+            Err(std::io::Error::other("owned launch refusal"))
+        })
+        .unwrap_err();
+        assert_eq!(launches, 1);
+        assert_eq!(error.to_string(), "owned launch refusal");
+    }
+
+    #[test]
+    fn real_sweep_keeps_each_files_killer_learning_attached_to_its_own_item() {
+        let work = Workspace::adopt("unused-learning-root".into(), "unused-learning-target".into());
+        let mut plan = plan_over(&["subject"; 8]);
+        for (index, mutant) in plan.mutants.iter_mut().enumerate() {
+            mutant.file = Arc::from(Utf8PathBuf::from(format!("src/file-{index}.rs")));
+            mutant.item_path = format!("item-{index}").into();
+        }
+        let binaries = [TestBinary {
+            package: "subject".into(),
+            ..crate::testing::test_binary("unused")
+        }];
+        let reach = Reachability::build(&plan, &binaries, &NARROW);
+        let mut killers = Killers::default();
+        let runner: super::super::verdict::SharedRunner = Arc::new(|_, attempt| {
+            assert_eq!(thread::current().name(), Some("gamma-sweep"));
+            super::super::verdict::BinaryRun {
+                verdict: Verdict::Failed(Some(format!("killer-{}", attempt.active.unwrap()))),
+                reach: super::super::verdict::ReachObservation::Reached,
+            }
+        });
+        super::super::verdict::with_shared_runner(runner, || {
+            test_all_with_hooks(
+                &work,
+                &mut plan,
+                &reach,
+                ranked_sweep(),
+                true,
+                &mut killers,
+                &mut crate::testing::Recorder::default(),
+                (|_, _| Ok(()), |_| None, || panic!("one worker without resources must not wait")),
+            )
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(killers.generalized().items.len(), 8);
+        for (index, mutant) in plan.mutants.iter().enumerate() {
+            let learned = killers
+                .generalized()
+                .items
+                .iter()
+                .find(|item| item.file == mutant.file.as_ref() && item.item == mutant.item_path.as_ref())
+                .unwrap();
+            assert_eq!(learned.candidates.len(), 1);
+            assert_eq!(learned.candidates[0].candidate.test, format!("killer-{}", index + 1));
+        }
     }
 
     fn with_planning_observer<T>(observer: impl FnMut(&[ScheduledWork], &[Vec<Candidate>]) + 'static, body: impl FnOnce() -> T) -> T {
@@ -4501,6 +4825,53 @@ mod tests {
              It stops here rather than reach verdicts that would each have to be taken on faith."
         );
         assert!(observed.get());
+        assert_eq!(plan.mutants[0].outcome, Outcome::Pending);
+    }
+
+    #[test]
+    fn a_first_sweep_worker_spawn_refusal_notifies_the_unstarted_pool() {
+        let root = Utf8PathBuf::from("never-read-spawn-refusal-root");
+        let work = Workspace::adopt(root.clone(), root.join("target"));
+        let mut plan = plan_over(&["subject"]);
+        plan.root = root;
+        let reach = Reachability::build(&plan, &[], &NARROW);
+        let observed = std::rc::Rc::new(std::cell::Cell::new(false));
+        let clock = tick::ClockControl::new().to_simple_clock();
+        SWEEP_FAIL_AFTER.set(Some(0));
+        let result = with_settled_scheduler_observer(
+            {
+                let observed = std::rc::Rc::clone(&observed);
+                move |exact, scheduler| {
+                    assert!(exact);
+                    assert!(!observed.replace(true), "a spawn refusal must prevent the fallback pass");
+                    // No worker spawned: this only counts notifications; the mutex publishes state.
+                    assert_eq!(scheduler.notifications.load(Ordering::Relaxed), 1);
+                    let state = scheduler.state.lock().unwrap();
+                    assert_eq!(state.active_files, [0]);
+                    assert!(state.active_items.is_empty());
+                }
+            },
+            || {
+                test_all_with_clock(
+                    &work,
+                    &mut plan,
+                    &reach,
+                    ranked_sweep(),
+                    true,
+                    &mut Killers::default(),
+                    &mut crate::testing::Recorder::default(),
+                    (
+                        |_, _, _| panic!("an unstarted pool cannot checkpoint a mutant"),
+                        |_| panic!("an unstarted pool cannot judge a mutant"),
+                        || panic!("an unstarted pool cannot wait"),
+                    ),
+                    &clock,
+                )
+            },
+        );
+        assert!(result.unwrap_err().to_string().contains("sweep worker spawn refused"));
+        assert!(observed.get());
+        assert_eq!(SWEEP_FAIL_AFTER.get(), None);
         assert_eq!(plan.mutants[0].outcome, Outcome::Pending);
     }
 
@@ -7012,6 +7383,29 @@ mod tests {
         assert_eq!(plan.mutants[0].outcome, Outcome::Survived);
     }
 
+    #[test]
+    fn a_second_sweep_worker_spawn_refusal_abandons_and_joins_the_pool() {
+        let (_directory, work, mut plan, binaries) = unreachable_harness(Vec::new());
+        let reach = Reachability::build(&plan, &binaries, &NARROW);
+        SWEEP_FAIL_AFTER.set(Some(1));
+        let error = test_all_with_hooks(
+            &work,
+            &mut plan,
+            &reach,
+            Sweep {
+                jobs: 2,
+                ..sweep(Stall::NONE)
+            },
+            false,
+            &mut Killers::default(),
+            &mut crate::testing::Recorder::default(),
+            (|_, _| Ok(()), |_| Some(Judgement::Reached(Outcome::Survived, None, None)), || {}),
+        )
+        .expect_err("a partially started pool cannot continue judging mutants");
+        assert!(error.to_string().contains("sweep worker spawn refused"), "{error}");
+        assert_eq!(SWEEP_FAIL_AFTER.get(), None, "the second spawn failure must have fired");
+    }
+
     /// A note describing a mutant that outgrew its ceiling says both numbers: what it reached and
     /// what it was allowed, since a reader's first question is how far past the ceiling it went.
     #[test]
@@ -8105,7 +8499,11 @@ mod tests {
         assert_eq!(worker_count(8), 8);
         for (jobs, expected) in [(0, 1), (1, 1), (8, 8), (17, 17)] {
             let mut launched = 0;
-            launch_workers(jobs, || launched += 1);
+            launch_workers(jobs, || {
+                launched += 1;
+                Ok(())
+            })
+            .unwrap();
             assert_eq!(launched, expected);
         }
         assert_eq!(elapsed_millis(Duration::from_millis(17)), 17);

@@ -11,7 +11,6 @@ use compact_str::{CompactString, format_compact};
 use proc_macro2::Span;
 use rustc_lexer::TokenKind;
 use syn::punctuated::Punctuated;
-use syn::spanned::Spanned as _;
 use syn::token::Comma;
 use syn::visit::{self, Visit};
 use syn::{
@@ -26,8 +25,9 @@ use super::stated::stated_range;
 use super::{Candidate, Defaults, Shape};
 use crate::cfg::CfgSet;
 use crate::model::{normalize_site_text, site_key};
+use crate::ops::collect::defaults::Declarations;
 use crate::ops::registry::Selection;
-use crate::parse::SourceFile;
+use crate::parse::{Extent as _, SourceFile};
 use crate::{HashMap, HashSet};
 
 mod api_identity;
@@ -40,6 +40,7 @@ mod operators;
 mod ownership;
 pub(super) mod phase_one;
 mod predicates;
+mod read_only;
 mod resource;
 mod tables;
 mod temporaries;
@@ -61,7 +62,7 @@ mod ownership_tests;
 #[cfg(test)]
 use indexes::ABSOLUTE_ROOT;
 use indexes::{Indexes, NumericUses, ScopePath, block_id, indexes_in, module_id};
-use noop::is_noop;
+use noop::{LocalCalls, is_noop, unused_primitive_parameter};
 use predicates::{
     active_statements, binds_a_pattern, boolean_literal, callee_name, callee_type, declared_name, diverges, expr_attrs,
     ident_returns_float, is_assign_op, is_capacity_call, is_capacity_result, is_catch_all, is_default_call, is_diagnostic_message,
@@ -74,7 +75,7 @@ use types::{Types, returns_undefaultable_error, undefaulted_parameters};
 use values::{Kind, resolve_type, return_values};
 
 use super::Confidence;
-use super::defaults::{DefaultPaths, impl_item_attrs, item_attrs, standard_defaulted_parameters, trait_item_attrs};
+use super::defaults::{impl_item_attrs, item_attrs, standard_defaulted_parameters, trait_item_attrs};
 
 /// The marker string every string-valued mutant is replaced by.
 ///
@@ -191,6 +192,9 @@ pub(super) struct Collector<'a> {
     /// discover and says nothing about the tests.
     in_default_impl: bool,
 
+    /// Whether enclosing impl attributes may introduce parameter uses during expansion.
+    impl_parameters_opaque: bool,
+
     /// The concrete type named by `Self` inside the enclosing `impl` block.
     impl_self_type: Option<Type>,
 
@@ -203,7 +207,7 @@ pub(super) struct Collector<'a> {
     /// custom traits can have the same spelling. This resolver keeps no-op elimination tied to
     /// the standard trait while recognizing a bare shadow that the fallback text would recurse
     /// through.
-    default_paths: DefaultPaths,
+    declarations: Arc<Declarations>,
 
     /// Caller-supplied `Err(...)` payloads, from `--error`.
     errors: &'a [String],
@@ -304,7 +308,7 @@ pub(super) struct Collector<'a> {
 
     /// Locally visible function return types and aliases.
     calls: calls::Calls,
-    local_calls: noop::LocalCalls,
+    local_calls: LocalCalls,
     implicit_prelude: bool,
     aliases: HashMap<String, Option<types::Alias>>,
     scope_aliases: HashMap<ScopePath, HashMap<String, Option<types::Alias>>>,
@@ -425,8 +429,8 @@ impl<'a> Collector<'a> {
         defaults: &'a Defaults,
         mut indexes: Indexes,
     ) -> Self {
-        let default_paths = DefaultPaths::of_in(&file.ast, cfg);
-        let calls = calls::Calls::of(&file.ast, cfg, &indexes);
+        let declarations = defaults.declarations_for(file, cfg);
+        let calls = calls::Calls::with_declarations(&file.ast, cfg, &indexes, Arc::clone(&declarations));
         calls.annotate_imports(&mut indexes.scope_imports);
         let _old = indexes
             .root_imports
@@ -435,9 +439,9 @@ impl<'a> Collector<'a> {
             let _old = imports.insert(types::SOURCE_FILE.to_owned(), Some(vec![file.path.as_str().to_owned()]));
         }
         let mut local_calls = core::mem::take(&mut indexes.local_calls);
-        local_calls.resolve_default_macros(&indexes, &default_paths, defaults, file.path.as_ref());
-        let mut statement_blocks = HashSet::default();
-        let expression_contents = expression_contents(&file.ast, &mut statement_blocks);
+        local_calls.resolve_default_macros(&indexes, &declarations.paths, defaults, file.path.as_ref());
+        let mut numeric_evidence = lexical::evidence(&file.ast, cfg);
+        let read_only = core::mem::take(&mut numeric_evidence.read_only);
 
         Self {
             file,
@@ -446,18 +450,19 @@ impl<'a> Collector<'a> {
             outermost: Arc::from(""),
             trait_impl: None,
             candidates: Vec::new(),
-            expression_contents,
-            statement_blocks,
-            consuming_sites: temporaries::consuming_sites(&file.ast),
+            expression_contents: read_only.expressions,
+            statement_blocks: read_only.statement_blocks,
+            consuming_sites: read_only.temporaries,
             identity_sites: HashMap::default(),
             candidate_identity_sites: Vec::new(),
             ownership_lifts: HashMap::default(),
             inert_depth: 0,
             const_guard_depth: 0,
             in_default_impl: false,
+            impl_parameters_opaque: false,
             impl_self_type: None,
             impl_self_associated: HashMap::default(),
-            default_paths,
+            declarations,
             numeric_return: false,
             unsigned_return: UnsignedReturn::Other,
             unsigned_zeros: Vec::new(),
@@ -481,7 +486,7 @@ impl<'a> Collector<'a> {
             scope_path: Vec::new(),
             defaults,
             numeric_uses: indexes.numeric_uses,
-            numeric_evidence: lexical::evidence(&file.ast, cfg),
+            numeric_evidence,
             #[cfg(test)]
             reuse_receivers: true,
             #[cfg(test)]
@@ -506,7 +511,7 @@ impl<'a> Collector<'a> {
             undo: Vec::new(),
             generics: Vec::new(),
             ownership_generics: Vec::new(),
-            format_macro_shadowed: ownership::format_macro_shadowed(&file.ast),
+            format_macro_shadowed: read_only.format_macro_shadowed,
             defaulted: Vec::new(),
             const_parameters: Vec::new(),
             iterator_bounded: Vec::new(),
@@ -694,7 +699,7 @@ impl<'a> Collector<'a> {
             &replacement,
             self.file.text.get(range.clone()).unwrap_or_default(),
             shape,
-            &self.default_paths,
+            &self.declarations.paths,
             &self.defaulted,
         ) {
             return;
@@ -801,7 +806,6 @@ impl<'a> Collector<'a> {
             .map_or(&[][..], Vec::as_slice);
         let modules_verified = self.defaults.resource_namespace_transparent(self.file.path.as_ref(), inline);
         if !self.resource_transparent || !self.local_calls.resource_scope_is_transparent(&self.scope_path, modules_verified) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let mut bindings = self
@@ -856,7 +860,7 @@ impl<'a> Collector<'a> {
             }
         }
         self.resource_source_bindings(expression, &mut bindings);
-        for name in resource::enclosing_pattern_shadows(&self.file.ast, &expression.span().byte_range())? {
+        for name in resource::enclosing_pattern_shadows(&self.file.ast, &expression.extent().byte_range())? {
             let _shadowed = bindings.remove(&name);
         }
         if bindings.values().any(|binding| {
@@ -871,7 +875,6 @@ impl<'a> Collector<'a> {
             )
         }) && !self.defaults.resource_sources().closed_methods_for(self.file.path.as_ref(), inline)
         {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         resource::LoopProof::new(expression, bindings, self.types().supports_char_api()).map(|proof| {
@@ -918,14 +921,12 @@ impl<'a> Collector<'a> {
             };
         }
         let Type::Path(path) = ty else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         };
         let first =
         // #[gamma::skip(try.propagate_to_unwrap, reason = "A source-parsed Type::Path always has at least one segment, so this first() cannot fail.", tag = "equivalent")]
         path.path.segments.first()?.ident.to_string();
         if path.path.leading_colon.is_none() && (self.generics.contains(&first) || self.defaulted.contains(&first)) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         if path.qself.is_none() && path.path.segments.len() == 1 && !imports.contains_key(&first) {
@@ -947,7 +948,6 @@ impl<'a> Collector<'a> {
                         }
                     }
                 {
-                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                     return None;
                 }
                 return self.resource_binding_with(&alias.target, scope, on_scope);
@@ -956,7 +956,6 @@ impl<'a> Collector<'a> {
         if
         // #[gamma::skip(cond.always_false, tag = "equivalent", reason = "Every accepting branch below independently proves the genuine primitive, collection, string, or Peekable API, including its unshadowed root.")]
         !types.standard_constructor_root(ty) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         if types.supports_peekable_chars(ty) {
@@ -1000,37 +999,29 @@ impl<'a> Collector<'a> {
 
     fn resource_iterator_initializer(&self, expression: &Expr) -> bool {
         let Expr::MethodCall(peekable) = expression else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         };
         if !peekable.attrs.is_empty() || peekable.turbofish.is_some() || !peekable.args.is_empty() || peekable.method != "peekable" {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         let Expr::MethodCall(chars) = &*peekable.receiver else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         };
         if !chars.attrs.is_empty() || chars.turbofish.is_some() || !chars.args.is_empty() || chars.method != "chars" {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         let Expr::Path(source) = &*chars.receiver else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         };
         if
         // #[gamma::skip(logical.or_remove_right, reason = "These sites independently require Path::get_ident/is_ident after the qself guard. On parsed syn paths, <Owner>::Name has a leading_colon, so get_ident/is_ident rejects it independently; <Owner as Trait>::Name contains at least two segments and is also rejected independently. The prior simple qualified-name negative assertions therefore never distinguished this guard. The proof is for parsed production inputs, not artificially inconsistent manually constructed paths.", tag = "equivalent")]
         !source.attrs.is_empty() || source.qself.is_some() {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         let Some(name) = source.path.get_ident() else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         };
         let Some(binding) = self.binding_types.get(&name.to_string()).filter(|binding| binding.resource_trusted) else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         };
         self.resource_binding(&binding.ty, &binding.scope) == Some(resource::Binding::StrReference)
@@ -1081,16 +1072,16 @@ impl<'a> Collector<'a> {
     /// keeps qualification, generic arguments, and reference syntax intact, the same way the trait
     /// path just below is read.
     fn impl_scope(&self, node: &ItemImpl) -> String {
-        let self_type = compact_path(self.text_of(node.self_ty.span()));
+        let self_type = compact_path(self.text_of(node.self_ty.extent()));
         // #[gamma::skip(cond.always_false, reason = "a parsed self type always contains a non-trivia token; this fallback is only defensive for an unmapped expansion")]
-        // #[gamma::skip(all, reason = "the fallback is reachable only for an unmapped expansion, and Collector never descends into expansions")]
+        // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, tag = "equivalent", reason = "The fallback string is unreachable for a parsed self type, which contains a source token; Collector does not traverse unmapped expansions.")]
         let self_type = if self_type.is_empty() { "_".to_owned() } else { self_type };
 
         let Some((trait_path, _for)) = &node.trait_ else {
             return self_type;
         };
 
-        let trait_path = compact_path(self.text_of(trait_path.span()));
+        let trait_path = compact_path(self.text_of(trait_path.extent()));
 
         // #[gamma::skip(cond.always_false, reason = "a parsed trait path always has a non-trivia token; an empty path can only be an unmapped expansion")]
         if trait_path.is_empty() {
@@ -1126,10 +1117,10 @@ impl<'a> Collector<'a> {
         if
         // #[gamma::skip(cond.always_true, reason = "emit_shaped_with_confidence immediately delegates to emit_at_conditionally, which repeats the identical wants(mutator) gate. parameter_shadows repeats its wants gate internally. The err_with body also emits through that same gate. Relaxing these prefilters cannot record an unselected or inert candidate or reserve its identity.", tag = "equivalent")]
         self.wants("parameter.default_shadow") {
-            self.parameter_shadows(sig, body);
+            self.parameter_shadows(attrs, sig, body);
         }
 
-        let span = body.span();
+        let span = body.extent();
 
         // Read before anything is emitted, because it decides whether the guessed values below are
         // offered at all. `None` covers both "nothing was stated" and "what was stated cannot be
@@ -1145,7 +1136,7 @@ impl<'a> Collector<'a> {
         // scope in the signature being read here.
         let mut abstracts = self.generics.clone();
 
-        abstracts.extend(undefaulted_parameters(&sig.generics, &self.default_paths));
+        abstracts.extend(undefaulted_parameters(&sig.generics, &self.declarations.paths));
 
         let types = Types {
             abstracts: &abstracts,
@@ -1254,10 +1245,10 @@ impl<'a> Collector<'a> {
             return;
         };
 
-        if self.undeletable_statements.contains(&statement.span().byte_range()) {
+        if self.undeletable_statements.contains(&statement.extent().byte_range()) {
             return;
         }
-        if !self.admit_ownership_edit(statement.span().byte_range(), &expression.span().byte_range(), false) {
+        if !self.admit_ownership_edit(statement.extent().byte_range(), &expression.extent().byte_range(), false) {
             return;
         }
 
@@ -1278,7 +1269,7 @@ impl<'a> Collector<'a> {
             _ => return,
         };
 
-        self.emit_shaped(mutator, statement.span(), "", 0, Shape::Stmt);
+        self.emit_shaped(mutator, statement.extent(), "", 0, Shape::Stmt);
     }
 
     /// Returns whether the target of an assignment is a binding that was declared without a value.
@@ -1287,7 +1278,6 @@ impl<'a> Collector<'a> {
     /// through a field, an index or a dereference presupposes that the binding already holds one.
     fn initializes_deferred(&self, target: &Expr) -> bool {
         let Expr::Path(path) = target else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         };
 
@@ -1303,10 +1293,9 @@ impl<'a> Collector<'a> {
     /// The shallow recursion allowance is a conservative traversal default, not a `Copy` depth rule
     /// or a measured stack limit; deeper fields simply supply no move-sensitive evidence.
     fn noncopy_place(&self, place: &Expr) -> bool {
-        if let Some(method) = self.numeric_evidence.receiver_moves.get(&place.span().byte_range())
+        if let Some(method) = self.numeric_evidence.receiver_moves.get(&place.extent().byte_range())
             && !self.ownership_receiver_consumes(place, method)
         {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         if let Some(noncopy) = self.ownership_known_place(place) {
@@ -1317,7 +1306,7 @@ impl<'a> Collector<'a> {
             .or_else(|| self.inferred_expression_type(place))
             .is_some_and(|ty| {
                 if let Type::Reference(reference) = values::strip(self.types().resolve_alias(&ty)) {
-                    return reference.mutability.is_some() && !self.numeric_evidence.reborrowable.contains(&place.span().byte_range());
+                    return reference.mutability.is_some() && !self.numeric_evidence.reborrowable.contains(&place.extent().byte_range());
                 }
                 self.noncopy_type(&ty, 8)
             })
@@ -1345,7 +1334,6 @@ impl<'a> Collector<'a> {
                             || self.current_imports().contains_key(&name)
                             || self.current_imports().contains_key("*")
                         {
-                            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                             return None;
                         }
                         let member = match member {
@@ -1379,11 +1367,10 @@ impl<'a> Collector<'a> {
                             .numeric_evidence
                             .ownership_continuations
                             .get(span)
-                            .and_then(|checks| checks.get(&place.span().byte_range()))
+                            .and_then(|checks| checks.get(&place.extent().byte_range()))
                             .is_none_or(|continuation| continuation.iter().all(|expression| self.ownership_falls_through(expression, 64))))
             })
         }) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         let owning = self
@@ -1411,7 +1398,7 @@ impl<'a> Collector<'a> {
             return;
         }
 
-        let span = cond.span();
+        let span = cond.extent();
 
         // `emit` repeats the selection check, so forcing this prefilter true cannot emit an
         // unselected mutant.
@@ -1483,7 +1470,7 @@ impl<'a> Collector<'a> {
                 .find(|(_, fallback)| self.cfg.guaranteed_when(&fallback.attrs, &arm.attrs))
                 .is_some_and(|(at, _)| index < *at)
             {
-                self.emit_shaped("match_arm.never_matches", arm.pat.span(), "", 0, Shape::Arm);
+                self.emit_shaped("match_arm.never_matches", arm.pat.extent(), "", 0, Shape::Arm);
             }
         }
     }
@@ -1507,7 +1494,7 @@ impl<'a> Collector<'a> {
             return;
         };
 
-        let whole = node.span().byte_range();
+        let whole = node.extent().byte_range();
 
         if
         // #[gamma::skip(logical.or_remove_left, reason = "struct_fields receives parser-produced ExprStruct spans from the same SourceFile. A path plus braces makes the whole span nonempty. Each field starts strictly after the opening path/brace, and its next field or .. token starts strictly later but before the closing brace. Hence the removed/strictness-adjusted invalid-span tests are always false, including inclusive comparisons at whole boundaries; their continue is unreachable.", tag = "equivalent")]
@@ -1524,7 +1511,7 @@ impl<'a> Collector<'a> {
             .fields
             .iter()
             .skip(1)
-            .map(|next| next.span().byte_range().start)
+            .map(|next| next.extent().byte_range().start)
             .chain(core::iter::once(rest.byte_range().start));
 
         for ((index, field), to) in node.fields.iter().enumerate().zip(next_starts) {
@@ -1534,7 +1521,7 @@ impl<'a> Collector<'a> {
                 continue;
             }
 
-            let from = field.span().byte_range().start;
+            let from = field.extent().byte_range().start;
 
             // Everything between the two is the field, its comma and the space after it.
             if
@@ -1567,7 +1554,7 @@ impl<'a> Collector<'a> {
             let replacement = format_compact!("{head}{tail}");
             let ordinal = saturating_ordinal(index);
 
-            self.emit_shaped("struct_field.omit", node.span(), replacement, ordinal, Shape::Expr);
+            self.emit_shaped("struct_field.omit", node.extent(), replacement, ordinal, Shape::Expr);
         }
     }
 
@@ -1576,7 +1563,7 @@ impl<'a> Collector<'a> {
     /// The removal sweeps up the separating comma along with the element, so the list that is left
     /// is still well formed wherever the element sat in it.
     fn omit_elements(&mut self, node: &Macro, elements: &Punctuated<Expr, Comma>) {
-        let spans: Vec<_> = elements.iter().map(|element| element.span().byte_range()).collect();
+        let spans: Vec<_> = elements.iter().map(|element| element.extent().byte_range()).collect();
 
         let (Some(first), Some(last)) = (spans.first(), spans.last()) else {
             return;
@@ -1585,7 +1572,7 @@ impl<'a> Collector<'a> {
         // The site has to be the whole `vec![..]`, not just the elements inside it. A guarded
         // mutant is one arm of an `if`, and `1, 2` is a list rather than an expression, so
         // narrowing the site to the element range would emit code that does not parse at all.
-        let whole = node.span().byte_range();
+        let whole = node.extent().byte_range();
         let items = first.start..last.end;
 
         let (Some(text), Some(head), Some(tail)) = (
@@ -1641,7 +1628,10 @@ impl<'a> Collector<'a> {
                 || elements.len() <
             // #[gamma::skip(literal.int_decrement, reason = "Admitting a singleton into reverse_elements reconstructs identical text: the same head, sole element and tail. emit_at_conditionally rejects that exact-text no-op before reserving identity, checking loop proofs or recording a candidate.", tag = "equivalent")]
             2
-        ) || mutator == "collection.reverse_array" && elements.iter().any(|element| self.text_of(element.span()).contains(".as_slice()"))
+        ) || mutator == "collection.reverse_array"
+            && elements
+                .iter()
+                .any(|element| self.text_of(element.extent()).contains(".as_slice()"))
         {
             return;
         }
@@ -1649,7 +1639,7 @@ impl<'a> Collector<'a> {
         if self.invalid_ownership_reversal(elements) {
             return;
         }
-        let spans: Vec<_> = elements.iter().map(|element| element.span().byte_range()).collect();
+        let spans: Vec<_> = elements.iter().map(|element| element.extent().byte_range()).collect();
         let first = spans.first().expect("the length check guarantees a first element");
         let last = spans.last().expect("the length check guarantees a last element");
         let (Some(head), Some(tail)) = (
@@ -1686,7 +1676,7 @@ impl<'a> Collector<'a> {
             return;
         };
 
-        let whole = node.span().byte_range();
+        let whole = node.extent().byte_range();
         let name = node.method.span().byte_range();
 
         // A method call whose receiver spans a macro expansion can put the name outside the call,
@@ -1729,7 +1719,7 @@ impl<'a> Collector<'a> {
             };
             self.emit_at_conditionally(
                 mutator,
-                node.span().byte_range(),
+                node.extent().byte_range(),
                 format_compact!("{before}{replacement}{after}"),
                 index,
                 shape,
@@ -1750,11 +1740,9 @@ impl<'a> Collector<'a> {
             return true;
         }
         if !self.defaults.has_single_source_evidence() {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         let Some(receiver) = receiver else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         };
         let types = self.types();
@@ -1765,7 +1753,6 @@ impl<'a> Collector<'a> {
             .method_signature(receiver, &node.method.to_string(), &self.scope_path, imports)
             .is_none()
         {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         let inline = imports
@@ -1808,7 +1795,6 @@ impl<'a> Collector<'a> {
     /// allowing deterministic cycle/progress assertions while preserving ordinary inference.
     fn character_receiver_with(&self, receiver: &Expr, mut on_visit: impl FnMut(*const Type)) -> bool {
         let Some(ty) = self.inferred_expression_type(receiver) else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         };
         let mut ty = &ty;
@@ -1828,7 +1814,6 @@ impl<'a> Collector<'a> {
                             || path_matches(&path.path, &["std", "primitive", "char"]));
                 }
                 _ => {
-                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
                     return false;
                 }
             }
@@ -1856,7 +1841,7 @@ impl<'a> Collector<'a> {
             return;
         }
 
-        if let Some(rewritten) = self.rewrite_part(node.span(), node.method.span(), replacement) {
+        if let Some(rewritten) = self.rewrite_part(node.extent(), node.method.span(), replacement) {
             let shape = if
             // #[gamma::skip(logical.and_remove_left, tag = "equivalent", reason = "Every rename_method_as caller passes Expr or IterExpr. For Expr both branches yield Expr; for IterExpr this left conjunct is true. No caller passes another shape.")]
             shape == Shape::IterExpr
@@ -1875,13 +1860,21 @@ impl<'a> Collector<'a> {
             };
             self.emit_at_conditionally(
                 mutator,
-                node.span().byte_range(),
+                node.extent().byte_range(),
                 rewritten,
                 0,
                 shape,
                 confidence,
                 !self.method_substitution_unsupported_for_receiver(node, replacement, receiver),
             );
+        }
+    }
+
+    fn fallback_confidence(&self, receiver: Option<&Type>) -> Confidence {
+        if receiver.is_some_and(|ty| self.types().supports_option_api(ty) || self.types().supports_result_api(ty)) {
+            Confidence::Proven
+        } else {
+            Confidence::Optimistic
         }
     }
 
@@ -1900,12 +1893,14 @@ impl<'a> Collector<'a> {
                     .first()
                     .is_some_and(|fallback| self.expression_can_directly_default(fallback) && !self.expression_is_known_default(fallback))
                 {
-                    let receiver = self.text_of(node.receiver.span()).to_owned();
-                    self.emit(
+                    let receiver_text = self.text_of(node.receiver.extent()).to_owned();
+                    self.emit_shaped_with_confidence(
                         "fallback.unwrap_or_to_default",
-                        node.span(),
-                        format_compact!("({receiver}).unwrap_or_default()"),
+                        node.extent(),
+                        format_compact!("({receiver_text}).unwrap_or_default()"),
                         0,
+                        Shape::Expr,
+                        self.fallback_confidence(receiver),
                     );
                 }
             }
@@ -1915,42 +1910,63 @@ impl<'a> Collector<'a> {
                     node.args.first()
                     && self.expression_can_directly_default(&closure.body)
                     && !self.expression_is_known_default(&closure.body)
-                    && let Some(rewritten) = self.rewrite_part(node.span(), closure.body.span(), "Default::default()")
+                    && let Some(rewritten) = self.rewrite_part(node.extent(), closure.body.extent(), "Default::default()")
                 {
-                    self.emit("fallback.unwrap_or_else_to_default", node.span(), rewritten, 0);
+                    self.emit_shaped_with_confidence(
+                        "fallback.unwrap_or_else_to_default",
+                        node.extent(),
+                        rewritten,
+                        0,
+                        Shape::Expr,
+                        self.fallback_confidence(receiver),
+                    );
                 }
             }
             ("map_or", 2) => {
                 if let Some(fallback) = node.args.first()
                     && self.expression_can_directly_default(fallback)
                     && !self.expression_is_known_default(fallback)
-                    && let Some(rewritten) = self.rewrite_part(node.span(), fallback.span(), "Default::default()")
+                    && let Some(rewritten) = self.rewrite_part(node.extent(), fallback.extent(), "Default::default()")
                 {
-                    self.emit("fallback.map_or_to_default", node.span(), rewritten, 0);
+                    self.emit_shaped_with_confidence(
+                        "fallback.map_or_to_default",
+                        node.extent(),
+                        rewritten,
+                        0,
+                        Shape::Expr,
+                        self.fallback_confidence(receiver),
+                    );
                 }
             }
             ("map_or_else", 2) => {
                 if let Some(Expr::Closure(closure)) = node.args.first()
                     && self.expression_can_directly_default(&closure.body)
                     && !self.expression_is_known_default(&closure.body)
-                    && let Some(rewritten) = self.rewrite_part(node.span(), closure.body.span(), "Default::default()")
+                    && let Some(rewritten) = self.rewrite_part(node.extent(), closure.body.extent(), "Default::default()")
                 {
-                    self.emit("fallback.map_or_else_to_default", node.span(), rewritten, 0);
+                    self.emit_shaped_with_confidence(
+                        "fallback.map_or_else_to_default",
+                        node.extent(),
+                        rewritten,
+                        0,
+                        Shape::Expr,
+                        self.fallback_confidence(receiver),
+                    );
                 }
             }
             ("rev", 0) => {
-                let receiver = self.text_of(node.receiver.span()).to_owned();
-                self.emit_shaped("iter.remove_rev", node.span(), receiver, 0, Shape::IterExpr);
+                let receiver = self.text_of(node.receiver.extent()).to_owned();
+                self.emit_shaped("iter.remove_rev", node.extent(), receiver, 0, Shape::IterExpr);
             }
             ("filter", 1) => {
                 if !self.is_option_receiver(&node.receiver) {
-                    let receiver = self.text_of(node.receiver.span()).to_owned();
+                    let receiver = self.text_of(node.receiver.extent()).to_owned();
                     let confidence = if self.is_iterator_receiver(&node.receiver) {
                         Confidence::Proven
                     } else {
                         Confidence::Optimistic
                     };
-                    self.emit_shaped_with_confidence("iter.remove_filter", node.span(), receiver, 0, Shape::IterExpr, confidence);
+                    self.emit_shaped_with_confidence("iter.remove_filter", node.extent(), receiver, 0, Shape::IterExpr, confidence);
                 }
             }
             ("take", 1) if !self.is_read_receiver(&node.receiver) => {
@@ -2011,7 +2027,6 @@ impl<'a> Collector<'a> {
 
     fn can_directly_default(&self, ty: &Type) -> bool {
         let types = self.types();
-        // #[gamma::skip(logical.and_remove_right, reason = "When resolve_type(resolve_alias(ty)) is Result, has_default(ty) returns false in its explicit Kind::Result arm; no earlier success bypasses that match. The conjunction's Result exclusion therefore removes no true has_default answer.", tag = "equivalent")]
         types.has_default(ty) && resolve_type(types.resolve_alias(ty)) != Kind::Result
     }
 
@@ -2020,7 +2035,8 @@ impl<'a> Collector<'a> {
             && self.local_calls.default_scope_is_transparent(&self.scope_path)
             && !self.generics.iter().chain(&self.defaulted).any(|name| name == "Default")
             && self
-                .default_paths
+                .declarations
+                .paths
                 .is_standard_default_segments(&["Default".into(), "default".into()])
             && self.types().supports_bare_default_trait()
     }
@@ -2056,7 +2072,6 @@ impl<'a> Collector<'a> {
 
     fn expression_is_known_default_for_type(&self, expression: &Expr, ty: &Type) -> bool {
         if !self.standard_default_replacement() {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         if self.expression_is_known_default(expression) {
@@ -2066,7 +2081,7 @@ impl<'a> Collector<'a> {
         let types = self.types();
         let kind = resolve_type(types.resolve_alias(ty));
 
-        if noop::is_standard_default_constructor(expression, ty, &types, &self.default_paths) {
+        if noop::is_standard_default_constructor(expression, ty, &types, &self.declarations.paths) {
             return true;
         }
 
@@ -2231,13 +2246,13 @@ impl<'a> Collector<'a> {
             return;
         }
 
-        let whole = expression.span().byte_range();
+        let whole = expression.extent().byte_range();
         let range = self.expression_contents.get(&whole).unwrap_or(&whole);
         let text = self.file.slice(range).to_owned();
-        self.emit("bool_expr.negate", expression.span(), format_compact!("!({text})"), 0);
+        self.emit("bool_expr.negate", expression.extent(), format_compact!("!({text})"), 0);
     }
 
-    fn parameter_shadows(&mut self, sig: &Signature, body: &Block) {
+    fn parameter_shadows(&mut self, attrs: &[Attribute], sig: &Signature, body: &Block) {
         if
         // #[gamma::skip(logical.or_remove_left, reason = "These mutations relax only a mutator-selection prefilter. All eventual emit paths recheck wants(mutator) before allocating an occurrence or recording a candidate. For the parameter-prefilter combinations, its only production caller function() already returns for const functions, making the removed const guard redundant too. The remaining syntax/type guards and selected candidates are unchanged.", tag = "equivalent")]
         (
@@ -2248,7 +2263,7 @@ impl<'a> Collector<'a> {
         {
             return;
         }
-        let body_range = body.span().byte_range();
+        let body_range = body.extent().byte_range();
         let Some(body_text) = self.file.text.get(body_range).map(str::to_owned) else {
             return;
         };
@@ -2267,8 +2282,15 @@ impl<'a> Collector<'a> {
             if !self.can_directly_default(&typed.ty) {
                 continue;
             }
+            if self.standard_default_replacement()
+                && !self.impl_parameters_opaque
+                && LocalCalls::nontransforming_attributes(attrs)
+                && unused_primitive_parameter(ident, &typed.ty, body, &self.types())
+            {
+                continue;
+            }
             let name = ident.ident.to_string();
-            let ty = self.text_of(typed.ty.span()).to_owned();
+            let ty = self.text_of(typed.ty.extent()).to_owned();
             let mutable = if ident.mutability.is_some() { "mut " } else { "" };
             let replacement = if contains_impl_trait(&typed.ty) {
                 format_compact!(
@@ -2286,7 +2308,7 @@ impl<'a> Collector<'a> {
             let shape = iterator_body_shape(return_type(&sig.output), &self.types()).unwrap_or(Shape::Block);
             self.emit_shaped(
                 "parameter.default_shadow",
-                body.span(),
+                body.extent(),
                 replacement,
                 saturating_ordinal(index),
                 shape,
@@ -2336,17 +2358,17 @@ impl<'a> Collector<'a> {
         if
         // #[gamma::skip(cond.always_true, reason = "These mutations relax only a mutator-selection prefilter. All eventual emit paths recheck wants(mutator) before allocating an occurrence or recording a candidate. For the parameter-prefilter combinations, its only production caller function() already returns for const functions, making the removed const guard redundant too. The remaining syntax/type guards and selected candidates are unchanged.", tag = "equivalent")]
         self.wants("call.replace_with_default") {
-            self.emit_confident("call.replace_with_default", node.span(), "Default::default()", 0, confidence);
+            self.emit_confident("call.replace_with_default", node.extent(), "Default::default()", 0, confidence);
         }
         if
         // #[gamma::skip(cond.always_true, reason = "These mutations relax only a mutator-selection prefilter. All eventual emit paths recheck wants(mutator) before allocating an occurrence or recording a candidate. For the parameter-prefilter combinations, its only production caller function() already returns for const functions, making the removed const guard redundant too. The remaining syntax/type guards and selected candidates are unchanged.", tag = "equivalent")]
         self.wants("call_result.default") {
-            let call = self.text_of(node.span());
+            let call = self.text_of(node.extent());
             let included = !self.standard_default_replacement()
                 || !self.local_calls.returns_unit(&node.func, &self.scope_path, self.current_imports());
             self.emit_at_conditionally(
                 "call_result.default",
-                node.span().byte_range(),
+                node.extent().byte_range(),
                 format_compact!("::gamma_rt::default_after({call})"),
                 0,
                 Shape::Expr,
@@ -2479,7 +2501,6 @@ impl<'a> Collector<'a> {
             Expr::Unary(unary) if matches!(unary.op, UnOp::Deref(_)) => {
                 let (ty, scope, imports) = self.type_of_place_in_scope(&unary.expr, scope)?;
                 let Type::Reference(reference) = ty else {
-                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                     return None;
                 };
                 Some((&reference.elem, scope, imports))
@@ -2736,7 +2757,6 @@ impl<'a> Collector<'a> {
         let mut scope = scope.clone();
         scope.push(block_id(&block.block));
         let Stmt::Expr(tail, None) = active_statements(&block.block, self.cfg).next_back()? else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         };
         (!tail_uses_block_locals(&block.block, self.cfg, tail, &scope, &self.calls, &|call, scope| {
@@ -2762,7 +2782,6 @@ impl<'a> Collector<'a> {
                 syn::parse_quote!(&'static #primitive)
             }
             _ => {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
         };
@@ -2811,7 +2830,6 @@ impl<'a> Collector<'a> {
             Expr::Block(block) => {
                 let mut statements = active_statements(&block.block, self.cfg);
                 let Some(Stmt::Expr(tail, None)) = statements.next_back() else {
-                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
                     return false;
                 };
                 self.scope_path.push(block_id(&block.block));
@@ -2888,7 +2906,6 @@ impl<'a> Collector<'a> {
 
     fn inferred_signature_type(&self, signature: &Signature, origin: &ScopePath) -> Option<Type> {
         if signature.asyncness.is_some() {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         let mut types = self.types_in_scope(origin);
@@ -2974,7 +2991,6 @@ impl<'a> Collector<'a> {
             other => other,
         };
         if matches!(owner, Type::Path(path) if path.path.leading_colon.is_some()) {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         self.calls
@@ -3214,7 +3230,6 @@ impl<'a> Collector<'a> {
                 .unshadowed_type_path(receiver)
                 .is_some_and(|path| path.iter().map(String::as_str).eq(["std", "fs", "OpenOptions"]))
         {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         }
         match call.method.to_string().as_str() {
@@ -3236,7 +3251,6 @@ impl<'a> Collector<'a> {
 
     fn inferred_call_type_in_scope(&self, expression: &Expr, scope: &ScopePath) -> Option<Type> {
         let Expr::Call(call) = expression else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
             return None;
         };
         if let Some(ty) = self.type_of_expression(&call.func)
@@ -3378,7 +3392,6 @@ impl<'a> Collector<'a> {
             inferred = ty;
             &inferred
         } else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         };
         let types = Types {
@@ -3393,7 +3406,6 @@ impl<'a> Collector<'a> {
             Some(&self.impl_self_associated),
         };
         let Type::Path(path) = values::strip(types.resolve_alias(ty)) else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         };
 
@@ -3450,7 +3462,6 @@ impl<'a> Collector<'a> {
 
     fn receiver_has_first(&self, expression: &Expr) -> bool {
         let Some(ty) = self.type_of_expression(expression) else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         };
         let types = Types {
@@ -3473,10 +3484,9 @@ impl<'a> Collector<'a> {
         if let Expr::Block(block) = diverge
             && let Some(statement) = active_statements(&block.block, self.cfg).next_back()
         {
-            self.undeletable_statements.push(statement.span().byte_range());
+            self.undeletable_statements.push(statement.extent().byte_range());
         }
         let loops_outer = self.value_required_loops.len();
-        // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
         value_position_loop_spans(self.cfg, diverge, &mut self.value_required_loops);
         self.visit_expr(diverge);
         self.value_required_loops.truncate(loops_outer);
@@ -3515,7 +3525,7 @@ impl<'a> Collector<'a> {
             return;
         }
 
-        let span = expression.span();
+        let span = expression.extent();
         let text = self.text_of(span);
 
         // #[gamma::skip(cond.always_false, reason = "empty text means the span is unmapped or the file was artificially truncated, so there is no site to perturb")]
@@ -3635,11 +3645,9 @@ impl<'a> Collector<'a> {
 
     fn is_primitive_numeric_associated_call(&self, call: &ExprCall) -> bool {
         let Expr::Path(path) = &*call.func else {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         };
         if path.qself.is_some() {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         let mut qualifier = path.path.clone();
@@ -3647,7 +3655,6 @@ impl<'a> Collector<'a> {
         if
         // #[gamma::skip(cond.always_false, reason = "An unqualified call leaves an empty qualifier after removing its function name. Without the early return, supports_primitive_kind receives that empty Type::Path and returns false for every primitive kind, preserving the original false answer.", tag = "equivalent")]
         qualifier.segments.is_empty() {
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
             return false;
         }
         let ty = Type::Path(syn::TypePath {
@@ -3725,7 +3732,7 @@ impl<'a> Collector<'a> {
 
                         self.bindings.get(&name).copied().unwrap_or_else(|| {
                             // #[gamma::skip(logical.or_remove_right, reason = "The earlier last-segment expression already includes is_primitive_constant(path). If that predicate is true it short-circuits the whole return before the later binding fallback; if false, the repeated primitive-constant disjunct in that fallback is false.", tag = "equivalent")]
-                            self.numeric_evidence.numeric.contains(&path.span().byte_range())
+                            self.numeric_evidence.numeric.contains(&path.extent().byte_range())
                                 || path.path.get_ident().is_some_and(|_| self.is_primitive_constant(&path.path))
                         })
                     })
@@ -3812,7 +3819,7 @@ impl<'a> Collector<'a> {
         let const_depth = self.const_parameters.len();
         let iterator_depth = self.iterator_bounded.len();
         let reader_depth = self.reader_bounded.len();
-        let names = standard_defaulted_parameters(generics, &self.default_paths);
+        let names = standard_defaulted_parameters(generics, &self.declarations.paths);
         let iterators = Types::standard_iterator_bounded_parameters(generics, self.current_imports());
 
         self.defaulted.extend(names);
@@ -3859,7 +3866,8 @@ impl<'a> Collector<'a> {
         let outer_expected = self.expected_return.take();
         let generic_depth = self.generics.len();
 
-        self.generics.extend(undefaulted_parameters(&sig.generics, &self.default_paths));
+        self.generics
+            .extend(undefaulted_parameters(&sig.generics, &self.declarations.paths));
 
         self.numeric_return = is_numeric_return(&sig.output);
         self.expected_return = return_type(&sig.output).cloned();
@@ -4002,7 +4010,6 @@ impl<'a> Collector<'a> {
     /// Visits an expression while marking zeros in its value-producing positions as unsigned-only.
     fn in_unsigned_expression<T>(&mut self, expression: &Expr, body: impl FnOnce(&mut Self) -> T) -> T {
         let outer = self.unsigned_zeros.len();
-        // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
         unsigned_zero_spans(self.cfg, expression, &mut self.unsigned_zeros);
         let result = body(self);
         self.unsigned_zeros.truncate(outer);
@@ -4012,7 +4019,6 @@ impl<'a> Collector<'a> {
     /// Visits an expression while marking zeros in its value-producing positions as signed.
     fn in_signed_expression<T>(&mut self, expression: &Expr, body: impl FnOnce(&mut Self) -> T) -> T {
         let outer = self.signed_zeros.len();
-        // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
         unsigned_zero_spans(self.cfg, expression, &mut self.signed_zeros);
         let result = body(self);
         self.signed_zeros.truncate(outer);
@@ -4042,9 +4048,7 @@ impl<'a> Collector<'a> {
         let statements_outer = self.undeletable_statements.len();
         let loops_outer = self.value_required_loops.len();
         if !matches!(resolve_type(expected), Kind::Unit) {
-            // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
             value_position_loop_spans(self.cfg, expression, &mut self.value_required_loops);
-            // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
             mandatory_tail_statements(self.cfg, expression, &mut self.undeletable_statements);
         }
         let imports = if
@@ -4055,7 +4059,6 @@ impl<'a> Collector<'a> {
             self.scope_imports.get(&self.scope_path).unwrap_or(&self.root_imports)
         };
         let aliases = self.scope_aliases.get(&self.scope_path).unwrap_or(&self.aliases);
-        // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
         admissible_default_spans(
             self.cfg,
             expression,
@@ -4071,7 +4074,6 @@ impl<'a> Collector<'a> {
             },
             &mut self.admissible_defaults,
         );
-        // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
         reusable_payload_spans(
             self.cfg,
             expression,
@@ -4110,7 +4112,7 @@ impl<'a> Collector<'a> {
                 && (matches!(expected, Type::Never(_)) || !matches!(resolve_type(expected), Kind::Unit | Kind::Unknown))
                 && let Some(statement @ Stmt::Expr(_, Some(_))) = last
             {
-                self.undeletable_statements.push(statement.span().byte_range());
+                self.undeletable_statements.push(statement.extent().byte_range());
             }
             let result = body(self);
             self.undeletable_statements.truncate(outer);
@@ -4423,60 +4425,49 @@ const fn word_like(kind: TokenKind) -> bool {
 fn unsigned_zero_spans(cfg: &CfgSet, expression: &Expr, spans: &mut Vec<Range<usize>>) {
     match expression {
         Expr::Lit(literal) if matches!(&literal.lit, Lit::Int(value) if value.base10_digits() == "0") => {
-            spans.push(literal.span().byte_range());
+            spans.push(literal.extent().byte_range());
         }
 
         Expr::Paren(paren) => {
-            // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
             unsigned_zero_spans(cfg, &paren.expr, spans);
         }
         Expr::Group(group) => {
-            // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
             unsigned_zero_spans(cfg, &group.expr, spans);
         }
         Expr::Block(block) => {
             if let Some(Stmt::Expr(tail, None)) = active_statements(&block.block, cfg).next_back() {
-                // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
                 unsigned_zero_spans(cfg, tail, spans);
             }
         }
 
         Expr::If(branch) => {
             if let Some(Stmt::Expr(tail, None)) = active_statements(&branch.then_branch, cfg).next_back() {
-                // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
                 unsigned_zero_spans(cfg, tail, spans);
             }
             if let Some((_, otherwise)) = &branch.else_branch {
-                // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
                 unsigned_zero_spans(cfg, otherwise, spans);
             }
         }
         Expr::Match(matched) => {
             for arm in &matched.arms {
-                // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
                 unsigned_zero_spans(cfg, &arm.body, spans);
             }
         }
         Expr::Range(range) => {
             if let Some(start) = &range.start {
-                // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
                 unsigned_zero_spans(cfg, start, spans);
             }
             if let Some(end) = &range.end {
-                // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
                 unsigned_zero_spans(cfg, end, spans);
             }
         }
         Expr::MethodCall(call) if call.method == "map_or" && call.args.len() == 2 => {
-            // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
             unsigned_zero_spans(cfg, &call.args[0], spans);
             if let Expr::Closure(closure) = &call.args[1] {
-                // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
                 unsigned_zero_spans(cfg, &closure.body, spans);
             }
         }
         Expr::MethodCall(call) if call.method == "sum" && call.args.is_empty() => {
-            // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
             unsigned_iterator_source_spans(cfg, &call.receiver, spans);
         }
         _ => {}
@@ -4487,20 +4478,16 @@ fn unsigned_iterator_source_spans(cfg: &CfgSet, expression: &Expr, spans: &mut V
     match expression {
         Expr::MethodCall(call) if call.method == "map" && call.args.len() == 1 => {
             if let Expr::Closure(closure) = &call.args[0] {
-                // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
                 unsigned_zero_spans(cfg, &closure.body, spans);
             }
         }
         Expr::MethodCall(call) => {
-            // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
             unsigned_iterator_source_spans(cfg, &call.receiver, spans);
         }
         Expr::Paren(paren) => {
-            // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
             unsigned_iterator_source_spans(cfg, &paren.expr, spans);
         }
         Expr::Group(group) => {
-            // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
             unsigned_iterator_source_spans(cfg, &group.expr, spans);
         }
         _ => {}
@@ -4509,34 +4496,28 @@ fn unsigned_iterator_source_spans(cfg: &CfgSet, expression: &Expr, spans: &mut V
 
 fn value_position_loop_spans(cfg: &CfgSet, expression: &Expr, spans: &mut Vec<Range<usize>>) {
     match expression {
-        Expr::Loop(loop_expr) => spans.push(loop_expr.span().byte_range()),
+        Expr::Loop(loop_expr) => spans.push(loop_expr.extent().byte_range()),
         Expr::Paren(paren) => {
-            // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
             value_position_loop_spans(cfg, &paren.expr, spans);
         }
         Expr::Group(group) => {
-            // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
             value_position_loop_spans(cfg, &group.expr, spans);
         }
         Expr::Block(block) => {
             if let Some(Stmt::Expr(tail, None)) = active_statements(&block.block, cfg).next_back() {
-                // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
                 value_position_loop_spans(cfg, tail, spans);
             }
         }
         Expr::If(branch) => {
             if let Some(Stmt::Expr(tail, None)) = active_statements(&branch.then_branch, cfg).next_back() {
-                // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
                 value_position_loop_spans(cfg, tail, spans);
             }
             if let Some((_, otherwise)) = &branch.else_branch {
-                // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
                 value_position_loop_spans(cfg, otherwise, spans);
             }
         }
         Expr::Match(matched) => {
             for arm in &matched.arms {
-                // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
                 value_position_loop_spans(cfg, &arm.body, spans);
             }
         }
@@ -4571,7 +4552,6 @@ fn unsigned_context(ty: &Type) -> bool {
         return true;
     }
     let Type::Path(path) = values::strip(ty) else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
         return false;
     };
     path.path.segments.last().is_some_and(|segment| {
@@ -4652,9 +4632,7 @@ fn ident_is_atomic_unsigned(ident: &syn::Ident) -> bool {
 
 fn standard_type_path(path: &syn::Path, imports: &HashMap<String, Option<Vec<String>>>, name: &str, prefix: &[&str]) -> bool {
     let Some(actual_name) = path.segments.last() else {
-        return
-        // #[gamma::skip(literal.bool_flip, reason = "These false returns handle a missing last/first segment of a source-parsed Path. syn source paths are nonempty; standard_unsigned_argument first rejects non-Path expressions. No valid parsed path reaches either empty-segment fallback.", tag = "equivalent")]
-        false;
+        return false; // #[gamma::skip(literal.bool_flip, reason = "A Path parsed from source always contains a segment, so this branch is unreachable.", tag = "equivalent")]
     };
     let qualifier_len = path.segments.len() - 1;
 
@@ -4677,17 +4655,13 @@ fn standard_type_path(path: &syn::Path, imports: &HashMap<String, Option<Vec<Str
 /// that an integer-looking argument must be unsigned.
 fn standard_unsigned_argument(callee: &Expr, index: usize, imports: &HashMap<String, Option<Vec<String>>>) -> bool {
     let Expr::Path(path) = callee else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
         return false;
     };
     let mut reversed = path.path.segments.iter().rev();
     let Some(method) = reversed.next().map(|segment| &segment.ident) else {
-        return
-        // #[gamma::skip(literal.bool_flip, reason = "These false returns handle a missing last/first segment of a source-parsed Path. syn source paths are nonempty; standard_unsigned_argument first rejects non-Path expressions. No valid parsed path reaches either empty-segment fallback.", tag = "equivalent")]
-        false;
+        return false; // #[gamma::skip(literal.bool_flip, reason = "A Path parsed from source always contains a segment, so this branch is unreachable.", tag = "equivalent")]
     };
     let Some(ty) = reversed.next().map(|segment| &segment.ident) else {
-        // #[gamma::skip(return_value.default, tag = "equivalent", reason = "false is already the default bool value.")]
         return false;
     };
     let qualifier_len = path.path.segments.len() - 2;
@@ -4748,15 +4722,15 @@ fn admissible_default_spans(cfg: &CfgSet, expression: &Expr, expected: &Type, ty
     match expression {
         Expr::Path(path) if path.path.is_ident("None") && resolve_type(resolved) == Kind::Option => {
             if types.payload(expected, 0).is_some_and(|payload| types.has_default(&payload)) {
-                spans.push(expression.span().byte_range());
+                spans.push(expression.extent().byte_range());
             }
         }
         Expr::Call(call) if resolve_type(resolved) == Kind::Result => match callee_name(&call.func).as_deref() {
             Some("Ok") if types.payload(expected, 1).is_some_and(|payload| types.has_default(&payload)) => {
-                spans.push(expression.span().byte_range());
+                spans.push(expression.extent().byte_range());
             }
             Some("Err") if types.payload(expected, 0).is_some_and(|payload| types.has_default(&payload)) => {
-                spans.push(expression.span().byte_range());
+                spans.push(expression.extent().byte_range());
             }
             _ => {}
         },
@@ -4770,36 +4744,30 @@ fn admissible_default_spans(cfg: &CfgSet, expression: &Expr, expected: &Type, ty
                 .and_then(|index| types.control_flow_payload(expected, index))
                 .is_some_and(|payload| types.has_proven_default(&payload))
             {
-                spans.push(expression.span().byte_range());
+                spans.push(expression.extent().byte_range());
             }
         }
         Expr::Paren(paren) => {
-            // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
             admissible_default_spans(cfg, &paren.expr, expected, types, spans);
         }
         Expr::Group(group) => {
-            // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
             admissible_default_spans(cfg, &group.expr, expected, types, spans);
         }
         Expr::Block(block) => {
             if let Some(Stmt::Expr(tail, None)) = active_statements(&block.block, cfg).next_back() {
-                // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
                 admissible_default_spans(cfg, tail, expected, types, spans);
             }
         }
         Expr::If(branch) => {
             if let Some(Stmt::Expr(tail, None)) = active_statements(&branch.then_branch, cfg).next_back() {
-                // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
                 admissible_default_spans(cfg, tail, expected, types, spans);
             }
             if let Some((_, otherwise)) = &branch.else_branch {
-                // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
                 admissible_default_spans(cfg, otherwise, expected, types, spans);
             }
         }
         Expr::Match(matched) => {
             for arm in &matched.arms {
-                // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
                 admissible_default_spans(cfg, &arm.body, expected, types, spans);
             }
         }
@@ -4835,37 +4803,31 @@ fn reusable_payload_spans(
             })
             .min()
     {
-        spans.push((expression.span().byte_range(), CompactString::from(name)));
+        spans.push((expression.extent().byte_range(), CompactString::from(name)));
     }
 
     match expression {
         Expr::Paren(paren) => {
-            // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
             reusable_payload_spans(cfg, &paren.expr, expected, types, parameters, spans);
         }
         Expr::Group(group) => {
-            // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
             reusable_payload_spans(cfg, &group.expr, expected, types, parameters, spans);
         }
         Expr::Block(block) => {
             if let Some(Stmt::Expr(tail, None)) = active_statements(&block.block, cfg).next_back() {
-                // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
                 reusable_payload_spans(cfg, tail, expected, types, parameters, spans);
             }
         }
         Expr::If(branch) => {
             if let Some(Stmt::Expr(tail, None)) = active_statements(&branch.then_branch, cfg).next_back() {
-                // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
                 reusable_payload_spans(cfg, tail, expected, types, parameters, spans);
             }
             if let Some((_, otherwise)) = &branch.else_branch {
-                // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
                 reusable_payload_spans(cfg, otherwise, expected, types, parameters, spans);
             }
         }
         Expr::Match(matched) => {
             for arm in &matched.arms {
-                // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
                 reusable_payload_spans(cfg, &arm.body, expected, types, parameters, spans);
             }
         }
@@ -4877,43 +4839,6 @@ fn copy_safe_payload(ty: &Type) -> bool {
     matches!(resolve_type(ty), Kind::NonZero)
         || matches!(values::strip(ty), Type::Reference(reference)
             if reference.mutability.is_none() && reference.lifetime.is_some())
-}
-
-/// Indexes attribute-free ranges and statements that must retain block syntax before cfg removal.
-fn expression_contents(file: &syn::File, statement_blocks: &mut HashSet<Range<usize>>) -> HashMap<Range<usize>, Range<usize>> {
-    #[derive(Default)]
-    struct Contents {
-        expressions: HashMap<Range<usize>, Range<usize>>,
-        blocks: HashSet<Range<usize>>,
-    }
-    #[expect(clippy::renamed_function_params, reason = "visitor parameters use descriptive names")]
-    impl<'ast> Visit<'ast> for Contents {
-        fn visit_block(&mut self, block: &'ast Block) {
-            for statement in block.stmts.iter().take(block.stmts.len().saturating_sub(1)) {
-                if let Stmt::Expr(expression, None) = statement {
-                    let _new = self.blocks.insert(expression.span().byte_range());
-                }
-            }
-            visit::visit_block(self, block);
-        }
-
-        fn visit_expr(&mut self, expression: &'ast Expr) {
-            if let Some(last) = expr_attrs(expression).last() {
-                let whole = expression.span().byte_range();
-                let _prior = self.expressions.insert(whole.clone(), last.span().byte_range().end..whole.end);
-            }
-            visit::visit_expr(self, expression);
-        }
-    }
-    let mut contents = Contents::default();
-    contents.visit_file(file);
-    statement_blocks.extend(
-        contents
-            .blocks
-            .into_iter()
-            .map(|range| contents.expressions.get(&range).unwrap_or(&range).clone()),
-    );
-    contents.expressions
 }
 
 /// Recognizes stated wrapper values with no iterator payload, which need no iterator adapter.
@@ -4970,7 +4895,6 @@ fn iterator_body_shape(output: Option<&Type>, types: &Types<'_>) -> Option<Shape
                 depth = depth.checked_add(1)?;
             }
             _ => {
-                // #[gamma::skip(return_value.default, tag = "equivalent", reason = "None is already the default Option value.")]
                 return None;
             }
         }
@@ -4999,7 +4923,7 @@ fn contains_impl_trait(ty: &Type) -> bool {
 /// Returns a final `continue;` whose deletion changes this block's value from diverging to unit.
 fn trailing_continue(cfg: &CfgSet, block: &Block) -> Option<Range<usize>> {
     match active_statements(block, cfg).next_back() {
-        Some(statement @ Stmt::Expr(Expr::Continue(_), Some(_))) => Some(statement.span().byte_range()),
+        Some(statement @ Stmt::Expr(Expr::Continue(_), Some(_))) => Some(statement.extent().byte_range()),
         _ => None,
     }
 }
@@ -5007,29 +4931,23 @@ fn trailing_continue(cfg: &CfgSet, block: &Block) -> Option<Range<usize>> {
 fn mandatory_tail_statements(cfg: &CfgSet, expression: &Expr, spans: &mut Vec<Range<usize>>) {
     match expression {
         Expr::Block(block) => {
-            // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
             mandatory_block_tail(cfg, &block.block, spans);
         }
         Expr::If(branch) => {
-            // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
             mandatory_block_tail(cfg, &branch.then_branch, spans);
             if let Some((_, otherwise)) = &branch.else_branch {
-                // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
                 mandatory_tail_statements(cfg, otherwise, spans);
             }
         }
         Expr::Match(matched) => {
             for arm in &matched.arms {
-                // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
                 mandatory_tail_statements(cfg, &arm.body, spans);
             }
         }
         Expr::Paren(paren) => {
-            // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
             mandatory_tail_statements(cfg, &paren.expr, spans);
         }
         Expr::Group(group) => {
-            // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
             mandatory_tail_statements(cfg, &group.expr, spans);
         }
         _ => {}
@@ -5055,9 +4973,8 @@ fn mandatory_block_tail(cfg: &CfgSet, block: &Block, spans: &mut Vec<Range<usize
         return;
     }
     match tail {
-        statement @ Stmt::Expr(_, Some(_)) => spans.push(statement.span().byte_range()),
+        statement @ Stmt::Expr(_, Some(_)) => spans.push(statement.extent().byte_range()),
         Stmt::Expr(tail, None) => {
-            // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
             mandatory_tail_statements(cfg, tail, spans);
         }
         _ => {}
@@ -5378,6 +5295,8 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         let iterator_depth = self.iterator_bounded.len();
         let reader_depth = self.reader_bounded.len();
         let outer = self.in_default_impl;
+        let outer_parameters_opaque = self.impl_parameters_opaque;
+        self.impl_parameters_opaque |= !LocalCalls::nontransforming_attributes(&node.attrs);
         let outer_trait_impl = replace(
             &mut self.trait_impl,
             node.trait_
@@ -5400,11 +5319,12 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         self.in_default_impl = node
             .trait_
             .as_ref()
-            .is_some_and(|(path, _for)| self.default_paths.is_fallback_trait(path));
+            .is_some_and(|(path, _for)| self.declarations.paths.is_fallback_trait(path));
 
-        self.generics.extend(undefaulted_parameters(&node.generics, &self.default_paths));
+        self.generics
+            .extend(undefaulted_parameters(&node.generics, &self.declarations.paths));
         self.defaulted
-            .extend(standard_defaulted_parameters(&node.generics, &self.default_paths));
+            .extend(standard_defaulted_parameters(&node.generics, &self.declarations.paths));
         self.const_parameters
             .extend(node.generics.const_params().map(|parameter| parameter.ident.to_string()));
         self.iterator_bounded
@@ -5420,6 +5340,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         self.iterator_bounded.truncate(iterator_depth);
         self.reader_bounded.truncate(reader_depth);
         self.in_default_impl = outer;
+        self.impl_parameters_opaque = outer_parameters_opaque;
         self.trait_impl = outer_trait_impl;
         self.impl_self_type = outer_self_type;
         self.impl_self_associated = outer_associated;
@@ -5473,7 +5394,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         }
 
         self.omit_elements(node, &elements);
-        self.reverse_elements("collection.reverse_vec", node.span().byte_range(), &elements);
+        self.reverse_elements("collection.reverse_vec", node.extent().byte_range(), &elements);
     }
 
     fn visit_attribute(&mut self, _node: &'ast Attribute) {
@@ -5492,7 +5413,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
     }
 
     fn visit_expr_binary(&mut self, node: &'ast ExprBinary) {
-        let span = node.span();
+        let span = node.extent();
         let assigns = is_assign_op(&node.op);
         let mut operands = None;
 
@@ -5538,7 +5459,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
                 continue;
             }
 
-            let (left, right) = *operands.get_or_insert_with(|| (self.text_of(node.left.span()), self.text_of(node.right.span())));
+            let (left, right) = *operands.get_or_insert_with(|| (self.text_of(node.left.extent()), self.text_of(node.right.extent())));
 
             // The operands are parenthesized because the replacement is spliced in as a unit and
             // must not renegotiate precedence with whatever encloses it: rewriting the `*` in
@@ -5558,13 +5479,13 @@ impl<'ast> Visit<'ast> for Collector<'_> {
                 if
                 // #[gamma::skip(cond.always_true, reason = "These are allocation/text-construction prefilters for selected mutators. Their final emit path rechecks wants before recording a candidate or advancing identity state. The newly executed text construction and eligibility queries are read-only; an unselected mutator remains unselected at the authoritative emission gate.", tag = "equivalent")]
                 self.wants(left_mutator) {
-                    let replacement = format_compact!("({})", self.text_of(node.right.span()));
+                    let replacement = format_compact!("({})", self.text_of(node.right.extent()));
                     self.emit(left_mutator, span, replacement, 0);
                 }
                 if
                 // #[gamma::skip(cond.always_true, reason = "These are allocation/text-construction prefilters for selected mutators. Their final emit path rechecks wants before recording a candidate or advancing identity state. The newly executed text construction and eligibility queries are read-only; an unselected mutator remains unselected at the authoritative emission gate.", tag = "equivalent")]
                 self.wants(right_mutator) {
-                    let replacement = format_compact!("({})", self.text_of(node.left.span()));
+                    let replacement = format_compact!("({})", self.text_of(node.left.extent()));
                     self.emit(right_mutator, span, replacement, 0);
                 }
             };
@@ -5782,7 +5703,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
     }
 
     fn visit_expr_closure(&mut self, node: &'ast ExprClosure) {
-        let expected = self.closure_inputs.get(&node.span().byte_range()).cloned();
+        let expected = self.closure_inputs.get(&node.extent().byte_range()).cloned();
         self.in_scope(|collector| {
             for input in &node.inputs {
                 collector.bind_pattern(input, expected.as_ref().filter(|_| node.inputs.len() == 1));
@@ -5807,9 +5728,9 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         match node.op {
             // Negating zero yields zero, so removing the negation changes nothing.
             UnOp::Neg(_) if is_integer_zero_literal(&node.expr) => {}
-            UnOp::Neg(_) => self.emit("unary.remove_neg", node.span(), self.text_of(node.expr.span()), 0),
+            UnOp::Neg(_) => self.emit("unary.remove_neg", node.extent(), self.text_of(node.expr.extent()), 0),
             UnOp::Not(_) => {
-                let operand = self.text_of(node.expr.span());
+                let operand = self.text_of(node.expr.extent());
                 let generic_operand = self.type_of_expression(&node.expr).is_some_and(|ty| {
                     matches!(values::strip(ty), Type::Path(path)
                         if path.path.get_ident().is_some_and(|name|
@@ -5818,14 +5739,14 @@ impl<'ast> Visit<'ast> for Collector<'_> {
                 match self.inferred_expression_type(&node.expr) {
                     Some(ty) if types::contains_unknown_type(&ty) && !generic_operand => {}
                     Some(ty) if types::contains_unknown_type(&ty) => {
-                        self.emit_confident("unary.remove_not", node.span(), operand, 0, Confidence::Optimistic);
+                        self.emit_confident("unary.remove_not", node.extent(), operand, 0, Confidence::Optimistic);
                     }
                     Some(ty) if is_borrowed_bool(&ty) => {
-                        self.emit("unary.remove_not", node.span(), format_compact!("*({operand})"), 1);
+                        self.emit("unary.remove_not", node.extent(), format_compact!("*({operand})"), 1);
                     }
-                    Some(_) => self.emit("unary.remove_not", node.span(), operand, 0),
+                    Some(_) => self.emit("unary.remove_not", node.extent(), operand, 0),
                     None => {
-                        self.emit_confident("unary.remove_not", node.span(), operand, 0, Confidence::Optimistic);
+                        self.emit_confident("unary.remove_not", node.extent(), operand, 0, Confidence::Optimistic);
                     }
                 }
             }
@@ -5900,7 +5821,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         if
         // #[gamma::skip(logical.and_remove_right, reason = "These are allocation/text-construction prefilters for selected mutators. Their final emit path rechecks wants before recording a candidate or advancing identity state. The newly executed text construction and eligibility queries are read-only; an unselected mutator remains unselected at the authoritative emission gate.", tag = "equivalent")]
         !binds_a_pattern(&node.cond) && self.wants("cond.negate") {
-            let span = node.cond.span();
+            let span = node.cond.extent();
             let negated = self.negation_of(span);
 
             self.emit("cond.negate", span, negated, 0);
@@ -5933,7 +5854,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
     fn visit_expr_loop(&mut self, node: &'ast ExprLoop) {
         self.loops.push(LoopContext {
             label: node.label.as_ref().map(|label| label.name.ident.to_string()),
-            produces_value: loop_produces_value(node) || self.value_required_loops.contains(&node.span().byte_range()),
+            produces_value: loop_produces_value(node) || self.value_required_loops.contains(&node.extent().byte_range()),
             proof: self.resource_proof(&Expr::Loop(node.clone())),
         });
         visit::visit_expr_loop(self, node);
@@ -5963,7 +5884,6 @@ impl<'ast> Visit<'ast> for Collector<'_> {
             })
         }) {
             for arm in &node.arms {
-                // #[gamma::skip(call_result.default, tag = "equivalent", reason = "This call returns (); evaluating it before replacing () with its default preserves every side effect.")]
                 mandatory_tail_statements(self.cfg, &arm.body, &mut self.undeletable_statements);
             }
         }
@@ -6028,12 +5948,12 @@ impl<'ast> Visit<'ast> for Collector<'_> {
                 return;
             }
             let start = node.start.as_ref().map_or_else(CompactString::default, |start| {
-                let text = self.text_of(start.span());
+                let text = self.text_of(start.extent());
 
                 format_compact!("({text})")
             });
 
-            let end_text = self.text_of(end.span());
+            let end_text = self.text_of(end.extent());
             let floating = self.is_known_float(end) || node.start.as_ref().is_some_and(|start| self.is_known_float(start));
             let unit = if floating { "1.0" } else { "1" };
 
@@ -6044,7 +5964,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
                 RangeLimits::HalfOpen(_) => {
                     self.emit(
                         "range.exclusive_to_inclusive",
-                        node.span(),
+                        node.extent(),
                         format_compact!("{start}..(({end_text}) + {unit})"),
                         0,
                     );
@@ -6052,7 +5972,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
                 RangeLimits::Closed(_) => {
                     self.emit(
                         "range.inclusive_to_exclusive",
-                        node.span(),
+                        node.extent(),
                         format_compact!("{start}..=(({end_text}) - {unit})"),
                         0,
                     );
@@ -6075,23 +5995,23 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         // `continue` cannot supply.
         if node.expr.is_none()
             && node.label.is_none()
-            && self.admit_ownership_edit(node.span().byte_range(), &node.span().byte_range(), true)
+            && self.admit_ownership_edit(node.extent().byte_range(), &node.extent().byte_range(), true)
         {
-            self.emit_shaped("loop.break_to_continue", node.span(), "continue", 0, Shape::Break);
+            self.emit_shaped("loop.break_to_continue", node.extent(), "continue", 0, Shape::Break);
         }
         if let Some(value) = node.expr.as_ref()
             && !self
                 .inferred_expression_type(value)
                 .is_some_and(|ty| self.types().lacks_default(&ty))
         {
-            self.emit("loop.break_value_default", value.span(), "Default::default()", 0);
+            self.emit("loop.break_value_default", value.extent(), "Default::default()", 0);
         }
 
         visit::visit_expr_break(self, node);
     }
 
     fn visit_expr_continue(&mut self, node: &'ast ExprContinue) {
-        if !self.admit_ownership_edit(node.span().byte_range(), &node.span().byte_range(), true) {
+        if !self.admit_ownership_edit(node.extent().byte_range(), &node.extent().byte_range(), true) {
             // #[gamma::skip(stmt.delete_call, reason = "The default binary-operator and continue-expression continuations visit punctuation tokens and an optional label/identifier only. Collector has no behavioral visitor for those token/identifier nodes; they neither emit candidates nor alter binding state.", tag = "equivalent")]
             visit::visit_expr_continue(self, node);
             return;
@@ -6121,7 +6041,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
             .as_ref()
             .map_or_else(|| CompactString::new("break"), |label| format_compact!("break {label}"));
 
-        self.emit_shaped("loop.continue_to_break", node.span(), replacement, 0, Shape::Continue);
+        self.emit_shaped("loop.continue_to_break", node.extent(), replacement, 0, Shape::Continue);
 
         // #[gamma::skip(stmt.delete_call, reason = "a continue has no expression children and its label contains no mutable expression")]
         visit::visit_expr_continue(self, node);
@@ -6138,20 +6058,20 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         // question a function at a time; this asks it at the site.
         if node.args.len() == 1 {
             match callee_name(&node.func).as_deref() {
-                _ if self.some_constructor(&node.func) => self.emit("option.some_to_none", node.span(), "None", 0),
-                Some("Ok") if !self.foreign_error_return && self.admissible_defaults.contains(&node.span().byte_range()) => {
-                    self.emit("result.ok_to_err", node.span(), "Err(Default::default())", 0);
+                _ if self.some_constructor(&node.func) => self.emit("option.some_to_none", node.extent(), "None", 0),
+                Some("Ok") if !self.foreign_error_return && self.admissible_defaults.contains(&node.extent().byte_range()) => {
+                    self.emit("result.ok_to_err", node.extent(), "Err(Default::default())", 0);
                 }
-                Some("Ok") if self.reusable_payload(&node.span().byte_range()).is_some() => {
-                    let value = self.reusable_payload(&node.span().byte_range()).unwrap_or_default().to_owned();
-                    self.emit("result.ok_to_err", node.span(), format_compact!("Err({value})"), 0);
+                Some("Ok") if self.reusable_payload(&node.extent().byte_range()).is_some() => {
+                    let value = self.reusable_payload(&node.extent().byte_range()).unwrap_or_default().to_owned();
+                    self.emit("result.ok_to_err", node.extent(), format_compact!("Err({value})"), 0);
                 }
-                Some("Err") if self.admissible_defaults.contains(&node.span().byte_range()) => {
-                    self.emit("result.err_to_ok", node.span(), "Ok(Default::default())", 0);
+                Some("Err") if self.admissible_defaults.contains(&node.extent().byte_range()) => {
+                    self.emit("result.err_to_ok", node.extent(), "Ok(Default::default())", 0);
                 }
-                Some("Err") if self.reusable_payload(&node.span().byte_range()).is_some() => {
-                    let value = self.reusable_payload(&node.span().byte_range()).unwrap_or_default().to_owned();
-                    self.emit("result.err_to_ok", node.span(), format_compact!("Ok({value})"), 0);
+                Some("Err") if self.reusable_payload(&node.extent().byte_range()).is_some() => {
+                    let value = self.reusable_payload(&node.extent().byte_range()).unwrap_or_default().to_owned();
+                    self.emit("result.err_to_ok", node.extent(), format_compact!("Ok({value})"), 0);
                 }
                 _ => {}
             }
@@ -6185,13 +6105,13 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         // stops the traversal before a pattern's interior is examined at all.
         if
         // #[gamma::skip(logical.and_remove_left, reason = "The marker producers record path-expression spans only for bare None. Their other recorded sites are complete Ok/Err calls, whose spans strictly contain the callee path plus argument parentheses and cannot equal an ExprPath span. Thus membership already implies this visited path is None.", tag = "equivalent")]
-        node.path.is_ident("None") && self.admissible_defaults.contains(&node.span().byte_range()) {
-            self.emit("option.none_to_some", node.span(), "Some(Default::default())", 0);
+        node.path.is_ident("None") && self.admissible_defaults.contains(&node.extent().byte_range()) {
+            self.emit("option.none_to_some", node.extent(), "Some(Default::default())", 0);
         } else if
         // #[gamma::skip(logical.and_remove_left, reason = "The marker producers record path-expression spans only for bare None. Their other recorded sites are complete Ok/Err calls, whose spans strictly contain the callee path plus argument parentheses and cannot equal an ExprPath span. Thus membership already implies this visited path is None.", tag = "equivalent")]
-        node.path.is_ident("None") && self.reusable_payload(&node.span().byte_range()).is_some() {
-            let value = self.reusable_payload(&node.span().byte_range()).unwrap_or_default().to_owned();
-            self.emit("option.none_to_some", node.span(), format_compact!("Some({value})"), 0);
+        node.path.is_ident("None") && self.reusable_payload(&node.extent().byte_range()).is_some() {
+            let value = self.reusable_payload(&node.extent().byte_range()).unwrap_or_default().to_owned();
+            self.emit("option.none_to_some", node.extent(), format_compact!("Some({value})"), 0);
         }
 
         // #[gamma::skip(stmt.delete_call, reason = "an expression path contains no child expressions or declarations handled by Collector")]
@@ -6201,12 +6121,12 @@ impl<'ast> Visit<'ast> for Collector<'_> {
     fn visit_expr_assign(&mut self, node: &'ast syn::ExprAssign) {
         // What is assigned is what the rest of the function reads, so replacing it with the type's
         // default asks whether anything downstream depends on the value rather than the write.
-        if !is_default_call(&node.right, &self.default_paths, &self.defaulted)
+        if !is_default_call(&node.right, &self.declarations.paths, &self.defaulted)
             && self
                 .type_of_place_in_scope(&node.left, &self.scope_path)
                 .is_some_and(|(ty, scope, imports)| self.types_with_in_scope(scope, imports).has_default(ty))
         {
-            self.emit("assign_value.default", node.right.span(), "Default::default()", 0);
+            self.emit("assign_value.default", node.right.extent(), "Default::default()", 0);
         }
 
         self.visit_expr(&node.left);
@@ -6267,7 +6187,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
                 } else {
                     item
                 };
-                return Some((closure.span().byte_range(), item));
+                return Some((closure.extent().byte_range(), item));
             }
             let types = self.types();
             let result = types.supports_result_api(receiver);
@@ -6283,7 +6203,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
             let argument = node.args.get(argument)?;
             let Expr::Closure(closure) = argument else { return None };
             let payload = types.payload(receiver, payload)?.into_owned();
-            Some((closure.span().byte_range(), payload))
+            Some((closure.extent().byte_range(), payload))
         });
         let prior = inferred
             .as_ref()
@@ -6327,7 +6247,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
             let included = !self.expression_is_known_default_for_type(value, expected);
             self.emit_at_conditionally(
                 "return_value.default",
-                value.span().byte_range(),
+                value.extent().byte_range(),
                 "Default::default()",
                 0,
                 Shape::Expr,
@@ -6356,7 +6276,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
     }
 
     fn visit_expr_lit(&mut self, node: &'ast ExprLit) {
-        let span = node.span();
+        let span = node.extent();
 
         match &node.lit {
             Lit::Int(value) => {
@@ -6470,7 +6390,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
     }
 
     fn visit_expr_array(&mut self, node: &'ast ExprArray) {
-        self.reverse_elements("collection.reverse_array", node.span().byte_range(), &node.elems);
+        self.reverse_elements("collection.reverse_array", node.extent().byte_range(), &node.elems);
         visit::visit_expr_array(self, node);
     }
 
@@ -6478,10 +6398,10 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         if
         // #[gamma::skip(cond.always_true, reason = "These are allocation/text-construction prefilters for selected mutators. Their final emit path rechecks wants before recording a candidate or advancing identity state. The newly executed text construction and eligibility queries are read-only; an unselected mutator remains unselected at the authoritative emission gate.", tag = "equivalent")]
         self.wants("try.propagate_to_unwrap") {
-            let value = self.text_of(node.expr.span());
+            let value = self.text_of(node.expr.extent());
             self.emit(
                 "try.propagate_to_unwrap",
-                node.span(),
+                node.extent(),
                 format_compact!("::gamma_rt::panic_on_failure({value})?"),
                 0,
             );
@@ -6502,6 +6422,76 @@ mod mutation_tests {
         let file = SourceFile::parse("mutation.rs", source.to_owned()).expect("fixture parses");
         let selection = Selection::parse(names).expect("selectors resolve");
         collect_in(&file, &selection, &CfgSet::unconditional())
+    }
+
+    #[test]
+    fn result_fallback_mutations_keep_proven_confidence_without_explicit_opt_in() {
+        for (source, mutator) in [
+            (
+                "fn f(value: Result<u8, ()>) -> u8 { value.unwrap_or(7) }",
+                "fallback.unwrap_or_to_default",
+            ),
+            (
+                "fn f(value: Result<u8, ()>) -> u8 { value.unwrap_or_else(|_| 7) }",
+                "fallback.unwrap_or_else_to_default",
+            ),
+            (
+                "fn f(value: Result<u8, ()>) -> u8 { value.map_or(7, |n| n) }",
+                "fallback.map_or_to_default",
+            ),
+            (
+                "fn f(value: Result<u8, ()>) -> u8 { value.map_or_else(|_| 7, |n| n) }",
+                "fallback.map_or_else_to_default",
+            ),
+        ] {
+            let found = candidates(source, mutator);
+            assert_eq!(found.len(), 1, "{source}");
+            assert_eq!(found[0].confidence, Confidence::Proven, "{source}");
+            assert!(found[0].replacement.contains("default"), "{source}");
+        }
+    }
+
+    #[test]
+    fn parameter_shadows_omit_only_provably_unused_primitive_bindings() {
+        let found = candidates(
+            "struct Events; impl Events { fn convergence_activity(&mut self, _round: u32, unviable: usize, _proof: usize) { self.convergence_progress(unviable); } }",
+            "parameter.default_shadow",
+        );
+        assert_eq!(found.len(), 1);
+        assert!(found[0].replacement.contains("let unviable: usize = Default::default();"));
+        assert_eq!(found[0].replacement_index, 2);
+        for (source, expected) in [
+            ("fn f(unused: u32) { consume(); }", 0),
+            ("fn f(_used: u32) { consume(_used); }", 1),
+            ("fn f(r#unused: u32) { consume(r#unused); }", 1),
+            ("fn f(unused: u32) { consume(r#unused); }", 1),
+            ("fn f(r#unused: u32) { consume(unused); }", 1),
+            ("fn f(unused: bool) { consume(); }", 0),
+            ("fn f(unused: f64) { consume(); }", 0),
+            ("fn f(unused: String) { consume(); }", 1),
+            ("#[derive(Default)] struct u32; fn f(unused: u32) { consume(); }", 1),
+            ("fn f<T: Default>(unused: T) { consume(); }", 1),
+            ("fn f(unused: u32) { captures_parameter!(); }", 1),
+            ("fn f(unused: u32) { #[transform] consume(); }", 1),
+            ("#[transform] fn f(unused: u32) { consume(); }", 1),
+            ("struct Subject; #[transform] impl Subject { fn f(unused: u32) { consume(); } }", 1),
+            ("struct Subject; impl Subject { fn f(unused: u32) { consume(); } }", 0),
+            (
+                "struct Subject; #[allow(dead_code)] impl Subject { fn f(unused: u32) { consume(); } }",
+                0,
+            ),
+            (
+                "struct Subject; #[transform] impl Subject { fn first(unused: u32) { consume(); } } impl Subject { fn second(unused: u32) { consume(); } }",
+                1,
+            ),
+            ("fn f(unused: u32) { struct Default; consume(); }", 1),
+            (
+                "struct Default; impl Default { fn default() -> u32 { side_effect(); 0 } } fn f(unused: u32) { consume(); }",
+                1,
+            ),
+        ] {
+            assert_eq!(candidates(source, "parameter.default_shadow").len(), expected, "{source}");
+        }
     }
 
     #[test]

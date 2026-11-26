@@ -33,6 +33,7 @@ These are the crates built out of this repo:
 - [`cargo-ensure-no-default-features`](./crates/cargo-ensure-no-default-features/README.md) - A cargo subcommand that ensures dependencies are declared with default-features = false
 - [`cargo-gamma`](./crates/cargo-gamma/README.md) - Fast mutation testing for Rust
 - [`cargo-heather`](./crates/cargo-heather/README.md) - A cargo subcommand to validate license headers in Rust, TOML, PowerShell, Just, and env source files
+- [`cargo-spellcheck-helper`](./crates/cargo-spellcheck-helper/README.md) - Portable dictionary preparation and source prerequisite checks for cargo-spellcheck
 - [`cargo-unique-target-names`](./crates/cargo-unique-target-names/README.md) - A cargo subcommand that detects workspace targets which uplift to the same build artifact
 - [`cargo-unused-deps`](./crates/cargo-unused-deps/README.md) - A Cargo subcommand that finds unused and misplaced dependencies
 - [`hunspell-dictgen`](./crates/hunspell-dictgen/README.md) - Generate deterministic Hunspell dictionaries from human-maintained word lists
@@ -305,12 +306,15 @@ These focused operations are not substitutes for either verification tier.
   threshold.
 
 - **Mutation Testing**. Anvil uses [`cargo-gamma`](./crates/cargo-gamma/README.md)
-  0.4.0 or newer for diff-scoped PR checks and full scheduled campaigns.
+  0.7.0 or newer for diff-scoped PR checks and full scheduled campaigns.
   Repository policy lives in `gamma.toml`, retaining all-feature testing and the
   existing `mutants` build profile. Campaigns must meet a 100% assertion-killed
-  score with no unresolved flaky outcomes. Empty diff selections succeed;
-  nonempty populations with no gradeable mutations and empty full campaigns
-  fail the applicable gates. The former `.cargo/mutants.toml` is not used by Anvil.
+  score with no unresolved flaky outcomes. Published Gamma 0.7.0 accepts empty
+  diff selections but fails the score gate for empty full campaigns. The Gamma
+  changes in this source tree also accept empty full campaigns; fresh Anvil setup
+  still pins 0.7.0 until a release containing that behavior is selected.
+  Nonempty populations with no gradeable mutations fail the applicable gates.
+  The former `.cargo/mutants.toml` is not used by Anvil.
 
 - **Source Linting**. We run Clippy with most warnings enabled and all treated as errors.
 

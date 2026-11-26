@@ -42,6 +42,7 @@ type WaitObserver = Box<dyn FnMut(&Pulse, u64, Duration)>;
 #[cfg(all(test, not(loom)))]
 thread_local! {
     static WAIT_OBSERVER: std::cell::RefCell<Option<WaitObserver>> = const { std::cell::RefCell::new(None) };
+    static TIMEOUT_WAITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// A wakeup shared between the reader threads and the thread waiting on the child.
@@ -87,7 +88,6 @@ impl Pulse {
     }
 
     /// The current generation, to be passed to a later [`Pulse::wait`].
-    // #[gamma::skip(all, reason = "the mutation affects internal orchestration state with no safely deterministic observation at this layer")]
     pub(super) fn seen(&self) -> u64 {
         #[expect(clippy::unwrap_used, reason = "the waiter only panics if the whole process is unwinding")]
         let generation = self.generation.lock().unwrap();
@@ -100,7 +100,6 @@ impl Pulse {
         #[expect(clippy::unwrap_used, reason = "the waiter only panics if the whole process is unwinding")]
         let mut generation = self.generation.lock().unwrap();
 
-        // #[gamma::skip(all, reason = "the value controls scheduling, accounting, identity, or a conservative bound whose one-step perturbation has no safely deterministic external observation here")]
         *generation = generation.wrapping_add(1);
 
         drop(generation);
@@ -109,7 +108,6 @@ impl Pulse {
     }
 
     /// Sleeps until the generation moves past `seen`, or `upto` elapses, whichever is sooner.
-    // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
     pub(super) fn wait(&self, seen: u64, upto: Duration) {
         #[cfg(all(test, not(loom)))]
         WAIT_OBSERVER.with_borrow_mut(|observer| {
@@ -125,6 +123,9 @@ impl Pulse {
         if *generation != seen {
             return;
         }
+
+        #[cfg(all(test, not(loom)))]
+        TIMEOUT_WAITS.set(TIMEOUT_WAITS.get() + 1);
 
         #[cfg(not(loom))]
         #[expect(clippy::unwrap_used, reason = "the waiter only panics if the whole process is unwinding")]
@@ -235,6 +236,24 @@ impl Readers {
     }
 }
 
+#[cfg(all(test, not(loom)))]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::{Duration, Pulse, TIMEOUT_WAITS};
+
+    #[test]
+    fn an_unchanged_generation_waits_for_the_timeout_but_a_signal_skips_it() {
+        let pulse = Pulse::default();
+        let seen = pulse.seen();
+        let before = TIMEOUT_WAITS.get();
+        pulse.wait(seen, Duration::ZERO);
+        assert_eq!(TIMEOUT_WAITS.get() - before, 1);
+        pulse.signal();
+        pulse.wait(seen, Duration::ZERO);
+        assert_eq!(TIMEOUT_WAITS.get() - before, 1);
+    }
+}
+
 /// Deterministic-scheduler models of the two hubs above, run under [`loom`](https://docs.rs/loom).
 ///
 /// These are **not** part of the ordinary test suite. They only compile and run under `--cfg loom`,
@@ -293,6 +312,7 @@ mod loom_models {
             };
 
             pulse.wait(seen, Duration::from_secs(0));
+            assert_ne!(pulse.seen(), seen, "a wait without a timeout cannot return before a signal");
 
             announcing_reader.join().unwrap();
             other_reader.join().unwrap();
