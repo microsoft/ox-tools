@@ -24,8 +24,6 @@ jobs:
     timeout-minutes: 90
     env:
       CARGO_INCREMENTAL: "0"
-      # The workspace drive can fill while retaining both feature configurations.
-      CARGO_TARGET_DIR: C:\coverage-target
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
       NEXTEST_SUCCESS_OUTPUT: immediate
@@ -43,7 +41,12 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $nightly = & just --evaluate rust_nightly
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & cargo "+$nightly" run --release --locked --package cargo-coverage-gate --bin cargo-coverage-gate -- coverage-gate run --coverage-dir "$env:CARGO_TARGET_DIR\coverage"
+          # Successful collection cleans its scratch build before the next configuration.
+          foreach ($configuration in @('all-features', 'no-default-features')) {
+            & cargo "+$nightly" run --release --locked --package cargo-coverage-gate --bin cargo-coverage-gate -- coverage-gate run --collect-only --configuration $configuration
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          & cargo "+$nightly" run --release --locked --package cargo-coverage-gate --bin cargo-coverage-gate -- coverage-gate --lcov target/coverage/lcov-all-features.info --lcov target/coverage/lcov-no-default.info
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Inspect library-test profile initialization
         if: failure()
@@ -52,7 +55,7 @@ jobs:
           LLVM_PROFILE_VERBOSE: "1"
         run: |
           $ErrorActionPreference = 'Stop'
-          $executables = @(Get-Item "$env:CARGO_TARGET_DIR\coverage-gate\run-*\cargo-target" |
+          $executables = @(Get-Item target/coverage-gate/run-*/cargo-target |
             ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Recurse -File -Filter 'cargo_*_lib*.exe' } |
             Where-Object { $_.Name -match '^cargo_(aprz|gamma)_lib(?:-[0-9a-f]+)?\.exe$' })
           if ($executables.Count -eq 0) { throw 'No APRZ/Gamma library-test executables are available for initialization diagnostics.' }
@@ -68,17 +71,17 @@ jobs:
         with:
           name: windows-coverage-diagnostics-${{ github.run_attempt }}
           path: |
-            ${{ env.CARGO_TARGET_DIR }}/coverage-gate/run-*/**/*.profraw
-            ${{ env.CARGO_TARGET_DIR }}/coverage-gate/run-*/**/*.profdata
-            ${{ env.CARGO_TARGET_DIR }}/coverage-gate/run-*/**/*-profraw-list
-            ${{ env.CARGO_TARGET_DIR }}/coverage-gate/run-*/**/*.info
-            ${{ env.CARGO_TARGET_DIR }}/coverage-gate/run-*/cargo-target/**/cargo_aprz_lib.exe
-            ${{ env.CARGO_TARGET_DIR }}/coverage-gate/run-*/cargo-target/**/cargo_aprz_lib-*.exe
-            ${{ env.CARGO_TARGET_DIR }}/coverage-gate/run-*/cargo-target/**/cargo_gamma_lib.exe
-            ${{ env.CARGO_TARGET_DIR }}/coverage-gate/run-*/cargo-target/**/cargo_gamma_lib-*.exe
-            ${{ env.CARGO_TARGET_DIR }}/coverage-gate/run-*/cargo-target/**/test-lib-cargo_aprz_lib.json
-            ${{ env.CARGO_TARGET_DIR }}/coverage-gate/run-*/cargo-target/**/test-lib-cargo_gamma_lib.json
-            ${{ env.CARGO_TARGET_DIR }}/coverage/lcov-*.info
+            target/coverage-gate/run-*/**/*.profraw
+            target/coverage-gate/run-*/**/*.profdata
+            target/coverage-gate/run-*/**/*-profraw-list
+            target/coverage-gate/run-*/**/*.info
+            target/coverage-gate/run-*/cargo-target/**/cargo_aprz_lib.exe
+            target/coverage-gate/run-*/cargo-target/**/cargo_aprz_lib-*.exe
+            target/coverage-gate/run-*/cargo-target/**/cargo_gamma_lib.exe
+            target/coverage-gate/run-*/cargo-target/**/cargo_gamma_lib-*.exe
+            target/coverage-gate/run-*/cargo-target/**/test-lib-cargo_aprz_lib.json
+            target/coverage-gate/run-*/cargo-target/**/test-lib-cargo_gamma_lib.json
+            target/coverage/lcov-*.info
           retention-days: 7
           if-no-files-found: warn
           include-hidden-files: true

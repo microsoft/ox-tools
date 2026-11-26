@@ -3932,6 +3932,21 @@ mod tests {
         let included = lcov_section(&root.join("member/src/included-test.rs"), &[(4, 0)]);
         let gap = lcov_section(&root.join("member/src/../src/macro-backend.rs"), &[(15, 1)]);
         let raw = [included.as_str(), gap.as_str(), ""];
+        let individually_filtered = raw
+            .iter()
+            .flat_map(|text| {
+                filter_reports_with_metadata(parse_reports(&[text]).expect("single raw report"), &metadata)
+                    .expect("individual filtering succeeds")
+            })
+            .collect::<Vec<_>>();
+        let split_coverage =
+            crate::lcov_cov::CoverageReport::from_strs(&individually_filtered.iter().map(String::as_str).collect::<Vec<_>>())
+                .expect("individually filtered reports parse");
+        assert_eq!(
+            split_coverage.files.iter().map(|file| file.lines_total).sum::<u32>(),
+            0,
+            "filtering before combining reports loses the uncovered included line"
+        );
         let filtered = filter_reports_with_metadata(parse_reports(&raw).expect("raw feature reports"), &metadata).expect("batch filters");
         for text in &filtered {
             let repeated = filter_reports_with_metadata(parse_reports(&[text]).expect("individual published report"), &metadata)
