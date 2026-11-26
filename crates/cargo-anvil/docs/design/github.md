@@ -165,6 +165,11 @@ check remains authoritative.
 
 ### Coverage
 
+PR and scheduled test groups set `CARGO_PROFILE_TEST_DEBUG=line-tables-only`
+to reduce instrumented build sizes while retaining coverage line information.
+This override applies only to the GitHub test-group steps; local test-profile
+settings remain unchanged.
+
 PR and scheduled test jobs upload the same released-surface-filtered LCOV
 files evaluated by the local gate. Both `lcov-all-features.info` and
 `lcov-no-default.info` must exist; completed reports can upload after a group

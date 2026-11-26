@@ -4028,6 +4028,8 @@ jobs:
           name: anvil-impact-${{ startsWith(matrix.os, 'linux') && 'Linux' || 'Windows' }}
           path: target/anvil/impact
       - uses: ./.anvil/github/actions/run-group
+        env:
+          CARGO_PROFILE_TEST_DEBUG: line-tables-only
         with:
           group: pr-test
           publish_commit_statuses: ${{ inputs.publish_commit_statuses }}
@@ -4367,6 +4369,8 @@ jobs:
         with:
           lfs: true
       - uses: ./.anvil/github/actions/run-group
+        env:
+          CARGO_PROFILE_TEST_DEBUG: line-tables-only
         with:
           group: scheduled-test
           free-disk-space: true

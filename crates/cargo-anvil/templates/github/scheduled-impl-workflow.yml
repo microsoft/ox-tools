@@ -59,6 +59,8 @@ jobs:
         with:
           lfs: true
       - uses: ./.anvil/github/actions/run-group
+        env:
+          CARGO_PROFILE_TEST_DEBUG: line-tables-only
         with:
           group: scheduled-test
           free-disk-space: true
