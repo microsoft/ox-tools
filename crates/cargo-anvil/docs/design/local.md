@@ -219,6 +219,81 @@ directory. All three package files are required. The override is ignored
 outside consume mode. Container execution rejects a consume-mode directory
 override because it names a host path.
 
+## Release-candidate discovery
+
+`just anvil-release-candidates` emits one JSON document to standard output.
+It does not create a report file. Diagnostics go to standard error; a failed
+discovery exits nonzero without emitting a report. Callers may inspect, capture,
+pipe, or save the JSON.
+
+Discovery compares effective Cargo versions for every current workspace member
+with a Git baseline. It includes saved, uncommitted manifest edits and honors
+workspace inheritance. It does not use impact scope or run as part of a check
+group or tier.
+
+The baseline follows the same precedence as impact: `BASE_REF`, the ADO PR target,
+the GitHub PR target, `origin/main`, then `origin/master`. It must exist locally
+and is resolved once to an exact commit, not a merge base. A publishing caller
+can set `BASE_REF=HEAD^`; no PR context is required. The baseline is read in a
+temporary detached worktree with the current selected toolchain. Like impact,
+discovery uses `RUNNER_TEMP`, then `AGENT_TEMPDIRECTORY`, then the OS temp
+directory. It removes the worktree before emitting the report. A missing
+baseline workspace manifest means an empty inventory; invalid existing manifests
+fail.
+
+Packages with `publish = false` are excluded. Unrestricted publication and
+nonempty named-registry lists qualify. Matching uses the exact Cargo package
+name: a move is not a new package, but a renamed package is. Newly added
+publishable packages qualify, as do existing publishable packages with a
+stable version increase or a version change involving a prerelease. Removed
+packages, unchanged versions, and build-metadata-only changes do not qualify.
+A decrease between stable versions fails with the package and versions.
+Enabling publication alone does not qualify an existing package.
+
+The report is a JSON array of candidates, or `[]` when nothing qualifies.
+Each candidate contains `name`, workspace-relative `manifest_path`,
+`old_version`, `new_version`, and `classification`.
+
+A package absent from the baseline is `new` and has a null `old_version`.
+For an existing package, `classification` describes the version transition,
+not proven API compatibility. Any qualifying change involving a prerelease
+is `breaking`, regardless of precedence. For example, `1.2.3-beta` to
+`1.2.3-alpha` qualifies. Stable transitions are `breaking` for a major change,
+a minor change under `0.x`, or a patch change under `0.0.x`; other stable
+increases are `compatible`.
+
+Discovery does not validate package contents, API changes, dependency
+availability, or registry publication state. It does not sort candidates,
+define consumer subsets, propagate candidates through dependencies, or
+determine publishing order.
+
+## Release dependency validation
+
+`just anvil-release-dependencies` runs discovery once and succeeds without Ark
+if the report is empty. For a populated report it uses the local `cargo-ark`
+source when present in ox-tools, or an installed `cargo-ark` binary. The
+recipe does not require the `cargo-anvil` binary.
+
+The check runs `cargo package` for exactly the candidates in one batch,
+including Cargo's default verification build. It leaves registry selection
+to Cargo and does not impose additional manifest rules.
+
+Each `.crate` is extracted separately outside the checkout. The Anvil recipe
+passes the CI temp directory when available. Direct callers can set the
+scratch parent with `cargo ark release-dependencies --temp-dir <DIR>`; if
+omitted, the validator uses the OS temp directory. The check runs
+`cargo test` separately with `--all-features` and `--no-default-features`
+from the packaged manifests. Cargo resolves dependencies during testing and
+may update the extracted crate's lockfile. A temporary `[patch.crates-io]`
+makes only the extracted candidates available to crates.io dependencies;
+dependencies on other registries are not patched. A published version that
+meets the requirement is also valid. A versionless dev-dependency that Cargo
+omits is not an error on its own. If a shipped test needs an omitted dependency
+or fixture, the test fails. Test targets omitted from the archive are not tested.
+
+The check is standalone: it does not run as part of the PR tier or publish
+anything.
+
 ## 5. Miri execution customization
 
 Miri setup installs its pinned nightly components and prepares the sysroot.

@@ -290,3 +290,13 @@ Dirty local trees snapshot the files on disk and produce the same package
 selections as that content committed to a clean tree. `ANVIL_IMPACT=off`
 disables scoping; `consume` reads an existing CI artifact. See
 [impact controls and failures](./local.md#4-impact-scoping-via-the-anvil-impact-recipe).
+
+## 6. Standalone release validation
+
+`just anvil-release-candidates` compares full-workspace versions and emits a
+candidate report. Discovery is separate from code-impact analysis and does
+not replace the advisory SemVer check.
+
+`just anvil-release-dependencies` consumes that report and builds and tests
+the packaged candidate archives. It is not part of any PR group. See
+[release dependency validation](./local.md#release-dependency-validation).

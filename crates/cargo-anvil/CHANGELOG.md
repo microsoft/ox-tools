@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-11-25
+
+- ✨ Features
+
+  - anvil: validate shipped release candidate tests
+  - cargo-anvil: add standalone release-candidate discovery
+
 ## [0.28.2] - 2026-11-25
 
 - ✨ Features

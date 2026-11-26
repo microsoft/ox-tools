@@ -1,7 +1,7 @@
 version = 2
 tool = "anvil"
-tool_version = "0.28.2"
-catalog_checksum = "sha256:38a0013c32782bb58e42c5d16a8568437816dfc65d514426207ce1dbf3d76aab"
+tool_version = "0.29.0"
+catalog_checksum = "sha256:17c070ce02562dd7f2b8c9c7a3fd0de07f8ad51695d0144f26b7d74b1a911d84"
 
 [[file]]
 path = ".anvil/anvil.just"
@@ -9,7 +9,7 @@ checksum = "sha256:607eeaa37d75a2feade07c55370b277333c2fa66997f0b643c937c7a5a9ee
 
 [[file]]
 path = ".anvil/checks.just"
-checksum = "sha256:baa2e31f568f2ff3845eef804056c0225d93819e37a95b318268007525014a2b"
+checksum = "sha256:d9559112144378e91792e75a60c724fd3cb25dea9b12e94c64166bf8fac663e5"
 
 [[file]]
 path = ".anvil/container.just"
