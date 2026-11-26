@@ -61,10 +61,7 @@ fn package_candidates(cargo: &ReleaseCargo, scratch: &Path, candidates: &BTreeMa
     // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "Both Cargo and archive lookup use this private directory under fresh scratch; neither replacement collides with other scratch paths.")]
     let artifacts = scratch.join("artifacts");
     let mut package = cargo.command(scratch);
-    package
-        .current_dir(&cargo.root)
-        .args(["package", "--allow-dirty", "--target-dir"])
-        .arg(&artifacts);
+    package.args(["package", "--allow-dirty", "--target-dir"]).arg(&artifacts);
     for (name, version) in candidates {
         package.arg("--package").arg(format!("{name}@{version}"));
     }
@@ -80,8 +77,9 @@ fn unpack_candidates(archives: &Path, scratch: &Path, candidates: BTreeMap<Strin
         // Separate parents keep a sibling's files out of the original relative layout.
         // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "The numbered parents remain separate, under fresh scratch, and the same paths are used for extraction and testing.")]
         let destination = scratch.join("sources").join(index.to_string());
-        fs::create_dir_all(&destination)?;
-        unpack(&archive, &destination).map_err(|error| format!("extracting {}: {error}", archive.display()))?;
+        File::open(&archive)
+            .and_then(|file| Archive::new(GzDecoder::new(file)).unpack(&destination))
+            .map_err(|error| format!("extracting {}: {error}", archive.display()))?;
         sources.insert(name, destination.join(stem));
     }
     Ok(sources)
@@ -119,8 +117,6 @@ fn patch_config(sources: &BTreeMap<String, PathBuf>) -> Result<DocumentMut> {
 struct ReleaseCargo {
     root: PathBuf,
     toolchain: String,
-    home: Option<PathBuf>,
-    configs: Vec<PathBuf>,
 }
 
 impl ReleaseCargo {
@@ -133,18 +129,8 @@ impl ReleaseCargo {
             .parent()
             .ok_or("workspace manifest has no parent directory")?
             .to_path_buf();
-        let home = std::env::var_os("CARGO_HOME")
-            .filter(|home| !home.is_empty())
-            .map(|home| root.join(home));
-        let mut configs: Vec<_> = root.ancestors().filter_map(|dir| cargo_config(&dir.join(".cargo"))).collect();
-        configs.reverse();
         let toolchain = capture(Command::new("rustc").args(["--print", "sysroot"]), "selecting Rust toolchain")?;
-        Ok(Self {
-            root,
-            toolchain,
-            home,
-            configs,
-        })
+        Ok(Self { root, toolchain })
     }
 
     fn command(&self, scratch: &Path) -> Command {
@@ -152,40 +138,20 @@ impl ReleaseCargo {
         // #[gamma::skip(literal.str_to_xyzzy, reason = "Renaming the private build subdirectory leaves Cargo's output isolated in scratch.")]
         let build = scratch.join("build");
         command
+            // Cargo loads configuration from this directory, not from --manifest-path.
+            .current_dir(&self.root)
             .env("RUSTUP_TOOLCHAIN", self.toolchain.trim())
             .env("CARGO_BUILD_BUILD_DIR", build);
-        if let Some(home) = &self.home {
-            command.env("CARGO_HOME", home);
-        }
         command
     }
 
     fn archive_command(&self, scratch: &Path, patch: &Path) -> Command {
         let mut command = self.command(scratch);
-        // Start outside the extracted crate so Cargo doesn't pick up config it shipped.
         // #[gamma::skip(literal.str_to_xyzzy, reason = "Renaming the private target subdirectory leaves Cargo's output isolated in scratch.")]
         let target = scratch.join("target");
-        command.current_dir(scratch).env("CARGO_TARGET_DIR", target);
-        for file in &self.configs {
-            if file.parent() != self.home.as_deref() && file.parent().and_then(Path::parent).is_some_and(|dir| !scratch.starts_with(dir)) {
-                command.arg("--config").arg(file);
-            }
-        }
-        command.arg("--config").arg(patch);
+        command.env("CARGO_TARGET_DIR", target).arg("--config").arg(patch);
         command
     }
-}
-
-fn cargo_config(dir: &Path) -> Option<PathBuf> {
-    ["config", "config.toml"]
-        .into_iter()
-        .map(|name| dir.join(name))
-        .find(|file| file.is_file())
-}
-
-fn unpack(archive: &Path, destination: &Path) -> Result<()> {
-    Archive::new(GzDecoder::new(File::open(archive)?)).unpack(destination)?;
-    Ok(())
 }
 
 fn capture(command: &mut Command, operation: &str) -> Result<String> {
@@ -279,24 +245,18 @@ mod tests {
     }
 
     #[test]
-    fn archive_tests_replay_only_configs_cargo_would_not_load_and_keep_builds_in_scratch() {
-        let parent = Path::new("source-parent");
-        let root = parent.join("workspace");
-        let home = root.join(".cargo");
-        let scratch = parent.join("scratch");
+    fn archive_commands_use_workspace_config_and_keep_builds_in_scratch() {
+        let root = PathBuf::from("workspace");
+        let scratch = PathBuf::from("scratch");
         let patch = scratch.join("patch.toml");
         let cargo = ReleaseCargo {
-            root,
+            root: root.clone(),
             toolchain: "workspace-toolchain\n".into(),
-            home: Some(home.clone()),
-            configs: vec![parent.join(".cargo/config.toml"), home.join("config.toml")],
         };
         let command = cargo.archive_command(&scratch, &patch);
-        assert_eq!(command.get_current_dir(), Some(scratch.as_path()));
-        // Cargo already loads the scratch ancestor's config and CARGO_HOME.
+        assert_eq!(command.get_current_dir(), Some(root.as_path()));
         assert_eq!(command.get_args().collect::<Vec<_>>(), ["--config".as_ref(), patch.as_os_str()]);
         let env: BTreeMap<_, _> = command.get_envs().collect();
-        assert_eq!(env.get(OsStr::new("CARGO_HOME")), Some(&Some(home.as_os_str())));
         assert_eq!(
             env.get(OsStr::new("RUSTUP_TOOLCHAIN")),
             Some(&Some(OsStr::new("workspace-toolchain")))
@@ -305,23 +265,5 @@ mod tests {
             let directory = env.get(OsStr::new(key)).copied().flatten().map(Path::new).unwrap();
             assert!(directory.starts_with(&scratch) && directory != scratch);
         }
-
-        let scratch = Path::new("outside");
-        let patch = scratch.join("patch.toml");
-        let workspace_config = home.join("config.toml");
-        let ancestor_config = parent.join(".cargo/config.toml");
-        let cargo = ReleaseCargo { home: None, ..cargo };
-        let command = cargo.archive_command(scratch, &patch);
-        assert_eq!(
-            command.get_args().collect::<Vec<_>>(),
-            [
-                "--config".as_ref(),
-                ancestor_config.as_os_str(),
-                "--config".as_ref(),
-                workspace_config.as_os_str(),
-                "--config".as_ref(),
-                patch.as_os_str(),
-            ]
-        );
     }
 }

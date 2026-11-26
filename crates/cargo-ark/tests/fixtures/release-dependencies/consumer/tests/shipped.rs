@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 fn check_archive() {
-    assert!(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml.orig").is_file());
+    assert!(std::path::Path::new("Cargo.toml.orig").is_file());
     assert_eq!(ark_fixture_consumer::value(), 42);
 }
 
