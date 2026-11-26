@@ -1209,7 +1209,7 @@ mod source_campaign_tests {
                     Ok(ExitCode::SUCCESS)
                 },
                 |_, flags, workspace, selected, _| {
-                    assert_eq!(flags, ["--package", "fixture", "--package", file_spec].map(OsString::from));
+                    assert_eq!(flags, ["--package", "[f]ixture"].map(OsString::from));
                     assert_eq!(selected, &BTreeSet::from([workspace.packages[0].manifest_path.clone()]));
                     Ok(false)
                 },
