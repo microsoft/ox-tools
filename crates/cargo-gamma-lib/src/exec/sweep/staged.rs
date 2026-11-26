@@ -26,7 +26,7 @@ impl Stage {
 #[derive(Default)]
 pub(super) struct ProbeState {
     pub(super) binary_runs: Vec<Option<Verdict>>,
-    pub(super) passed_tests: crate::HashSet<(usize, String)>,
+    pub(super) passed_tests: crate::HashMap<usize, crate::HashSet<String>>,
 }
 
 /// Queued mutant bookkeeping across invocations, including accumulated execution time and evidence.
@@ -216,7 +216,7 @@ impl Execution<'_> {
             Err(judged) => return Some(judged),
         };
         if matches!(run.verdict, Verdict::Passed) {
-            state.passed_tests.insert((index, hint.test.clone()));
+            state.passed_tests.entry(index).or_default().insert(hint.test.clone());
         }
         probe_kill(self.reachable[index], run.verdict, Some(&hint.test))
     }
@@ -236,7 +236,11 @@ impl Execution<'_> {
             if !filters.admits(&killer.test) || !seen.insert((index, killer.test.as_str())) {
                 continue;
             }
-            if state.passed_tests.contains(&(index, killer.test.clone())) {
+            if state
+                .passed_tests
+                .get(&index)
+                .is_some_and(|tests| tests.contains(killer.test.as_str()))
+            {
                 record_duplicate_avoided(self.tally);
                 continue;
             }
@@ -255,7 +259,7 @@ impl Execution<'_> {
                 Err(judged) => return Some(judged),
             };
             if matches!(run.verdict, Verdict::Passed) {
-                state.passed_tests.insert((index, name.to_owned()));
+                state.passed_tests.entry(index).or_default().insert(name.to_owned());
             }
             if let Some(judged) = probe_kill(self.reachable[index], run.verdict, Some(name)) {
                 return Some(judged);

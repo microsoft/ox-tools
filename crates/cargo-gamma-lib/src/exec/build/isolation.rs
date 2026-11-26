@@ -9,10 +9,13 @@ use camino::{Utf8Path, Utf8PathBuf};
 
 use super::messages::{build_evidence, cargo_message};
 use super::{
-    BuildScope, CompilerReason, Converger, Events, HashMap, HashSet, Isolation, Mutant, Plan, Result, Workspace, compiles_test_harnesses,
-    isolation_candidate, run_cargo,
+    BuildScope, CompilerReason, Converger, Events, HashMap, HashSet, Isolation, Mutant, Plan, Result, Workspace, blame,
+    compiles_test_harnesses, isolation_candidate, retain_blamed,
 };
+use crate::error::error;
 use crate::exec::cargo_options::BuildLimits;
+
+pub(super) mod proof_cache;
 
 /// One proof search may hold at most this many candidates.
 ///
@@ -141,6 +144,9 @@ impl IsolationBudget {
 pub struct Proofs {
     pub local: usize,
     pub results: HashMap<Vec<u32>, Option<bool>>,
+    pub attributed: HashMap<u32, CompilerReason>,
+    pub pending: Vec<Vec<u32>>,
+    pub reuse_generation: Option<[u8; 32]>,
 }
 
 #[derive(Debug)]
@@ -155,6 +161,42 @@ impl Proofs {
         let mut key = active.iter().map(|mutant| mutant.ordinal).collect::<Vec<_>>();
         key.sort_unstable();
         key
+    }
+
+    fn defer(&mut self, active: &[&Mutant]) {
+        let key = Self::key(active);
+        if !key.is_empty() && !self.pending.contains(&key) {
+            self.pending.push(key);
+        }
+    }
+
+    fn next_partition(
+        &mut self,
+        eligible: &HashSet<u32>,
+        withdrawn: &HashSet<u32>,
+        mut cost: impl FnMut(&[u32]) -> (usize, usize, bool),
+    ) -> Option<Vec<u32>> {
+        for partition in &mut self.pending {
+            partition.retain(|ordinal| !withdrawn.contains(ordinal));
+        }
+        self.pending.retain(|partition| !partition.is_empty());
+        let selected = self
+            .pending
+            .iter()
+            .enumerate()
+            .filter(|(_, partition)| partition.iter().all(|ordinal| eligible.contains(ordinal)))
+            .min_by_key(|(index, partition)| (cost(partition), *index))
+            .map(|(index, _)| index)?;
+        Some(self.pending.remove(selected))
+    }
+
+    fn attributed_attempt(&self) -> Option<IsolationAttempt> {
+        if self.attributed.is_empty() {
+            return None;
+        }
+        let mut ordinals = self.attributed.keys().copied().collect::<Vec<_>>();
+        ordinals.sort_unstable();
+        Some(IsolationAttempt::Resolved(Isolation::Blamed(ordinals)))
     }
 }
 
@@ -257,6 +299,111 @@ fn ownership_failure(codes: &HashSet<String>) -> bool {
     codes
         .iter()
         .any(|code| super::blame::FLOW_SENSITIVE.contains(&code.as_str()) || matches!(code.as_str(), "E0500" | "E0501"))
+}
+
+fn may_have_nonlocal_effects(mutant: &Mutant) -> bool {
+    let mutator = mutant.mutator.as_ref();
+    mutator.starts_with("fn_value.")
+        || mutator.starts_with("stmt.")
+        || mutator.starts_with("loop.")
+        || matches!(
+            mutator,
+            "parameter.default_shadow"
+                | "cond.always_true"
+                | "cond.always_false"
+                | "match_guard.always_true"
+                | "match_guard.always_false"
+                | "match_arm.never_matches"
+                | "return_value.default"
+                | "try.propagate_to_unwrap"
+        )
+}
+
+struct ProofMetadata<'a> {
+    file: &'a Utf8Path,
+    package: &'a str,
+    nonlocal: bool,
+}
+
+struct ProofCostIndex<'a> {
+    mutants: HashMap<u32, Vec<ProofMetadata<'a>>>,
+    dependents: HashMap<&'a str, Vec<&'a str>>,
+}
+
+impl<'a> ProofCostIndex<'a> {
+    fn new(plan: &'a Plan) -> Self {
+        let mut mutants: HashMap<_, Vec<_>> = HashMap::default();
+        for mutant in &plan.mutants {
+            #[cfg(test)]
+            tests::cost_work(|work| work.index_mutants += 1);
+            // Historical exclusions can share ordinal zero; live ordinals need only one slot.
+            mutants
+                .entry(mutant.ordinal)
+                // #[gamma::skip(literal.int_increment, literal.int_decrement, tag = "equivalent", reason = "Vec capacity changes allocation only, not the stored proof metadata.")]
+                .or_insert_with(|| Vec::with_capacity(1))
+                .push(ProofMetadata {
+                    file: mutant.file.as_ref(),
+                    package: mutant.package.as_ref(),
+                    nonlocal: may_have_nonlocal_effects(mutant),
+                });
+        }
+        let mut dependents: HashMap<_, Vec<_>> = HashMap::default();
+        for (package, dependencies) in &plan.reach {
+            #[cfg(test)]
+            tests::cost_work(|work| work.index_packages += 1);
+            for dependency in dependencies {
+                #[cfg(test)]
+                tests::cost_work(|work| work.index_dependencies += 1);
+                dependents.entry(dependency.as_str()).or_default().push(package.as_str());
+            }
+        }
+        Self { mutants, dependents }
+    }
+
+    fn cost(&self, previous: &HashSet<u32>, background: &HashSet<u32>, active: &[u32]) -> (usize, usize, bool) {
+        let active = active.iter().copied().collect::<HashSet<_>>();
+        let mut nonlocal = false;
+        for ordinal in &active {
+            #[cfg(test)]
+            tests::cost_work(|work| work.ordinal_lookups += 1);
+            if let Some(metadata) = self.mutants.get(ordinal) {
+                for mutant in metadata {
+                    #[cfg(test)]
+                    tests::cost_work(|work| work.metadata += 1);
+                    nonlocal |= mutant.nonlocal;
+                }
+            }
+        }
+        let mut files = HashSet::default();
+        let mut packages = HashSet::default();
+        for ordinal in previous
+            .symmetric_difference(&active)
+            .filter(|ordinal| !background.contains(ordinal))
+        {
+            #[cfg(test)]
+            tests::cost_work(|work| work.ordinal_lookups += 1);
+            if let Some(metadata) = self.mutants.get(ordinal) {
+                for mutant in metadata {
+                    #[cfg(test)]
+                    tests::cost_work(|work| work.metadata += 1);
+                    let _ = files.insert(mutant.file);
+                    let _ = packages.insert(mutant.package);
+                }
+            }
+        }
+        let mut rebuilt = packages.clone();
+        for package in packages {
+            if let Some(dependents) = self.dependents.get(package) {
+                for dependent in dependents {
+                    #[cfg(test)]
+                    tests::cost_work(|work| work.dependent_entries += 1);
+                    let _ = rebuilt.insert(*dependent);
+                }
+            }
+        }
+        // Prefer nonlocal partitions when rebuild and changed-file costs tie.
+        (rebuilt.len(), files.len(), !nonlocal)
+    }
 }
 
 fn diagnostic_envelopes<'a>(converger: &Converger, plan: &'a Plan) -> HashMap<(&'a Utf8Path, &'a str), (u32, u32)> {
@@ -463,7 +610,7 @@ fn extend_affected_packages(affected: &mut HashSet<String>, reach: &HashMap<Stri
                 affected.extend(dependencies.iter().cloned());
             }
         }
-        // #[gamma::skip(all, reason = "this fixed-point exit is the only bound once affected packages stop changing")]
+        // #[gamma::skip(all, tag = "timeout", reason = "Without the fixed-point exit, isolation repeatedly scans the unchanged affected-package closure forever.")]
         if affected.len() == before {
             break;
         }
@@ -504,6 +651,7 @@ impl Converger {
         events: &mut dyn Events,
         positional: Option<&HashSet<u32>>,
     ) -> Result<Vec<Isolation>> {
+        let costs = core::cell::LazyCell::new(|| ProofCostIndex::new(plan));
         let by_package = isolation_population(plan, &self.withdrawn);
         let contexts = prioritized_contexts(failure_contexts(stdout, plan, &work.root, failed_verb), plan, &by_package);
         let mut affected: HashSet<String> = contexts.iter().map(|(context, _, _)| context.package.clone()).collect();
@@ -519,6 +667,7 @@ impl Converger {
         // Proof schemas replace the live guards; diagnostics still name the original failed schema.
         let envelopes = diagnostic_envelopes(self, plan);
         let mut proof_contexts: HashMap<Vec<String>, Proofs> = HashMap::default();
+        let reuse_generation = proof_cache::identity(work, plan).and_then(|_| proof_cache::generation(plan));
         let mut isolated = Vec::new();
 
         for (context, packages, _dependency_count) in contexts {
@@ -574,6 +723,7 @@ impl Converger {
                 context.verb()
             };
             let proofs = proof_contexts.entry(verb.clone()).or_default();
+            proofs.reuse_generation = reuse_generation;
             proofs.local = 0;
             let verb = verb.iter().map(String::as_str).collect::<Vec<_>>();
             let mut resolved = HashSet::default();
@@ -604,13 +754,17 @@ impl Converger {
                     #[cfg(test)]
                     tests::visit_isolation_iteration();
                     let current_dependencies = without_withdrawn(dependencies.difference(&resolved).copied().collect(), &self.withdrawn);
-                    match self.isolate_candidates(work, plan, scope, &verb, limits, events, &eligible, proofs)? {
+                    match self.isolate_candidates_indexed(work, plan, scope, &verb, limits, events, &eligible, proofs, &costs)? {
                         IsolationAttempt::Resolved(result) => {
                             let before = eligible.len();
                             match &result {
                                 Isolation::Blamed(ordinals) => {
-                                    let blamed: HashMap<_, _> =
-                                        ordinals.iter().map(|ordinal| (*ordinal, CompilerReason::isolated())).collect();
+                                    let blamed: HashMap<_, _> = ordinals
+                                        .iter()
+                                        .map(|ordinal| {
+                                            (*ordinal, proofs.attributed.remove(ordinal).unwrap_or_else(CompilerReason::isolated))
+                                        })
+                                        .collect();
                                     self.persist_compiler_exclusions(work, plan, &blamed)?;
                                     let before = self.census.len();
                                     for (ordinal, reason) in blamed {
@@ -685,6 +839,35 @@ impl Converger {
         eligible: &HashSet<u32>,
         proofs: &mut Proofs,
     ) -> Result<IsolationAttempt> {
+        self.isolate_candidates_indexed(
+            work,
+            plan,
+            scope,
+            verb,
+            limits,
+            events,
+            eligible,
+            proofs,
+            &ProofCostIndex::new(plan),
+        )
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "candidate isolation shares immutable cost metadata across tiers"
+    )]
+    fn isolate_candidates_indexed(
+        &mut self,
+        work: &Workspace,
+        plan: &Plan,
+        scope: BuildScope<'_>,
+        verb: &[&str],
+        limits: BuildLimits,
+        events: &mut dyn Events,
+        eligible: &HashSet<u32>,
+        proofs: &mut Proofs,
+        costs: &ProofCostIndex<'_>,
+    ) -> Result<IsolationAttempt> {
         let mut candidates = plan
             .mutants
             .iter()
@@ -697,6 +880,9 @@ impl Converger {
         // The campaign's initial pristine validation supplies the control under this same frozen
         // context; subset searches need reproduce the populated failure, not rebuild that control.
         let populated = self.subset_fails(work, plan, scope, verb, limits, events, &candidates, &candidates, proofs)?;
+        if let Some(attempt) = proofs.attributed_attempt() {
+            return Ok(attempt);
+        }
         if populated != Some(true) {
             return Ok(if populated == Some(false) {
                 IsolationAttempt::NotReproduced
@@ -705,16 +891,66 @@ impl Converger {
             });
         }
 
-        candidates.sort_by(|left, right| left.item_path.cmp(&right.item_path).then_with(|| left.ordinal.cmp(&right.ordinal)));
+        let complete = candidates.clone();
+        while let Some(pending) = proofs.next_partition(eligible, &self.withdrawn, |active| self.proof_cost(costs, active)) {
+            let pending = pending.into_iter().collect::<HashSet<_>>();
+            candidates = complete
+                .iter()
+                .copied()
+                .filter(|mutant| pending.contains(&mutant.ordinal))
+                .collect();
+            let failed = self.subset_fails(work, plan, scope, verb, limits, events, &complete, &candidates, proofs)?;
+            if let Some(attempt) = proofs.attributed_attempt() {
+                return Ok(attempt);
+            }
+            match failed {
+                Some(true) => break,
+                Some(false) => candidates.clone_from(&complete),
+                None => return Ok(IsolationAttempt::Inconclusive),
+            }
+        }
+
+        self.narrow_candidates(work, plan, scope, verb, limits, events, candidates, proofs, costs)
+    }
+
+    #[expect(clippy::too_many_arguments, reason = "narrowing preserves the complete proof invocation context")]
+    fn narrow_candidates(
+        &mut self,
+        work: &Workspace,
+        plan: &Plan,
+        scope: BuildScope<'_>,
+        verb: &[&str],
+        limits: BuildLimits,
+        events: &mut dyn Events,
+        mut candidates: Vec<&Mutant>,
+        proofs: &mut Proofs,
+        costs: &ProofCostIndex<'_>,
+    ) -> Result<IsolationAttempt> {
+        candidates.sort_by(|left, right| {
+            (
+                &left.package,
+                &left.file,
+                &left.item_path,
+                !may_have_nonlocal_effects(left),
+                left.ordinal,
+            )
+                .cmp(&(
+                    &right.package,
+                    &right.file,
+                    &right.item_path,
+                    !may_have_nonlocal_effects(right),
+                    right.ordinal,
+                ))
+        });
         let population = candidates.clone();
         let mut items: Vec<Vec<&Mutant>> = Vec::new();
         for mutant in candidates {
             if items
                 .last()
                 .and_then(|item|
-                // #[gamma::skip(iter.first_to_last, reason = "Every existing item group is formed only by equality of item_path to the group's representative. All members therefore have identical item_path; first() and last() return representatives with the same compared field.", tag = "equivalent")]
+                // #[gamma::skip(iter.first_to_last, reason = "Every item group is formed by equality of package, file, and item_path to its representative, so first() and last() have identical grouping fields.", tag = "equivalent")]
                 item.first())
-                .is_some_and(|first| first.item_path == mutant.item_path)
+                .is_some_and(|first| first.package == mutant.package && first.file == mutant.file && first.item_path == mutant.item_path)
             {
                 items
                     .last_mut()
@@ -725,24 +961,52 @@ impl Converger {
             }
         }
 
-        // #[gamma::skip(relational.gt_to_ge, literal.int_decrement, tag = "timeout", reason = "bisecting a singleton cannot reduce the isolation population")]
-        while items.len() > 1 {
+        let mut failing = population.clone();
+        while
+        // #[gamma::skip(relational.gt_to_ge, literal.int_decrement, tag = "timeout", reason = "admitting a singleton repeats a cached proof of the same population without shrinking the partition")]
+        // #[gamma::skip(iter.first_to_last, tag = "equivalent", reason = "the right operand is reached only with at most one item, whose first and last elements are identical")]
+        items.len() > 1 || items.first().is_some_and(|item| item.len() > 1) {
+            if
+            // #[gamma::skip(cond.always_false, literal.int_decrement, tag = "timeout", reason = "the sole multi-mutant item must split into singleton items before bisection; otherwise its cached proof repeats forever")]
+            items.len() == 1 {
+                failing = items.pop().unwrap_or_default();
+                items = failing.iter().copied().map(|mutant| vec![mutant]).collect();
+            }
             // #[gamma::skip(arith.div_to_rem, literal.int_decrement, literal.int_increment, tag = "timeout", reason = "these campaign divisors produced empty or nonshrinking isolation partitions")]
             let middle = items.len() / 2;
             let left = items[..middle].concat();
             let right = items[middle..].concat();
-            if self.subset_fails(work, plan, scope, verb, limits, events, &population, &left, proofs)? == Some(true) {
+            let right_first = self.proof_cost(costs, &Proofs::key(&right)) < self.proof_cost(costs, &Proofs::key(&left));
+            let (first, second) = if right_first { (&right, &left) } else { (&left, &right) };
+            let failed = self.subset_fails(work, plan, scope, verb, limits, events, &population, first, proofs)?;
+            if let Some(attempt) = proofs.attributed_attempt() {
+                return Ok(attempt);
+            }
+            if failed == Some(true) {
+                proofs.defer(second);
                 // #[gamma::skip(stmt.delete_call, tag = "timeout", reason = "successful bisection must shrink the population before retrying")]
-                items.truncate(middle);
+                if right_first {
+                    drop(items.drain(..middle));
+                } else {
+                    items.truncate(middle);
+                }
                 continue;
             }
-            if self.subset_fails(work, plan, scope, verb, limits, events, &population, &right, proofs)? == Some(true) {
-                drop(items.drain(..middle));
+            let failed = self.subset_fails(work, plan, scope, verb, limits, events, &population, second, proofs)?;
+            if let Some(attempt) = proofs.attributed_attempt() {
+                return Ok(attempt);
+            }
+            if failed == Some(true) {
+                // #[gamma::skip(stmt.delete_call, tag = "timeout", reason = "a failing second partition must replace the current items or the same cached split repeats without progress")]
+                if right_first {
+                    items.truncate(middle);
+                } else {
+                    drop(items.drain(..middle));
+                }
                 continue;
             }
-            let Some(members) = self.minimize_interaction(work, plan, scope, verb, limits, events, &population, &population, proofs)?
-            else {
-                return Ok(IsolationAttempt::Inconclusive);
+            let Some(members) = self.minimize_interaction(work, plan, scope, verb, limits, events, &population, &failing, proofs)? else {
+                return Ok(proofs.attributed_attempt().unwrap_or(IsolationAttempt::Inconclusive));
             };
             return Ok(IsolationAttempt::Resolved(Isolation::Interaction {
                 excluded: members[0],
@@ -750,32 +1014,13 @@ impl Converger {
             }));
         }
 
-        let item = items.pop().unwrap_or_default();
-        let mut narrowed = item.clone();
-        // #[gamma::skip(relational.gt_to_ge, literal.int_decrement, tag = "timeout", reason = "bisecting a singleton cannot reduce the isolation population")]
-        while narrowed.len() > 1 {
-            // #[gamma::skip(arith.div_to_rem, literal.int_decrement, literal.int_increment, tag = "timeout", reason = "these campaign divisors produced empty or nonshrinking isolation partitions")]
-            let middle = narrowed.len() / 2;
-            let left = &narrowed[..middle];
-            let right = &narrowed[middle..];
-            if self.subset_fails(work, plan, scope, verb, limits, events, &population, left, proofs)? == Some(true) {
-                // #[gamma::skip(stmt.delete_call, tag = "timeout", reason = "successful bisection must shrink the population before retrying")]
-                narrowed.truncate(middle);
-            } else if self.subset_fails(work, plan, scope, verb, limits, events, &population, right, proofs)? == Some(true) {
-                drop(narrowed.drain(..middle));
-            } else {
-                let Some(members) = self.minimize_interaction(work, plan, scope, verb, limits, events, &population, &item, proofs)? else {
-                    return Ok(IsolationAttempt::Inconclusive);
-                };
-                return Ok(IsolationAttempt::Resolved(Isolation::Interaction {
-                    excluded: members[0],
-                    members,
-                }));
-            }
-        }
         Ok(IsolationAttempt::Resolved(Isolation::Blamed(
-            narrowed.iter().map(|mutant| mutant.ordinal).collect(),
+            items.into_iter().flatten().map(|mutant| mutant.ordinal).collect(),
         )))
+    }
+
+    fn proof_cost(&self, costs: &ProofCostIndex<'_>, active: &[u32]) -> (usize, usize, bool) {
+        costs.cost(&self.proof_active, &self.proof_background, active)
     }
 
     #[expect(
@@ -797,7 +1042,9 @@ impl Converger {
         let mut active = failing.to_vec();
         let mut granularity = 2;
         let mut previous = None;
-        while Self::minimization_can_continue(active.len(), proofs.local, self.isolation_budget.proofs) {
+        while
+        // #[gamma::skip(logical.and_remove_left, tag = "equivalent", reason = "after attribution subset_fails returns None before cache, budget, or compiler access; omitting this guard only performs finite chunk refinement, and the final attribution check still returns None")]
+        proofs.attributed.is_empty() && Self::minimization_can_continue(active.len(), proofs.local, self.isolation_budget.proofs) {
             assert!(
                 previous.is_none_or(|(length, partitions)| active.len() < length || (active.len() == length && granularity > partitions)),
                 "interaction minimization must remove candidates or refine its partition before retrying cached proofs"
@@ -809,7 +1056,6 @@ impl Converger {
             Some((active.len(), granularity));
             let width = active.len().div_ceil(granularity);
             let chunks = active.chunks(width).map(<[_]>::to_vec).collect::<Vec<_>>();
-            // #[gamma::skip(literal.bool_flip, tag = "timeout", reason = "claiming reduction without a successful proof keeps retrying the same active population")]
             let mut reduced = false;
             for chunk in &chunks {
                 if self.subset_fails(work, plan, scope, verb, limits, events, population, chunk, proofs)? == Some(true) {
@@ -860,10 +1106,10 @@ impl Converger {
             }
             granularity = granularity.saturating_mul(2).min(active.len());
         }
-        Ok(
-            (proofs.local < MAX_ISOLATION_PROOFS && self.isolation_budget.proofs < MAX_INVOCATION_ISOLATION_PROOFS)
-                .then(|| active.iter().map(|mutant| mutant.ordinal).collect()),
-        )
+        Ok((proofs.attributed.is_empty()
+            && proofs.local < MAX_ISOLATION_PROOFS
+            && self.isolation_budget.proofs < MAX_INVOCATION_ISOLATION_PROOFS)
+            .then(|| active.iter().map(|mutant| mutant.ordinal).collect()))
     }
 
     fn minimization_can_continue(active: usize, local: usize, invocation: usize) -> bool {
@@ -890,9 +1136,21 @@ impl Converger {
         active: &[&Mutant],
         proofs: &mut Proofs,
     ) -> Result<Option<bool>> {
+        if !proofs.attributed.is_empty() {
+            return Ok(None);
+        }
         let key = Proofs::key(active);
         if let Some(cached) = proofs.results.get(&key) {
             return Ok(*cached);
+        }
+        let compilation = proofs
+            .reuse_generation
+            .filter(|_| self.unavailable.is_empty())
+            .and_then(|_| proof_cache::identity(work, plan));
+        let reuse_key = proof_cache::key(proofs, compilation, scope, verb, &self.proof_background, &key);
+        if let Some(cached) = self.proof_cache.get(reuse_key) {
+            let _previous = proofs.results.insert(key, Some(cached));
+            return Ok(Some(cached));
         }
         if !self.isolation_budget.proof(proofs.local) {
             return Ok(None);
@@ -903,14 +1161,36 @@ impl Converger {
         #[cfg(any(test, feature = "internals"))]
         if let Some(oracle) = self.subset_oracle {
             self.proof_roots.push(scope.roots.map(<[String]>::to_vec));
+            self.proof_active.clone_from(&self.proof_background);
+            self.proof_active.extend(&active);
             let result = oracle(&active);
+            if compilation == proofs.reuse_generation.and_then(|_| proof_cache::identity(work, plan)) {
+                self.proof_cache.insert(reuse_key, result);
+            }
             let _ = proofs.results.insert(key, result);
             return Ok(result);
         }
 
-        let result = self.run_proof(work, plan, scope, verb, limits, events, population.len(), &active)?;
+        let result = self.run_proof(
+            work,
+            plan,
+            scope,
+            verb,
+            limits,
+            events,
+            population.len(),
+            &active,
+            &mut proofs.attributed,
+        )?;
+        if (
+            // #[gamma::skip(logical.and_remove_right, tag = "equivalent", reason = "Unavailability is sticky for this Converger and independently disables every later compilation-key lookup.")]
+            proofs.attributed.is_empty() && self.unavailable.is_empty()
+        ) && compilation == proofs.reuse_generation.and_then(|_| proof_cache::identity(work, plan))
+        {
+            self.proof_cache.insert(reuse_key, result);
+        }
         let _ = proofs.results.insert(key, result);
-        Ok(result)
+        Ok(if proofs.attributed.is_empty() { result } else { None })
     }
 
     /// Executes one proof build after the deterministic isolation algorithm selects its schema.
@@ -929,6 +1209,7 @@ impl Converger {
         events: &mut dyn Events,
         population: usize,
         active: &HashSet<u32>,
+        attributed: &mut HashMap<u32, CompilerReason>,
     ) -> Result<Option<bool>> {
         let mut applied = core::mem::take(&mut self.proof_active);
         applied.clear();
@@ -942,7 +1223,15 @@ impl Converger {
             self.historical_exclusions + self.census.len(),
             self.isolation_budget.proofs,
         );
-        let outcome = run_cargo(work, plan, verb, scope.roots, limits, self.first_round, events)?;
+        let outcome = super::invoke::run_cargo_selective(work, plan, verb, scope.roots, limits, self.first_round, events)?;
+        if !outcome.succeeded
+            && let Some(stdout) = outcome.stdout.as_deref()
+        {
+            let mut blamed = blame(stdout, &work.root, self.splices.guards());
+            retain_blamed(&mut blamed, plan, scope.mutants);
+            blamed.retain(|ordinal, reason| active.contains(ordinal) && !self.withdrawn.contains(ordinal) && !reason.needs_confirmation());
+            attributed.extend(blamed);
+        }
         if events.wants_isolation_evidence()
             && let Some(stdout) = outcome.stdout.as_deref()
         {
@@ -957,17 +1246,290 @@ impl Converger {
                 &evidence.failed_targets,
             );
         }
-        Ok(outcome.stdout.map(|_stdout| !outcome.succeeded))
+        proof_result(&outcome, plan, work, verb, active)
     }
+}
+
+#[ohno::error]
+#[display("compile isolation stopped because its proof failed without attributable compiler errors:\n{failure_context}\n{stderr}")]
+struct UnattributableProof {
+    failure_context: String,
+    stderr: String,
+}
+
+/// `None` means missing stdout; `Some(false)` means success; `Some(true)` means an active file
+/// has attributable compiler errors. `Err` means a failed build supplied no such attribution.
+fn proof_result(
+    outcome: &super::invoke::Compiled,
+    plan: &Plan,
+    work: &Workspace,
+    verb: &[&str],
+    active: &HashSet<u32>,
+) -> Result<Option<bool>> {
+    let Some(stdout) = outcome.stdout.as_deref() else {
+        return Ok(None);
+    };
+    if outcome.succeeded {
+        return Ok(Some(false));
+    }
+    let contexts = failure_contexts(stdout, plan, &work.root, verb);
+    if !contexts.iter().any(|context| {
+        plan.mutants.iter().any(|mutant| {
+            active.contains(&mutant.ordinal)
+                && context
+                    .files
+                    .iter()
+                    .any(|file| super::blame::matches_reported_file(Utf8Path::new(file), mutant.file.as_ref(), &work.root))
+        })
+    }) {
+        let cause = UnattributableProof::new(outcome.failure_context.clone(), outcome.stderr.clone());
+        return Err(error!("{cause}").caused_by(cause));
+    }
+    Ok(Some(true))
 }
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use core::error::Error as _;
+
     use serde_json::{Value, from_str, from_value, json};
 
     use super::*;
     use crate::error::error;
+
+    #[test]
+    fn noncompiler_and_unrelated_proof_failures_never_convict_a_subset() {
+        let root = Utf8Path::new("workspace");
+        let work = Workspace::adopt(root.to_owned(), root.join("target"));
+        let mut plan = plan(root, 2);
+        plan.mutants[1].file = Utf8Path::new("src/other.rs").into();
+        let mut outcome = super::super::invoke::Compiled {
+            succeeded: false,
+            failure_context: "Cargo finished with signal 9".into(),
+            stdout: Some(String::new()),
+            stderr: "linker failed: disk full".into(),
+        };
+        let noncompiler = proof_result(&outcome, &plan, &work, &["check", "--lib"], &HashSet::from_iter([1])).unwrap_err();
+        let cause = noncompiler.source().unwrap().downcast_ref::<UnattributableProof>().unwrap();
+        assert_eq!(cause.failure_context, outcome.failure_context);
+        assert_eq!(cause.stderr, outcome.stderr);
+        outcome.stdout = Some(error_stream());
+        assert_eq!(
+            proof_result(&outcome, &plan, &work, &["check", "--lib"], &HashSet::from_iter([1])).unwrap(),
+            Some(true)
+        );
+        let unrelated = proof_result(&outcome, &plan, &work, &["check", "--lib"], &HashSet::from_iter([2])).unwrap_err();
+        let cause = unrelated.source().unwrap().downcast_ref::<UnattributableProof>().unwrap();
+        assert_eq!(cause.failure_context, outcome.failure_context);
+        assert_eq!(cause.stderr, outcome.stderr);
+        outcome.succeeded = true;
+        assert_eq!(
+            proof_result(&outcome, &plan, &work, &["check", "--lib"], &HashSet::from_iter([1])).unwrap(),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn proof_result_uses_component_suffixes_only_for_absolute_paths_outside_the_workspace() {
+        let root = Utf8Path::new(if cfg!(windows) { "C:\\prepared" } else { "/prepared" });
+        let work = Workspace::adopt(root.to_owned(), root.join("target"));
+        let mut plan = plan(root, 1);
+        plan.mutants[0].file = Utf8Path::new("crates/pkg/src/lib.rs").into();
+        let outside = if cfg!(windows) { "C:\\elsewhere" } else { "/elsewhere" };
+        for (file, allowed) in [
+            ("crates/pkg/src/lib.rs".to_owned(), true),
+            (root.join("crates/pkg/src/lib.rs").to_string(), true),
+            (format!("{outside}/crates/pkg/src/lib.rs"), true),
+            ("elsewhere/crates/pkg/src/lib.rs".to_owned(), false),
+            (root.join("other/crates/pkg/src/lib.rs").to_string(), false),
+            (format!("{outside}/src/lib.rs"), false),
+            (format!("{outside}/crates/other/src/lib.rs"), false),
+        ] {
+            let mut diagnostic: Value = from_str(&error_stream()).unwrap();
+            diagnostic["message"]["spans"][0]["file_name"] = file.clone().into();
+            let outcome = super::super::invoke::Compiled {
+                succeeded: false,
+                failure_context: "compiler failed".into(),
+                stdout: Some(diagnostic.to_string()),
+                stderr: "compiler stderr".into(),
+            };
+            let actual = proof_result(&outcome, &plan, &work, &["check", "--lib"], &HashSet::from_iter([1]));
+            if allowed {
+                assert_eq!(actual.unwrap(), Some(true), "{file}");
+            } else {
+                assert_eq!(
+                    actual.unwrap_err().message(),
+                    "compile isolation stopped because its proof failed without attributable compiler errors:\ncompiler failed\ncompiler stderr",
+                    "{file}"
+                );
+            }
+        }
+    }
+
+    #[derive(Debug, Default, PartialEq, Eq)]
+    pub(super) struct CostWork {
+        pub(super) index_mutants: usize,
+        pub(super) index_packages: usize,
+        pub(super) index_dependencies: usize,
+        pub(super) ordinal_lookups: usize,
+        pub(super) metadata: usize,
+        pub(super) dependent_entries: usize,
+        scan_mutants: usize,
+        scan_packages: usize,
+    }
+
+    thread_local! {
+        static COST_WORK: std::cell::RefCell<CostWork> = std::cell::RefCell::default();
+    }
+
+    pub(super) fn cost_work(update: impl FnOnce(&mut CostWork)) {
+        COST_WORK.with_borrow_mut(update);
+    }
+
+    fn take_cost_work() -> CostWork {
+        COST_WORK.with_borrow_mut(core::mem::take)
+    }
+
+    fn scan_cost(plan: &Plan, previous: &HashSet<u32>, background: &HashSet<u32>, active: &[u32]) -> (usize, usize, bool) {
+        let active = active.iter().copied().collect::<HashSet<_>>();
+        let changed = previous
+            .symmetric_difference(&active)
+            .filter(|ordinal| !background.contains(ordinal))
+            .copied()
+            .collect::<HashSet<_>>();
+        let mut files = HashSet::default();
+        let mut packages = HashSet::default();
+        let mut nonlocal = false;
+        for mutant in &plan.mutants {
+            cost_work(|work| work.scan_mutants += 1);
+            nonlocal |= active.contains(&mutant.ordinal) && may_have_nonlocal_effects(mutant);
+            if changed.contains(&mutant.ordinal) {
+                let _ = files.insert(mutant.file.as_ref());
+                let _ = packages.insert(mutant.package.as_ref());
+            }
+        }
+        let mut rebuilt = packages.clone();
+        for (package, dependencies) in &plan.reach {
+            cost_work(|work| work.scan_packages += 1);
+            if dependencies.iter().any(|dependency| packages.contains(dependency.as_str())) {
+                let _ = rebuilt.insert(package.as_str());
+            }
+        }
+        (rebuilt.len(), files.len(), !nonlocal)
+    }
+
+    #[test]
+    fn indexed_cost_matches_scan_across_active_background_and_historical_ordinals() {
+        let mut plan = plan(Utf8Path::new("indexed-cost"), 6);
+        for (mutant, (ordinal, package, file, mutator)) in plan.mutants.iter_mut().zip([
+            (1, "leaf", "shared.rs", "literal.int_to_zero"),
+            (2, "leaf", "shared.rs", "stmt.delete_assign"),
+            (3, "middle", "middle.rs", "literal.int_to_zero"),
+            (4, "unmapped", "unmapped.rs", "literal.int_to_zero"),
+            (0, "history-a", "history-a.rs", "literal.int_to_zero"),
+            (0, "history-b", "history-b.rs", "fn_value.zero"),
+        ]) {
+            mutant.ordinal = ordinal;
+            mutant.package = package.into();
+            mutant.file = Utf8Path::new(file).into();
+            mutant.mutator = mutator.into();
+        }
+        plan.reach = [
+            ("middle", vec!["leaf", "middle"]),
+            ("top", vec!["middle"]),
+            ("overlap", vec!["leaf", "middle"]),
+            ("unrelated", vec!["unrelated"]),
+        ]
+        .into_iter()
+        .map(|(package, dependencies)| (package.to_owned(), dependencies.into_iter().map(str::to_owned).collect()))
+        .collect();
+        let costs = ProofCostIndex::new(&plan);
+        let ordinals = [0, 1, 2, 3, 4, 99];
+        let population = |mask| {
+            ordinals
+                .iter()
+                .enumerate()
+                .filter_map(|(bit, ordinal)| (mask & (1 << bit) != 0).then_some(*ordinal))
+                .collect::<Vec<_>>()
+        };
+        for previous in 0..64 {
+            let previous = population(previous).into_iter().collect();
+            for active in 0..64 {
+                let mut active = population(active);
+                active.extend(active.clone());
+                for background in [vec![], vec![2], vec![0, 1, 3, 99]] {
+                    let background = background.into_iter().collect();
+                    assert_eq!(
+                        costs.cost(&previous, &background, &active),
+                        scan_cost(&plan, &previous, &background, &active),
+                        "previous={previous:?}, background={background:?}, active={active:?}",
+                    );
+                }
+            }
+        }
+        assert_eq!(costs.cost(&HashSet::default(), &HashSet::default(), &[1]), (3, 1, true));
+        assert_eq!(costs.cost(&HashSet::default(), &HashSet::default(), &[4]), (1, 1, true));
+        assert_eq!(costs.cost(&HashSet::from_iter([2]), &HashSet::default(), &[2]), (0, 0, false));
+        assert_eq!(costs.cost(&HashSet::from_iter([2]), &HashSet::from_iter([2]), &[]), (0, 0, true));
+    }
+
+    #[test]
+    fn indexed_cost_work_tracks_selected_metadata_and_reverse_reach_not_plan_population() {
+        let mut plan = plan(Utf8Path::new("indexed-cost-work"), 8_192);
+        for mutant in &mut plan.mutants[8..] {
+            mutant.package = "cold".into();
+        }
+        plan.mutants[1].mutator = "stmt.delete_assign".into();
+        plan.reach = (0..256)
+            .map(|number| {
+                (
+                    format!("package-{number}"),
+                    HashSet::from_iter([if number < 4 { "subject" } else { "cold" }.to_owned()]),
+                )
+            })
+            .collect();
+        let _ = take_cost_work();
+        let costs = ProofCostIndex::new(&plan);
+        assert_eq!(
+            take_cost_work(),
+            CostWork {
+                index_mutants: 8_192,
+                index_packages: 256,
+                index_dependencies: 256,
+                ..CostWork::default()
+            },
+        );
+        assert_eq!(costs.mutants.len(), 8_192);
+        assert_eq!(costs.mutants.values().map(Vec::len).sum::<usize>(), 8_192);
+        assert_eq!(costs.dependents.len(), 2);
+        assert_eq!(costs.dependents.values().map(Vec::len).sum::<usize>(), 256);
+
+        let mut converger = Converger {
+            proof_active: HashSet::from_iter([1, 2, 8_192]),
+            proof_background: HashSet::from_iter([8_192]),
+            ..Converger::default()
+        };
+        for active in [&[1][..], &[2][..], &[1, 2][..], &[1][..]] {
+            assert_eq!(
+                converger.proof_cost(&costs, active),
+                scan_cost(&plan, &converger.proof_active, &converger.proof_background, active),
+            );
+            converger.proof_active = converger.proof_background.clone();
+            converger.proof_active.extend(active);
+        }
+        assert_eq!(
+            take_cost_work(),
+            CostWork {
+                ordinal_lookups: 10,
+                metadata: 10,
+                dependent_entries: 16,
+                scan_mutants: 32_768,
+                scan_packages: 1_024,
+                ..CostWork::default()
+            },
+        );
+    }
 
     #[derive(Default)]
     struct ProofEvents {
@@ -1044,7 +1606,1047 @@ mod tests {
         }
     }
 
+    #[test]
+    fn deferred_partitions_deduplicate_prune_withdrawals_and_wait_for_complete_eligibility() {
+        let plan = plan(Utf8Path::new("deferred-partitions"), 5);
+        let population = plan.mutants.iter().collect::<Vec<_>>();
+        let mut proofs = Proofs::default();
+        proofs.defer(&[]);
+        proofs.defer(&population[..2]);
+        proofs.defer(&[population[1], population[0]]);
+        proofs.defer(&population[2..4]);
+        proofs.defer(&population[4..]);
+        assert_eq!(proofs.pending, [vec![1, 2], vec![3, 4], vec![5]]);
+        let eligible = HashSet::from_iter([1, 3]);
+        let withdrawn = HashSet::from_iter([2, 5]);
+        let mut costed = Vec::new();
+        assert_eq!(
+            proofs.next_partition(&eligible, &withdrawn, |partition| {
+                costed.push(partition.to_vec());
+                (0, 0, false)
+            }),
+            Some(vec![1]),
+        );
+        assert!(costed.iter().all(|partition| partition == &[1]));
+        assert_eq!(proofs.pending, [vec![3, 4]]);
+        assert_eq!(
+            proofs.next_partition(&eligible, &withdrawn, |_| panic!("ineligible partition")),
+            None
+        );
+        assert_eq!(
+            proofs.next_partition(&HashSet::from_iter([3, 4]), &withdrawn, |_| (0, 0, false)),
+            Some(vec![3, 4]),
+        );
+        assert_eq!(proofs.pending, Vec::<Vec<u32>>::new());
+    }
+
+    #[test]
+    fn proof_cost_prioritizes_body_statement_and_loop_edits_after_equal_rebuild_costs() {
+        let mut plan = plan(Utf8Path::new("proof-cost"), 1);
+        let converger = Converger::default();
+        for (mutator, nonlocal) in [
+            ("fn_value.zero", true),
+            ("stmt.delete_assign", true),
+            ("loop.delete_continue", true),
+            ("parameter.default_shadow", true),
+            ("cond.always_true", true),
+            ("literal.int_to_zero", false),
+            ("custom.fn_value.", false),
+            ("custom.loop.", false),
+        ] {
+            plan.mutants[0].mutator = mutator.into();
+            assert_eq!(
+                converger.proof_cost(&ProofCostIndex::new(&plan), &[1]),
+                (1, 1, !nonlocal),
+                "{mutator}"
+            );
+        }
+    }
+
+    #[test]
+    fn deferred_proof_transport_errors_propagate_before_narrowing_or_publishing_blame() {
+        let work = memory_workspace();
+        let plan = plan(&work.root, 3);
+        let mut proofs = Proofs {
+            results: HashMap::from_iter([(vec![1, 2, 3], Some(true))]),
+            pending: vec![vec![2]],
+            ..Proofs::default()
+        };
+        let mut converger = Converger::default();
+        let failure = super::super::with_compiler(
+            |_, _, _, _| Err(error!("deferred proof transport failed")),
+            || {
+                converger.isolate_candidates(
+                    &work,
+                    &plan,
+                    BuildScope {
+                        roots: None,
+                        mutants: None,
+                        publish_progress: false,
+                    },
+                    &["check"],
+                    BuildLimits::default(),
+                    &mut ProofEvents::default(),
+                    &HashSet::from_iter([1, 2, 3]),
+                    &mut proofs,
+                )
+            },
+        )
+        .unwrap_err();
+        assert_eq!(failure.message(), "deferred proof transport failed");
+        assert!(converger.withdrawn.is_empty());
+        assert!(proofs.attributed.is_empty());
+        assert_eq!(proofs.local, 1);
+    }
+
+    #[test]
+    fn isolation_orchestration_reuses_only_proofs_from_the_same_frozen_source_generation() {
+        let work = memory_workspace();
+        let mut plan = plan(&work.root, 1);
+        let path = Utf8PathBuf::from("src/lib.rs");
+        plan.files.push(crate::discover::TargetFile {
+            absolute: work.root.join(&path),
+            path: path.clone(),
+            package: "subject".into(),
+            source: None,
+        });
+        let mut converger = Converger {
+            subset_oracle: Some(|_| Some(false)),
+            ..Converger::default()
+        };
+        proof_cache::with_identity(Some([7; 32]), || {
+            for source in ["fn value() -> u32 { 1 }", "fn value() -> u32 { 2 }"] {
+                plan.files[0].source = Some(source.into());
+                let _previous = plan.digests.insert(path.clone(), crate::discover::digest(source.as_bytes()));
+                for round in 0..2 {
+                    converger.begin_convergence();
+                    assert!(
+                        converger
+                            .isolate_scoped(
+                                &work,
+                                &plan,
+                                &error_stream(),
+                                &["check", "--tests"],
+                                None,
+                                BuildLimits::default(),
+                                &mut ProofEvents::default(),
+                            )
+                            .unwrap()
+                            .is_empty()
+                    );
+                    assert_eq!(converger.isolation_budget.proofs, usize::from(round == 0));
+                    assert!(converger.withdrawn.is_empty());
+                }
+            }
+        });
+        assert_eq!(converger.proof_roots.len(), 2);
+    }
+
+    #[test]
+    fn definitive_proofs_reuse_across_rounds_without_spending_another_launch() {
+        let work = memory_workspace();
+        let plan = plan(&work.root, 2);
+        let population = plan.mutants.iter().collect::<Vec<_>>();
+        let scope = BuildScope {
+            roots: None,
+            mutants: None,
+            publish_progress: false,
+        };
+        for oracle in [
+            (|_: &HashSet<u32>| Some(false)) as super::super::SubsetOracle,
+            |_| Some(true),
+            |_| None,
+        ] {
+            let mut converger = Converger {
+                subset_oracle: Some(oracle),
+                ..Converger::default()
+            };
+            proof_cache::with_identity(Some([7; 32]), || {
+                let mut first = Proofs {
+                    reuse_generation: Some([1; 32]),
+                    ..Proofs::default()
+                };
+                let original = converger
+                    .subset_fails(
+                        &work,
+                        &plan,
+                        scope,
+                        &["check", "--tests"],
+                        BuildLimits::default(),
+                        &mut ProofEvents::default(),
+                        &population,
+                        &population,
+                        &mut first,
+                    )
+                    .unwrap();
+                assert_eq!(first.local, 1);
+                converger.begin_convergence();
+                let mut second = Proofs {
+                    reuse_generation: Some([1; 32]),
+                    ..Proofs::default()
+                };
+                assert_eq!(
+                    converger
+                        .subset_fails(
+                            &work,
+                            &plan,
+                            scope,
+                            &["check", "--tests"],
+                            BuildLimits::default(),
+                            &mut ProofEvents::default(),
+                            &population,
+                            &population,
+                            &mut second,
+                        )
+                        .unwrap(),
+                    original
+                );
+                assert_eq!(
+                    converger
+                        .subset_fails(
+                            &work,
+                            &plan,
+                            scope,
+                            &["check", "--tests"],
+                            BuildLimits::default(),
+                            &mut ProofEvents::default(),
+                            &population,
+                            &population,
+                            &mut second,
+                        )
+                        .unwrap(),
+                    original,
+                    "a cross-round cache hit remains a definitive local verdict on repeated queries"
+                );
+                let launches = usize::from(original.is_none());
+                assert_eq!(second.local, launches);
+                assert_eq!(converger.isolation_budget.proofs, launches);
+                assert_eq!(converger.proof_roots.len(), 1 + launches);
+            });
+        }
+    }
+
+    #[test]
+    fn cross_round_reuse_declines_unknown_and_changed_compilation_identities() {
+        let work = memory_workspace();
+        let plan = plan(&work.root, 1);
+        let population = plan.mutants.iter().collect::<Vec<_>>();
+        let scope = BuildScope {
+            roots: None,
+            mutants: None,
+            publish_progress: false,
+        };
+        let mut converger = Converger {
+            subset_oracle: Some(|_| Some(false)),
+            ..Converger::default()
+        };
+        for compilation in [Some([1; 32]), None, Some([2; 32])] {
+            proof_cache::with_identity(compilation, || {
+                let mut proofs = Proofs {
+                    reuse_generation: Some([1; 32]),
+                    ..Proofs::default()
+                };
+                assert_eq!(
+                    converger
+                        .subset_fails(
+                            &work,
+                            &plan,
+                            scope,
+                            &["check"],
+                            BuildLimits::default(),
+                            &mut ProofEvents::default(),
+                            &population,
+                            &population,
+                            &mut proofs,
+                        )
+                        .unwrap(),
+                    Some(false)
+                );
+                assert_eq!(proofs.local, 1);
+            });
+        }
+        assert_eq!(converger.proof_roots.len(), 3);
+    }
+
+    #[test]
+    fn actual_proof_results_reuse_only_after_an_unchanged_complete_compilation_context() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        use crate::exec::proof_context::{Operation, with_operations};
+
+        for succeeded in [true, false] {
+            for after_first in [Some([1; 32]), Some([2; 32]), None] {
+                let work = memory_workspace();
+                let plan = plan(&work.root, 1);
+                let population = plan.mutants.iter().collect::<Vec<_>>();
+                let identity = Rc::new(Cell::new(Some([1; 32])));
+                let calls = Rc::new(Cell::new(0));
+                let compiler_identity = Rc::clone(&identity);
+                let compiler_calls = Rc::clone(&calls);
+                let observed_identity = Rc::clone(&identity);
+                let mut converger = Converger::default();
+                super::super::with_compiler(
+                    move |_, _, _, _| {
+                        compiler_calls.set(compiler_calls.get() + 1);
+                        if compiler_calls.get() == 1 {
+                            compiler_identity.set(after_first);
+                        }
+                        let stdout = if succeeded { String::new() } else { error_stream() };
+                        Ok(Some(super::super::tests::scripted_output(succeeded, &stdout, "")))
+                    },
+                    || {
+                        with_operations(
+                            move |operation| match operation {
+                                Operation::Identity(_) => observed_identity.get(),
+                                Operation::Seal(_, _) | Operation::Invalidate => None,
+                            },
+                            || {
+                                for round in 0..3 {
+                                    converger.begin_convergence();
+                                    let mut proofs = Proofs {
+                                        reuse_generation: Some([7; 32]),
+                                        ..Proofs::default()
+                                    };
+                                    assert_eq!(
+                                        converger
+                                            .subset_fails(
+                                                &work,
+                                                &plan,
+                                                BuildScope {
+                                                    roots: None,
+                                                    mutants: None,
+                                                    publish_progress: false
+                                                },
+                                                &["check", "--tests"],
+                                                BuildLimits::default(),
+                                                &mut ProofEvents::default(),
+                                                &population,
+                                                &population,
+                                                &mut proofs,
+                                            )
+                                            .unwrap(),
+                                        Some(!succeeded)
+                                    );
+                                    let expected = match after_first {
+                                        Some(value) if value == [1; 32] => 1,
+                                        Some(_) => (round + 1).min(2),
+                                        None => round + 1,
+                                    };
+                                    assert_eq!(calls.get(), expected, "round {round}, context {after_first:?}");
+                                }
+                            },
+                        );
+                    },
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn transient_context_changes_cannot_publish_a_proof_for_a_later_return_to_the_old_identity() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        use crate::exec::proof_context::{Operation, with_operations};
+
+        for scripted_oracle in [false, true] {
+            let work = memory_workspace();
+            let plan = plan(&work.root, 1);
+            let population = plan.mutants.iter().collect::<Vec<_>>();
+            let reads = Rc::new(Cell::new(0));
+            let observed_reads = Rc::clone(&reads);
+            let calls = Rc::new(Cell::new(0));
+            let compiler_calls = Rc::clone(&calls);
+            let mut converger = Converger {
+                subset_oracle: scripted_oracle.then_some((|_| Some(true)) as super::super::SubsetOracle),
+                ..Converger::default()
+            };
+            super::super::with_compiler(
+                move |_, _, _, _| {
+                    compiler_calls.set(compiler_calls.get() + 1);
+                    let succeeded = compiler_calls.get() != 1;
+                    let stdout = if succeeded { String::new() } else { error_stream() };
+                    Ok(Some(super::super::tests::scripted_output(succeeded, &stdout, "")))
+                },
+                || {
+                    with_operations(
+                        move |operation| match operation {
+                            Operation::Identity(_) => {
+                                observed_reads.set(observed_reads.get() + 1);
+                                Some(if observed_reads.get() == 2 { [2; 32] } else { [1; 32] })
+                            }
+                            Operation::Seal(_, _) | Operation::Invalidate => None,
+                        },
+                        || {
+                            for round in 0..3 {
+                                converger.begin_convergence();
+                                let mut proofs = Proofs {
+                                    reuse_generation: Some([7; 32]),
+                                    ..Proofs::default()
+                                };
+                                let verdict = converger
+                                    .subset_fails(
+                                        &work,
+                                        &plan,
+                                        BuildScope {
+                                            roots: None,
+                                            mutants: None,
+                                            publish_progress: false,
+                                        },
+                                        &["check"],
+                                        BuildLimits::default(),
+                                        &mut ProofEvents::default(),
+                                        &population,
+                                        &population,
+                                        &mut proofs,
+                                    )
+                                    .unwrap();
+                                assert_eq!(verdict, Some(scripted_oracle || round == 0));
+                                assert_eq!(proofs.local, usize::from(round < 2));
+                            }
+                        },
+                    );
+                },
+            );
+            assert_eq!(calls.get(), if scripted_oracle { 0 } else { 2 });
+            if scripted_oracle {
+                assert_eq!(converger.proof_roots.len(), 2);
+            }
+        }
+    }
+
+    #[test]
+    fn oracle_side_effects_cannot_publish_stale_verdicts_when_the_original_identity_returns() {
+        use std::cell::Cell;
+
+        use crate::exec::proof_context::{Operation, with_operations};
+
+        thread_local! {
+            static CONTEXT: Cell<[u8; 32]> = const { Cell::new([1; 32]) };
+            static CALLS: Cell<usize> = const { Cell::new(0) };
+        }
+        CONTEXT.set([1; 32]);
+        CALLS.set(0);
+        let work = memory_workspace();
+        let plan = plan(&work.root, 1);
+        let population = plan.mutants.iter().collect::<Vec<_>>();
+        let mut converger = Converger {
+            subset_oracle: Some(|_| {
+                let first = CALLS.replace(CALLS.get() + 1) == 0;
+                if first {
+                    CONTEXT.set([2; 32]);
+                }
+                Some(first)
+            }),
+            ..Converger::default()
+        };
+        with_operations(
+            |operation| match operation {
+                Operation::Identity(_) => Some(CONTEXT.get()),
+                _ => None,
+            },
+            || {
+                for round in 0..3 {
+                    CONTEXT.set([1; 32]);
+                    converger.begin_convergence();
+                    let mut proofs = Proofs {
+                        reuse_generation: Some([7; 32]),
+                        ..Proofs::default()
+                    };
+                    assert_eq!(
+                        converger
+                            .subset_fails(
+                                &work,
+                                &plan,
+                                BuildScope {
+                                    roots: None,
+                                    mutants: None,
+                                    publish_progress: false
+                                },
+                                &["check"],
+                                BuildLimits::default(),
+                                &mut ProofEvents::default(),
+                                &population,
+                                &population,
+                                &mut proofs,
+                            )
+                            .unwrap(),
+                        Some(round == 0)
+                    );
+                    assert_eq!(proofs.local, usize::from(round < 2));
+                }
+            },
+        );
+        assert_eq!(CALLS.get(), 2);
+    }
+
+    #[test]
+    fn attributed_compiler_errors_do_not_become_cross_round_subset_verdicts() {
+        let work = memory_workspace();
+        let plan = plan(&work.root, 1);
+        let position = |line| crate::schema::Position::new(line, 1).unwrap();
+        let guards = HashMap::from_iter([(
+            1,
+            (
+                "src/lib.rs".into(),
+                crate::schema::Guard {
+                    site: position(10)..position(12),
+                    mutated: Some(position(10)..position(11)),
+                },
+            ),
+        )]);
+        let mut converger = Converger {
+            splices: super::super::Splices::seeded_guards_for_test(work.root.clone(), guards),
+            ..Converger::default()
+        };
+        let diagnostic = json!({
+            "reason": "compiler-message",
+            "package_id": "subject 0.0.0",
+            "target": {"name": "subject", "kind": ["lib"]},
+            "message": {
+                "level": "error", "message": "independent type error", "code": {"code": "E0308"},
+                "spans": [{"file_name": "src/lib.rs", "is_primary": true,
+                           "line_start": 10, "column_start": 1, "line_end": 10, "column_end": 2}]
+            }
+        })
+        .to_string();
+        let mut calls = 0;
+        super::super::with_compiler(
+            move |_, _, _, _| {
+                calls += 1;
+                Ok(Some(super::super::tests::scripted_output(
+                    calls != 1,
+                    if calls == 1 { &diagnostic } else { "{}" },
+                    "",
+                )))
+            },
+            || {
+                proof_cache::with_identity(Some([1; 32]), || {
+                    let population = plan.mutants.iter().collect::<Vec<_>>();
+                    for round in 0..2 {
+                        converger.begin_convergence();
+                        let mut proofs = Proofs {
+                            reuse_generation: Some([7; 32]),
+                            ..Proofs::default()
+                        };
+                        assert_eq!(
+                            converger
+                                .subset_fails(
+                                    &work,
+                                    &plan,
+                                    BuildScope {
+                                        roots: None,
+                                        mutants: None,
+                                        publish_progress: false
+                                    },
+                                    &["check"],
+                                    BuildLimits::default(),
+                                    &mut ProofEvents::default(),
+                                    &population,
+                                    &population,
+                                    &mut proofs,
+                                )
+                                .unwrap(),
+                            if round == 0 { None } else { Some(false) }
+                        );
+                        assert_eq!(proofs.local, 1);
+                        assert_eq!(proofs.attributed.len(), usize::from(round == 0));
+                    }
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn attributed_failures_stop_cached_subsets_and_interaction_minimization() {
+        let work = memory_workspace();
+        let plan = plan(&work.root, 3);
+        let population = plan.mutants.iter().collect::<Vec<_>>();
+        let mut converger = Converger {
+            subset_oracle: Some(|_| panic!("an attributed failure ends proof search")),
+            ..Converger::default()
+        };
+        let mut proofs = Proofs {
+            attributed: HashMap::from_iter([(2, CompilerReason::isolated())]),
+            results: HashMap::from_iter([(vec![1, 2, 3], Some(true))]),
+            ..Proofs::default()
+        };
+        let scope = BuildScope {
+            roots: None,
+            mutants: None,
+            publish_progress: false,
+        };
+        let mut events = ProofEvents::default();
+        assert_eq!(
+            converger
+                .subset_fails(
+                    &work,
+                    &plan,
+                    scope,
+                    &["check"],
+                    BuildLimits::default(),
+                    &mut events,
+                    &population,
+                    &population,
+                    &mut proofs,
+                )
+                .unwrap(),
+            None,
+        );
+        assert_eq!(
+            converger
+                .minimize_interaction(
+                    &work,
+                    &plan,
+                    scope,
+                    &["check"],
+                    BuildLimits::default(),
+                    &mut events,
+                    &population,
+                    &population,
+                    &mut proofs,
+                )
+                .unwrap(),
+            None,
+        );
+        assert_eq!(proofs.local, 0);
+        assert_eq!(converger.isolation_budget.proofs, 0);
+    }
+
+    #[test]
+    fn item_narrowing_keeps_packages_files_and_item_paths_as_distinct_groups() {
+        thread_local! {
+            static QUERIES: std::cell::RefCell<Vec<Vec<u32>>> = const { std::cell::RefCell::new(Vec::new()) };
+        }
+        let work = memory_workspace();
+        for (package, file, item) in [("b", "a.rs", "first"), ("a", "b.rs", "first"), ("a", "a.rs", "second")] {
+            let mut plan = plan(&work.root, 5);
+            for mutant in &mut plan.mutants {
+                let (package, file, item) = if mutant.ordinal <= 3 {
+                    ("a", "a.rs", "first")
+                } else {
+                    (package, file, item)
+                };
+                mutant.package = package.into();
+                mutant.file = Utf8Path::new(file).into();
+                mutant.item_path = item.into();
+            }
+            QUERIES.with_borrow_mut(Vec::clear);
+            let mut converger = Converger {
+                subset_oracle: Some(|active| {
+                    let mut key = active.iter().copied().collect::<Vec<_>>();
+                    key.sort_unstable();
+                    QUERIES.with_borrow_mut(|queries| queries.push(key));
+                    Some(active.contains(&1))
+                }),
+                ..Converger::default()
+            };
+            let mut proofs = Proofs::default();
+            let result = converger
+                .narrow_candidates(
+                    &work,
+                    &plan,
+                    BuildScope {
+                        roots: None,
+                        mutants: None,
+                        publish_progress: false,
+                    },
+                    &["check"],
+                    BuildLimits::default(),
+                    &mut ProofEvents::default(),
+                    plan.mutants.iter().collect(),
+                    &mut proofs,
+                    &ProofCostIndex::new(&plan),
+                )
+                .unwrap();
+            assert!(matches!(result, IsolationAttempt::Resolved(Isolation::Blamed(ordinals)) if ordinals == [1]));
+            QUERIES.with_borrow(|queries| assert_eq!(*queries, [vec![1, 2, 3], vec![1]]));
+        }
+    }
+
+    #[test]
+    fn a_clean_cheaper_right_partition_keeps_the_failing_left_partition() {
+        thread_local! {
+            static QUERIES: std::cell::RefCell<Vec<Vec<u32>>> = const { std::cell::RefCell::new(Vec::new()) };
+        }
+        let work = memory_workspace();
+        let mut plan = plan(&work.root, 4);
+        for mutant in &mut plan.mutants {
+            mutant.item_path = format!("item_{}", mutant.ordinal).into();
+        }
+        QUERIES.with_borrow_mut(Vec::clear);
+        let mut converger = Converger {
+            proof_active: HashSet::from_iter([3, 4]),
+            subset_oracle: Some(|active| {
+                let mut key = active.iter().copied().collect::<Vec<_>>();
+                key.sort_unstable();
+                QUERIES.with_borrow_mut(|queries| queries.push(key));
+                Some(active.contains(&1))
+            }),
+            ..Converger::default()
+        };
+        let result = converger
+            .narrow_candidates(
+                &work,
+                &plan,
+                BuildScope {
+                    roots: None,
+                    mutants: None,
+                    publish_progress: false,
+                },
+                &["check"],
+                BuildLimits::default(),
+                &mut ProofEvents::default(),
+                plan.mutants.iter().collect(),
+                &mut Proofs::default(),
+                &ProofCostIndex::new(&plan),
+            )
+            .unwrap();
+        assert!(matches!(result, IsolationAttempt::Resolved(Isolation::Blamed(ordinals)) if ordinals == [1]));
+        QUERIES.with_borrow(|queries| assert_eq!(*queries, [vec![3, 4], vec![1, 2], vec![1]]));
+    }
+
+    #[test]
+    fn actual_subset_diagnostics_attribute_only_active_unwithdrawn_independent_errors_and_cache_the_result() {
+        let work = memory_workspace();
+        let mut plan = plan(&work.root, 5);
+        plan.mutants[4].package = "foreign".into();
+        let position = |line| crate::schema::Position::new(line, 1).unwrap();
+        let guards = (1..=5)
+            .map(|ordinal| {
+                (
+                    ordinal,
+                    (
+                        "src/lib.rs".into(),
+                        crate::schema::Guard {
+                            site: position(ordinal * 10)..position(ordinal * 10 + 2),
+                            mutated: (ordinal != 4).then(|| position(ordinal * 10)..position(ordinal * 10 + 1)),
+                        },
+                    ),
+                )
+            })
+            .collect();
+        let mut converger = Converger {
+            splices: super::super::Splices::seeded_guards_for_test(work.root.clone(), guards),
+            withdrawn: HashSet::from_iter([2]),
+            proof_background: HashSet::from_iter([3]),
+            ..Converger::default()
+        };
+        let diagnostics = (1..=5)
+            .map(|ordinal| {
+                json!({
+                    "reason": "compiler-message",
+                    "package_id": "subject 0.0.0",
+                    "target": {"name": "subject", "kind": ["lib"]},
+                    "message": {
+                        "level": "error", "message": "independent type error", "code": {"code": "E0308"},
+                        "spans": [{
+                            "file_name": "src/lib.rs", "is_primary": true,
+                            "line_start": ordinal * 10, "column_start": 1,
+                            "line_end": ordinal * 10, "column_end": 2
+                        }]
+                    }
+                })
+                .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut calls = 0;
+        let mut proofs = Proofs::default();
+        let population = plan.mutants.iter().collect::<Vec<_>>();
+        let active = [population[0], population[1], population[3], population[4]];
+        let packages = ["subject".to_owned()];
+        let scope = BuildScope {
+            roots: None,
+            mutants: Some(&packages),
+            publish_progress: false,
+        };
+        super::super::with_compiler(
+            move |_, _, _, _| {
+                calls += 1;
+                assert_eq!(calls, 1, "the populated proof must be cached");
+                Ok(Some(super::super::tests::scripted_output(false, &diagnostics, "")))
+            },
+            || {
+                let mut events = ProofEvents::default();
+                assert_eq!(
+                    converger
+                        .subset_fails(
+                            &work,
+                            &plan,
+                            scope,
+                            &["check"],
+                            BuildLimits::default(),
+                            &mut events,
+                            &population,
+                            &active,
+                            &mut proofs,
+                        )
+                        .unwrap(),
+                    None,
+                );
+                assert_eq!(proofs.attributed.keys().copied().collect::<HashSet<_>>(), HashSet::from_iter([1]));
+                assert_eq!(proofs.attributed[&1].code, "E0308");
+                proofs.attributed.clear();
+                assert_eq!(
+                    converger
+                        .subset_fails(
+                            &work,
+                            &plan,
+                            scope,
+                            &["check"],
+                            BuildLimits::default(),
+                            &mut events,
+                            &population,
+                            &active,
+                            &mut proofs,
+                        )
+                        .unwrap(),
+                    Some(true),
+                );
+                assert_eq!(proofs.local, 1);
+            },
+        );
+    }
+
+    #[test]
+    fn oracle_proofs_replace_the_previous_schema_before_comparing_partition_rebuild_costs() {
+        let work = memory_workspace();
+        let plan = plan(&work.root, 5);
+        let population = plan.mutants.iter().collect::<Vec<_>>();
+        let mut converger = Converger {
+            subset_oracle: Some(|active| {
+                assert_eq!(*active, HashSet::from_iter([1, 2]));
+                Some(false)
+            }),
+            proof_active: HashSet::from_iter([5]),
+            proof_background: HashSet::from_iter([4]),
+            ..Converger::default()
+        };
+        assert_eq!(
+            converger
+                .subset_fails(
+                    &work,
+                    &plan,
+                    BuildScope {
+                        roots: None,
+                        mutants: None,
+                        publish_progress: false,
+                    },
+                    &["check"],
+                    BuildLimits::default(),
+                    &mut ProofEvents::default(),
+                    &population,
+                    &population[..2],
+                    &mut Proofs::default(),
+                )
+                .unwrap(),
+            Some(false),
+        );
+        assert_eq!(converger.proof_cost(&ProofCostIndex::new(&plan), &[1, 2]), (0, 0, true));
+    }
+
+    #[test]
+    fn deletion_only_proof_diagnostics_still_require_independent_confirmation() {
+        let work = memory_workspace();
+        let plan = plan(&work.root, 1);
+        let position = |line| crate::schema::Position::new(line, 1).unwrap();
+        let mut converger = Converger {
+            splices: super::super::Splices::seeded_guards_for_test(
+                work.root.clone(),
+                HashMap::from_iter([(
+                    1,
+                    (
+                        "src/lib.rs".into(),
+                        crate::schema::Guard {
+                            site: position(10)..position(12),
+                            mutated: None,
+                        },
+                    ),
+                )]),
+            ),
+            ..Converger::default()
+        };
+        let diagnostics = json!({
+            "reason": "compiler-message",
+            "package_id": "subject 0.0.0",
+            "target": {"name": "subject", "kind": ["lib"]},
+            "message": {
+                "level": "error", "message": "type error enclosing a deleted assignment", "code": {"code": "E0308"},
+                "spans": [{
+                    "file_name": "src/lib.rs", "is_primary": true,
+                    "line_start": 10, "column_start": 1, "line_end": 10, "column_end": 2
+                }]
+            }
+        })
+        .to_string();
+        let population = plan.mutants.iter().collect::<Vec<_>>();
+        let mut proofs = Proofs::default();
+        let result = super::super::with_compiler(
+            move |_, _, _, _| Ok(Some(super::super::tests::scripted_output(false, &diagnostics, ""))),
+            || {
+                converger.subset_fails(
+                    &work,
+                    &plan,
+                    BuildScope {
+                        roots: None,
+                        mutants: None,
+                        publish_progress: false,
+                    },
+                    &["check"],
+                    BuildLimits::default(),
+                    &mut ProofEvents::default(),
+                    &population,
+                    &population,
+                    &mut proofs,
+                )
+            },
+        )
+        .unwrap();
+        assert_eq!(result, Some(true));
+        assert_eq!(proofs.attributed.len(), 0);
+    }
+
     // Population, failure-predicate mode, ordered compiler queries, and minimal surviving ordinals.
+
+    #[test]
+    fn far_reaching_partitions_reduce_proofs_without_changing_exclusions() {
+        thread_local! {
+            static QUERIES: std::cell::RefCell<Vec<Vec<u32>>> = const { std::cell::RefCell::new(Vec::new()) };
+        }
+        let work = memory_workspace();
+        let mut traces = Vec::new();
+        for classify in [false, true] {
+            let mut plan = plan(&work.root, 8);
+            for mutant in &mut plan.mutants {
+                mutant.item_path = "shared_item".into();
+                mutant.mutator = if classify && [5, 7].contains(&mutant.ordinal) {
+                    "stmt.delete_assign"
+                } else if mutant.ordinal == 2 {
+                    "future.unclassified"
+                } else {
+                    "literal.int_to_zero"
+                }
+                .into();
+            }
+            QUERIES.with_borrow_mut(Vec::clear);
+            let mut converger = Converger {
+                subset_oracle: Some(|active| {
+                    let mut key = active.iter().copied().collect::<Vec<_>>();
+                    key.sort_unstable();
+                    QUERIES.with_borrow_mut(|queries| queries.push(key));
+                    Some(active.contains(&5) || active.contains(&7))
+                }),
+                ..Converger::default()
+            };
+            let isolated = converger
+                .isolate_scoped(
+                    &work,
+                    &plan,
+                    &error_stream(),
+                    &["check"],
+                    None,
+                    BuildLimits::default(),
+                    &mut ProofEvents::default(),
+                )
+                .unwrap();
+            assert!(isolated.iter().all(|result| matches!(result, Isolation::Blamed(_))));
+            assert_eq!(converger.withdrawn, HashSet::from_iter([5, 7]));
+            assert_eq!(converger.census.keys().copied().collect::<HashSet<_>>(), HashSet::from_iter([5, 7]));
+            traces.push(QUERIES.with_borrow(Clone::clone));
+        }
+        assert_eq!(traces[0][0], (1..=8).collect::<Vec<_>>());
+        assert_eq!(traces[1][0], traces[0][0]);
+        assert_eq!((traces[0].len(), traces[1].len()), (9, 7), "{traces:?}");
+    }
+
+    #[test]
+    fn retained_partitions_reduce_repeated_narrowing_without_extra_clean_sibling_proofs() {
+        thread_local! {
+            static FAILURES: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
+            static QUERIES: std::cell::RefCell<Vec<Vec<u32>>> = const { std::cell::RefCell::new(Vec::new()) };
+        }
+        let work = memory_workspace();
+        let plan = plan(&work.root, 16);
+        for (failures, expected_builds) in [(vec![1], 6), (vec![1, 9], 11), (vec![1, 5, 9, 13], 21)] {
+            FAILURES.with_borrow_mut(|values| values.clone_from(&failures));
+            QUERIES.with_borrow_mut(Vec::clear);
+            let mut converger = Converger {
+                subset_oracle: Some(|active| {
+                    let mut key = active.iter().copied().collect::<Vec<_>>();
+                    key.sort_unstable();
+                    QUERIES.with_borrow_mut(|queries| queries.push(key));
+                    Some(FAILURES.with_borrow(|failures| failures.iter().any(|ordinal| active.contains(ordinal))))
+                }),
+                ..Converger::default()
+            };
+            let isolated = converger
+                .isolate_scoped(
+                    &work,
+                    &plan,
+                    &error_stream(),
+                    &["check"],
+                    None,
+                    BuildLimits::default(),
+                    &mut ProofEvents::default(),
+                )
+                .unwrap();
+            assert!(isolated.iter().all(|result| matches!(result, Isolation::Blamed(_))));
+            assert_eq!(converger.withdrawn, failures.iter().copied().collect());
+            assert_eq!(converger.isolation_budget.proofs, expected_builds, "{failures:?}");
+            QUERIES.with_borrow(|queries| {
+                assert_eq!(queries.len(), expected_builds);
+                assert_eq!(queries.iter().collect::<HashSet<_>>().len(), queries.len());
+                if failures.len() > 1 {
+                    assert!(queries.contains(&(9..=16).collect::<Vec<_>>()));
+                    assert!(!queries.contains(&(2..=8).collect::<Vec<_>>()));
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn retained_clean_partitions_do_not_hide_a_cross_partition_interaction_after_individual_blame() {
+        let work = memory_workspace();
+        let mut plan = plan(&work.root, 5);
+        for mutant in &mut plan.mutants {
+            mutant.mutator = match mutant.ordinal {
+                1 => "stmt.delete_assign",
+                5 => "future.unclassified",
+                _ => "literal.int_to_zero",
+            }
+            .into();
+        }
+        let mut converger = Converger {
+            subset_oracle: Some(|active| Some(active.contains(&2) || active.contains(&1) && active.contains(&5))),
+            ..Converger::default()
+        };
+        let isolated = converger
+            .isolate_scoped(
+                &work,
+                &plan,
+                &error_stream(),
+                &["check"],
+                None,
+                BuildLimits::default(),
+                &mut ProofEvents::default(),
+            )
+            .unwrap();
+        assert!(
+            isolated
+                .iter()
+                .any(|result| matches!(result, Isolation::Blamed(ordinals) if ordinals == &[2]))
+        );
+        assert!(
+            isolated
+                .iter()
+                .any(|result| matches!(result, Isolation::Interaction { members, .. } if members == &[1, 5]))
+        );
+        assert_eq!(converger.withdrawn, HashSet::from_iter([2]));
+        assert_eq!(converger.census.keys().copied().collect::<HashSet<_>>(), HashSet::from_iter([2]));
+        assert!(converger.isolation_budget.proofs < MAX_ISOLATION_PROOFS);
+    }
 
     #[test]
     fn context_streams_ignore_each_rejected_message_and_choose_the_first_kind_before_harness_routing() {
@@ -1423,6 +3025,7 @@ mod tests {
                     &mut events,
                     17,
                     &HashSet::from_iter([1]),
+                    &mut HashMap::default(),
                 )
             },
         );
@@ -1456,6 +3059,12 @@ mod tests {
                 } else {
                     "shared_item".into()
                 };
+                mutant.mutator = match mutant.ordinal {
+                    1 | 3 => "stmt.delete_assign",
+                    4 => "future.unclassified",
+                    _ => "literal.int_to_zero",
+                }
+                .into();
             }
             for mask in 1..32_u32 {
                 REQUIRED.with(|required| required.set(mask));
@@ -2027,7 +3636,7 @@ mod tests {
         assert!(has_admissible_tier(core::slice::from_ref(&overflow), &one));
     }
 
-    fn plan(root: &Utf8Path, mutants: usize) -> Plan {
+    pub(super) fn plan(root: &Utf8Path, mutants: usize) -> Plan {
         let mut population = (1..=mutants)
             .map(|ordinal| {
                 let mut mutant =

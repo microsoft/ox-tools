@@ -11,7 +11,8 @@ siblings.
 The root workflows, `.github/workflows/anvil-pr.yml` and
 `anvil-scheduled.yml`, control triggers, permissions, secrets, and runner
 overrides. They call `anvil-pr-impl.yml` and `anvil-scheduled-impl.yml`,
-which arrange the jobs and invoke shared actions under `.github/actions/anvil-*`.
+which arrange the jobs and invoke shared actions under
+`.anvil/github/actions/`.
 Customize the roots for repository policy; changing the job graph requires
 editing the implementation workflows.
 
@@ -61,6 +62,8 @@ Two preparation jobs compute impact on Linux and Windows and upload
 family's artifact into `target/anvil/impact/`; ARM legs reuse the corresponding
 x64 result. **Impact is per OS family, not per architecture:** ARM-only
 dependency differences do not receive a separate impact computation.
+Impact preparation fails if its checkout is dirty; only the normal clean cache
+path is eligible for upload.
 
 Most PR groups depend on both preparation jobs; fuzzing depends only on Linux
 impact. A failed preparation blocks its dependent groups. Successful impact
@@ -85,12 +88,19 @@ payload. Lookup failures fail the leg; merge-group runs skip title validation.
 
 ## Toolchains, setup, and caches
 
-The generated configuration requires Rust/Cargo 1.95 or newer and Just 1.46.0
+Every generated job ends with a non-blocking `Report disk usage` step, including
+impact preparation, no-op matrix legs, and result publication. One PowerShell
+command logs filesystem drives and their used/free space, including Windows C:
+and D:, even after earlier failures. It writes no files and scans no directories.
+Reporting failures do not change the checks' verdict. These are final
+observations, not peak usage; runner termination can prevent reporting.
+
+The generated configuration requires Rust/Cargo 1.95 or newer and Just 1.47.0
 or newer. Individual tools can impose higher requirements. Stable-toolchain
 selection follows the [local contract](./local.md): caller
 `RUSTUP_TOOLCHAIN`, then native rustup toolchain-file selection, then the root
-manifest's MSRV. There is no runner-default fallback. The dedicated MSRV group
-uses the root MSRV and skips when none is declared.
+manifest's MSRV, then Cargo's default toolchain when none is declared. The
+dedicated MSRV group uses the root MSRV and skips when none is declared.
 
 Setup expects rustup proxies on `PATH`, bootstraps cargo-binstall and Just, and
 installs the selected group's tools and public toolchains. Custom/path
@@ -116,17 +126,18 @@ Reusable workflows default to `contents: read`. Their callers grant the upper
 permission bound; individual jobs restore only their publication scopes:
 
 - PR groups receive `statuses: write`; only `pr-fast` also receives
-  `pull-requests: write`.
+  `pull-requests: read` to fetch the current pull request title for
+  Conventional Commits validation.
 - Mutation jobs receive `actions: read` and `security-events: write` for SARIF.
 - The scheduled failure publisher receives only `issues: write`, without
   repository-content access.
 
-Status and advisory-comment writes are restricted to same-repository
-`pull_request` events, even if an administrator enables write tokens for
-forks. Merge-group jobs still receive their declared write scopes but do not
-perform those writes. Code-scanning uploads are separate and also run for
-merge groups. Keep scheduled-only credentials out of PR workflows; the
-generated roots use `secrets: inherit`.
+Commit-status writes are restricted to same-repository `pull_request` events,
+even if an administrator enables write tokens for forks. Merge-group jobs
+still receive their declared write scopes but do not perform those writes.
+Code-scanning uploads are separate and also run for merge groups. Keep
+scheduled-only credentials out of PR workflows; the generated roots use
+`secrets: inherit`.
 
 Third-party actions are pinned by commit SHA in the source templates. The
 shared actions are implementation details, not a public per-group action API.
@@ -200,14 +211,6 @@ one, a later failure creates a new issue.
 
 Issues must be enabled and the caller must retain `issues: write`; publication
 errors fail the publishing job rather than silently dropping the notification.
-
-### Advisory PR comments
-
-The canonical Linux `pr-fast` leg maintains the `anvil-semver` sticky comment
-from `target/anvil/comments/semver.md`, even after another check fails.
-Presence upserts the comment; absence deletes it. Fork and merge-group runs
-do not publish. Advisory findings do not themselves fail the recipe; see
-[checks](./checks.md) for the advisory convention.
 
 ## Dependabot ownership
 

@@ -13,8 +13,6 @@ const HELPERS: &str = include_str!("fixtures/helpers.rs");
 const RANGES: &str = include_str!("fixtures/ranges.rs");
 const GUARDED: &str = include_str!("acceptance/guarded.rs");
 const GLOB: &str = include_str!("fixtures/campaign/glob.rs");
-const SURVEY: &str = include_str!("fixtures/campaign/survey.rs");
-const DIFF: &str = include_str!("fixtures/campaign/diff.rs");
 const TEXT: &str = include_str!("fixtures/campaign/report/text.rs");
 const DASHBOARD: &str = include_str!("fixtures/campaign/commands/dashboard.rs");
 const HINTS: &str = include_str!("fixtures/campaign/discover/hints.rs");
@@ -259,8 +257,6 @@ fn local_scalar_helper_effects_are_resolved_without_inventing_progress() {
 const RESOURCE_ACCEPTANCE_GAPS: &[(&str, &str, &str, &str)] = &[
     (GLOB, "tokenize", "stmt.delete_assign", "index += 1"),
     (GLOB, "tokenize", "literal.int_decrement", "1"),
-    (SURVEY, "strongly_connected_components", "literal.int_decrement", "1"),
-    (DIFF, "script", "stmt.delete_assign", "k += 2;"),
     (TEXT, "fit", "stmt.delete_assign", "at += next.len_utf8();"),
     (DASHBOARD, "equalize_panels", "stmt.delete_call", "left.insert"),
     (DASHBOARD, "equalize_panels", "cond.negate", "right.len() < target"),

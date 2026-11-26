@@ -23,7 +23,8 @@
 //! The [`evaluate`] function is the main entry point. For each crate, it:
 //! - Builds a CEL context with all metric values as variables
 //! - Evaluates expressions in order (high-risk-if-any, then eval)
-//! - Returns an [`Appraisal`] with the risk level, score, and reasons
+//! - Returns an [`Appraisal`] with the risk level, score, and reasons, or an error
+//!   if the local time-zone offset cannot be represented by CEL
 //!
 //! The CEL context is created once per crate and reused for all expressions,
 //! significantly improving performance when evaluating multiple expressions.

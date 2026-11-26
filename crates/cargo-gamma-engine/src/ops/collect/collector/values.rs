@@ -104,9 +104,7 @@ pub(super) fn values_for(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Repl
     // An `impl Iterator` is the one exception, and only because it is not really a guess: every
     // iterator can be named through `gamma_rt::Either`, whatever concrete type the body chose.
     if kind != Kind::Iterator && is_abstract_type(resolved, types.abstracts) {
-        return
-        // #[gamma::skip(return_value.default, reason = "The original Vec::new() already constructs the default value of its inferred return type.", tag = "equivalent")]
-        Vec::new();
+        return Vec::new();
     }
 
     if depth > 0 && types.supports_ordering_api(resolved) {
@@ -140,18 +138,14 @@ pub(super) fn values_for(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Repl
     if
     // #[gamma::skip(cond.always_false, tag = "equivalent", reason = "For Unknown without proven Default, both the depth-zero path and the final Unknown match arm call pure default_values, which repeats has_proven_default and returns the same empty vector. This is only an early empty-result return.")]
     kind == Kind::Unknown && !types.has_proven_default(resolved) {
-        return
-        // #[gamma::skip(return_value.default, reason = "The original Vec::new() already constructs the default value of its inferred return type.", tag = "equivalent")]
-        Vec::new();
+        return Vec::new();
     }
     if types
         .collection_hasher_index(resolved)
         .and_then(|index| types.payload(resolved, index))
         .is_some_and(|hasher| types.lacks_default(&hasher))
     {
-        return
-        // #[gamma::skip(return_value.default, reason = "The original Vec::new() already constructs the default value of its inferred return type.", tag = "equivalent")]
-        Vec::new();
+        return Vec::new();
     }
     // An alias must preserve its declared constructor shape rather than borrowing the standard
     // collection spelling of the type it resolves to.
@@ -378,7 +372,7 @@ pub(super) fn values_for(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Repl
             };
             // Unsized string wrappers need shape-specific constructors; `Default` cannot construct
             // their unsized payload directly.
-            if is_unsized_string_wrapper(resolved) {
+            if is_unsized_string_wrapper(resolved, types) {
                 return vec![
                     (
                         "fn_value.empty_string",
@@ -593,9 +587,7 @@ pub(super) fn literal_values(kind: Kind, ty: &Type) -> Vec<ReplacementValue> {
 // #[gamma::skip(parameter.default_shadow, reason = "_depth is deliberately unused and defaulting it cannot affect any reference replacement")]
 pub(super) fn reference_values(ty: &Type, _depth: usize, _types: &Types<'_>) -> Vec<ReplacementValue> {
     let Some(elem) = reference_elem(ty) else {
-        return
-        // #[gamma::skip(return_value.default, reason = "The original Vec::new() already constructs the default value of its inferred return type.", tag = "equivalent")]
-        Vec::new();
+        return Vec::new();
     };
     match strip(ty) {
         Type::Reference(reference) if reference.mutability.is_none() && matches!(strip(elem), Type::Slice(_)) => {
@@ -605,9 +597,11 @@ pub(super) fn reference_values(ty: &Type, _depth: usize, _types: &Types<'_>) -> 
     }
 }
 
-fn is_unsized_string_wrapper(ty: &Type) -> bool {
+fn is_unsized_string_wrapper(ty: &Type, types: &Types<'_>) -> bool {
     matches!(resolve_type(ty), Kind::Wrapper)
-        && type_argument(ty, 0).is_some_and(|inner| matches!(strip(inner), Type::Path(path) if path.path.is_ident("str")))
+        && types
+            .payload(ty, 0)
+            .is_some_and(|inner| types.supports_primitive_type(&inner, "str"))
 }
 
 /// The type a reference points at, seeing through parentheses and invisible grouping.
@@ -642,9 +636,7 @@ pub(super) fn inner_values(ty: &Type, index: usize, depth: usize, types: &Types<
 /// wrapper infers it from the arm holding the original.
 pub(super) fn iterator_item(ty: &Type) -> Option<&Type> {
     let Type::ImplTrait(imp) = strip(ty) else {
-        return
-        // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-        None;
+        return None;
     };
 
     imp.bounds.iter().find_map(|bound| {
@@ -671,20 +663,14 @@ pub(super) fn type_argument(ty: &Type, index: usize) -> Option<&Type> {
 /// The type arguments of a path type, ignoring lifetimes and const generics.
 pub(super) fn type_argument_values(ty: &Type) -> Vec<&Type> {
     let Type::Path(path) = strip(ty) else {
-        return
-        // #[gamma::skip(return_value.default, reason = "The original Vec::new() already constructs the default value of its inferred return type.", tag = "equivalent")]
-        Vec::new();
+        return Vec::new();
     };
 
     let Some(segment) = path.path.segments.last() else {
-        return
-        // #[gamma::skip(return_value.default, reason = "The original Vec::new() already constructs the default value of its inferred return type.", tag = "equivalent")]
-        Vec::new();
+        return Vec::new();
     };
     let PathArguments::AngleBracketed(args) = &segment.arguments else {
-        return
-        // #[gamma::skip(return_value.default, reason = "The original Vec::new() already constructs the default value of its inferred return type.", tag = "equivalent")]
-        Vec::new();
+        return Vec::new();
     };
 
     args.args
@@ -703,9 +689,7 @@ pub(super) fn type_text(ty: &Type) -> String {
 
 pub(super) fn type_name(ty: &Type) -> Option<&syn::Ident> {
     let Type::Path(path) = strip(ty) else {
-        return
-        // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-        None;
+        return None;
     };
     path.path.segments.last().map(|segment| &segment.ident)
 }
@@ -716,9 +700,7 @@ pub(super) fn type_name(ty: &Type) -> Option<&syn::Ident> {
 /// being named: `Cow<'a, str>` names one type, not two.
 pub(super) fn type_arguments(segment: &PathSegment) -> usize {
     let PathArguments::AngleBracketed(args) = &segment.arguments else {
-        return
-        // #[gamma::skip(return_value.default, reason = "The inferred usize literal zero already equals Default::default::<usize>().", tag = "equivalent")]
-        0;
+        return 0;
     };
 
     args.args.iter().filter(|arg| matches!(arg, GenericArgument::Type(_))).count()
@@ -737,19 +719,20 @@ pub(super) fn wrapper_ctor(ty: &Type) -> String {
 /// The written path of a type, without its generic arguments.
 fn path_text(ty: &Type) -> Option<String> {
     let Type::Path(path) = strip(ty) else {
-        return
-        // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-        None;
+        return None;
     };
 
-    Some(
-        path.path
-            .segments
-            .iter()
-            .map(|segment| segment.ident.to_string())
-            .collect::<Vec<_>>()
-            .join("::"),
-    )
+    let mut text = path
+        .path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>()
+        .join("::");
+    if path.path.leading_colon.is_some() {
+        text.insert_str(0, "::");
+    }
+    Some(text)
 }
 
 /// Sees through parentheses to the type underneath.
@@ -789,6 +772,20 @@ pub(super) enum Kind {
     Unknown,
 }
 
+pub(super) fn is_str(ty: &Type) -> bool {
+    let Type::Path(path) = strip(ty) else {
+        return false;
+    };
+    let mut segments = path.path.segments.iter();
+    path.qself.is_none()
+        && (path.path.is_ident("str")
+            || matches!(
+                (segments.next(), segments.next(), segments.next(), segments.next()),
+                (Some(root), Some(module), Some(name), None)
+                    if (root.ident == "std" || root.ident == "core") && module.ident == "primitive" && name.ident == "str"
+            ))
+}
+
 pub(super) fn primitive_kind(name: &str) -> Option<Kind> {
     match name {
         "bool" => Some(Kind::Bool),
@@ -820,7 +817,7 @@ pub(super) fn resolve_type(ty: &Type) -> Kind {
             // Mutability is load-bearing, not decoration: `StaticStr`'s values are string literals,
             // which are `&'static str` and cannot be returned where `&mut str` was promised. A
             // mutable one therefore gets its own kind rather than being folded in here.
-            Type::Path(path) if path.path.is_ident("str") => {
+            elem if is_str(elem) => {
                 if reference.mutability.is_some() {
                     Kind::MutStr
                 } else {
@@ -1443,9 +1440,9 @@ mod tests {
             values_for(&syn::parse_quote!(Result<bool, foreign::bool>), 3, &types),
             [proven("fn_value.ok", "Ok(true)"), proven("fn_value.ok", "Ok(false)")]
         );
-        assert!(!is_unsized_string_wrapper(&syn::parse_quote!(Vec<str>)));
-        assert!(!is_unsized_string_wrapper(&syn::parse_quote!(Option<str>)));
-        assert!(is_unsized_string_wrapper(&syn::parse_quote!(Box<str>)));
+        assert!(!is_unsized_string_wrapper(&syn::parse_quote!(Vec<str>), &types));
+        assert!(!is_unsized_string_wrapper(&syn::parse_quote!(Option<str>), &types));
+        assert!(is_unsized_string_wrapper(&syn::parse_quote!(Box<str>), &types));
     }
 
     #[test]
@@ -2240,6 +2237,14 @@ mod tests {
             (parse_quote!(()), Kind::Unit),
             (parse_quote!(&str), Kind::StaticStr),
             (parse_quote!(&mut str), Kind::MutStr),
+            (parse_quote!(&'static ::core::primitive::str), Kind::StaticStr),
+            (parse_quote!(&mut ::core::primitive::str), Kind::MutStr),
+            (parse_quote!(&std::primitive::str), Kind::StaticStr),
+            (parse_quote!(&[u8]), Kind::Reference),
+            (parse_quote!(&(bool, u8)), Kind::Reference),
+            (parse_quote!(&crate::primitive::str), Kind::Reference),
+            (parse_quote!(&<T>::str), Kind::Reference),
+            (parse_quote!(&<T as core::primitive>::str), Kind::Reference),
             (parse_quote!(NonZeroU8), Kind::NonZero),
             (parse_quote!(NonZero<u8>), Kind::Unknown),
             (parse_quote!(Vec<bool>), Kind::Collection),

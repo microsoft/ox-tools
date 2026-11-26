@@ -3,8 +3,8 @@
 
 use std::collections::BTreeMap;
 
-use chrono::{DateTime, Utc};
 use compact_str::CompactString;
+use jiff::Timestamp;
 use ohno::IntoAppError;
 use semver::Version;
 use url::Url;
@@ -25,8 +25,8 @@ define_rows! {
         pub num: Version,
         pub downloads: u64,
         edition: Option<u64>,
-        pub created_at: DateTime<Utc>,
-        pub updated_at: DateTime<Utc>,
+        pub created_at: Timestamp,
+        pub updated_at: Timestamp,
         pub description: &'a str,
         features: &'a str,
         pub license: &'a str,
@@ -184,7 +184,7 @@ fn read_row_lean(reader: &mut super::RowReader<'_>) -> VersionRowLean {
 #[derive(Debug, Clone)]
 pub struct VersionRowQuery {
     pub num: Version,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
     pub yanked: bool,
 }
 
@@ -232,8 +232,6 @@ impl VersionsTable {
 #[cfg(not(miri))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use chrono::TimeZone as _;
-
     use super::super::{RowReader, RowWriter, Table};
     use super::*;
 
@@ -284,8 +282,8 @@ mod tests {
             num: semver::Version::parse("1.2.3").expect("valid version literal"),
             downloads: 3,
             edition: Some(2021),
-            created_at: Utc.timestamp_opt(1, 0).single().expect("valid timestamp"),
-            updated_at: Utc.timestamp_opt(2, 0).single().expect("valid timestamp"),
+            created_at: Timestamp::from_second(1).expect("valid timestamp"),
+            updated_at: Timestamp::from_second(2).expect("valid timestamp"),
             description: "description",
             features: "{}",
             license: "MIT",

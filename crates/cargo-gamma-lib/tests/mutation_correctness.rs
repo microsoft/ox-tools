@@ -44,6 +44,15 @@ mod temporal_operator_fixture;
 
 #[expect(
     dead_code,
+    clippy::duration_suboptimal_units,
+    clippy::unchecked_time_subtraction,
+    reason = "compiler-backed admission fixtures retain uncalled original operations"
+)]
+#[path = "fixtures/correctness/generation_admission.rs"]
+mod generation_admission_fixture;
+
+#[expect(
+    dead_code,
     clippy::default_trait_access,
     clippy::unnecessary_wraps,
     reason = "multi-file compiler fixture preserves qualified aliases and enum constructors"
@@ -97,6 +106,8 @@ use syn::visit::{self, Visit};
     unused_braces,
     clippy::needless_bool,
     clippy::match_bool,
+    clippy::match_single_binding,
+    clippy::non_minimal_cfg,
     clippy::single_char_add_str,
     clippy::bool_to_int_with_if,
     clippy::let_and_return,
@@ -529,6 +540,73 @@ fn assert_propagation_panic<T>(run: impl FnOnce() -> T + std::panic::UnwindSafe)
 }
 
 #[test]
+fn progress_assertions_keep_detectable_cursor_grouping_and_retry_mutations_eligible() {
+    let guarded = r"
+        fn retry(ready: bool) {
+            while ready {
+                let reduced = false;
+                assert!(!reduced);
+                if reduced { continue; }
+                break;
+            }
+        }
+
+        fn scan(mut k: isize, d: isize) {
+            while k <= d {
+                let previous_diagonal = k;
+                k += 2;
+                assert!(k > previous_diagonal);
+            }
+        }
+
+        struct Input { entries: Vec<Entry> }
+        struct Entry { path: String, ordinal: u32 }
+        struct Output { path: String, ids: Vec<u32> }
+
+        fn groups(input: &Input) -> Vec<Output> {
+            let mut files = Vec::new();
+            let mut cursor = 0;
+            while cursor < input.entries.len() {
+                let path = input.entries[cursor].path.clone();
+                let end = input.entries[cursor..]
+                    .iter()
+                    .position(|entry| entry.path != path)
+                    .map_or(input.entries.len(), |offset| cursor + offset);
+                assert!(end > cursor);
+                let group = &input.entries[cursor..end];
+                let ids = group.iter().map(|entry| entry.ordinal).collect::<Vec<_>>();
+                files.push(Output { path, ids });
+                cursor = end;
+                assert!(cursor > 0);
+            }
+            files
+        }
+    ";
+    let unguarded = guarded
+        .replace("assert!(!reduced);", "")
+        .replace("assert!(k > previous_diagonal);", "")
+        .replace("assert!(end > cursor);", "")
+        .replace("assert!(cursor > 0);", "");
+    for (item, selector, original) in [
+        ("retry", "literal.bool_flip", "false"),
+        ("scan", "stmt.delete_assign", "k += 2;"),
+        ("groups", "arith.add_to_mul", "cursor + offset"),
+        ("groups", "stmt.delete_assign", "cursor = end;"),
+    ] {
+        for (source, retained) in [(guarded, true), (unguarded.as_str(), false)] {
+            let (file, found) = candidates(source, selector);
+            assert_eq!(
+                found.iter().any(|candidate| {
+                    candidate.item_path.as_ref() == item && candidate.mutator == selector && file.slice(&candidate.span) == original
+                }),
+                retained,
+                "{item}: {selector} at {original:?}, guarded = {retained}"
+            );
+        }
+    }
+}
+
+#[test]
 fn campaign_generation_repairs_compile_and_preserve_semantically_valid_mutations() {
     let source = include_str!("fixtures/correctness/generation.rs");
     let (_, readers) = candidates(source, "iter.take_to_skip");
@@ -838,6 +916,16 @@ fn assert_borrows_schema() {
                 "loop.continue_to_break",
                 "for () in [(), ()] { line = refreshed(resets); out.push(line); break; }",
             ),
+            (
+                "configured_block_first",
+                "bool_expr.negate",
+                "!({ let left = left.trim(); left.eq_ignore_ascii_case(right) })",
+            ),
+            (
+                "configured_match_last",
+                "bool_expr.negate",
+                "!(match (left.trim(), right) { (a, b) => a.eq_ignore_ascii_case(b), })",
+            ),
         ],
     );
 }
@@ -865,6 +953,15 @@ fn consuming_guards_preserve_temporary_lifetimes_drop_order_and_attributes() {
     assert!(!active(5, borrows::configured_body));
     assert!(active(0, borrows::configured_body_first));
     assert!(!active(11, borrows::configured_body_first));
+    for (ordinal, function) in [
+        (34, borrows::configured_block_first as fn(&str, &str) -> bool),
+        (35, borrows::configured_match_last as fn(&str, &str) -> bool),
+    ] {
+        assert!(active(0, || function(" a ", "A")));
+        assert!(!active(0, || function("a", "b")));
+        assert!(!active(ordinal, || function(" a ", "A")));
+        assert!(active(ordinal, || function("a", "b")));
+    }
     assert_eq!(borrows::mandatory(true), 3);
     assert_eq!(active(0, borrows::mandatory_continue), 7);
     assert_eq!(active(7, borrows::mandatory_continue), 0);

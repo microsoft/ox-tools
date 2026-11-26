@@ -2,6 +2,211 @@
 
 ## [Unreleased]
 
+## [0.28.2] - 2026-11-25
+
+- ✨ Features
+
+  - cargo-anvil: add cargo-unused-deps check ([#378](https://github.com/microsoft/ox-tools/pull/378))
+  - cargo-anvil: report disk usage at the end of CI jobs
+
+- 🐛 Bug Fixes
+
+  - cargo-anvil: reconcile disk diagnostics with new catalog release
+  - cargo-anvil: preserve final diagnostics across consolidation
+  - cargo-anvil: simplify final disk reports to one native command
+
+- ✔️ Tasks
+
+  - cargo-anvil: release disk diagnostics catalog as 0.26.1
+
+## [0.28.1] - 2026-11-24
+
+- ✨ Features
+
+  - cargo-anvil: add cargo-unused-deps check ([#378](https://github.com/microsoft/ox-tools/pull/378))
+
+- 🐛 Bug Fixes
+
+  - harden cargo-gamma and require 0.7.0 for Anvil mutation checks
+
+## [0.28.0] - 2026-11-23
+
+- ✨ Features
+
+  - cargo-anvil: add cargo-unused-deps check ([#378](https://github.com/microsoft/ox-tools/pull/378))
+
+## [0.27.0] - 2026-11-23
+
+- ⚠️ Breaking
+
+  - cargo-anvil: narrow public setup recipes
+  - cargo-anvil: remove SemVer advisory check
+
+- ✨ Features
+
+  - cargo-anvil: release v0.27.0
+  - cargo-anvil: expose individual recipe sections
+  - cargo-anvil: expose per-check artifacts
+  - cargo-anvil: run Miri artifacts with cargo-each
+  - cargo-anvil: split generated recipe roles
+  - cargo-anvil: release v0.20.0
+  - cargo-anvil: consolidate generated infrastructure
+
+- 🐛 Bug Fixes
+
+  - cargo-anvil: hide scoped group setup recipes
+  - cargo-anvil: narrow generated path visibility
+  - cargo-anvil: defer MSRV resolution until setup
+  - cargo-anvil: install mutation impact driver
+  - cargo-anvil: plan legacy manifest retirement
+  - cargo-anvil: update manifest references
+  - cargo-anvil: repair setup prerequisites
+  - cargo-anvil: align generated contracts
+  - cargo-anvil: avoid macro doc warnings
+  - cargo-anvil: consolidate release version
+  - cargo-anvil: validate nightly component artifacts
+  - cargo-anvil: align generated edit guidance
+  - cargo-anvil: avoid nested Just in scheduled CI
+  - cargo-anvil: keep root MSRV with containers
+  - cargo-anvil: preserve consolidated update engine
+  - cargo-anvil: preserve merged recipe behavior
+  - cargo-anvil: keep setup independent of workspace tools
+  - cargo-anvil: decouple tool installs from workspace toolchain
+  - cargo-anvil: bootstrap cargo-each before recipe evaluation
+  - cargo-anvil: allow rich recipe help
+  - cargo-anvil: collapse unreleased version bumps
+  - cargo-anvil: retain consolidated impact action path
+  - cargo-anvil: require cargo-each 0.7.0
+  - cargo-anvil: reconcile consolidation with current main
+
+- 📚 Documentation
+
+  - cargo-anvil: clarify formatting impact scope
+  - cargo-anvil: remove standalone verification guide
+  - cargo-anvil: narrow design updates to changed contracts
+  - cargo-anvil: simplify generated recipe help
+
+- ♻️ Code Refactoring
+
+  - cargo-anvil: compose whole source sections
+  - cargo-anvil: align recipe source layout
+  - cargo-anvil: name mutation skip prefix clearly
+  - cargo-anvil: streamline generated guidance
+  - cargo-anvil: simplify Miri recipe flow
+  - cargo-anvil: clarify Miri recipe commands
+  - cargo-anvil: remove root MSRV PowerShell
+  - cargo-anvil: keep helpers recipes private
+  - cargo-anvil: mark hidden recipes private
+  - cargo-anvil: unify example target selection
+  - cargo-anvil: make README checks shell-free
+  - cargo-anvil: make mutants diff shell-free
+  - cargo-anvil: make Miri recipes shell-free
+  - cargo-anvil: remove portable recipe PowerShell
+
+- 🧩 Miscellaneous
+
+  - Merge follower updates into cargo-anvil consolidation
+  - Merge current main into cargo-anvil consolidation
+  - Merge main into consolidate-anvil-files
+  - Merge branch 'consolidate-anvil-files' of https://github.com/microsoft/ox-tools into makolnek-microsoft-cargo-anvil-consolidation
+  - Update principles
+  - Add one more principle
+  - Remove implementation plans
+  - Add cargo-anvil principles
+  - Merge latest main into cargo-anvil consolidation
+  - Merge current main into cargo-anvil consolidation
+  - Merge current main into cargo-anvil consolidation
+  - Merge current main into cargo-anvil consolidation
+  - Merge current main into cargo-anvil consolidation
+  - Merge current main into cargo-anvil consolidation
+  - Merge current main into cargo-anvil consolidation
+
+## [0.26.0] - 2026-11-20
+
+- ⚠️ Breaking
+
+  - cargo-anvil: narrow public setup recipes
+  - cargo-anvil: remove SemVer advisory check
+
+- ✨ Features
+
+  - cargo-anvil: expose individual recipe sections
+  - cargo-anvil: expose per-check artifacts
+  - cargo-anvil: run Miri artifacts with cargo-each
+  - cargo-anvil: split generated recipe roles
+  - cargo-anvil: release v0.20.0
+  - cargo-anvil: consolidate generated infrastructure
+
+- 🐛 Bug Fixes
+
+  - cargo-anvil: align generated contracts
+  - cargo-anvil: avoid macro doc warnings
+  - cargo-anvil: consolidate release version
+  - cargo-anvil: validate nightly component artifacts
+  - cargo-anvil: align generated edit guidance
+  - cargo-anvil: avoid nested Just in scheduled CI
+  - cargo-anvil: keep root MSRV with containers
+  - cargo-anvil: preserve consolidated update engine
+  - cargo-anvil: preserve merged recipe behavior
+  - cargo-anvil: keep setup independent of workspace tools
+  - cargo-anvil: decouple tool installs from workspace toolchain
+  - cargo-anvil: bootstrap cargo-each before recipe evaluation
+  - cargo-anvil: allow rich recipe help
+  - cargo-anvil: collapse unreleased version bumps
+  - cargo-anvil: retain consolidated impact action path
+  - cargo-anvil: require cargo-each 0.7.0
+  - cargo-anvil: reconcile consolidation with current main
+
+- 📚 Documentation
+
+  - cargo-anvil: remove standalone verification guide
+  - cargo-anvil: narrow design updates to changed contracts
+  - cargo-anvil: simplify generated recipe help
+
+- ♻️ Code Refactoring
+
+  - cargo-anvil: compose whole source sections
+  - cargo-anvil: align recipe source layout
+  - cargo-anvil: name mutation skip prefix clearly
+  - cargo-anvil: streamline generated guidance
+  - cargo-anvil: simplify Miri recipe flow
+  - cargo-anvil: clarify Miri recipe commands
+  - cargo-anvil: remove root MSRV PowerShell
+  - cargo-anvil: keep helpers recipes private
+  - cargo-anvil: mark hidden recipes private
+  - cargo-anvil: unify example target selection
+  - cargo-anvil: make README checks shell-free
+  - cargo-anvil: make mutants diff shell-free
+  - cargo-anvil: make Miri recipes shell-free
+  - cargo-anvil: remove portable recipe PowerShell
+
+- 🧩 Miscellaneous
+
+  - Add one more principle
+  - Remove implementation plans
+  - Add cargo-anvil principles
+  - Merge latest main into cargo-anvil consolidation
+  - Merge current main into cargo-anvil consolidation
+  - Merge current main into cargo-anvil consolidation
+  - Merge current main into cargo-anvil consolidation
+  - Merge current main into cargo-anvil consolidation
+  - Merge current main into cargo-anvil consolidation
+  - Merge current main into cargo-anvil consolidation
+
+## [0.25.3] - 2026-11-18
+
+- 🐛 Bug Fixes
+
+  - cargo-gamma: strengthen admission proofs and compiler isolation
+  - stabilize scheduled checks and close Linux mutation coverage gaps ([#357](https://github.com/microsoft/ox-tools/pull/357))
+
+## [0.25.2] - 2026-11-18
+
+- 🐛 Bug Fixes
+
+  - cargo-gamma: strengthen admission proofs and compiler isolation
+  - stabilize scheduled checks and close Linux mutation coverage gaps ([#357](https://github.com/microsoft/ox-tools/pull/357))
+
 ## [0.25.1] - 2026-11-06
 
 - 🐛 Bug Fixes

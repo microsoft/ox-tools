@@ -14,6 +14,9 @@ use crate::report::Styler;
 
 pub(super) const TESTING_PROGRESS_LOG: &str = "gamma-progress.log";
 pub(super) const TEST_SELECTION_LOG: &str = "gamma-selection.jsonl";
+/// Maximum retained size of the test selection journal.
+///
+/// A truncation record prevents a bounded journal from being mistaken for complete selection evidence.
 const MAX_SELECTION_LOG_BYTES: usize = 64 * 1024 * 1024;
 const SELECTION_TRUNCATION_MARKER: &[u8] = b"{\"truncated\":true,\"reason\":\"selection journal reached its 64 MiB retention limit\"}\n";
 
@@ -334,7 +337,6 @@ impl VerdictLog {
         Ok(())
     }
 
-    // #[gamma::skip(all, reason = "finish only flushes an optional best-effort diagnostic log; absent logs and already-flushed buffers have the same command result")]
     pub(super) fn finish(&mut self) -> crate::Result<()> {
         let previous = core::mem::take(self);
 

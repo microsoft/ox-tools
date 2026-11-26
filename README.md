@@ -33,6 +33,7 @@ These are the crates built out of this repo:
 - [`cargo-ensure-no-default-features`](./crates/cargo-ensure-no-default-features/README.md) - A cargo subcommand that ensures dependencies are declared with default-features = false
 - [`cargo-gamma`](./crates/cargo-gamma/README.md) - Fast mutation testing for Rust
 - [`cargo-heather`](./crates/cargo-heather/README.md) - A cargo subcommand to validate license headers in Rust, TOML, PowerShell, Just, and env source files
+- [`cargo-spellcheck-helper`](./crates/cargo-spellcheck-helper/README.md) - Portable dictionary preparation and source prerequisite checks for cargo-spellcheck
 - [`cargo-unique-target-names`](./crates/cargo-unique-target-names/README.md) - A cargo subcommand that detects workspace targets which uplift to the same build artifact
 - [`cargo-unused-deps`](./crates/cargo-unused-deps/README.md) - A Cargo subcommand that finds unused and misplaced dependencies
 - [`hunspell-dictgen`](./crates/hunspell-dictgen/README.md) - Generate deterministic Hunspell dictionaries from human-maintained word lists
@@ -97,6 +98,125 @@ this simple process:
 
 Once your PR is merged, automation will kick in. It will tag the
 commit and push the crate to crates.io.
+
+### GitHub Release Notes
+
+The `Publish GitHub Release` workflow runs once per pushed crate-version tag.
+Immediately before creating the GitHub release, `scripts\publish-gh-release.rs`
+generates its notes from Git commit messages. It does not read or update `CHANGELOG.md`.
+The PowerShell release-preparation script still generates changelogs independently.
+
+#### Previewing Locally
+
+Run from the repository root with an existing crate-version tag:
+
+```powershell
+cargo +nightly -Zscript .\scripts\publish-gh-release.rs --dry-run sample-v1.3.0
+```
+
+Replace `sample-v1.3.0` with the tag to preview. The script prints the release title
+and generated Markdown, followed by a notice that release creation was skipped,
+without invoking `gh`. `--repo` is not required for a dry run; publishing still
+requires `--repo <owner/name>`.
+The same history selection, filtering, and errors apply in both modes.
+
+#### Commit Selection
+
+For example, publishing `sample-v1.3.0`:
+
+1. Find the greatest version tag below `1.3.0` for `sample`. Versions are compared
+   numerically, not by tag date or alphabetical order. If both `sample-v1.2.0` and
+   `sample-v1.10.0` exist, only `sample-v1.2.0` can precede this release.
+2. Read commits in `sample-v1.2.0..sample-v1.3.0`, limited to changes under
+   `crates\sample`. The previous tag's history is excluded; the target tag is included.
+3. If there is no preceding version tag, read all history affecting that directory
+   through `sample-v1.3.0`. There is no special "Initial release" replacement.
+
+The upper bound is always the requested release tag, not `HEAD`. Later commits do not
+enter an older release's notes. Only `<crate>-v<major>.<minor>.<patch>` tags are supported;
+prerelease tags, build-metadata tags, and tags for other crates are not predecessor candidates.
+Full history and tags are required; the workflow checks out with `fetch-depth: 0`.
+
+Selection is based on changed paths, not the conventional-commit scope. A commit scoped
+to another crate can appear if it also changes files under `crates\sample`.
+
+#### Formatting Example
+
+Suppose the selected history contains these two commit messages:
+
+```text
+feat(sample): add configuration files (#123)
+```
+
+```text
+fix(sample): reject invalid configuration
+
+BREAKING CHANGE: invalid configurations now return an error instead of using defaults.
+```
+
+The generated Markdown is:
+
+```markdown
+- ⚠️ Breaking
+
+  - reject invalid configuration
+
+- ✨ Features
+
+  - add configuration files (#123)
+```
+
+These are illustrative commit messages and a PR number, not an actual release.
+`git-conventional` parses full messages. Both a header `!`, such as
+`fix(sample)!: reject invalid configuration`, and a `BREAKING CHANGE` footer select
+the Breaking category. Only the description becomes bullet text;
+scopes, commit bodies, and footer explanations are not copied into the notes.
+
+#### Categories and Filtering
+
+The standard category order is Breaking, Features, Bug Fixes, Performance, Documentation,
+Tasks, Code Refactoring, Build System, Continuous Integration, Styling, and Miscellaneous. Empty
+categories are omitted. `chore` maps to Tasks, `doc` to Documentation, and `misc` to
+Miscellaneous. Other conventional types get their own capitalized heading after the
+standard categories, sorted alphabetically. Messages that cannot be parsed as conventional
+commits retain their subject under Miscellaneous. Conventional commit types are matched
+case-insensitively and custom category names are normalized to lowercase.
+
+PR references such as `(#123)` are
+retained verbatim for GitHub to link. Entries within each category retain Git's log order.
+
+Conventional `test` commits are excluded, including ones marked breaking.
+Notes-maintenance and release-preparation commits receive no special filtering or
+deduplication.
+
+Git failures stop publication. If the selected history is empty or filtering removes
+every entry, publication also fails rather than creating a release with placeholder notes.
+
+#### Limitations
+
+**Package moves are not followed.** The publisher assumes `crates\<crate-name>` exists
+in the checkout and uses only that path throughout the selected history. For example:
+
+```text
+sample-v1.2.0
+  fix(sample): correct parsing     [old\sample]
+  chore: move sample              [old\sample -> crates\sample]
+  feat(sample): add validation    [crates\sample]
+sample-v1.3.0
+```
+
+The parsing fix under `old\sample` is omitted even though it belongs to this release.
+Moving the package away from `crates\sample` instead fails the directory check.
+Package renames and historical directory discovery are not supported.
+
+**Changes outside the package directory are not selected on their own.** For example,
+a root `Cargo.toml`, `Cargo.lock`, or shared build-configuration update appears only if
+the same commit also affects the package directory. The generator does not infer a
+package's changes from its workspace dependency graph.
+
+**Changelog-only information is not carried over.** Manually curated text, `Unreleased`
+sections, and dependency-upgrade bullets stored in `CHANGELOG.md` do not become GitHub
+release notes. Only the selected commit messages supply note content.
 
 ### Documenting Crates
 
@@ -186,12 +306,15 @@ These focused operations are not substitutes for either verification tier.
   threshold.
 
 - **Mutation Testing**. Anvil uses [`cargo-gamma`](./crates/cargo-gamma/README.md)
-  0.4.0 or newer for diff-scoped PR checks and full scheduled campaigns.
+  0.7.0 or newer for diff-scoped PR checks and full scheduled campaigns.
   Repository policy lives in `gamma.toml`, retaining all-feature testing and the
   existing `mutants` build profile. Campaigns must meet a 100% assertion-killed
-  score with no unresolved flaky outcomes. Empty diff selections succeed;
-  nonempty populations with no gradeable mutations and empty full campaigns
-  fail the applicable gates. The former `.cargo/mutants.toml` is not used by Anvil.
+  score with no unresolved flaky outcomes. Published Gamma 0.7.0 accepts empty
+  diff selections but fails the score gate for empty full campaigns. The Gamma
+  changes in this source tree also accept empty full campaigns; fresh Anvil setup
+  still pins 0.7.0 until a release containing that behavior is selected.
+  Nonempty populations with no gradeable mutations fail the applicable gates.
+  The former `.cargo/mutants.toml` is not used by Anvil.
 
 - **Source Linting**. We run Clippy with most warnings enabled and all treated as errors.
 
@@ -232,9 +355,6 @@ These focused operations are not substitutes for either verification tier.
 - **Dependency Validation**. We use [`cargo-deny`](https://crates.io/crates/cargo-deny) to ensure our dependencies
   have acceptable licenses and don't contain known vulnerabilities.
 
-- **Semantic Version Compatibility**. We use [`cargo-semver-checks`](https://crates.io/crates/cargo-semver-checks) to report
-  advisory findings about API compatibility against the pull request target.
-
 - **PR Title**. Every PR submitted to this repo must follow
   the [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/)
   specification. We use these PR titles as part of our automatic change log generation logic.
@@ -251,9 +371,9 @@ These focused operations are not substitutes for either verification tier.
 ### Tool Versions
 
 Anvil's Rust nightly and cargo-tool pins live exclusively in
-[`justfiles/anvil/versions.just`](./justfiles/anvil/versions.just). Because this
+[`.anvil/setup.just`](./.anvil/setup.just). Because this
 repository develops cargo-anvil itself, catalog updates start in
-`crates/cargo-anvil/templates/justfiles/anvil/versions.just` and are applied by
+`crates/cargo-anvil/templates/justfiles/anvil/setup/versions.just` and are applied by
 running `cargo anvil`. The default stable toolchain remains in
 [`rust-toolchain.toml`](./rust-toolchain.toml), while the workspace MSRV remains
 the `rust-version` in [`Cargo.toml`](./Cargo.toml).

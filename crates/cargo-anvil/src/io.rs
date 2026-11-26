@@ -181,10 +181,11 @@ fn write_repository_file_with(
     write: impl FnOnce(&Path, &str) -> Result<(), AppError>,
     save_manifest: impl FnOnce(&Path, &str) -> Result<(), AppError>,
 ) -> Result<(), AppError> {
+    let relative = path.to_string_lossy().replace('\\', "/");
     if path == Path::new(crate::manifest::MANIFEST_FILE_NAME) {
+        contained(root, &relative)?;
         return save_manifest(root, content);
     }
-    let relative = path.to_string_lossy().replace('\\', "/");
     let destination = contained(root, &relative)?;
     write(&destination, content)
 }
@@ -421,13 +422,20 @@ mod tests {
         let root = Path::new("repository");
         for fails in [false, true] {
             let saved = Cell::new(false);
+            let contained = Cell::new(false);
             let result = write_repository_file_with(
                 root,
                 Path::new(crate::manifest::MANIFEST_FILE_NAME),
                 "manifest contents",
-                |_, _| panic!("the manifest writer owns its containment check"),
+                |requested_root, relative| {
+                    assert_eq!(requested_root, root);
+                    assert_eq!(relative, crate::manifest::MANIFEST_FILE_NAME);
+                    contained.set(true);
+                    Ok(root.join(relative))
+                },
                 |_, _| panic!("the manifest must not use the ordinary writer"),
                 |requested_root, content| {
+                    assert!(contained.get(), "containment must be established before manifest publication");
                     assert_eq!(requested_root, root);
                     assert_eq!(content, "manifest contents");
                     saved.set(true);
@@ -441,6 +449,23 @@ mod tests {
                 result.unwrap();
             }
         }
+    }
+
+    #[test]
+    fn repository_manifest_writes_stop_at_containment_errors() {
+        let error = write_repository_file_with(
+            Path::new("repository"),
+            Path::new(crate::manifest::MANIFEST_FILE_NAME),
+            "manifest contents",
+            |_, relative| {
+                assert_eq!(relative, crate::manifest::MANIFEST_FILE_NAME);
+                Err(app_err!("manifest escapes repository"))
+            },
+            |_, _| panic!("the manifest must not use the ordinary writer"),
+            |_, _| panic!("containment failure must prevent manifest publication"),
+        )
+        .unwrap_err();
+        assert_eq!(error.message(), "manifest escapes repository");
     }
 
     #[test]

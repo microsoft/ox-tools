@@ -13,6 +13,8 @@ Every subcommand and every option `cargo-gamma` accepts.
 * [Exact-first adaptive scheduling](#exact-first-adaptive-scheduling)
 * [Understanding uncovered mutants](#understanding-uncovered-mutants)
 * [Exit status](#exit-status)
+* [Editing source safely](#editing-source-safely)
+* [Merging historical results](#merging-historical-results)
 * [Full option reference](#full-option-reference)
   * [Accepted by every subcommand](#accepted-by-every-subcommand)
   * [`gamma run`](#gamma-run)
@@ -250,8 +252,10 @@ Before generating mutation guards, campaigns filter exact mutant IDs in
 `compiler-exclusions.json` under the campaign cache. These mutants count as
 unviable without being applied or recompiled. The inventory accumulates
 individually established compiler failures across campaigns, including interrupted
-preparation, and is initialized from earlier completed/incomplete records and
-`gamma-hints.yaml`. Compiler-interaction removals do not enter it.
+preparation, and is initialized from earlier completed/incomplete campaign records.
+Checked-in compiler hints in `gamma-hints.yaml` only affect build ordering;
+they do not initialize exclusions or withdraw fresh candidates.
+Compiler-interaction removals do not enter it.
 
 This is an explicit exclusion policy, not an incremental-cache optimization:
 `--incremental no`, feature changes, and toolchain changes do not disable it.
@@ -308,10 +312,10 @@ gate failed, and a campaign that could not obtain a complete answer:
 | `3` | The command could not proceed or could not produce the requested complete result. |
 | `70` | An internal cargo-gamma panic reached the top-level boundary. |
 
-An `--in-diff` run that selects no mutants succeeds, even with `--min-score` or `--max-flaky`
-configured. This applies to the final selection after combining diff scope with other filters,
-such as `--re` and sharding, not only to a diff with no mutable lines. Other empty populations fail
-when a configured gate requires something to grade. An `--in-diff` population that contains only
+A run that selects no mutants succeeds, even with `--min-score` or `--max-flaky`
+configured, whether it is a full run or uses `--in-diff`. This applies to the final selection
+after combining all filters, such as `--exclude-file`, `--re` and sharding.
+An `--in-diff` population that contains only
 source- or configuration-excluded mutations also succeeds if none carries a source expectation.
 Its reports retain those exclusions. The command states that no eligible mutations remain and
 that mutation gates are not applicable. This is not a measured passing score.
@@ -357,6 +361,20 @@ score-neutral bucket. `--max-flaky` gates those verdicts, not ordinary intermitt
 Merge also retains and gates flaky verdicts in historical reports. Timeout, stall and memory
 suspicions retain their retries.
 `--no-confirm` and `no-confirm` are unsupported; omit them from commands and configuration.
+
+## Editing source safely
+
+`cargo gamma suppress --apply` and `cargo gamma unsuppress --apply` require Git
+to confirm that affected files are clean, except when Git recognizes that the
+directory is not a work tree. `--allow-dirty` explicitly bypasses this check,
+including when Git is unavailable or its status check fails.
+
+## Merging historical results
+
+JSON publication is refused if a historical verdict would be omitted from the
+selected source. Include a current unfiltered listing, such as
+`cargo gamma list mutants --json-report reports/current.json`, as a merge input.
+Console or HTML-only output can still report those historical verdicts.
 
 ## Full option reference
 

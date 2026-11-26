@@ -4,7 +4,7 @@
 [package]
 name = "cargo-gamma-lib"
 description = "Internal library for cargo-gamma"
-version = "0.6.0"
+version = "0.8.0"
 readme = "README.md"
 keywords = ["cargo", "mutation-testing", "testing"]
 categories = ["development-tools::testing"]
@@ -33,7 +33,8 @@ min-lines-percent = 97.6
 [features]
 # Exposes the crate's internal modules so that the integration tests in `tests/` can drive them
 # directly. Test targets that need it declare it in `required-features`; test commands must still
-# enable it explicitly. Never enable it from outside this crate.
+# enable it explicitly. The cargo-gamma binary's dev-dependency also enables it for child-process
+# fixtures. It is not a supported feature for downstream applications.
 internals = ["dep:tempfile"]
 # Opts into real-toolchain generator checks and existing native link-provisioning smoke tests.
 system-tests = ["internals"]
@@ -42,6 +43,7 @@ system-tests = ["internals"]
 loom = []
 
 [dependencies]
+base64 = { workspace = true, features = ["alloc"] }
 blake3 = { workspace = true, features = ["std"] }
 camino = { workspace = true }
 cargo-gamma-engine = { workspace = true }
@@ -53,6 +55,7 @@ clap = { workspace = true, features = ["std", "derive", "color", "help", "error-
 clap_complete = { workspace = true }
 compact_str = { workspace = true, features = ["serde", "std"] }
 ignore = { workspace = true }
+ohno = { workspace = true }
 owo-colors = { workspace = true }
 proc-macro2 = { workspace = true, features = ["span-locations", "proc-macro"] }
 reflink-copy = { workspace = true }
@@ -61,6 +64,7 @@ rustc-hash = { workspace = true, features = ["std"] }
 saphyr-parser = { workspace = true }
 serde = { workspace = true, features = ["derive", "rc", "std"] }
 serde_json = { workspace = true, features = ["std"] }
+sha2 = { workspace = true }
 syn = { workspace = true, features = ["full", "parsing", "printing", "visit", "extra-traits", "clone-impls", "proc-macro"] }
 tempfile = { workspace = true, optional = true }
 tick = { workspace = true, features = ["fmt"] }
@@ -83,12 +87,11 @@ libc = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
 bolero = { workspace = true }
-bolero-engine = { workspace = true, features = ["any"] }
 # Cargo omits versionless dev-dependencies from published packages. The local path keeps the
 # cross-crate agreement tests available without adding a registry or release-order dependency.
 cargo-gamma-attrs-impl = { path = "../cargo-gamma-attrs-impl", features = ["agreement"] }
 cargo-gamma-process = { workspace = true, features = ["fault-injection"] }
-chrono = { workspace = true, features = ["std"] }
+cargo-gamma-process-test-helper = { path = "../cargo-gamma-process/tests/support/output-helper" }
 quote = { workspace = true }
 tempfile = { workspace = true }
 tick = { workspace = true, features = ["test-util"] }

@@ -5,6 +5,8 @@
 
 use core::ops::Range;
 
+use rustc_lexer::{LiteralKind, Token, TokenKind, tokenize};
+
 /// What kind of comment was found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommentKind {
@@ -72,31 +74,38 @@ pub(super) fn scan_comments(text: &str, lines: &[usize]) -> Vec<Comment> {
 
 /// Locates comments while skipping comment-shaped text inside literals.
 pub(crate) fn comment_spans(text: &str) -> Vec<Range<usize>> {
-    let bytes = text.as_bytes();
+    let mut rest = text;
+    comment_spans_from_tokens(std::iter::from_fn(|| {
+        let mut token = tokenize(rest).next()?;
+        // The pinned lexer predates C strings; lex their raw form as the equivalent r literal.
+        if &rest[..token.len] == "cr"
+            && let Some(raw) = tokenize(&rest[1..]).next()
+            && matches!(
+                raw.kind,
+                TokenKind::Literal {
+                    kind: LiteralKind::RawStr { .. },
+                    ..
+                }
+            )
+        {
+            token = raw;
+            token.len += 1;
+        }
+        // #[gamma::skip(stmt.delete_assign, tag = "timeout", reason = "Without advancing rest, from_fn returns the same nonempty token forever, so comment collection never terminates.")]
+        rest = &rest[token.len..];
+        Some(token)
+    }))
+}
+
+fn comment_spans_from_tokens(tokens: impl Iterator<Item = Token>) -> Vec<Range<usize>> {
     let mut comments = Vec::new();
-    let mut i = 0;
+    let mut offset = 0;
 
-    while i < bytes.len() {
-        if bytes[i] == b'/' && bytes.get(i + 1) == Some(&b'/') {
-            // #[gamma::skip(call.replace_with_default, call_result.default, tag = "timeout", reason = "a zero endpoint rewinds the scanner to rediscover the same line comment indefinitely")]
-            let end = line_comment_end(bytes, i);
-
-            comments.push(i..end);
-            // #[gamma::skip(all, reason = "not advancing to the comment end rediscovers it forever")]
-            i = end;
-        } else if bytes[i] == b'/' && bytes.get(i + 1) == Some(&b'*') {
-            // #[gamma::skip(call.replace_with_default, call_result.default, tag = "timeout", reason = "a zero endpoint rewinds the scanner to rediscover the same block comment indefinitely")]
-            let end = block_comment_end(bytes, i);
-
-            comments.push(i..end);
-            // #[gamma::skip(all, reason = "not advancing to the comment end rediscovers it forever")]
-            i = end;
-        } else if let Some(end) = literal_end(text, i) {
-            // #[gamma::skip(all, reason = "not advancing to the literal end retries it forever")]
-            i = end;
-        } else {
-            // #[gamma::skip(all, reason = "not advancing the fallback cursor leaves the scanner on one byte forever")]
-            i += 1;
+    for token in tokens {
+        let start = offset;
+        offset += token.len;
+        if matches!(token.kind, TokenKind::LineComment | TokenKind::BlockComment { .. }) {
+            comments.push(start..offset);
         }
     }
 
@@ -113,9 +122,7 @@ pub(crate) fn literal_end(text: &str, start: usize) -> Option<usize> {
         b'\'' => quote_end(bytes, start),
         // #[gamma::skip(option.none_to_some, reason = "claiming ordinary syntax starts a zero-width literal leaves the outer scanner non-progressing")]
         _ => {
-            return
-        // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-        None;
+            return None;
         }
     };
 
@@ -123,7 +130,7 @@ pub(crate) fn literal_end(text: &str, start: usize) -> Option<usize> {
 }
 
 /// Classifies a `//` comment. Order matters: `//!` and `///` must be checked before `//`.
-fn line_comment_kind(raw: &str) -> CommentKind {
+pub(super) fn line_comment_kind(raw: &str) -> CommentKind {
     if raw.starts_with("//!") {
         CommentKind::InnerDoc
     } else if raw.starts_with("///") && !raw.starts_with("////") {
@@ -134,7 +141,7 @@ fn line_comment_kind(raw: &str) -> CommentKind {
 }
 
 /// Classifies a `/* */` comment.
-fn block_comment_kind(raw: &str) -> CommentKind {
+pub(super) fn block_comment_kind(raw: &str) -> CommentKind {
     if raw.starts_with("/*!") {
         CommentKind::InnerDoc
     } else if raw.starts_with("/**") && !raw.starts_with("/**/") && !raw.starts_with("/***") {
@@ -182,60 +189,17 @@ fn build_comment(kind: CommentKind, raw: &str, span: Range<usize>, text: &str, l
     }
 }
 
-/// Returns the offset just past the end of a `//` comment.
-// #[gamma::skip(fn_value.zero, fn_value.one, parameter.default_shadow, tag = "timeout", reason = "resetting the start or returning a fixed endpoint revisits a comment without forward progress")]
-fn line_comment_end(bytes: &[u8], start: usize) -> usize {
-    // #[gamma::skip(literal.int_decrement, literal.int_to_zero, reason = "the caller has recognized two slash bytes; scanning either delimiter too reaches the same first newline or EOF")]
-    let mut i = start + 2;
-
-    while i < bytes.len() && bytes[i] != b'\n' {
-        // #[gamma::skip(all, reason = "not advancing through comment text leaves the scan on one byte forever")]
-        i += 1;
-    }
-
-    i
-}
-
-/// Returns the offset just past the end of a `/* */` comment, which may nest.
-// #[gamma::skip(all, reason = "a fixed endpoint prevents the outer scanner from advancing and exhausts its resource budget")]
-fn block_comment_end(bytes: &[u8], start: usize) -> usize {
-    let mut i = start + 2;
-    let mut depth = 1_usize;
-
-    while i < bytes.len() {
-        if bytes[i] == b'/' && bytes.get(i + 1) == Some(&b'*') {
-            depth += 1;
-            // #[gamma::skip(all, reason = "not advancing past an opener repeatedly counts it until overflow or timeout")]
-            i += 2;
-        } else if bytes[i] == b'*' && bytes.get(i + 1) == Some(&b'/') {
-            depth -= 1;
-            // #[gamma::skip(all, reason = "not advancing past a closer repeatedly consumes it until overflow or timeout")]
-            i += 2;
-
-            if depth == 0 {
-                return i;
-            }
-        } else {
-            // #[gamma::skip(all, reason = "not advancing through block-comment text leaves the scan on one byte forever")]
-            i += 1;
-        }
-    }
-
-    bytes.len()
-}
-
 /// Returns the offset just past the end of a `"..."` literal.
-// #[gamma::skip(all, reason = "a fixed endpoint prevents the outer scanner from advancing and exhausts its resource budget")]
 fn string_end(bytes: &[u8], start: usize) -> usize {
     let mut i = start + 1;
 
     while i < bytes.len() {
         match bytes[i] {
-            // #[gamma::skip(all, reason = "moving backward or not moving over an escape makes the scan non-progressing")]
+            // #[gamma::skip(all, tag = "timeout", reason = "This escape branch must leave the current backslash; removing or reversing its update repeatedly revisits that byte.")]
             b'\\' => i += 2,
             b'"' => return i + 1,
             _ => {
-                // #[gamma::skip(all, reason = "not advancing through string text leaves the scan on one byte forever")]
+                // #[gamma::skip(all, tag = "timeout", reason = "This increment is the ordinary-string text branch's only progress toward a quote or EOF.")]
                 i += 1;
             }
         }
@@ -251,7 +215,7 @@ fn raw_string_end(bytes: &[u8], start: usize) -> usize {
 
     while bytes.get(i) == Some(&b'#') {
         hashes += 1;
-        // #[gamma::skip(all, reason = "not advancing through raw-string hashes leaves the scan on one byte forever")]
+        // #[gamma::skip(all, tag = "timeout", reason = "This increment is the raw-string prefix loop's only progress through its hash delimiters.")]
         i += 1;
     }
 
@@ -260,11 +224,9 @@ fn raw_string_end(bytes: &[u8], start: usize) -> usize {
         return start + 1;
     }
 
-    // #[gamma::skip(all, reason = "not advancing past the raw-string quote leaves the scan on one byte forever")]
     i += 1;
 
     while i < bytes.len() {
-        // #[gamma::skip(all, reason = "treating non-quotes as closing candidates makes this scan exceed its test budget")]
         if bytes[i] == b'"' {
             let closing = i + 1;
             let found = bytes[closing..].iter().take_while(|b| **b == b'#').count();
@@ -274,7 +236,7 @@ fn raw_string_end(bytes: &[u8], start: usize) -> usize {
             }
         }
 
-        // #[gamma::skip(all, reason = "not advancing through raw-string text leaves the scan on one byte forever")]
+        // #[gamma::skip(all, tag = "timeout", reason = "This increment is the raw-string content loop's only progress toward a closing delimiter or EOF.")]
         i += 1;
     }
 
@@ -284,8 +246,8 @@ fn raw_string_end(bytes: &[u8], start: usize) -> usize {
 /// Returns the offset just past a `'`, which may open a character literal or a lifetime.
 ///
 /// This is the one genuinely ambiguous case in Rust's lexical grammar for a scanner this small.
-/// Getting it wrong is not cosmetic: treating the `'a` in `fn f<'a>()` as an unterminated
-/// character literal would swallow the rest of the file and lose every comment in it.
+/// Treating the `'a` in `fn f<'a>()` as an unterminated character literal would make the
+/// syntax-shape precheck skip the rest of the file.
 fn quote_end(bytes: &[u8], start: usize) -> usize {
     // `'\n'`, `'\''`, `'\u{1f600}'` and friends. The escaped character is skipped rather than
     // examined, or the quote in `'\''` would be mistaken for the closing one.
@@ -294,7 +256,7 @@ fn quote_end(bytes: &[u8], start: usize) -> usize {
 
         // #[gamma::skip(cond.negate, reason = "negating the bounded quote search can index past the slice or exhaust the test budget")]
         while i < bytes.len() && bytes[i] != b'\'' {
-            // #[gamma::skip(all, reason = "not advancing through an escaped character leaves the scan on one byte forever")]
+            // #[gamma::skip(all, tag = "timeout", reason = "This increment is the escaped-character quote search's only progress toward its quote or EOF bound.")]
             i += 1;
         }
 
@@ -332,20 +294,12 @@ mod fuzz {
     use super::scan_comments;
     use crate::parse::source_file::line_starts;
 
-    /// Arbitrary text is scanned without panicking, and every comment it finds is really there.
-    ///
-    /// This scanner indexes a byte slice directly and jumps over string, raw-string and character
-    /// literals, so it is the one parser here that can produce an out-of-bounds index or a span
-    /// that is not on a character boundary. Random text — especially multi-byte text next to a
-    /// quote — is the cheapest way to find that.
-    ///
-    /// Reaching the end at all is half the property: every arm has to advance the cursor, and one
-    /// that returns its own position would spin here rather than fail, which the harness's own
-    /// timeout reports.
+    /// Arbitrary text yields lexer-identical, ordered comment spans on UTF-8 boundaries.
     #[test]
     fn arbitrary_text_is_scanned_into_spans_that_exist() {
         bolero::check!().with_type::<String>().for_each(|text| {
             super::tests::assert_comment_scan_invariants(text);
+            super::tests::assert_lexer_comment_spans(text);
         });
     }
 
@@ -372,6 +326,133 @@ mod fuzz {
 mod tests {
     use super::super::source_file::{SourceFile, line_starts};
     use super::*;
+
+    #[test]
+    fn raw_c_strings_preserve_following_directives_and_hide_embedded_comments() {
+        for literal in [
+            r##"cr#""text"#"##,
+            r###"cr##"// hidden /* hidden */ " quoted"##"###,
+            r#"cr"// hidden""#,
+            r##"cr#""text"#suffix"##,
+        ] {
+            for directive in ["#[gamma::skip(arith.add_to_sub)]", "#[gamma::expect(killed)]"] {
+                let text = format!("fn f() {{ let _ = {literal}// {directive}\n; }}");
+                let start = text.find(&format!("// {directive}")).unwrap();
+                assert_eq!(comment_spans(&text), vec![start..start + 3 + directive.len()]);
+                let file = SourceFile::parse("c-string.rs", text).unwrap();
+                assert_eq!(file.comments.len(), 1);
+                assert_eq!(file.slice(&file.comments[0].body), directive);
+            }
+        }
+    }
+
+    #[test]
+    fn literal_suffixes_do_not_hide_comments_in_macro_tokens() {
+        for literal in ["\"x\"", "b\"x\"", "r\"x\"", "br\"x\"", "'x'", "b'x'"] {
+            let text = format!("macro_rules! m {{ ($($token:tt)*) => {{}} }}\nm!({literal}r#\" body\" // real\n\"# \");");
+            let expected_start = text.find("// real").unwrap();
+            assert_eq!(comment_spans(&text), vec![expected_start..expected_start + 7], "{text}");
+            assert_lexer_comment_spans(&text);
+            let file = SourceFile::parse("macro.rs", text).unwrap();
+            assert_eq!(file.comments.len(), 1);
+            assert_eq!(file.slice(&file.comments[0].body), "real");
+        }
+    }
+
+    #[test]
+    fn malformed_quotes_and_byte_literals_keep_lexer_comment_boundaries() {
+        for text in [
+            "'\\x// real\nnext",
+            "b'\\x// real\nnext",
+            "b\"\" // real",
+            "b\"'x'// hidden\" // real",
+            "br##\"// hidden\"## // real",
+            "before bname // real",
+        ] {
+            let start = text.rfind("// real").unwrap();
+            assert_eq!(comment_spans(text), vec![start..start + 7], "{text}");
+            assert_lexer_comment_spans(text);
+        }
+    }
+
+    #[test]
+    fn literal_endpoints_at_nonzero_offsets_include_raw_string_delimiters() {
+        for literal in [
+            "\"\"",
+            "r\"\"",
+            "r#\"\"#",
+            "r\"x\"",
+            "r#\"x\"#",
+            "r##\"x\"##",
+            "r##\"a\"# // still inside \"##",
+            "r###\"a\"# /* still inside */ \"## // still inside \"###",
+            "'x'",
+            "'\\n'",
+        ] {
+            let text = format!("prefix {literal} // real");
+            assert_eq!(literal_end(&text, 7), Some(7 + literal.len()), "{text}");
+        }
+    }
+
+    #[test]
+    fn block_comment_endpoints_do_not_treat_body_slashes_as_delimiters() {
+        for raw in ["/*/ body */", "/* slash / body */", "/* outer /* inner */ tail */"] {
+            let text = format!("xx{raw} trailing");
+            assert_eq!(comment_spans(&text), vec![2..2 + raw.len()], "{text}");
+            let file = SourceFile::parse("comments.rs", format!("{raw}\nfn f() {{}}")).unwrap();
+            assert_eq!(file.slice(&file.comments[0].span), raw);
+        }
+    }
+
+    #[test]
+    fn token_walk_reaches_comments_after_noncomment_prefixes() {
+        let text = "name + 27; // real";
+        let mut tokens = tokenize(text);
+        let mut observations = 0;
+        // Bound runaway traversal without depending on a test timeout.
+        let bounded = std::iter::from_fn(|| {
+            observations += 1;
+            assert!(observations <= 9, "the eight-token input must be exhausted on the ninth read");
+            tokens.next()
+        });
+        assert_eq!(comment_spans_from_tokens(bounded), vec![11..18]);
+        assert_eq!(comment_spans(text), vec![11..18]);
+    }
+
+    pub(super) fn assert_lexer_comment_spans(text: &str) {
+        if text.contains("cr\"") || text.contains("cr#") {
+            return; // The legacy lexer is not an oracle for raw C strings.
+        }
+        let mut offset = 0;
+        let expected = tokenize(text)
+            .filter_map(|token| {
+                let span = offset..offset + token.len;
+                offset = span.end;
+                matches!(token.kind, TokenKind::LineComment | TokenKind::BlockComment { .. }).then_some(span)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(comment_spans(text), expected, "{text:?}");
+    }
+
+    #[test]
+    fn checked_in_comment_corpus_matches_the_rust_lexer() {
+        for text in [
+            include_str!("../../tests/corpus/comments/literals.txt"),
+            include_str!("../../tests/corpus/comments/malformed.txt"),
+        ] {
+            assert_comment_scan_invariants(text);
+            assert_lexer_comment_spans(text);
+        }
+        for text in [
+            "name_r#\"// real",
+            "br##\"// hidden\"## // real",
+            "'ab// real",
+            "'// hidden' // real",
+            "1r#\"// real",
+        ] {
+            assert_lexer_comment_spans(text);
+        }
+    }
 
     #[test]
     fn empty_and_single_character_literals_stop_before_adjacent_real_comments() {
@@ -405,7 +486,7 @@ mod tests {
             assert_eq!(comment_spans(text), expected, "{text}");
         }
         for (text, start, end) in [("xx//abc\nz", 2, 7), ("xx//", 2, 4), ("xx//é", 2, 6)] {
-            assert_eq!(line_comment_end(text.as_bytes(), start), end);
+            assert_eq!(comment_spans(text), vec![start..end]);
         }
         for (text, start, expected) in [
             ("x 'a'", 2, Some(5)),
@@ -694,9 +775,9 @@ mod tests {
         assert_eq!(literal_end("'é' tail", 0), Some(4));
         assert_eq!(literal_end("'name", 0), None);
 
-        assert_eq!(line_comment_end(b"//abc\nnext", 0), 5);
-        assert_eq!(line_comment_end(b"//abc", 0), 5);
-        assert_eq!(block_comment_end(b"/*a/*b*/c*/next", 0), 11);
+        assert_eq!(comment_spans("//abc\nnext"), vec![0..5]);
+        assert_eq!(comment_spans("//abc"), vec![0..5]);
+        assert_eq!(comment_spans("/*a/*b*/c*/next"), vec![0..11]);
         assert_eq!(string_end(br#""a\"b"tail"#, 0), 6);
         assert_eq!(raw_string_end(br##"r#"a"#tail"##, 0), 6);
         assert_eq!(quote_end("'é'".as_bytes(), 0), 4);

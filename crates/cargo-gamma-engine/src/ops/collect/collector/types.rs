@@ -9,13 +9,49 @@ use syn::visit::{self, Visit};
 use syn::{GenericArgument, GenericParam, Generics, Path, PathArguments, ReturnType, Type, TypeParamBound, WherePredicate};
 
 use super::super::defaults::{DefaultPaths, standard_defaulted_parameters};
-use super::indexes::{ABSOLUTE_ROOT, EXTERN_ROOT_PREFIX};
+use super::indexes::{ABSOLUTE_ROOT, EXTERN_ROOT_PREFIX, EXTERNAL_ROOT, ROOT_EXTERN_PREFIX, import_target};
 use super::predicates::payload;
 use super::values::{Kind, primitive_kind, resolve_type, strip, type_argument_values, type_arguments, type_name};
 use crate::ops::collect::Defaults;
 use crate::{HashMap, HashSet};
 
 pub(super) const LOCAL_MODULE: &str = "<gamma-local-module>";
+
+pub(super) fn frozen_type_identity(ty: &Type) -> Type {
+    let imports = HashMap::default();
+    let defaults = Defaults::default();
+    let mut budget = TYPE_EXPANSION_LIMIT;
+    Types {
+        abstracts: &[],
+        defaulted: &[],
+        imports: &imports,
+        defaults: &defaults,
+        aliases: None,
+        self_type: None,
+        self_associated: None,
+    }
+    .source_type_at(
+        ty,
+        &mut 64,
+        TypeQualification::Identity,
+        // #[gamma::skip(literal.bool_flip, tag = "equivalent", reason = "The alias inventory is None above. instantiate_alias_with_budget returns None before consuming any budget, so toggling alias expansion cannot change any result.")]
+        true,
+        &mut budget,
+    )
+}
+
+pub(super) fn contains_unknown_type(ty: &Type) -> bool {
+    struct Unknown(bool);
+    impl<'ast> Visit<'ast> for Unknown {
+        fn visit_type_infer(&mut self, _: &'ast syn::TypeInfer) {
+            self.0 = true;
+        }
+    }
+    let mut unknown = Unknown(false);
+    unknown.visit_type(ty);
+    unknown.0
+}
+
 pub(super) const BLOCK_TYPES: &str = "<gamma-block-types>";
 pub(super) const SOURCE_FILE: &str = "<gamma-source-file>";
 /// Conservative default for input plus projected output syntax work before cloning.
@@ -26,6 +62,35 @@ pub(super) const TYPE_EXPANSION_LIMIT: usize = 4096;
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod coverage_tests;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TypeQualification {
+    Source,
+    Primitives,
+    Declaration,
+    CanonicalPrimitives,
+    Full,
+    Canonical,
+    Identity,
+}
+
+impl TypeQualification {
+    fn after_alias(self) -> Self {
+        match self {
+            Self::Full => Self::Canonical,
+            Self::Primitives | Self::Declaration => Self::CanonicalPrimitives,
+            other => other,
+        }
+    }
+
+    fn fully_qualified(self) -> bool {
+        matches!(self, Self::Full | Self::Canonical | Self::Identity)
+    }
+
+    fn absolute_identity(self, names: &[String]) -> bool {
+        self == Self::Identity && names.len() > 1 && names.first().is_some_and(|root| matches!(root.as_str(), "std" | "core" | "alloc"))
+    }
+}
 
 #[derive(Clone, PartialEq)]
 pub(super) struct Alias {
@@ -48,7 +113,6 @@ pub(super) fn substitute_type_with_budget(ty: &Type, substitutions: &HashMap<Str
     // Retain the input's cost too: unsupported syntactic positions are cloned unchanged.
     *remaining -= input_size + output_size;
     let mut substituted = ty.clone();
-    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
     substitute_type_in_place(&mut substituted, substitutions);
     substituted
 }
@@ -77,19 +141,13 @@ fn substitute_type_in_place(ty: &mut Type, substitutions: &HashMap<String, Type>
         return;
     }
     match ty {
-        Type::Array(array) =>
-        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
-        {
+        Type::Array(array) => {
             substitute_type_in_place(&mut array.elem, substitutions);
         }
-        Type::Group(group) =>
-        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
-        {
+        Type::Group(group) => {
             substitute_type_in_place(&mut group.elem, substitutions);
         }
-        Type::Paren(paren) =>
-        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
-        {
+        Type::Paren(paren) => {
             substitute_type_in_place(&mut paren.elem, substitutions);
         }
         Type::Path(path) => {
@@ -97,31 +155,23 @@ fn substitute_type_in_place(ty: &mut Type, substitutions: &HashMap<String, Type>
                 if let PathArguments::AngleBracketed(arguments) = &mut segment.arguments {
                     for argument in &mut arguments.args {
                         if let GenericArgument::Type(inner) = argument {
-                            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                             substitute_type_in_place(inner, substitutions);
                         }
                     }
                 }
             }
         }
-        Type::Ptr(pointer) =>
-        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
-        {
+        Type::Ptr(pointer) => {
             substitute_type_in_place(&mut pointer.elem, substitutions);
         }
-        Type::Reference(reference) =>
-        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
-        {
+        Type::Reference(reference) => {
             substitute_type_in_place(&mut reference.elem, substitutions);
         }
-        Type::Slice(slice) =>
-        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
-        {
+        Type::Slice(slice) => {
             substitute_type_in_place(&mut slice.elem, substitutions);
         }
         Type::Tuple(tuple) => {
             for element in &mut tuple.elems {
-                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                 substitute_type_in_place(element, substitutions);
             }
         }
@@ -147,9 +197,7 @@ fn type_size(ty: &Type, substitutions: Option<&HashMap<String, Type>>, limit: us
             ) || self.depth == 64
             {
                 self.exceeded = true;
-                return
-                // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-                false;
+                return false;
             }
             self.remaining -= 1;
             self.depth += 1;
@@ -209,9 +257,7 @@ fn type_size(ty: &Type, substitutions: Option<&HashMap<String, Type>>, limit: us
 
 pub(super) fn reserve_type(ty: &Type, remaining: &mut usize) -> bool {
     let Some(size) = type_size(ty, None, *remaining) else {
-        return
-        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-        false;
+        return false;
     };
     *remaining -= size;
     true
@@ -248,16 +294,12 @@ pub(super) struct Types<'a> {
 impl Types<'_> {
     fn source_path(&self, ty: &Type) -> Option<(&str, &[String], Vec<String>)> {
         if matches!(strip(ty), Type::Path(path) if path.path.leading_colon.is_some()) {
-            return
-            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-            None;
+            return None;
         }
         let path = resolved_type_path(ty, self.imports)?;
         // A glob cannot replace an explicit local root or an explicit named import.
         if self.imports.contains_key("*") && !matches!(path.first().map(String::as_str), Some("crate" | "self" | "super")) {
-            return
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "This return is None with inferred Option type, exactly Option::default().")]
-            None;
+            return None;
         }
         if self
             .imports
@@ -265,9 +307,7 @@ impl Types<'_> {
             .and_then(Option::as_ref)
             .is_some_and(|names| path.first().is_some_and(|name| names.contains(name)))
         {
-            return
-            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-            None;
+            return None;
         }
         let source = self.imports.get(SOURCE_FILE)?.as_ref()?.first()?.as_str();
         let inline = self
@@ -299,14 +339,10 @@ impl Types<'_> {
         let left = as_type(left);
         let right = as_type(right);
         let Some((source, inline, left)) = self.source_path(&left) else {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         };
         let Some((_, _, right)) = self.source_path(&right) else {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         };
         self.defaults.source_same_type(source, inline, &left, &right)
     }
@@ -318,9 +354,7 @@ impl Types<'_> {
     /// distinguish declarations in different modules with the same final identifier.
     fn package_type_name(&self, ty: &Type) -> Option<String> {
         if self.imports.contains_key("*") || self.block_type(ty) {
-            return
-            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-            None;
+            return None;
         }
 
         let written_name = match strip(ty) {
@@ -343,9 +377,7 @@ impl Types<'_> {
 
     fn package_has_default(&self, ty: &Type) -> bool {
         if self.block_type(ty) {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         }
         if self.defaults.has_labeled_sources() {
             return self.source_default(ty) == Some(true);
@@ -356,9 +388,7 @@ impl Types<'_> {
 
     fn package_declares_default(&self, ty: &Type) -> bool {
         if self.block_type(ty) {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         }
         if self.defaults.has_labeled_sources() {
             return self.source_default(ty) == Some(true);
@@ -401,9 +431,7 @@ impl Types<'_> {
                 Some("super") => {
                     while path.first().is_some_and(|name| name == "super") {
                         if module.pop().is_none() {
-                            return
-                            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-                            false;
+                            return false;
                         }
                         let _parent = path.remove(0);
                     }
@@ -431,9 +459,7 @@ impl Types<'_> {
             }
         }
         if self.defaults.has_single_source_evidence() {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         }
         let name = self.package_type_name(ty);
         name.is_some_and(|name| self.defaults.lacks_default_name(&name))
@@ -475,9 +501,7 @@ impl Types<'_> {
                 return changed.then_some(resolved);
             }
             if !visited.insert(resolved.clone()) {
-                return
-                // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-                None;
+                return None;
             }
             let Some(alias) = aliases.get(&name).and_then(Option::as_ref) else {
                 return changed.then_some(resolved);
@@ -566,22 +590,103 @@ impl Types<'_> {
 
     // All normalization entry points use a separate conservative reconstruction-work allowance.
     // Its matching scale with visitor depth does not make the two budgets shared accounting.
+    #[cfg(test)]
     pub(super) fn source_type(&self, ty: &Type) -> Type {
         let mut budget = TYPE_EXPANSION_LIMIT;
-        self.source_type_at(ty, &mut 64, false, true, &mut budget)
+        self.source_type_at(ty, &mut 64, TypeQualification::Source, true, &mut budget)
     }
 
     pub(super) fn canonical_type(&self, ty: &Type) -> Type {
         let mut budget = TYPE_EXPANSION_LIMIT;
-        self.source_type_at(ty, &mut 64, true, true, &mut budget)
+        self.source_type_at(ty, &mut 64, TypeQualification::Primitives, true, &mut budget)
     }
 
     pub(super) fn declaration_type(&self, ty: &Type) -> Type {
         let mut budget = TYPE_EXPANSION_LIMIT;
-        self.source_type_at(ty, &mut 64, true, false, &mut budget)
+        self.source_type_at(ty, &mut 64, TypeQualification::Declaration, false, &mut budget)
     }
 
-    fn source_type_at(&self, ty: &Type, remaining: &mut usize, freeze_primitives: bool, expand_aliases: bool, budget: &mut usize) -> Type {
+    pub(super) fn frozen_type(&self, ty: &Type) -> Type {
+        let mut budget = TYPE_EXPANSION_LIMIT;
+        self.source_type_at(ty, &mut 64, TypeQualification::Full, true, &mut budget)
+    }
+
+    pub(super) fn frozen_canonical_type(&self, ty: &Type) -> Type {
+        let mut budget = TYPE_EXPANSION_LIMIT;
+        self.source_type_at(ty, &mut 64, TypeQualification::Canonical, true, &mut budget)
+    }
+
+    fn instantiate_source_alias(
+        &self,
+        ty: &Type,
+        remaining: &mut usize,
+        qualification: TypeQualification,
+        budget: &mut usize,
+    ) -> Option<Type> {
+        let Type::Path(path) = strip(ty) else {
+            return self.instantiate_alias_with_budget(ty, budget);
+        };
+        if path.path.leading_colon.is_some()
+            || path.path.segments.len() != 1
+            || !self
+                .aliases
+                .is_some_and(|aliases| aliases.get(&path.path.segments[0].ident.to_string()).is_some_and(Option::is_some))
+        {
+            return self.instantiate_alias_with_budget(ty, budget);
+        }
+        let mut prepared = strip(ty).clone();
+        if let Type::Path(path) = &mut prepared
+            && let PathArguments::AngleBracketed(arguments) = &mut path.path.segments[0].arguments
+        {
+            for argument in &mut arguments.args {
+                if let GenericArgument::Type(inner) = argument {
+                    *inner = self.source_type_at(inner, remaining, qualification, true, budget);
+                }
+            }
+        }
+        self.instantiate_alias_with_budget(&prepared, budget)
+    }
+
+    pub(super) fn standard_type(&self, module: &str, name: &str, roots: &[&str]) -> Option<Type> {
+        let root = roots.iter().find(|root| {
+            if module == "primitive" {
+                self.standard_external_root(root) && self.primitive_external_root(root)
+            } else {
+                self.standard_absolute_root(root)
+            }
+        })?;
+        syn::parse_str(&format!("::{root}::{module}::{name}")).ok()
+    }
+
+    fn prelude_path(&self, ty: &Type, names: &[String]) -> Option<Vec<String>> {
+        let Some(name) = names.last() else {
+            return None; // #[gamma::skip(option.none_to_some, reason = "This fallback is reached only for empty resolved names. Its sole consumer source_type_at then parses names.join(\"::\"), which is empty and cannot be a Path. Returning Some(Vec::default()) leaves those names empty too; the absolute flag is only applied after a successful parse, so both versions preserve the same cloned input type.", tag = "equivalent")]
+        };
+        let (module, roots) = match name.as_str() {
+            "String" => ("string", &["std", "alloc"]),
+            "Vec" => ("vec", &["std", "alloc"]),
+            "Box" => ("boxed", &["std", "alloc"]),
+            "Option" => ("option", &["std", "core"]),
+            "Result" => ("result", &["std", "core"]),
+            _ => {
+                return None;
+            }
+        };
+        if !self.supports_standard_type(ty, name, module, roots) {
+            return None;
+        }
+        let root = roots.iter().find(|root| self.standard_absolute_root(root))?;
+        Some(vec![(*root).into(), module.into(), name.clone()])
+    }
+
+    fn source_type_at(
+        &self,
+        ty: &Type,
+        remaining: &mut usize,
+        qualification: TypeQualification,
+        expand_aliases: bool,
+        budget: &mut usize,
+    ) -> Type {
         if *remaining == 0 {
             return syn::parse_quote!(_);
         }
@@ -589,13 +694,18 @@ impl Types<'_> {
         if !reserve_type(ty, budget) {
             return syn::parse_quote!(_);
         }
-        let alias = expand_aliases.then(|| self.instantiate_alias_with_budget(ty, budget)).flatten();
+        let alias = expand_aliases
+            .then(|| self.instantiate_source_alias(ty, remaining, qualification, budget))
+            .flatten();
+        let qualification = alias.as_ref().map_or(qualification, |_| qualification.after_alias());
+        let canonical = matches!(qualification, TypeQualification::Canonical | TypeQualification::CanonicalPrimitives);
         let ty = alias.as_ref().unwrap_or(ty);
         if self.is_io_result_path(ty)
             && let Some(inner) = payload(ty, 0)
         {
-            let inner = self.source_type_at(inner, remaining, freeze_primitives, expand_aliases, budget);
-            return syn::parse_quote!(std::result::Result<#inner, std::io::Error>);
+            let inner = self.source_type_at(inner, remaining, qualification, expand_aliases, budget);
+            let root = qualification.fully_qualified().then(|| quote::quote!(::));
+            return syn::parse_quote!(#root std::result::Result<#inner, #root std::io::Error>);
         }
         let mut resolved = ty.clone();
         match &mut resolved {
@@ -604,35 +714,43 @@ impl Types<'_> {
                     return syn::parse_quote!(_);
                 };
                 let name = first.ident.to_string();
-                if self.abstracts.contains(&name)
-                    || self.defaulted.contains(&name)
-                    || self
-                        .imports
-                        .get(BLOCK_TYPES)
-                        .and_then(Option::as_ref)
-                        .is_some_and(|names| names.contains(&name))
+                if path.path.leading_colon.is_none()
+                    && (self.abstracts.contains(&name)
+                        || self.defaulted.contains(&name)
+                        || self
+                            .imports
+                            .get(BLOCK_TYPES)
+                            .and_then(Option::as_ref)
+                            .is_some_and(|names| names.contains(&name)))
                 {
                     return syn::parse_quote!(_);
                 }
-                let Some(mut names) = resolved_type_path(ty, self.imports) else {
+                let Some((mut names, source_absolute, external)) = resolved_type_path_with_origin(ty, self.imports) else {
                     return syn::parse_quote!(_);
                 };
                 let bare_primitive = names.len() == 1
-                    && primitive_kind(&name).is_some()
+                    && (primitive_kind(&name).is_some() || matches!(name.as_str(), "str" | "char"))
                     && !self.defaults.defines(&name)
                     && !self.imports.contains_key(&name)
                     && !self.aliases.is_some_and(|aliases| aliases.contains_key(&name));
-                if freeze_primitives && bare_primitive && self.imports.contains_key("*") {
+                if qualification != TypeQualification::Source && bare_primitive && self.imports.contains_key("*") {
                     return syn::parse_quote!(_);
                 }
                 let qualified_primitive = matches!(names.as_slice(), [root, module, primitive]
                     if matches!(root.as_str(), "std" | "core")
                         && module == "primitive"
-                        && primitive_kind(primitive).is_some());
-                let primitive = freeze_primitives && (bare_primitive || qualified_primitive);
+                        && (primitive_kind(primitive).is_some() || matches!(primitive.as_str(), "str" | "char")));
+                let primitive = qualification != TypeQualification::Source && (bare_primitive || qualified_primitive);
                 if primitive {
-                    let name = names.pop().expect("a primitive path has a terminal type name");
-                    names = vec!["core".to_owned(), "primitive".to_owned(), name];
+                    let Some(path) = self.primitive_path(&names, external || canonical) else {
+                        return syn::parse_quote!(_);
+                    };
+                    names = path;
+                }
+                let prelude = qualification.fully_qualified().then(|| self.prelude_path(ty, &names)).flatten();
+                let absolute = primitive || prelude.is_some() || qualification.absolute_identity(&names);
+                if let Some(prelude) = prelude {
+                    names = prelude;
                 }
                 if names.len() == 1
                     && (self.defaults.defines(&name) || self.aliases.is_some_and(|aliases| aliases.get(&name).is_some_and(Option::is_none)))
@@ -640,38 +758,73 @@ impl Types<'_> {
                 {
                     names.splice(..0, core::iter::once("crate".to_owned()).chain(module.iter().cloned()));
                 }
+                let source_absolute = if external {
+                    source_absolute
+                } else {
+                    self.qualify_crate_root(&mut names, source_absolute, qualification)
+                };
                 if let Ok(mut qualified) = syn::parse_str::<Path>(&names.join("::")) {
-                    qualified.leading_colon = path.path.leading_colon.or_else(|| primitive.then(Default::default));
-                    if let (Some(last), Some(original)) = (qualified.segments.last_mut(), path.path.segments.last()) {
-                        last.arguments = original.arguments.clone();
-                        if let PathArguments::AngleBracketed(arguments) = &mut last.arguments {
-                            for argument in &mut arguments.args {
-                                if let GenericArgument::Type(inner) = argument {
-                                    *inner = self.source_type_at(inner, remaining, freeze_primitives, expand_aliases, budget);
-                                }
-                            }
-                        }
-                    }
+                    // Import markers also protect relative local paths from further expansion.
+                    qualified.leading_colon =
+                        (external || source_absolute && path.path.leading_colon.is_some() || absolute).then(Default::default);
+                    self.qualify_type_arguments(&mut qualified, &path.path, remaining, qualification, expand_aliases, budget);
                     path.path = qualified;
                 }
             }
             Type::Reference(reference) => {
-                *reference.elem = self.source_type_at(&reference.elem, remaining, freeze_primitives, expand_aliases, budget);
+                *reference.elem = self.source_type_at(&reference.elem, remaining, qualification, expand_aliases, budget);
             }
             Type::Tuple(tuple) => {
                 for element in &mut tuple.elems {
-                    *element = self.source_type_at(element, remaining, freeze_primitives, expand_aliases, budget);
+                    *element = self.source_type_at(element, remaining, qualification, expand_aliases, budget);
                 }
             }
-            Type::Array(array) => *array.elem = self.source_type_at(&array.elem, remaining, freeze_primitives, expand_aliases, budget),
-            Type::Ptr(pointer) => *pointer.elem = self.source_type_at(&pointer.elem, remaining, freeze_primitives, expand_aliases, budget),
-            Type::Slice(slice) => *slice.elem = self.source_type_at(&slice.elem, remaining, freeze_primitives, expand_aliases, budget),
-            Type::Paren(paren) => *paren.elem = self.source_type_at(&paren.elem, remaining, freeze_primitives, expand_aliases, budget),
-            Type::Group(group) => *group.elem = self.source_type_at(&group.elem, remaining, freeze_primitives, expand_aliases, budget),
+            Type::Array(array) => *array.elem = self.source_type_at(&array.elem, remaining, qualification, expand_aliases, budget),
+            Type::Ptr(pointer) => *pointer.elem = self.source_type_at(&pointer.elem, remaining, qualification, expand_aliases, budget),
+            Type::Slice(slice) => *slice.elem = self.source_type_at(&slice.elem, remaining, qualification, expand_aliases, budget),
+            Type::Paren(paren) => *paren.elem = self.source_type_at(&paren.elem, remaining, qualification, expand_aliases, budget),
+            Type::Group(group) => *group.elem = self.source_type_at(&group.elem, remaining, qualification, expand_aliases, budget),
             _ => {}
         }
         resolved
     }
+
+    fn qualify_type_arguments(
+        &self,
+        qualified: &mut Path,
+        original: &Path,
+        remaining: &mut usize,
+        qualification: TypeQualification,
+        expand_aliases: bool,
+        budget: &mut usize,
+    ) {
+        if let (Some(last), Some(original)) = (qualified.segments.last_mut(), original.segments.last()) {
+            last.arguments = original.arguments.clone();
+            if let PathArguments::AngleBracketed(arguments) = &mut last.arguments {
+                arguments.colon2_token = arguments.colon2_token.filter(|_| qualification != TypeQualification::Identity);
+                for argument in &mut arguments.args {
+                    if let GenericArgument::Type(inner) = argument {
+                        *inner = self.source_type_at(inner, remaining, qualification, expand_aliases, budget);
+                    }
+                }
+            }
+        }
+    }
+
+    fn qualify_crate_root(&self, names: &mut [String], absolute: bool, qualification: TypeQualification) -> bool {
+        if let Some(root) = names.first_mut()
+            && (matches!(
+                qualification,
+                TypeQualification::Full | TypeQualification::Identity | TypeQualification::Declaration
+            ) && matches!(self.imports.get(&format!("{ROOT_EXTERN_PREFIX}{root}")).and_then(Option::as_deref),
+                        Some([marker, target]) if marker == ABSOLUTE_ROOT && target == "crate"))
+        {
+            "crate".clone_into(root);
+            return false;
+        }
+        absolute
+    }
+
     pub(super) fn payload<'a>(&'a self, ty: &'a Type, index: usize) -> Option<Cow<'a, Type>> {
         if self.is_io_result(ty) && index == 1 {
             return Some(Cow::Owned(syn::parse_quote!(std::io::Error)));
@@ -686,6 +839,9 @@ impl Types<'_> {
     }
 
     pub(super) fn value_kind(&self, ty: &Type) -> Kind {
+        if matches!(resolve_type(ty), Kind::StaticStr | Kind::MutStr) && !self.supports_str_reference(ty) {
+            return Kind::Reference;
+        }
         if type_argument_values(ty).is_empty() {
             return resolve_type(ty);
         }
@@ -745,19 +901,13 @@ impl Types<'_> {
             Kind::Array => {
                 let array = array_type(concrete);
                 let syn::Expr::Lit(length) = &array.len else {
-                    return
-                    // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-                    false;
+                    return false;
                 };
                 let syn::Lit::Int(length) = &length.lit else {
-                    return
-                    // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-                    false;
+                    return false;
                 };
                 let Ok(length) = length.base10_parse::<usize>() else {
-                    return
-                    // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-                    false;
+                    return false;
                 };
 
                 length == 0 || length <= 32 && (self.has_source_independent_reference_default(&array.elem) || self.has_default(&array.elem))
@@ -767,14 +917,10 @@ impl Types<'_> {
             }
             Kind::Unknown => {
                 let Type::Path(path) = strip(concrete) else {
-                    return
-                    // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-                    false;
+                    return false;
                 };
                 if path.path.is_ident("str") {
-                    return
-                    // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-                    false;
+                    return false;
                 }
                 if resolved_type_path(concrete, self.imports).is_some_and(|segments| {
                     matches!(segments.as_slice(), [root, module, name]
@@ -811,9 +957,7 @@ impl Types<'_> {
             return true;
         }
         if self.has_generic_root(concrete) {
-            return
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "The inferred bool default is already false.")]
-            false;
+            return false;
         }
         let kind = self.value_kind(concrete);
         // Resolved declaration identities can prove an alias-target impl that the by-name index
@@ -827,18 +971,14 @@ impl Types<'_> {
             .package_type_name(concrete)
             .is_some_and(|name| self.defaults.generic_default_is_unproven(&name))
         {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         }
         if self.package_declares_default(concrete) || self.local_generic_default(concrete) {
             return true;
         }
         if matches!(kind, Kind::Collection | Kind::Map) && !self.supports_collection_api(concrete) {
             let Some(path) = resolved_type_path(concrete, self.imports) else {
-                return
-                // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-                false;
+                return false;
             };
 
             return
@@ -875,19 +1015,13 @@ impl Types<'_> {
             Kind::Array => {
                 let array = array_type(concrete);
                 let syn::Expr::Lit(length) = &array.len else {
-                    return
-                    // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-                    false;
+                    return false;
                 };
                 let syn::Lit::Int(length) = &length.lit else {
-                    return
-                    // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-                    false;
+                    return false;
                 };
                 let Ok(length) = length.base10_parse::<usize>() else {
-                    return
-                    // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-                    false;
+                    return false;
                 };
 
                 length == 0
@@ -924,24 +1058,22 @@ impl Types<'_> {
     }
 
     pub(super) fn supports_primitive_kind(&self, ty: &Type, expected: Kind) -> bool {
-        self.supports_primitive_kind_with(ty, expected, &mut HashSet::default())
+        self.supported_primitive_kind(ty) == Some(expected)
     }
 
-    fn supports_primitive_kind_with(&self, ty: &Type, expected: Kind, visited: &mut HashSet<*const Type>) -> bool {
+    pub(super) fn supported_primitive_kind(&self, ty: &Type) -> Option<Kind> {
+        self.supported_primitive_kind_with(ty, &mut HashSet::default())
+    }
+
+    fn supported_primitive_kind_with(&self, ty: &Type, visited: &mut HashSet<*const Type>) -> Option<Kind> {
         if !visited.insert(core::ptr::from_ref(ty)) {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return None;
         }
         let ty = self.resolve_alias(ty);
         if let Type::Reference(reference) = strip(ty) {
-            return self.supports_primitive_kind_with(&reference.elem, expected, visited);
+            return self.supported_primitive_kind_with(&reference.elem, visited);
         }
-        let Some(path) = resolved_type_path(ty, self.imports) else {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
-        };
+        let path = resolved_type_path(ty, self.imports)?;
         let name = match path.as_slice() {
             [name] if !self.defaults.defines(name) && !self.imports.contains_key("*") => name,
             [root, module, name]
@@ -950,13 +1082,11 @@ impl Types<'_> {
                 name
             }
             _ => {
-                return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+                return None;
             }
         };
 
-        primitive_kind(name) == Some(expected)
+        primitive_kind(name)
     }
 
     pub(super) fn import_changes_name(&self, ty: &Type) -> bool {
@@ -970,15 +1100,11 @@ impl Types<'_> {
     pub(super) fn supports_collection_api(&self, ty: &Type) -> bool {
         let ty = self.resolve_alias(ty);
         if self.package_defines(ty) {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         }
 
         let Some(path) = resolved_type_path(ty, self.imports) else {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         };
         let collection_kind = |name: &str| match name {
             "Vec" | "VecDeque" | "HashSet" | "BTreeSet" | "BinaryHeap" | "LinkedList" | "FxHashSet" => Some(Kind::Collection),
@@ -1031,11 +1157,37 @@ impl Types<'_> {
             .is_none_or(|path| matches!(path.as_deref(), Some([absolute, original]) if absolute == ABSOLUTE_ROOT && original == root))
     }
 
+    fn standard_absolute_root(&self, root: &str) -> bool {
+        self.standard_external_root(root)
+            && self
+                .imports
+                .get(&format!("{ROOT_EXTERN_PREFIX}{root}"))
+                .is_none_or(|path| matches!(path.as_deref(), Some([_, original]) if original == root))
+    }
+
+    fn primitive_external_root(&self, root: &str) -> bool {
+        // std and core expose the same primitives, even when one is named through the other's alias.
+        self.imports.get(&format!("{ROOT_EXTERN_PREFIX}{root}")).is_none_or(
+            |path| matches!(path.as_deref(), Some([absolute, original]) if absolute == ABSOLUTE_ROOT && matches!(original.as_str(), "std" | "core")),
+        )
+    }
+
+    fn primitive_path(&self, names: &[String], external: bool) -> Option<Vec<String>> {
+        if !external && names.len() == 3 && !self.primitive_external_root(&names[0]) {
+            return None;
+        }
+        let name = names
+            .last()
+            .expect("primitive normalization is called only for nonempty primitive paths");
+        let root = ["core", "std"]
+            .into_iter()
+            .find(|root| self.standard_external_root(root) && self.primitive_external_root(root))?;
+        Some(vec![root.to_owned(), "primitive".to_owned(), name.clone()])
+    }
+
     pub(super) fn supports_collection_constructor(&self, ty: &Type) -> bool {
         if !self.supports_collection_api(ty) {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         }
 
         let ty = self.resolve_alias(ty);
@@ -1064,9 +1216,7 @@ impl Types<'_> {
 
     fn collection_key_proven(&self, ty: &Type, remaining: usize) -> bool {
         if remaining == 0 {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         }
         let instantiated = self.instantiate_alias(ty);
         let ty = self.resolve_alias(instantiated.as_ref().unwrap_or(ty));
@@ -1156,39 +1306,29 @@ impl Types<'_> {
 
     fn supports_peekable_chars_with(&self, ty: &Type, visited: &mut HashSet<*const Type>) -> bool {
         if !visited.insert(core::ptr::from_ref(ty)) {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         }
         if matches!(strip(ty), Type::Path(path) if path.path.segments.first().is_some_and(|segment| {
             let name = segment.ident.to_string();
             self.abstracts.contains(&name) || self.defaulted.contains(&name)
         })) {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         }
         let ty = self.resolve_alias(ty);
         if let Type::Reference(reference) = strip(ty) {
             return reference.mutability.is_some() && self.supports_peekable_chars_with(&reference.elem, visited);
         }
         let Type::Path(path) = strip(ty) else {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         };
         let Some(resolved) = resolved_type_path(ty, self.imports) else {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         };
         if !self.standard_root_unshadowed(&resolved)
             || !matches!(resolved.as_slice(), [root, module, name]
                 if matches!(root.as_str(), "std" | "core") && module == "iter" && name == "Peekable")
         {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         }
         let segment = path
             .path
@@ -1196,34 +1336,25 @@ impl Types<'_> {
             .last()
             .expect("the resolved source path matched std/core::iter::Peekable above");
         let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         };
         if arguments.args.len() != 1 {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         }
         let Some(GenericArgument::Type(element)) =
         // #[gamma::skip(iter.first_to_last, reason = "The enclosing guard requires exactly one path segment or exactly one generic argument, respectively, so first and last select the same element.", tag = "equivalent")]
         arguments.args.first() else {
             return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
             false;
         };
         if matches!(strip(element), Type::Path(path) if path.path.segments.first().is_some_and(|segment| {
             let name = segment.ident.to_string();
             self.abstracts.contains(&name) || self.defaulted.contains(&name)
         })) {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         }
         let Some(resolved) = resolved_type_path(element, self.imports) else {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         };
         self.standard_root_unshadowed(&resolved)
             && matches!(resolved.as_slice(), [root, module, name]
@@ -1233,9 +1364,7 @@ impl Types<'_> {
     pub(super) fn supports_char_api(&self) -> bool {
         let ty: Type = syn::parse_quote!(char);
         let Some(path) = resolved_type_path(&ty, self.imports) else {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         };
         !self.abstracts.iter().chain(self.defaulted).any(|name| name == "char")
             && !self.defaults.defines("char")
@@ -1253,52 +1382,37 @@ impl Types<'_> {
             let name = segment.ident.to_string();
             self.abstracts.contains(&name) || self.defaulted.contains(&name)
         })) {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         }
         let Type::Reference(reference) = strip(self.resolve_alias(ty)) else {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         };
-        let Some(path) = resolved_type_path(&reference.elem, self.imports) else {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
-        };
-        !self.abstracts.iter().chain(self.defaulted).any(|name| name == "str")
-            && !self.defaults.defines("str")
-            && !self.imports.contains_key("*")
-            && self.standard_root_unshadowed(&path)
-            && (matches!(path.as_slice(), [name] if name == "str")
+        self.supports_primitive_type(&reference.elem, "str")
+    }
+
+    pub(super) fn supports_primitive_type(&self, ty: &Type, primitive: &str) -> bool {
+        self.unshadowed_type_path(ty).is_some_and(|path| {
+            matches!(path.as_slice(), [name] if name == primitive)
                 || matches!(path.as_slice(), [root, module, name]
-                    if matches!(root.as_str(), "std" | "core") && module == "primitive" && name == "str"))
+                    if matches!(root.as_str(), "std" | "core") && module == "primitive" && name == primitive)
+        })
     }
 
     /// Constructors whose empty value has the same allocation and state as their trait default.
     pub(super) fn supports_empty_default_constructor(&self, ty: &Type) -> bool {
         let Type::Path(path) = strip(ty) else {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         };
         if
         // #[gamma::skip(cond.always_false, reason = "After either removed qself guard, resolved_type_path still rejects every qself path before the package name or empty-constructor result can be produced.", tag = "equivalent")]
         path.qself.is_some() {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         }
         let Some(first) = path.path.segments.first() else {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         };
         let Some((resolved, absolute)) = resolved_type_path_with_root(ty, self.imports) else {
-            return
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "The inferred bool default is already false.")]
-            false;
+            return false;
         };
         let name = first.ident.to_string();
         if !absolute
@@ -1307,29 +1421,21 @@ impl Types<'_> {
                 || self.defaults.defines(&name)
                 || self.aliases.is_some_and(|aliases| aliases.contains_key(&name)))
         {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         }
         if
         // #[gamma::skip(cond.always_false, tag = "equivalent", reason = "The only accepting branches below call supports_string_api or supports_collection_api, which independently require the same genuine external root. Relative opaque roots already fail path resolution; canonical import maps cannot retain expanding self-prefixes.")]
         !self.standard_path_unshadowed(&resolved, absolute) {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         }
         let name = resolved
             .last()
             .expect("standard_root_unshadowed rejected an empty resolved path above");
         if resolved.len() == 1 && !matches!(name.as_str(), "Vec" | "String") {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         }
         let Some(arguments) = constructor_argument_count(&path.path) else {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         };
         if name == "String" {
             return self.supports_string_api(ty) && arguments == 0;
@@ -1363,28 +1469,22 @@ impl Types<'_> {
 
     fn unshadowed_path(&self, ty: &Type) -> Option<Vec<String>> {
         if self.has_generic_root(ty) {
-            return
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "The return type is Option<Vec<String>>; its default is already None.")]
-            None;
+            return None;
         }
-        let (path, absolute) = resolved_type_path_with_root(ty, self.imports)?;
+        let (path, absolute, external) = resolved_type_path_with_origin(ty, self.imports)?;
         let first = path.first()?;
-        if !self.standard_path_unshadowed(&path, absolute)
+        if !external && !self.standard_path_unshadowed(&path, absolute)
             || !absolute && (self.abstracts.contains(first) || self.defaulted.contains(first))
             || path.len() == 1 && (self.defaults.defines(first) || self.imports.contains_key("*"))
         {
-            return
-            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-            None;
+            return None;
         }
         Some(path)
     }
 
     pub(super) fn supports_default_trait(&self, ty: &Type) -> bool {
         let Type::Path(written) = ty else {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         };
         if written
             .path
@@ -1393,19 +1493,13 @@ impl Types<'_> {
             .any(|segment| !matches!(segment.arguments, PathArguments::None))
             || self.has_generic_root(ty)
         {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         }
         let Some((path, absolute)) = resolved_type_path_with_root(ty, self.imports) else {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         };
         if !self.standard_path_unshadowed(&path, absolute) {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         }
         matches!(path.as_slice(), [name]
             if name == "Default"
@@ -1421,13 +1515,16 @@ impl Types<'_> {
         if let Some(imported) = self.imports.get("Default") {
             return imported.as_ref().is_some_and(|path| {
                 let absolute = path.first().is_some_and(|root| root == ABSOLUTE_ROOT);
-                let path = if absolute { &path[1..] } else { path.as_slice() };
+                let path = import_target(path);
                 matches!(path, [root, module, name]
                     if matches!(root.as_str(), "std" | "core") && module == "default" && name == "Default")
                     && self.standard_path_unshadowed(path, absolute)
             });
         }
-        !self.imports.contains_key("*") && !self.defaults.defines("Default")
+        let shadowed = self
+            .aliases
+            .map_or_else(|| self.defaults.defines("Default"), |aliases| aliases.contains_key("Default"));
+        !self.imports.contains_key("*") && !shadowed
     }
 
     pub(super) fn standard_constructor_root(&self, ty: &Type) -> bool {
@@ -1441,7 +1538,7 @@ impl Types<'_> {
 
     fn standard_path_unshadowed(&self, path: &[String], absolute: bool) -> bool {
         if absolute {
-            path.first().is_some_and(|root| self.standard_external_root(root))
+            path.first().is_some_and(|root| self.standard_absolute_root(root))
         } else {
             self.standard_root_unshadowed(path)
         }
@@ -1449,9 +1546,7 @@ impl Types<'_> {
 
     fn standard_root_unshadowed(&self, path: &[String]) -> bool {
         let Some(root) = path.first() else {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         };
         if !matches!(root.as_str(), "std" | "core" | "alloc") {
             return true;
@@ -1459,11 +1554,7 @@ impl Types<'_> {
         self.standard_external_root(root)
             && self.imports.get(root).is_none_or(|imported| {
                 imported.as_ref().is_some_and(|imported| {
-                    let imported = if imported.first().is_some_and(|root| root == ABSOLUTE_ROOT) {
-                        &imported[1..]
-                    } else {
-                        imported.as_slice()
-                    };
+                    let imported = import_target(imported);
                     matches!(imported, [name] if name == root)
                 })
             })
@@ -1472,14 +1563,10 @@ impl Types<'_> {
     pub(super) fn supports_nonzero_api(&self, ty: &Type) -> bool {
         let ty = self.resolve_alias(ty);
         if self.package_defines(ty) {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         }
         let Some(path) = resolved_type_path(ty, self.imports) else {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         };
         let is_nonzero = |name: &str| {
             matches!(
@@ -1513,15 +1600,11 @@ impl Types<'_> {
     fn supports_standard_type(&self, ty: &Type, expected_name: &str, expected_module: &str, roots: &[&str]) -> bool {
         let ty = self.resolve_alias(ty);
         if self.package_defines(ty) {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         }
 
-        let Some(path) = resolved_type_path(ty, self.imports) else {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+        let Some((path, absolute, external)) = resolved_type_path_with_origin(ty, self.imports) else {
+            return false;
         };
 
         matches!(path.as_slice(), [name] if name == expected_name && !self.imports.contains_key("*"))
@@ -1529,7 +1612,7 @@ impl Types<'_> {
                 path.as_slice(),
                 [root, module, name]
                     if roots.contains(&root.as_str())
-                        && self.standard_external_root(root)
+                        && (external || self.standard_path_unshadowed(&path, absolute))
                         && module == expected_module
                         && name == expected_name
             )
@@ -1541,9 +1624,7 @@ impl Types<'_> {
 
     fn supports_iterator_trait_with(&self, ty: &Type, iterator_bounded: &[String], visited: &mut HashSet<*const Type>) -> bool {
         if !visited.insert(core::ptr::from_ref(ty)) {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         }
         let ty = self.resolve_alias(ty);
         if let Type::Reference(reference) = strip(ty) {
@@ -1555,9 +1636,7 @@ impl Types<'_> {
             return true;
         }
         let Type::ImplTrait(implementation) = strip(ty) else {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         };
 
         implementation.bounds.iter().any(|bound| {
@@ -1571,15 +1650,11 @@ impl Types<'_> {
     pub(super) fn supports_range_iterator(&self, ty: &Type) -> bool {
         let ty = self.resolve_alias(ty);
         if !self.supports_standard_type(ty, "Range", "ops", &["std", "core"]) {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         }
         let arguments = type_argument_values(ty);
         let [element] = arguments.as_slice() else {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         };
 
         self.supports_primitive_kind(element, Kind::Signed) || self.supports_primitive_kind(element, Kind::Unsigned)
@@ -1587,7 +1662,7 @@ impl Types<'_> {
 
     fn has_source_independent_reference_default(&self, ty: &Type) -> bool {
         let concrete = self.resolve_alias(ty);
-        if matches!(resolve_type(concrete), Kind::StaticStr) {
+        if matches!(resolve_type(concrete), Kind::StaticStr) && self.supports_str_reference(concrete) {
             return true;
         }
 
@@ -1600,9 +1675,7 @@ impl Types<'_> {
 
     pub(super) fn collection_hasher_index(&self, ty: &Type) -> Option<usize> {
         if !self.supports_collection_api(ty) {
-            return
-            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-            None;
+            return None;
         }
         match
         // #[gamma::skip(try.propagate_to_unwrap, tag = "equivalent", reason = "supports_collection_api above already resolved this same immutable type and import map successfully, so the repeated resolution cannot return None.")]
@@ -1616,14 +1689,10 @@ impl Types<'_> {
     pub(super) fn supports_wrapper_api(&self, ty: &Type) -> bool {
         let ty = self.resolve_alias(ty);
         if self.package_defines(ty) {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         }
         let Some(path) = resolved_type_path(ty, self.imports) else {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         };
 
         matches!(path.as_slice(), [name]
@@ -1653,17 +1722,14 @@ impl Types<'_> {
         {
             let _replaced = segments.splice(..1, imported.iter().cloned());
         }
-        if segments.first().is_some_and(|segment| segment == ABSOLUTE_ROOT) {
-            let _absolute = segments.remove(0);
-        }
         let iterator_name = |name: &str| matches!(name, "Iterator" | "DoubleEndedIterator" | "ExactSizeIterator" | "FusedIterator");
 
-        matches!(segments.as_slice(), [name]
+        matches!(import_target(&segments), [name]
             if iterator_name(name)
                 && !imports.contains_key(name)
                 && !imports.contains_key("*"))
             || matches!(
-                segments.as_slice(),
+                import_target(&segments),
                 [root, module, name]
                     if matches!(root.as_str(), "std" | "core")
                         && module == "iter"
@@ -1730,9 +1796,7 @@ impl Types<'_> {
 
     fn renamed_collection_has_default(&self, ty: &Type) -> bool {
         let Some(path) = resolved_type_path(ty, self.imports) else {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         };
 
         matches!(
@@ -1754,9 +1818,7 @@ impl Types<'_> {
 
     fn local_generic_default(&self, ty: &Type) -> bool {
         let Some(name) = self.package_type_name(ty) else {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         };
 
         self.defaults.declares_generic_default_name(&name)
@@ -1864,9 +1926,7 @@ impl Types<'_> {
 
     fn concrete_self_type<'a>(&'a self, ty: &Type) -> Option<&'a Type> {
         let Type::Path(path) = strip(ty) else {
-            return
-            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-            None;
+            return None;
         };
 
         (
@@ -1879,15 +1939,11 @@ impl Types<'_> {
 
     fn concrete_self_associated_type<'a>(&'a self, ty: &Type) -> Option<&'a Type> {
         let Type::Path(path) = strip(ty) else {
-            return
-            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-            None;
+            return None;
         };
         let mut segments = path.path.segments.iter();
         let (Some(root), Some(name), None) = (segments.next(), segments.next(), segments.next()) else {
-            return
-            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-            None;
+            return None;
         };
 
         (path.qself.is_none() && root.ident == "Self")
@@ -1909,9 +1965,7 @@ pub(super) fn constructor_argument_count(path: &Path) -> Option<usize> {
     while let Some(segment) = segments.next() {
         if segments.peek().is_some() {
             if !matches!(segment.arguments, PathArguments::None) {
-                return
-                // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-                None;
+                return None;
             }
             continue;
         }
@@ -1933,15 +1987,15 @@ fn resolved_type_path(ty: &Type, imports: &HashMap<String, Option<Vec<String>>>)
 }
 
 fn resolved_type_path_with_root(ty: &Type, imports: &HashMap<String, Option<Vec<String>>>) -> Option<(Vec<String>, bool)> {
+    resolved_type_path_with_origin(ty, imports).map(|(path, absolute, _external)| (path, absolute))
+}
+
+fn resolved_type_path_with_origin(ty: &Type, imports: &HashMap<String, Option<Vec<String>>>) -> Option<(Vec<String>, bool, bool)> {
     let Type::Path(path) = strip(ty) else {
-        return
-        // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-        None;
+        return None;
     };
     if path.qself.is_some() {
-        return
-        // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-        None;
+        return None;
     }
 
     let mut segments = path
@@ -1952,11 +2006,16 @@ fn resolved_type_path_with_root(ty: &Type, imports: &HashMap<String, Option<Vec<
         .collect::<Vec<_>>();
 
     let mut absolute = path.path.leading_colon.is_some();
+    let mut external = false;
     if !absolute {
         for _ in 0..imports.len().saturating_add(1) {
             let first = segments.first()?;
             if first == ABSOLUTE_ROOT {
                 let _absolute = segments.remove(0);
+                if segments.first().is_some_and(|first| first == EXTERNAL_ROOT) {
+                    let _external = segments.remove(0);
+                    external = true;
+                }
                 absolute = true;
                 break;
             }
@@ -1965,9 +2024,7 @@ fn resolved_type_path_with_root(ty: &Type, imports: &HashMap<String, Option<Vec<
                 break;
             };
             let Some(prefix) = imported else {
-                return
-                // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-                None;
+                return None;
             };
             // #[gamma::skip(iter.first_to_last, reason = "the comparison is reached only for a one-element prefix, whose first and last element are identical")]
             if
@@ -1991,7 +2048,7 @@ fn resolved_type_path_with_root(ty: &Type, imports: &HashMap<String, Option<Vec<
         }
     }
 
-    Some((segments, absolute))
+    Some((segments, absolute, external))
 }
 
 /// Exact external error APIs whose `Default` obligations are unavailable.
@@ -1999,9 +2056,7 @@ fn resolved_type_path_with_root(ty: &Type, imports: &HashMap<String, Option<Vec<
 /// An arbitrary dependency type ending in `Error` is not negative evidence.
 pub(super) fn is_foreign_error(ty: &Type, imports: &HashMap<String, Option<Vec<String>>>) -> bool {
     let Some(resolved) = resolved_type_path(ty, imports) else {
-        return
-        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-        false;
+        return false;
     };
 
     matches!(
@@ -2024,20 +2079,14 @@ pub(super) fn is_foreign_error(ty: &Type, imports: &HashMap<String, Option<Vec<S
 /// is close to universal in real Rust, the alias is resolved through the workspace index.
 pub(super) fn returns_undefaultable_error(output: &ReturnType, types: &Types<'_>) -> bool {
     let ReturnType::Type(_arrow, ty) = output else {
-        return
-        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-        false;
+        return false;
     };
 
     let Type::Path(path) = strip(ty) else {
-        return
-        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-        false;
+        return false;
     };
     if resolve_type(ty) != Kind::Result {
-        return
-        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-        false;
+        return false;
     }
 
     if let Some(error) = payload(ty, 1) {
@@ -2073,9 +2122,7 @@ pub(super) fn is_abstract_type(ty: &Type, abstracts: &[String]) -> bool {
 
         Type::Path(path) if path.qself.is_none() => {
             let Some(last) = path.path.segments.last() else {
-                return
-                // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-                false;
+                return false;
             };
 
             if path.path.segments.len() > 1 {

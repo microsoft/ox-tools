@@ -11,6 +11,7 @@ use camino::{Utf8Component, Utf8Path, Utf8PathBuf};
 use crate::Result;
 use crate::error::error;
 
+/// Match Linux's link-follow ceiling so cycles fail promptly without rejecting ordinary chains.
 const MAX_SYMLINKS: usize = 40;
 
 /// Resolves every extant symlink in `path`, including a dangling final link's target spelling.
@@ -61,7 +62,6 @@ fn physical_with_filesystem(
                         Ok(symlink) => symlink,
 
                         Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => {
-                            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
                             append(
                                 &mut resolved,
                                 core::iter::once(*component).chain(components[at + 1..].iter().copied()),
@@ -206,7 +206,6 @@ fn lexical(path: &Utf8Path) -> Result<Utf8PathBuf> {
     let absolute = absolute(path)?;
     let mut normalized = Utf8PathBuf::new();
 
-    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
     append(&mut normalized, absolute.components());
 
     Ok(normalized)

@@ -1,6 +1,8 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
+#Requires -Version 7.6
+
 <#
 .SYNOPSIS
     Updates the version of a Rust crate and generates a CHANGELOG.md file based on git history.
@@ -72,6 +74,10 @@ param(
     [Parameter(Mandatory = $false)]
     [string]$BackfillVersion
 )
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
 
 # --- CONFIGURATION ---
 
@@ -223,8 +229,17 @@ function Get-DirectDependents {
     )
 
     $rootManifest = Join-Path $repoRoot "Cargo.toml"
-    $metadataJson = cargo metadata --format-version=1 --no-deps --manifest-path $rootManifest
-    if ($LASTEXITCODE -ne 0) {
+    $metadataJson = $null
+    $metadataExitCode = 1
+    $previousNativeErrorPreference = $PSNativeCommandUseErrorActionPreference
+    try {
+        $PSNativeCommandUseErrorActionPreference = $false
+        $metadataJson = cargo metadata --format-version=1 --no-deps --manifest-path $rootManifest
+        $metadataExitCode = $LASTEXITCODE
+    } finally {
+        $PSNativeCommandUseErrorActionPreference = $previousNativeErrorPreference
+    }
+    if ($metadataExitCode -ne 0) {
         Write-Warning "Failed to run 'cargo metadata'. Skipping dependent crate check."
         return @()
     }
@@ -489,8 +504,11 @@ function Update-CrateVersion {
 
     $escapedCrateName = Get-EscapedRegexSpecialChars($crateName)
     $crateNamePattern = $escapedCrateName.Replace('_', '[-_]')
-    $regex = '(?<=' + $crateNamePattern + '\s*=\s*\{[^\}]*?version\s*=\s*")[^"]+'
-    (Get-Content $rootCargoToml -Raw) -replace $regex, $newVersion | Set-Content $rootCargoToml -NoNewline
+    $regex = '(' + $crateNamePattern + '\s*=\s*\{[^\}]*?version\s*=\s*")(?<pin>=?)[^"]+'
+    [regex]::Replace((Get-Content $rootCargoToml -Raw), $regex, {
+        param($match)
+        $match.Groups[1].Value + $match.Groups['pin'].Value + $newVersion
+    }) | Set-Content $rootCargoToml -NoNewline
 
     cargo check -p $crateName --quiet | Write-Host
     if ($LASTEXITCODE -ne 0) {
@@ -509,7 +527,9 @@ function Write-BackfilledChangelogVersion {
         [string]$prBaseUrl
     )
 
-    $tags = Invoke-GitCommand -Command "tag --list `"$crateName-v*`"" -ErrorMessage "Failed to retrieve git tags"
+    $tags = @(
+        Invoke-GitCommand -Command "tag --list `"$crateName-v*`"" -ErrorMessage "Failed to retrieve git tags"
+    )
     $releaseTags = @(
         $tags |
             Where-Object { $_ -match "^${crateName}-v\d+\.\d+\.\d+$" } |
@@ -578,7 +598,9 @@ function Write-Changelog {
         [string]$prBaseUrl
     )
 
-    $tags = Invoke-GitCommand -Command "tag --list `"$crateName-v*`"" -ErrorMessage "Failed to retrieve git tags"
+    $tags = @(
+        Invoke-GitCommand -Command "tag --list `"$crateName-v*`"" -ErrorMessage "Failed to retrieve git tags"
+    )
     $latestTag = $null
     $initialCommit = $null
     $previousReleaseCommit = $null
@@ -627,11 +649,11 @@ function Write-Changelog {
     } else {
         "HEAD"
     }
-    $rawCommits = Invoke-GitCommand -Command "log $range --pretty=format:`"%s`" -- `"$crateFolder`"" -ErrorMessage "Failed to retrieve git log for unreleased commits"
+    $rawCommits = @(
+        Invoke-GitCommand -Command "log $range --pretty=format:`"%s`" -- `"$crateFolder`"" -ErrorMessage "Failed to retrieve git log for unreleased commits"
+    )
     if ($null -eq $rawCommits -or $rawCommits.Count -eq 0) {
         $rawCommits = @()
-    } else {
-        $rawCommits = @($rawCommits)
     }
 
     if (-not $rawCommits) {
@@ -734,8 +756,15 @@ function Update-Readme {
     Write-Host "📝 Updating README.md..."
     Push-Location $crateFolder
     try {
-        $result = cargo doc2readme --lib --template ../README.j2 2>&1
-        if ($LASTEXITCODE -ne 0) {
+        $previousNativeErrorPreference = $PSNativeCommandUseErrorActionPreference
+        try {
+            $PSNativeCommandUseErrorActionPreference = $false
+            $result = cargo doc2readme --lib --template ../README.j2 2>&1
+            $readmeExitCode = $LASTEXITCODE
+        } finally {
+            $PSNativeCommandUseErrorActionPreference = $previousNativeErrorPreference
+        }
+        if ($readmeExitCode -ne 0) {
             Write-Warning "Failed to generate README: $result"
         } else {
             Write-Host "✅ README.md updated."
@@ -904,7 +933,7 @@ try {
 
         if (Test-SemverIncompatibleBump -oldVersion $oldVersion -newVersion $newVersion) {
             $dependentCrates = Get-DirectDependents -crateName $CrateName -repoRoot $repoRoot
-            if ($dependentCrates.Count -gt 0) {
+            if (@($dependentCrates).Count -gt 0) {
                 Show-DependentCratesWarning -crateName $CrateName -oldVersion $oldVersion -newVersion $newVersion -dependentCrates $dependentCrates
             }
         }

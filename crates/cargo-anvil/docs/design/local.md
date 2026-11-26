@@ -16,25 +16,23 @@ The recipe validators currently check toolchain availability and workspace MSRV
 compatibility, not a universal Rust/Cargo 1.95 minimum. Passing prerequisite
 validation with an older compiler does not make that configuration supported.
 
-Local execution also requires rustup, **just 1.46.0+**, and **PowerShell 7+**
-(`pwsh`). Setup installs catalog tools and Rust components; install `just` and
-PowerShell before invoking the recipes.
+Local execution also requires rustup and **just 1.47.0+**. PowerShell 7+
+(`pwsh`) is needed only for container commands, spell-dictionary preparation,
+and the cargo-spellcheck source-build prerequisite probe. Setup installs
+catalog tools and Rust components; install the prerequisites needed by the
+selected recipes before invoking them.
 
 ## 1. File layout
 
 | Path | Purpose |
 |------|---------|
-| `Justfile` | Imports `justfiles/anvil/mod.just` through a managed region; other content belongs to the repository. |
-| `justfiles/anvil/mod.just` | Recipe entry point and `anvil` alias for `anvil-pr`. |
-| `justfiles/anvil/checks/` | Individual checks. |
-| `justfiles/anvil/dev/` | Local development commands. |
-| `justfiles/anvil/groups/` | Check groups. |
-| `justfiles/anvil/tiers.just` | PR, scheduled, and full tiers. |
-| `justfiles/anvil/tools.just` | Tool setup and prerequisite validation. |
-| `justfiles/anvil/versions.just` | Cargo-tool versions and nightly pins. |
-| `justfiles/anvil/impact.just` | Impact analysis and its cached results. |
-| `justfiles/anvil/helpers.just` | Shared recipe helpers. |
-| `justfiles/anvil/container.just` | Container commands. |
+| `Justfile` | Imports `.anvil/anvil.just` through a managed region; other content belongs to the repository. |
+| `.anvil/anvil.just` | Recipe entry point and `anvil` alias for `anvil-pr`. |
+| `.anvil/checks.just` | Individual checks, impact analysis, and developer commands. |
+| `.anvil/groups.just` | Check groups and PR/scheduled/full tiers. |
+| `.anvil/helpers.just` | Private recipes and shared definitions. |
+| `.anvil/setup.just` | Tool pins, setup recipes, and prerequisite validation. |
+| `.anvil/container.just` | Container commands and helpers; optional when a derived catalog removes container support. |
 | `.anvil/container/` | Container image definition. |
 
 Generated recipe files are tool-owned. The top-level `Justfile` and container
@@ -96,7 +94,7 @@ GitHub setup uses `binstall`; ADO uses source installation.
 
 Cargo tools are installed at their exact catalog versions. Already-installed
 versions at or above the catalog minimum are accepted and are not downgraded.
-Pins are recorded in `versions.just`. Bootstrap utilities such as cargo-binstall
+Pins are recorded in `.anvil/setup.just`. Bootstrap utilities such as cargo-binstall
 are not covered by the catalog's exact-version guarantee.
 
 ### System prerequisites
@@ -120,25 +118,24 @@ Checks without a dedicated nightly or MSRV select their compiler in this order:
 2. A root `rust-toolchain` or `rust-toolchain.toml`, interpreted by rustup.
 3. Root `[workspace.package].rust-version`, or root `[package].rust-version`.
 
-No selection means an error. Toolchain files retain rustup's native behavior,
-including lookup from each command's working directory; nested toolchain files
-can therefore affect commands.
+No selection means Cargo uses its default toolchain. Toolchain files retain
+rustup's native behavior, including lookup from each command's working
+directory; nested toolchain files can therefore affect commands.
 
 With the root-MSRV fallback, every workspace member must declare or inherit a
 `rust-version` no higher than the root value. Correct inconsistent declarations
-or select the catalog compiler explicitly. Setup provisions the selected
-compiler before installing Cargo tools; validation requires it to be available.
-Cargo-installed tools use this compiler too, so their own compiler requirements
-can exceed the supported floor.
+or select the compiler explicitly. Cargo tools are independent applications
+and install with the Cargo available to the setup caller; workspace toolchain
+selection applies when checks compile or analyze workspace code.
 
 `anvil-msrv-test` separately tests the root MSRV even when a toolchain file
-selects a newer compiler. Without a root MSRV it skips. For provisioned internal
-toolchains, `ANVIL_MSRV_TOOLCHAIN` maps the MSRV run to an available toolchain;
-stable checks must then have an explicit `RUSTUP_TOOLCHAIN` or root toolchain file.
+selects a newer compiler. Without a root MSRV, setup, validation, and execution
+are successful no-ops. Environments substituting an internally built compiler
+must expose it through rustup under the declared public version.
 
 ### Nightly pinning
 
-Nightly checks use catalog pins from `versions.just`. The general nightly
+Nightly checks use catalog pins from `.anvil/setup.just`. The general nightly
 supports formatting, coverage, unused-dependency checks, Miri, careful, and
 Bolero. External-types has a separate nightly matched to its rustdoc JSON schema.
 A newer installed external-types tool can pass version validation yet fail
@@ -162,14 +159,22 @@ determine which package set each check uses.
 Other nonempty values fail with exit code 2. Scheduled groups and the
 scheduled/full tiers set `off` automatically.
 
-Any tracked edit or non-ignored untracked file widens local checks to the full
-workspace. Commit changes to restore committed-diff scoping. An empty impact
-set skips scoped checks successfully; unscoped checks still run.
+Local runs with tracked edits, staged edits, deletions, renames, or non-ignored
+untracked files snapshot the current filesystem and compute fresh package
+selections. These selections match the tiers produced if that filesystem state
+were committed. Dirty results are isolated from the clean cache and are never
+published. An empty impact set skips scoped package work successfully; unscoped
+checks still run, including the unused-deps workspace dependency inheritance
+check.
+
+GitHub Actions and Azure Pipelines impact jobs require clean checkouts and fail
+if tracked or non-ignored untracked content is present. `consume` mode continues
+to trust only the downloaded clean cache.
 
 ### Base ref and failures
 
 The shared base resolver uses `BASE_REF`, then `SYSTEM_PULLREQUEST_TARGETBRANCH`
-(ADO), then `GITHUB_BASE_REF`, then `origin/main`, then `origin/master`.
+(ADO), then `GITHUB_BASE_REF`, then `origin/main`.
 CI target branch names resolve to remote-tracking refs under `origin`.
 The ref must exist locally; recipes do not fetch it. Missing refs and shallow
 history fail with fetch guidance. A base commit without a root workspace
@@ -180,24 +185,39 @@ commands are errors, not empty selections.
 
 ### Cache
 
-Results live under `target/anvil/impact/`:
+Clean results live under `target/anvil/impact/`:
 
 | File | Meaning |
 |------|---------|
-| `snapshots/baseline.json`, `snapshots/current.json` | Cached cargo-delta snapshots. |
-| `impact.json` | Impact report; may be `{}` when safety widening applies. |
-| `include_modified.txt`, `include_affected.txt`, `include_required.txt` | Selected scope for each category, including explicit skips and full-workspace selections. |
-| `doctest_packages.txt` | Doctest-capable workspace members. |
+| `modified.packages` | Modified workspace package specifications. |
+| `affected.packages` | Modified packages plus their workspace dependents. |
+| `required.packages` | Affected packages plus their workspace dependencies. |
 
-Use the include files, not an empty `impact.json`, to determine the selected
-scope. Delete `target/anvil/impact/` to force recomputation.
+Each file is directly consumable by cargo-each. An empty file is an explicit
+successful no-op for scoped checks. Delete `target/anvil/impact/` to force
+clean recomputation.
+
+Dirty local results use immutable generation directories under
+`target/anvil/impact-dirty/` with the same package files and a fresh current
+snapshot. Each Just invocation publishes an `active-<invocation-id>` selector
+for its completed generation; `active` records the latest generation for local
+inspection. Concurrent invocations retain distinct selectors and generations.
+Completed generations are bounded and cleaned up best-effort without deleting
+an active invocation's inputs. The dirty directory is never a CI artifact input
+or a fallback for consume mode.
+
+Checks read package files from `target/anvil/impact-invocations/<invocation-id>/`.
+`anvil-impact` atomically publishes the selected clean-cache or dirty-generation
+package files there before dependent checks start. The deterministic
+invocation path is known while Just evaluates recipe arguments, so checks do
+not need a nested Just invocation or runtime command wrapper to discover the
+completed dirty generation.
 
 In consume mode, `ANVIL_IMPACT_INPUT_DIR` selects another read-only cache
 directory, using an absolute path or a path relative to the recipe's working
-directory. All three include files are required; doctest capabilities can be
-discovered when their projection is absent. The override is ignored outside
-consume mode. Container execution rejects a consume-mode directory override
-because it names a host path.
+directory. All three package files are required. The override is ignored
+outside consume mode. Container execution rejects a consume-mode directory
+override because it names a host path.
 
 ## 5. Miri execution customization
 
@@ -206,10 +226,14 @@ Initial preparation can require registry access. A setup failure fails the
 calling check/group/tier setup as well.
 
 Miri runs all-features library and binary unit tests and integration tests.
-Executables run concurrently, with one worker per logical processor by default,
-limited by the executable count. Set `ANVIL_MIRI_JOBS` to a positive integer to
-limit memory use. Each executable's output is labelled and replayed in a
-deterministic order; failures are aggregated after all executables finish.
+The selected package scope compiles together once, preserving workspace feature
+unification, and Cargo's JSON artifact stream is handed to cargo-each.
+Executables run from their owning package roots concurrently, with one worker
+per logical processor by default, limited by the executable count. Set
+`ANVIL_MIRI_JOBS` to a positive integer to limit memory use. Each executable's
+output is labelled and replayed in deterministic artifact order; failures are
+aggregated after all executables finish. Successful runs remove the PID-scoped
+artifact handoff; failed runs retain it under `target/` for diagnosis.
 
 Package-wide exclusions apply to all Miri profiles:
 
@@ -231,6 +255,7 @@ just anvil-build --package my-crate
 just anvil-doc-build --open
 just anvil-examples --package my-crate --example basic
 just anvil-fmt --fix
+just anvil-unused-deps --fix
 just anvil-miri --package my-crate --test test_name
 just anvil-miri --package my-crate --example basic
 just anvil-readme --fix
@@ -239,6 +264,14 @@ just anvil-readme --fix
 `anvil` aliases `anvil-pr`. `anvil-build` builds all workspace targets with all
 features and the lockfile; it is a development command, not a check-group member.
 `anvil-readme` checks by default and regenerates with `--fix`.
+
+### Unused dependencies
+
+`anvil-unused-deps` is check-only by default, including in groups and CI.
+Explicit `--fix` removes uninherited workspace catalog entries, never package
+dependency declarations. Compiler-backed package analysis uses the required
+impact set; workspace dependency inheritance is checked even when that set is
+empty. Disabling impact analyzes every workspace package.
 
 ### Examples
 
@@ -292,15 +325,18 @@ managed import regions have different update behavior; see
 
 ## 9. Mutation testing with cargo-gamma
 
-`anvil-mutants-diff` and `anvil-mutants-full` use cargo-gamma 0.4.0+ with a
+`anvil-mutants-diff` and `anvil-mutants-full` use cargo-gamma 0.7.0+ with a
 100% assertion-killed score requirement and zero unresolved flaky outcomes.
 Timeouts and out-of-memory outcomes do not count as assertion kills.
 
 The PR recipe selects mutation sites from changed lines against the resolved
 base, including uncommitted changes. The full recipe covers the workspace.
-An empty impact set skips the PR campaign. A diff campaign with no mutation
-sites succeeds; an empty full campaign or wholly ungradeable nonempty population
-fails its gates. Infrastructure and baseline failures still fail.
+An empty impact set skips the PR campaign. Gamma 0.7.0 accepts an empty diff
+selection, but an empty full campaign fails its score gate. The Gamma changes
+in this source tree also accept empty full campaigns; that behavior requires
+a release containing those changes and is not guaranteed by Anvil's 0.7.0 pin.
+Wholly ungradeable nonempty populations fail their gates. Infrastructure and
+baseline failures still fail.
 
 Gamma reads native `gamma.toml` configuration. Mutators, Cargo features, build
 profile, tests, concurrency, and memory policy follow Gamma's settings and
@@ -308,10 +344,10 @@ defaults. Anvil supplies workspace selection, diff scope, and strict gates.
 On GitHub Actions it also fixes the report directory to `target/cargo-gamma`;
 local and ADO runs honor Gamma's configured directory.
 
-After an invoked campaign returns, `cargo gamma hints` merges learned hints into
-`gamma-hints.yaml`, even if the campaign failed. Campaign failures take
-precedence over hint failures; a hint failure fails an otherwise successful run.
-Skipped campaigns do not update hints.
+The recipes pass `--update-hints`, so an invoked campaign promotes learned hints
+into `gamma-hints.yaml` even if the campaign fails. Campaign failures take
+precedence over promotion failures; a promotion failure fails an otherwise
+successful run. Skipped campaigns do not update hints.
 
 See [GitHub reports](./github.md#gamma-reports-and-code-scanning) for artifact
 and SARIF publication.

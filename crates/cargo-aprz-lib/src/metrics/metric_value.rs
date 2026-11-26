@@ -1,8 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use chrono::{DateTime, Utc};
 use compact_str::CompactString;
+use jiff::Timestamp;
 
 #[derive(Debug, Clone)]
 pub enum MetricValue {
@@ -10,6 +10,6 @@ pub enum MetricValue {
     Float(f64),
     String(CompactString),
     Boolean(bool),
-    DateTime(DateTime<Utc>),
+    DateTime(Timestamp),
     List(Vec<Self>),
 }

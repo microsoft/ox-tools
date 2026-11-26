@@ -46,7 +46,7 @@ pub(super) fn visible_vcs_metadata(path: &Utf8Path) -> Vec<Utf8PathBuf> {
     }
 
     found.sort();
-    // #[gamma::skip(all, reason = "the ordering or deduplication is retained for deterministic, efficient behavior; the current internal consumer observes the same population")]
+    // #[gamma::skip(all, reason = "Distinct ancestor VCS markers can resolve to one physical path through native links; reproducing those aliases depends on platform link privileges and path resolution.", tag = "native-boundary")]
     found.dedup();
     found
 }
@@ -143,25 +143,21 @@ pub(super) fn copy_tree_with(from: &Utf8Path, to: &Utf8Path, skip: &Utf8Path, op
         // Only ignore files inside the tree have any say. Reading them from parent directories
         // means a checkout nested under a directory whose `.gitignore` says `*` copies as nothing
         // at all, and the resulting empty tree fails the build for reasons nobody can see.
-        // #[gamma::skip(all, reason = "the mutation affects internal orchestration state with no safely deterministic observation at this layer")]
         .parents(false)
         // `.gitignore` describes what git would restore, which is only meaningful in something git
         // is actually tracking. Outside a repository the same file is a leftover.
         .require_git(true)
         .git_ignore(!options.copy_ignored)
-        // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
         .git_exclude(!options.copy_ignored)
         // A user's global ignore file describes their machine, not this project, and a rule in it
         // would silently change what a shared tree copies to.
-        // #[gamma::skip(all, reason = "the mutation affects internal orchestration state with no safely deterministic observation at this layer")]
+        // #[gamma::skip(all, reason = "The ignore crate discovers the global Git ignore file through process-wide home/configuration state; tests must not replace the shared host's Git configuration.", tag = "native-boundary")]
         .git_global(false)
         // `.ignore` is a search convention. It routinely excludes vendored or generated code that
         // a build genuinely needs.
-        // #[gamma::skip(all, reason = "the mutation affects internal orchestration state with no safely deterministic observation at this layer")]
         .ignore(false)
         // A link is recreated rather than followed, so there is nothing to descend into and no
         // cycle to guard against.
-        // #[gamma::skip(all, reason = "the mutation affects internal orchestration state with no safely deterministic observation at this layer")]
         .follow_links(false);
 
     let root = from.to_owned();
@@ -183,7 +179,6 @@ pub(super) fn copy_tree_with(from: &Utf8Path, to: &Utf8Path, skip: &Utf8Path, op
                 // file missing from the copy produces a build failure naming something unrelated,
                 // which is far harder to act on than the permission error that caused it.
                 Err(cause) => {
-                    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
                     record(failure, error!("could not read the source tree").caused_by(cause));
 
                     return WalkState::Quit;
@@ -191,7 +186,6 @@ pub(super) fn copy_tree_with(from: &Utf8Path, to: &Utf8Path, skip: &Utf8Path, op
             };
 
             let Some(source) = Utf8Path::from_path(entry.path()) else {
-                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
                 record(
                     failure,
                     error!("`{}` is not valid UTF-8 and cannot be copied", entry.path().display()),
@@ -206,7 +200,7 @@ pub(super) fn copy_tree_with(from: &Utf8Path, to: &Utf8Path, skip: &Utf8Path, op
                 return WalkState::Continue;
             };
 
-            // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
+            // #[gamma::skip(cond.always_false, tag = "equivalent", reason = "The root entry would only recreate the destination directory that already exists.")]
             if relative.as_str().is_empty() {
                 return WalkState::Continue;
             }
@@ -218,7 +212,6 @@ pub(super) fn copy_tree_with(from: &Utf8Path, to: &Utf8Path, skip: &Utf8Path, op
             match copy_entry(source, &destination.join(relative), &reflinks) {
                 Ok(()) => WalkState::Continue,
                 Err(cause) => {
-                    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
                     record(failure, cause);
 
                     WalkState::Quit
@@ -407,7 +400,7 @@ fn copy_entry(source: &Utf8Path, destination: &Utf8Path, reflinks: &Reflinks) ->
     // the parallel-walk safety the unconditional call had — `create_dir_all` is idempotent, so a
     // parent another thread finished in the meantime is not a conflict, and a parent that is a plain
     // file surfaces here as the same "could not create" the unconditional call raised.
-    // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
+    // #[gamma::skip(cond.always_true, tag = "performance-only", reason = "Creating the parent before the sole placement preserves the copy but repeats directory work on the common path.")]
     if place(&metadata, source, destination, reflinks).is_err() {
         if let Some(parent) = destination.parent() {
             fs::create_dir_all(parent.as_std_path()).map_err(|cause| error!("could not create `{parent}`").caused_by(cause))?;
@@ -482,7 +475,6 @@ fn copy_symlink_with(
         .parent()
         .map_or_else(|| target.is_dir(), |parent| parent.as_std_path().join(&target).is_dir());
     #[cfg(not(windows))]
-    // #[gamma::skip(literal.bool_flip, reason = "Unix symlink creation has no file/directory distinction and ignores this Windows-only callback argument.", tag = "equivalent")]
     let directory = false;
 
     create(&target, destination.as_std_path(), directory)
@@ -492,7 +484,7 @@ fn copy_symlink_with(
 /// Copies one file, cloning it if the filesystem can.
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn copy_file(source: &Utf8Path, destination: &Utf8Path, reflinks: &Reflinks) -> Result<()> {
-    // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
+    // #[gamma::skip(all, reason = "Whether this dispatch reaches a successful clone depends on the backing filesystem's native reflink support; Reflinks state transitions are tested independently.", tag = "native-boundary")]
     if reflinks.worth_trying() {
         match reflink_copy::reflink(source.as_std_path(), destination.as_std_path()) {
             Ok(()) => {
@@ -504,12 +496,12 @@ fn copy_file(source: &Utf8Path, destination: &Utf8Path, reflinks: &Reflinks) -> 
             // filesystem that cannot clone. Surface it so `copy_entry` creates the parent and
             // retries, and leave the latch alone: one such race must not force the rest of the copy
             // onto the byte-for-byte path.
-            // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
+            // #[gamma::skip(all, reason = "This classifies a native clone syscall's missing-parent failure; filesystems without reflink support can reject the operation before checking the destination parent.", tag = "native-boundary")]
             Err(cause) if cause.kind() == ErrorKind::NotFound => {
                 return Err(error!("could not copy `{source}` to `{destination}`").caused_by(cause));
             }
             Err(_unsupported) => {
-                // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
+                // #[gamma::skip(all, reason = "This call latches a failure reported by the native clone syscall; forcing that failure without changing the backing filesystem needs a separate syscall adapter.", tag = "native-boundary")]
                 reflinks.unsupported();
 
                 // A failed clone can leave a partial destination behind; remove it so the fallback
@@ -540,7 +532,6 @@ const fn reflink_supported() -> bool {
 /// `/var/folders` once they pass three days, so a scratch tree cloned from an old checkout can
 /// have files deleted out from under a run that is still using them.
 fn freshen(destination: &Utf8Path) {
-    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
     freshen_at(destination, SystemTime::now());
 }
 
@@ -713,7 +704,7 @@ mod final_survivor_tests {
 
     #[test]
     fn a_native_unrepresentable_source_name_fails_the_actual_parallel_copy_without_discarding_prior_destination_bytes() {
-        let directory = tempfile::tempdir_in(".").unwrap();
+        let directory = tempfile::tempdir().unwrap();
         let root = Utf8Path::from_path(directory.path()).unwrap();
         let source = root.join("source");
         let destination = root.join("destination");
@@ -736,6 +727,8 @@ mod final_survivor_tests {
             fs::read_to_string(destination.join("preserved")).unwrap(),
             "prior destination bytes"
         );
+        fs::remove_file(&path).unwrap();
+        directory.close().unwrap();
     }
 
     #[test]
@@ -825,6 +818,98 @@ mod final_survivor_tests {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "system-tests")]
+    #[test]
+    fn global_ignore_child() {
+        let Some(home) = std::env::var_os("GAMMA_OWNED_IGNORE_HOME") else {
+            return;
+        };
+        let home = Utf8PathBuf::from_path_buf(home.into()).unwrap();
+        let from = home.join("source");
+        let to = home.join("copy");
+        fs::create_dir(&from).unwrap();
+        let init = Command::new("git").arg("-C").arg(&from).args(["init", "--quiet"]).output().unwrap();
+        assert!(init.status.success(), "{}", String::from_utf8_lossy(&init.stderr));
+        fs::write(from.join("global-hidden.rs"), "build input").unwrap();
+        let ignored = Command::new("git")
+            .arg("-C")
+            .arg(&from)
+            .args(["check-ignore", "--quiet", "global-hidden.rs"])
+            .output()
+            .unwrap();
+        assert!(
+            ignored.status.success(),
+            "the owned global rule must actually ignore the source: {}",
+            String::from_utf8_lossy(&ignored.stderr)
+        );
+        copy_tree(&from, &to, &to).unwrap();
+        assert_eq!(fs::read_to_string(to.join("global-hidden.rs")).unwrap(), "build input");
+    }
+
+    #[cfg(feature = "system-tests")]
+    #[test]
+    fn global_git_ignores_do_not_change_the_copied_build_inputs() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let home = crate::paths::physical(Utf8Path::from_path(directory.path()).unwrap()).unwrap();
+        let ignore = home.join("global-ignore");
+        fs::write(&ignore, "global-hidden.rs\n").unwrap();
+        let config = home.join(".gitconfig");
+        fs::write(
+            &config,
+            format!("[core]\nexcludesFile = \"{}\"\n", ignore.as_str().replace('\\', "/")),
+        )
+        .unwrap();
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "exec::copy::tests::global_ignore_child", "--nocapture"])
+            .env("GAMMA_OWNED_IGNORE_HOME", &home)
+            .env("HOME", &home)
+            .env("USERPROFILE", &home)
+            .env("XDG_CONFIG_HOME", &home)
+            .env("GIT_CONFIG_GLOBAL", config)
+            .env("GIT_CONFIG_COUNT", "0")
+            .env_remove("GIT_CONFIG_PARAMETERS")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert_eq!(
+            fs::read_to_string(home.join("copy").join("global-hidden.rs")).unwrap(),
+            "build input"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_successfully_placed_link_is_not_recreated_over_itself() {
+        let (_directory, from, to) = tree();
+        fs::write(from.join("target-file"), "original").unwrap();
+        std::os::unix::fs::symlink("target-file", from.join("link")).unwrap();
+        fs::create_dir_all(&to).unwrap();
+        copy_entry(&from.join("link"), &to.join("link"), &Reflinks::new()).unwrap();
+        assert_eq!(fs::read_link(to.join("link")).unwrap(), std::path::PathBuf::from("target-file"));
+        assert!(!to.join("target-file").exists());
+    }
+
+    #[cfg(feature = "system-tests")]
+    #[test]
+    fn copying_an_external_directory_link_never_writes_through_the_copy() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = crate::paths::physical(Utf8Path::from_path(directory.path()).unwrap()).unwrap();
+        let from = root.join("from");
+        let to = root.join("to");
+        let outside = root.join("outside");
+        fs::create_dir(&from).unwrap();
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("marker"), "external build input").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, from.join("link")).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&outside, from.join("link")).unwrap();
+        copy_tree(&from, &to, &to).unwrap();
+        assert!(fs::symlink_metadata(to.join("link")).unwrap().is_symlink());
+        assert_eq!(fs::read_link(to.join("link")).unwrap(), outside.as_std_path());
+        assert_eq!(fs::read_to_string(outside.join("marker")).unwrap(), "external build input");
+    }
 
     fn tree() -> (tempfile::TempDir, Utf8PathBuf, Utf8PathBuf) {
         let temporary = tempfile::tempdir().unwrap();
@@ -960,6 +1045,47 @@ mod tests {
             fs::read_to_string(to.join("src").join("bin").join("scratch.rs").as_std_path()).unwrap(),
             "fn untracked() {}"
         );
+    }
+
+    #[test]
+    fn repository_excludes_apply_but_search_ignore_files_do_not() {
+        let (_temporary, from, to) = tree();
+        if !git(&from, &["init"]) {
+            return;
+        }
+        fs::write(from.join(".git/info/exclude"), "excluded.rs\n").unwrap();
+        fs::write(from.join(".ignore"), "kept.rs\n").unwrap();
+        fs::write(from.join("excluded.rs"), "excluded").unwrap();
+        fs::write(from.join("kept.rs"), "kept").unwrap();
+
+        copy_tree(&from, &to, Utf8Path::new("/nowhere")).unwrap();
+        assert_eq!(fs::read_to_string(to.join("kept.rs")).unwrap(), "kept");
+        assert!(!to.join("excluded.rs").exists());
+
+        let all = to.with_file_name("with-ignored");
+        copy_tree_with(
+            &from,
+            &all,
+            Utf8Path::new("/nowhere"),
+            CopyOptions { copy_ignored: true },
+            &Reflinks::new(),
+        )
+        .unwrap();
+        assert_eq!(fs::read_to_string(all.join("excluded.rs")).unwrap(), "excluded");
+    }
+
+    #[test]
+    fn a_parent_repositories_ignore_rules_do_not_hide_source_files() {
+        let (_temporary, from, to) = tree();
+        let parent = from.parent().unwrap();
+        if !git(parent, &["init"]) {
+            return;
+        }
+        fs::write(parent.join(".gitignore"), "from/kept.rs\n").unwrap();
+        fs::write(from.join("kept.rs"), "kept").unwrap();
+
+        copy_tree(&from, &to, Utf8Path::new("/nowhere")).unwrap();
+        assert_eq!(fs::read_to_string(to.join("kept.rs")).unwrap(), "kept");
     }
 
     /// Outside a repository there is no index to consult and no ignore file worth obeying, so

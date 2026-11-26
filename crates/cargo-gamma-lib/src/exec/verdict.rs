@@ -898,7 +898,6 @@ fn configured_launcher(work: &Workspace, binary: &TestBinary, attempt: Attempt<'
     } else {
         Some("1")
     };
-    // #[gamma::skip(call_result.default, reason = "configure returns unit and this mutator retains all command mutations before replacing unit with unit")]
     configure(&mut command, binary, launch, threads, attempt.active, None);
     Ok(command)
 }
@@ -1186,18 +1185,6 @@ fn supervise(
                         usage,
                         retain_failure.then(|| collected.failure_evidence(None, announced_failures(progress))),
                     );
-                }
-
-                // A direct libtest failure settles a mutant verdict, so every test after it would
-                // be paid for to learn nothing. A baseline instead completes to collect every
-                // failure and libtest's trailing diagnostics. Nextest prints its FAIL line before
-                // replaying the failed child's captured output, which may hold the guard runtime's
-                // environment-error marker, so it is never cut here.
-                if !retain_failure && let Some(name) = failure_to_cut_short(under_nextest, progress) {
-                    let (usage, _ceiling) = cut_short!(true);
-                    let _collected = supervision.collect();
-
-                    return (cut_by_named_failure(name), usage, None);
                 }
 
                 let (stalled, expired) = supervision.expiration(progress);
@@ -1490,19 +1477,6 @@ fn stopped_by_ceiling(under_nextest: bool, code: Option<i32>, peak: Option<u64>,
         .map(|limit| Verdict::MemoryLimit { peak, limit })
 }
 
-/// The verdict a run cut short by a failure the harness announced reaches.
-///
-/// Stated once, and in the same terms as the ordinary exit path, because the two are the same run
-/// seen from either side of one race: whether the reader publishes the failure before the exit
-/// observation cleans up the child decides which of them is taken, and nothing orders those two events. A policy
-/// spelled out twice would make the verdict a statement about that ordering — the name kept on a
-/// machine where the reader wins and replaced by a byte count where the reaper does.
-///
-/// [`cut_short`] has already ended the run by the time this is asked, so both facts are final.
-fn cut_by_named_failure(name: String) -> Verdict {
-    Verdict::Failed(Some(name))
-}
-
 /// Ends a run early, whether before or after its verdict is settled.
 ///
 /// Everything the workload spawned goes with it. An orphan holds locks in the scratch tree, which
@@ -1744,17 +1718,11 @@ fn reach_from_records(bytes: &[u8], ordinal: u32) -> ReachObservation {
     }
 }
 
-/// Whether this run's output can be trusted to announce a failure, and in whose format.
+/// Selects progress parsing, never authority to convict before the harness exits.
 ///
-/// A mutant is usually caught by one test, and reading the announcement as it arrives ends the run
-/// there instead of paying for every test after it. The saving is the whole tail of the binary.
-///
-/// It is only sound while the harness is the only thing writing to the stream being read. libtest
-/// captures each test's output by default and replays it after every test has run, so a line
-/// announcing a failure during the run is libtest's own. Under `--nocapture` or `--show-output`
-/// that stops being true: a test's own writing lands among the harness's, and a test that prints
-/// something shaped like a failure would convict a mutant the suite had not caught — inflating the
-/// score, which is the worst direction to be wrong in. So the whole optimization is given up there.
+/// Libtest captures Rust print macros, not inherited descriptors: child processes can print
+/// failure-shaped lines while their outer test passes. Streaming names remain useful for
+/// progress and diagnostics, but only a nonzero harness exit establishes a failure.
 fn watch(work: &Workspace) -> Watch {
     if work.runner().is_some() {
         return Watch::Nextest;
@@ -1966,11 +1934,6 @@ mod pulse_wait_regression_tests {
         assert!(observations >= 2, "the real contained child must be observed through completion");
         assert!(waits.get() >= 1, "every forced live observation must enter the actual Pulse::wait");
     }
-}
-
-/// Returns a live failure only when its announcement cannot precede a startup-error marker.
-fn failure_to_cut_short(under_nextest: bool, progress: &Mutex<Progress>) -> Option<String> {
-    (!under_nextest).then(|| announced_failure(progress)).flatten()
 }
 
 /// The first failure announcement, without treating it as a completed verdict.
@@ -2325,7 +2288,7 @@ pub(super) const DIAGNOSTIC_TAIL_LINES: usize = 20;
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod final_survivor_tests {
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::ffi::OsStr;
 
     use super::ReachObservation::{NotReached, Reached, Unknown};
@@ -2975,6 +2938,8 @@ mod final_survivor_tests {
 
     struct ScriptedSupervision {
         observation: Option<io::Result<Option<ExitStatus>>>,
+        pending: bool,
+        waits: Cell<usize>,
         expiration: (bool, bool),
         stopped: Option<bool>,
         collected: std::cell::Cell<bool>,
@@ -2987,6 +2952,8 @@ mod final_survivor_tests {
         fn new(observation: io::Result<Option<ExitStatus>>, expiration: (bool, bool)) -> Self {
             Self {
                 observation: Some(observation),
+                pending: false,
+                waits: Cell::new(0),
                 expiration,
                 stopped: None,
                 collected: std::cell::Cell::new(false),
@@ -2999,6 +2966,9 @@ mod final_survivor_tests {
 
     impl Supervision for ScriptedSupervision {
         fn observe(&mut self) -> io::Result<Option<ExitStatus>> {
+            if core::mem::take(&mut self.pending) {
+                return Ok(None);
+            }
             self.observation.take().expect("only one completion observation is scripted")
         }
         fn released(&self) -> bool {
@@ -3030,7 +3000,14 @@ mod final_survivor_tests {
             0
         }
         fn wait(&self, _seen: u64, _progress: &Mutex<Progress>) {
-            panic!("the supplied terminal observation must settle without waiting")
+            assert!(self.observation.is_some(), "a terminal observation must settle without waiting");
+            assert_eq!(self.stopped, None, "pending failure-shaped output must not terminate the child");
+            assert!(!self.collected.get(), "output is collected only after the successful exit");
+            assert_eq!(
+                self.waits.replace(self.waits.get() + 1),
+                0,
+                "only one pending observation is scripted"
+            );
         }
     }
 
@@ -3045,6 +3022,19 @@ mod final_survivor_tests {
             use std::os::windows::process::ExitStatusExt as _;
             ExitStatus::from_raw(u32::try_from(code).unwrap())
         }
+    }
+
+    #[test]
+    fn failure_shaped_output_does_not_convict_a_successful_harness() {
+        let progress = recorded_failures(false);
+        let binary = crate::testing::test_binary("never-launched-successful-harness");
+        let mut supervision = ScriptedSupervision::new(Ok(Some(exit_status(0))), (false, false));
+        supervision.pending = true;
+        let (verdict, _usage, evidence) = supervise(&mut supervision, &binary, None, false, MemoryRequest::default(), &progress, true);
+        assert_eq!(verdict, Verdict::Passed);
+        assert!(evidence.is_none());
+        assert_eq!(supervision.waits.get(), 1);
+        assert_eq!(supervision.stopped, None);
     }
 
     #[test]
@@ -4602,6 +4592,37 @@ mod tests {
         assert_eq!(verdict, Verdict::TimedOut);
     }
 
+    #[test]
+    fn timeout_confirmation_receives_three_times_the_original_budget() {
+        let mut issued = 0;
+        let verdict = settle_suspicions(attempt_for_confirmation(), |attempt| {
+            issued += 1;
+            assert_eq!(attempt.timeout, Some(Duration::from_secs(if issued == 1 { 30 } else { 90 })));
+            if issued == 1 { Verdict::TimedOut } else { Verdict::Passed }
+        });
+        assert_eq!(issued, 2);
+        assert_eq!(verdict, Verdict::Passed);
+    }
+
+    #[test]
+    fn stalled_attempt_is_retried_with_a_patient_budget() {
+        let attempt = Attempt {
+            stall: Stall {
+                budget: Some(Duration::from_secs(2)),
+            },
+            ..attempt_for_confirmation()
+        };
+        let mut issued = 0;
+        let verdict = settle_suspicions(attempt, |attempt| {
+            issued += 1;
+            assert_eq!(attempt.timeout, Some(Duration::from_secs(30)));
+            assert_eq!(attempt.stall.budget, Some(Duration::from_secs(if issued == 1 { 2 } else { 6 })));
+            if issued == 1 { Verdict::Stalled(None) } else { Verdict::Passed }
+        });
+        assert_eq!(issued, 2);
+        assert_eq!(verdict, Verdict::Passed);
+    }
+
     /// Alternating classes stop at the bound rather than running forever.
     #[test]
     fn a_verdict_that_never_settles_stops_at_the_bound() {
@@ -4635,7 +4656,7 @@ mod tests {
         assert_eq!(verdict, Verdict::Failed(Some("a::b".to_owned())));
     }
 
-    /// The attempt the ladder tests are run against; none of them reads it.
+    /// The common original attempt for confirmation-ladder tests.
     fn attempt_for_confirmation() -> Attempt<'static> {
         Attempt {
             active: Some(1),
@@ -5438,31 +5459,43 @@ mod tests {
         );
     }
 
-    /// A mutant caught by an early test is convicted there, not after every later test has run.
-    ///
-    /// This is the whole value of watching the output: the binary below would take half a minute to
-    /// finish, and the verdict is settled a fraction of a second in.
     #[test]
-    fn a_failure_convicts_a_mutant_without_waiting_for_the_rest_of_the_binary() {
-        let (_directory, work) = scripted(&["print:running 2 tests", "print:test a::b ... FAILED", "sleep:30000", "exit:101"]);
-        let binary = crate::testing::helper();
-        let started = Instant::now();
+    #[ignore = "subprocess fixture for the inherited-stdout regression"]
+    fn passing_outer_test_spawns_a_failure_shaped_child() {
+        let status = Command::new(crate::testing::helper_binary_path().as_std_path())
+            .args([
+                crate::testing::directive("print:test inner ... FAILED"),
+                crate::testing::directive("exit:0"),
+            ])
+            .status()
+            .expect("a child inherits the outer harness's stdout");
+        assert!(status.success());
+    }
 
-        let verdict = run_binary(
-            &work,
-            &binary,
-            Attempt {
-                active: None,
-                timeout: Some(Duration::from_mins(2)),
-                stall: Stall::NONE,
-                request: MemoryRequest::default(),
-                only: Only::All,
-            },
+    #[test]
+    fn a_childs_libtest_shaped_output_does_not_kill_its_passing_outer_test() {
+        let (_directory, mut work) = scripted(&[]);
+        work.set_test_args(vec![
+            "--exact".into(),
+            "exec::verdict::tests::passing_outer_test_spawns_a_failure_shaped_child".into(),
+            "--ignored".into(),
+        ]);
+        let binary = crate::testing::test_binary(
+            &Utf8PathBuf::from_path_buf(std::env::current_exe().expect("the running harness has a path"))
+                .expect("UTF-8 harness")
+                .into_string(),
         );
-        let took = started.elapsed();
-
-        assert_eq!(verdict, Verdict::Failed(Some("a::b".to_owned())));
-        assert!(took < Duration::from_secs(15), "the run waited for the whole binary: {took:?}");
+        let attempt = Attempt {
+            active: Some(1),
+            ..plain_attempt()
+        };
+        let observed = observe(&work, &binary, attempt);
+        assert_eq!(observed.verdict, Verdict::Passed);
+        assert_eq!(
+            observed.tests,
+            Some(1),
+            "the regression must actually execute its outer libtest fixture"
+        );
     }
 
     /// A baseline waits for libtest's trailing diagnostics and retains every announced failure.
@@ -5493,6 +5526,32 @@ mod tests {
         let evidence = observed.failure.expect("a failed baseline retains evidence");
         assert_eq!(evidence.failed_tests, ["a::b", "a::later"]);
         assert!(evidence.stdout_tail.contains("failure detail"), "{evidence:?}");
+    }
+
+    #[test]
+    fn ordinary_mutant_observation_does_not_retain_baseline_failure_artifacts() {
+        let (_directory, work) = scripted(&[
+            "print:running 1 test",
+            "print:test tests::failure ... FAILED",
+            "print:private failure detail",
+            "exit:101",
+        ]);
+        let observed = observe(
+            &work,
+            &crate::testing::helper(),
+            Attempt {
+                active: Some(1),
+                timeout: Some(Duration::from_secs(30)),
+                stall: Stall::NONE,
+                request: MemoryRequest::default(),
+                only: Only::All,
+            },
+        );
+        assert_eq!(observed.verdict, Verdict::Failed(Some("tests::failure".into())));
+        assert!(
+            observed.failure.is_none(),
+            "only a baseline observation retains failure artifact payloads"
+        );
     }
 
     /// The name reported is the one the run would have reported had it read the binary to the end.
@@ -5882,35 +5941,11 @@ mod tests {
         assert_eq!(plain, Verdict::Failed(Some("module::case".to_owned())));
     }
 
-    /// A run cut short by a named failure keeps the name, exactly as the ordinary exit does.
-    ///
-    /// The two exits carry the same pair of facts, and which one a run takes is decided by nothing
-    /// but whether the reader published the failure before `try_wait` reaped the child. An early
-    /// cut that preferred the ceiling would drop the name a reader goes and opens, discard the
-    /// killer hint the next mutant would have probed with.
-    ///
-    /// Asserted here rather than through a launched binary because the state cannot be arranged on
-    /// Linux: the ceiling sets `memory.oom.group`, so an OOM takes the whole subtree with it and
-    /// there is no announcing process left to reach the early cut. Windows, where a job object
-    /// refuses allocations rather than killing, is where the run really survives its ceiling.
-    #[test]
-    fn a_run_cut_short_by_a_named_failure_keeps_the_name_beside_the_ceiling() {
-        let named = cut_by_named_failure("module::case".to_owned());
-
-        assert_eq!(named, Verdict::Failed(Some("module::case".to_owned())));
-
-        // With no ceiling crossed there is only the failure, which is the ordinary shape of this.
-        let plain = prefer_named(Verdict::Failed(Some("module::case".to_owned())), None, None);
-
-        assert_eq!(plain, Verdict::Failed(Some("module::case".to_owned())));
-    }
-
     /// A named failure that arrives before an allocation ceiling is exceeded prefers the named
     /// failure end-to-end on Windows.
     ///
-    /// On Windows, the job object enforces memory limits without killing the process immediately
-    /// with SIGKILL/cgroup kill, allowing the named failure streaming reader to report the killing
-    /// test name alongside the memory ceiling.
+    /// On Windows, the job object rejects further allocations rather than immediately killing the
+    /// process. Retained failure output remains diagnostic once the real process exits unsuccessfully.
     #[test]
     #[cfg(windows)]
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -5921,13 +5956,7 @@ mod tests {
 
         let (_directory, work) = crate::testing::helper_workspace(
             "verdict-named-memory",
-            &[
-                "print:running 1 test",
-                "print:test failing::case ... FAILED",
-                "eat:512",
-                "sleep:30000",
-                "exit:101",
-            ],
+            &["print:running 1 test", "print:test failing::case ... FAILED", "eat:512", "exit:101"],
         );
         let binary = crate::testing::helper();
         let limit = 32 * 1024 * 1024;
@@ -6275,7 +6304,6 @@ mod tests {
             .heard("        FAIL [   0.024s] (1/1) nxspike tests::case\n");
 
         assert_eq!(announced_failure(&progress).as_deref(), Some("tests::case"));
-        assert_eq!(failure_to_cut_short(true, &progress), None);
         assert!(matches!(unfinished_nextest_failure(true, &progress), Some(Verdict::Unmetered(_))));
 
         let mut output = b"        FAIL [   0.024s] (1/1) nxspike tests::case\n".to_vec();
@@ -6286,7 +6314,6 @@ mod tests {
             .heard(core::str::from_utf8(gamma_rt::ENVIRONMENT_ERROR_MARKER).expect("the marker is ASCII"));
 
         assert!(environment_failure(&progress));
-        assert_eq!(failure_to_cut_short(true, &progress), None);
 
         let direct = Mutex::new(Progress::new(Watch::Libtest));
         {
@@ -6294,7 +6321,7 @@ mod tests {
             state.heard("running 1 test\n");
             state.heard("test tests::case ... FAILED\n");
         }
-        assert_eq!(failure_to_cut_short(false, &direct).as_deref(), Some("tests::case"));
+        assert_eq!(announced_failure(&direct).as_deref(), Some("tests::case"));
 
         let (verdict, _usage) = settle(
             true,
@@ -6324,8 +6351,7 @@ mod tests {
         assert_eq!(watch(&work), Watch::Nextest);
     }
 
-    /// A plain libtest run captures each test's output and replays it only after every test has
-    /// run, so a failure line seen during the run is the harness's own and can be trusted.
+    /// Plain libtest output still supplies progress names, not an early conviction.
     #[test]
     fn a_plain_libtest_run_is_watched_in_libtest_format() {
         let (_scratch, mut work) = crate::testing::helper_workspace("watch-libtest", &["exit:0"]);

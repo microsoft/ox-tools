@@ -11,12 +11,11 @@ use compact_str::{CompactString, format_compact};
 use proc_macro2::Span;
 use rustc_lexer::TokenKind;
 use syn::punctuated::Punctuated;
-use syn::spanned::Spanned as _;
 use syn::token::Comma;
 use syn::visit::{self, Visit};
 use syn::{
     Arm, Attribute, BinOp, Block, Expr, ExprArray, ExprAsync, ExprBinary, ExprBreak, ExprCall, ExprCast, ExprClosure, ExprContinue,
-    ExprForLoop, ExprIf, ExprIndex, ExprLet, ExprLit, ExprLoop, ExprMatch, ExprMethodCall, ExprRange, ExprReference, ExprRepeat,
+    ExprField, ExprForLoop, ExprIf, ExprIndex, ExprLet, ExprLit, ExprLoop, ExprMatch, ExprMethodCall, ExprRange, ExprReference, ExprRepeat,
     ExprReturn, ExprStruct, ExprTry, ExprUnary, ExprWhile, FnArg, GenericArgument, Generics, ImplItem, ImplItemConst, ImplItemFn, Item,
     ItemConst, ItemFn, ItemImpl, ItemMod, ItemStatic, ItemTrait, Lit, Local, Macro, Member, Pat, PathArguments, RangeLimits, ReturnType,
     Signature, Stmt, TraitItemConst, TraitItemFn, Type, UnOp, Variant,
@@ -26,8 +25,9 @@ use super::stated::stated_range;
 use super::{Candidate, Defaults, Shape};
 use crate::cfg::CfgSet;
 use crate::model::{normalize_site_text, site_key};
+use crate::ops::collect::defaults::Declarations;
 use crate::ops::registry::Selection;
-use crate::parse::SourceFile;
+use crate::parse::{Extent as _, SourceFile};
 use crate::{HashMap, HashSet};
 
 mod api_identity;
@@ -37,8 +37,10 @@ mod indexes;
 mod lexical;
 mod noop;
 mod operators;
+mod ownership;
 pub(super) mod phase_one;
 mod predicates;
+mod read_only;
 mod resource;
 mod tables;
 mod temporaries;
@@ -53,20 +55,27 @@ mod tests;
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod survivor_tests;
 
-use indexes::{ABSOLUTE_ROOT, Indexes, NumericUses, ScopePath, block_id, indexes_in, module_id};
-use noop::is_noop;
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod ownership_tests;
+
+#[cfg(test)]
+use indexes::ABSOLUTE_ROOT;
+use indexes::{Indexes, NumericUses, ScopePath, block_id, indexes_in, module_id};
+use noop::{LocalCalls, is_noop, unused_primitive_parameter};
 use predicates::{
-    binds_a_pattern, boolean_literal, callee_name, callee_type, declared_name, diverges, expr_attrs, ident_returns_float, is_assign_op,
-    is_capacity_call, is_capacity_result, is_catch_all, is_default_call, is_diagnostic_message, is_int_literal, is_integer_zero_literal,
-    is_numeric_binding, is_numeric_return, is_promotable, is_textual, is_unsigned_binding, loop_produces_value, primitive_numeric_method,
-    returns_numeric, returns_result, stmt_attrs, supports_unit_arithmetic_type,
+    active_statements, binds_a_pattern, boolean_literal, callee_name, callee_type, declared_name, diverges, expr_attrs,
+    ident_returns_float, is_assign_op, is_capacity_call, is_capacity_result, is_catch_all, is_default_call, is_diagnostic_message,
+    is_int_literal, is_integer_zero_literal, is_numeric_binding, is_numeric_return, is_promotable, is_textual, is_unsigned_binding,
+    loop_produces_value, primitive_numeric_method, returns_numeric, returns_result, stmt_attrs, supports_unit_arithmetic_type,
+    tail_uses_block_locals, uses_pattern_bindings,
 };
 use tables::{binary_replacements, in_place_reorder, method_renames};
 use types::{Types, returns_undefaultable_error, undefaulted_parameters};
 use values::{Kind, resolve_type, return_values};
 
 use super::Confidence;
-use super::defaults::{DefaultPaths, impl_item_attrs, item_attrs, standard_defaulted_parameters, trait_item_attrs};
+use super::defaults::{impl_item_attrs, item_attrs, standard_defaulted_parameters, trait_item_attrs};
 
 /// The marker string every string-valued mutant is replaced by.
 ///
@@ -86,6 +95,14 @@ fn numeric_associated_call(call: &ExprCall) -> bool {
 
 fn saturating_ordinal(index: usize) -> u32 {
     u32::try_from(index).unwrap_or(u32::MAX)
+}
+
+type ScopedType<'a> = (&'a Type, &'a ScopePath, &'a HashMap<String, Option<Vec<String>>>);
+
+struct ReceiverFacts<'a> {
+    ty: Type,
+    origin: ScopePath,
+    imports: &'a HashMap<String, Option<Vec<String>>>,
 }
 
 /// One reversible change to the block-scoped binding evidence.
@@ -151,6 +168,7 @@ pub(super) struct Collector<'a> {
 
     candidates: Vec<Candidate>,
     expression_contents: HashMap<Range<usize>, Range<usize>>,
+    statement_blocks: HashSet<Range<usize>>,
     consuming_sites: HashMap<Range<usize>, Range<usize>>,
     ownership_lifts: HashMap<Range<usize>, Range<usize>>,
     identity_sites: HashMap<(u128, Range<usize>), u32>,
@@ -174,6 +192,9 @@ pub(super) struct Collector<'a> {
     /// discover and says nothing about the tests.
     in_default_impl: bool,
 
+    /// Whether enclosing impl attributes may introduce parameter uses during expansion.
+    impl_parameters_opaque: bool,
+
     /// The concrete type named by `Self` inside the enclosing `impl` block.
     impl_self_type: Option<Type>,
 
@@ -186,7 +207,7 @@ pub(super) struct Collector<'a> {
     /// custom traits can have the same spelling. This resolver keeps no-op elimination tied to
     /// the standard trait while recognizing a bare shadow that the fallback text would recurse
     /// through.
-    default_paths: DefaultPaths,
+    declarations: Arc<Declarations>,
 
     /// Caller-supplied `Err(...)` payloads, from `--error`.
     errors: &'a [String],
@@ -251,6 +272,7 @@ pub(super) struct Collector<'a> {
     inferred_unsigned: HashSet<String>,
     inferred_floating: HashSet<String>,
     parameter_types: HashMap<String, Type>,
+    parameter_scope: ScopePath,
 
     /// Whether each field name declared anywhere in this file holds a number.
     ///
@@ -264,7 +286,13 @@ pub(super) struct Collector<'a> {
     ///
     /// Read as evidence of last resort, after annotations and initialisers have had their say.
     numeric_uses: NumericUses,
-    numeric_evidence: lexical::Evidence,
+    numeric_evidence: lexical::Evidence<'a>,
+    #[cfg(test)]
+    reuse_receivers: bool,
+    #[cfg(test)]
+    receiver_queries: core::cell::Cell<usize>,
+    #[cfg(test)]
+    signature_freezes: core::cell::Cell<usize>,
 
     /// Whether each constant and static declared anywhere in this file holds a number.
     ///
@@ -280,7 +308,7 @@ pub(super) struct Collector<'a> {
 
     /// Locally visible function return types and aliases.
     calls: calls::Calls,
-    local_calls: noop::LocalCalls,
+    local_calls: LocalCalls,
     implicit_prelude: bool,
     aliases: HashMap<String, Option<types::Alias>>,
     scope_aliases: HashMap<ScopePath, HashMap<String, Option<types::Alias>>>,
@@ -318,6 +346,8 @@ pub(super) struct Collector<'a> {
     /// `E` or a trait's `Self::Value` has a `Default`, and on a serde-shaped API almost none of
     /// them do. Holding the names lets the guess be withheld exactly where it is unfounded.
     generics: Vec<String>,
+    ownership_generics: Vec<String>,
+    format_macro_shadowed: bool,
 
     /// Type parameters in scope that are known to implement the standard `Default` trait.
     ///
@@ -399,8 +429,8 @@ impl<'a> Collector<'a> {
         defaults: &'a Defaults,
         mut indexes: Indexes,
     ) -> Self {
-        let default_paths = DefaultPaths::of_in(&file.ast, cfg);
-        let calls = calls::Calls::of(&file.ast, cfg, &indexes);
+        let declarations = defaults.declarations_for(file, cfg);
+        let calls = calls::Calls::with_declarations(&file.ast, cfg, &indexes, Arc::clone(&declarations));
         calls.annotate_imports(&mut indexes.scope_imports);
         let _old = indexes
             .root_imports
@@ -408,6 +438,10 @@ impl<'a> Collector<'a> {
         for imports in indexes.scope_imports.values_mut() {
             let _old = imports.insert(types::SOURCE_FILE.to_owned(), Some(vec![file.path.as_str().to_owned()]));
         }
+        let mut local_calls = core::mem::take(&mut indexes.local_calls);
+        local_calls.resolve_default_macros(&indexes, &declarations.paths, defaults, file.path.as_ref());
+        let mut numeric_evidence = lexical::evidence(&file.ast, cfg);
+        let read_only = core::mem::take(&mut numeric_evidence.read_only);
 
         Self {
             file,
@@ -416,17 +450,19 @@ impl<'a> Collector<'a> {
             outermost: Arc::from(""),
             trait_impl: None,
             candidates: Vec::new(),
-            expression_contents: expression_contents(&file.ast),
-            consuming_sites: temporaries::consuming_sites(&file.ast),
+            expression_contents: read_only.expressions,
+            statement_blocks: read_only.statement_blocks,
+            consuming_sites: read_only.temporaries,
             identity_sites: HashMap::default(),
             candidate_identity_sites: Vec::new(),
             ownership_lifts: HashMap::default(),
             inert_depth: 0,
             const_guard_depth: 0,
             in_default_impl: false,
+            impl_parameters_opaque: false,
             impl_self_type: None,
             impl_self_associated: HashMap::default(),
-            default_paths,
+            declarations,
             numeric_return: false,
             unsigned_return: UnsignedReturn::Other,
             unsigned_zeros: Vec::new(),
@@ -443,17 +479,24 @@ impl<'a> Collector<'a> {
             inferred_unsigned: HashSet::default(),
             inferred_floating: HashSet::default(),
             parameter_types: HashMap::default(),
+            parameter_scope: Vec::new(),
             fields: indexes.fields,
             root_imports: indexes.root_imports,
             scope_imports: indexes.scope_imports,
             scope_path: Vec::new(),
             defaults,
             numeric_uses: indexes.numeric_uses,
-            numeric_evidence: lexical::evidence(&file.ast, cfg),
+            numeric_evidence,
+            #[cfg(test)]
+            reuse_receivers: true,
+            #[cfg(test)]
+            receiver_queries: core::cell::Cell::new(0),
+            #[cfg(test)]
+            signature_freezes: core::cell::Cell::new(0),
             constants: indexes.constants,
             declared_types: indexes.declared_types,
             calls,
-            local_calls: indexes.local_calls,
+            local_calls,
             implicit_prelude: !file
                 .ast
                 .attrs
@@ -467,6 +510,8 @@ impl<'a> Collector<'a> {
             deferred: HashSet::default(),
             undo: Vec::new(),
             generics: Vec::new(),
+            ownership_generics: Vec::new(),
+            format_macro_shadowed: read_only.format_macro_shadowed,
             defaulted: Vec::new(),
             const_parameters: Vec::new(),
             iterator_bounded: Vec::new(),
@@ -637,6 +682,15 @@ impl<'a> Collector<'a> {
         } else {
             (range, shape)
         };
+        let shape = if self.statement_blocks.contains(&range) {
+            match shape {
+                Shape::Expr => Shape::Block,
+                Shape::IterExpr => Shape::IterBlock,
+                shape => shape,
+            }
+        } else {
+            shape
+        };
 
         // A mutant that reproduces the code it replaces cannot be caught by any test, because
         // there is nothing to catch. Reporting it would accuse the suite of a gap that does not
@@ -645,7 +699,7 @@ impl<'a> Collector<'a> {
             &replacement,
             self.file.text.get(range.clone()).unwrap_or_default(),
             shape,
-            &self.default_paths,
+            &self.declarations.paths,
             &self.defaulted,
         ) {
             return;
@@ -728,6 +782,23 @@ impl<'a> Collector<'a> {
     /// The source cutoff is a conservative per-loop cloning/work default shared with `LoopProof`.
     /// It is neither a Rust limit nor a measured cost threshold; larger loops retain candidates.
     fn resource_proof(&self, expression: &Expr) -> Option<resource::LoopProof> {
+        let inline = self
+            .current_imports()
+            .get(types::LOCAL_MODULE)
+            .and_then(Option::as_ref)
+            .map_or(&[][..], Vec::as_slice);
+        resource::LoopProof::new_cursor(
+            expression,
+            &self.file.ast,
+            self.defaults.resource_sources(),
+            self.file.path.as_ref(),
+            inline,
+        )
+        .or_else(|| resource::LoopProof::new_retry(expression, &self.file.ast))
+        .or_else(|| self.resource_legacy_proof(expression))
+    }
+
+    fn resource_legacy_proof(&self, expression: &Expr) -> Option<resource::LoopProof> {
         let imports = self.scope_imports.get(&self.scope_path).unwrap_or(&self.root_imports);
         let inline = imports
             .get(types::LOCAL_MODULE)
@@ -735,9 +806,7 @@ impl<'a> Collector<'a> {
             .map_or(&[][..], Vec::as_slice);
         let modules_verified = self.defaults.resource_namespace_transparent(self.file.path.as_ref(), inline);
         if !self.resource_transparent || !self.local_calls.resource_scope_is_transparent(&self.scope_path, modules_verified) {
-            return
-            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-            None;
+            return None;
         }
         let mut bindings = self
             .resource_iterators
@@ -791,7 +860,7 @@ impl<'a> Collector<'a> {
             }
         }
         self.resource_source_bindings(expression, &mut bindings);
-        for name in resource::enclosing_pattern_shadows(&self.file.ast, &expression.span().byte_range())? {
+        for name in resource::enclosing_pattern_shadows(&self.file.ast, &expression.extent().byte_range())? {
             let _shadowed = bindings.remove(&name);
         }
         if bindings.values().any(|binding| {
@@ -806,9 +875,7 @@ impl<'a> Collector<'a> {
             )
         }) && !self.defaults.resource_sources().closed_methods_for(self.file.path.as_ref(), inline)
         {
-            return
-            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-            None;
+            return None;
         }
         resource::LoopProof::new(expression, bindings, self.types().supports_char_api()).map(|proof| {
             proof
@@ -854,17 +921,13 @@ impl<'a> Collector<'a> {
             };
         }
         let Type::Path(path) = ty else {
-            return
-        // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-        None;
+            return None;
         };
         let first =
         // #[gamma::skip(try.propagate_to_unwrap, reason = "A source-parsed Type::Path always has at least one segment, so this first() cannot fail.", tag = "equivalent")]
         path.path.segments.first()?.ident.to_string();
-        if self.generics.contains(&first) || self.defaulted.contains(&first) {
-            return
-            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-            None;
+        if path.path.leading_colon.is_none() && (self.generics.contains(&first) || self.defaulted.contains(&first)) {
+            return None;
         }
         if path.qself.is_none() && path.path.segments.len() == 1 && !imports.contains_key(&first) {
             on_scope(scope);
@@ -885,9 +948,7 @@ impl<'a> Collector<'a> {
                         }
                     }
                 {
-                    return
-                    // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-                    None;
+                    return None;
                 }
                 return self.resource_binding_with(&alias.target, scope, on_scope);
             }
@@ -895,9 +956,7 @@ impl<'a> Collector<'a> {
         if
         // #[gamma::skip(cond.always_false, tag = "equivalent", reason = "Every accepting branch below independently proves the genuine primitive, collection, string, or Peekable API, including its unshadowed root.")]
         !types.standard_constructor_root(ty) {
-            return
-            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-            None;
+            return None;
         }
         if types.supports_peekable_chars(ty) {
             Some(resource::Binding::PeekableChars)
@@ -917,8 +976,7 @@ impl<'a> Collector<'a> {
             let characters = matches!(ty, Type::Path(path)
                 if path.path.segments.last().is_some_and(|segment| matches!(&segment.arguments,
                     PathArguments::AngleBracketed(arguments) if matches!(arguments.args.first(),
-                        Some(syn::GenericArgument::Type(Type::Path(element))) if element.path.is_ident("char")))))
-                && types.supports_char_api();
+                        Some(syn::GenericArgument::Type(element)) if types.supports_primitive_type(element, "char")))));
             let strings = matches!(ty, Type::Path(path)
                 if path.path.segments.last().is_some_and(|segment| matches!(&segment.arguments,
                     PathArguments::AngleBracketed(arguments) if matches!(arguments.args.first(),
@@ -941,46 +999,30 @@ impl<'a> Collector<'a> {
 
     fn resource_iterator_initializer(&self, expression: &Expr) -> bool {
         let Expr::MethodCall(peekable) = expression else {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         };
         if !peekable.attrs.is_empty() || peekable.turbofish.is_some() || !peekable.args.is_empty() || peekable.method != "peekable" {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         }
         let Expr::MethodCall(chars) = &*peekable.receiver else {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         };
         if !chars.attrs.is_empty() || chars.turbofish.is_some() || !chars.args.is_empty() || chars.method != "chars" {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         }
         let Expr::Path(source) = &*chars.receiver else {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         };
         if
         // #[gamma::skip(logical.or_remove_right, reason = "These sites independently require Path::get_ident/is_ident after the qself guard. On parsed syn paths, <Owner>::Name has a leading_colon, so get_ident/is_ident rejects it independently; <Owner as Trait>::Name contains at least two segments and is also rejected independently. The prior simple qualified-name negative assertions therefore never distinguished this guard. The proof is for parsed production inputs, not artificially inconsistent manually constructed paths.", tag = "equivalent")]
         !source.attrs.is_empty() || source.qself.is_some() {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         }
         let Some(name) = source.path.get_ident() else {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         };
         let Some(binding) = self.binding_types.get(&name.to_string()).filter(|binding| binding.resource_trusted) else {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         };
         self.resource_binding(&binding.ty, &binding.scope) == Some(resource::Binding::StrReference)
     }
@@ -1030,16 +1072,16 @@ impl<'a> Collector<'a> {
     /// keeps qualification, generic arguments, and reference syntax intact, the same way the trait
     /// path just below is read.
     fn impl_scope(&self, node: &ItemImpl) -> String {
-        let self_type = compact_path(self.text_of(node.self_ty.span()));
+        let self_type = compact_path(self.text_of(node.self_ty.extent()));
         // #[gamma::skip(cond.always_false, reason = "a parsed self type always contains a non-trivia token; this fallback is only defensive for an unmapped expansion")]
-        // #[gamma::skip(all, reason = "the fallback is reachable only for an unmapped expansion, and Collector never descends into expansions")]
+        // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, tag = "equivalent", reason = "The fallback string is unreachable for a parsed self type, which contains a source token; Collector does not traverse unmapped expansions.")]
         let self_type = if self_type.is_empty() { "_".to_owned() } else { self_type };
 
         let Some((trait_path, _for)) = &node.trait_ else {
             return self_type;
         };
 
-        let trait_path = compact_path(self.text_of(trait_path.span()));
+        let trait_path = compact_path(self.text_of(trait_path.extent()));
 
         // #[gamma::skip(cond.always_false, reason = "a parsed trait path always has a non-trivia token; an empty path can only be an unmapped expansion")]
         if trait_path.is_empty() {
@@ -1075,10 +1117,10 @@ impl<'a> Collector<'a> {
         if
         // #[gamma::skip(cond.always_true, reason = "emit_shaped_with_confidence immediately delegates to emit_at_conditionally, which repeats the identical wants(mutator) gate. parameter_shadows repeats its wants gate internally. The err_with body also emits through that same gate. Relaxing these prefilters cannot record an unselected or inert candidate or reserve its identity.", tag = "equivalent")]
         self.wants("parameter.default_shadow") {
-            self.parameter_shadows(sig, body);
+            self.parameter_shadows(attrs, sig, body);
         }
 
-        let span = body.span();
+        let span = body.extent();
 
         // Read before anything is emitted, because it decides whether the guessed values below are
         // offered at all. `None` covers both "nothing was stated" and "what was stated cannot be
@@ -1094,7 +1136,7 @@ impl<'a> Collector<'a> {
         // scope in the signature being read here.
         let mut abstracts = self.generics.clone();
 
-        abstracts.extend(undefaulted_parameters(&sig.generics, &self.default_paths));
+        abstracts.extend(undefaulted_parameters(&sig.generics, &self.declarations.paths));
 
         let types = Types {
             abstracts: &abstracts,
@@ -1123,7 +1165,7 @@ impl<'a> Collector<'a> {
         // positions where being wrong by one is a real fault rather than a compile error — but
         // only when the value is a number, which the signature already says.
         if is_numeric_return(&sig.output)
-            && let Some(Stmt::Expr(trailing, None)) = body.stmts.iter().rev().find(|statement| !self.skipped(stmt_attrs(statement)))
+            && let Some(Stmt::Expr(trailing, None)) = active_statements(body, self.cfg).next_back()
             && !matches!(trailing, Expr::Lit(ExprLit { lit: Lit::Int(_), .. }))
         {
             let floating = matches!(&sig.output, ReturnType::Type(_, ty) if resolve_type(ty) == Kind::Float);
@@ -1203,10 +1245,10 @@ impl<'a> Collector<'a> {
             return;
         };
 
-        if self.undeletable_statements.contains(&statement.span().byte_range()) {
+        if self.undeletable_statements.contains(&statement.extent().byte_range()) {
             return;
         }
-        if !self.admit_ownership_edit(statement.span().byte_range(), &expression.span().byte_range(), false) {
+        if !self.admit_ownership_edit(statement.extent().byte_range(), &expression.extent().byte_range(), false) {
             return;
         }
 
@@ -1227,7 +1269,7 @@ impl<'a> Collector<'a> {
             _ => return,
         };
 
-        self.emit_shaped(mutator, statement.span(), "", 0, Shape::Stmt);
+        self.emit_shaped(mutator, statement.extent(), "", 0, Shape::Stmt);
     }
 
     /// Returns whether the target of an assignment is a binding that was declared without a value.
@@ -1236,9 +1278,7 @@ impl<'a> Collector<'a> {
     /// through a field, an index or a dereference presupposes that the binding already holds one.
     fn initializes_deferred(&self, target: &Expr) -> bool {
         let Expr::Path(path) = target else {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         };
 
         path.path
@@ -1253,12 +1293,20 @@ impl<'a> Collector<'a> {
     /// The shallow recursion allowance is a conservative traversal default, not a `Copy` depth rule
     /// or a measured stack limit; deeper fields simply supply no move-sensitive evidence.
     fn noncopy_place(&self, place: &Expr) -> bool {
+        if let Some(method) = self.numeric_evidence.receiver_moves.get(&place.extent().byte_range())
+            && !self.ownership_receiver_consumes(place, method)
+        {
+            return false;
+        }
+        if let Some(noncopy) = self.ownership_known_place(place) {
+            return noncopy;
+        }
         self.ownership_type(place)
             .cloned()
             .or_else(|| self.inferred_expression_type(place))
             .is_some_and(|ty| {
                 if let Type::Reference(reference) = values::strip(self.types().resolve_alias(&ty)) {
-                    return reference.mutability.is_some() && !self.numeric_evidence.reborrowable.contains(&place.span().byte_range());
+                    return reference.mutability.is_some() && !self.numeric_evidence.reborrowable.contains(&place.extent().byte_range());
                 }
                 self.noncopy_type(&ty, 8)
             })
@@ -1268,37 +1316,7 @@ impl<'a> Collector<'a> {
     ///
     /// This is not a complete `Copy` classifier: false also means unsupported or exhausted evidence.
     fn noncopy_type(&self, ty: &Type, remaining: usize) -> bool {
-        if remaining == 0 {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
-        }
-        let types = self.types();
-        let ty = types.resolve_alias(ty);
-        match values::strip(ty) {
-            Type::Reference(reference) => return reference.mutability.is_some(),
-            Type::Tuple(tuple) => return tuple.elems.iter().any(|ty| self.noncopy_type(ty, remaining - 1)),
-            Type::Array(array) => return self.noncopy_type(&array.elem, remaining - 1),
-            _ => {}
-        }
-        types.supports_string_api(ty)
-            || types.supports_collection_api(ty)
-            || types.supports_wrapper_api(ty)
-            || types.unshadowed_type_path(ty).is_some_and(|path| {
-                matches!(
-                    path.as_slice(),
-                    [root, module, name] if root == "std" && matches!(
-                        (module.as_str(), name.as_str()),
-                        ("fs", "File") | ("path", "PathBuf") | ("ffi", "OsString")
-                            | ("process", "Child" | "Command" | "Stdio" | "Output")
-                            | ("thread", "JoinHandle")
-                            | ("sync", "Mutex" | "RwLock" | "MutexGuard" | "RwLockReadGuard" | "RwLockWriteGuard")
-                    )
-                )
-            })
-            || self.calls.has_noncopy_field(ty, &self.scope_path, self.current_imports(), |field| {
-                self.noncopy_type(field, remaining - 1)
-            })
+        self.ownership_noncopy_type(ty, remaining, &self.scope_path, self.current_imports())
     }
 
     /// Recovers declared place and field types without trusting shadowed nominal field layouts.
@@ -1316,9 +1334,7 @@ impl<'a> Collector<'a> {
                             || self.current_imports().contains_key(&name)
                             || self.current_imports().contains_key("*")
                         {
-                            return
-                            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-                            None;
+                            return None;
                         }
                         let member = match member {
                             Member::Named(name) => name.to_string(),
@@ -1343,13 +1359,19 @@ impl<'a> Collector<'a> {
         } else {
             &self.numeric_evidence.invalid_ownership
         };
-        if invalid
-            .get(span)
-            .is_some_and(|places| places.iter().any(|place| self.noncopy_place(place)))
-        {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+        if invalid.get(span).is_some_and(|places| {
+            places.iter().any(|place| {
+                self.noncopy_place(place)
+                    && (transition
+                        || self
+                            .numeric_evidence
+                            .ownership_continuations
+                            .get(span)
+                            .and_then(|checks| checks.get(&place.extent().byte_range()))
+                            .is_none_or(|continuation| continuation.iter().all(|expression| self.ownership_falls_through(expression, 64))))
+            })
+        }) {
+            return false;
         }
         let owning = self
             .numeric_evidence
@@ -1376,7 +1398,7 @@ impl<'a> Collector<'a> {
             return;
         }
 
-        let span = cond.span();
+        let span = cond.extent();
 
         // `emit` repeats the selection check, so forcing this prefilter true cannot emit an
         // unselected mutant.
@@ -1448,7 +1470,7 @@ impl<'a> Collector<'a> {
                 .find(|(_, fallback)| self.cfg.guaranteed_when(&fallback.attrs, &arm.attrs))
                 .is_some_and(|(at, _)| index < *at)
             {
-                self.emit_shaped("match_arm.never_matches", arm.pat.span(), "", 0, Shape::Arm);
+                self.emit_shaped("match_arm.never_matches", arm.pat.extent(), "", 0, Shape::Arm);
             }
         }
     }
@@ -1472,7 +1494,7 @@ impl<'a> Collector<'a> {
             return;
         };
 
-        let whole = node.span().byte_range();
+        let whole = node.extent().byte_range();
 
         if
         // #[gamma::skip(logical.or_remove_left, reason = "struct_fields receives parser-produced ExprStruct spans from the same SourceFile. A path plus braces makes the whole span nonempty. Each field starts strictly after the opening path/brace, and its next field or .. token starts strictly later but before the closing brace. Hence the removed/strictness-adjusted invalid-span tests are always false, including inclusive comparisons at whole boundaries; their continue is unreachable.", tag = "equivalent")]
@@ -1489,7 +1511,7 @@ impl<'a> Collector<'a> {
             .fields
             .iter()
             .skip(1)
-            .map(|next| next.span().byte_range().start)
+            .map(|next| next.extent().byte_range().start)
             .chain(core::iter::once(rest.byte_range().start));
 
         for ((index, field), to) in node.fields.iter().enumerate().zip(next_starts) {
@@ -1499,7 +1521,7 @@ impl<'a> Collector<'a> {
                 continue;
             }
 
-            let from = field.span().byte_range().start;
+            let from = field.extent().byte_range().start;
 
             // Everything between the two is the field, its comma and the space after it.
             if
@@ -1532,7 +1554,7 @@ impl<'a> Collector<'a> {
             let replacement = format_compact!("{head}{tail}");
             let ordinal = saturating_ordinal(index);
 
-            self.emit_shaped("struct_field.omit", node.span(), replacement, ordinal, Shape::Expr);
+            self.emit_shaped("struct_field.omit", node.extent(), replacement, ordinal, Shape::Expr);
         }
     }
 
@@ -1541,7 +1563,7 @@ impl<'a> Collector<'a> {
     /// The removal sweeps up the separating comma along with the element, so the list that is left
     /// is still well formed wherever the element sat in it.
     fn omit_elements(&mut self, node: &Macro, elements: &Punctuated<Expr, Comma>) {
-        let spans: Vec<_> = elements.iter().map(|element| element.span().byte_range()).collect();
+        let spans: Vec<_> = elements.iter().map(|element| element.extent().byte_range()).collect();
 
         let (Some(first), Some(last)) = (spans.first(), spans.last()) else {
             return;
@@ -1550,7 +1572,7 @@ impl<'a> Collector<'a> {
         // The site has to be the whole `vec![..]`, not just the elements inside it. A guarded
         // mutant is one arm of an `if`, and `1, 2` is a list rather than an expression, so
         // narrowing the site to the element range would emit code that does not parse at all.
-        let whole = node.span().byte_range();
+        let whole = node.extent().byte_range();
         let items = first.start..last.end;
 
         let (Some(text), Some(head), Some(tail)) = (
@@ -1606,12 +1628,18 @@ impl<'a> Collector<'a> {
                 || elements.len() <
             // #[gamma::skip(literal.int_decrement, reason = "Admitting a singleton into reverse_elements reconstructs identical text: the same head, sole element and tail. emit_at_conditionally rejects that exact-text no-op before reserving identity, checking loop proofs or recording a candidate.", tag = "equivalent")]
             2
-        ) || mutator == "collection.reverse_array" && elements.iter().any(|element| self.text_of(element.span()).contains(".as_slice()"))
+        ) || mutator == "collection.reverse_array"
+            && elements
+                .iter()
+                .any(|element| self.text_of(element.extent()).contains(".as_slice()"))
         {
             return;
         }
 
-        let spans: Vec<_> = elements.iter().map(|element| element.span().byte_range()).collect();
+        if self.invalid_ownership_reversal(elements) {
+            return;
+        }
+        let spans: Vec<_> = elements.iter().map(|element| element.extent().byte_range()).collect();
         let first = spans.first().expect("the length check guarantees a first element");
         let last = spans.last().expect("the length check guarantees a last element");
         let (Some(head), Some(tail)) = (
@@ -1643,12 +1671,12 @@ impl<'a> Collector<'a> {
     /// as `if guard { .. } else { .. }` and an `if` is not a legal method name. Rewriting the name
     /// inside a copy of the call's own text keeps any turbofish and every argument exactly as
     /// written, which reconstructing the call from its parts would not.
-    fn rename_method(&mut self, node: &ExprMethodCall, method: &str) {
+    fn rename_method(&mut self, node: &ExprMethodCall, method: &str, receiver: Option<&Type>) {
         let Some(swaps) = method_renames(method, node.args.len()) else {
             return;
         };
 
-        let whole = node.span().byte_range();
+        let whole = node.extent().byte_range();
         let name = node.method.span().byte_range();
 
         // A method call whose receiver spans a macro expansion can put the name outside the call,
@@ -1691,38 +1719,41 @@ impl<'a> Collector<'a> {
             };
             self.emit_at_conditionally(
                 mutator,
-                node.span().byte_range(),
+                node.extent().byte_range(),
                 format_compact!("{before}{replacement}{after}"),
                 index,
                 shape,
                 Confidence::Proven,
-                !self.method_substitution_unsupported(node, replacement),
+                !self.method_substitution_unsupported_for_receiver(node, replacement, receiver),
             );
         }
     }
 
+    #[cfg(test)]
     fn method_substitution_unsupported(&self, node: &ExprMethodCall, replacement: &str) -> bool {
-        if !self.defaults.has_single_source_evidence() {
-            return
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "This return has inferred bool type and is already false, exactly bool::default().")]
-            false;
+        let receiver = self.inferred_expression_type(&node.receiver);
+        self.method_substitution_unsupported_for_receiver(node, replacement, receiver.as_ref())
+    }
+
+    fn method_substitution_unsupported_for_receiver(&self, node: &ExprMethodCall, replacement: &str, receiver: Option<&Type>) -> bool {
+        if receiver.is_some_and(|receiver| self.dependency_method_missing(receiver, replacement)) {
+            return true;
         }
-        let Some(receiver) = self.inferred_expression_type(&node.receiver) else {
-            return
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "This return has inferred bool type and is already false, exactly bool::default().")]
-            false;
+        if !self.defaults.has_single_source_evidence() {
+            return false;
+        }
+        let Some(receiver) = receiver else {
+            return false;
         };
         let types = self.types();
         let imports = self.current_imports();
-        let receiver = types.resolve_alias(&receiver);
+        let receiver = types.resolve_alias(receiver);
         if self
             .calls
             .method_signature(receiver, &node.method.to_string(), &self.scope_path, imports)
             .is_none()
         {
-            return
-            // #[gamma::skip(return_value.default, tag = "equivalent", reason = "This return has inferred bool type and is already false, exactly bool::default().")]
-            false;
+            return false;
         }
         let inline = imports
             .get(types::LOCAL_MODULE)
@@ -1738,15 +1769,7 @@ impl<'a> Collector<'a> {
                         !matches!(name.as_str(), types::LOCAL_MODULE | types::BLOCK_TYPES | types::SOURCE_FILE)
                             && !name.starts_with(indexes::EXTERN_ROOT_PREFIX)
                     })
-                    .map(|(_, path)| {
-                        path.as_deref().map(|path| {
-                            if path.first().is_some_and(|root| root == ABSOLUTE_ROOT) {
-                                &path[1..]
-                            } else {
-                                path
-                            }
-                        })
-                    }),
+                    .map(|(_, path)| path.as_deref().map(indexes::import_target)),
             )
             && self.calls.method_absent(receiver, replacement, &self.scope_path, imports)
     }
@@ -1772,9 +1795,7 @@ impl<'a> Collector<'a> {
     /// allowing deterministic cycle/progress assertions while preserving ordinary inference.
     fn character_receiver_with(&self, receiver: &Expr, mut on_visit: impl FnMut(*const Type)) -> bool {
         let Some(ty) = self.inferred_expression_type(receiver) else {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         };
         let mut ty = &ty;
         let types = self.types();
@@ -1793,9 +1814,7 @@ impl<'a> Collector<'a> {
                             || path_matches(&path.path, &["std", "primitive", "char"]));
                 }
                 _ => {
-                    return
-                // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-                false;
+                    return false;
                 }
             }
         }
@@ -1815,19 +1834,19 @@ impl<'a> Collector<'a> {
         Some(format_compact!("{before}{replacement}{after}"))
     }
 
-    fn rename_method_as(&mut self, node: &ExprMethodCall, mutator: &'static str, replacement: &str, shape: Shape) {
+    fn rename_method_as(&mut self, node: &ExprMethodCall, mutator: &'static str, replacement: &str, shape: Shape, receiver: Option<&Type>) {
         if
         // #[gamma::skip(cond.always_false, reason = "These mutations relax only a mutator-selection prefilter. All eventual emit paths recheck wants(mutator) before allocating an occurrence or recording a candidate. For the parameter-prefilter combinations, its only production caller function() already returns for const functions, making the removed const guard redundant too. The remaining syntax/type guards and selected candidates are unchanged.", tag = "equivalent")]
         !self.wants(mutator) {
             return;
         }
 
-        if let Some(rewritten) = self.rewrite_part(node.span(), node.method.span(), replacement) {
+        if let Some(rewritten) = self.rewrite_part(node.extent(), node.method.span(), replacement) {
             let shape = if
             // #[gamma::skip(logical.and_remove_left, tag = "equivalent", reason = "Every rename_method_as caller passes Expr or IterExpr. For Expr both branches yield Expr; for IterExpr this left conjunct is true. No caller passes another shape.")]
             shape == Shape::IterExpr
                 && self
-                    .inferred_method_type(node)
+                    .inferred_method_type(node, &self.scope_path)
                     .is_some_and(|ty| self.types().supports_result_api(&ty) || self.types().supports_option_api(&ty))
             {
                 Shape::Expr
@@ -1841,23 +1860,31 @@ impl<'a> Collector<'a> {
             };
             self.emit_at_conditionally(
                 mutator,
-                node.span().byte_range(),
+                node.extent().byte_range(),
                 rewritten,
                 0,
                 shape,
                 confidence,
-                !self.method_substitution_unsupported(node, replacement),
+                !self.method_substitution_unsupported_for_receiver(node, replacement, receiver),
             );
         }
     }
 
+    fn fallback_confidence(&self, receiver: Option<&Type>) -> Confidence {
+        if receiver.is_some_and(|ty| self.types().supports_option_api(ty) || self.types().supports_result_api(ty)) {
+            Confidence::Proven
+        } else {
+            Confidence::Optimistic
+        }
+    }
+
     /// Emits method-level semantic mutations that need more than a same-type table rename.
-    fn method_semantics(&mut self, node: &ExprMethodCall, method: &str) {
+    fn method_semantics(&mut self, node: &ExprMethodCall, method: &str, receiver: Option<&Type>) {
         match (method, node.args.len()) {
-            ("is_some", 0) => self.rename_method_as(node, "option.is_some_to_is_none", "is_none", Shape::Expr),
-            ("is_none", 0) => self.rename_method_as(node, "option.is_none_to_is_some", "is_some", Shape::Expr),
-            ("is_ok", 0) => self.rename_method_as(node, "result.is_ok_to_is_err", "is_err", Shape::Expr),
-            ("is_err", 0) => self.rename_method_as(node, "result.is_err_to_is_ok", "is_ok", Shape::Expr),
+            ("is_some", 0) => self.rename_method_as(node, "option.is_some_to_is_none", "is_none", Shape::Expr, receiver),
+            ("is_none", 0) => self.rename_method_as(node, "option.is_none_to_is_some", "is_some", Shape::Expr, receiver),
+            ("is_ok", 0) => self.rename_method_as(node, "result.is_ok_to_is_err", "is_err", Shape::Expr, receiver),
+            ("is_err", 0) => self.rename_method_as(node, "result.is_err_to_is_ok", "is_ok", Shape::Expr, receiver),
             ("unwrap_or", 1) => {
                 if
                 // #[gamma::skip(iter.first_to_last, reason = "These first()/last() calls are reached only from method_semantics' unwrap_or/unwrap_or_else arms with args.len()==1, or regex_semantics after its args.len()!=1 rejection. The single argument is both first and last.", tag = "equivalent")]
@@ -1866,12 +1893,14 @@ impl<'a> Collector<'a> {
                     .first()
                     .is_some_and(|fallback| self.expression_can_directly_default(fallback) && !self.expression_is_known_default(fallback))
                 {
-                    let receiver = self.text_of(node.receiver.span()).to_owned();
-                    self.emit(
+                    let receiver_text = self.text_of(node.receiver.extent()).to_owned();
+                    self.emit_shaped_with_confidence(
                         "fallback.unwrap_or_to_default",
-                        node.span(),
-                        format_compact!("({receiver}).unwrap_or_default()"),
+                        node.extent(),
+                        format_compact!("({receiver_text}).unwrap_or_default()"),
                         0,
+                        Shape::Expr,
+                        self.fallback_confidence(receiver),
                     );
                 }
             }
@@ -1881,48 +1910,69 @@ impl<'a> Collector<'a> {
                     node.args.first()
                     && self.expression_can_directly_default(&closure.body)
                     && !self.expression_is_known_default(&closure.body)
-                    && let Some(rewritten) = self.rewrite_part(node.span(), closure.body.span(), "Default::default()")
+                    && let Some(rewritten) = self.rewrite_part(node.extent(), closure.body.extent(), "Default::default()")
                 {
-                    self.emit("fallback.unwrap_or_else_to_default", node.span(), rewritten, 0);
+                    self.emit_shaped_with_confidence(
+                        "fallback.unwrap_or_else_to_default",
+                        node.extent(),
+                        rewritten,
+                        0,
+                        Shape::Expr,
+                        self.fallback_confidence(receiver),
+                    );
                 }
             }
             ("map_or", 2) => {
                 if let Some(fallback) = node.args.first()
                     && self.expression_can_directly_default(fallback)
                     && !self.expression_is_known_default(fallback)
-                    && let Some(rewritten) = self.rewrite_part(node.span(), fallback.span(), "Default::default()")
+                    && let Some(rewritten) = self.rewrite_part(node.extent(), fallback.extent(), "Default::default()")
                 {
-                    self.emit("fallback.map_or_to_default", node.span(), rewritten, 0);
+                    self.emit_shaped_with_confidence(
+                        "fallback.map_or_to_default",
+                        node.extent(),
+                        rewritten,
+                        0,
+                        Shape::Expr,
+                        self.fallback_confidence(receiver),
+                    );
                 }
             }
             ("map_or_else", 2) => {
                 if let Some(Expr::Closure(closure)) = node.args.first()
                     && self.expression_can_directly_default(&closure.body)
                     && !self.expression_is_known_default(&closure.body)
-                    && let Some(rewritten) = self.rewrite_part(node.span(), closure.body.span(), "Default::default()")
+                    && let Some(rewritten) = self.rewrite_part(node.extent(), closure.body.extent(), "Default::default()")
                 {
-                    self.emit("fallback.map_or_else_to_default", node.span(), rewritten, 0);
+                    self.emit_shaped_with_confidence(
+                        "fallback.map_or_else_to_default",
+                        node.extent(),
+                        rewritten,
+                        0,
+                        Shape::Expr,
+                        self.fallback_confidence(receiver),
+                    );
                 }
             }
             ("rev", 0) => {
-                let receiver = self.text_of(node.receiver.span()).to_owned();
-                self.emit_shaped("iter.remove_rev", node.span(), receiver, 0, Shape::IterExpr);
+                let receiver = self.text_of(node.receiver.extent()).to_owned();
+                self.emit_shaped("iter.remove_rev", node.extent(), receiver, 0, Shape::IterExpr);
             }
             ("filter", 1) => {
                 if !self.is_option_receiver(&node.receiver) {
-                    let receiver = self.text_of(node.receiver.span()).to_owned();
+                    let receiver = self.text_of(node.receiver.extent()).to_owned();
                     let confidence = if self.is_iterator_receiver(&node.receiver) {
                         Confidence::Proven
                     } else {
                         Confidence::Optimistic
                     };
-                    self.emit_shaped_with_confidence("iter.remove_filter", node.span(), receiver, 0, Shape::IterExpr, confidence);
+                    self.emit_shaped_with_confidence("iter.remove_filter", node.extent(), receiver, 0, Shape::IterExpr, confidence);
                 }
             }
             ("take", 1) if !self.is_read_receiver(&node.receiver) => {
-                self.rename_method_as(node, "iter.take_to_skip", "skip", Shape::IterExpr);
+                self.rename_method_as(node, "iter.take_to_skip", "skip", Shape::IterExpr, receiver);
             }
-            ("skip", 1) => self.rename_method_as(node, "iter.skip_to_take", "take", Shape::IterExpr),
+            ("skip", 1) => self.rename_method_as(node, "iter.skip_to_take", "take", Shape::IterExpr, receiver),
             _ => {}
         }
     }
@@ -1936,38 +1986,57 @@ impl<'a> Collector<'a> {
     }
 
     fn types_with<'b>(&'b self, imports: &'b HashMap<String, Option<Vec<String>>>) -> Types<'b> {
+        self.types_with_in_scope(&self.scope_path, imports)
+    }
+
+    fn types_with_in_scope<'b>(&'b self, scope: &ScopePath, imports: &'b HashMap<String, Option<Vec<String>>>) -> Types<'b> {
         Types {
             abstracts: &self.generics,
             defaulted: &self.defaulted,
             imports,
             defaults: self.defaults,
-            aliases: Some(self.current_aliases()),
+            aliases: Some(self.scope_aliases.get(scope).unwrap_or(&self.aliases)),
             self_type: self.impl_self_type.as_ref(),
             self_associated: Some(&self.impl_self_associated),
         }
     }
 
     fn current_imports(&self) -> &HashMap<String, Option<Vec<String>>> {
-        if
-        // #[gamma::skip(cond.always_false, reason = "Indexes::Walk writes root imports to root_imports, reserving scope_imports entries for scopes after pushing a module or block ID. No empty scope_imports key is inserted by canonicalization or annotation. Looking up the empty scope therefore falls back to the same root_imports reference selected by the original is_empty branch.", tag = "equivalent")]
-        self.scope_path.is_empty() {
-            &self.root_imports
-        } else {
-            self.scope_imports.get(&self.scope_path).unwrap_or(&self.root_imports)
+        self.imports_in_scope(&self.scope_path)
+    }
+
+    fn imports_in_scope(&self, scope: &ScopePath) -> &HashMap<String, Option<Vec<String>>> {
+        self.scope_imports.get(scope).unwrap_or(&self.root_imports)
+    }
+
+    fn types_in_scope(&self, scope: &ScopePath) -> Types<'_> {
+        self.types_with_in_scope(scope, self.imports_in_scope(scope))
+    }
+
+    fn frozen_types<'b>(&'b self, imports: &'b HashMap<String, Option<Vec<String>>>) -> Types<'b> {
+        Types {
+            abstracts: &[],
+            defaulted: &[],
+            imports,
+            aliases: None,
+            self_type: None,
+            self_associated: None,
+            defaults: self.defaults,
         }
     }
 
     fn can_directly_default(&self, ty: &Type) -> bool {
         let types = self.types();
-        // #[gamma::skip(logical.and_remove_right, reason = "When resolve_type(resolve_alias(ty)) is Result, has_default(ty) returns false in its explicit Kind::Result arm; no earlier success bypasses that match. The conjunction's Result exclusion therefore removes no true has_default answer.", tag = "equivalent")]
         types.has_default(ty) && resolve_type(types.resolve_alias(ty)) != Kind::Result
     }
 
     fn standard_default_replacement(&self) -> bool {
         self.implicit_prelude
+            && self.local_calls.default_scope_is_transparent(&self.scope_path)
             && !self.generics.iter().chain(&self.defaulted).any(|name| name == "Default")
             && self
-                .default_paths
+                .declarations
+                .paths
                 .is_standard_default_segments(&["Default".into(), "default".into()])
             && self.types().supports_bare_default_trait()
     }
@@ -2003,9 +2072,7 @@ impl<'a> Collector<'a> {
 
     fn expression_is_known_default_for_type(&self, expression: &Expr, ty: &Type) -> bool {
         if !self.standard_default_replacement() {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         }
         if self.expression_is_known_default(expression) {
             return true;
@@ -2014,7 +2081,7 @@ impl<'a> Collector<'a> {
         let types = self.types();
         let kind = resolve_type(types.resolve_alias(ty));
 
-        if noop::is_standard_default_constructor(expression, ty, &types, &self.default_paths) {
+        if noop::is_standard_default_constructor(expression, ty, &types, &self.declarations.paths) {
             return true;
         }
 
@@ -2131,16 +2198,12 @@ impl<'a> Collector<'a> {
         {
             let _replaced = segments.splice(..1, imported.iter().cloned());
         }
-        if segments.first().is_some_and(|segment| segment == ABSOLUTE_ROOT) {
-            let _absolute = segments.remove(0);
-        }
-
         matches!(
-            segments.as_slice(),
+            indexes::import_target(&segments),
             [primitive, constant]
                 if supports_unit_arithmetic_type(primitive) && matches!(constant.as_str(), "MAX" | "MIN" | "BITS")
         ) || matches!(
-            segments.as_slice(),
+            indexes::import_target(&segments),
             [root, primitive, constant]
                 if matches!(root.as_str(), "std" | "core")
                 && supports_unit_arithmetic_type(primitive)
@@ -2183,13 +2246,13 @@ impl<'a> Collector<'a> {
             return;
         }
 
-        let whole = expression.span().byte_range();
+        let whole = expression.extent().byte_range();
         let range = self.expression_contents.get(&whole).unwrap_or(&whole);
         let text = self.file.slice(range).to_owned();
-        self.emit("bool_expr.negate", expression.span(), format_compact!("!({text})"), 0);
+        self.emit("bool_expr.negate", expression.extent(), format_compact!("!({text})"), 0);
     }
 
-    fn parameter_shadows(&mut self, sig: &Signature, body: &Block) {
+    fn parameter_shadows(&mut self, attrs: &[Attribute], sig: &Signature, body: &Block) {
         if
         // #[gamma::skip(logical.or_remove_left, reason = "These mutations relax only a mutator-selection prefilter. All eventual emit paths recheck wants(mutator) before allocating an occurrence or recording a candidate. For the parameter-prefilter combinations, its only production caller function() already returns for const functions, making the removed const guard redundant too. The remaining syntax/type guards and selected candidates are unchanged.", tag = "equivalent")]
         (
@@ -2200,7 +2263,7 @@ impl<'a> Collector<'a> {
         {
             return;
         }
-        let body_range = body.span().byte_range();
+        let body_range = body.extent().byte_range();
         let Some(body_text) = self.file.text.get(body_range).map(str::to_owned) else {
             return;
         };
@@ -2219,8 +2282,15 @@ impl<'a> Collector<'a> {
             if !self.can_directly_default(&typed.ty) {
                 continue;
             }
+            if self.standard_default_replacement()
+                && !self.impl_parameters_opaque
+                && LocalCalls::nontransforming_attributes(attrs)
+                && unused_primitive_parameter(ident, &typed.ty, body, &self.types())
+            {
+                continue;
+            }
             let name = ident.ident.to_string();
-            let ty = self.text_of(typed.ty.span()).to_owned();
+            let ty = self.text_of(typed.ty.extent()).to_owned();
             let mutable = if ident.mutability.is_some() { "mut " } else { "" };
             let replacement = if contains_impl_trait(&typed.ty) {
                 format_compact!(
@@ -2238,7 +2308,7 @@ impl<'a> Collector<'a> {
             let shape = iterator_body_shape(return_type(&sig.output), &self.types()).unwrap_or(Shape::Block);
             self.emit_shaped(
                 "parameter.default_shadow",
-                body.span(),
+                body.extent(),
                 replacement,
                 saturating_ordinal(index),
                 shape,
@@ -2288,17 +2358,17 @@ impl<'a> Collector<'a> {
         if
         // #[gamma::skip(cond.always_true, reason = "These mutations relax only a mutator-selection prefilter. All eventual emit paths recheck wants(mutator) before allocating an occurrence or recording a candidate. For the parameter-prefilter combinations, its only production caller function() already returns for const functions, making the removed const guard redundant too. The remaining syntax/type guards and selected candidates are unchanged.", tag = "equivalent")]
         self.wants("call.replace_with_default") {
-            self.emit_confident("call.replace_with_default", node.span(), "Default::default()", 0, confidence);
+            self.emit_confident("call.replace_with_default", node.extent(), "Default::default()", 0, confidence);
         }
         if
         // #[gamma::skip(cond.always_true, reason = "These mutations relax only a mutator-selection prefilter. All eventual emit paths recheck wants(mutator) before allocating an occurrence or recording a candidate. For the parameter-prefilter combinations, its only production caller function() already returns for const functions, making the removed const guard redundant too. The remaining syntax/type guards and selected candidates are unchanged.", tag = "equivalent")]
         self.wants("call_result.default") {
-            let call = self.text_of(node.span());
+            let call = self.text_of(node.extent());
             let included = !self.standard_default_replacement()
                 || !self.local_calls.returns_unit(&node.func, &self.scope_path, self.current_imports());
             self.emit_at_conditionally(
                 "call_result.default",
-                node.span().byte_range(),
+                node.extent().byte_range(),
                 format_compact!("::gamma_rt::default_after({call})"),
                 0,
                 Shape::Expr,
@@ -2408,59 +2478,113 @@ impl<'a> Collector<'a> {
     }
 
     fn type_of_place(&self, expression: &Expr) -> Option<&Type> {
+        self.type_of_place_in_scope(expression, &self.scope_path).map(|(ty, _, _)| ty)
+    }
+
+    fn type_of_place_in_scope(&self, expression: &Expr, scope: &ScopePath) -> Option<ScopedType<'_>> {
+        if let Some((ty, origin)) = self.indexed_place_type(expression, scope) {
+            return ty.map(|ty| (ty, origin, self.imports_in_scope(origin)));
+        }
         match expression {
-            Expr::Path(path) => path
-                .path
-                .get_ident()
-                .and_then(|ident| self.binding_types.get(&ident.to_string()))
-                .map(|binding| &binding.ty)
-                .or_else(|| {
-                    path.path
-                        .get_ident()
-                        .and_then(|ident| self.declared_types.get(&ident.to_string())?.as_ref())
-                }),
-            Expr::Paren(paren) => self.type_of_place(&paren.expr),
-            Expr::Group(group) => self.type_of_place(&group.expr),
+            Expr::Path(path) => {
+                let name = path.path.get_ident()?.to_string();
+                let binding = self.binding_types.get(&name);
+                binding.map(|binding| (&binding.ty, &binding.scope, &binding.imports)).or_else(|| {
+                    self.declared_types
+                        .get(&name)?
+                        .as_ref()
+                        .map(|ty| (ty, &self.scope_path, self.current_imports()))
+                })
+            }
+            Expr::Paren(paren) => self.type_of_place_in_scope(&paren.expr, scope),
+            Expr::Group(group) => self.type_of_place_in_scope(&group.expr, scope),
             Expr::Unary(unary) if matches!(unary.op, UnOp::Deref(_)) => {
-                let Type::Reference(reference) = self.type_of_place(&unary.expr)? else {
-                    return
-                    // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-                    None;
+                let (ty, scope, imports) = self.type_of_place_in_scope(&unary.expr, scope)?;
+                let Type::Reference(reference) = ty else {
+                    return None;
                 };
-                Some(&reference.elem)
+                Some((&reference.elem, scope, imports))
+            }
+            _ => None,
+        }
+    }
+
+    fn indexed_place_type(&self, expression: &Expr, scope: &ScopePath) -> Option<(Option<&Type>, &ScopePath)> {
+        match expression {
+            Expr::Path(path) => {
+                let name = path.path.get_ident()?.to_string();
+                let binding = self.binding_types.get(&name);
+                self.calls.value_type(&name, scope, binding.map(|binding| &binding.scope))
+            }
+            Expr::Paren(paren) => self.indexed_place_type(&paren.expr, scope),
+            Expr::Group(group) => self.indexed_place_type(&group.expr, scope),
+            Expr::Unary(unary) if matches!(unary.op, UnOp::Deref(_)) => {
+                let (ty, origin) = self.indexed_place_type(&unary.expr, scope)?;
+                let element = ty.and_then(|ty| match ty {
+                    Type::Reference(reference) => Some(reference.elem.as_ref()),
+                    _ => None,
+                });
+                Some((element, origin))
             }
             _ => None,
         }
     }
 
     fn imports_of_expression(&self, expression: &Expr) -> &HashMap<String, Option<Vec<String>>> {
+        self.imports_of_expression_in_scope(expression, &self.scope_path)
+    }
+
+    fn imports_of_expression_in_scope(&self, expression: &Expr, scope: &ScopePath) -> &HashMap<String, Option<Vec<String>>> {
         match expression {
-            Expr::Path(path) => path
-                .path
-                .get_ident()
-                .and_then(|ident| self.binding_types.get(&ident.to_string()))
-                .map_or_else(|| self.current_imports(), |binding| &binding.imports),
-            Expr::Paren(paren) => self.imports_of_expression(&paren.expr),
-            Expr::Group(group) => self.imports_of_expression(&group.expr),
-            Expr::Unary(unary) if matches!(unary.op, UnOp::Deref(_)) => self.imports_of_expression(&unary.expr),
-            _ => self.current_imports(),
+            Expr::Paren(paren) => return self.imports_of_expression_in_scope(&paren.expr, scope),
+            Expr::Group(group) => return self.imports_of_expression_in_scope(&group.expr, scope),
+            Expr::Reference(reference) => return self.imports_of_expression_in_scope(&reference.expr, scope),
+            Expr::Unary(unary) if matches!(unary.op, UnOp::Deref(_)) => return self.imports_of_expression_in_scope(&unary.expr, scope),
+            Expr::Try(tried) => return self.imports_of_expression_in_scope(&tried.expr, scope),
+            Expr::Path(_) => {
+                if let Some((_, _, imports)) = self.type_of_place_in_scope(expression, scope) {
+                    return imports;
+                }
+            }
+            Expr::MethodCall(call) => {
+                if let Some(origin) = self.indexed_method_scope(call, scope) {
+                    return self.imports_in_scope(origin);
+                }
+                if matches!(
+                    call.method.to_string().as_str(),
+                    "unwrap" | "expect" | "unwrap_or" | "unwrap_or_else"
+                ) {
+                    return self.imports_of_expression_in_scope(&call.receiver, scope);
+                }
+            }
+            _ => {}
         }
+        self.imports_in_scope(&self.expression_type_scope(expression, scope))
     }
 
     fn reusable_payload(&self, span: &Range<usize>) -> Option<&str> {
         self.reusable_payloads.iter().rev().find_map(|(site, value)| {
-            (site == span
-                && self
-                    .binding_types
-                    .get(value.as_str())
-                    .is_some_and(|binding| self.parameter_types.get(value.as_str()) == Some(&binding.ty)))
-            .then_some(value.as_str())
+            if site != span {
+                return None;
+            }
+            let binding = self.binding_types.get(value.as_str())?;
+            let parameter =
+            // #[gamma::skip(try.propagate_to_unwrap, reason = "reusable_payload_spans records only names selected from parameter_types, and traverses expression tails without entering nested functions. Parameter maps are unchanged during that expression; in_function restores the enclosing map, and disjoint source spans prevent an enclosing marker from matching a nested function's site. Every matching marker therefore retains its parameter entry.", tag = "equivalent")]
+            self.parameter_types.get(value.as_str())?;
+            let declared = self.types_in_scope(&self.parameter_scope).frozen_type(parameter);
+            let actual = self.types_with_in_scope(&binding.scope, &binding.imports).frozen_type(&binding.ty);
+            let same = actual == declared && (!types::contains_unknown_type(&declared) || binding.scope == self.parameter_scope);
+            same.then_some(value.as_str())
         })
     }
 
     fn type_of_expression<'b>(&'b self, expression: &'b Expr) -> Option<&'b Type> {
+        self.type_of_expression_in_scope(expression, &self.scope_path).map(|(ty, _, _)| ty)
+    }
+
+    fn type_of_expression_in_scope<'b>(&'b self, expression: &'b Expr, scope: &'b ScopePath) -> Option<ScopedType<'b>> {
         match expression {
-            Expr::Cast(cast) => Some(&cast.ty),
+            Expr::Cast(cast) => Some((&cast.ty, scope, self.imports_in_scope(scope))),
             Expr::Binary(binary)
                 if matches!(
                     binary.op,
@@ -2468,11 +2592,11 @@ impl<'a> Collector<'a> {
                 ) =>
             {
                 let left = self
-                    .type_of_expression(&binary.left)
-                    .filter(|ty| is_numeric_binding(self.types().resolve_alias(ty)));
+                    .type_of_expression_in_scope(&binary.left, scope)
+                    .filter(|(ty, scope, imports)| is_numeric_binding(self.types_with_in_scope(scope, imports).resolve_alias(ty)));
                 let right = self
-                    .type_of_expression(&binary.right)
-                    .filter(|ty| is_numeric_binding(self.types().resolve_alias(ty)));
+                    .type_of_expression_in_scope(&binary.right, scope)
+                    .filter(|(ty, scope, imports)| is_numeric_binding(self.types_with_in_scope(scope, imports).resolve_alias(ty)));
 
                 match (left, right) {
                     (Some(ty), Some(_)) => Some(ty),
@@ -2482,44 +2606,59 @@ impl<'a> Collector<'a> {
                 }
             }
             Expr::Call(call) => self
-                .call_signature(&call.func)
-                .filter(|signature| signature.asyncness.is_none())
-                .and_then(|signature| return_type(&signature.output)),
-            Expr::Paren(paren) => self.type_of_expression(&paren.expr),
-            Expr::Group(group) => self.type_of_expression(&group.expr),
-            other => self.type_of_place(other),
+                .call_signature_in_scope(&call.func, scope)
+                .filter(|(signature, _)| signature.asyncness.is_none())
+                .and_then(|(signature, origin)| return_type(&signature.output).map(|ty| (ty, origin, self.imports_in_scope(origin)))),
+            Expr::Paren(paren) => self.type_of_expression_in_scope(&paren.expr, scope),
+            Expr::Group(group) => self.type_of_expression_in_scope(&group.expr, scope),
+            other => self.type_of_place_in_scope(other, scope),
         }
     }
 
     fn call_signature(&self, callee: &Expr) -> Option<&Signature> {
-        self.calls.signature(
-            callee,
-            &self.scope_path,
-            self.current_imports(),
-            self.impl_self_type.as_ref(),
-            |name| self.bindings.contains_key(name),
-        )
+        self.call_signature_in_scope(callee, &self.scope_path)
+            .map(|(signature, _)| signature)
+    }
+
+    fn call_signature_in_scope(&self, callee: &Expr, scope: &ScopePath) -> Option<(&Signature, &ScopePath)> {
+        self.calls
+            .scoped_signature(callee, scope, self.imports_in_scope(scope), self.impl_self_type.as_ref(), |name| {
+                self.bindings.contains_key(name)
+            })
     }
 
     fn inferred_expression_type(&self, expression: &Expr) -> Option<Type> {
-        if let Some(ty) = self.type_of_expression(expression) {
-            return Some(self.types_with(self.imports_of_expression(expression)).source_type(ty));
+        self.inferred_expression_type_in_scope(expression, &self.scope_path)
+    }
+
+    fn inferred_expression_type_in_scope(&self, expression: &Expr, scope: &ScopePath) -> Option<Type> {
+        match expression {
+            Expr::Paren(paren) => return self.inferred_expression_type_in_scope(&paren.expr, scope),
+            Expr::Group(group) => return self.inferred_expression_type_in_scope(&group.expr, scope),
+            Expr::Call(call) => {
+                if let Some((signature, origin)) = self.call_signature_in_scope(&call.func, scope) {
+                    return self.inferred_signature_type(signature, origin);
+                }
+            }
+            _ => {}
+        }
+        if let Some((Some(ty), _)) = self.indexed_place_type(expression, scope) {
+            return Some(ty.clone());
+        }
+        if let Some((ty, scope, imports)) = self.type_of_expression_in_scope(expression, scope) {
+            let types = self.types_with_in_scope(scope, imports);
+            return Some(types.frozen_type(ty));
         }
         match expression {
-            Expr::MethodCall(call) => return self.inferred_method_type(call),
-            Expr::Binary(binary) => return self.binary_expression_type(binary),
-            Expr::Block(block) => {
-                return block.block.stmts.last().and_then(|statement| match statement {
-                    Stmt::Expr(tail, None) => self.inferred_expression_type(tail),
-                    _ => None,
-                });
-            }
+            Expr::MethodCall(call) => return self.inferred_method_type(call, scope),
+            Expr::Binary(binary) => return self.binary_expression_type_in_scope(binary, scope),
+            Expr::Block(block) => return self.inferred_block_type_in_scope(block, scope),
             Expr::Match(matched) => {
-                return self.inferred_branch_type(matched.arms.iter().map(|arm| &*arm.body));
+                return self.inferred_branch_type(matched.arms.iter().filter(|arm| !self.skipped(&arm.attrs)), scope);
             }
             Expr::Struct(structure) if structure.qself.is_none() => {
                 let path = &structure.path;
-                return Some(syn::parse_quote!(#path));
+                return Some(self.types_in_scope(scope).frozen_type(&syn::parse_quote!(#path)));
             }
             Expr::Path(path)
                 if !path
@@ -2528,7 +2667,7 @@ impl<'a> Collector<'a> {
                     .first()
                     .is_some_and(|head| self.bindings.contains_key(&head.ident.to_string()))
                     && self
-                        .types()
+                        .types_in_scope(scope)
                         .unshadowed_type_path(&Type::Path(syn::TypePath {
                             attrs: Vec::new(),
                             qself: path.qself.clone(),
@@ -2543,7 +2682,7 @@ impl<'a> Collector<'a> {
             }
             Expr::Path(path)
                 if path.qself.is_none()
-                    && self.calls.structure(&path.path, &self.scope_path, self.current_imports())
+                    && self.calls.structure(&path.path, scope, self.imports_in_scope(scope))
                     && !path
                         .path
                         .segments
@@ -2551,29 +2690,19 @@ impl<'a> Collector<'a> {
                         .is_some_and(|first| self.bindings.contains_key(&first.ident.to_string())) =>
             {
                 let path = &path.path;
-                return Some(syn::parse_quote!(#path));
+                return Some(self.types_in_scope(scope).frozen_type(&syn::parse_quote!(#path)));
             }
-            Expr::Field(field) => {
-                let base = self.inferred_expression_type(&field.base)?;
-                let base = self.types().resolve_alias(&base).clone();
-                return self
-                    .calls
-                    .field(&base, &field.member, &self.scope_path, self.imports_of_expression(&field.base));
-            }
+            Expr::Field(field) => return self.inferred_field_type(field, scope),
             Expr::Try(expression) => {
-                let ty = self.inferred_expression_type(&expression.expr)?;
-                let types = self.types();
+                let ty = self.inferred_expression_type_in_scope(&expression.expr, scope)?;
+                let types = self.types_in_scope(scope);
                 return (types.supports_result_api(&ty) || types.supports_option_api(&ty))
                     .then(|| types.payload(&ty, 0).map(std::borrow::Cow::into_owned))
                     .flatten();
             }
-            Expr::Paren(paren) => return self.inferred_expression_type(&paren.expr),
-            Expr::Group(group) => return self.inferred_expression_type(&group.expr),
-            Expr::Lit(ExprLit { lit: Lit::Bool(_), .. }) => return Some(syn::parse_quote!(bool)),
-            Expr::Lit(ExprLit { lit: Lit::Char(_), .. }) => return Some(syn::parse_quote!(char)),
-            Expr::Lit(ExprLit { lit: Lit::Str(_), .. }) => return Some(syn::parse_quote!(&'static str)),
+            Expr::Lit(literal) => return self.inferred_literal_type(&literal.lit, scope),
             Expr::Reference(reference) => {
-                let ty = self.inferred_expression_type(&reference.expr)?;
+                let ty = self.inferred_expression_type_in_scope(&reference.expr, scope)?;
                 return syn::parse2(if reference.mutability.is_some() {
                     quote::quote!(&mut (#ty))
                 } else {
@@ -2585,85 +2714,442 @@ impl<'a> Collector<'a> {
                 let types = tuple
                     .elems
                     .iter()
-                    .map(|element| self.inferred_expression_type(element).unwrap_or_else(|| syn::parse_quote!(_)))
+                    .map(|element| {
+                        self.inferred_expression_type_in_scope(element, scope)
+                            .unwrap_or_else(|| syn::parse_quote!(_))
+                    })
                     .collect::<Vec<_>>();
                 return Some(syn::parse_quote!((#(#types,)*)));
+            }
+            Expr::Closure(closure) if closure.inputs.is_empty() && closure.asyncness.is_none() => {
+                let output = match &closure.output {
+                    ReturnType::Type(_, ty) => self.types_in_scope(scope).frozen_type(ty),
+                    ReturnType::Default => self.inferred_expression_type_in_scope(&closure.body, scope)?,
+                };
+                let callable = self.types_in_scope(scope).standard_type("ops", "FnOnce", &["core", "std"])?;
+                return Some(syn::parse_quote!(impl #callable() -> #output));
             }
             _ => {}
         }
 
-        self.inferred_call_type(expression)
+        self.inferred_call_type_in_scope(expression, scope)
     }
 
-    fn inferred_branch_type<'b>(&self, branches: impl Iterator<Item = &'b Expr>) -> Option<Type> {
-        let branches = branches.map(|branch| self.inferred_expression_type(branch)).collect::<Vec<_>>();
+    fn inferred_field_type(&self, field: &ExprField, scope: &ScopePath) -> Option<Type> {
+        if let Some((ty, _)) = self.indexed_field_type(field, scope) {
+            return Some(ty.clone());
+        }
+        if let Member::Unnamed(index) = &field.member {
+            let base = self.inferred_expression_type_in_scope(&field.base, scope)?;
+            let mut base = values::strip(&base);
+            while let Type::Reference(reference) = base {
+                // #[gamma::skip(stmt.delete_assign, tag = "timeout", reason = "Each iteration must advance to the reference element; deleting this assignment repeatedly inspects the same reference forever.")]
+                base = values::strip(&reference.elem);
+            }
+            if let Type::Tuple(tuple) = base {
+                return tuple.elems.iter().nth(index.index as usize).cloned();
+            }
+        }
+        self.dependency_field_type(field, scope)
+    }
+
+    fn inferred_block_type_in_scope(&self, block: &syn::ExprBlock, scope: &ScopePath) -> Option<Type> {
+        let mut scope = scope.clone();
+        scope.push(block_id(&block.block));
+        let Stmt::Expr(tail, None) = active_statements(&block.block, self.cfg).next_back()? else {
+            return None;
+        };
+        (!tail_uses_block_locals(&block.block, self.cfg, tail, &scope, &self.calls, &|call, scope| {
+            self.constructor_uses_payload(call, scope)
+        }))
+        .then(|| self.inferred_expression_type_in_scope(tail, &scope))
+        .flatten()
+    }
+
+    fn inferred_literal_type(&self, literal: &Lit, scope: &ScopePath) -> Option<Type> {
+        let types = self.types_in_scope(scope);
+        let intrinsic = match literal {
+            Lit::Bool(_) => types
+                .standard_type("primitive", "bool", &["core", "std"])
+                .unwrap_or_else(|| syn::parse_quote!(_)),
+            Lit::Char(_) => types
+                .standard_type("primitive", "char", &["core", "std"])
+                .unwrap_or_else(|| syn::parse_quote!(_)),
+            Lit::Str(_) => {
+                let primitive = types
+                    .standard_type("primitive", "str", &["core", "std"])
+                    .unwrap_or_else(|| syn::parse_quote!(_));
+                syn::parse_quote!(&'static #primitive)
+            }
+            _ => {
+                return None;
+            }
+        };
+        Some(types.frozen_type(&intrinsic))
+    }
+
+    fn inferred_branch_type<'b>(&self, branches: impl Iterator<Item = &'b Arm>, scope: &ScopePath) -> Option<Type> {
+        let branches = branches
+            .map(|arm| {
+                if uses_pattern_bindings(
+                    self.cfg,
+                    &arm.body,
+                    core::iter::once(&arm.pat),
+                    scope,
+                    &self.calls,
+                    &|call, scope| self.constructor_uses_payload(call, scope),
+                ) {
+                    None
+                } else {
+                    self.inferred_expression_type_in_scope(&arm.body, scope)
+                }
+            })
+            .collect::<Vec<_>>();
         let first = branches.iter().flatten().next()?;
-        if branches.iter().all(|branch| branch.as_ref() == Some(first)) {
+        // Frozen paths have already been resolved in their declaration scopes. Compare their
+        // standard identities without applying any branch's root aliases a second time.
+        let identity = types::frozen_type_identity(first);
+        if branches
+            .iter()
+            .all(|branch| branch.as_ref().is_some_and(|ty| types::frozen_type_identity(ty) == identity))
+        {
             return Some(first.clone());
         }
         branches
             .iter()
             .flatten()
-            .any(|branch| self.types().supports_result_api(branch))
+            .any(|branch| self.types_in_scope(scope).supports_result_api(branch))
             .then(|| syn::parse_quote!(std::result::Result<_, _>))
     }
 
+    fn known_nonunit_match_arm(&mut self, expression: &Expr) -> bool {
+        if explicitly_nonunit(self.cfg, expression) {
+            return true;
+        }
+        match expression {
+            Expr::Block(block) => {
+                let mut statements = active_statements(&block.block, self.cfg);
+                let Some(Stmt::Expr(tail, None)) = statements.next_back() else {
+                    return false;
+                };
+                self.scope_path.push(block_id(&block.block));
+                let nonunit = self.in_scope(|collector| {
+                    for statement in statements {
+                        if let Stmt::Local(local) = statement {
+                            let expected = local.init.as_ref().and_then(|init| collector.inferred_expression_type(&init.expr));
+                            collector.bind_pattern(&local.pat, expected.as_ref());
+                        }
+                    }
+                    collector.known_nonunit_match_arm(tail)
+                });
+                let _scope = self.scope_path.pop();
+                nonunit
+            }
+            Expr::Paren(paren) => self.known_nonunit_match_arm(&paren.expr),
+            Expr::Group(group) => self.known_nonunit_match_arm(&group.expr),
+            _ => self.inferred_expression_type(expression).is_some_and(|ty| {
+                let types = self.types();
+                types.supports_primitive_type(&ty, "char") || !matches!(resolve_type(types.resolve_alias(&ty)), Kind::Unit | Kind::Unknown)
+            }),
+        }
+    }
+
     fn inferred_iterator_item(&self, ty: &Type) -> Option<Type> {
-        let types = self.types();
+        self.inferred_iterator_item_in_scope(ty, &self.scope_path)
+    }
+
+    fn inferred_iterator_item_in_scope(&self, ty: &Type, scope: &ScopePath) -> Option<Type> {
+        let types = self.types_in_scope(scope);
         let ty = types.resolve_alias(ty);
         let path = types.unshadowed_type_path(ty)?;
         match path.as_slice() {
-            [root, module, name] if matches!(root.as_str(), "std" | "core") && module == "str" && name == "Chars" => {
-                Some(syn::parse_quote!(char))
+            [root, module, name]
+                if matches!(root.as_str(), "std" | "core")
+                    && (module == "str" && name == "Chars"
+                        || module == "char" && matches!(name.as_str(), "ToUppercase" | "ToLowercase")) =>
+            {
+                types.standard_type("primitive", "char", &["core", "std"])
             }
-            [root, module, name] if matches!(root.as_str(), "std" | "core") && module == "slice" && name == "Iter" => {
+            [root, module, name]
+                if matches!(root.as_str(), "std" | "core") && module == "slice" && matches!(name.as_str(), "Iter" | "IterMut") =>
+            {
                 let item = types.payload(ty, 0)?.into_owned();
-                Some(syn::parse_quote!(&#item))
+                Some(if name == "IterMut" {
+                    syn::parse_quote!(&mut #item)
+                } else {
+                    syn::parse_quote!(&#item)
+                })
             }
             [root, module, name] if matches!(root.as_str(), "std" | "core") && module == "iter" && name == "Enumerate" => {
                 let inner = types.payload(ty, 0)?;
-                let item = self.inferred_iterator_item(&inner)?;
-                Some(syn::parse_quote!((usize, #item)))
+                let item = self.inferred_iterator_item_in_scope(&inner, scope)?;
+                let index =
+                // #[gamma::skip(try.propagate_to_unwrap, tag = "equivalent", reason = "unshadowed_type_path accepts this Enumerate path only after standard_path_unshadowed validates its std/core external root. standard_type checks those same roots against unchanged imports, so at least that validated root succeeds and this Option cannot be None.")]
+                types.standard_type("primitive", "usize", &["core", "std"])?;
+                Some(syn::parse_quote!((#index, #item)))
+            }
+            [root, module, name]
+                if matches!(root.as_str(), "std" | "core")
+                    && module == "iter"
+                    && matches!(name.as_str(), "Skip" | "Take" | "Filter" | "Rev") =>
+            {
+                let inner = types.payload(ty, 0)?;
+                self.inferred_iterator_item_in_scope(&inner, scope)
             }
             _ => None,
         }
     }
 
-    fn inferred_method_type(&self, call: &ExprMethodCall) -> Option<Type> {
-        // Deliberately generous test-only headroom catches a reference walk that stops advancing;
+    fn inferred_method_type(&self, call: &ExprMethodCall, scope: &ScopePath) -> Option<Type> {
+        self.inferred_method_type_with(call, scope, || {})
+    }
+
+    fn inferred_signature_type(&self, signature: &Signature, origin: &ScopePath) -> Option<Type> {
+        if signature.asyncness.is_some() {
+            return None;
+        }
+        let mut types = self.types_in_scope(origin);
+        // The call index already substitutes declaration generics; caller generics cannot bind here.
+        types.abstracts = &[];
+        types.defaulted = &[];
+        return_type(&signature.output).map(|ty| {
+            #[cfg(test)]
+            self.signature_freezes.set(self.signature_freezes.get() + 1);
+            types.frozen_canonical_type(ty)
+        })
+    }
+
+    fn receiver_facts(&self, expression: &Expr, scope: &ScopePath) -> Option<ReceiverFacts<'_>> {
+        #[cfg(test)]
+        {
+            self.receiver_queries.set(self.receiver_queries.get() + 1);
+            if !self.reuse_receivers {
+                let ty = self.inferred_expression_type_in_scope(expression, scope)?;
+                let imports = self.imports_of_expression_in_scope(expression, scope);
+                let origin = self.expression_type_scope(expression, scope);
+                return Some(ReceiverFacts { ty, origin, imports });
+            }
+        }
+        // #[gamma::skip(match_arm.never_matches, reason = "All three fallback receiver-fact queries independently peel these wrappers, preserving the same facts.", tag = "equivalent")]
+        match expression {
+            Expr::Paren(paren) => return self.receiver_facts(&paren.expr, scope),
+            Expr::Group(group) => return self.receiver_facts(&group.expr, scope),
+            _ => {}
+        }
+        if let Expr::MethodCall(call) = expression {
+            let receiver = self.receiver_facts(&call.receiver, scope)?;
+            return self.inferred_method_facts(call, scope, receiver, || {});
+        }
+        let ty = self.inferred_expression_type_in_scope(expression, scope)?;
+        let imports = self.imports_of_expression_in_scope(expression, scope);
+        let origin = self.expression_type_scope(expression, scope);
+        Some(ReceiverFacts { ty, origin, imports })
+    }
+
+    fn expression_type_scope(&self, expression: &Expr, scope: &ScopePath) -> ScopePath {
+        if let Some((_, origin, _)) = self.type_of_expression_in_scope(expression, scope) {
+            return origin.clone();
+        }
+        match expression {
+            Expr::Field(field) => self
+                .indexed_field_type(field, scope)
+                .map_or_else(|| scope.clone(), |(_, origin)| origin.clone()),
+            Expr::Paren(paren) => self.expression_type_scope(&paren.expr, scope),
+            Expr::Group(group) => self.expression_type_scope(&group.expr, scope),
+            Expr::Reference(reference) => self.expression_type_scope(&reference.expr, scope),
+            Expr::Try(tried) => self.expression_type_scope(&tried.expr, scope),
+            Expr::MethodCall(call) => {
+                if let Some(origin) = self.indexed_method_scope(call, scope) {
+                    return origin.clone();
+                }
+                if matches!(
+                    call.method.to_string().as_str(),
+                    "unwrap" | "expect" | "unwrap_or" | "unwrap_or_else"
+                ) {
+                    self.expression_type_scope(&call.receiver, scope)
+                } else {
+                    scope.clone()
+                }
+            }
+            Expr::Block(block) => {
+                if let Some(Stmt::Expr(tail, None)) = active_statements(&block.block, self.cfg).next_back() {
+                    let mut scope = scope.clone();
+                    scope.push(block_id(&block.block));
+                    return self.expression_type_scope(tail, &scope);
+                }
+                scope.clone()
+            }
+            _ => scope.clone(),
+        }
+    }
+
+    fn indexed_field_type(&self, field: &syn::ExprField, scope: &ScopePath) -> Option<&(Type, ScopePath)> {
+        let base = self.inferred_expression_type_in_scope(&field.base, scope)?;
+        let base = self.types_in_scope(scope).resolve_alias(&base).clone();
+        let owner = match values::strip(&base) {
+            Type::Reference(reference) => values::strip(&reference.elem),
+            other => other,
+        };
+        if matches!(owner, Type::Path(path) if path.path.leading_colon.is_some()) {
+            return None;
+        }
+        self.calls
+            .scoped_field(&base, &field.member, scope, self.imports_of_expression_in_scope(&field.base, scope))
+    }
+
+    fn indexed_method_scope(&self, call: &ExprMethodCall, scope: &ScopePath) -> Option<&ScopePath> {
+        let receiver = self.receiver_facts(&call.receiver, scope)?;
+        self.calls
+            .scoped_method_signature(&receiver.ty, &call.method.to_string(), &receiver.origin, receiver.imports)
+            .map(|(_, origin)| origin)
+    }
+
+    /// Exposes each peeled receiver reference to deterministic progress checks; direct method
+    /// signature resolution returns before this fallback traversal.
+    fn inferred_method_type_with(&self, call: &ExprMethodCall, scope: &ScopePath, on_reference: impl FnMut()) -> Option<Type> {
+        let receiver = self.receiver_facts(&call.receiver, scope)?;
+        self.inferred_method_facts(call, scope, receiver, on_reference)
+            .map(|facts| facts.ty)
+    }
+
+    fn inferred_method_facts<'s>(
+        &'s self,
+        call: &ExprMethodCall,
+        scope: &ScopePath,
+        receiver: ReceiverFacts<'s>,
+        on_reference: impl FnMut(),
+    ) -> Option<ReceiverFacts<'s>> {
+        if let Some((signature, origin)) =
+            self.calls
+                .scoped_method_signature(&receiver.ty, &call.method.to_string(), &receiver.origin, receiver.imports)
+        {
+            return Some(ReceiverFacts {
+                ty: self.inferred_signature_type(signature, origin)?,
+                origin: origin.clone(),
+                imports: self.imports_in_scope(origin),
+            });
+        }
+        let ty = self.inferred_method_fallback(call, scope, &receiver.ty, &receiver.origin, on_reference)?;
+        let (origin, imports) = if matches!(
+            call.method.to_string().as_str(),
+            "unwrap" | "expect" | "unwrap_or" | "unwrap_or_else"
+        ) {
+            (receiver.origin, receiver.imports)
+        } else {
+            (scope.clone(), self.imports_in_scope(scope))
+        };
+        Some(ReceiverFacts { ty, origin, imports })
+    }
+
+    fn inferred_method_fallback(
+        &self,
+        call: &ExprMethodCall,
+        result_scope: &ScopePath,
+        receiver: &Type,
+        scope: &ScopePath,
+        mut on_reference: impl FnMut(),
+    ) -> Option<Type> {
+        let result_types = self.types_in_scope(result_scope);
+        let frozen_imports = HashMap::default();
+        let types = self.frozen_types(&frozen_imports);
+        let mut receiver_type = types.resolve_alias(receiver);
+        // Test-only headroom catches a stalled walk, including nested receiver queries;
         // production inference has no corresponding counter or supported-depth cutoff.
         #[cfg(test)]
         let mut remaining = 16384;
-        self.inferred_method_type_with(call, || {
+        while let Type::Reference(reference) = values::strip(receiver_type) {
             #[cfg(test)]
             {
                 assert!(remaining > 0, "method inference must advance through its finite reference layers");
                 remaining -= 1;
             }
-        })
-    }
-
-    /// Exposes each peeled receiver reference to deterministic progress checks; direct method
-    /// signature resolution returns before this fallback traversal.
-    fn inferred_method_type_with(&self, call: &ExprMethodCall, mut on_reference: impl FnMut()) -> Option<Type> {
-        let receiver = self.inferred_expression_type(&call.receiver)?;
-        if let Some(signature) = self
-            .calls
-            .method_signature(&receiver, &call.method.to_string(), &self.scope_path, self.current_imports())
-        {
-            return signature
-                .asyncness
-                .is_none()
-                .then(|| return_type(&signature.output).cloned())
-                .flatten();
-        }
-        let types = self.types();
-        let mut receiver_type = types.resolve_alias(&receiver);
-        while let Type::Reference(reference) = values::strip(receiver_type) {
             on_reference();
             receiver_type = types.resolve_alias(&reference.elem);
         }
-        if call.method == "iter" && call.args.is_empty() {
+        if let Some(ty) = self.inferred_iterator_method_type(call, receiver, receiver_type, scope, &types, &result_types) {
+            return Some(ty);
+        }
+        if let Some(ty) = Self::standard_file_method_type(call, receiver_type, &types, &result_types) {
+            return Some(ty);
+        }
+        if matches!(call.method.to_string().as_str(), "last" | "last_mut")
+            && call.args.is_empty()
+            && types
+                .unshadowed_type_path(receiver_type)
+                .is_some_and(|path| path.iter().map(String::as_str).eq(["syn", "punctuated", "Punctuated"]))
+        {
+            let item = types.payload(receiver_type, 0)?;
+            let option = result_types.standard_type("option", "Option", &["std", "core"])?;
+            return Some(if call.method == "last_mut" {
+                syn::parse_quote!(#option<&mut #item>)
+            } else {
+                syn::parse_quote!(#option<&#item>)
+            });
+        }
+        if call.args.is_empty()
+            && call.method == "as_str"
+            && (types.supports_string_api(receiver_type)
+                || types.unshadowed_type_path(receiver_type).is_some_and(|path| {
+                    matches!(path.as_slice(), [root, module, name]
+                        if matches!(root.as_str(), "std" | "core") && module == "str" && name == "Chars")
+                }))
+        {
+            return result_types
+                .standard_type("primitive", "str", &["core", "std"])
+                .map(|ty| syn::parse_quote!(&#ty));
+        }
+        if types.unshadowed_type_path(receiver).is_some_and(|path| {
+            matches!(path.as_slice(),
+                [root, module, name] if matches!(root.as_str(), "std" | "core") && module == "time" && name == "Instant")
+        }) && matches!(
+            call.method.to_string().as_str(),
+            "elapsed" | "duration_since" | "saturating_duration_since"
+        ) {
+            return result_types.standard_type("time", "Duration", &["std", "core"]);
+        }
+        if types.unshadowed_type_path(receiver_type).is_some_and(|path| {
+            matches!(path.as_slice(),
+                [root, module, name] if matches!(root.as_str(), "std" | "core") && module == "time" && name == "Duration")
+        }) && matches!(
+            call.method.to_string().as_str(),
+            "mul_f32" | "mul_f64" | "div_f32" | "div_f64" | "saturating_add" | "saturating_sub" | "saturating_mul"
+        ) {
+            return result_types.standard_type("time", "Duration", &["std", "core"]);
+        }
+        if types.supports_result_api(receiver)
+            && matches!(call.method.to_string().as_str(), "map" | "map_err" | "and_then" | "or_else")
+            && call.args.len() == 1
+        {
+            return result_types
+                .standard_type("result", "Result", &["std", "core"])
+                .map(|ty| syn::parse_quote!(#ty<_, _>));
+        }
+        if matches!(
+            call.method.to_string().as_str(),
+            "unwrap" | "expect" | "unwrap_or" | "unwrap_or_else"
+        ) && (types.supports_option_api(receiver) || types.supports_result_api(receiver))
+        {
+            return types.payload(receiver, 0).map(std::borrow::Cow::into_owned);
+        }
+        if matches!(call.method.to_string().as_str(), "to_owned" | "to_string")
+            && call.args.is_empty()
+            && (types.supports_str_reference(receiver) || types.supports_string_api(receiver_type))
+        {
+            return result_types.standard_type("string", "String", &["std", "alloc"]);
+        }
+        None
+    }
+
+    fn inferred_iterator_method_type(
+        &self,
+        call: &ExprMethodCall,
+        receiver: &Type,
+        receiver_type: &Type,
+        scope: &ScopePath,
+        types: &Types<'_>,
+        result_types: &Types<'_>,
+    ) -> Option<Type> {
+        if matches!(call.method.to_string().as_str(), "iter" | "iter_mut") && call.args.is_empty() {
             let element = match values::strip(receiver_type) {
                 Type::Slice(slice) => Some((*slice.elem).clone()),
                 Type::Array(array) => Some((*array.elem).clone()),
@@ -2673,91 +3159,117 @@ impl<'a> Collector<'a> {
                 _ => None,
             };
             if let Some(element) = element {
-                return Some(syn::parse_quote!(std::slice::Iter<'_, #element>));
+                let iterator = if call.method == "iter_mut" { "IterMut" } else { "Iter" };
+                return result_types
+                    .standard_type("slice", iterator, &["std", "core"])
+                    .map(|ty| syn::parse_quote!(#ty<'_, #element>));
             }
         }
-        if types
-            .unshadowed_type_path(receiver_type)
-            .is_some_and(|path| path.iter().map(String::as_str).eq(["std", "fs", "OpenOptions"]))
-            && call.args.len() == 1
+        if call.method == "chars" && call.args.is_empty() && (types.supports_str_reference(receiver) || types.supports_string_api(receiver))
         {
-            match call.method.to_string().as_str() {
-                "open" => return Some(syn::parse_quote!(std::result::Result<std::fs::File, std::io::Error>)),
-                "read" | "write" | "append" | "truncate" | "create" | "create_new" => {
-                    return Some(syn::parse_quote!(&mut std::fs::OpenOptions));
-                }
-                _ => {}
+            return result_types
+                .standard_type("str", "Chars", &["std", "core"])
+                .map(|ty| syn::parse_quote!(#ty<'_>));
+        }
+        if call.args.is_empty() && types.supports_primitive_type(receiver_type, "char") {
+            let iterator = match call.method.to_string().as_str() {
+                "to_uppercase" => Some("ToUppercase"),
+                "to_lowercase" => Some("ToLowercase"),
+                _ => None,
+            };
+            if let Some(iterator) = iterator {
+                return result_types.standard_type("char", iterator, &["core", "std"]);
             }
         }
-        if call.method == "chars"
+        if call.method == "collect"
             && call.args.is_empty()
-            && (types.supports_str_reference(&receiver) || types.supports_string_api(&receiver))
+            && self.implicit_prelude
+            && self.inferred_iterator_item_in_scope(receiver, scope).is_some()
+            && let Some(arguments) = &call.turbofish
+            && let Some(GenericArgument::Type(ty)) = arguments.args.first()
         {
-            return Some(syn::parse_quote!(std::str::Chars<'_>));
+            return Some(result_types.frozen_type(ty));
         }
         if call.method == "next"
             && call.args.is_empty()
-            && let Some(item) = self.inferred_iterator_item(&receiver)
+            && let Some(item) = self.inferred_iterator_item_in_scope(receiver, scope)
         {
-            return Some(syn::parse_quote!(std::option::Option<#item>));
+            return result_types
+                .standard_type("option", "Option", &["std", "core"])
+                .map(|ty| syn::parse_quote!(#ty<#item>));
         }
-        if call.method == "enumerate" && call.args.is_empty() && self.inferred_iterator_item(&receiver).is_some() {
-            return Some(syn::parse_quote!(std::iter::Enumerate<#receiver>));
+        if call.method == "enumerate" && call.args.is_empty() && self.inferred_iterator_item_in_scope(receiver, scope).is_some() {
+            return result_types
+                .standard_type("iter", "Enumerate", &["std", "core"])
+                .map(|ty| syn::parse_quote!(#ty<#receiver>));
         }
-        if types.unshadowed_type_path(&receiver).is_some_and(|path| {
-            matches!(path.as_slice(),
-                [root, module, name] if matches!(root.as_str(), "std" | "core") && module == "time" && name == "Instant")
-        }) && matches!(
-            call.method.to_string().as_str(),
-            "elapsed" | "duration_since" | "saturating_duration_since"
-        ) {
-            return Some(syn::parse_quote!(std::time::Duration));
-        }
-        if types.unshadowed_type_path(receiver_type).is_some_and(|path| {
-            matches!(path.as_slice(),
-                [root, module, name] if matches!(root.as_str(), "std" | "core") && module == "time" && name == "Duration")
-        }) && matches!(
-            call.method.to_string().as_str(),
-            "mul_f32" | "mul_f64" | "div_f32" | "div_f64" | "saturating_add" | "saturating_sub" | "saturating_mul"
-        ) {
-            return Some(syn::parse_quote!(std::time::Duration));
-        }
-        if types.supports_result_api(&receiver)
-            && matches!(call.method.to_string().as_str(), "map" | "map_err" | "and_then" | "or_else")
-            && call.args.len() == 1
-        {
-            return Some(syn::parse_quote!(std::result::Result<_, _>));
-        }
-        if matches!(
-            call.method.to_string().as_str(),
-            "unwrap" | "expect" | "unwrap_or" | "unwrap_or_else"
-        ) && (types.supports_option_api(&receiver) || types.supports_result_api(&receiver))
-        {
-            return types.payload(&receiver, 0).map(std::borrow::Cow::into_owned);
-        }
-        if matches!(call.method.to_string().as_str(), "to_owned" | "to_string")
-            && call.args.is_empty()
-            && (types.supports_str_reference(&receiver) || types.supports_string_api(&receiver))
-        {
-            return Some(syn::parse_quote!(std::string::String));
+        if self.inferred_iterator_item_in_scope(receiver, scope).is_some() {
+            let adapter = match call.method.to_string().as_str() {
+                "skip" if call.args.len() == 1 => Some("Skip"),
+                "take" if call.args.len() == 1 => Some("Take"),
+                "rev" if call.args.is_empty() => Some("Rev"),
+                _ => None,
+            };
+            if let Some(adapter) = adapter {
+                return result_types
+                    .standard_type("iter", adapter, &["std", "core"])
+                    .map(|ty| syn::parse_quote!(#ty<#receiver>));
+            }
         }
         None
     }
 
+    fn standard_file_method_type(
+        call: &ExprMethodCall,
+        receiver: &Type,
+        types: &types::Types<'_>,
+        result_types: &types::Types<'_>,
+    ) -> Option<Type> {
+        if call.args.len() != 1
+            || !types
+                .unshadowed_type_path(receiver)
+                .is_some_and(|path| path.iter().map(String::as_str).eq(["std", "fs", "OpenOptions"]))
+        {
+            return None;
+        }
+        match call.method.to_string().as_str() {
+            "open" => {
+                let file = result_types.standard_type("fs", "File", &["std"])?;
+                Some(syn::parse_quote!(::std::result::Result<#file, ::std::io::Error>))
+            }
+            "read" | "write" | "append" | "truncate" | "create" | "create_new" => result_types
+                .standard_type("fs", "OpenOptions", &["std"])
+                .map(|ty| syn::parse_quote!(&mut #ty)),
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
     fn inferred_call_type(&self, expression: &Expr) -> Option<Type> {
+        self.inferred_call_type_in_scope(expression, &self.scope_path)
+    }
+
+    fn inferred_call_type_in_scope(&self, expression: &Expr, scope: &ScopePath) -> Option<Type> {
         let Expr::Call(call) = expression else {
-            return
-            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-            None;
+            return None;
         };
-        if let Some(ty) = self.standard_constructor_type(call) {
-            return Some(ty);
+        if let Some(ty) = self.type_of_expression(&call.func)
+            && let Some(output) = self.callable_output(ty, scope)
+        {
+            return Some(output);
+        }
+        if let Some(ty) = self.standard_constructor_type_in_scope(call, scope) {
+            return Some(if self.constructor_uses_payload(call, scope) {
+                ty
+            } else {
+                self.types_in_scope(scope).frozen_type(&ty)
+            });
         }
         if let Expr::Path(path) = &*call.func
-            && self.calls.structure(&path.path, &self.scope_path, self.current_imports())
+            && self.calls.structure(&path.path, scope, self.imports_in_scope(scope))
         {
             let path = &path.path;
-            return Some(syn::parse_quote!(#path));
+            return Some(self.types_in_scope(scope).frozen_type(&syn::parse_quote!(#path)));
         }
         let path = called_path(&call.func)?;
         let mut segments = path.segments.iter().rev();
@@ -2765,10 +3277,14 @@ impl<'a> Collector<'a> {
         // #[gamma::skip(try.propagate_to_unwrap, reason = "This is the FIRST reversed segments.next(), assigning method, not the later qualifier access. called_path supplies a nonempty parsed Path, so that first access cannot fail. The previous unqualified factory() oracle tests the untouched second access.", tag = "equivalent")]
         segments.next()?.ident;
         let qualifier = &segments.next()?.ident;
-        if qualifier == "String" && method == "new" && !self.current_imports().contains_key("String") && !self.defaults.defines("String") {
+        if qualifier == "String"
+            && method == "new"
+            && !self.imports_in_scope(scope).contains_key("String")
+            && !self.defaults.defines("String")
+        {
             return Some(syn::parse_quote!(String));
         }
-        let imported_from = imported_path(self.current_imports(), qualifier);
+        let imported_from = imported_path(self.imports_in_scope(scope), qualifier);
         let chrono = imported_from.is_some_and(|path| path.first().is_some_and(|root| root == "chrono"));
         if qualifier == "Utc" && chrono && method == "now" {
             return syn::parse_str("chrono::DateTime").ok();
@@ -2786,7 +3302,7 @@ impl<'a> Collector<'a> {
             qself: None,
             path: owner,
         });
-        if let Some(owner) = self.types().unshadowed_type_path(&owner) {
+        if let Some(owner) = self.types_in_scope(scope).unshadowed_type_path(&owner) {
             match owner.as_slice() {
                 [root, module, name] if root == "std" && module == "time" && name == "Instant" && method == "now" => {
                     return Some(syn::parse_quote!(std::time::Instant));
@@ -2839,7 +3355,7 @@ impl<'a> Collector<'a> {
         let ty = types.resolve_alias(ty);
 
         match values::strip(ty) {
-            Type::Reference(reference) => matches!(&*reference.elem, Type::Path(path) if path.path.is_ident("str")),
+            Type::Reference(reference) => values::is_str(&reference.elem),
             Type::Path(path) => {
                 let standard_option =
                     (path.path.is_ident("Option") && !self.current_imports().contains_key("Option") && !self.defaults.defines("Option"))
@@ -2876,9 +3392,7 @@ impl<'a> Collector<'a> {
             inferred = ty;
             &inferred
         } else {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         };
         let types = Types {
             abstracts: &self.generics,
@@ -2892,9 +3406,7 @@ impl<'a> Collector<'a> {
             Some(&self.impl_self_associated),
         };
         let Type::Path(path) = values::strip(types.resolve_alias(ty)) else {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         };
 
         // #[gamma::skip(collection.reverse_array, reason = "These arrays are consumed only by any over pure standard_type_path membership checks. Reversing their names changes evaluation order, not the boolean answer.", tag = "equivalent")]
@@ -2950,9 +3462,7 @@ impl<'a> Collector<'a> {
 
     fn receiver_has_first(&self, expression: &Expr) -> bool {
         let Some(ty) = self.type_of_expression(expression) else {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         };
         let types = Types {
             abstracts: &self.generics,
@@ -2972,13 +3482,12 @@ impl<'a> Collector<'a> {
     fn visit_let_else_diverge(&mut self, diverge: &Expr) {
         let statements_outer = self.undeletable_statements.len();
         if let Expr::Block(block) = diverge
-            && let Some(statement) = block.block.stmts.last()
+            && let Some(statement) = active_statements(&block.block, self.cfg).next_back()
         {
-            self.undeletable_statements.push(statement.span().byte_range());
+            self.undeletable_statements.push(statement.extent().byte_range());
         }
         let loops_outer = self.value_required_loops.len();
-        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
-        value_position_loop_spans(diverge, &mut self.value_required_loops);
+        value_position_loop_spans(self.cfg, diverge, &mut self.value_required_loops);
         self.visit_expr(diverge);
         self.value_required_loops.truncate(loops_outer);
         self.undeletable_statements.truncate(statements_outer);
@@ -2994,11 +3503,11 @@ impl<'a> Collector<'a> {
         if !self.wants("expr.increment") && !self.wants("expr.decrement") {
             return;
         }
-        if self.type_of_expression(expression).is_some_and(|ty| {
-            let types = self.types_with(self.imports_of_expression(expression));
-            matches!(types.resolve_alias(ty), Type::Reference(reference)
-                if reference.mutability.is_some()
-                    && matches!(types.primitive_kind(&reference.elem), Kind::Signed | Kind::Unsigned | Kind::Float)
+        if self.inferred_expression_type(expression).is_some_and(|ty| {
+            let imports = HashMap::default();
+            let types = self.frozen_types(&imports);
+            matches!(values::strip(types.resolve_alias(&ty)), Type::Reference(reference)
+                if matches!(types.primitive_kind(&reference.elem), Kind::Signed | Kind::Unsigned | Kind::Float)
                     && types.supports_primitive_kind(&reference.elem, types.primitive_kind(&reference.elem)))
         }) {
             return;
@@ -3008,7 +3517,7 @@ impl<'a> Collector<'a> {
         // all-diverging `if` or `match` -- has type `!` and so passes the signature-only numeric
         // proof, but its value is never reached: `(return 5) + 1` returns before the `+ 1` runs, so
         // both perturbations behave exactly like the original and survive every test. See `diverges`.
-        if diverges(expression) {
+        if diverges(self.cfg, expression) {
             return;
         }
 
@@ -3016,7 +3525,7 @@ impl<'a> Collector<'a> {
             return;
         }
 
-        let span = expression.span();
+        let span = expression.extent();
         let text = self.text_of(span);
 
         // #[gamma::skip(cond.always_false, reason = "empty text means the span is unmapped or the file was artificially truncated, so there is no site to perturb")]
@@ -3027,7 +3536,7 @@ impl<'a> Collector<'a> {
         // Parenthesised because the expression may bind more loosely than the addition, and
         // because the result is spliced into whatever position the original held.
         let unit = if floating { "1.0" } else { "1" };
-        let inferred_reduction = needs_expected_numeric_type(expression);
+        let inferred_reduction = needs_expected_numeric_type(self.cfg, expression);
         let incremented = if inferred_reduction {
             format_compact!("::gamma_rt::increment({text})")
         } else {
@@ -3136,23 +3645,17 @@ impl<'a> Collector<'a> {
 
     fn is_primitive_numeric_associated_call(&self, call: &ExprCall) -> bool {
         let Expr::Path(path) = &*call.func else {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         };
         if path.qself.is_some() {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         }
         let mut qualifier = path.path.clone();
         let _function = qualifier.segments.pop();
         if
         // #[gamma::skip(cond.always_false, reason = "An unqualified call leaves an empty qualifier after removing its function name. Without the early return, supports_primitive_kind receives that empty Type::Path and returns false for every primitive kind, preserving the original false answer.", tag = "equivalent")]
         qualifier.segments.is_empty() {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         }
         let ty = Type::Path(syn::TypePath {
             attrs: Vec::new(),
@@ -3229,7 +3732,7 @@ impl<'a> Collector<'a> {
 
                         self.bindings.get(&name).copied().unwrap_or_else(|| {
                             // #[gamma::skip(logical.or_remove_right, reason = "The earlier last-segment expression already includes is_primitive_constant(path). If that predicate is true it short-circuits the whole return before the later binding fallback; if false, the repeated primitive-constant disjunct in that fallback is false.", tag = "equivalent")]
-                            self.numeric_evidence.numeric.contains(&path.span().byte_range())
+                            self.numeric_evidence.numeric.contains(&path.extent().byte_range())
                                 || path.path.get_ident().is_some_and(|_| self.is_primitive_constant(&path.path))
                         })
                     })
@@ -3316,7 +3819,7 @@ impl<'a> Collector<'a> {
         let const_depth = self.const_parameters.len();
         let iterator_depth = self.iterator_bounded.len();
         let reader_depth = self.reader_bounded.len();
-        let names = standard_defaulted_parameters(generics, &self.default_paths);
+        let names = standard_defaulted_parameters(generics, &self.declarations.paths);
         let iterators = Types::standard_iterator_bounded_parameters(generics, self.current_imports());
 
         self.defaulted.extend(names);
@@ -3356,13 +3859,15 @@ impl<'a> Collector<'a> {
     /// Restored rather than cleared afterwards, because a nested function inside a body must not
     /// leave the outer one's `return` expressions looking like its own.
     fn in_function<T>(&mut self, sig: &Signature, body: impl FnOnce(&mut Self) -> T) -> T {
+        let outer_ownership_generics = replace(&mut self.ownership_generics, ownership::unbounded_parameters(&sig.generics));
         let outer = self.numeric_return;
         let outer_unsigned = self.unsigned_return;
         let outer_error = self.foreign_error_return;
         let outer_expected = self.expected_return.take();
         let generic_depth = self.generics.len();
 
-        self.generics.extend(undefaulted_parameters(&sig.generics, &self.default_paths));
+        self.generics
+            .extend(undefaulted_parameters(&sig.generics, &self.declarations.paths));
 
         self.numeric_return = is_numeric_return(&sig.output);
         self.expected_return = return_type(&sig.output).cloned();
@@ -3393,6 +3898,7 @@ impl<'a> Collector<'a> {
         let outer_inferred_unsigned = take(&mut self.inferred_unsigned);
         let outer_inferred_floating = take(&mut self.inferred_floating);
         let outer_parameter_types = take(&mut self.parameter_types);
+        let outer_parameter_scope = replace(&mut self.parameter_scope, self.scope_path.clone());
         let outer_deferred = take(&mut self.deferred);
         let outer_resource_iterators = take(&mut self.resource_iterators);
 
@@ -3447,6 +3953,7 @@ impl<'a> Collector<'a> {
         self.inferred_unsigned = outer_inferred_unsigned;
         self.inferred_floating = outer_inferred_floating;
         self.parameter_types = outer_parameter_types;
+        self.parameter_scope = outer_parameter_scope;
         self.deferred = outer_deferred;
         self.resource_iterators = outer_resource_iterators;
         self.undo.truncate(mark);
@@ -3455,6 +3962,7 @@ impl<'a> Collector<'a> {
         self.foreign_error_return = outer_error;
         self.expected_return = outer_expected;
         self.generics.truncate(generic_depth);
+        self.ownership_generics = outer_ownership_generics;
         result
     }
 
@@ -3502,8 +4010,7 @@ impl<'a> Collector<'a> {
     /// Visits an expression while marking zeros in its value-producing positions as unsigned-only.
     fn in_unsigned_expression<T>(&mut self, expression: &Expr, body: impl FnOnce(&mut Self) -> T) -> T {
         let outer = self.unsigned_zeros.len();
-        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
-        unsigned_zero_spans(expression, &mut self.unsigned_zeros);
+        unsigned_zero_spans(self.cfg, expression, &mut self.unsigned_zeros);
         let result = body(self);
         self.unsigned_zeros.truncate(outer);
         result
@@ -3512,8 +4019,7 @@ impl<'a> Collector<'a> {
     /// Visits an expression while marking zeros in its value-producing positions as signed.
     fn in_signed_expression<T>(&mut self, expression: &Expr, body: impl FnOnce(&mut Self) -> T) -> T {
         let outer = self.signed_zeros.len();
-        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
-        unsigned_zero_spans(expression, &mut self.signed_zeros);
+        unsigned_zero_spans(self.cfg, expression, &mut self.signed_zeros);
         let result = body(self);
         self.signed_zeros.truncate(outer);
         result
@@ -3542,10 +4048,8 @@ impl<'a> Collector<'a> {
         let statements_outer = self.undeletable_statements.len();
         let loops_outer = self.value_required_loops.len();
         if !matches!(resolve_type(expected), Kind::Unit) {
-            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
-            value_position_loop_spans(expression, &mut self.value_required_loops);
-            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
-            mandatory_tail_statements(expression, &mut self.undeletable_statements);
+            value_position_loop_spans(self.cfg, expression, &mut self.value_required_loops);
+            mandatory_tail_statements(self.cfg, expression, &mut self.undeletable_statements);
         }
         let imports = if
         // #[gamma::skip(cond.always_false, reason = "Indexes::Walk writes root imports to root_imports, reserving scope_imports entries for scopes after pushing a module or block ID. No empty scope_imports key is inserted by canonicalization or annotation. Looking up the empty scope therefore falls back to the same root_imports reference selected by the original is_empty branch.", tag = "equivalent")]
@@ -3555,8 +4059,8 @@ impl<'a> Collector<'a> {
             self.scope_imports.get(&self.scope_path).unwrap_or(&self.root_imports)
         };
         let aliases = self.scope_aliases.get(&self.scope_path).unwrap_or(&self.aliases);
-        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
         admissible_default_spans(
+            self.cfg,
             expression,
             expected,
             &Types {
@@ -3570,8 +4074,8 @@ impl<'a> Collector<'a> {
             },
             &mut self.admissible_defaults,
         );
-        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
         reusable_payload_spans(
+            self.cfg,
             expression,
             expected,
             &Types {
@@ -3598,7 +4102,7 @@ impl<'a> Collector<'a> {
 
     /// Visits a function body with its trailing expression checked against the declared return type.
     fn in_typed_block<T>(&mut self, block: &Block, expected: &Type, body: impl FnOnce(&mut Self) -> T) -> T {
-        let mut statements = block.stmts.iter().filter(|statement| !self.skipped(stmt_attrs(statement)));
+        let mut statements = active_statements(block, self.cfg);
         let last = statements.next_back();
         let Some(Stmt::Expr(tail, None)) = last else {
             let outer = self.undeletable_statements.len();
@@ -3608,7 +4112,7 @@ impl<'a> Collector<'a> {
                 && (matches!(expected, Type::Never(_)) || !matches!(resolve_type(expected), Kind::Unit | Kind::Unknown))
                 && let Some(statement @ Stmt::Expr(_, Some(_))) = last
             {
-                self.undeletable_statements.push(statement.span().byte_range());
+                self.undeletable_statements.push(statement.extent().byte_range());
             }
             let result = body(self);
             self.undeletable_statements.truncate(outer);
@@ -3687,13 +4191,19 @@ impl<'a> Collector<'a> {
                 }
             }
             Pat::Tuple(tuple) => {
-                let (tuple_type, reference) = match expected {
-                    Some(Type::Tuple(tuple)) => (Some(tuple), None),
-                    Some(Type::Reference(reference)) => match &*reference.elem {
-                        Type::Tuple(tuple) => (Some(tuple), Some(reference)),
-                        _ => (None, None),
-                    },
-                    _ => (None, None),
+                let mut expected = expected.map(values::strip);
+                let mut reference: Option<&syn::TypeReference> = None;
+                while let Some(Type::Reference(layer)) = expected {
+                    // Match ergonomics dereferences every layer but sets one binding mode.
+                    if reference.is_none_or(|prior| prior.mutability.is_some()) {
+                        reference = Some(layer);
+                    }
+                    // #[gamma::skip(stmt.delete_assign, tag = "timeout", reason = "Each iteration must advance to the reference element; deleting this assignment leaves expected pointing at the same reference and stalls the loop.")]
+                    expected = Some(values::strip(&layer.elem));
+                }
+                let tuple_type = match expected {
+                    Some(Type::Tuple(tuple)) => Some(tuple),
+                    _ => None,
                 };
                 let rest = tuple.elems.iter().position(|element| matches!(element, Pat::Rest(_)));
                 for (index, element) in tuple.elems.iter().enumerate() {
@@ -3752,9 +4262,13 @@ impl<'a> Collector<'a> {
     }
 
     fn bind_type_with_trust(&mut self, name: String, ty: Type, resource_trusted: bool) {
+        self.bind_type_with_imports(name, ty, resource_trusted, self.current_imports().clone());
+    }
+
+    fn bind_type_with_imports(&mut self, name: String, ty: Type, resource_trusted: bool, imports: HashMap<String, Option<Vec<String>>>) {
         let binding = BindingType {
             ty,
-            imports: self.current_imports().clone(),
+            imports,
             scope: self.scope_path.clone(),
             resource_trusted,
         };
@@ -3908,131 +4422,103 @@ const fn word_like(kind: TokenKind) -> bool {
 }
 
 /// Records zero literals reached only through syntax that preserves the expected value type.
-fn unsigned_zero_spans(expression: &Expr, spans: &mut Vec<Range<usize>>) {
+fn unsigned_zero_spans(cfg: &CfgSet, expression: &Expr, spans: &mut Vec<Range<usize>>) {
     match expression {
         Expr::Lit(literal) if matches!(&literal.lit, Lit::Int(value) if value.base10_digits() == "0") => {
-            spans.push(literal.span().byte_range());
+            spans.push(literal.extent().byte_range());
         }
 
-        Expr::Paren(paren) =>
-        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
-        {
-            unsigned_zero_spans(&paren.expr, spans);
+        Expr::Paren(paren) => {
+            unsigned_zero_spans(cfg, &paren.expr, spans);
         }
-        Expr::Group(group) =>
-        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
-        {
-            unsigned_zero_spans(&group.expr, spans);
+        Expr::Group(group) => {
+            unsigned_zero_spans(cfg, &group.expr, spans);
         }
         Expr::Block(block) => {
-            if let Some(Stmt::Expr(tail, None)) = block.block.stmts.last() {
-                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
-                unsigned_zero_spans(tail, spans);
+            if let Some(Stmt::Expr(tail, None)) = active_statements(&block.block, cfg).next_back() {
+                unsigned_zero_spans(cfg, tail, spans);
             }
         }
 
         Expr::If(branch) => {
-            if let Some(Stmt::Expr(tail, None)) = branch.then_branch.stmts.last() {
-                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
-                unsigned_zero_spans(tail, spans);
+            if let Some(Stmt::Expr(tail, None)) = active_statements(&branch.then_branch, cfg).next_back() {
+                unsigned_zero_spans(cfg, tail, spans);
             }
             if let Some((_, otherwise)) = &branch.else_branch {
-                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
-                unsigned_zero_spans(otherwise, spans);
+                unsigned_zero_spans(cfg, otherwise, spans);
             }
         }
         Expr::Match(matched) => {
             for arm in &matched.arms {
-                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
-                unsigned_zero_spans(&arm.body, spans);
+                unsigned_zero_spans(cfg, &arm.body, spans);
             }
         }
         Expr::Range(range) => {
             if let Some(start) = &range.start {
-                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
-                unsigned_zero_spans(start, spans);
+                unsigned_zero_spans(cfg, start, spans);
             }
             if let Some(end) = &range.end {
-                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
-                unsigned_zero_spans(end, spans);
+                unsigned_zero_spans(cfg, end, spans);
             }
         }
         Expr::MethodCall(call) if call.method == "map_or" && call.args.len() == 2 => {
-            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
-            unsigned_zero_spans(&call.args[0], spans);
+            unsigned_zero_spans(cfg, &call.args[0], spans);
             if let Expr::Closure(closure) = &call.args[1] {
-                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
-                unsigned_zero_spans(&closure.body, spans);
+                unsigned_zero_spans(cfg, &closure.body, spans);
             }
         }
         Expr::MethodCall(call) if call.method == "sum" && call.args.is_empty() => {
-            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
-            unsigned_iterator_source_spans(&call.receiver, spans);
+            unsigned_iterator_source_spans(cfg, &call.receiver, spans);
         }
         _ => {}
     }
 }
 
-fn unsigned_iterator_source_spans(expression: &Expr, spans: &mut Vec<Range<usize>>) {
+fn unsigned_iterator_source_spans(cfg: &CfgSet, expression: &Expr, spans: &mut Vec<Range<usize>>) {
     match expression {
         Expr::MethodCall(call) if call.method == "map" && call.args.len() == 1 => {
             if let Expr::Closure(closure) = &call.args[0] {
-                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
-                unsigned_zero_spans(&closure.body, spans);
+                unsigned_zero_spans(cfg, &closure.body, spans);
             }
         }
-        Expr::MethodCall(call) =>
-        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
-        {
-            unsigned_iterator_source_spans(&call.receiver, spans);
+        Expr::MethodCall(call) => {
+            unsigned_iterator_source_spans(cfg, &call.receiver, spans);
         }
-        Expr::Paren(paren) =>
-        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
-        {
-            unsigned_iterator_source_spans(&paren.expr, spans);
+        Expr::Paren(paren) => {
+            unsigned_iterator_source_spans(cfg, &paren.expr, spans);
         }
-        Expr::Group(group) =>
-        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
-        {
-            unsigned_iterator_source_spans(&group.expr, spans);
+        Expr::Group(group) => {
+            unsigned_iterator_source_spans(cfg, &group.expr, spans);
         }
         _ => {}
     }
 }
 
-fn value_position_loop_spans(expression: &Expr, spans: &mut Vec<Range<usize>>) {
+fn value_position_loop_spans(cfg: &CfgSet, expression: &Expr, spans: &mut Vec<Range<usize>>) {
     match expression {
-        Expr::Loop(loop_expr) => spans.push(loop_expr.span().byte_range()),
-        Expr::Paren(paren) =>
-        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
-        {
-            value_position_loop_spans(&paren.expr, spans);
+        Expr::Loop(loop_expr) => spans.push(loop_expr.extent().byte_range()),
+        Expr::Paren(paren) => {
+            value_position_loop_spans(cfg, &paren.expr, spans);
         }
-        Expr::Group(group) =>
-        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
-        {
-            value_position_loop_spans(&group.expr, spans);
+        Expr::Group(group) => {
+            value_position_loop_spans(cfg, &group.expr, spans);
         }
         Expr::Block(block) => {
-            if let Some(Stmt::Expr(tail, None)) = block.block.stmts.last() {
-                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
-                value_position_loop_spans(tail, spans);
+            if let Some(Stmt::Expr(tail, None)) = active_statements(&block.block, cfg).next_back() {
+                value_position_loop_spans(cfg, tail, spans);
             }
         }
         Expr::If(branch) => {
-            if let Some(Stmt::Expr(tail, None)) = branch.then_branch.stmts.last() {
-                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
-                value_position_loop_spans(tail, spans);
+            if let Some(Stmt::Expr(tail, None)) = active_statements(&branch.then_branch, cfg).next_back() {
+                value_position_loop_spans(cfg, tail, spans);
             }
             if let Some((_, otherwise)) = &branch.else_branch {
-                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
-                value_position_loop_spans(otherwise, spans);
+                value_position_loop_spans(cfg, otherwise, spans);
             }
         }
         Expr::Match(matched) => {
             for arm in &matched.arms {
-                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
-                value_position_loop_spans(&arm.body, spans);
+                value_position_loop_spans(cfg, &arm.body, spans);
             }
         }
         _ => {}
@@ -4053,9 +4539,11 @@ fn type_has_first(ty: &Type) -> bool {
 }
 
 fn is_borrowed_bool(ty: &Type) -> bool {
+    // Inferred evidence is already frozen; caller imports must not rebind its primitive identity.
     matches!(
         values::strip(ty),
-        Type::Reference(reference) if matches!(values::strip(&reference.elem), Type::Path(path) if path.path.is_ident("bool"))
+        Type::Reference(reference)
+            if types::frozen_type_identity(values::strip(&reference.elem)) == syn::parse_quote!(::core::primitive::bool)
     )
 }
 
@@ -4064,9 +4552,7 @@ fn unsigned_context(ty: &Type) -> bool {
         return true;
     }
     let Type::Path(path) = values::strip(ty) else {
-        return
-        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-        false;
+        return false;
     };
     path.path.segments.last().is_some_and(|segment| {
         (segment.ident == "Range" || segment.ident == "RangeInclusive") && values::type_argument(ty, 0).is_some_and(is_unsigned_binding)
@@ -4115,13 +4601,10 @@ fn path_ends_with(path: &syn::Path, expected: &[&str]) -> bool {
 
 fn imported_path<'a>(imports: &'a HashMap<String, Option<Vec<String>>>, ident: &syn::Ident) -> Option<&'a [String]> {
     imports.iter().find_map(|(name, path)| {
-        (ident == name.as_str()).then_some(path.as_deref()).flatten().map(|path| {
-            if path.first().is_some_and(|segment| segment == ABSOLUTE_ROOT) {
-                &path[1..]
-            } else {
-                path
-            }
-        })
+        (ident == name.as_str())
+            .then_some(path.as_deref())
+            .flatten()
+            .map(indexes::import_target)
     })
 }
 
@@ -4149,10 +4632,7 @@ fn ident_is_atomic_unsigned(ident: &syn::Ident) -> bool {
 
 fn standard_type_path(path: &syn::Path, imports: &HashMap<String, Option<Vec<String>>>, name: &str, prefix: &[&str]) -> bool {
     let Some(actual_name) = path.segments.last() else {
-        return
-        // #[gamma::skip(literal.bool_flip, reason = "These false returns handle a missing last/first segment of a source-parsed Path. syn source paths are nonempty; standard_unsigned_argument first rejects non-Path expressions. No valid parsed path reaches either empty-segment fallback.", tag = "equivalent")]
-        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-        false;
+        return false; // #[gamma::skip(literal.bool_flip, reason = "A Path parsed from source always contains a segment, so this branch is unreachable.", tag = "equivalent")]
     };
     let qualifier_len = path.segments.len() - 1;
 
@@ -4175,21 +4655,14 @@ fn standard_type_path(path: &syn::Path, imports: &HashMap<String, Option<Vec<Str
 /// that an integer-looking argument must be unsigned.
 fn standard_unsigned_argument(callee: &Expr, index: usize, imports: &HashMap<String, Option<Vec<String>>>) -> bool {
     let Expr::Path(path) = callee else {
-        return
-        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-        false;
+        return false;
     };
     let mut reversed = path.path.segments.iter().rev();
     let Some(method) = reversed.next().map(|segment| &segment.ident) else {
-        return
-        // #[gamma::skip(literal.bool_flip, reason = "These false returns handle a missing last/first segment of a source-parsed Path. syn source paths are nonempty; standard_unsigned_argument first rejects non-Path expressions. No valid parsed path reaches either empty-segment fallback.", tag = "equivalent")]
-        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-        false;
+        return false; // #[gamma::skip(literal.bool_flip, reason = "A Path parsed from source always contains a segment, so this branch is unreachable.", tag = "equivalent")]
     };
     let Some(ty) = reversed.next().map(|segment| &segment.ident) else {
-        return
-        // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-        false;
+        return false;
     };
     let qualifier_len = path.path.segments.len() - 2;
 
@@ -4243,21 +4716,21 @@ fn standard_unsigned_argument(callee: &Expr, index: usize, imports: &HashMap<Str
 }
 
 /// Records variant replacements whose required default is proved by an explicit expected type.
-fn admissible_default_spans(expression: &Expr, expected: &Type, types: &Types<'_>, spans: &mut Vec<Range<usize>>) {
+fn admissible_default_spans(cfg: &CfgSet, expression: &Expr, expected: &Type, types: &Types<'_>, spans: &mut Vec<Range<usize>>) {
     let resolved = types.resolve_alias(expected);
 
     match expression {
         Expr::Path(path) if path.path.is_ident("None") && resolve_type(resolved) == Kind::Option => {
             if types.payload(expected, 0).is_some_and(|payload| types.has_default(&payload)) {
-                spans.push(expression.span().byte_range());
+                spans.push(expression.extent().byte_range());
             }
         }
         Expr::Call(call) if resolve_type(resolved) == Kind::Result => match callee_name(&call.func).as_deref() {
             Some("Ok") if types.payload(expected, 1).is_some_and(|payload| types.has_default(&payload)) => {
-                spans.push(expression.span().byte_range());
+                spans.push(expression.extent().byte_range());
             }
             Some("Err") if types.payload(expected, 0).is_some_and(|payload| types.has_default(&payload)) => {
-                spans.push(expression.span().byte_range());
+                spans.push(expression.extent().byte_range());
             }
             _ => {}
         },
@@ -4271,39 +4744,31 @@ fn admissible_default_spans(expression: &Expr, expected: &Type, types: &Types<'_
                 .and_then(|index| types.control_flow_payload(expected, index))
                 .is_some_and(|payload| types.has_proven_default(&payload))
             {
-                spans.push(expression.span().byte_range());
+                spans.push(expression.extent().byte_range());
             }
         }
-        Expr::Paren(paren) =>
-        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
-        {
-            admissible_default_spans(&paren.expr, expected, types, spans);
+        Expr::Paren(paren) => {
+            admissible_default_spans(cfg, &paren.expr, expected, types, spans);
         }
-        Expr::Group(group) =>
-        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
-        {
-            admissible_default_spans(&group.expr, expected, types, spans);
+        Expr::Group(group) => {
+            admissible_default_spans(cfg, &group.expr, expected, types, spans);
         }
         Expr::Block(block) => {
-            if let Some(Stmt::Expr(tail, None)) = block.block.stmts.last() {
-                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
-                admissible_default_spans(tail, expected, types, spans);
+            if let Some(Stmt::Expr(tail, None)) = active_statements(&block.block, cfg).next_back() {
+                admissible_default_spans(cfg, tail, expected, types, spans);
             }
         }
         Expr::If(branch) => {
-            if let Some(Stmt::Expr(tail, None)) = branch.then_branch.stmts.last() {
-                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
-                admissible_default_spans(tail, expected, types, spans);
+            if let Some(Stmt::Expr(tail, None)) = active_statements(&branch.then_branch, cfg).next_back() {
+                admissible_default_spans(cfg, tail, expected, types, spans);
             }
             if let Some((_, otherwise)) = &branch.else_branch {
-                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
-                admissible_default_spans(otherwise, expected, types, spans);
+                admissible_default_spans(cfg, otherwise, expected, types, spans);
             }
         }
         Expr::Match(matched) => {
             for arm in &matched.arms {
-                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
-                admissible_default_spans(&arm.body, expected, types, spans);
+                admissible_default_spans(cfg, &arm.body, expected, types, spans);
             }
         }
         _ => {}
@@ -4311,6 +4776,7 @@ fn admissible_default_spans(expression: &Expr, expected: &Type, types: &Types<'_
 }
 
 fn reusable_payload_spans(
+    cfg: &CfgSet,
     expression: &Expr,
     expected: &Type,
     types: &Types<'_>,
@@ -4337,40 +4803,32 @@ fn reusable_payload_spans(
             })
             .min()
     {
-        spans.push((expression.span().byte_range(), CompactString::from(name)));
+        spans.push((expression.extent().byte_range(), CompactString::from(name)));
     }
 
     match expression {
-        Expr::Paren(paren) =>
-        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
-        {
-            reusable_payload_spans(&paren.expr, expected, types, parameters, spans);
+        Expr::Paren(paren) => {
+            reusable_payload_spans(cfg, &paren.expr, expected, types, parameters, spans);
         }
-        Expr::Group(group) =>
-        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
-        {
-            reusable_payload_spans(&group.expr, expected, types, parameters, spans);
+        Expr::Group(group) => {
+            reusable_payload_spans(cfg, &group.expr, expected, types, parameters, spans);
         }
         Expr::Block(block) => {
-            if let Some(Stmt::Expr(tail, None)) = block.block.stmts.last() {
-                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
-                reusable_payload_spans(tail, expected, types, parameters, spans);
+            if let Some(Stmt::Expr(tail, None)) = active_statements(&block.block, cfg).next_back() {
+                reusable_payload_spans(cfg, tail, expected, types, parameters, spans);
             }
         }
         Expr::If(branch) => {
-            if let Some(Stmt::Expr(tail, None)) = branch.then_branch.stmts.last() {
-                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
-                reusable_payload_spans(tail, expected, types, parameters, spans);
+            if let Some(Stmt::Expr(tail, None)) = active_statements(&branch.then_branch, cfg).next_back() {
+                reusable_payload_spans(cfg, tail, expected, types, parameters, spans);
             }
             if let Some((_, otherwise)) = &branch.else_branch {
-                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
-                reusable_payload_spans(otherwise, expected, types, parameters, spans);
+                reusable_payload_spans(cfg, otherwise, expected, types, parameters, spans);
             }
         }
         Expr::Match(matched) => {
             for arm in &matched.arms {
-                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
-                reusable_payload_spans(&arm.body, expected, types, parameters, spans);
+                reusable_payload_spans(cfg, &arm.body, expected, types, parameters, spans);
             }
         }
         _ => {}
@@ -4381,25 +4839,6 @@ fn copy_safe_payload(ty: &Type) -> bool {
     matches!(resolve_type(ty), Kind::NonZero)
         || matches!(values::strip(ty), Type::Reference(reference)
             if reference.mutability.is_none() && reference.lifetime.is_some())
-}
-
-/// Indexes attribute-free expression ranges so guard insertion leaves outer attributes in place.
-fn expression_contents(file: &syn::File) -> HashMap<Range<usize>, Range<usize>> {
-    #[derive(Default)]
-    struct Contents(HashMap<Range<usize>, Range<usize>>);
-    #[expect(clippy::renamed_function_params, reason = "visitor parameters use descriptive names")]
-    impl<'ast> Visit<'ast> for Contents {
-        fn visit_expr(&mut self, expression: &'ast Expr) {
-            if let Some(last) = expr_attrs(expression).last() {
-                let whole = expression.span().byte_range();
-                let _prior = self.0.insert(whole.clone(), last.span().byte_range().end..whole.end);
-            }
-            visit::visit_expr(self, expression);
-        }
-    }
-    let mut contents = Contents::default();
-    contents.visit_file(file);
-    contents.0
 }
 
 /// Recognizes stated wrapper values with no iterator payload, which need no iterator adapter.
@@ -4420,20 +4859,22 @@ fn absent_iterator_value(value: &str) -> bool {
 }
 
 /// Finds reduction results that need the original return type to keep numeric inference intact.
-fn needs_expected_numeric_type(expression: &Expr) -> bool {
+fn needs_expected_numeric_type(cfg: &CfgSet, expression: &Expr) -> bool {
     match expression {
         Expr::MethodCall(call) => matches!(call.method.to_string().as_str(), "sum" | "product"),
-        Expr::Paren(paren) => needs_expected_numeric_type(&paren.expr),
-        Expr::Group(group) => needs_expected_numeric_type(&group.expr),
-        Expr::Block(block) => matches!(block.block.stmts.last(), Some(Stmt::Expr(tail, None)) if needs_expected_numeric_type(tail)),
+        Expr::Paren(paren) => needs_expected_numeric_type(cfg, &paren.expr),
+        Expr::Group(group) => needs_expected_numeric_type(cfg, &group.expr),
+        Expr::Block(block) => {
+            matches!(active_statements(&block.block, cfg).next_back(), Some(Stmt::Expr(tail, None)) if needs_expected_numeric_type(cfg, tail))
+        }
         Expr::If(branch) => {
-            matches!(branch.then_branch.stmts.last(), Some(Stmt::Expr(tail, None)) if needs_expected_numeric_type(tail))
+            matches!(active_statements(&branch.then_branch, cfg).next_back(), Some(Stmt::Expr(tail, None)) if needs_expected_numeric_type(cfg, tail))
                 || branch
                     .else_branch
                     .as_ref()
-                    .is_some_and(|(_, otherwise)| needs_expected_numeric_type(otherwise))
+                    .is_some_and(|(_, otherwise)| needs_expected_numeric_type(cfg, otherwise))
         }
-        Expr::Match(matched) => matched.arms.iter().any(|arm| needs_expected_numeric_type(&arm.body)),
+        Expr::Match(matched) => matched.arms.iter().any(|arm| needs_expected_numeric_type(cfg, &arm.body)),
         _ => false,
     }
 }
@@ -4454,9 +4895,7 @@ fn iterator_body_shape(output: Option<&Type>, types: &Types<'_>) -> Option<Shape
                 depth = depth.checked_add(1)?;
             }
             _ => {
-                return
-            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-            None;
+                return None;
             }
         }
     }
@@ -4482,43 +4921,34 @@ fn contains_impl_trait(ty: &Type) -> bool {
 }
 
 /// Returns a final `continue;` whose deletion changes this block's value from diverging to unit.
-fn trailing_continue(block: &Block) -> Option<Range<usize>> {
-    match block.stmts.last() {
-        Some(statement @ Stmt::Expr(Expr::Continue(_), Some(_))) => Some(statement.span().byte_range()),
+fn trailing_continue(cfg: &CfgSet, block: &Block) -> Option<Range<usize>> {
+    match active_statements(block, cfg).next_back() {
+        Some(statement @ Stmt::Expr(Expr::Continue(_), Some(_))) => Some(statement.extent().byte_range()),
         _ => None,
     }
 }
 
-fn mandatory_tail_statements(expression: &Expr, spans: &mut Vec<Range<usize>>) {
+fn mandatory_tail_statements(cfg: &CfgSet, expression: &Expr, spans: &mut Vec<Range<usize>>) {
     match expression {
-        Expr::Block(block) =>
-        // #[gamma::skip(call_result.default, tag = "equivalent", reason = "mandatory_block_tail returns unit. default_after executes the call with all spans effects intact and then returns the same unit value.")]
-        {
-            mandatory_block_tail(&block.block, spans);
+        Expr::Block(block) => {
+            mandatory_block_tail(cfg, &block.block, spans);
         }
         Expr::If(branch) => {
-            // #[gamma::skip(call_result.default, tag = "equivalent", reason = "mandatory_block_tail returns unit. default_after executes the call with all spans effects intact and then returns the same unit value.")]
-            mandatory_block_tail(&branch.then_branch, spans);
+            mandatory_block_tail(cfg, &branch.then_branch, spans);
             if let Some((_, otherwise)) = &branch.else_branch {
-                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
-                mandatory_tail_statements(otherwise, spans);
+                mandatory_tail_statements(cfg, otherwise, spans);
             }
         }
         Expr::Match(matched) => {
             for arm in &matched.arms {
-                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
-                mandatory_tail_statements(&arm.body, spans);
+                mandatory_tail_statements(cfg, &arm.body, spans);
             }
         }
-        Expr::Paren(paren) =>
-        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
-        {
-            mandatory_tail_statements(&paren.expr, spans);
+        Expr::Paren(paren) => {
+            mandatory_tail_statements(cfg, &paren.expr, spans);
         }
-        Expr::Group(group) =>
-        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
-        {
-            mandatory_tail_statements(&group.expr, spans);
+        Expr::Group(group) => {
+            mandatory_tail_statements(cfg, &group.expr, spans);
         }
         _ => {}
     }
@@ -4535,35 +4965,32 @@ fn nondiverging_statement(statement: &Stmt) -> bool {
     }
 }
 
-fn mandatory_block_tail(block: &Block, spans: &mut Vec<Range<usize>>) {
-    let Some((tail, prefix)) = block.stmts.split_last() else { return };
+fn mandatory_block_tail(cfg: &CfgSet, block: &Block, spans: &mut Vec<Range<usize>>) {
+    let mut statements = active_statements(block, cfg);
+    let Some(tail) = statements.next_back() else { return };
     // Unknown calls or earlier exits may already make the tail unreachable.
-    if !prefix.iter().all(nondiverging_statement) {
+    if !statements.all(nondiverging_statement) {
         return;
     }
     match tail {
-        statement @ Stmt::Expr(_, Some(_)) => spans.push(statement.span().byte_range()),
-        Stmt::Expr(tail, None) =>
-        // #[gamma::skip(call_result.default, tag = "equivalent", reason = "mandatory_tail_statements returns unit. default_after executes the call with all spans effects intact and then returns the same unit value.")]
-        {
-            mandatory_tail_statements(tail, spans);
+        statement @ Stmt::Expr(_, Some(_)) => spans.push(statement.extent().byte_range()),
+        Stmt::Expr(tail, None) => {
+            mandatory_tail_statements(cfg, tail, spans);
         }
         _ => {}
     }
 }
 
 /// Returns whether an expression's syntax proves that its value is not unit.
-fn explicitly_nonunit(expression: &Expr) -> bool {
+fn explicitly_nonunit(cfg: &CfgSet, expression: &Expr) -> bool {
     match expression {
         Expr::Lit(_) | Expr::Array(_) | Expr::Repeat(_) | Expr::Struct(_) | Expr::Reference(_) => true,
         Expr::Tuple(tuple) => !tuple.elems.is_empty(),
-        Expr::Paren(paren) => explicitly_nonunit(&paren.expr),
-        Expr::Group(group) => explicitly_nonunit(&group.expr),
-        Expr::Block(block) => block
-            .block
-            .stmts
-            .last()
-            .is_some_and(|statement| matches!(statement, Stmt::Expr(tail, None) if explicitly_nonunit(tail))),
+        Expr::Paren(paren) => explicitly_nonunit(cfg, &paren.expr),
+        Expr::Group(group) => explicitly_nonunit(cfg, &group.expr),
+        Expr::Block(block) => active_statements(&block.block, cfg)
+            .next_back()
+            .is_some_and(|statement| matches!(statement, Stmt::Expr(tail, None) if explicitly_nonunit(cfg, tail))),
         _ => false,
     }
 }
@@ -4772,7 +5199,8 @@ impl<'ast> Visit<'ast> for Collector<'_> {
                     }
 
                     if let Some(ty) = inferred_type {
-                        self.bind_type_with_trust(name, ty, false);
+                        let imports = self.imports_of_expression(&init.expr).clone();
+                        self.bind_type_with_imports(name, ty, false, imports);
                     } else if inferred_unsigned {
                         self.bind_inferred_unsigned(name);
                     } else {
@@ -4867,6 +5295,8 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         let iterator_depth = self.iterator_bounded.len();
         let reader_depth = self.reader_bounded.len();
         let outer = self.in_default_impl;
+        let outer_parameters_opaque = self.impl_parameters_opaque;
+        self.impl_parameters_opaque |= !LocalCalls::nontransforming_attributes(&node.attrs);
         let outer_trait_impl = replace(
             &mut self.trait_impl,
             node.trait_
@@ -4889,11 +5319,12 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         self.in_default_impl = node
             .trait_
             .as_ref()
-            .is_some_and(|(path, _for)| self.default_paths.is_fallback_trait(path));
+            .is_some_and(|(path, _for)| self.declarations.paths.is_fallback_trait(path));
 
-        self.generics.extend(undefaulted_parameters(&node.generics, &self.default_paths));
+        self.generics
+            .extend(undefaulted_parameters(&node.generics, &self.declarations.paths));
         self.defaulted
-            .extend(standard_defaulted_parameters(&node.generics, &self.default_paths));
+            .extend(standard_defaulted_parameters(&node.generics, &self.declarations.paths));
         self.const_parameters
             .extend(node.generics.const_params().map(|parameter| parameter.ident.to_string()));
         self.iterator_bounded
@@ -4909,6 +5340,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         self.iterator_bounded.truncate(iterator_depth);
         self.reader_bounded.truncate(reader_depth);
         self.in_default_impl = outer;
+        self.impl_parameters_opaque = outer_parameters_opaque;
         self.trait_impl = outer_trait_impl;
         self.impl_self_type = outer_self_type;
         self.impl_self_associated = outer_associated;
@@ -4962,7 +5394,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         }
 
         self.omit_elements(node, &elements);
-        self.reverse_elements("collection.reverse_vec", node.span().byte_range(), &elements);
+        self.reverse_elements("collection.reverse_vec", node.extent().byte_range(), &elements);
     }
 
     fn visit_attribute(&mut self, _node: &'ast Attribute) {
@@ -4981,7 +5413,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
     }
 
     fn visit_expr_binary(&mut self, node: &'ast ExprBinary) {
-        let span = node.span();
+        let span = node.extent();
         let assigns = is_assign_op(&node.op);
         let mut operands = None;
 
@@ -5022,11 +5454,12 @@ impl<'ast> Visit<'ast> for Collector<'_> {
                 }
             }
 
-            if mutator.starts_with("arith.") && self.unsupported_operator(node, operator) {
+            // #[gamma::skip(logical.and_remove_left, literal.str_to_empty, tag = "equivalent", reason = "binary_replacements gives every arithmetic operation an arith/assign prefix, so those checks are unchanged. Broadening either prefix or removing this prefilter only calls unsupported_operator for other BinOps; that helper immediately returns false for every non-arithmetic original operation, without changing collector state.")]
+            if (mutator.starts_with("arith.") || mutator.starts_with("assign.")) && self.unsupported_operator(node, operator) {
                 continue;
             }
 
-            let (left, right) = *operands.get_or_insert_with(|| (self.text_of(node.left.span()), self.text_of(node.right.span())));
+            let (left, right) = *operands.get_or_insert_with(|| (self.text_of(node.left.extent()), self.text_of(node.right.extent())));
 
             // The operands are parenthesized because the replacement is spliced in as a unit and
             // must not renegotiate precedence with whatever encloses it: rewriting the `*` in
@@ -5046,13 +5479,13 @@ impl<'ast> Visit<'ast> for Collector<'_> {
                 if
                 // #[gamma::skip(cond.always_true, reason = "These are allocation/text-construction prefilters for selected mutators. Their final emit path rechecks wants before recording a candidate or advancing identity state. The newly executed text construction and eligibility queries are read-only; an unselected mutator remains unselected at the authoritative emission gate.", tag = "equivalent")]
                 self.wants(left_mutator) {
-                    let replacement = format_compact!("({})", self.text_of(node.right.span()));
+                    let replacement = format_compact!("({})", self.text_of(node.right.extent()));
                     self.emit(left_mutator, span, replacement, 0);
                 }
                 if
                 // #[gamma::skip(cond.always_true, reason = "These are allocation/text-construction prefilters for selected mutators. Their final emit path rechecks wants before recording a candidate or advancing identity state. The newly executed text construction and eligibility queries are read-only; an unselected mutator remains unselected at the authoritative emission gate.", tag = "equivalent")]
                 self.wants(right_mutator) {
-                    let replacement = format_compact!("({})", self.text_of(node.left.span()));
+                    let replacement = format_compact!("({})", self.text_of(node.left.extent()));
                     self.emit(right_mutator, span, replacement, 0);
                 }
             };
@@ -5270,7 +5703,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
     }
 
     fn visit_expr_closure(&mut self, node: &'ast ExprClosure) {
-        let expected = self.closure_inputs.get(&node.span().byte_range()).cloned();
+        let expected = self.closure_inputs.get(&node.extent().byte_range()).cloned();
         self.in_scope(|collector| {
             for input in &node.inputs {
                 collector.bind_pattern(input, expected.as_ref().filter(|_| node.inputs.len() == 1));
@@ -5295,16 +5728,25 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         match node.op {
             // Negating zero yields zero, so removing the negation changes nothing.
             UnOp::Neg(_) if is_integer_zero_literal(&node.expr) => {}
-            UnOp::Neg(_) => self.emit("unary.remove_neg", node.span(), self.text_of(node.expr.span()), 0),
+            UnOp::Neg(_) => self.emit("unary.remove_neg", node.extent(), self.text_of(node.expr.extent()), 0),
             UnOp::Not(_) => {
-                let operand = self.text_of(node.expr.span());
+                let operand = self.text_of(node.expr.extent());
+                let generic_operand = self.type_of_expression(&node.expr).is_some_and(|ty| {
+                    matches!(values::strip(ty), Type::Path(path)
+                        if path.path.get_ident().is_some_and(|name|
+                            self.generics.iter().chain(&self.defaulted).any(|generic| generic == &name.to_string())))
+                });
                 match self.inferred_expression_type(&node.expr) {
-                    Some(ty) if is_borrowed_bool(self.types().resolve_alias(&ty)) => {
-                        self.emit("unary.remove_not", node.span(), format_compact!("*({operand})"), 1);
+                    Some(ty) if types::contains_unknown_type(&ty) && !generic_operand => {}
+                    Some(ty) if types::contains_unknown_type(&ty) => {
+                        self.emit_confident("unary.remove_not", node.extent(), operand, 0, Confidence::Optimistic);
                     }
-                    Some(_) => self.emit("unary.remove_not", node.span(), operand, 0),
+                    Some(ty) if is_borrowed_bool(&ty) => {
+                        self.emit("unary.remove_not", node.extent(), format_compact!("*({operand})"), 1);
+                    }
+                    Some(_) => self.emit("unary.remove_not", node.extent(), operand, 0),
                     None => {
-                        self.emit_confident("unary.remove_not", node.span(), operand, 0, Confidence::Optimistic);
+                        self.emit_confident("unary.remove_not", node.extent(), operand, 0, Confidence::Optimistic);
                     }
                 }
             }
@@ -5319,19 +5761,21 @@ impl<'ast> Visit<'ast> for Collector<'_> {
 
         let outer = self.undeletable_statements.len();
         if let Some((_, otherwise)) = &node.else_branch {
-            if explicitly_nonunit(otherwise)
-                && let Some(span) = trailing_continue(&node.then_branch)
+            if explicitly_nonunit(self.cfg, otherwise)
+                && let Some(span) = trailing_continue(self.cfg, &node.then_branch)
             {
                 self.undeletable_statements.push(span);
             }
 
-            let then_value = node.then_branch.stmts.last().and_then(|statement| match statement {
-                Stmt::Expr(tail, None) => Some(tail),
-                _ => None,
-            });
-            if then_value.is_some_and(explicitly_nonunit)
+            let then_value = active_statements(&node.then_branch, self.cfg)
+                .next_back()
+                .and_then(|statement| match statement {
+                    Stmt::Expr(tail, None) => Some(tail),
+                    _ => None,
+                });
+            if then_value.is_some_and(|tail| explicitly_nonunit(self.cfg, tail))
                 && let Expr::Block(block) = &**otherwise
-                && let Some(span) = trailing_continue(&block.block)
+                && let Some(span) = trailing_continue(self.cfg, &block.block)
             {
                 self.undeletable_statements.push(span);
             }
@@ -5349,7 +5793,8 @@ impl<'ast> Visit<'ast> for Collector<'_> {
 
     fn visit_expr_let(&mut self, node: &'ast ExprLet) {
         self.visit_expr(&node.expr);
-        self.bind_pattern(&node.pat, None);
+        let expected = self.inferred_expression_type(&node.expr);
+        self.bind_pattern(&node.pat, expected.as_ref());
         // #[gamma::skip(stmt.delete_call, reason = "Collector.visit_pat does work only for a top-level Pat::Guard. The parser produces that top-level form for guarded match arms, never local declarations or let-expression conditions; their pattern entry points parse ordinary patterns without a trailing guard. These two calls therefore perform no work on their actual AST producers.", tag = "equivalent")]
         self.visit_pat(&node.pat);
     }
@@ -5376,7 +5821,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         if
         // #[gamma::skip(logical.and_remove_right, reason = "These are allocation/text-construction prefilters for selected mutators. Their final emit path rechecks wants before recording a candidate or advancing identity state. The newly executed text construction and eligibility queries are read-only; an unselected mutator remains unselected at the authoritative emission gate.", tag = "equivalent")]
         !binds_a_pattern(&node.cond) && self.wants("cond.negate") {
-            let span = node.cond.span();
+            let span = node.cond.extent();
             let negated = self.negation_of(span);
 
             self.emit("cond.negate", span, negated, 0);
@@ -5409,7 +5854,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
     fn visit_expr_loop(&mut self, node: &'ast ExprLoop) {
         self.loops.push(LoopContext {
             label: node.label.as_ref().map(|label| label.name.ident.to_string()),
-            produces_value: loop_produces_value(node) || self.value_required_loops.contains(&node.span().byte_range()),
+            produces_value: loop_produces_value(node) || self.value_required_loops.contains(&node.extent().byte_range()),
             proof: self.resource_proof(&Expr::Loop(node.clone())),
         });
         visit::visit_expr_loop(self, node);
@@ -5428,15 +5873,18 @@ impl<'ast> Visit<'ast> for Collector<'_> {
     fn visit_expr_match(&mut self, node: &'ast ExprMatch) {
         self.match_arms(node);
         let outer = self.undeletable_statements.len();
+        let expected = self.inferred_expression_type(&node.expr);
         if node.arms.iter().any(|arm| {
-            explicitly_nonunit(&arm.body)
-                || self
-                    .inferred_expression_type(&arm.body)
-                    .is_some_and(|ty| !matches!(resolve_type(self.types().resolve_alias(&ty)), Kind::Unit | Kind::Unknown))
+            if self.skipped(&arm.attrs) {
+                return false;
+            }
+            self.in_scope(|collector| {
+                collector.bind_pattern(&arm.pat, expected.as_ref());
+                collector.known_nonunit_match_arm(&arm.body)
+            })
         }) {
             for arm in &node.arms {
-                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
-                mandatory_tail_statements(&arm.body, &mut self.undeletable_statements);
+                mandatory_tail_statements(self.cfg, &arm.body, &mut self.undeletable_statements);
             }
         }
         self.visit_expr(&node.expr);
@@ -5500,12 +5948,12 @@ impl<'ast> Visit<'ast> for Collector<'_> {
                 return;
             }
             let start = node.start.as_ref().map_or_else(CompactString::default, |start| {
-                let text = self.text_of(start.span());
+                let text = self.text_of(start.extent());
 
                 format_compact!("({text})")
             });
 
-            let end_text = self.text_of(end.span());
+            let end_text = self.text_of(end.extent());
             let floating = self.is_known_float(end) || node.start.as_ref().is_some_and(|start| self.is_known_float(start));
             let unit = if floating { "1.0" } else { "1" };
 
@@ -5516,7 +5964,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
                 RangeLimits::HalfOpen(_) => {
                     self.emit(
                         "range.exclusive_to_inclusive",
-                        node.span(),
+                        node.extent(),
                         format_compact!("{start}..(({end_text}) + {unit})"),
                         0,
                     );
@@ -5524,7 +5972,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
                 RangeLimits::Closed(_) => {
                     self.emit(
                         "range.inclusive_to_exclusive",
-                        node.span(),
+                        node.extent(),
                         format_compact!("{start}..=(({end_text}) - {unit})"),
                         0,
                     );
@@ -5547,23 +5995,23 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         // `continue` cannot supply.
         if node.expr.is_none()
             && node.label.is_none()
-            && self.admit_ownership_edit(node.span().byte_range(), &node.span().byte_range(), true)
+            && self.admit_ownership_edit(node.extent().byte_range(), &node.extent().byte_range(), true)
         {
-            self.emit_shaped("loop.break_to_continue", node.span(), "continue", 0, Shape::Break);
+            self.emit_shaped("loop.break_to_continue", node.extent(), "continue", 0, Shape::Break);
         }
         if let Some(value) = node.expr.as_ref()
             && !self
                 .inferred_expression_type(value)
                 .is_some_and(|ty| self.types().lacks_default(&ty))
         {
-            self.emit("loop.break_value_default", value.span(), "Default::default()", 0);
+            self.emit("loop.break_value_default", value.extent(), "Default::default()", 0);
         }
 
         visit::visit_expr_break(self, node);
     }
 
     fn visit_expr_continue(&mut self, node: &'ast ExprContinue) {
-        if !self.admit_ownership_edit(node.span().byte_range(), &node.span().byte_range(), true) {
+        if !self.admit_ownership_edit(node.extent().byte_range(), &node.extent().byte_range(), true) {
             // #[gamma::skip(stmt.delete_call, reason = "The default binary-operator and continue-expression continuations visit punctuation tokens and an optional label/identifier only. Collector has no behavioral visitor for those token/identifier nodes; they neither emit candidates nor alter binding state.", tag = "equivalent")]
             visit::visit_expr_continue(self, node);
             return;
@@ -5593,7 +6041,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
             .as_ref()
             .map_or_else(|| CompactString::new("break"), |label| format_compact!("break {label}"));
 
-        self.emit_shaped("loop.continue_to_break", node.span(), replacement, 0, Shape::Continue);
+        self.emit_shaped("loop.continue_to_break", node.extent(), replacement, 0, Shape::Continue);
 
         // #[gamma::skip(stmt.delete_call, reason = "a continue has no expression children and its label contains no mutable expression")]
         visit::visit_expr_continue(self, node);
@@ -5610,20 +6058,20 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         // question a function at a time; this asks it at the site.
         if node.args.len() == 1 {
             match callee_name(&node.func).as_deref() {
-                _ if self.some_constructor(&node.func) => self.emit("option.some_to_none", node.span(), "None", 0),
-                Some("Ok") if !self.foreign_error_return && self.admissible_defaults.contains(&node.span().byte_range()) => {
-                    self.emit("result.ok_to_err", node.span(), "Err(Default::default())", 0);
+                _ if self.some_constructor(&node.func) => self.emit("option.some_to_none", node.extent(), "None", 0),
+                Some("Ok") if !self.foreign_error_return && self.admissible_defaults.contains(&node.extent().byte_range()) => {
+                    self.emit("result.ok_to_err", node.extent(), "Err(Default::default())", 0);
                 }
-                Some("Ok") if self.reusable_payload(&node.span().byte_range()).is_some() => {
-                    let value = self.reusable_payload(&node.span().byte_range()).unwrap_or_default().to_owned();
-                    self.emit("result.ok_to_err", node.span(), format_compact!("Err({value})"), 0);
+                Some("Ok") if self.reusable_payload(&node.extent().byte_range()).is_some() => {
+                    let value = self.reusable_payload(&node.extent().byte_range()).unwrap_or_default().to_owned();
+                    self.emit("result.ok_to_err", node.extent(), format_compact!("Err({value})"), 0);
                 }
-                Some("Err") if self.admissible_defaults.contains(&node.span().byte_range()) => {
-                    self.emit("result.err_to_ok", node.span(), "Ok(Default::default())", 0);
+                Some("Err") if self.admissible_defaults.contains(&node.extent().byte_range()) => {
+                    self.emit("result.err_to_ok", node.extent(), "Ok(Default::default())", 0);
                 }
-                Some("Err") if self.reusable_payload(&node.span().byte_range()).is_some() => {
-                    let value = self.reusable_payload(&node.span().byte_range()).unwrap_or_default().to_owned();
-                    self.emit("result.err_to_ok", node.span(), format_compact!("Ok({value})"), 0);
+                Some("Err") if self.reusable_payload(&node.extent().byte_range()).is_some() => {
+                    let value = self.reusable_payload(&node.extent().byte_range()).unwrap_or_default().to_owned();
+                    self.emit("result.err_to_ok", node.extent(), format_compact!("Ok({value})"), 0);
                 }
                 _ => {}
             }
@@ -5657,13 +6105,13 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         // stops the traversal before a pattern's interior is examined at all.
         if
         // #[gamma::skip(logical.and_remove_left, reason = "The marker producers record path-expression spans only for bare None. Their other recorded sites are complete Ok/Err calls, whose spans strictly contain the callee path plus argument parentheses and cannot equal an ExprPath span. Thus membership already implies this visited path is None.", tag = "equivalent")]
-        node.path.is_ident("None") && self.admissible_defaults.contains(&node.span().byte_range()) {
-            self.emit("option.none_to_some", node.span(), "Some(Default::default())", 0);
+        node.path.is_ident("None") && self.admissible_defaults.contains(&node.extent().byte_range()) {
+            self.emit("option.none_to_some", node.extent(), "Some(Default::default())", 0);
         } else if
         // #[gamma::skip(logical.and_remove_left, reason = "The marker producers record path-expression spans only for bare None. Their other recorded sites are complete Ok/Err calls, whose spans strictly contain the callee path plus argument parentheses and cannot equal an ExprPath span. Thus membership already implies this visited path is None.", tag = "equivalent")]
-        node.path.is_ident("None") && self.reusable_payload(&node.span().byte_range()).is_some() {
-            let value = self.reusable_payload(&node.span().byte_range()).unwrap_or_default().to_owned();
-            self.emit("option.none_to_some", node.span(), format_compact!("Some({value})"), 0);
+        node.path.is_ident("None") && self.reusable_payload(&node.extent().byte_range()).is_some() {
+            let value = self.reusable_payload(&node.extent().byte_range()).unwrap_or_default().to_owned();
+            self.emit("option.none_to_some", node.extent(), format_compact!("Some({value})"), 0);
         }
 
         // #[gamma::skip(stmt.delete_call, reason = "an expression path contains no child expressions or declarations handled by Collector")]
@@ -5673,19 +6121,12 @@ impl<'ast> Visit<'ast> for Collector<'_> {
     fn visit_expr_assign(&mut self, node: &'ast syn::ExprAssign) {
         // What is assigned is what the rest of the function reads, so replacing it with the type's
         // default asks whether anything downstream depends on the value rather than the write.
-        let types = Types {
-            abstracts: &self.generics,
-            defaulted: &self.defaulted,
-            imports: self.current_imports(),
-            defaults: self.defaults,
-            aliases: Some(self.current_aliases()),
-            self_type: self.impl_self_type.as_ref(),
-            self_associated: Some(&self.impl_self_associated),
-        };
-        if !is_default_call(&node.right, &self.default_paths, &self.defaulted)
-            && self.type_of_place(&node.left).is_some_and(|ty| types.has_default(ty))
+        if !is_default_call(&node.right, &self.declarations.paths, &self.defaulted)
+            && self
+                .type_of_place_in_scope(&node.left, &self.scope_path)
+                .is_some_and(|(ty, scope, imports)| self.types_with_in_scope(scope, imports).has_default(ty))
         {
-            self.emit("assign_value.default", node.right.span(), "Default::default()", 0);
+            self.emit("assign_value.default", node.right.extent(), "Default::default()", 0);
         }
 
         self.visit_expr(&node.left);
@@ -5700,11 +6141,12 @@ impl<'ast> Visit<'ast> for Collector<'_> {
 
     fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
         let method = node.method.to_string();
+        let receiver = self.inferred_expression_type(&node.receiver);
 
         self.perturb_arguments(Some(method.as_str()), &node.args);
-        self.rename_method(node, &method);
-        self.method_semantics(node, &method);
-        self.enum_predicate(node, &method);
+        self.rename_method(node, &method, receiver.as_ref());
+        self.method_semantics(node, &method, receiver.as_ref());
+        self.enum_predicate(node, &method, receiver.as_ref());
 
         // The receiver is ordinary code and is traversed; the message is not descended into at all.
         // Renaming the call itself is still offered above, because `expect` and `unwrap_or_default`
@@ -5726,9 +6168,12 @@ impl<'ast> Visit<'ast> for Collector<'_> {
             return;
         }
 
-        let receiver = self.inferred_expression_type(&node.receiver);
         let inferred = receiver.as_ref().and_then(|receiver| {
-            if matches!(method.as_str(), "any" | "all") && node.args.len() == 1 {
+            if matches!(
+                method.as_str(),
+                "any" | "all" | "find" | "filter" | "position" | "rposition" | "find_map" | "filter_map" | "for_each"
+            ) && node.args.len() == 1
+            {
                 let Expr::Closure(closure) =
                 // #[gamma::skip(try.propagate_to_unwrap, reason = "The any/all branch guards args.len()==1 before inspecting args.first(). The singleton is also last, and its first element cannot be None.", tag = "equivalent")]
 
@@ -5737,7 +6182,12 @@ impl<'ast> Visit<'ast> for Collector<'_> {
                     return None;
                 };
                 let item = self.inferred_iterator_item(receiver)?;
-                return Some((closure.span().byte_range(), item));
+                let item = if matches!(method.as_str(), "find" | "filter") {
+                    syn::parse_quote!(&#item)
+                } else {
+                    item
+                };
+                return Some((closure.extent().byte_range(), item));
             }
             let types = self.types();
             let result = types.supports_result_api(receiver);
@@ -5753,7 +6203,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
             let argument = node.args.get(argument)?;
             let Expr::Closure(closure) = argument else { return None };
             let payload = types.payload(receiver, payload)?.into_owned();
-            Some((closure.span().byte_range(), payload))
+            Some((closure.extent().byte_range(), payload))
         });
         let prior = inferred
             .as_ref()
@@ -5797,7 +6247,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
             let included = !self.expression_is_known_default_for_type(value, expected);
             self.emit_at_conditionally(
                 "return_value.default",
-                value.span().byte_range(),
+                value.extent().byte_range(),
                 "Default::default()",
                 0,
                 Shape::Expr,
@@ -5826,7 +6276,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
     }
 
     fn visit_expr_lit(&mut self, node: &'ast ExprLit) {
-        let span = node.span();
+        let span = node.extent();
 
         match &node.lit {
             Lit::Int(value) => {
@@ -5940,7 +6390,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
     }
 
     fn visit_expr_array(&mut self, node: &'ast ExprArray) {
-        self.reverse_elements("collection.reverse_array", node.span().byte_range(), &node.elems);
+        self.reverse_elements("collection.reverse_array", node.extent().byte_range(), &node.elems);
         visit::visit_expr_array(self, node);
     }
 
@@ -5948,10 +6398,10 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         if
         // #[gamma::skip(cond.always_true, reason = "These are allocation/text-construction prefilters for selected mutators. Their final emit path rechecks wants before recording a candidate or advancing identity state. The newly executed text construction and eligibility queries are read-only; an unselected mutator remains unselected at the authoritative emission gate.", tag = "equivalent")]
         self.wants("try.propagate_to_unwrap") {
-            let value = self.text_of(node.expr.span());
+            let value = self.text_of(node.expr.extent());
             self.emit(
                 "try.propagate_to_unwrap",
-                node.span(),
+                node.extent(),
                 format_compact!("::gamma_rt::panic_on_failure({value})?"),
                 0,
             );
@@ -5972,6 +6422,76 @@ mod mutation_tests {
         let file = SourceFile::parse("mutation.rs", source.to_owned()).expect("fixture parses");
         let selection = Selection::parse(names).expect("selectors resolve");
         collect_in(&file, &selection, &CfgSet::unconditional())
+    }
+
+    #[test]
+    fn result_fallback_mutations_keep_proven_confidence_without_explicit_opt_in() {
+        for (source, mutator) in [
+            (
+                "fn f(value: Result<u8, ()>) -> u8 { value.unwrap_or(7) }",
+                "fallback.unwrap_or_to_default",
+            ),
+            (
+                "fn f(value: Result<u8, ()>) -> u8 { value.unwrap_or_else(|_| 7) }",
+                "fallback.unwrap_or_else_to_default",
+            ),
+            (
+                "fn f(value: Result<u8, ()>) -> u8 { value.map_or(7, |n| n) }",
+                "fallback.map_or_to_default",
+            ),
+            (
+                "fn f(value: Result<u8, ()>) -> u8 { value.map_or_else(|_| 7, |n| n) }",
+                "fallback.map_or_else_to_default",
+            ),
+        ] {
+            let found = candidates(source, mutator);
+            assert_eq!(found.len(), 1, "{source}");
+            assert_eq!(found[0].confidence, Confidence::Proven, "{source}");
+            assert!(found[0].replacement.contains("default"), "{source}");
+        }
+    }
+
+    #[test]
+    fn parameter_shadows_omit_only_provably_unused_primitive_bindings() {
+        let found = candidates(
+            "struct Events; impl Events { fn convergence_activity(&mut self, _round: u32, unviable: usize, _proof: usize) { self.convergence_progress(unviable); } }",
+            "parameter.default_shadow",
+        );
+        assert_eq!(found.len(), 1);
+        assert!(found[0].replacement.contains("let unviable: usize = Default::default();"));
+        assert_eq!(found[0].replacement_index, 2);
+        for (source, expected) in [
+            ("fn f(unused: u32) { consume(); }", 0),
+            ("fn f(_used: u32) { consume(_used); }", 1),
+            ("fn f(r#unused: u32) { consume(r#unused); }", 1),
+            ("fn f(unused: u32) { consume(r#unused); }", 1),
+            ("fn f(r#unused: u32) { consume(unused); }", 1),
+            ("fn f(unused: bool) { consume(); }", 0),
+            ("fn f(unused: f64) { consume(); }", 0),
+            ("fn f(unused: String) { consume(); }", 1),
+            ("#[derive(Default)] struct u32; fn f(unused: u32) { consume(); }", 1),
+            ("fn f<T: Default>(unused: T) { consume(); }", 1),
+            ("fn f(unused: u32) { captures_parameter!(); }", 1),
+            ("fn f(unused: u32) { #[transform] consume(); }", 1),
+            ("#[transform] fn f(unused: u32) { consume(); }", 1),
+            ("struct Subject; #[transform] impl Subject { fn f(unused: u32) { consume(); } }", 1),
+            ("struct Subject; impl Subject { fn f(unused: u32) { consume(); } }", 0),
+            (
+                "struct Subject; #[allow(dead_code)] impl Subject { fn f(unused: u32) { consume(); } }",
+                0,
+            ),
+            (
+                "struct Subject; #[transform] impl Subject { fn first(unused: u32) { consume(); } } impl Subject { fn second(unused: u32) { consume(); } }",
+                1,
+            ),
+            ("fn f(unused: u32) { struct Default; consume(); }", 1),
+            (
+                "struct Default; impl Default { fn default() -> u32 { side_effect(); 0 } } fn f(unused: u32) { consume(); }",
+                1,
+            ),
+        ] {
+            assert_eq!(candidates(source, "parameter.default_shadow").len(), expected, "{source}");
+        }
     }
 
     #[test]
@@ -6096,30 +6616,38 @@ mod mutation_tests {
     fn transparent_groups_preserve_collector_classification() {
         let zero = grouped(syn::parse_quote!(0));
         let mut zero_spans = Vec::new();
-        unsigned_zero_spans(&zero, &mut zero_spans);
+        unsigned_zero_spans(&CfgSet::unconditional(), &zero, &mut zero_spans);
         assert_eq!(zero_spans.len(), 1);
 
         let iterator = grouped(syn::parse_quote!(values.map(|_| 0)));
         let mut iterator_spans = Vec::new();
-        unsigned_iterator_source_spans(&iterator, &mut iterator_spans);
+        unsigned_iterator_source_spans(&CfgSet::unconditional(), &iterator, &mut iterator_spans);
         assert_eq!(iterator_spans.len(), 1);
-        unsigned_iterator_source_spans(&syn::parse_quote!((values.inspect(log).map(|_| 0))), &mut iterator_spans);
+        unsigned_iterator_source_spans(
+            &CfgSet::unconditional(),
+            &syn::parse_quote!((values.inspect(log).map(|_| 0))),
+            &mut iterator_spans,
+        );
         assert_eq!(iterator_spans.len(), 2);
-        unsigned_iterator_source_spans(&syn::parse_quote!(values.inspect(log)), &mut iterator_spans);
+        unsigned_iterator_source_spans(
+            &CfgSet::unconditional(),
+            &syn::parse_quote!(values.inspect(log)),
+            &mut iterator_spans,
+        );
         assert_eq!(iterator_spans.len(), 2);
-        unsigned_iterator_source_spans(&syn::parse_quote!(value), &mut iterator_spans);
+        unsigned_iterator_source_spans(&CfgSet::unconditional(), &syn::parse_quote!(value), &mut iterator_spans);
         assert_eq!(iterator_spans.len(), 2);
 
         let value_loop = grouped(syn::parse_quote!(loop {
             break 1;
         }));
         let mut loop_spans = Vec::new();
-        value_position_loop_spans(&value_loop, &mut loop_spans);
+        value_position_loop_spans(&CfgSet::unconditional(), &value_loop, &mut loop_spans);
         assert_eq!(loop_spans.len(), 1);
 
-        assert!(explicitly_nonunit(&syn::parse_quote!((1,))));
-        assert!(explicitly_nonunit(&syn::parse_quote!((1))));
-        assert!(explicitly_nonunit(&grouped(syn::parse_quote!(1))));
+        assert!(explicitly_nonunit(&CfgSet::unconditional(), &syn::parse_quote!((1,))));
+        assert!(explicitly_nonunit(&CfgSet::unconditional(), &syn::parse_quote!((1))));
+        assert!(explicitly_nonunit(&CfgSet::unconditional(), &grouped(syn::parse_quote!(1))));
         assert!(!type_has_first(&syn::parse_quote!(String)));
         assert!(!type_has_first(&syn::parse_quote!((String,))));
     }
@@ -6203,6 +6731,7 @@ mod mutation_tests {
 
         let mut admissible = Vec::new();
         admissible_default_spans(
+            &CfgSet::unconditional(),
             &grouped(syn::parse_quote!(None)),
             &syn::parse_quote!(Option<usize>),
             &types,
@@ -6214,6 +6743,7 @@ mod mutation_tests {
         let _previous = parameters.insert("value".to_owned(), syn::parse_quote!(&'static str));
         let mut reusable = Vec::new();
         reusable_payload_spans(
+            &CfgSet::unconditional(),
             &grouped(syn::parse_quote!(None)),
             &syn::parse_quote!(Option<&'static str>),
             &types,

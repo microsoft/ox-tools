@@ -201,11 +201,21 @@ Hints can contain:
 - ranked exact tests for a stable `(source file, enclosing item)`;
 - ranked test binaries for a source file;
 - test sets known to reach a stable source site;
-- likely compiler-unviable mutants, used only for build ordering.
+- historical compiler-unviable mutant IDs.
 
-Hints are guesses, not verdicts. A test or binary named by a hint is run again
+Test and reach hints are guesses, not verdicts. A test or binary named by a hint is run again
 before it can affect the result. Missing, stale, corrupt, or unsupported hints
 fall back to colder scheduling.
+
+Compiler history in retained campaign records has a separate policy role.
+When `compiler-exclusions.json` does not exist, historical compiler-unviable
+IDs from completed or incomplete run records initialize that inventory. Its applicable exact IDs
+are excluded from execution and scoring, not merely reordered. This is
+explicit exclusion policy, not a context-validated compiler cache. Repairs to
+schema generation or attribution require affected evidence to be revalidated;
+an existing inventory is not reseeded, so user removals remain effective.
+Compiler-unviable IDs in checked-in hints only affect build ordering; they
+do not initialize exclusions or withdraw fresh candidates.
 
 The version-4 YAML artifact groups exact mutant hints by workspace-relative source
 file. Each file group contains a deterministic table of distinct killer
@@ -227,7 +237,7 @@ ignored rather than partially trusted.
 - `(source file, item)` to ranked candidate tests;
 - source file to ranked candidate binaries;
 - stable source site to previously observed reaching tests;
-- likely-unviable mutant IDs for build ordering only.
+- historical compiler-unviable IDs for build ordering.
 
 ## 4. Scheduling mutant work
 

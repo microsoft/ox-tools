@@ -329,16 +329,6 @@ impl Hints {
         replace || hints.generalized.supported().is_some()
     }
 
-    /// Whether this workspace has never had a checked-in hints artifact.
-    ///
-    /// An unreadable, corrupt or foreign-version file is present even though it cannot provide
-    /// hints, so it must not trigger advice to create the file that is already there.
-    #[must_use]
-    #[cfg(test)]
-    pub(crate) fn is_missing(root: &Utf8Path) -> bool {
-        matches!(fs::metadata(path(root).as_std_path()), Err(cause) if cause.kind() == ErrorKind::NotFound)
-    }
-
     /// Reads and validates the artifact at `path`, or nothing when it cannot be trusted.
     fn read(path: &Utf8Path) -> Option<Self> {
         Self::read_with(path, |path| input::text(File::open(path.as_std_path())?))
@@ -608,7 +598,6 @@ impl Hints {
     pub fn changes_from(&self, previous: &Self) -> HintChanges {
         let mut changes = HintChanges::default();
 
-        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
         compare_entries_or_preserved(
             &previous.mutants,
             &self.mutants,
@@ -616,7 +605,6 @@ impl Hints {
             &mut changes,
         );
 
-        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
         compare_entries_or_preserved(
             &previous.generalized.items,
             &self.generalized.items,
@@ -624,7 +612,6 @@ impl Hints {
             &mut changes,
         );
 
-        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
         compare_entries_or_preserved(
             &previous.generalized.binaries,
             &self.generalized.binaries,
@@ -638,7 +625,6 @@ impl Hints {
             let previous_reach = reach_entries(&previous.generalized);
             let current_reach = reach_entries(&self.generalized);
 
-            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
             compare_entries(&previous_reach, &current_reach, |(site, _)| site.clone(), &mut changes);
         }
 
@@ -924,7 +910,6 @@ impl Hints {
             Publication::PublishedUndurable(cause) => return Err(cause),
         }
 
-        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
         after_publication(path);
 
         match verify(path, self) {
@@ -1044,7 +1029,6 @@ impl From<&Hints> for GroupedHints {
             let path = hints.mutants[start].file.clone();
             let end = hints.mutants[start..]
                 .iter()
-                // #[gamma::skip(relational.ne_to_eq, tag = "outofmemory", reason = "matching the first equal path produces an empty group and repeatedly allocates without advancing start")]
                 .position(|hint| hint.file != path)
                 .map_or(hints.mutants.len(), |offset| start + offset);
             assert!(end > start, "a file group always contains the first mutant at its start");
@@ -1130,7 +1114,6 @@ pub(super) fn merge_generalized(existing: &GeneralizedHints, incoming: &Generali
     }
     reach.extend(incoming_reach);
 
-    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
     rebuild_reach(&mut output, reach.into_iter().collect());
     Ok(output)
 }
@@ -1189,7 +1172,6 @@ fn compare_entries_or_preserved<T: PartialEq, K: Eq + core::hash::Hash>(
     if previous == current {
         changes.preserved += current.len();
     } else {
-        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
         compare_entries(previous, current, key, changes);
     }
 }
@@ -2090,7 +2072,6 @@ mod tests {
         let (_dir, root) = workspace("hints-absent-");
 
         assert!(Hints::load(&root).is_empty());
-        assert!(Hints::is_missing(&root));
     }
 
     #[test]
@@ -2476,7 +2457,6 @@ mod tests {
         fs::write(path(&root).as_std_path(), "{ not json").expect("the artifact should be writable");
 
         assert!(Hints::load(&root).is_empty());
-        assert!(!Hints::is_missing(&root));
 
         fs::write(
             path(&root).as_std_path(),
@@ -2574,7 +2554,6 @@ mod tests {
         .expect("writable");
 
         assert!(Hints::load(&root).is_empty());
-        assert!(!Hints::is_missing(&root));
     }
 
     #[test]
@@ -3149,7 +3128,6 @@ mod tests {
         assert_eq!(promotion.probes, 1);
         assert_eq!(promotion.ordering, 1);
         assert_eq!(Hints::load(&root), hints);
-        assert!(!Hints::is_missing(&root));
     }
 
     #[test]

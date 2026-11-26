@@ -49,7 +49,6 @@ impl Manifest {
         Ok(Self {
             path: path.to_owned(),
             document,
-            // #[gamma::skip(all, reason = "the mutation affects internal orchestration state with no safely deterministic observation at this layer")]
             changed: false,
             within: Utf8PathBuf::new(),
         })
@@ -381,7 +380,6 @@ mod final_survivor_tests {
 impl Manifest {
     /// Writes the manifest back if anything changed.
     pub(super) fn save(&self) -> Result<()> {
-        // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
         if !self.changed {
             return Ok(());
         }
@@ -414,7 +412,6 @@ impl Manifest {
 
         // `[replace]` names crates by version requirement, and every entry is a source
         // specification of exactly the same shape as a dependency.
-        // #[gamma::skip(all, reason = "this literal belongs to a Cargo process protocol or diagnostic boundary that cannot be isolated deterministically without replacing process-global integration state")]
         self.anchor_table("replace", original);
 
         // Every `[patch.<registry>]` is its own table of dependencies, and a workspace commonly
@@ -424,7 +421,6 @@ impl Manifest {
 
             for registry in registries {
                 if let Some(table) = patch.get_mut(&registry).and_then(Item::as_table_like_mut) {
-                    // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
                     anchor_dependencies(table, original, &self.within, &mut self.changed);
                 }
             }
@@ -441,7 +437,6 @@ impl Manifest {
 
                 for name in DEPENDENCY_TABLES {
                     if let Some(dependencies) = table.get_mut(name).and_then(Item::as_table_like_mut) {
-                        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
                         anchor_dependencies(dependencies, original, &self.within, &mut self.changed);
                     }
                 }
@@ -452,7 +447,6 @@ impl Manifest {
         if let Some(workspace) = self.document.get_mut("workspace").and_then(Item::as_table_like_mut)
             && let Some(dependencies) = workspace.get_mut("dependencies").and_then(Item::as_table_like_mut)
         {
-            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
             anchor_dependencies(dependencies, original, &self.within, &mut self.changed);
         }
     }
@@ -460,7 +454,6 @@ impl Manifest {
     /// Rewrites the paths in one top-level table.
     fn anchor_table(&mut self, name: &str, original: &Utf8Path) {
         if let Some(table) = self.document.get_mut(name).and_then(Item::as_table_like_mut) {
-            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
             anchor_dependencies(table, original, &self.within, &mut self.changed);
         }
     }
@@ -503,7 +496,6 @@ impl Manifest {
 
         let conflicting_target = self
             .document
-            // #[gamma::skip(all, reason = "this literal belongs to a Cargo process protocol or diagnostic boundary that cannot be isolated deterministically without replacing process-global integration state")]
             .get("target")
             .and_then(Item::as_table_like)
             .into_iter()
@@ -513,7 +505,6 @@ impl Manifest {
                 dependencies.contains_key(RUNTIME_CRATE) && !dependency_points_to(dependencies.get(RUNTIME_CRATE), &runtime)
             });
 
-        // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
         if conflicting_target {
             return Err(Self::runtime_name_reserved(&self.path));
         }
@@ -567,7 +558,6 @@ impl Manifest {
             .merge(workspace_features.resolve_canonical(table.get(RUNTIME_PACKAGE)));
         let feature_settings = own_features.merge(target_features);
 
-        // #[gamma::skip(all, reason = "this literal belongs to a Cargo process protocol or diagnostic boundary that cannot be isolated deterministically without replacing process-global integration state")]
         let _existing_runtime = table.remove("cargo-gamma-rt");
         let mut entry = toml_edit::InlineTable::new();
         let _package = entry.insert("package", Value::from(RUNTIME_PACKAGE));
@@ -598,7 +588,6 @@ impl Manifest {
             .is_some_and(|dependencies| dependencies.contains_key(RUNTIME_CRATE) || dependencies.contains_key("cargo-gamma-rt"));
         let targeted = self
             .document
-            // #[gamma::skip(all, reason = "this literal belongs to a Cargo process protocol or diagnostic boundary that cannot be isolated deterministically without replacing process-global integration state")]
             .get("target")
             .and_then(Item::as_table_like)
             .into_iter()
@@ -942,7 +931,6 @@ pub(super) fn anchor_cargo_config(root: &Utf8Path, original: &Utf8Path) -> Resul
     for name in ["config.toml", "config"] {
         let path = root.join(".cargo").join(name);
 
-        // #[gamma::skip(all, reason = "this literal belongs to a Cargo process protocol or diagnostic boundary that cannot be isolated deterministically without replacing process-global integration state")]
         let _destination = crate::paths::require_within(&path, root, "a scratch Cargo configuration")?;
 
         if !path.as_std_path().is_file() {
@@ -978,10 +966,9 @@ pub(super) const CAP_LINTS: &str = "--cap-lints=allow";
 /// `target.<triple>.rustflags` would build with none of them, which can change what its code
 /// compiles to and therefore what its tests prove.
 ///
-/// The flag is appended to every rustflags key already present, because cargo picks exactly one of
-/// them — `target.<triple>` over `target.<cfg>` over `build` — and which one is not knowable here
-/// without resolving the target triple. Appending to all of them means the winner carries the flag
-/// whichever it turns out to be. If none is configured, `build.rustflags` is created.
+/// The copied configuration keeps a cap in every local rustflags table and in `build.rustflags`.
+/// Ancestor and Cargo-home target tables may still outrank these entries; the compiler wrapper
+/// therefore appends the final cap after Cargo has resolved its flags.
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub(super) fn cap_lints(root: &Utf8Path) -> Result<()> {
     let path = root.join(".cargo").join("config.toml");
@@ -991,11 +978,9 @@ pub(super) fn cap_lints(root: &Utf8Path) -> Result<()> {
     } else {
         path
     };
-    // #[gamma::skip(all, reason = "this literal belongs to a Cargo process protocol or diagnostic boundary that cannot be isolated deterministically without replacing process-global integration state")]
     let _destination = crate::paths::require_within(&path, root, "a scratch Cargo configuration")?;
 
     if let Some(parent) = path.parent() {
-        // #[gamma::skip(try.propagate_to_unwrap, reason = "This adapter creates a native manifest parent; injected publication failures do not control mkdir without the deferred filesystem backend.", tag = "native-boundary")]
         fs::create_dir_all(parent.as_std_path()).map_err(|cause| error!("could not create `{parent}`").caused_by(cause))?;
     }
 
@@ -1028,7 +1013,8 @@ pub(super) fn cap_lints(root: &Utf8Path) -> Result<()> {
             };
 
             if let Some(flags) = table.get_mut("rustflags") {
-                found |= append_flag(flags);
+                // #[gamma::skip(call_result.default, tag = "equivalent", reason = "Appending retains its side effects; the returned bool is deliberately unused.")]
+                let _appended = append_flag(flags);
             }
         }
     }
@@ -1072,6 +1058,65 @@ fn append_flag(flags: &mut Item) -> bool {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unchanged_manifests_are_not_recreated_and_existing_build_flags_are_extended() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = Utf8Path::from_path(directory.path()).unwrap();
+        let manifest_path = root.join("Cargo.toml");
+        fs::write(&manifest_path, "[package]\nname = 'unchanged'\nversion = '0.1.0'\n").unwrap();
+        let manifest = Manifest::read(&manifest_path).unwrap();
+        fs::remove_file(&manifest_path).unwrap();
+        manifest.save().unwrap();
+        assert!(
+            !manifest_path.exists(),
+            "an unchanged document must not recreate a removed manifest"
+        );
+
+        fs::create_dir(root.join(".cargo")).unwrap();
+        let config = root.join(".cargo").join("config.toml");
+        fs::write(&config, "[build]\nrustflags = ['--cfg=original']\n").unwrap();
+        cap_lints(root).unwrap();
+        let saved = Manifest::read(&config).unwrap();
+        let flags = saved.document["build"]["rustflags"].as_array().unwrap();
+        assert_eq!(
+            flags.iter().filter_map(Value::as_str).collect::<Vec<_>>(),
+            ["--cfg=original", "--cap-lints=allow"]
+        );
+    }
+
+    #[test]
+    fn linked_cargo_configurations_report_the_boundary_without_rewriting_the_target() {
+        let (_directory, root, outside) = linked_configuration();
+        let error = anchor_cargo_config(&root, root.parent().unwrap()).unwrap_err();
+        assert!(error.to_string().contains("a scratch Cargo configuration"), "{error}");
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "[build]\nrustflags = ['--cfg=untouched']\n");
+    }
+
+    #[test]
+    fn lint_capping_reports_linked_configurations_without_rewriting_the_target() {
+        let (_directory, root, outside) = linked_configuration();
+        let error = cap_lints(&root).unwrap_err();
+        assert!(error.to_string().contains("a scratch Cargo configuration"), "{error}");
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "[build]\nrustflags = ['--cfg=untouched']\n");
+    }
+
+    fn linked_configuration() -> (tempfile::TempDir, Utf8PathBuf, Utf8PathBuf) {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let base = crate::paths::physical(Utf8Path::from_path(directory.path()).unwrap()).unwrap();
+        let root = base.join("scratch");
+        fs::create_dir(&root).unwrap();
+        let outside_directory = base.join("outside");
+        fs::create_dir(&outside_directory).unwrap();
+        let outside = outside_directory.join("config.toml");
+        let original = "[build]\nrustflags = ['--cfg=untouched']\n";
+        fs::write(&outside, original).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside_directory, root.join(".cargo")).unwrap();
+        #[cfg(windows)]
+        super::super::sync::junction_for_test(&root.join(".cargo"), &outside_directory);
+        (directory, root, outside)
+    }
 
     #[test]
     fn portable_paths_normalize_windows_separators_on_every_host() {
@@ -1813,8 +1858,25 @@ mod tests {
         assert!(text.contains("not_a_table = \"ignored\""), "{text}");
         // The target with no rustflags key at all keeps its other settings untouched.
         assert!(text.contains("linker = \"lld\""), "{text}");
-        // Only the one target that actually carries rustflags gets the cap appended.
-        assert_eq!(text.matches(CAP_LINTS).count(), 1, "{text}");
+        assert_eq!(text.matches(CAP_LINTS).count(), 2, "{text}");
+        let configured: toml::Value = toml::from_str(&text).unwrap();
+        assert_eq!(configured["build"]["rustflags"][0].as_str(), Some(CAP_LINTS));
+    }
+
+    #[test]
+    fn a_non_host_target_does_not_prevent_build_rustflags_receiving_the_cap() {
+        let temporary = tempfile::tempdir_in(".").unwrap();
+        let root = Utf8Path::from_path(temporary.path()).unwrap();
+        let config = root.join(".cargo").join("config.toml");
+        fs::create_dir_all(config.parent().unwrap()).unwrap();
+        fs::write(&config, "[target.wasm32-unknown-unknown]\nrustflags=['--cfg=other_target']\n").unwrap();
+        cap_lints(root).unwrap();
+        let configured: toml::Value = toml::from_str(&fs::read_to_string(config).unwrap()).unwrap();
+        assert_eq!(configured["build"]["rustflags"][0].as_str(), Some(CAP_LINTS));
+        assert_eq!(
+            configured["target"]["wasm32-unknown-unknown"]["rustflags"][0].as_str(),
+            Some("--cfg=other_target")
+        );
     }
 
     /// A rustflags value that is neither an array nor a string — malformed, or written some other

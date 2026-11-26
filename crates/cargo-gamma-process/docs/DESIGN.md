@@ -105,6 +105,23 @@ therefore covers the complete descendant tree.
   lifecycle fault available to this crate's unit tests, including capture,
   observation, cleanup, and Windows job failures, so dependent-crate tests do
   not see a smaller fault vocabulary.
+- Contained `output` and `wait_with_output` retain a stdout prefix of at most
+  64 MiB and a stderr tail of at most 64 KiB. Explicit bounded variants allow
+  callers to select smaller or larger finite byte limits. Both readers keep
+  draining beyond their retention limits, then return a failure. The original
+  exit status and bounded diagnostic output remain available through
+  `OutputError::captured_output`, and truncated stdout is never returned as
+  successful JSON. The bounded wait API retains its I/O-result shape; callers
+  convert its error into `OutputError` to use the same recovery operation.
+  The concrete overflow leaf is private. Debug output reports status and retained
+  byte counts; the display message previews at most the final 1 KiB of stderr
+  before lossy UTF-8 decoding, marking any omitted prefix. Structured recovery
+  retains both buffers unchanged.
+- Cleanup tests observe EOF on a helper-owned readiness connection, rather than
+  inferring termination from the absence of a delayed file write. Fault guards
+  own distinct arming tokens. A private dev-dependency builds the native helper
+  with Cargo's host compiler before tests execute and supplies its exact path;
+  ordinary tests never compile it lazily or depend on a shared helper cache.
 - Before observation, termination, or drop reaps a Unix leader, registry release
   clears its slot and waits for any sweep already holding its extracted identity
   to finish. Slot removal alone does not permit numeric-identity reuse.

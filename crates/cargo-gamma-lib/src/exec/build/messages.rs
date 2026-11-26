@@ -311,7 +311,7 @@ pub(crate) fn dependencies(list: &str) -> Vec<String> {
 /// Names the dep-info file for every unit in one build, from cargo's JSON artifact messages.
 ///
 /// Cargo does not list the `.d` file among an artifact's `filenames`, but it does name it after
-/// the same unit hash, so an artifact at `deps/libfoo-9a3f.rmeta` is described by `deps/foo-9a3f.d`.
+/// the same 16-hex-digit unit hash, independent of the artifact's optional `lib` prefix.
 /// Deriving the name from the hash rather than from the file stem avoids having to reproduce
 /// cargo's own rules about which artifact kinds carry a `lib` prefix.
 ///
@@ -336,9 +336,8 @@ fn dep_files_with(stdout: &str, mut entries: impl FnMut(&Utf8Path) -> std::io::R
             continue;
         };
 
-        // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
+        // #[gamma::skip(cond.always_false, loop.delete_continue, tag = "equivalent", reason = "Cargo non-artifact messages have no filenames, so the following filename loop is empty.")]
         if message.reason != "compiler-artifact" {
-            // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
             continue;
         }
 
@@ -352,6 +351,9 @@ fn dep_files_with(stdout: &str, mut entries: impl FnMut(&Utf8Path) -> std::io::R
             let Some((_name, hash)) = stem.rsplit_once('-') else {
                 continue;
             };
+            if hash.len() != 16 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                continue;
+            }
 
             let _added = wanted.entry(directory.to_owned()).or_default().insert(hash.to_owned());
         }
@@ -365,9 +367,7 @@ fn dep_files_with(stdout: &str, mut entries: impl FnMut(&Utf8Path) -> std::io::R
         };
 
         for path in entries {
-            // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
             if path.extension() != Some("d") {
-                // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
                 continue;
             }
 
@@ -398,6 +398,52 @@ mod final_survivor_tests {
     use super::*;
 
     #[test]
+    fn nov21_dep_info_selection_skips_nonartifacts_and_continues_after_an_uplifted_filename() {
+        let stdout = [
+            json!({"reason":"compiler-message","message":{"level":"warning","message":"a compiler warning"}}).to_string(),
+            json!({"reason":"compiler-artifact","filenames":[
+                "target/libsubject-short.rlib",
+                "target/libsubject-bbbbbbbbbbbbbbbb.rmeta"
+            ]})
+            .to_string(),
+        ]
+        .join("\n");
+        let mut scanned = Vec::new();
+        let found = dep_files_with(&stdout, |directory| {
+            scanned.push(directory.to_owned());
+            Ok(vec![
+                "target/ignored-aaaaaaaaaaaaaaaa.d".into(),
+                "target/subject-bbbbbbbbbbbbbbbb.d".into(),
+            ])
+        });
+        assert_eq!(scanned, [Utf8PathBuf::from("target")]);
+        assert_eq!(found, [Utf8PathBuf::from("target/subject-bbbbbbbbbbbbbbbb.d")]);
+    }
+
+    #[test]
+    fn uplifted_hyphenated_names_and_non_metadata_suffixes_are_not_unit_hashes() {
+        for stem in [
+            "cargo-gamma",
+            "subject-abcdef",
+            "subject-0123456789abcdeg",
+            "subject-0123456789abcdef0",
+        ] {
+            let stream = json!({"reason":"compiler-artifact","filenames":[format!("target/debug/{stem}")]}).to_string();
+            let found = dep_files_with(&stream, |_| panic!("an uplifted or invalid artifact must not scan stale dep-info"));
+            assert!(found.is_empty(), "{stem}");
+        }
+        let stream = json!({"reason":"compiler-artifact","filenames":["target/debug/deps/libsubject-0123456789abcdef.rlib"]}).to_string();
+        assert_eq!(
+            dep_files_with(&stream, |_| Ok(vec![
+                "target/debug/deps/subject-0123456789abcdef.d".into(),
+                "target/debug/deps/subject-0123456789abcdeg.d".into(),
+                "target/debug/deps/cargo-gamma.d".into(),
+            ])),
+            [Utf8PathBuf::from("target/debug/deps/subject-0123456789abcdef.d")]
+        );
+    }
+
+    #[test]
     fn recovered_dep_info_walks_continue_after_the_first_read_or_directory_error() {
         let root = Utf8Path::new("workspace");
         let mut reads = Vec::new();
@@ -419,7 +465,7 @@ mod final_survivor_tests {
 
         let stream = json!({
             "reason":"compiler-artifact",
-            "filenames":["first/libsubject-hash.rlib","second/libsubject-hash.rlib"]
+            "filenames":["first/libsubject-0123456789abcdef.rlib","second/libsubject-0123456789abcdef.rlib"]
         })
         .to_string();
         let mut calls = 0;
@@ -429,7 +475,7 @@ mod final_survivor_tests {
             if calls == 1 {
                 Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "first directory"))
             } else {
-                let path = directory.join("subject-hash.d");
+                let path = directory.join("subject-0123456789abcdef.d");
                 accepted = Some(path.clone());
                 Ok(vec![path])
             }
@@ -441,8 +487,8 @@ mod final_survivor_tests {
     #[test]
     fn dep_info_rejections_do_not_discard_the_later_valid_message_or_filename() {
         let root = Utf8Path::new("target/deps");
-        let dependency = root.join("subject-exact-hash.d");
-        let artifact = root.join("libsubject-exact-hash.rmeta");
+        let dependency = root.join("subject-0123456789abcdef.d");
+        let artifact = root.join("libsubject-0123456789abcdef.rmeta");
         let stdout = [
             json!({"reason":"compiler-message"}),
             json!({
@@ -460,7 +506,7 @@ mod final_survivor_tests {
                 scanned.push(directory.to_owned());
                 match directory.as_str() {
                     "target/deps" => Ok(vec![
-                        root.join("subject-exact-hash.rmeta"),
+                        root.join("subject-0123456789abcdef.rmeta"),
                         root.join("subject-other.d"),
                         dependency.clone(),
                     ]),
@@ -521,8 +567,8 @@ mod final_survivor_tests {
             "not-json".to_owned(),
             json!({"reason":"compiler-message","filenames":[deps.join("old-999.rlib")]}).to_string(),
             artifact(vec![deps.join("without_hash.rlib").into_string()]),
-            artifact(vec![root.join("absent/subject-123.rlib").into_string()]),
-            artifact(vec![deps.join("libsubject-123.rlib").into_string()]),
+            artifact(vec![root.join("absent/subject-0123456789abcdef.rlib").into_string()]),
+            artifact(vec![deps.join("libsubject-0123456789abcdef.rlib").into_string()]),
         ]
         .join("\n");
         assert_eq!(
@@ -531,14 +577,14 @@ mod final_survivor_tests {
                 root,
                 |stream| dep_files_with(stream, |directory| {
                     if directory == deps {
-                        Ok(vec![deps.join("subject-123.d"), deps.join("old-999.d")])
+                        Ok(vec![deps.join("subject-0123456789abcdef.d"), deps.join("old-999.d")])
                     } else {
                         assert_eq!(directory, root.join("absent"));
                         Err(std::io::Error::new(std::io::ErrorKind::NotFound, "scripted missing directory"))
                     }
                 }),
                 |path| {
-                    assert_eq!(path, deps.join("subject-123.d"));
+                    assert_eq!(path, deps.join("subject-0123456789abcdef.d"));
                     Ok(format!(
                         "invalid dep-info line\noutput: {} src/second.rs\n",
                         root.join("src/first.rs").as_str().replace(' ', "\\ ")

@@ -3,6 +3,9 @@
 
 //! The configuration predicates that hold for one build, and what they say about an attribute.
 
+use std::borrow::Cow;
+use std::sync::Arc;
+
 use syn::punctuated::Punctuated;
 use syn::{Attribute, Expr, Lit, Meta, Token};
 
@@ -12,19 +15,19 @@ use crate::HashSet;
 ///
 /// Construct one with [`CfgSet::parse`] from captured `rustc` output or
 /// [`CfgSet::unconditional`] for a context where nothing should be stripped.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CfgSet {
     /// Bare names, such as `unix` or a `--cfg loom` the build passes.
-    names: HashSet<String>,
+    names: Arc<HashSet<String>>,
 
     /// Key/value pairs, such as `target_arch="x86_64"` or `feature="std"`.
-    pairs: HashSet<(String, String)>,
+    pairs: Arc<HashSet<(String, String)>>,
 
     /// Names that are in force under a condition this cannot evaluate.
     ///
     /// Answering one of these either way would settle a predicate on a guess, so they are
     /// unanswerable and the code they gate stays mutable.
-    undecided: HashSet<String>,
+    undecided: Arc<HashSet<String>>,
 
     /// Whether predicates are checked at all.
     ///
@@ -80,10 +83,10 @@ impl CfgSet {
                 // undecided either, so the lookup would answer `No` to something the compiler
                 // says is true and take the code it gates out of the population.
                 if !key.is_empty() && !quoted.is_empty() {
-                    let _added = set.pairs.insert((key.to_owned(), quoted.trim_matches('"').to_owned()));
+                    let _added = Arc::make_mut(&mut set.pairs).insert((key.to_owned(), quoted.trim_matches('"').to_owned()));
                 }
             } else {
-                let _added = set.names.insert(line.to_owned());
+                let _added = Arc::make_mut(&mut set.names).insert(line.to_owned());
             }
         }
 
@@ -96,7 +99,7 @@ impl CfgSet {
     #[must_use]
     pub fn with_features(mut self, features: impl IntoIterator<Item = String>) -> Self {
         for feature in features {
-            let _added = self.pairs.insert(("feature".to_owned(), feature));
+            let _added = Arc::make_mut(&mut self.pairs).insert(("feature".to_owned(), feature));
         }
 
         self
@@ -111,7 +114,7 @@ impl CfgSet {
     #[must_use]
     pub fn with_undecided(mut self, names: impl IntoIterator<Item = String>) -> Self {
         for name in names {
-            let _added = self.undecided.insert(name);
+            let _added = Arc::make_mut(&mut self.undecided).insert(name);
         }
 
         self
@@ -137,7 +140,7 @@ impl CfgSet {
     /// ```
     #[must_use]
     pub fn with_test(mut self) -> Self {
-        let _added = self.names.insert("test".to_owned());
+        let _added = Arc::make_mut(&mut self.names).insert("test".to_owned());
 
         self
     }
@@ -149,6 +152,11 @@ impl CfgSet {
     /// might have appeared would be the same unsupported guess this module avoids elsewhere.
     #[must_use]
     pub fn holds_for(&self, attrs: &[Attribute]) -> bool {
+        if
+        // #[gamma::skip(cond.always_false, tag = "performance-only", reason = "Without cfg or cfg_attr, effective metadata has no cfg predicates and holds_effective still returns true.")]
+        !attrs.iter().any(|attribute| configuration_meta(&attribute.meta)) {
+            return true;
+        }
         self.holds_effective(&self.effective(attrs))
     }
 
@@ -166,20 +174,24 @@ impl CfgSet {
     /// ```
     #[must_use]
     pub fn guaranteed_for(&self, attrs: &[Attribute]) -> bool {
-        let mut pending = attrs.iter().map(|attribute| attribute.meta.clone()).collect::<Vec<_>>();
+        let mut pending =
+        // #[gamma::skip(iter.remove_filter, tag = "performance-only", reason = "The worklist independently ignores every entry whose path is neither cfg nor cfg_attr.")]
+        attrs
+            .iter()
+            .filter(|attribute| configuration_meta(&attribute.meta))
+            .map(|attribute| Cow::Borrowed(&attribute.meta))
+            .collect::<Vec<_>>();
         while let Some(attribute) = pending.pop() {
             if attribute.path().is_ident("cfg") {
                 if cfg_predicate(&attribute).is_none_or(|predicate| self.verdict(&predicate) != Verdict::Yes) {
-                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "the inferred bool default is already false")]
                     return false;
                 }
             } else if attribute.path().is_ident("cfg_attr") {
                 let Some((condition, nested)) = cfg_attr(&attribute) else {
-                    // #[gamma::skip(return_value.default, tag = "equivalent", reason = "the inferred bool default is already false")]
                     return false;
                 };
                 match self.verdict(&condition) {
-                    Verdict::Yes | Verdict::Unknown => pending.extend(nested),
+                    Verdict::Yes | Verdict::Unknown => pending.extend(nested.into_iter().map(Cow::Owned)),
                     Verdict::No => {}
                 }
             }
@@ -205,15 +217,20 @@ impl CfgSet {
     /// ```
     #[must_use]
     pub fn guaranteed_when(&self, attrs: &[Attribute], required: &[Attribute]) -> bool {
-        let remaining = attrs
-            .iter()
-            .filter(|attribute| {
-                // #[gamma::skip(logical.and_remove_left, tag = "equivalent", reason = "removing the cfg-name check only additionally drops shared non-cfg attributes, which guaranteed_for ignores")]
-                !((attribute.path().is_ident("cfg") || attribute.path().is_ident("cfg_attr"))
-                    && required.iter().any(|required| required.meta == attribute.meta))
-            })
-            .cloned()
-            .collect::<Vec<_>>();
+        if
+        // #[gamma::skip(cond.always_false, tag = "performance-only", reason = "Without cfg or cfg_attr, remaining is empty and guaranteed_for still returns true.")]
+        !attrs.iter().any(|attribute| configuration_meta(&attribute.meta)) {
+            return true;
+        }
+        let remaining = (
+            // Only this configuration prefilter is redundant; shared restrictions below affect the verdict.
+            attrs // #[gamma::skip(iter.remove_filter, tag = "performance-only", reason = "guaranteed_for independently filters ordinary attributes before its proof loop.")]
+                .iter()
+                .filter(|attribute| configuration_meta(&attribute.meta))
+        )
+        .filter(|attribute| !required.iter().any(|required| required.meta == attribute.meta))
+        .cloned()
+        .collect::<Vec<_>>();
         self.guaranteed_for(&remaining)
     }
 
@@ -225,6 +242,11 @@ impl CfgSet {
     #[doc(hidden)]
     #[must_use]
     pub fn test_gated(&self, attrs: &[Attribute]) -> bool {
+        if
+        // #[gamma::skip(cond.always_false, tag = "performance-only", reason = "Without cfg_attr, effective metadata is unchanged and test_gated_effective reduces to the same is_test_meta check.")]
+        !attrs.iter().any(|attribute| attribute.path().is_ident("cfg_attr")) {
+            return attrs.iter().any(|attribute| is_test_meta(&attribute.meta));
+        }
         self.test_gated_effective(attrs, &self.effective(attrs))
     }
 
@@ -232,18 +254,22 @@ impl CfgSet {
     /// is behind a configuration predicate that does not hold for this build.
     ///
     /// Every call site that asks this asks both [`Self::test_gated`] and [`Self::holds_for`]
-    /// together, and each independently expands `cfg_attr` metadata — cloning every attribute and
-    /// shifting a vector — to answer its one question. This shares that expansion between both.
+    /// together. This shares their `cfg_attr` expansion and borrows ordinary metadata.
     #[doc(hidden)]
     #[must_use]
     pub fn skip_gate(&self, attrs: &[Attribute]) -> bool {
+        if
+        // #[gamma::skip(cond.always_false, tag = "performance-only", reason = "Without cfg or cfg_attr, holds_effective is true and test_gated_effective reduces to is_test_attribute.")]
+        !attrs.iter().any(|attribute| configuration_meta(&attribute.meta)) {
+            return attrs.iter().any(|attribute| is_test_attribute(&attribute.meta));
+        }
         let effective = self.effective(attrs);
 
         self.test_gated_effective(attrs, &effective) || !self.holds_effective(&effective)
     }
 
     /// The [`Self::holds_for`] answer, given an already-expanded attribute list.
-    fn holds_effective(&self, effective: &[Meta]) -> bool {
+    fn holds_effective(&self, effective: &[Cow<'_, Meta>]) -> bool {
         // #[gamma::skip(cond.always_false, reason = "`decide` also returns `Unknown` whenever enforcement is off, so this is only an early return and removing it cannot change an answer")]
         if !self.enforced {
             return true;
@@ -257,8 +283,8 @@ impl CfgSet {
     }
 
     /// The [`Self::test_gated`] answer, given an already-expanded attribute list.
-    fn test_gated_effective(&self, attrs: &[Attribute], effective: &[Meta]) -> bool {
-        effective.iter().any(is_test_meta)
+    fn test_gated_effective(&self, attrs: &[Attribute], effective: &[Cow<'_, Meta>]) -> bool {
+        effective.iter().any(|attribute| is_test_meta(attribute))
             || attrs.iter().any(|attribute| {
                 cfg_attr(&attribute.meta)
                     .is_some_and(|(condition, nested)| self.decide(&condition, true) == Verdict::Yes && nested.iter().any(is_test_meta))
@@ -311,14 +337,14 @@ impl CfgSet {
     ///
     /// The worklist rather than recursion matters for nested `cfg_attr`s: source is input, and
     /// the expansion must not add another unbounded walk beside the parser's nesting guard.
-    fn effective(&self, attrs: &[Attribute]) -> Vec<Meta> {
-        let mut pending: Vec<Meta> = attrs.iter().rev().map(|attribute| attribute.meta.clone()).collect();
+    fn effective<'a>(&self, attrs: &'a [Attribute]) -> Vec<Cow<'a, Meta>> {
+        let mut pending: Vec<_> = attrs.iter().rev().map(|attribute| Cow::Borrowed(&attribute.meta)).collect();
         let mut effective = Vec::with_capacity(attrs.len());
 
         while let Some(attribute) = pending.pop() {
             if let Some((condition, nested)) = cfg_attr(&attribute) {
                 if self.verdict(&condition) == Verdict::Yes {
-                    pending.extend(nested.into_iter().rev());
+                    pending.extend(nested.into_iter().rev().map(Cow::Owned));
                 }
             } else {
                 effective.push(attribute);
@@ -454,15 +480,11 @@ impl CfgSet {
 /// evidence that code should be omitted from the population.
 fn cfg_predicate(attribute: &Meta) -> Option<Meta> {
     let Meta::List(list) = attribute else {
-        return
-        // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-        None;
+        return None;
     };
 
     if !attribute.path().is_ident("cfg") {
-        return
-        // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-        None;
+        return None;
     }
 
     list.parse_args::<Meta>().ok()
@@ -474,15 +496,11 @@ fn cfg_predicate(attribute: &Meta) -> Option<Meta> {
 /// just like an unparsable `cfg`: it must not shrink the population on a guess.
 fn cfg_attr(attribute: &Meta) -> Option<(Meta, Vec<Meta>)> {
     let Meta::List(list) = attribute else {
-        return
-        // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-        None;
+        return None;
     };
 
     if !attribute.path().is_ident("cfg_attr") {
-        return
-        // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-        None;
+        return None;
     }
 
     let parser = Punctuated::<Meta, Token![,]>::parse_terminated;
@@ -512,9 +530,19 @@ fn is_test_meta(attribute: &Meta) -> bool {
 /// `cfg(test)` controls whether a separately declared module file is test scaffolding.
 #[must_use]
 pub fn test_gated_for(cfg: &CfgSet, attrs: &[Attribute]) -> bool {
+    if
+    // #[gamma::skip(cond.always_false, tag = "performance-only", reason = "Without cfg or cfg_attr, every effective attribute lacks a cfg predicate and the final any still returns false.")]
+    !attrs.iter().any(|attribute| configuration_meta(&attribute.meta)) {
+        return false;
+    }
     cfg.effective(attrs)
         .iter()
         .any(|attribute| cfg_predicate(attribute).is_some_and(|predicate| is_test_only(&predicate)))
+}
+
+// #[gamma::skip(fn_value.bool_true, tag = "performance-only", reason = "This predicate only prefilters metadata; every consumer independently checks exact cfg and cfg_attr paths.")]
+fn configuration_meta(meta: &Meta) -> bool {
+    meta.path().is_ident("cfg") || meta.path().is_ident("cfg_attr")
 }
 
 /// Returns whether a predicate can only hold in a unit-test target.
@@ -593,6 +621,33 @@ fn combine(answers: &mut dyn Iterator<Item = Verdict>, settles: Verdict, otherwi
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mixed_attributes_preserve_configuration_and_module_test_gates() {
+        let cfg = CfgSet::parse("unix").with_test();
+        assert!(!cfg.holds_for(&attribute("#[doc = \"ordinary\"] #[cfg(windows)]")));
+        assert!(test_gated_for(&cfg, &attribute("#[doc = \"ordinary\"] #[cfg(test)]")));
+        assert!(cfg.test_gated(&attribute("#[doc = \"ordinary\"] #[cfg_attr(unix, test)]")));
+    }
+
+    #[test]
+    fn conditional_unit_test_attributes_are_detected_among_ordinary_attributes() {
+        let cfg = CfgSet::parse("unix").with_test();
+        let attrs = attribute("#[doc = \"ordinary\"] #[cfg_attr(test, test)]");
+        assert!(cfg.test_gated(&attrs));
+        assert!(cfg.skip_gate(&attrs));
+        assert!(!cfg.holds_for(&attribute("#[doc = \"ordinary\"] #[cfg_attr(unix, cfg(windows))]")));
+    }
+
+    #[test]
+    fn ordinary_attribute_lists_are_not_cfg_attr_expansions() {
+        let attrs = attribute("#[allow(dead_code, test)] #[cfg(unix)]");
+        let cfg = CfgSet::parse("unix\ndead_code");
+        assert!(cfg_attr(&attrs[0].meta).is_none());
+        assert!(cfg.holds_for(&attrs));
+        assert!(!cfg.test_gated(&attrs));
+        assert!(!cfg.skip_gate(&attrs));
+    }
 
     #[test]
     fn guaranteed_presence_requires_every_compilation_context() {
@@ -681,6 +736,25 @@ mod tests {
     fn set() -> CfgSet {
         CfgSet::parse("unix\ntarget_arch=\"x86_64\"\ntarget_os=\"linux\"\npanic=\"unwind\"\n")
             .with_features(["std".to_owned(), "serde".to_owned()])
+    }
+
+    #[test]
+    fn cfg_clones_share_package_evidence_but_builder_changes_are_isolated() {
+        let original = set();
+        let clone = original.clone();
+        assert!(Arc::ptr_eq(&original.names, &clone.names));
+        assert!(Arc::ptr_eq(&original.pairs, &clone.pairs));
+        assert!(Arc::ptr_eq(&original.undecided, &clone.undecided));
+        let changed = clone
+            .with_test()
+            .with_features(["extra".to_owned()])
+            .with_undecided(["unknown".to_owned()]);
+        assert!(!original.is_test_build());
+        assert!(changed.is_test_build());
+        assert!(!original.holds_str("feature = \"extra\""));
+        assert!(changed.holds_str("feature = \"extra\""));
+        assert_eq!(original.decide_str("unknown"), Verdict::No);
+        assert_eq!(changed.decide_str("unknown"), Verdict::Unknown);
     }
 
     fn attribute(text: &str) -> Vec<Attribute> {
@@ -1019,6 +1093,8 @@ mod tests {
             .collect();
 
         assert_eq!(names, ["first", "second", "third", "fourth", "fifth"]);
+        assert!(matches!(effective[0], Cow::Borrowed(_)));
+        assert!(matches!(effective[1], Cow::Owned(_)));
     }
 
     /// `skip_gate` shares one `cfg_attr` expansion between the two questions callers otherwise ask

@@ -12,6 +12,7 @@ use super::merged::Merged;
 use super::status::{NEVER_RUN, scoring};
 use super::verdict::Verdict;
 use crate::elements::{FileResult, MergeProvenance, MutantResult, Report, RunInfo, SourceProvenance, VerdictProvenance};
+use crate::merge::lineage::Lineage;
 use crate::model::{MUTANT_ID_VERSION, Scoring};
 
 fn population_is_authoritative(source: (u64, &str, &str), population: (u64, &str, &str)) -> bool {
@@ -92,16 +93,11 @@ pub fn merge(reports: &[(String, Report)], now: u64, window: Option<u64>) -> Mer
                 continue;
             };
             let (source_at, source_origin, source_lineage) = source_provenance(input_name, report, path, file, &mut lineages);
+            let name_filtered = source_name_filtered(report, path);
+            let compatible = file.source == source.file.source && file.language == source.file.language;
 
             for mutant in &file.mutants {
-                let sighting = sighting_provenance(
-                    report,
-                    mutant,
-                    source_at,
-                    source_origin,
-                    &source_lineage,
-                    source_name_filtered(report, path),
-                );
+                let sighting = sighting_provenance(report, mutant, source_at, source_origin, &source_lineage, name_filtered);
                 match sightings.entry(mutant.id.as_str()) {
                     Entry::Vacant(slot) => {
                         let _ = slot.insert(sighting);
@@ -123,10 +119,8 @@ pub fn merge(reports: &[(String, Report)], now: u64, window: Option<u64>) -> Mer
                 }
 
                 let (tested_at, origin, lineage, name_filtered) =
-                    verdict_provenance(input_name, report, mutant, source_name_filtered(report, path), &mut lineages);
-                let compatible = file.source == source.file.source && file.language == source.file.language;
+                    verdict_provenance(input_name, report, mutant, name_filtered, &mut lineages);
 
-                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
                 retain(
                     &mut latest,
                     Candidate {
@@ -174,7 +168,7 @@ pub fn merge(reports: &[(String, Report)], now: u64, window: Option<u64>) -> Mer
 
     for (id, verdict) in &latest {
         if verdict.presentation.is_none() {
-            out.incompatible += 1;
+            *out.incompatible_files.entry(verdict.file.to_owned()).or_default() += 1;
             if verdict.name_filtered || sightings.get(id).is_some_and(|sighting| sighting.name_filtered) {
                 out.unpresentable_filtered += 1;
             }
@@ -234,10 +228,10 @@ struct Candidate<'report> {
     path: &'report str,
     tested_at: u64,
     origin: &'report str,
-    lineage: String,
+    lineage: Lineage<'report>,
     compatible: bool,
     name_filtered: bool,
-    source_rank: (u64, &'report str, String),
+    source_rank: (u64, &'report str, Lineage<'report>),
 }
 
 /// Retains the newest verdict and the newest presentation that fits the selected source.
@@ -360,7 +354,7 @@ fn verdict_rank<'name, 'lineage>(
 struct Population<'report> {
     started_at: u64,
     origin: &'report str,
-    lineage: String,
+    lineage: Lineage<'report>,
     ids: HashSet<&'report str>,
 }
 
@@ -370,7 +364,7 @@ struct Source<'report> {
     file: &'report FileResult,
     started_at: u64,
     origin: &'report str,
-    lineage: String,
+    lineage: Lineage<'report>,
     name_filtered: bool,
 }
 
@@ -378,7 +372,7 @@ struct Source<'report> {
 struct Sighting<'report> {
     started_at: u64,
     origin: &'report str,
-    lineage: String,
+    lineage: Lineage<'report>,
     name_filtered: bool,
 }
 
@@ -471,7 +465,7 @@ fn source_provenance<'report>(
     path: &str,
     file: &'report FileResult,
     lineages: &mut Lineages<'report>,
-) -> (u64, &'report str, String) {
+) -> (u64, &'report str, Lineage<'report>) {
     let provenance = report
         .config
         .as_ref()
@@ -482,7 +476,7 @@ fn source_provenance<'report>(
         let lineage = if provenance.lineage.is_empty() {
             lineages.source(provenance.origin.as_str(), file)
         } else {
-            provenance.lineage.clone()
+            Lineage::Borrowed(&provenance.lineage)
         };
 
         (provenance.started_at, provenance.origin.as_str(), lineage)
@@ -512,7 +506,7 @@ fn sighting_provenance<'report>(
     mutant: &MutantResult,
     source_at: u64,
     source_origin: &'report str,
-    source_lineage: &str,
+    source_lineage: &Lineage<'report>,
     name_filtered: bool,
 ) -> Sighting<'report> {
     let provenance = report
@@ -525,16 +519,16 @@ fn sighting_provenance<'report>(
         || Sighting {
             started_at: source_at,
             origin: source_origin,
-            lineage: source_lineage.to_owned(),
+            lineage: source_lineage.clone(),
             name_filtered,
         },
         |sighting| Sighting {
             started_at: sighting.started_at,
             origin: sighting.origin.as_str(),
             lineage: if sighting.lineage.is_empty() {
-                source_lineage.to_owned()
+                source_lineage.clone()
             } else {
-                sighting.lineage.clone()
+                Lineage::Borrowed(&sighting.lineage)
             },
             name_filtered: sighting.name_filtered,
         },
@@ -548,7 +542,7 @@ fn verdict_provenance<'report>(
     mutant: &MutantResult,
     name_filtered: bool,
     lineages: &mut Lineages<'report>,
-) -> (u64, &'report str, String, bool) {
+) -> (u64, &'report str, Lineage<'report>, bool) {
     let provenance = report
         .config
         .as_ref()
@@ -559,7 +553,7 @@ fn verdict_provenance<'report>(
         let lineage = if provenance.lineage.is_empty() {
             lineages.verdict(provenance.origin.as_str(), mutant)
         } else {
-            provenance.lineage.clone()
+            Lineage::Borrowed(&provenance.lineage)
         };
 
         (provenance.started_at, provenance.origin.as_str(), lineage, provenance.name_filtered)
@@ -569,7 +563,7 @@ fn verdict_provenance<'report>(
 }
 
 /// Gives an original source or verdict a stable identity that survives staged merges.
-fn lineage(parts: &[&[u8]]) -> String {
+fn lineage(parts: &[&[u8]]) -> Lineage<'static> {
     let mut hasher = blake3::Hasher::new();
 
     for part in parts {
@@ -577,7 +571,12 @@ fn lineage(parts: &[&[u8]]) -> String {
         let _ = hasher.update(part);
     }
 
-    hasher.finalize().to_hex().to_string()
+    let hex = hasher.finalize().to_hex();
+    Lineage::Inline(
+        hex.as_bytes()
+            .try_into()
+            .expect("blake3 encodes its 32-byte hash as exactly 64 ASCII hex bytes"),
+    )
 }
 
 /// The lineages computed so far, and the buffer they are computed in.
@@ -598,7 +597,7 @@ struct Lineages<'report> {
     /// both and one `FileResult` is asked about under several names as provenance is followed. The
     /// address is a key rather than a claim about the file: every `FileResult` here is owned by the
     /// reports, which outlive the merge, so no two live entries can share an address.
-    sources: HashMap<(usize, &'report str), String>,
+    sources: HashMap<(usize, &'report str), Lineage<'report>>,
 
     /// Reused for every verdict encoding, so the merge allocates one buffer rather than one per
     /// mutant.
@@ -607,7 +606,7 @@ struct Lineages<'report> {
 
 impl<'report> Lineages<'report> {
     /// The lineage of a file's source under one origin name, computed at most once.
-    fn source(&mut self, name: &'report str, file: &'report FileResult) -> String {
+    fn source(&mut self, name: &'report str, file: &'report FileResult) -> Lineage<'report> {
         let key = (from_ref(file).addr(), name);
 
         if let Some(known) = self.sources.get(&key) {
@@ -622,7 +621,7 @@ impl<'report> Lineages<'report> {
 
     /// The lineage of one verdict, encoded through the shared buffer.
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn verdict(&mut self, name: &str, mutant: &MutantResult) -> String {
+    fn verdict(&mut self, name: &str, mutant: &MutantResult) -> Lineage<'report> {
         self.scratch.clear();
 
         // An encoding that failed part way through has left bytes in the buffer that are not the
@@ -752,7 +751,7 @@ fn rebuild(
                 SourceProvenance {
                     started_at: source.started_at,
                     origin: source.origin.to_owned(),
-                    lineage: source.lineage.clone(),
+                    lineage: source.lineage.to_string(),
                     name_filtered: source.name_filtered,
                 },
             );
@@ -788,7 +787,7 @@ fn rebuild(
                         VerdictProvenance {
                             started_at: verdict.tested_at,
                             origin: verdict.origin.to_owned(),
-                            lineage: verdict.lineage.clone(),
+                            lineage: verdict.lineage.to_string(),
                             name_filtered: verdict.name_filtered,
                         },
                     );
@@ -799,7 +798,7 @@ fn rebuild(
                             SourceProvenance {
                                 started_at: sighting.started_at,
                                 origin: sighting.origin.to_owned(),
-                                lineage: sighting.lineage.clone(),
+                                lineage: sighting.lineage.to_string(),
                                 name_filtered: sighting.name_filtered,
                             },
                         );
@@ -871,7 +870,7 @@ mod tests {
             vec![("current".into(), current), ("filtered".into(), filtered), ("old".into(), old)],
         ] {
             let merged = merge(&inputs, 400, None);
-            assert_eq!((merged.incompatible, merged.unpresentable_filtered), (1, 1));
+            assert_eq!((merged.incompatible(), merged.unpresentable_filtered), (1, 1));
             assert!(merged.report.is_none(), "staging must not erase the latest filtered sighting");
         }
     }
@@ -929,7 +928,7 @@ mod tests {
                 400,
                 None,
             );
-            assert_eq!((merged.incompatible, merged.unpresentable_filtered), (1, 1));
+            assert_eq!((merged.incompatible(), merged.unpresentable_filtered), (1, 1));
             assert!(merged.report.is_none());
         }
     }
@@ -1024,6 +1023,19 @@ mod tests {
     }
 
     #[test]
+    fn inline_and_borrowed_lineages_compare_by_the_persisted_text_not_the_storage_variant() {
+        let computed = lineage(&[b"verdict", b"origin", b"payload"]);
+        let text = computed.to_string();
+        let borrowed = Lineage::Borrowed(&text);
+        assert_eq!(computed, borrowed);
+        assert_eq!(computed.cmp(&borrowed), Ordering::Equal);
+        for opaque in ["", "not-a-hex-lineage", "zzzz"] {
+            let held = Lineage::Borrowed(opaque);
+            assert_eq!(computed.cmp(&held), text.as_str().cmp(opaque));
+        }
+    }
+
+    #[test]
     fn survivor_legacy_empty_and_retained_opaque_provenance_lineages_have_distinct_preservation_rules() {
         for retained in [false, true] {
             let mut report = report(None, 17, vec![mutant("site", 1, "Killed")]);
@@ -1053,12 +1065,12 @@ mod tests {
             let file = &report.files["src/lib.rs"];
             let mut cached = Lineages::default();
             let expected_source = if retained {
-                source_lineage
+                Lineage::Borrowed(&source_lineage)
             } else {
                 cached.source("original-source.json", file)
             };
             let expected_verdict = if retained {
-                verdict_lineage
+                Lineage::Borrowed(&verdict_lineage)
             } else {
                 cached.verdict("original-verdict.json", &file.mutants[0])
             };
@@ -1086,10 +1098,10 @@ mod tests {
                     path: "src/lib.rs",
                     tested_at: generation,
                     origin: "run.json",
-                    lineage: generation.to_string(),
+                    lineage: lineage(&[&generation.to_le_bytes()]),
                     compatible: true,
                     name_filtered: false,
-                    source_rank: (generation, "run.json", generation.to_string()),
+                    source_rank: (generation, "run.json", lineage(&[&generation.to_le_bytes()])),
                 },
             );
         }
@@ -1118,7 +1130,7 @@ mod tests {
         assert_schema_valid(&old);
         assert_schema_valid(&current);
         let result = merge(&[("old.json".to_owned(), old), ("current.json".to_owned(), current)], 20, None);
-        assert_eq!(result.incompatible, 1);
+        assert_eq!(result.incompatible(), 1);
         assert_eq!((result.valid, result.detected), (0, 0));
         assert!(result.report.expect("an empty merged report still exists").files.is_empty());
     }
@@ -1249,7 +1261,7 @@ mod tests {
         let mut newer = report_with_source(None, 2, "fn new() {}\n", vec![mutant("new", 1, "Survived")]);
         newer.config.as_mut().unwrap().population_complete = false;
         let merged = merge(&[("z-old".to_owned(), old), ("a-new".to_owned(), newer)], 2, None);
-        assert_eq!((merged.withdrawn, merged.valid, merged.incompatible), (0, 1, 1));
+        assert_eq!((merged.withdrawn, merged.valid, merged.incompatible()), (0, 1, 1));
         let report = merged.report.unwrap();
         assert_eq!(report.files["src/lib.rs"].source, "fn new() {}\n");
         assert_eq!(report.files["src/lib.rs"].mutants[0].id, "new");
@@ -2110,7 +2122,7 @@ mod tests {
             let merged = merge(&[("old".into(), old), ("empty".into(), empty)], 300, None);
             assert_eq!(merged.withdrawn, usize::from(complete));
             assert_eq!(merged.valid, 0);
-            assert_eq!(merged.incompatible, usize::from(!complete));
+            assert_eq!(merged.incompatible(), usize::from(!complete));
         }
     }
 
@@ -2247,14 +2259,14 @@ mod tests {
         let newer = report_with_source(Some((0, 2)), 200, "fn newer() {}\n", vec![mutant("new", 1, "Killed")]);
 
         let merged = merge(&[("old".to_owned(), old), ("newer".to_owned(), newer)], 300, None);
-        let report = merged.report.expect("a report");
+        let report = merged.report.as_ref().expect("a report");
         let file = report.files.get("src/lib.rs").expect("the newer file survives");
 
         assert_eq!(file.source, "fn newer() {}\n");
         assert_eq!(file.mutants.len(), 1, "the old overlay cannot be rendered over changed source");
         assert_eq!(file.mutants[0].id, "new");
         assert_eq!(merged.valid, 1, "the summary must match the rendered population");
-        assert_eq!(merged.incompatible, 1);
+        assert_eq!(merged.incompatible(), 1);
     }
 
     #[test]
@@ -2373,7 +2385,7 @@ mod tests {
         );
         assert_eq!(verdicts, [("aaa", "Killed"), ("bbb", "Survived")]);
         assert_eq!(merged.withdrawn, 0);
-        assert_eq!(merged.incompatible, 0);
+        assert_eq!(merged.incompatible(), 0);
         assert_eq!(merged.valid, 2);
         assert_eq!(merged.detected, 1);
         assert!((merged.score() - 50.0).abs() < f64::EPSILON);
@@ -2391,7 +2403,7 @@ mod tests {
             None,
         );
         assert_eq!(incomplete.unpresentable_filtered, 1);
-        assert_eq!(incomplete.incompatible, 1);
+        assert_eq!(incomplete.incompatible(), 1);
         assert!(incomplete.report.is_none());
         assert_eq!(incomplete.scored(), None);
 
@@ -2408,7 +2420,7 @@ mod tests {
         let file = &merged.report.as_ref().expect("the complete source makes a report stageable").files["src/lib.rs"];
 
         assert_eq!(merged.unpresentable_filtered, 0);
-        assert_eq!(merged.incompatible, 0);
+        assert_eq!(merged.incompatible(), 0);
         assert_eq!(file.source, "new source\n");
         assert_eq!(file.mutants.len(), 1);
         assert_eq!(file.mutants[0].id, "aaa");
@@ -2438,11 +2450,11 @@ mod tests {
             .as_ref()
             .expect("the complete C listing presents both retained verdicts")
             .files["src/lib.rs"];
-        assert_eq!(direct.incompatible, 0);
+        assert_eq!(direct.incompatible(), 0);
         assert_eq!(direct.unpresentable_filtered, 0);
         assert_eq!(file.mutants[0].id, "aaa");
         assert_eq!(file.mutants[0].status, "Killed");
-        assert_eq!(incomplete.incompatible, 1);
+        assert_eq!(incomplete.incompatible(), 1);
         assert_eq!(
             (incomplete.unpresentable_filtered, incomplete.report.is_none()),
             (1, true),
@@ -2461,7 +2473,7 @@ mod tests {
         let complete = report_with_source(None, 400, source_c, vec![mutant("aaa", 1, "Pending"), mutant("bbb", 2, "Pending")]);
         let originals = vec![("filtered".to_owned(), filtered), ("listing".to_owned(), listing)];
         let first = merge(&originals, 400, None);
-        assert_eq!((first.incompatible, first.unpresentable_filtered), (0, 0));
+        assert_eq!((first.incompatible(), first.unpresentable_filtered), (0, 0));
         let staged = first.report.expect("the complete B listing presents the filtered verdict");
         assert_eq!(staged.files["src/lib.rs"].mutants[0].status, "Killed");
         let staged = to_value(staged).expect("the staged report serializes");
@@ -2482,10 +2494,10 @@ mod tests {
             .as_ref()
             .expect("the complete C listing presents the retained verdict")
             .files["src/lib.rs"];
-        assert_eq!((direct.incompatible, direct.unpresentable_filtered), (0, 0));
+        assert_eq!((direct.incompatible(), direct.unpresentable_filtered), (0, 0));
         assert_eq!(file.mutants[0].id, "aaa");
         assert_eq!(file.mutants[0].status, "Killed");
-        assert_eq!(second.incompatible, 1);
+        assert_eq!(second.incompatible(), 1);
         assert_eq!(
             (second.unpresentable_filtered, second.report.is_none()),
             (1, true),
@@ -2551,7 +2563,7 @@ mod tests {
         assert_eq!(ids, ["aaa", "bbb"]);
         assert_eq!(merged.valid, 2);
         assert_eq!(merged.detected, 1);
-        assert_eq!(merged.incompatible, 0);
+        assert_eq!(merged.incompatible(), 0);
     }
 
     #[test]

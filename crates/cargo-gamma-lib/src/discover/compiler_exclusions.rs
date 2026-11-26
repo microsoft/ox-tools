@@ -10,7 +10,7 @@ use std::io::ErrorKind;
 
 use camino::Utf8Path;
 
-use super::{Hints, RunRecord};
+use super::RunRecord;
 use crate::error::error;
 use crate::model::{Mutant, Outcome};
 use crate::ops::collect::Shape;
@@ -18,7 +18,7 @@ use crate::{HashSet, Result};
 
 const FILE: &str = "compiler-exclusions.json";
 const VERSION: u32 = 1;
-const EVIDENCE_REVISION: u32 = 2;
+const EVIDENCE_REVISION: u32 = 4;
 const HISTORICAL_REASON: &str = "historical compiler exclusion imported from earlier campaign evidence";
 
 /// Authoritative cumulative exclusion policy, not context-validated compiler-cache evidence.
@@ -39,22 +39,30 @@ pub struct CompilerExclusions {
 
 impl CompilerExclusions {
     /// Loads the authoritative inventory, importing historical evidence only on initialization.
-    pub fn load(base: &Utf8Path, root: &Utf8Path) -> Result<Self> {
+    pub fn load(base: &Utf8Path, _root: &Utf8Path) -> Result<Self> {
+        Self::load_with(
+            base,
+            |path| fs::read_to_string(path),
+            || {
+                let completed = RunRecord::load(base);
+                let incomplete = RunRecord::load_incomplete(base);
+                let mutants = completed.ordering().into_iter().chain(incomplete.ordering()).map(str::to_owned);
+                Self::from_historical(mutants)
+            },
+        )
+    }
+
+    fn load_with(
+        base: &Utf8Path,
+        read: impl FnOnce(&Utf8Path) -> std::io::Result<String>,
+        historical: impl FnOnce() -> Self,
+    ) -> Result<Self> {
         let path = base.join(FILE);
-        match fs::read_to_string(&path) {
+        match read(&path) {
             Ok(text) => Self::from_saved(&text, &path, |saved| saved.store(base)),
             Err(cause) if cause.kind() == ErrorKind::NotFound => {
                 // Reimporting into an existing inventory would undo the user's explicit removals.
-                let completed = RunRecord::load(base);
-                let incomplete = RunRecord::load_incomplete(base);
-                let hints = Hints::load(root);
-                let mutants = completed
-                    .ordering()
-                    .into_iter()
-                    .chain(incomplete.ordering())
-                    .chain(hints.ordering())
-                    .map(str::to_owned);
-                Ok(Self::from_historical(mutants))
+                Ok(historical())
             }
             Err(cause) => Err(error!("could not read compiler exclusion inventory `{path}`").caused_by(cause)),
         }
@@ -157,7 +165,7 @@ impl CompilerExclusions {
         crate::elements::write(&base.join(FILE), &text)
     }
 
-    /// Applies historical exclusions before executable numbering, without changing scorable results.
+    /// Applies historical compiler evidence before executable numbering.
     pub(crate) fn exclude(&self, mutants: &mut [Mutant]) -> usize {
         let mut excluded = 0;
         for mutant in mutants.iter_mut().filter(|mutant| mutant.outcome == Outcome::Pending) {
@@ -181,6 +189,18 @@ fn legacy_isolated(reason: &str) -> bool {
 }
 
 fn repaired_schema(mutant: &Mutant, reason: &str) -> bool {
+    // Historical normalization erased the receiver type, including `!`. Reprove this
+    // diagnostic cohort rather than treating an old inference consequence as permanent blame.
+    if reason.starts_with("rustc E0599: no method named <value> found for type <value> in the current scope;") {
+        return true;
+    }
+    // Non-body block guards may previously have used expression-only wrapping before cfg removal.
+    if matches!(mutant.shape, Shape::Block | Shape::IterBlock)
+        && !mutant.mutator.starts_with("fn_value.")
+        && mutant.mutator.as_ref() != "parameter.default_shadow"
+    {
+        return true;
+    }
     match mutant.mutator.as_ref() {
         "parameter.default_shadow" if mutant.replacement.contains("::gamma_rt::default_like") => return true,
         "fn_value.one_element" if mutant.replacement.contains("core::iter::once::<") => return true,
@@ -226,6 +246,36 @@ mod tests {
     use crate::testing::ci_fixture::mutant;
 
     #[test]
+    fn inference_cascade_migration_reproves_erased_receivers_but_keeps_independent_method_errors() {
+        let population = (1..=3).map(candidate).collect::<Vec<_>>();
+        let cascade = "rustc E0599: no method named <value> found for type <value> in the current scope; primary span identified the replacement site";
+        let root = "rustc E0599: <value> is not an iterator; primary span identified the replacement site";
+        let isolated = "rustc: isolated compiler failure; isolated by proof builds without diagnostic-span attribution";
+        let mut inventory: CompilerExclusions = serde_json::from_value(serde_json::json!({
+            "version": 1,
+            "evidence_revision": 2,
+            "mutants": {
+                population[0].id.to_string(): cascade,
+                population[1].id.to_string(): root,
+                population[2].id.to_string(): isolated
+            }
+        }))
+        .unwrap();
+        assert_eq!(inventory.reason(&population[0]), None);
+        assert_eq!(inventory.reason(&population[1]), Some(root));
+        assert_eq!(inventory.reason(&population[2]), Some(isolated));
+        assert!(inventory.migrate_evidence());
+        assert_eq!(inventory.reason(&population[0]), None);
+        assert!(inventory.remember(&population, &HashSet::from_iter([1]), |_| panic!(
+            "original reasons must be preserved"
+        )));
+        assert_eq!(inventory.reason(&population[0]), Some(cascade));
+        let restored: CompilerExclusions = serde_json::from_str(&serde_json::to_string(&inventory).unwrap()).unwrap();
+        assert_eq!(restored.reason(&population[0]), Some(cascade));
+        assert_eq!(restored.reason(&population[1]), Some(root));
+    }
+
+    #[test]
     fn recovered_imported_exclusions_preserve_the_exact_historical_reason_for_each_identity() {
         let inventory = CompilerExclusions::from_historical(["first", "second", "first"].map(str::to_owned).into_iter());
         assert_eq!(inventory.version, 1);
@@ -236,6 +286,29 @@ mod tests {
                 Some("historical compiler exclusion imported from earlier campaign evidence")
             );
         }
+    }
+
+    #[test]
+    fn absent_inventory_and_history_leave_a_fresh_candidate_pending() {
+        let root = Utf8Path::new("project");
+        let mut population = [candidate(1)];
+        let base = root.join("fresh-campaign");
+        let inventory = CompilerExclusions::load_with(
+            &base,
+            |path| {
+                assert_eq!(path, base.join(FILE));
+                Err(std::io::ErrorKind::NotFound.into())
+            },
+            || CompilerExclusions::from_historical(std::iter::empty()),
+        )
+        .unwrap();
+        assert_eq!(inventory.exclude(&mut population), 0);
+        assert_eq!(population[0].outcome, Outcome::Pending);
+        assert_eq!(
+            population[0].ordinal, 1,
+            "the current compiler and test executor must still see this candidate"
+        );
+        assert!(inventory.reason(&population[0]).is_none());
     }
 
     #[test]
@@ -496,6 +569,25 @@ mod tests {
             ),
             ("stmt.delete_assign", "{ 1 } + 2", "", Shape::Stmt, "E0308", false),
             ("literal.bool_flip", "not an expression", "replacement", Shape::Expr, "E0308", false),
+            ("bool_expr.negate", "{ check() }", "!({ check() })", Shape::Block, "E0308", true),
+            ("expr.increment", "{ count }", "({ count }) + 1", Shape::Block, "E0308", true),
+            ("bool_expr.negate", "{ check() }", "!({ check() })", Shape::Expr, "E0308", false),
+            (
+                "fn_value.default",
+                "{ check() }",
+                "Default::default()",
+                Shape::Block,
+                "E0308",
+                false,
+            ),
+            (
+                "parameter.default_shadow",
+                "{ value }",
+                "Default::default()",
+                Shape::Block,
+                "E0308",
+                false,
+            ),
         ]
         .into_iter()
         .enumerate()
@@ -525,7 +617,7 @@ mod tests {
     #[test]
     fn cor2_schema_repair_migration_precisely_revalidates_legacy_direct_diagnostics_before_and_after_serialization() {
         let population = schema_repair_population();
-        for revision in [0, 1] {
+        for revision in [0, 1, 2, 3] {
             let mut inventory = schema_inventory(&population, revision);
             for (mutant, reason, affected) in &population {
                 assert_eq!(

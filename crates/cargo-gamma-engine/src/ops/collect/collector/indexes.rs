@@ -19,8 +19,23 @@ use crate::ops::registry::Selection;
 use crate::{HashMap, HashSet};
 
 pub(super) const ABSOLUTE_ROOT: &str = "<absolute>";
+pub(super) const EXTERNAL_ROOT: &str = "<external>";
 pub(super) const EXTERN_ROOT_PREFIX: &str = "<gamma-extern-root>";
+pub(super) const ROOT_EXTERN_PREFIX: &str = "<gamma-extern-root><crate-root>";
 pub(super) type ScopePath = Vec<(usize, usize)>;
+
+pub(super) fn import_target(path: &[String]) -> &[String] {
+    let path = if path.first().is_some_and(|root| root == ABSOLUTE_ROOT) {
+        &path[1..]
+    } else {
+        path
+    };
+    if path.first().is_some_and(|root| root == EXTERNAL_ROOT) {
+        &path[1..]
+    } else {
+        path
+    }
+}
 
 pub(super) fn module_id(ident: &syn::Ident) -> (usize, usize) {
     let start = ident.span().start();
@@ -391,9 +406,7 @@ fn canonical_import(name: &str, imports: &HashMap<String, Option<Vec<String>>>) 
         }
         // #[gamma::skip(cond.always_false, reason = "disabling cycle detection makes cyclic import aliases alternate forever")]
         if !expanded.insert(first.clone()) {
-            return
-            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-            None;
+            return None;
         }
         let _replaced = path.splice(..1, prefix.iter().cloned());
     }
@@ -459,6 +472,21 @@ impl Walk<'_> {
         self.indexes.local_calls.opaque(&self.scope_path);
     }
 
+    pub(super) fn on_macro(&mut self, mac: &syn::Macro) {
+        self.indexes.local_calls.macro_call(&self.scope_path, mac);
+    }
+
+    pub(super) fn on_item_macro(&mut self, node: &syn::ItemMacro) {
+        if node.ident.is_some() {
+            self.indexes.local_calls.macro_definition(&self.scope_path);
+        } else {
+            self.on_macro(&node.mac);
+        }
+        if !LocalCalls::nontransforming_attributes(&node.attrs) {
+            self.on_opaque_macro();
+        }
+    }
+
     pub(super) fn on_local_attributes(&mut self, attributes: &[syn::Attribute]) {
         if self.indexes.block_scopes.contains(&self.scope_path) && !LocalCalls::nontransforming_attributes(attributes) {
             self.on_opaque_macro();
@@ -468,9 +496,21 @@ impl Walk<'_> {
     pub(super) fn on_item_extern_crate(&mut self, node: &syn::ItemExternCrate) {
         if self.type_evidence {
             let name = node.rename.as_ref().map_or(&node.ident, |(_, name)| name);
-            let path = [ABSOLUTE_ROOT.to_owned(), node.ident.to_string()];
-            self.imported(name.to_string(), &path);
+            let root = if node.ident == "self" {
+                "crate".to_owned()
+            } else {
+                node.ident.to_string()
+            };
+            let path = [ABSOLUTE_ROOT.to_owned(), root];
+            let mut imported = path.to_vec();
+            if node.ident != "self" {
+                imported.insert(1, EXTERNAL_ROOT.to_owned());
+            }
+            self.imported(name.to_string(), &imported);
             self.imported(format!("{EXTERN_ROOT_PREFIX}{name}"), &path);
+            if self.scope_path.is_empty() {
+                self.imported(format!("{ROOT_EXTERN_PREFIX}{name}"), &path);
+            }
         }
     }
 
@@ -529,7 +569,6 @@ impl Walk<'_> {
     /// Records one constant's declaration, demoting a name two declarations disagree about.
     pub(super) fn declared(&mut self, name: &str, ty: &Type) {
         if self.type_evidence {
-            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
             merge_type(&mut self.indexes.declared_types, name, ty);
         }
 
@@ -558,7 +597,6 @@ impl Walk<'_> {
             }
             ReturnType::Type(_, ty) => ty,
         };
-        // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
         merge_type(&mut self.indexes.returns, name, ty);
     }
 
@@ -754,7 +792,6 @@ impl Walk<'_> {
 
             let name = name.to_string();
             if self.type_evidence {
-                // #[gamma::skip(call_result.default, reason = "This call returns (); default_after evaluates it first, preserving every effect and the same unit result.", tag = "equivalent")]
                 merge_type(&mut self.indexes.declared_types, &name, &field.ty);
             }
 
@@ -934,8 +971,8 @@ impl<'ast> Visit<'ast> for Walk<'_> {
     fn visit_stmt(&mut self, node: &'ast Stmt) {
         if !self.cfg.skip_gate(stmt_attrs(node)) {
             self.on_local_attributes(stmt_attrs(node));
-            if matches!(node, Stmt::Expr(Expr::Macro(_), _)) {
-                self.on_opaque_macro();
+            if let Stmt::Expr(Expr::Macro(expression), _) = node {
+                self.on_macro(&expression.mac);
             }
             visit::visit_stmt(self, node);
         }
@@ -997,7 +1034,7 @@ impl<'ast> Visit<'ast> for Walk<'_> {
     }
 
     fn visit_item_macro(&mut self, node: &'ast syn::ItemMacro) {
-        self.on_opaque_macro();
+        self.on_item_macro(node);
         // #[gamma::skip(stmt.delete_call, reason = "Walk::visit_attribute ignores metadata. The default continuation visits only attributes, paths/identifiers, visibility, and opaque macro tokens; none supplies numeric declarations or uses. Value-name registration is outside the deleted continuation and remains unchanged.", tag = "equivalent")]
         visit::visit_item_macro(self, node);
     }
@@ -1009,7 +1046,7 @@ impl<'ast> Visit<'ast> for Walk<'_> {
     }
 
     fn visit_stmt_macro(&mut self, node: &'ast syn::StmtMacro) {
-        self.on_opaque_macro();
+        self.on_macro(&node.mac);
         // #[gamma::skip(stmt.delete_call, reason = "Walk::visit_attribute ignores metadata. The default continuation visits only attributes, paths/identifiers, visibility, and opaque macro tokens; none supplies numeric declarations or uses. Value-name registration is outside the deleted continuation and remains unchanged.", tag = "equivalent")]
         visit::visit_stmt_macro(self, node);
     }

@@ -12,14 +12,9 @@
 //! integration tests maintaining a second capturing host of their own.
 
 #![cfg_attr(coverage_nightly, coverage(off))]
-// This module is test scaffolding that happens to be compiled as a library module, so the lints
-// written for production code do not apply to it: a fixture builder whose result is dropped is a
-// test bug the test itself reveals, and `panic` is how a fixture reports one.
-#![allow(
+#![expect(
     clippy::must_use_candidate,
-    clippy::missing_const_for_fn,
-    clippy::panic,
-    reason = "test scaffolding, not production code"
+    reason = "dropping a fixture result makes incomplete test setup apparent through test behavior"
 )]
 
 use core::cell::{Cell, RefCell};

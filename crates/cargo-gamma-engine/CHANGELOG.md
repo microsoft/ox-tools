@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-24
+
+- ✨ Features
+
+  - cargo-anvil: add cargo-unused-deps check ([#378](https://github.com/microsoft/ox-tools/pull/378))
+
+- 🐛 Bug Fixes
+
+  - cargo-gamma: address audit findings ([#381](https://github.com/microsoft/ox-tools/pull/381))
+
+## [0.7.0] - 2026-11-19
+
+- 🐛 Bug Fixes
+
+  - cargo-gamma: strengthen admission proofs and compiler isolation ([#367](https://github.com/microsoft/ox-tools/pull/367))
+  - stabilize scheduled checks and close Linux mutation coverage gaps ([#357](https://github.com/microsoft/ox-tools/pull/357))
+
 ## [0.6.0] - 2026-11-06
 
 - ✨ Features

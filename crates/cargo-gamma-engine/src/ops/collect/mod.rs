@@ -4,7 +4,7 @@
 //! Walking a syntax tree and producing the mutants it admits.
 //!
 //! The traversal tracks the enclosing item path and how many identical sites for a mutator have
-//! already been seen, giving each mutant an identity that survives reformatting and code motion.
+//! already been seen, giving each mutant an identity independent of source line numbers.
 
 mod candidate;
 mod collector;

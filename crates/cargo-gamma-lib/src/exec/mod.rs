@@ -36,9 +36,18 @@ mod memory;
 mod nextest;
 mod process_output;
 mod progress;
-#[cfg(target_os = "linux")]
+mod proof_context;
+#[cfg(any(target_os = "linux", test))]
+#[cfg_attr(
+    not(target_os = "linux"),
+    expect(
+        dead_code,
+        reason = "Only the injected relaunch policy tests run on non-Linux hosts, not the native launch adapters."
+    )
+)]
 pub(crate) mod relaunch;
 pub(crate) mod resources;
+mod rustc_replay;
 mod rustc_wrapper;
 mod session;
 mod stall;

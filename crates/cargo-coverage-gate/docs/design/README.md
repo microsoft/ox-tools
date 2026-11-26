@@ -535,8 +535,12 @@ coverage remains unavailable when an explicit or configured target is
 necessary.
 
 This repository's Windows diagnostic workflow also runs the collector from the
-checkout. On failure, it uploads raw
-profiles, merged profiles, profile lists, and LCOV reports for seven days.
+checkout. It uses matching line-table-only dev and test debug information to
+reduce disk use while retaining coverage line mapping. Matching the profiles
+also keeps Gamma's nested `cargo build --tests` artifacts consistent with
+nextest's test-profile inventory. Both feature configurations, coverage
+instrumentation, and coverage thresholds remain unchanged. On failure, it uploads
+raw profiles, merged profiles, profile lists, and LCOV reports for seven days.
 It also uploads the APRZ and Gamma library-test executables to inspect their
 instrumentation, plus their test fingerprint JSON files to inspect compiler
 inputs. Hidden-file upload permits these fingerprints under `.fingerprint`.

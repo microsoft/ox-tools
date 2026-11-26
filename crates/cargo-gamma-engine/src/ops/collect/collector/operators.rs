@@ -7,7 +7,10 @@ use syn::{BinOp, Expr, Lit, Type};
 
 use super::Collector;
 use super::calls::OperatorResult;
+use super::indexes::{ScopePath, complete_type};
+use super::types::frozen_type_identity;
 use super::values::{Kind, primitive_kind, strip};
+use crate::HashMap;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Operand {
@@ -24,7 +27,12 @@ enum Operand {
 }
 
 impl Collector<'_> {
+    #[cfg(test)]
     pub(super) fn binary_expression_type(&self, node: &syn::ExprBinary) -> Option<Type> {
+        self.binary_expression_type_in_scope(node, &self.scope_path)
+    }
+
+    pub(super) fn binary_expression_type_in_scope(&self, node: &syn::ExprBinary, scope: &ScopePath) -> Option<Type> {
         let original = match node.op {
             BinOp::Add(_) => "+",
             BinOp::Sub(_) => "-",
@@ -32,17 +40,15 @@ impl Collector<'_> {
             BinOp::Div(_) => "/",
             BinOp::Rem(_) => "%",
             _ => {
-                return
-            // #[gamma::skip(return_value.default, reason = "None is already Option::default(); replacing just this value cannot change an outcome.", tag = "equivalent")]
-            None;
+                return None;
             }
         };
-        let left = self.inferred_expression_type(&node.left)?;
-        let right = self.inferred_expression_type(&node.right)?;
+        let left = self.inferred_expression_type_in_scope(&node.left, scope)?;
+        let right = self.inferred_expression_type_in_scope(&node.right, scope)?;
         if self.defaults.has_single_source_evidence()
-            && let OperatorResult::Output(output) =
-                self.calls
-                    .operator_result(&left, &right, original, &self.scope_path, self.current_imports())
+            && let OperatorResult::Output(output) = self
+                .calls
+                .operator_result(&left, &right, original, scope, self.imports_in_scope(scope))
         {
             return Some(output.clone());
         }
@@ -74,10 +80,10 @@ impl Collector<'_> {
     }
 
     fn operator_type(&self, ty: &Type) -> Option<Operand> {
-        let types = self.types();
-        let ty = types.resolve_alias(ty);
+        let imports = HashMap::default();
+        let types = self.frozen_types(&imports);
         if let Type::Reference(reference) = strip(ty) {
-            if matches!(strip(&reference.elem), Type::Path(path) if path.path.is_ident("str")) {
+            if types.supports_primitive_type(&reference.elem, "str") {
                 return Some(Operand::Str);
             }
             return self.operator_type(&reference.elem);
@@ -113,9 +119,7 @@ impl Collector<'_> {
             BinOp::Rem(_) => "%",
             BinOp::RemAssign(_) => "%=",
             _ => {
-                return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+                return false;
             }
         };
         if self.defaults.has_single_source_evidence()
@@ -134,17 +138,14 @@ impl Collector<'_> {
                 OperatorResult::Unknown => false,
                 OperatorResult::Missing => true,
                 OperatorResult::Output(replaced) => {
-                    let types = self.types();
-                    let output = super::indexes::complete_type(types.canonical_type(output));
-                    let replaced = super::indexes::complete_type(types.canonical_type(replaced));
+                    let output = complete_type(frozen_type_identity(output));
+                    let replaced = complete_type(frozen_type_identity(replaced));
                     !matches!(output, syn::Type::Infer(_)) && !matches!(replaced, syn::Type::Infer(_)) && replaced != output
                 }
             };
         }
         let (Some(left), Some(right)) = (self.operator_operand(&node.left), self.operator_operand(&node.right)) else {
-            return
-            // #[gamma::skip(return_value.default, reason = "The inferred type is bool, whose Default value is already false.", tag = "equivalent")]
-            false;
+            return false;
         };
         let operator = replacement.trim_end_matches('=');
         let original_result = result(left, right, original.trim_end_matches('='));

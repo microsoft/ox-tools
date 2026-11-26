@@ -19,6 +19,19 @@ use super::messages::{CompilerMessage, Span, cargo_message};
 use crate::schema::{Guard, Position};
 use crate::{HashMap, HashSet};
 
+/// In-root and relative paths already have workspace identity and must match exactly.
+///
+/// Only outside-root absolute paths use a workspace-relative suffix. Blame and proof attribution
+/// share this asymmetric eligibility rule.
+pub(super) fn matches_reported_file(reported: &Utf8Path, file: &Utf8Path, root: &Utf8Path) -> bool {
+    reported.strip_prefix(root).unwrap_or(reported) == file
+        || (reported.is_absolute() && !reported.starts_with(root) && reported.ends_with(file))
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod compiler_tests;
+
 /// A bounded, host-independent account of why rustc rejected a mutant.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum AttributionEvidence {
@@ -89,6 +102,7 @@ impl CompilerReason {
 /// proof-build isolation, never individual unviability. Flow-sensitive errors also require proofs.
 #[expect(clippy::too_many_lines, reason = "the attribution tiers share one parsed diagnostic walk")]
 pub fn blame(stdout: &str, root: &Utf8Path, guards: &Guards) -> HashMap<u32, CompilerReason> {
+    /// Bound the less precise secondary-span search; exhausting it leaves attribution to proofs.
     const SECONDARY_ATTRIBUTION_BUDGET: usize = 65_536;
 
     let mut exact_blame: HashMap<u32, CompilerReason> = HashMap::default();
@@ -119,6 +133,12 @@ pub fn blame(stdout: &str, root: &Utf8Path, guards: &Guards) -> HashMap<u32, Com
             continue;
         }
 
+        // Inference recovery can turn a downstream receiver into `!`. Even an exact
+        // replacement span then identifies a consequence, not the edit that broke inference.
+        if diagnostic.code.as_ref().is_some_and(|code| code.code == "E0599") && diagnostic.message.contains("for type `!`") {
+            continue;
+        }
+
         if diagnostic
             .code
             .as_ref()
@@ -143,9 +163,8 @@ pub fn blame(stdout: &str, root: &Utf8Path, guards: &Guards) -> HashMap<u32, Com
                 continue;
             };
 
-            let relative = Utf8Path::new(file_name)
-                .strip_prefix(root.as_str())
-                .unwrap_or_else(|_ignored| Utf8Path::new(file_name));
+            let reported_path = Utf8Path::new(file_name);
+            let relative = reported_path.strip_prefix(root).unwrap_or(reported_path);
 
             let Some(reported) = position_range(span) else {
                 continue;
@@ -156,10 +175,16 @@ pub fn blame(stdout: &str, root: &Utf8Path, guards: &Guards) -> HashMap<u32, Com
             let matched = by_path.get(relative).map(Vec::as_slice).unwrap_or_default();
             let scanned;
 
-            let here = if matched.is_empty() {
+            let here = if
+            // #[gamma::skip(cond.always_true, logical.and_remove_left, logical.and_remove_right, logical.and_to_or, tag = "equivalent", reason = "This condition only avoids redundant scans. matches_reported_file independently enforces exact relative/in-root identity and external suffix matching, so these changes scan the same candidate set or an empty one.")]
+            (
+                // #[gamma::skip(logical.and_remove_left, tag = "equivalent", reason = "An absolute path outside root cannot match the workspace-relative guard keys.")]
+                matched.is_empty() && reported_path.is_absolute()
+            ) && !reported_path.starts_with(root)
+            {
                 scanned = by_path
                     .iter()
-                    .filter(|(file, _found)| file_name.ends_with(file.as_str()))
+                    .filter(|(file, _found)| matches_reported_file(reported_path, file, root))
                     .flat_map(|(_file, found)| found.iter().copied())
                     .collect::<Vec<_>>();
 
@@ -558,6 +583,72 @@ mod final_survivor_tests {
     }
 
     #[test]
+    fn unrelated_workspace_paths_never_suffix_match_another_packages_guards() {
+        let guard = Guard {
+            site: range(NonZeroU32::new(1).unwrap(), NonZeroU32::new(20).unwrap()),
+            mutated: Some(range(NonZeroU32::new(6).unwrap(), NonZeroU32::new(8).unwrap())),
+        };
+        let guards = Guards::from_iter([(1, ("src/lib.rs".into(), guard))]);
+        let parent = Utf8Path::new(env!("CARGO_MANIFEST_DIR"));
+        let root = parent.join("workspace");
+        for path in [
+            "crates/c/src/lib.rs".into(),
+            root.join("crates/c/src/lib.rs"),
+            parent.join("elsewhere/mysrc/lib.rs"),
+        ] {
+            let message = diagnostic("error", "E0308", &[span(Some(path.as_str()), 6, 7, true)]);
+            assert!(blame(&message, &root, &guards).is_empty(), "{path}");
+        }
+        for path in ["src/lib.rs".into(), root.join("src/lib.rs"), parent.join("elsewhere/src/lib.rs")] {
+            let message = diagnostic("error", "E0308", &[span(Some(path.as_str()), 6, 7, true)]);
+            assert_eq!(blame(&message, &root, &guards).keys().copied().collect::<Vec<_>>(), [1], "{path}");
+        }
+    }
+
+    #[test]
+    fn reported_file_matching_requires_exact_in_root_identity() {
+        let root = Utf8Path::new(if cfg!(windows) { r"C:\workspace" } else { "/workspace" });
+        let file = Utf8Path::new("src/lib.rs");
+        let external = root.parent().unwrap().join("elsewhere");
+        for (reported, expected) in [
+            (file.to_owned(), true),
+            (root.join(file), true),
+            (root.join("nested").join(file), false),
+            (Utf8Path::new("nested").join(file), false),
+            (external.join(file), true),
+            (external.join("mysrc/lib.rs"), false),
+        ] {
+            assert_eq!(matches_reported_file(&reported, file, root), expected, "{reported}");
+        }
+    }
+
+    #[test]
+    fn an_external_source_leaf_can_equal_the_relative_workspace_root_name() {
+        let guard = Guard {
+            site: range(NonZeroU32::new(1).unwrap(), NonZeroU32::new(20).unwrap()),
+            mutated: Some(range(NonZeroU32::new(6).unwrap(), NonZeroU32::new(8).unwrap())),
+        };
+        let guards = Guards::from_iter([(1, ("workspace".into(), guard))]);
+        let reported = if cfg!(windows) {
+            r"C:\elsewhere\workspace"
+        } else {
+            "/elsewhere/workspace"
+        };
+        let message = diagnostic("error", "E0308", &[span(Some(reported), 6, 7, true)]);
+        assert_eq!(
+            blame(&message, Utf8Path::new("workspace"), &guards),
+            HashMap::from_iter([(
+                1,
+                CompilerReason {
+                    code: "E0308".into(),
+                    category: "mismatched types".into(),
+                    evidence: AttributionEvidence::ReplacementPrimary,
+                },
+            )])
+        );
+    }
+
+    #[test]
     fn recovered_flow_sensitive_and_repeated_diagnostics_do_not_hide_later_independent_errors() {
         let guard = Guard {
             site: range(NonZeroU32::new(5).unwrap(), NonZeroU32::new(10).unwrap()),
@@ -575,6 +666,25 @@ mod final_survivor_tests {
         assert_eq!(blamed.len(), 2);
         assert_eq!(blamed[&1].code, "E0308");
         assert_eq!(blamed[&2].code, "E0277");
+    }
+
+    #[test]
+    fn never_receiver_cascades_do_not_hide_later_errors_or_other_diagnostic_codes() {
+        let guard = Guard {
+            site: range(NonZeroU32::new(5).unwrap(), NonZeroU32::new(10).unwrap()),
+            mutated: Some(range(NonZeroU32::new(6).unwrap(), NonZeroU32::new(8).unwrap())),
+        };
+        let guards = Guards::from_iter([(1, ("a.rs".into(), guard.clone())), (2, ("b.rs".into(), guard))]);
+        let mut cascade: serde_json::Value =
+            serde_json::from_str(&diagnostic("error", "E0599", &[span(Some("a.rs"), 6, 7, true)])).unwrap();
+        cascade["message"]["message"] = "no method named `read` found for type `!`".into();
+        let later = diagnostic("error", "E0308", &[span(Some("b.rs"), 6, 7, true)]);
+        let blamed = blame(&format!("{cascade}\n{later}"), Utf8Path::new("workspace"), &guards);
+        assert_eq!(blamed.len(), 1);
+        assert_eq!(blamed[&2].code, "E0308");
+
+        cascade["message"]["code"]["code"] = "E0308".into();
+        assert_eq!(blame(&cascade.to_string(), Utf8Path::new("workspace"), &guards)[&1].code, "E0308");
     }
 
     #[test]

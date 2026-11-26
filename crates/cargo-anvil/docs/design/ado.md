@@ -8,10 +8,10 @@ repository edits survive regeneration; conflicting updates produce
 
 ## Pipeline configuration
 
-The roots `.pipelines/anvil-pr.yml` and `anvil-scheduled.yml` select triggers,
+The roots `.pipelines/anvil-pr.yml` and `.pipelines/anvil-scheduled.yml` select triggers,
 pools, secrets, and any compliance-template composition. They include
-`.pipelines/anvil/pr.yml` and `scheduled.yml`, which arrange stages and invoke
-per-group templates under `anvil/steps/`.
+`.anvil/ado/pr.yml` and `scheduled.yml`, which arrange stages and invoke
+per-group templates under `.anvil/ado/steps/`.
 
 For Azure Repos, configure PR build validation through branch policies;
 YAML `pr:` triggers do not enable it. The generated PR root disables push
@@ -23,7 +23,7 @@ to `ubuntu-latest` and `windows-latest`. For example:
 
 ```yaml
 stages:
-  - template: anvil/pr.yml
+  - template: ../.anvil/ado/pr.yml
     parameters:
       linuxPool: { name: my-linux-pool }
       windowsPool: { name: my-windows-pool }
@@ -36,11 +36,20 @@ does not remove a job. Excluding a check does not remove its stage or setup.
 
 ## Repository extension points
 
+The default job wrapper appends a non-blocking `Report disk usage` step after
+artifact publication, with `condition: always()`. The same single PowerShell
+command as [GitHub jobs](./github.md#toolchains-setup-and-caches) logs filesystem
+drives and used/free space. It writes no files, scans no directories, and does
+not change the checks' verdict. Command failures are logged as warnings and
+the reporting script exits successfully. Terminated runners cannot report.
+Repository-owned job wrappers must retain or add this step to get diagnostics;
+custom stages outside the wrapper are not instrumented.
+
 ### Custom stages
 
-Each root also includes `anvil/custom-pr-stages.yml` or
-`anvil/custom-scheduled-stages.yml`. These empty stage templates accept the
-same pool parameters and provide space for repository-specific validation,
+Each root also includes `.anvil/ado/custom/pr-stages.yml` or
+`.anvil/ado/custom/scheduled-stages.yml`. These empty stage templates accept
+the same pool parameters and provide space for repository-specific validation,
 deployment, or downstream triggers without editing the generated roots.
 Repository additions are preserved by the owned-file flow.
 
@@ -67,7 +76,7 @@ extends:
   parameters:
     pool: { name: my-default-pool }
     stages:
-      - template: /.pipelines/anvil/pr.yml@self
+      - template: /.anvil/ado/pr.yml@self
         parameters:
           linuxPool: { name: my-linux-pool }
           windowsPool: { name: my-windows-pool }
@@ -76,7 +85,7 @@ extends:
 The harness's own permissions and template requirements still apply. Include
 the custom-stages template too if the repository uses that extension point.
 
-Every generated job passes through `.pipelines/anvil/steps/job.yml`. Customize
+Every generated job passes through `.anvil/ado/steps/job.yml`. Customize
 this wrapper for `templateContext`, compliance metadata, checkout, or artifact
 handling while retaining its parameter contract:
 
@@ -97,11 +106,11 @@ declaration: ADO rejects undeclared parameters before running jobs.
 ### Before/after check hooks
 
 Repository prerequisites and cleanup belong in
-`.pipelines/anvil/hooks/before-checks.yml` and `after-checks.yml`. Both start
+`.anvil/ado/hooks/before-checks.yml` and `after-checks.yml`. Both start
 as empty step templates and preserve repository edits. For example:
 
 ```yaml
-# .pipelines/anvil/hooks/before-checks.yml
+# .anvil/ado/hooks/before-checks.yml
 steps:
   - template: /ci/native-prerequisites.yml
 ```
@@ -125,6 +134,8 @@ publishes `anvil-impact-linux` and `anvil-impact-windows`. Each PR group
 depends on successful impact, downloads its OS artifact into
 `target/anvil/impact/`, and consumes the cache without recomputing it.
 Failure of either impact job blocks the dependent stages.
+Impact preparation fails if its checkout is dirty; only the normal clean cache
+path is eligible for publication.
 
 Successful impact does not skip whole stages: scoped recipes can no-op while
 unscoped checks still run. Scheduled groups run independently over the full
@@ -144,17 +155,18 @@ ADO's predefined pull-request target branch.
 
 ## Toolchains, setup, and caches
 
-The generated configuration requires Rust/Cargo 1.95 or newer and Just 1.46.0
+The generated configuration requires Rust/Cargo 1.95 or newer and Just 1.47.0
 or newer; individual tools can require newer versions. The runner or repository
 bootstrap must provide Rust/rustup, Cargo, PowerShell, and native dependencies.
 Generated command steps use `pwsh`, not Bash.
 
 Stable-toolchain selection follows the [local contract](./local.md): inherit
 `RUSTUP_TOOLCHAIN`, otherwise let rustup process a repository toolchain file,
-otherwise select the root manifest MSRV. Missing all three is an error, not
-permission to use the agent default. Setup provisions the selected public
-toolchain; custom/path toolchains remain the repository's responsibility.
-The dedicated MSRV group uses the declared root MSRV and skips if none exists.
+otherwise select the root manifest MSRV, then Cargo's default toolchain when
+none is declared. Setup installs catalog tools, pinned nightlies, and required
+components; custom/path toolchains and the caller's default stable toolchain
+remain the repository or runner's responsibility. The dedicated MSRV group
+uses the declared root MSRV and skips if none exists.
 
 `steps/setup.yml` restores Cargo downloads and installed tools before
 bootstrapping Just. Its `group` parameter selects full setup when empty,
@@ -185,21 +197,6 @@ Publication runs after success or failure, but not cancellation. Missing
 reports are allowed because unaffected coverage checks can no-op. Collection
 or evaluation failures still fail the recipe. ADO's Code Coverage tab is an
 informational view; the generated recipe determines the coverage verdict.
-
-## Advisory PR comments
-
-The canonical Linux `pr_fast` job maintains a semver advisory thread from
-`target/anvil/comments/semver.md`, including after another check fails.
-The publisher finds an open thread by `<!-- anvil-semver -->` in its first
-comment, then updates that comment or creates a thread. If the file is absent,
-it closes the matching thread rather than deleting it. A later finding after
-closure creates a new thread.
-
-The step explicitly maps `System.AccessToken`. The build identity needs
-**Contribute to pull requests** on the repository; `persistCredentials` does
-not grant that permission. Missing PR/token context or HTTP 401/403 while
-listing threads skips publication. Other API errors, including errors during
-writes, propagate rather than being silently ignored.
 
 ADO retains group-stage and Just failure diagnostics in logs; it does not
 publish GitHub-style supplemental commit statuses or scheduled failure issues.

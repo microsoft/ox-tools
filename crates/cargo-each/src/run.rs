@@ -284,7 +284,6 @@ fn execute_sequential_with(
 ) -> ExitCode {
     let mut any_failed = false;
     for invocation in &plan.invocations {
-        // #[gamma::skip(call_result.default, reason = "emit_label returns unit; label emission still executes and () is replaced with ()")]
         emit_label(invocation);
         let result = run_invocation(invocation, timeout);
         match result {
@@ -358,7 +357,6 @@ fn execute_parallel_with(
         outcomes.sort_by_key(|outcome| outcome.index);
         for indexed in &mut outcomes {
             emit(&plan.invocations[indexed.index], &mut indexed.outcome).into_app_err("failed to emit buffered command output")?;
-            // #[gamma::skip(call_result.default, reason = "record_emitted_failure returns unit; scheduler updates still execute and () is replaced with ()")]
             record_emitted_failure(
                 &indexed.outcome.result,
                 keep_going,
@@ -437,7 +435,6 @@ fn spawn_worker_with(
     let (sender, receiver) = mpsc::channel();
     let job = Box::new(move || {
         let work = move || run_captured(&invocation, timeout);
-        // #[gamma::skip(call_result.default, reason = "complete_worker returns unit; work and channel delivery still execute and () is replaced with ()")]
         complete_worker(&sender, work);
     });
     let thread = spawn(format!("cargo-each-worker-{index}"), job)?;
@@ -639,7 +636,6 @@ fn combine_captured_output(stdout: CapturedStream, stderr: CapturedStream, resul
         .collect::<Vec<_>>()
         .join("; ");
     let mut result = result;
-    // #[gamma::skip(call_result.default, reason = "add_infrastructure_failure returns unit; result updates still execute and () is replaced with ()")]
     add_infrastructure_failure(&mut result, failure);
     BufferedOutcome {
         stdout: stdout.output,
@@ -837,7 +833,6 @@ fn emit_buffered_to(
     // #[gamma::skip(cond.always_true, reason = "when the list is empty join produces an empty string, and add_infrastructure_failure explicitly returns without changing the result for an empty string")]
     if !source_failures.is_empty() {
         let failure = source_failures.join("; ");
-        // #[gamma::skip(call_result.default, reason = "add_infrastructure_failure returns unit; result updates still execute and () is replaced with ()")]
         add_infrastructure_failure(&mut outcome.result, failure);
     }
     match &outcome.result {

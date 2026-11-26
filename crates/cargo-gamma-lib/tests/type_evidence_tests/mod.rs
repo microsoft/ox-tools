@@ -1,11 +1,85 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use cargo_gamma_engine::ops::collect::Confidence;
+use cargo_gamma_engine::ops::collect::{Confidence, ResourceDependency};
 
 use super::{candidates, tokens, type_evidence_fixture};
 
 const SOURCE: &str = include_str!("../fixtures/correctness/type_evidence.rs");
+
+#[test]
+fn campaign_generation_admission_preserves_compiling_reference_and_api_controls() {
+    let source = include_str!("../fixtures/correctness/generation_admission.rs");
+    let mutators = "assign.add_to_mul,arith.add_to_mul,arith.add_to_sub,arith.sub_to_div,range.exclusive_to_inclusive,expr.increment,expr.decrement,unary.remove_not,option.is_none_to_is_some";
+    let (file, unresolved) = super::candidates(source, mutators);
+    for item in ["path_arguments", "path_owner"] {
+        assert!(
+            unresolved
+                .iter()
+                .any(|candidate| candidate.item_path.as_ref() == item && candidate.mutator == "option.is_none_to_is_some"),
+            "{item}: unresolved dependencies must remain optimistic"
+        );
+    }
+    let cfg = super::CfgSet::parse("");
+    let mut defaults = super::collect::Defaults::of_source_in(file.ast(), &cfg, file.path().as_str());
+    defaults.bind_sources(&[(file.path().to_string(), file.path().to_string(), Vec::new())]);
+    defaults.bind_resource_dependencies(&[ResourceDependency {
+        crate_root: file.path().to_string(),
+        import_name: "syn".into(),
+        package_id: "registry+https://github.com/rust-lang/crates.io-index#syn@3.0.9".into(),
+        package_name: "syn".into(),
+        version: "3.0.9".into(),
+        source: "registry+https://github.com/rust-lang/crates.io-index".into(),
+        features: Vec::new(),
+        registry_closure: true,
+        library_root: None,
+    }]);
+    let found = super::collect::collect_with(&file, &super::Selection::parse(mutators).unwrap(), &cfg, &defaults);
+    for (item, mutator) in [
+        ("field_assignment", "assign.add_to_mul"),
+        ("tuple_assignment", "assign.add_to_mul"),
+        ("timestamp", "arith.sub_to_div"),
+        ("closure_clock", "arith.add_to_mul"),
+        ("collected_text", "arith.add_to_sub"),
+        ("collected_text", "arith.add_to_mul"),
+        ("nonnumeric_range", "range.exclusive_to_inclusive"),
+        ("path_arguments", "option.is_none_to_is_some"),
+        ("path_owner", "option.is_none_to_is_some"),
+    ] {
+        assert!(
+            !found
+                .iter()
+                .any(|candidate| candidate.item_path.as_ref() == item && candidate.mutator == mutator),
+            "{item}: {found:#?}"
+        );
+    }
+    assert!(
+        !found
+            .iter()
+            .any(|candidate| { candidate.item_path.as_ref() == "borrowed_boundary" && file.slice(&candidate.span) == "offset" }),
+        "{found:#?}"
+    );
+    let predicate = found
+        .iter()
+        .find(|candidate| candidate.item_path.as_ref() == "borrowed_predicate" && candidate.mutator == "unary.remove_not")
+        .unwrap();
+    assert_eq!(tokens(&predicate.replacement), tokens("*(opens)"));
+    for (item, mutator) in [
+        ("option_predicate", "option.is_none_to_is_some"),
+        ("owned_boundary", "expr.increment"),
+        ("dereferenced_boundary", "expr.increment"),
+    ] {
+        assert!(
+            found
+                .iter()
+                .any(|candidate| candidate.item_path.as_ref() == item && candidate.mutator == mutator),
+            "{item}: {found:#?}"
+        );
+    }
+    let values = [(0, true), (1, false), (2, true)];
+    assert_eq!(super::generation_admission_fixture::borrowed_predicate(&values).unwrap().0, 1);
+    assert_eq!(super::generation_admission_fixture::compiled_predicate(&values).unwrap().0, 2);
+}
 
 #[test]
 fn exact_type_negative_population_is_removed_and_supported_mutants_still_compile() {
@@ -207,16 +281,23 @@ fn temporal_operator_results_match_compiled_counterparts() {
             "{item}: {selector}"
         );
     }
-    let instant = chrono::DateTime::<chrono::Utc>::from_timestamp(100, 0).unwrap();
-    let delta = chrono::TimeDelta::seconds(4);
-    assert_eq!(compiled_shift(instant, delta).timestamp(), 96);
+    let instant = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(100);
+    let delta = std::time::Duration::from_secs(4);
     assert_eq!(
-        compiled_naive_shift(instant.naive_utc(), std::time::Duration::from_secs(4))
-            .and_utc()
-            .timestamp(),
+        compiled_shift(instant, delta)
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
         96
     );
-    assert_eq!(compiled_scale(delta, 3).num_seconds(), 12);
+    assert_eq!(
+        compiled_naive_shift(instant, std::time::Duration::from_secs(4))
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        96
+    );
+    assert_eq!(compiled_scale(delta, 3).as_secs(), 12);
 }
 
 #[test]

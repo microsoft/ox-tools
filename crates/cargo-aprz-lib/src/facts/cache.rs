@@ -12,7 +12,9 @@ use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, TimeDelta, Utc};
+use jiff::Timestamp;
+#[cfg(test)]
+use jiff::ToSpan;
 use ohno::IntoAppError;
 use serde::{Deserialize, Serialize};
 
@@ -36,7 +38,7 @@ pub enum CacheResult<T> {
 /// On-disk representation of a cache entry.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct Envelope<T> {
-    timestamp: DateTime<Utc>,
+    timestamp: Timestamp,
     payload: EnvelopePayload<T>,
 }
 
@@ -111,26 +113,26 @@ impl Cache {
             }
         };
 
-        self.fresh_payload(filename, envelope, Utc::now())
+        self.fresh_payload(filename, envelope, Timestamp::now())
     }
 
     #[cfg(test)]
     pub(crate) fn load_data_for_test<T: Serialize + for<'de> Deserialize<'de>>(&self, filename: &str, data: T) -> CacheResult<T> {
         let bytes = rmp_serde::to_vec(&Envelope {
-            timestamp: DateTime::<Utc>::MAX_UTC,
+            timestamp: Timestamp::now() + (365_i32 * 24).hours(),
             payload: EnvelopePayload::Data(data),
         })
         .expect("test cache payloads must have infallible serialization");
         self.load_with(filename, |_path| Ok(std::io::Cursor::new(bytes)))
     }
 
-    fn fresh_payload<T>(&self, filename: &str, envelope: Envelope<T>, now: DateTime<Utc>) -> CacheResult<T> {
+    fn fresh_payload<T>(&self, filename: &str, envelope: Envelope<T>, now: Timestamp) -> CacheResult<T> {
         // Handle future timestamps (clock skew) — treat as fresh data
-        let age = now.signed_duration_since(envelope.timestamp);
-        if age < TimeDelta::zero() {
+        let age = now - envelope.timestamp;
+        if now < envelope.timestamp {
             log::debug!(target: LOG_TARGET, "Cache timestamp is in the future for {filename} (clock skew detected), treating as fresh");
         } else {
-            let age_duration = age.to_std().unwrap_or(Duration::MAX);
+            let age_duration = Duration::try_from(age).unwrap_or(Duration::MAX);
 
             if age_duration >= self.ttl {
                 log::debug!(
@@ -157,7 +159,7 @@ impl Cache {
         T: Serialize,
     {
         let envelope = Envelope {
-            timestamp: Utc::now(),
+            timestamp: Timestamp::now(),
             payload: EnvelopePayload::Data(data),
         };
         self.write_envelope(filename, &envelope)
@@ -167,7 +169,7 @@ impl Cache {
     pub fn save_no_data(&self, filename: &str, reason: &str) -> Result<()> {
         // The type parameter doesn't matter for NoData; we use `()` as a placeholder.
         let envelope = Envelope::<()> {
-            timestamp: Utc::now(),
+            timestamp: Timestamp::now(),
             payload: EnvelopePayload::NoData(reason.to_string()),
         };
         self.write_envelope(filename, &envelope)
@@ -199,6 +201,8 @@ impl Cache {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use jiff::SignedDuration;
+
     use super::*;
 
     #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
@@ -239,14 +243,14 @@ mod tests {
 
     #[test]
     fn cache_expiry_and_clock_skew_use_exact_nanosecond_boundaries() {
-        let now = DateTime::UNIX_EPOCH + TimeDelta::days(1);
+        let now = Timestamp::UNIX_EPOCH + 24_i32.hours();
         for (ttl, age, fresh) in [
-            (60, TimeDelta::seconds(60) - TimeDelta::nanoseconds(1), true),
-            (60, TimeDelta::seconds(60), false),
-            (60, TimeDelta::seconds(60) + TimeDelta::nanoseconds(1), false),
-            (0, TimeDelta::nanoseconds(-1), true),
-            (0, TimeDelta::zero(), false),
-            (0, TimeDelta::nanoseconds(1), false),
+            (60, SignedDuration::new(60, -1), true),
+            (60, SignedDuration::new(60, 0), false),
+            (60, SignedDuration::new(60, 1), false),
+            (0, SignedDuration::new(0, -1), true),
+            (0, SignedDuration::new(0, 0), false),
+            (0, SignedDuration::new(0, 1), false),
         ] {
             let cache = make_cache(Path::new("scripted-cache"), ttl);
             for payload in [EnvelopePayload::Data(42_u64), EnvelopePayload::NoData("absent".to_owned())] {
@@ -327,7 +331,7 @@ mod tests {
         crate::facts::test_logging::enable_log_argument_evaluation();
 
         let tmp = tempfile::tempdir().unwrap();
-        let old_time = Utc::now() - chrono::Duration::hours(2);
+        let old_time = Timestamp::now() - 2_i32.hours();
 
         // Write an envelope with an old timestamp directly
         let envelope = Envelope {
@@ -350,7 +354,7 @@ mod tests {
     fn load_entry_just_before_ttl_boundary_is_fresh() {
         let tmp = tempfile::tempdir().unwrap();
         let ttl_seconds = 3600i64;
-        let fresh_time = Utc::now() - chrono::Duration::seconds(ttl_seconds - 5);
+        let fresh_time = Timestamp::now() - (ttl_seconds - 5).seconds();
 
         let envelope = Envelope {
             timestamp: fresh_time,
@@ -374,7 +378,7 @@ mod tests {
     #[cfg_attr(miri, ignore = "Miri cannot call GetTempPathW")]
     fn load_future_timestamp_treated_as_fresh() {
         let tmp = tempfile::tempdir().unwrap();
-        let future_time = Utc::now() + chrono::Duration::hours(1);
+        let future_time = Timestamp::now() + 1_i32.hour();
 
         let envelope = Envelope {
             timestamp: future_time,
@@ -397,7 +401,7 @@ mod tests {
     #[test]
     fn write_envelope_reports_serialization_write_failures() {
         let envelope = Envelope {
-            timestamp: DateTime::UNIX_EPOCH,
+            timestamp: Timestamp::UNIX_EPOCH,
             payload: EnvelopePayload::Data(TestData {
                 name: "test".to_string(),
                 value: 1,
@@ -418,7 +422,7 @@ mod tests {
     #[test]
     fn write_envelope_reports_flush_failures() {
         let envelope = Envelope {
-            timestamp: DateTime::UNIX_EPOCH,
+            timestamp: Timestamp::UNIX_EPOCH,
             payload: EnvelopePayload::Data(TestData {
                 name: "test".to_string(),
                 value: 1,
@@ -441,7 +445,7 @@ mod tests {
     fn zero_ttl_entry_created_this_second_is_expired() {
         let tmp = tempfile::tempdir().unwrap();
         let envelope = Envelope {
-            timestamp: Utc::now(),
+            timestamp: Timestamp::now(),
             payload: EnvelopePayload::Data(TestData {
                 name: "immediate".to_string(),
                 value: 1,
@@ -551,7 +555,7 @@ mod tests {
     fn exactly_at_ttl_boundary_is_miss() {
         let tmp = tempfile::tempdir().unwrap();
         let ttl_seconds = 3600i64;
-        let old_time = Utc::now() - chrono::Duration::seconds(ttl_seconds);
+        let old_time = Timestamp::now() - ttl_seconds.seconds();
 
         let envelope = Envelope {
             timestamp: old_time,

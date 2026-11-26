@@ -1,0 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[workspace]
+members = ["doc-only", "library-used", "twin"]
+resolver = "2"

@@ -920,7 +920,6 @@ fn phases_of(session: &Session, redaction: Redaction) -> Phases {
 }
 
 /// The test binaries, most expensive baseline first.
-// #[gamma::skip(all, reason = "diagnostic ranking and truncation are covered by exact serialized-bundle tests; mutations here duplicate that artifact contract")]
 fn binaries_of(session: &Session, redaction: Redaction) -> Vec<Binary> {
     let mut binaries: Vec<&crate::exec::TestBinary> = session.binaries.iter().collect();
 
@@ -1292,6 +1291,31 @@ mod tests {
         assert_eq!((sweep.packages[0].first_started_ms(), sweep.packages[0].settled_ms()), (11, 29));
         session.widened = false;
         assert!(!build_of(&session, Redaction::Names).widened);
+    }
+
+    #[test]
+    fn diagnostic_binary_rows_are_the_twenty_most_expensive_in_descending_order() {
+        let mut session = session_with(crate::exec::Phases::default());
+        for index in (0..27).map(|index| (index * 11) % 27) {
+            let mut binary = crate::testing::test_binary(&format!("target/binary-{index}"));
+            binary.target = format!("binary-{index}");
+            binary.baseline = Duration::from_millis(index + 1);
+            session.binaries.push(binary);
+        }
+        let actual = binaries_of(&session, Redaction::Names);
+        assert_eq!(
+            actual
+                .iter()
+                .map(|binary| (binary.target.as_deref().unwrap(), binary.baseline_ms))
+                .collect::<Vec<_>>(),
+            (7..27)
+                .rev()
+                .map(|index| (format!("binary-{index}"), index + 1))
+                .collect::<Vec<_>>()
+                .iter()
+                .map(|(name, duration)| (name.as_str(), *duration))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

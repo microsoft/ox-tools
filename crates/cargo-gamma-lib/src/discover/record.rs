@@ -39,7 +39,7 @@ use crate::{HashMap, HashSet};
 const VERSION: u32 = 12;
 
 /// Increment when compiler attribution or isolation changes which exclusions can be trusted.
-const COMPILER_EVIDENCE_POLICY_EPOCH: u32 = 3;
+const COMPILER_EVIDENCE_POLICY_EPOCH: u32 = 5;
 
 /// The file name under the gamma scratch base.
 const FILE: &str = "last-gamma-run.json";
@@ -753,11 +753,9 @@ impl GeneralizedHints {
         match self.version {
             1 => {
                 for candidate in self.items.iter_mut().flat_map(|item| &mut item.candidates) {
-                    // #[gamma::skip(call_result.default, reason = "reset returns unit and call_result.default retains every field reset")]
                     reset(candidate);
                 }
                 for candidate in self.binaries.iter_mut().flat_map(|file| &mut file.candidates) {
-                    // #[gamma::skip(call_result.default, reason = "reset returns unit and call_result.default retains every field reset")]
                     reset(candidate);
                 }
             }
@@ -845,7 +843,6 @@ impl GeneralizedHints {
                 .filter(|(_, keep)| *keep)
                 .map(|(binary, _)| binary),
         );
-        // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
         if !newer.reach.is_empty() {
             self.test_sets = newer.test_sets;
             self.reach = newer.reach;
@@ -1777,7 +1774,6 @@ impl RunRecord {
                 .filter_map(|dependency| plan.specs.get(dependency).map(|(root, _version)| root.clone()))
                 .collect();
 
-            // #[gamma::skip(call_result.default, reason = "This call returns (); default_after performs the original side effects and substitutes only the identical unit value.", tag = "equivalent")]
             normalize_compilation_roots(&mut roots);
             let _previous = compilation_roots.insert(package.clone(), roots);
         }

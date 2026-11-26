@@ -2,7 +2,7 @@
 # Licensed under the MIT License.
 
 # Creates a GitHub release for a crate when a version tag (e.g. "bytesbuf-v1.2.3")
-# is pushed. Extracts the relevant changelog section and publishes the release via
+# is pushed. Generates release notes from the crate's commits and publishes via
 # `scripts/publish-gh-release.rs`. This workflow is triggered automatically by tag
 # pushes and is not intended to be run manually.
 
@@ -30,6 +30,7 @@ jobs:
     - name: Checkout
       uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
+        fetch-depth: 0
         lfs: true
 
     - name: Install Rust

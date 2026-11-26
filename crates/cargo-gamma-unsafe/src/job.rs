@@ -81,7 +81,7 @@ const fn thread_identifier(thread: u32) -> u32 {
 impl NativeCalls for SystemCalls {
     fn thread_snapshot(&self) -> HANDLE {
         // SAFETY: the arguments are a flag word and a process id, and no caller memory is touched.
-        // #[gamma::skip(all, reason = "Windows accepts reserved or irrelevant flag/process-id bits for a thread-only system snapshot, so altered arguments are not reliably observable across supported Windows versions")]
+        // #[gamma::skip(all, tag = "native-boundary", reason = "Windows accepts reserved or irrelevant flag/process-id bits for a thread-only system snapshot, so altered arguments are not reliably observable across supported Windows versions")]
         unsafe { CreateToolhelp32Snapshot(THREAD_SNAPSHOT_FLAGS, SNAPSHOT_PROCESS_ID) }
     }
 
@@ -100,11 +100,11 @@ impl NativeCalls for SystemCalls {
 
     fn open_thread(&self, thread: u32) -> HANDLE {
         // SAFETY: the arguments are an access mask, an inheritance flag and a thread identifier.
-        // #[gamma::skip(all, reason = "nonzero BOOL encodings all request inheritance and Windows may normalize them identically, while inheriting this short-lived internal handle is not observable because no child is spawned before it closes")]
+        // #[gamma::skip(all, tag = "native-boundary", reason = "nonzero BOOL encodings all request inheritance and Windows may normalize them identically, while inheriting this short-lived internal handle is not observable because no child is spawned before it closes")]
         unsafe { OpenThread(THREAD_SUSPEND_RESUME, INHERIT_THREAD_HANDLE, thread_identifier(thread)) }
     }
 
-    // #[gamma::skip(all, reason = "returning without calling ResumeThread reports a still-suspended child as released, so its owner waits for a process that can never run")]
+    // #[gamma::skip(all, tag = "timeout", reason = "returning without calling ResumeThread reports a still-suspended child as released, so its owner waits for a process that can never run")]
     fn resume_thread(&self, thread: HANDLE) -> u32 {
         // SAFETY: the handle was opened with `THREAD_SUSPEND_RESUME`.
         unsafe { ResumeThread(thread) }
@@ -117,7 +117,7 @@ impl NativeCalls for SystemCalls {
 
     fn create_completion_port(&self) -> HANDLE {
         // SAFETY: these documented sentinel arguments request a new completion port.
-        // #[gamma::skip(all, reason = "the completion key is ignored when creating a fresh port, and Windows may normalize supported concurrency hints without exposing the chosen scheduler policy")]
+        // #[gamma::skip(all, tag = "native-boundary", reason = "the completion key is ignored when creating a fresh port, and Windows may normalize supported concurrency hints without exposing the chosen scheduler policy")]
         unsafe { CreateIoCompletionPort(INVALID_HANDLE_VALUE, core::ptr::null_mut(), COMPLETION_KEY, COMPLETION_CONCURRENCY) }
     }
 
@@ -167,7 +167,7 @@ impl NativeCalls for SystemCalls {
         })
     }
 
-    // #[gamma::skip(all, reason = "claiming an empty queue produced a message loops forever; decrementing zero waits forever, while a one-millisecond wait at every high-volume poll exceeded the four-minute mutation budget without changing any result")]
+    // #[gamma::skip(all, tag = "timeout", reason = "claiming an empty queue produced a message loops forever; decrementing zero waits forever, while a one-millisecond wait at every high-volume poll exceeded the four-minute mutation budget without changing any result")]
     fn completion_status(&self, completion: HANDLE, message: &mut u32, key: &mut usize, overlapped: &mut *mut OVERLAPPED) -> bool {
         // SAFETY: the completion port is live, output references are writable, and the zero timeout
         // makes the operation non-blocking.
@@ -408,7 +408,7 @@ pub fn release(process: u32) -> bool {
     // here is what closes it once, on every path out of this function.
     let snapshot = unsafe { OwnedHandle::from_raw_handle(snapshot) };
 
-    main_thread(&snapshot, process).is_some_and(resume)
+    snapshot_thread(&snapshot, process).is_some_and(resume)
 }
 
 /// Takes the thread snapshot [`release`] scans.
@@ -421,7 +421,19 @@ fn valid_snapshot(snapshot: HANDLE) -> bool {
 }
 
 /// The id of the one thread a suspended child has, if the snapshot still lists it.
-fn main_thread(snapshot: &OwnedHandle, process: u32) -> Option<u32> {
+fn snapshot_thread(snapshot: &OwnedHandle, process: u32) -> Option<u32> {
+    main_thread(
+        process,
+        |entry| NATIVE_CALLS.first_thread(snapshot.as_raw_handle(), entry),
+        |entry| NATIVE_CALLS.next_thread(snapshot.as_raw_handle(), entry),
+    )
+}
+
+fn main_thread(
+    process: u32,
+    first: impl FnOnce(&mut THREADENTRY32) -> bool,
+    mut next: impl FnMut(&mut THREADENTRY32) -> bool,
+) -> Option<u32> {
     let mut entry = THREADENTRY32 {
         // The API rejects an entry whose declared size is not its own, which is how it tells
         // the versions of this structure apart.
@@ -429,7 +441,7 @@ fn main_thread(snapshot: &OwnedHandle, process: u32) -> Option<u32> {
         ..Default::default()
     };
 
-    let mut found = NATIVE_CALLS.first_thread(snapshot.as_raw_handle(), &mut entry);
+    let mut found = first(&mut entry);
 
     while found {
         if let Some(thread) = thread_owned_by(&entry, process) {
@@ -437,7 +449,7 @@ fn main_thread(snapshot: &OwnedHandle, process: u32) -> Option<u32> {
         }
 
         // #[gamma::skip(stmt.delete_assign, reason = "not advancing the thread snapshot repeats the first unrelated entry forever")]
-        found = NATIVE_CALLS.next_thread(snapshot.as_raw_handle(), &mut entry);
+        found = next(&mut entry);
     }
 
     // #[gamma::skip(option.none_to_some, reason = "the default thread id is zero, which Win32 never assigns; attempting to open it also reports release failure, so the public result remains false")]
@@ -484,7 +496,7 @@ fn valid_handle(handle: HANDLE) -> bool {
 ///
 /// The handle is still owned by the caller, so the failure a test injects here leaves it to be
 /// closed on the way out exactly as a real failure would.
-// #[gamma::skip(all, reason = "replacing the ResumeThread call with a count reports success without releasing the child, so the owner waits indefinitely")]
+// #[gamma::skip(all, tag = "timeout", reason = "replacing the ResumeThread call with a count reports success without releasing the child, so the owner waits indefinitely")]
 fn previous_suspension_count(handle: &OwnedHandle) -> u32 {
     NATIVE_CALLS.resume_thread(handle.as_raw_handle())
 }
@@ -671,7 +683,7 @@ fn memory_limit_was_hit_with(
         let (mut message, mut key, mut overlapped) = (u32::default(), usize::default(), core::ptr::null_mut());
         let received = completion_status(completion, &mut message, &mut key, &mut overlapped);
 
-        // #[gamma::skip(all, reason = "continuing after a non-blocking completion-port read reports an empty queue spins forever")]
+        // #[gamma::skip(all, tag = "timeout", reason = "continuing after a non-blocking completion-port read reports an empty queue spins forever")]
         if !received {
             break *hit;
         }
@@ -943,6 +955,43 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_selection_preserves_the_matching_thread_id_after_unrelated_entries() {
+        for selected in [1, 73, u32::MAX] {
+            let mut advances = 0;
+            let found = main_thread(
+                41,
+                |entry| {
+                    assert_eq!(entry.dwSize as usize, size_of::<THREADENTRY32>());
+                    entry.th32OwnerProcessID = 40;
+                    entry.th32ThreadID = 5;
+                    true
+                },
+                |entry| {
+                    advances += 1;
+                    assert_eq!(advances, 1, "stop enumerating as soon as the owner matches");
+                    entry.th32OwnerProcessID = 41;
+                    entry.th32ThreadID = selected;
+                    true
+                },
+            );
+            assert_eq!(found, Some(selected));
+            assert_eq!(advances, 1);
+        }
+        assert_eq!(main_thread(41, |_| false, |_| panic!("empty snapshots cannot advance")), None);
+        assert_eq!(
+            main_thread(
+                41,
+                |entry| {
+                    entry.th32OwnerProcessID = 40;
+                    true
+                },
+                |_| false,
+            ),
+            None,
+        );
+    }
+
+    #[test]
     fn completion_draining_returns_and_retains_the_actual_limit_hit() {
         for expected in [false, true] {
             let completion = core::ptr::dangling_mut::<c_void>();
@@ -1121,7 +1170,7 @@ mod tests {
 
         // SAFETY: the successful snapshot call above returned this newly owned handle.
         let snapshot = unsafe { OwnedHandle::from_raw_handle(snapshot) };
-        let thread = main_thread(&snapshot, child.id()).expect("the suspended child's thread is listed");
+        let thread = snapshot_thread(&snapshot, child.id()).expect("the suspended child's thread is listed");
         let opened = SystemCalls.open_thread(thread);
 
         assert!(valid_handle(opened), "the child thread can be opened for resumption");
@@ -1342,7 +1391,7 @@ mod tests {
 
         // SAFETY: the successful snapshot call above returned this newly owned handle.
         let snapshot = unsafe { OwnedHandle::from_raw_handle(snapshot) };
-        let thread = main_thread(&snapshot, child.id()).expect("the suspended child's thread is listed");
+        let thread = snapshot_thread(&snapshot, child.id()).expect("the suspended child's thread is listed");
         let handle = SystemCalls.open_thread(thread);
 
         assert!(!handle.is_null(), "the suspended thread can be opened");
