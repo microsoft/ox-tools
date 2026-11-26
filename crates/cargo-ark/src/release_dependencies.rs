@@ -49,7 +49,6 @@ fn parse_candidates(json: &str) -> Result<BTreeMap<String, String>> {
 fn scratch_directory(root: &Path, temp_dir: Option<&Path>) -> Result<tempfile::TempDir> {
     let temporary = std::path::absolute(temp_dir.map_or_else(std::env::temp_dir, Path::to_path_buf))?;
     let scratch = tempfile::Builder::new()
-        .prefix("ark-release-")
         .tempdir_in(&temporary)
         .map_err(|error| format!("creating release scratch directory in {}: {error}", temporary.display()))?;
     if scratch.path().canonicalize()?.starts_with(root.canonicalize()?) {
@@ -59,6 +58,7 @@ fn scratch_directory(root: &Path, temp_dir: Option<&Path>) -> Result<tempfile::T
 }
 
 fn package_candidates(cargo: &ReleaseCargo, scratch: &Path, candidates: &BTreeMap<String, String>) -> Result<PathBuf> {
+    // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "Both Cargo and archive lookup use this private directory under fresh scratch; neither replacement collides with other scratch paths.")]
     let artifacts = scratch.join("artifacts");
     let mut package = cargo.command(scratch);
     package
@@ -78,6 +78,7 @@ fn unpack_candidates(archives: &Path, scratch: &Path, candidates: BTreeMap<Strin
         let stem = format!("{name}-{version}");
         let archive = archives.join(format!("{stem}.crate"));
         // Separate parents keep a sibling's files out of the original relative layout.
+        // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "The numbered parents remain separate, under fresh scratch, and the same paths are used for extraction and testing.")]
         let destination = scratch.join("sources").join(index.to_string());
         fs::create_dir_all(&destination)?;
         unpack(&archive, &destination).map_err(|error| format!("extracting {}: {error}", archive.display()))?;
@@ -87,6 +88,7 @@ fn unpack_candidates(archives: &Path, scratch: &Path, candidates: BTreeMap<Strin
 }
 
 fn test_archives(cargo: &ReleaseCargo, scratch: &Path, sources: &BTreeMap<String, PathBuf>) -> Result<()> {
+    // #[gamma::skip(literal.str_to_xyzzy, reason = "The same private file is written and passed to Cargo by explicit --config path.")]
     let patch = scratch.join("candidates.toml");
     fs::write(&patch, patch_config(sources)?.to_string())?;
     for (name, source) in sources {
@@ -127,7 +129,7 @@ impl ReleaseCargo {
             Command::new("cargo").args(["locate-project", "--workspace", "--message-format", "plain"]),
             "locating the Cargo workspace",
         )?;
-        let root = Path::new(manifest.trim_end_matches(['\r', '\n']))
+        let root = Path::new(&manifest)
             .parent()
             .ok_or("workspace manifest has no parent directory")?
             .to_path_buf();
@@ -147,9 +149,11 @@ impl ReleaseCargo {
 
     fn command(&self, scratch: &Path) -> Command {
         let mut command = Command::new("cargo");
+        // #[gamma::skip(literal.str_to_xyzzy, reason = "Renaming the private build subdirectory leaves Cargo's output isolated in scratch.")]
+        let build = scratch.join("build");
         command
             .env("RUSTUP_TOOLCHAIN", self.toolchain.trim())
-            .env("CARGO_BUILD_BUILD_DIR", scratch.join("build"));
+            .env("CARGO_BUILD_BUILD_DIR", build);
         if let Some(home) = &self.home {
             command.env("CARGO_HOME", home);
         }
@@ -159,7 +163,9 @@ impl ReleaseCargo {
     fn archive_command(&self, scratch: &Path, patch: &Path) -> Command {
         let mut command = self.command(scratch);
         // Start outside the extracted crate so Cargo doesn't pick up config it shipped.
-        command.current_dir(scratch).env("CARGO_TARGET_DIR", scratch.join("target"));
+        // #[gamma::skip(literal.str_to_xyzzy, reason = "Renaming the private target subdirectory leaves Cargo's output isolated in scratch.")]
+        let target = scratch.join("target");
+        command.current_dir(scratch).env("CARGO_TARGET_DIR", target);
         for file in &self.configs {
             if file.parent() != self.home.as_deref() && file.parent().and_then(Path::parent).is_some_and(|dir| !scratch.starts_with(dir)) {
                 command.arg("--config").arg(file);
@@ -223,6 +229,53 @@ mod tests {
         ] {
             assert_eq!(parse_candidates(report).unwrap_err().to_string(), diagnostic);
         }
+    }
+
+    #[test]
+    fn reports_the_candidate_archive_that_could_not_be_extracted() -> Result<()> {
+        let scratch = tempfile::tempdir()?;
+        let archives = scratch.path().join("package");
+        let candidates = BTreeMap::from([("missing".into(), "1.2.0".into())]);
+        let error = unpack_candidates(&archives, scratch.path(), candidates).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("extracting {}", archives.join("missing-1.2.0.crate").display()))
+        );
+        Ok(())
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn reports_paths_cargo_cannot_represent_in_patch_toml() {
+        #[cfg(unix)]
+        let directory = {
+            use std::os::unix::ffi::OsStringExt;
+            std::ffi::OsString::from_vec(vec![0xff])
+        };
+        #[cfg(windows)]
+        let directory = {
+            use std::os::windows::ffi::OsStringExt;
+            std::ffi::OsString::from_wide(&[0xd800])
+        };
+        let sources = BTreeMap::from([("candidate".into(), directory.into())]);
+        assert_eq!(
+            patch_config(&sources).unwrap_err().to_string(),
+            "candidate archive path must be UTF-8"
+        );
+    }
+
+    #[test]
+    fn reports_when_the_required_cargo_process_cannot_start() -> Result<()> {
+        let scratch = tempfile::tempdir()?;
+        let mut missing = Command::new(scratch.path().join("unavailable-cargo"));
+        for error in [
+            capture(&mut missing, "locating the Cargo workspace").unwrap_err(),
+            run(&mut missing, "testing a candidate").unwrap_err(),
+        ] {
+            assert_eq!(error.downcast_ref::<io::Error>().unwrap().kind(), io::ErrorKind::NotFound);
+        }
+        Ok(())
     }
 
     #[test]

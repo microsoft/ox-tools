@@ -31,6 +31,9 @@ fn handles_discovery_input_before_looking_for_a_workspace() -> io::Result<()> {
     let invalid = run_report(&mut command, r#"[{"name":"ark-fixture-peer"}]"#)?;
     assert_error(&invalid, "candidate is missing its version");
 
+    let invalid_encoding = run_report(&mut command, [0xff])?;
+    assert_error(&invalid_encoding, "stream did not contain valid UTF-8");
+
     let no_workspace = run_report(&mut command, BOTH_BUMPED)?;
     assert_error(&no_workspace, "locating the Cargo workspace failed");
     Ok(())
@@ -53,8 +56,15 @@ fn validates_shipped_tests_and_reports_release_failures() -> io::Result<()> {
     assert!(stdout.contains("archive_all ... ok"), "{stdout}");
     assert!(stdout.contains("archive_none ... ok"), "{stdout}");
 
-    let internal_scratch = run_report(&mut ark_command(&workspace, &workspace)?, BOTH_BUMPED)?;
+    let internal_scratch = run_report(ark_command(&workspace, temp.path())?.arg("--temp-dir").arg(&workspace), BOTH_BUMPED)?;
     assert_error(&internal_scratch, "select a temporary directory outside the source workspace");
+
+    let nonexistent_parent = temp.path().join("nonexistent");
+    let mut command = ark_command(&workspace, temp.path())?;
+    command.args(["--temp-dir"]).arg(&nonexistent_parent);
+    let unavailable_scratch = run_report(&mut command, BOTH_BUMPED)?;
+    assert_error(&unavailable_scratch, "creating release scratch directory in");
+    assert!(String::from_utf8_lossy(&unavailable_scratch.stderr).contains("nonexistent"));
 
     let stale_report = r#"[{"name":"ark-fixture-peer","new_version":"0.1.0"}]"#;
     let stale = ark(&workspace, stale_report, false)?;
@@ -86,6 +96,7 @@ fn validates_shipped_tests_and_reports_release_failures() -> io::Result<()> {
 fn ark(workspace: &Path, report: &str, fail_shipped_test: bool) -> io::Result<Output> {
     let home = tempfile::tempdir()?;
     let mut command = ark_command(workspace, home.path())?;
+    command.arg("--temp-dir").arg(home.path());
     if fail_shipped_test {
         command.env("ARK_FIXTURE_FAIL_TEST", "1");
     }
@@ -104,8 +115,7 @@ fn ark_command(workspace: &Path, home: &Path) -> io::Result<Command> {
     .map_err(io::Error::other)?;
     let mut command = Command::new(env!("CARGO_BIN_EXE_cargo-ark"));
     command
-        .args(["ark", "release-dependencies", "--temp-dir"])
-        .arg(home)
+        .args(["ark", "release-dependencies"])
         .current_dir(workspace)
         .env("PATH", path)
         .env("CARGO_HOME", home)
@@ -115,11 +125,11 @@ fn ark_command(workspace: &Path, home: &Path) -> io::Result<Command> {
     Ok(command)
 }
 
-fn run_report(command: &mut Command, report: &str) -> io::Result<Output> {
+fn run_report(command: &mut Command, report: impl AsRef<[u8]>) -> io::Result<Output> {
     command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = command.spawn()?;
     if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(report.as_bytes())?;
+        stdin.write_all(report.as_ref())?;
     }
     child.wait_with_output()
 }

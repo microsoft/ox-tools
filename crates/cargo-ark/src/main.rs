@@ -43,6 +43,7 @@ enum ArkCommand {
 fn main() -> ExitCode {
     let mut args: Vec<_> = std::env::args_os().collect();
     if args.get(1).is_some_and(|arg| arg == "ark") {
+        // #[gamma::skip(literal.int_decrement, reason = "Clap discards argv[0] and has an explicit command name; leaving ark rather than the binary path in argv[0] is equivalent.")]
         args.remove(1);
     }
     let Cli {
