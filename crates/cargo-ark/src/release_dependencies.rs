@@ -47,14 +47,13 @@ fn parse_candidates(json: &str) -> Result<BTreeMap<String, String>> {
 }
 
 fn scratch_directory(root: &Path, temp_dir: Option<&Path>) -> Result<tempfile::TempDir> {
-    let temporary = std::path::absolute(temp_dir.map_or_else(std::env::temp_dir, Path::to_path_buf))?;
-    let scratch = tempfile::Builder::new()
-        .tempdir_in(&temporary)
-        .map_err(|error| format!("creating release scratch directory in {}: {error}", temporary.display()))?;
-    if scratch.path().canonicalize()?.starts_with(root.canonicalize()?) {
+    let temporary = temp_dir.map_or_else(std::env::temp_dir, Path::to_path_buf);
+    let scratch_error = |error| format!("preparing release scratch directory in {}: {error}", temporary.display());
+    let parent = temporary.canonicalize().map_err(scratch_error)?;
+    if parent.starts_with(root.canonicalize()?) {
         return Err("select a temporary directory outside the source workspace".into());
     }
-    Ok(scratch)
+    tempfile::tempdir_in(parent).map_err(|error| scratch_error(error).into())
 }
 
 fn package_candidates(cargo: &ReleaseCargo, scratch: &Path, candidates: &BTreeMap<String, String>) -> Result<PathBuf> {
@@ -215,9 +214,30 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn reports_a_missing_workspace_when_preparing_scratch() -> Result<()> {
+        let parent = tempfile::tempdir()?;
+        let error = scratch_directory(&parent.path().join("missing-workspace"), Some(parent.path())).unwrap_err();
+        assert_eq!(error.downcast_ref::<io::Error>().unwrap().kind(), io::ErrorKind::NotFound);
+        Ok(())
+    }
+
+    #[test]
+    fn reports_when_the_candidate_patch_cannot_be_written() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let cargo = ReleaseCargo {
+            root: temp.path().to_path_buf(),
+            toolchain: String::new(),
+        };
+        let scratch = temp.path().join("missing-scratch");
+        let error = test_archives(&cargo, &scratch, &BTreeMap::new()).unwrap_err();
+        assert_eq!(error.downcast_ref::<io::Error>().unwrap().kind(), io::ErrorKind::NotFound);
+        Ok(())
+    }
+
     #[cfg(any(unix, windows))]
     #[test]
-    fn reports_paths_cargo_cannot_represent_in_patch_toml() {
+    fn reports_paths_cargo_cannot_represent_in_patch_toml() -> Result<()> {
         #[cfg(unix)]
         let directory = {
             use std::os::unix::ffi::OsStringExt;
@@ -229,10 +249,18 @@ mod tests {
             std::ffi::OsString::from_wide(&[0xd800])
         };
         let sources = BTreeMap::from([("candidate".into(), directory.into())]);
+        let temp = tempfile::tempdir()?;
+        let cargo = ReleaseCargo {
+            root: temp.path().to_path_buf(),
+            toolchain: String::new(),
+        };
         assert_eq!(
-            patch_config(&sources).unwrap_err().to_string(),
+            test_archives(&cargo, &temp.path().join("scratch"), &sources)
+                .unwrap_err()
+                .to_string(),
             "candidate archive path must be UTF-8"
         );
+        Ok(())
     }
 
     #[test]

@@ -63,7 +63,7 @@ fn validates_shipped_tests_and_reports_release_failures() -> io::Result<()> {
     let mut command = ark_command(&workspace, temp.path())?;
     command.args(["--temp-dir"]).arg(&nonexistent_parent);
     let unavailable_scratch = run_report(&mut command, BOTH_BUMPED)?;
-    assert_error(&unavailable_scratch, "creating release scratch directory in");
+    assert_error(&unavailable_scratch, "preparing release scratch directory in");
     assert!(String::from_utf8_lossy(&unavailable_scratch.stderr).contains("nonexistent"));
 
     let stale_report = r#"[{"name":"ark-fixture-peer","new_version":"0.1.0"}]"#;

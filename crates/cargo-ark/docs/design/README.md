@@ -15,7 +15,9 @@ remaining dependencies using the workspace's Cargo configuration, including
 any existing source overrides.
 
 Packaging and archive tests use a temporary directory outside the source
-workspace. The optional `--temp-dir` selects its parent. Ark reports errors
-and exits nonzero if it cannot complete packaging or testing. It does not
-discover candidates or publish crates. Cargo may update the workspace lockfile
-during packaging and the extracted lockfiles during testing.
+workspace. The optional `--temp-dir` selects its parent. Ark resolves the
+parent and rejects locations inside the workspace before creating scratch.
+It reports errors and exits nonzero if it cannot complete packaging or
+testing. It does not discover candidates or publish crates. Cargo may update
+the workspace lockfile during packaging and the extracted lockfiles during
+testing.
