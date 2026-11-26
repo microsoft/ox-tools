@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.28.3] - 2026-11-25
+
+- ✨ Features
+
+  - cargo-anvil: run cargo-unused-deps in pr-fast
+
 ## [0.28.2] - 2026-11-25
 
 - ✨ Features
