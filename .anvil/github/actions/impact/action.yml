@@ -7,12 +7,11 @@ description: |
   Compute the cargo-delta impact set for this PR and publish it as the
   `anvil-impact-<runner.os>` workflow artifact.
 
-  This runs the same `anvil-impact` recipe adopters run locally: it snapshots
-  the base ref and the working tree, runs `cargo delta impact`, and writes the
-  durable package files and cargo-delta cache under `target/anvil/impact/`. The
-  whole directory is uploaded so each downstream group job can download it and
-  read the cache exactly as a local run does. This keeps CI and local execution
-  identical by construction.
+  This runs the same `anvil-impact` recipe adopters run locally: cargo-delta
+  manages snapshots of the merge base and working tree, then writes the
+  durable package files under `target/anvil/impact/`. Downstream group jobs
+  download that directory and consume the same package-file format as local
+  checks, without recomputing impact.
 
   Computed once per OS family (see anvil-pr-impl.yml) because an
   OS-conditional dependency changes the reverse-dep set only in that host's
@@ -36,9 +35,8 @@ runs:
     - name: Compute impact
       shell: bash
       # Run the shared anvil-impact recipe -- the same impact building block
-      # adopters run locally. It resolves the base ref (_anvil-base-ref),
-      # snapshots the base ref in a throwaway worktree and the working
-      # tree, runs `cargo delta impact`, and writes the cache under
+      # adopters run locally. It resolves the base ref, delegates snapshots
+      # and caching to cargo-delta, and writes package selections under
       # target/anvil/impact/. This is the only job that runs cargo-delta to
       # compute the impact set; group jobs install it as a setup prereq (for
       # local recompute-capable runs) but consume the downloaded artifact

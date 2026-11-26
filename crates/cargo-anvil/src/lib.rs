@@ -55,7 +55,8 @@
 //! Supported adopter toolchains are **Rust and Cargo 1.95 or newer**, including
 //! the repository's declared MSRV. Building this release of cargo-anvil from
 //! source requires **Rust 1.97 or newer**. Generated recipes require
-//! **Just 1.46.0 or newer**, PowerShell Core (`pwsh`), Git, and rustup.
+//! **Just 1.47.0 or newer**, Git, and rustup. PowerShell Core (`pwsh`) is
+//! needed for container commands and scoped unused-dependency checks.
 //! They target one Cargo workspace or single-crate package at the repository root.
 //! Older adopter toolchains and multi-workspace orchestration are unsupported.
 //!
@@ -257,8 +258,10 @@
 //! ### Spelling
 //!
 //! Add project names, acronyms, and domain terms to the repository's
-//! `.spelling` file, one term per line. `anvil-spellcheck` converts it to the
-//! dictionary format expected by cargo-spellcheck.
+//! `.spelling` file, one term per line. `anvil-spellcheck` uses
+//! `cargo-spellcheck-helper` to convert it to the dictionary format expected
+//! by cargo-spellcheck without PowerShell. Setup installs the helper and uses
+//! it to check native prerequisites when cargo-spellcheck needs a source build.
 //!
 //! ### Coverage
 //!
