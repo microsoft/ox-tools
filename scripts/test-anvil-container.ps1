@@ -412,14 +412,14 @@ $checkoutComponents = Invoke-Just -Repo $repo -Arguments @(
 )
 Assert-Equal 'the checkout toolchain components are queryable' 0 $checkoutComponents.ExitCode
 Assert-That 'the checkout toolchain includes its file-declared rust-src component' `
-    ($checkoutComponents.StdOut -match '(?m)^rust-src-') $checkoutComponents.StdOut
+    ($checkoutComponents.StdOut -match '(?m)^rust-src\r?$') $checkoutComponents.StdOut
 
 $checkoutTargets = Invoke-Just -Repo $repo -Arguments @(
     'anvil-container', 'rustup', 'target', 'list', '--toolchain', '1.95', '--installed'
 )
 Assert-Equal 'the checkout toolchain targets are queryable' 0 $checkoutTargets.ExitCode
 Assert-That 'the checkout toolchain includes its file-declared non-host target' `
-    ($checkoutTargets.StdOut -match '(?m)^wasm32-unknown-unknown$') $checkoutTargets.StdOut
+    ($checkoutTargets.StdOut -match '(?m)^wasm32-unknown-unknown\r?$') $checkoutTargets.StdOut
 
 $unscopedImpact = Invoke-Just -Repo $repo `
     -Arguments @('anvil-container', 'just', '_anvil-unscoped', 'e2e-impact') `
