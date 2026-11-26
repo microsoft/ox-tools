@@ -12,4 +12,4 @@ anvil-spellcheck-setup installer="install": (anvil-tool-cargo-spellcheck-install
 # Validate prerequisites for the `anvil-spellcheck` recipe.
 [group("anvil-setup")]
 [private]
-anvil-spellcheck-validate-prereqs: anvil-tool-cargo-spellcheck-validate-prereqs anvil-tool-cargo-each-validate-prereqs
+anvil-spellcheck-validate-prereqs: anvil-tool-cargo-spellcheck-helper-validate-prereqs anvil-tool-cargo-spellcheck-validate-prereqs anvil-tool-cargo-each-validate-prereqs

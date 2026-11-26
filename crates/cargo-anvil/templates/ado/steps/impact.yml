@@ -17,9 +17,8 @@ steps:
     displayName: anvil impact (install tools)
   - pwsh: just anvil-impact
     # Run the shared anvil-impact recipe -- the same impact building block
-    # adopters run locally. It resolves the base ref (_anvil-base-ref),
-    # snapshots the base ref in a throwaway worktree and the working
-    # tree, runs `cargo delta impact`, and writes the cache under
+    # adopters run locally. It resolves the base ref, delegates snapshots
+    # and caching to cargo-delta, and writes package selections under
     # target/anvil/impact/. This is the only job that needs cargo-delta; the
     # group stages just download the artifact it produces.
     displayName: anvil impact (cargo-delta)
