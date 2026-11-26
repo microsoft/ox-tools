@@ -5664,7 +5664,7 @@ mod tests {
 
         let code = run_session(&mut host, &args, When::Never, Styler::new(false)).expect("run session");
 
-        assert_eq!(code, EXIT_GATE_FAILED);
+        assert_eq!(code, EXIT_GATE_FAILED, "stdout:\n{}\nstderr:\n{}", host.out(), host.err());
         assert!(host.err().contains("expected survived, but this mutant was"), "{}", host.err());
         assert!(host.err().contains("1 expectation did not hold"), "{}", host.err());
     }
@@ -5747,7 +5747,7 @@ mod tests {
 
         let code = run_session(&mut host, &args, When::Never, Styler::new(false)).expect("run session");
 
-        assert_eq!(code, EXIT_GATE_FAILED);
+        assert_eq!(code, EXIT_GATE_FAILED, "stdout:\n{}\nstderr:\n{}", host.out(), host.err());
         assert!(host.err().contains("is below the required 100.0%"), "{}", host.err());
     }
 
