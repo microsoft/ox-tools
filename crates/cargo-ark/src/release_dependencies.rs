@@ -6,7 +6,7 @@ use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
 
 use flate2::read::GzDecoder;
 use serde_json::Value;
@@ -28,7 +28,7 @@ pub(super) fn check(temp_dir: Option<&Path>) -> Result<()> {
         return Ok(());
     }
 
-    let cargo = ReleaseCargo::new()?;
+    let cargo = ReleaseCargo::discover(Command::output)?;
     let scratch = scratch_directory(&cargo.root, temp_dir)?;
     let archives = package_candidates(&cargo, scratch.path(), &candidates)?;
     validate_packages(&cargo, scratch.path(), &archives, candidates)
@@ -125,16 +125,21 @@ struct ReleaseCargo {
 }
 
 impl ReleaseCargo {
-    fn new() -> Result<Self> {
+    fn discover(mut run_output: impl FnMut(&mut Command) -> io::Result<Output>) -> Result<Self> {
         let manifest = capture(
             Command::new("cargo").args(["locate-project", "--workspace", "--message-format", "plain"]),
             "locating the Cargo workspace",
+            &mut run_output,
         )?;
         let root = Path::new(&manifest)
             .parent()
             .ok_or("workspace manifest has no parent directory")?
             .to_path_buf();
-        let toolchain = capture(Command::new("rustc").args(["--print", "sysroot"]), "selecting Rust toolchain")?;
+        let toolchain = capture(
+            Command::new("rustc").args(["--print", "sysroot"]),
+            "selecting Rust toolchain",
+            run_output,
+        )?;
         let cargo_home = std::env::var_os("CARGO_HOME");
         Ok(Self {
             root,
@@ -168,8 +173,8 @@ impl ReleaseCargo {
     }
 }
 
-fn capture(command: &mut Command, operation: &str) -> Result<String> {
-    let output = command.stderr(Stdio::inherit()).output()?;
+fn capture(command: &mut Command, operation: &str, run_output: impl FnOnce(&mut Command) -> io::Result<Output>) -> Result<String> {
+    let output = run_output(command.stderr(Stdio::inherit()))?;
     if !output.status.success() {
         return Err(format!("{operation} failed ({})", output.status).into());
     }
@@ -187,8 +192,56 @@ fn run(command: &mut Command, operation: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use std::ffi::OsStr;
+    use std::process::ExitStatus;
 
     use super::*;
+
+    fn probe_output(status: ExitStatus, stdout: &[u8]) -> Output {
+        Output {
+            status,
+            stdout: stdout.to_vec(),
+            stderr: Vec::new(),
+        }
+    }
+
+    fn discovery_error(probes: impl IntoIterator<Item = (&'static str, Output)>) -> Box<dyn std::error::Error> {
+        let mut probes = probes.into_iter();
+        let error = ReleaseCargo::discover(|command| {
+            let (program, output) = probes.next().expect("discovery ran a probe beyond the scripted failure");
+            assert_eq!(command.get_program(), program);
+            Ok(output)
+        })
+        .err()
+        .expect("the scripted probe results cannot yield a workspace and toolchain");
+        assert!(probes.next().is_none(), "discovery stopped before the failing probe");
+        error
+    }
+
+    #[test]
+    fn rejects_a_workspace_manifest_without_a_parent() {
+        let error = discovery_error([("cargo", probe_output(ExitStatus::default(), b""))]);
+        assert_eq!(error.to_string(), "workspace manifest has no parent directory");
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn reports_a_failed_rustc_sysroot_probe() {
+        #[cfg(unix)]
+        let status = <ExitStatus as std::os::unix::process::ExitStatusExt>::from_raw(7 << 8);
+        #[cfg(windows)]
+        let status = <ExitStatus as std::os::windows::process::ExitStatusExt>::from_raw(7);
+        let error = discovery_error([
+            ("cargo", probe_output(ExitStatus::default(), b"workspace/Cargo.toml")),
+            ("rustc", probe_output(status, b"")),
+        ]);
+        assert_eq!(error.to_string(), format!("selecting Rust toolchain failed ({status})"));
+    }
+
+    #[test]
+    fn rejects_non_utf8_probe_output() {
+        let error = discovery_error([("cargo", probe_output(ExitStatus::default(), &[0xff]))]);
+        assert!(error.is::<std::string::FromUtf8Error>(), "{error}");
+    }
 
     #[test]
     fn reads_candidate_versions_and_ignores_discovery_metadata() -> Result<()> {
@@ -289,7 +342,7 @@ mod tests {
         let scratch = tempfile::tempdir()?;
         let mut missing = Command::new(scratch.path().join("unavailable-cargo"));
         for error in [
-            capture(&mut missing, "locating the Cargo workspace").unwrap_err(),
+            capture(&mut missing, "locating the Cargo workspace", Command::output).unwrap_err(),
             run(&mut missing, "testing a candidate").unwrap_err(),
         ] {
             assert_eq!(error.downcast_ref::<io::Error>().unwrap().kind(), io::ErrorKind::NotFound);
