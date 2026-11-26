@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Run the real Cargo test with `cargo test -p cargo-ark --test release_dependencies -- --ignored`.
+//! Offline integration test for Ark and Cargo.
 
 use std::io::{self, Write};
 use std::path::Path;
@@ -17,7 +17,6 @@ const ONLY_CONSUMER_BUMPED: &str = r#"[
 ]"#;
 
 #[test]
-#[ignore = "runs the real Ark binary and Cargo offline"]
 fn validates_shipped_tests_and_reports_release_failures() -> io::Result<()> {
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().join("workspace");
