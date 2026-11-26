@@ -93,7 +93,13 @@ fn copy_fixture(source: &Path, destination: &Path) -> io::Result<()> {
     fs::create_dir(destination)?;
     for entry in source.read_dir()? {
         let entry = entry?;
-        let target = destination.join(entry.file_name());
+        let name = entry.file_name();
+        // Cargo skips nested packages when packaging Ark itself.
+        let target = if name == "Cargo.fixture.toml" {
+            destination.join("Cargo.toml")
+        } else {
+            destination.join(name)
+        };
         if entry.file_type()?.is_dir() {
             copy_fixture(&entry.path(), &target)?;
         } else {
