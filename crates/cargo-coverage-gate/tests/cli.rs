@@ -752,6 +752,7 @@ fn run_delegates_both_configurations_to_cargo_llvm_cov_report_and_evaluates() {
         .env("FAKE_TOOL_LOG", &tool_log)
         .env("FAKE_WORKSPACE_ROOT", tmp.path())
         .env("FAKE_COVERAGE_OBJECT", &object)
+        .env("FAKE_EXPECT_PREVIOUS_TARGET_CLEANED", "1")
         .assert()
         .success()
         .stdout(predicate::str::contains("all packages meet their threshold"));
