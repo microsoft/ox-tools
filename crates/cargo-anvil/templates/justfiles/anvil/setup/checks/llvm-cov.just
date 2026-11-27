@@ -8,10 +8,20 @@
 [group("anvil-setup")]
 [private]
 anvil-llvm-cov-setup installer="install": anvil-component-nightly-llvm-tools-install (anvil-tool-cargo-llvm-cov-install installer) (anvil-tool-cargo-nextest-install installer) (anvil-tool-cargo-each-install installer)
-    {{ if anvil_coverage_gate_local_command == "" { just_executable() + " anvil-tool-cargo-coverage-gate-install " + installer } else { "# the workspace supplies the cargo-coverage-gate command" } }}
+    {{ just_executable() }} --justfile {{ quote(justfile()) }} _anvil-llvm-cov-setup-coverage-gate {{ installer }}
+
+# Resolve the workspace-owned tool after the cargo-each prerequisite exists.
+[private]
+_anvil-llvm-cov-setup-coverage-gate installer:
+    {{ if anvil_coverage_gate_local_command == "" { just_executable() + " --justfile " + quote(justfile()) + " anvil-tool-cargo-coverage-gate-install " + installer } else { "# the workspace supplies the cargo-coverage-gate command" } }}
 
 # Validate prerequisites for the `anvil-llvm-cov` recipe.
 [group("anvil-setup")]
 [private]
 anvil-llvm-cov-validate-prereqs: anvil-component-nightly-llvm-tools-validate-prereqs anvil-tool-cargo-llvm-cov-validate-prereqs anvil-tool-cargo-nextest-validate-prereqs anvil-tool-cargo-each-validate-prereqs
-    {{ if anvil_coverage_gate_local_command == "" { just_executable() + " anvil-tool-cargo-coverage-gate-validate-prereqs" } else { "# the workspace supplies the cargo-coverage-gate command" } }}
+    {{ just_executable() }} --justfile {{ quote(justfile()) }} _anvil-llvm-cov-validate-coverage-gate
+
+# Resolve the workspace-owned tool only after cargo-each is known to be present.
+[private]
+_anvil-llvm-cov-validate-coverage-gate:
+    {{ if anvil_coverage_gate_local_command == "" { just_executable() + " --justfile " + quote(justfile()) + " anvil-tool-cargo-coverage-gate-validate-prereqs" } else { "# the workspace supplies the cargo-coverage-gate command" } }}

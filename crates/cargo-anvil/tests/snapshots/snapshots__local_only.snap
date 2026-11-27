@@ -343,9 +343,9 @@ RUN : "${ANVIL_ROOT_MSRV:?pass --build-arg ANVIL_ROOT_MSRV=<declared-rust-versio
     && if [ -f rust-toolchain.toml ] || [ -f rust-toolchain ]; then \
         unset RUSTUP_TOOLCHAIN \
         && rustup toolchain install \
-        && just anvil-setup binstall; \
+        && ANVIL_COVERAGE_GATE_LOCAL_COMMAND="" just anvil-setup binstall; \
     else \
-        RUSTUP_TOOLCHAIN="${setup_toolchain}" just anvil-setup binstall; \
+        RUSTUP_TOOLCHAIN="${setup_toolchain}" ANVIL_COVERAGE_GATE_LOCAL_COMMAND="" just anvil-setup binstall; \
     fi \
     && rm -rf "${CARGO_HOME}/registry/cache" "${CARGO_HOME}/registry/src" \
     && rm -f "${CARGO_HOME}/credentials" "${CARGO_HOME}/credentials.toml" "${HOME:-/root}/.netrc" /root/.netrc \
@@ -1718,13 +1718,20 @@ anvil_careful_target_dir := if anvil_careful_prefix == "" {
 }
 
 anvil_coverage_gate_host_target := shell("rustc +" + rust_nightly + " --print host-tuple")
-anvil_coverage_gate_local_command := shell(
-    "cargo each --workspace --filter metadata:anvil.catalog-tool=cargo-coverage-gate --once --dry-run -- cargo +"
-    + rust_nightly
-    + " run --locked --package cargo-coverage-gate --bin cargo-coverage-gate --target="
-    + anvil_coverage_gate_host_target
-    + " -- coverage-gate"
-)
+# The sentinel distinguishes automatic workspace detection from the explicit
+# empty override used when a container build has no copied Cargo manifests.
+anvil_coverage_gate_local_command_override := env_var_or_default("ANVIL_COVERAGE_GATE_LOCAL_COMMAND", "__anvil-auto-detect__")
+anvil_coverage_gate_local_command := if anvil_coverage_gate_local_command_override == "__anvil-auto-detect__" {
+    shell(
+        "cargo each --workspace --filter metadata:anvil.catalog-tool=cargo-coverage-gate --once --dry-run -- cargo +"
+        + rust_nightly
+        + " run --locked --package cargo-coverage-gate --bin cargo-coverage-gate --target="
+        + anvil_coverage_gate_host_target
+        + " -- coverage-gate"
+    )
+} else {
+    anvil_coverage_gate_local_command_override
+}
 anvil_coverage_gate_command := if anvil_coverage_gate_local_command == "" {
     "cargo +" + rust_nightly + " coverage-gate"
 } else {
@@ -2419,13 +2426,23 @@ anvil-license-headers-validate-prereqs: anvil-tool-cargo-heather-validate-prereq
 [group("anvil-setup")]
 [private]
 anvil-llvm-cov-setup installer="install": anvil-component-nightly-llvm-tools-install (anvil-tool-cargo-llvm-cov-install installer) (anvil-tool-cargo-nextest-install installer) (anvil-tool-cargo-each-install installer)
-    {{ if anvil_coverage_gate_local_command == "" { just_executable() + " anvil-tool-cargo-coverage-gate-install " + installer } else { "# the workspace supplies the cargo-coverage-gate command" } }}
+    {{ just_executable() }} --justfile {{ quote(justfile()) }} _anvil-llvm-cov-setup-coverage-gate {{ installer }}
+
+# Resolve the workspace-owned tool after the cargo-each prerequisite exists.
+[private]
+_anvil-llvm-cov-setup-coverage-gate installer:
+    {{ if anvil_coverage_gate_local_command == "" { just_executable() + " --justfile " + quote(justfile()) + " anvil-tool-cargo-coverage-gate-install " + installer } else { "# the workspace supplies the cargo-coverage-gate command" } }}
 
 # Validate prerequisites for the `anvil-llvm-cov` recipe.
 [group("anvil-setup")]
 [private]
 anvil-llvm-cov-validate-prereqs: anvil-component-nightly-llvm-tools-validate-prereqs anvil-tool-cargo-llvm-cov-validate-prereqs anvil-tool-cargo-nextest-validate-prereqs anvil-tool-cargo-each-validate-prereqs
-    {{ if anvil_coverage_gate_local_command == "" { just_executable() + " anvil-tool-cargo-coverage-gate-validate-prereqs" } else { "# the workspace supplies the cargo-coverage-gate command" } }}
+    {{ just_executable() }} --justfile {{ quote(justfile()) }} _anvil-llvm-cov-validate-coverage-gate
+
+# Resolve the workspace-owned tool only after cargo-each is known to be present.
+[private]
+_anvil-llvm-cov-validate-coverage-gate:
+    {{ if anvil_coverage_gate_local_command == "" { just_executable() + " --justfile " + quote(justfile()) + " anvil-tool-cargo-coverage-gate-validate-prereqs" } else { "# the workspace supplies the cargo-coverage-gate command" } }}
 
 # Install prerequisites for the `anvil-loom` recipe.
 [group("anvil-setup")]

@@ -125,9 +125,9 @@ RUN : "${ANVIL_ROOT_MSRV:?pass --build-arg ANVIL_ROOT_MSRV=<declared-rust-versio
     && if [ -f rust-toolchain.toml ] || [ -f rust-toolchain ]; then \
         unset RUSTUP_TOOLCHAIN \
         && rustup toolchain install \
-        && just anvil-setup binstall; \
+        && ANVIL_COVERAGE_GATE_LOCAL_COMMAND="" just anvil-setup binstall; \
     else \
-        RUSTUP_TOOLCHAIN="${setup_toolchain}" just anvil-setup binstall; \
+        RUSTUP_TOOLCHAIN="${setup_toolchain}" ANVIL_COVERAGE_GATE_LOCAL_COMMAND="" just anvil-setup binstall; \
     fi \
     && rm -rf "${CARGO_HOME}/registry/cache" "${CARGO_HOME}/registry/src" \
     && rm -f "${CARGO_HOME}/credentials" "${CARGO_HOME}/credentials.toml" "${HOME:-/root}/.netrc" /root/.netrc \

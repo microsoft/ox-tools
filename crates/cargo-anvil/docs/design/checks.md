@@ -115,7 +115,9 @@ see [cargo-coverage-gate's accepted layouts](../../../cargo-coverage-gate/docs/d
 Workspaces owning the `cargo-coverage-gate` package and binary use that checkout's
 collector, bootstrapped in release mode to avoid retaining a separate debug build
 alongside the instrumented test builds. This does not change the coverage test
-profiles or thresholds. Other workspaces use the installed tool.
+profiles or thresholds. Setup and prerequisite validation also skip the external
+tool installation when this checkout supplies the command. Other workspaces use
+the installed tool.
 
 ### `pr-msrv`
 

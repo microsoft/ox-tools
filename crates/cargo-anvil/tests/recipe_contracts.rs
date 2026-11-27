@@ -226,14 +226,14 @@ fn coverage_is_one_domain_tool_invocation() {
 #[test]
 fn coverage_setup_prefers_a_workspace_catalog_tool_before_external_installation() {
     let setup = include_str!("../templates/justfiles/anvil/setup/checks/llvm-cov.just");
+    assert!(
+        setup.contains(r"{{ just_executable() }} --justfile {{ quote(justfile()) }} _anvil-llvm-cov-setup-coverage-gate {{ installer }}")
+    );
     assert!(setup.contains(
-        r#"{{ if anvil_coverage_gate_local_command == "" { just_executable() + " anvil-tool-cargo-coverage-gate-install " + installer }"#
+        r#"{{ if anvil_coverage_gate_local_command == "" { just_executable() + " --justfile " + quote(justfile()) + " anvil-tool-cargo-coverage-gate-install " + installer }"#
     ));
     assert!(setup.contains(
-        r#"{{ if anvil_coverage_gate_local_command == "" { just_executable() + " anvil-tool-cargo-coverage-gate-validate-prereqs" }"#
-    ));
-    assert!(!setup.contains(
-        r#"anvil-llvm-cov-setup installer="install": anvil-component-nightly-llvm-tools-install (anvil-tool-cargo-llvm-cov-install installer) (anvil-tool-cargo-nextest-install installer) (anvil-tool-cargo-coverage-gate-install installer)"#
+        r#"{{ if anvil_coverage_gate_local_command == "" { just_executable() + " --justfile " + quote(justfile()) + " anvil-tool-cargo-coverage-gate-validate-prereqs" }"#
     ));
 }
 
@@ -453,7 +453,8 @@ fn container_context_and_setup_use_all_generated_recipe_files() {
     assert!(dockerfile.contains("setup_toolchain=stable"));
     assert!(dockerfile.contains("unset RUSTUP_TOOLCHAIN"));
     assert!(dockerfile.contains("rustup toolchain install \\\n"));
-    assert!(dockerfile.contains("RUSTUP_TOOLCHAIN=\"${setup_toolchain}\" just anvil-setup"));
+    assert!(dockerfile.contains(r#"ANVIL_COVERAGE_GATE_LOCAL_COMMAND="" just anvil-setup binstall"#));
+    assert!(dockerfile.contains(r#"RUSTUP_TOOLCHAIN="${setup_toolchain}" ANVIL_COVERAGE_GATE_LOCAL_COMMAND="" just anvil-setup binstall"#));
     assert!(generated.helpers.contains("[env(\"ANVIL_IMPACT\", \"off\")]"));
 }
 
