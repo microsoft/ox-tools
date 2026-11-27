@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.29.1] - 2026-11-27
+
+- 🐛 Bug Fixes
+
+  - cargo-anvil: qualify Cargo package selectors by source
+
 ## [0.29.0] - 2026-11-27
 
 - ✨ Features
