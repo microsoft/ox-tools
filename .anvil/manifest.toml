@@ -1,7 +1,7 @@
 version = 2
 tool = "anvil"
-tool_version = "0.28.4"
-catalog_checksum = "sha256:6b7dac6a6be56420985da64637ea12f4505412c88b7e86121e180cff573cb6b4"
+tool_version = "0.28.5"
+catalog_checksum = "sha256:e218b577c26bd357193804693334b7f8bf523b309d9a21861f79e72db83b27e2"
 
 [[file]]
 path = ".anvil/anvil.just"
@@ -49,7 +49,7 @@ checksum = "sha256:745af1a2241e5535a848d2dfefb58784ceb2e8674be8ddd98001b09842a4c
 
 [[file]]
 path = ".anvil/setup.just"
-checksum = "sha256:59b35e0d2d2cf2e6be333358860455ff8997188dce429def76968d157de5a010"
+checksum = "sha256:cc1873782a889a67e88cc9a649dbe4ce8f6756837c00bc8cf652107ffe033123"
 
 [[file]]
 path = ".github/instructions/cargo-anvil.instructions.md"
@@ -69,7 +69,7 @@ checksum = "sha256:0a5175097db63c01ef0933a3b48fa55c485a7f92de504037b2f2a93e6376e
 
 [[file]]
 path = ".github/workflows/anvil-pr-impl.yml"
-checksum = "sha256:2b473f15d8428e557ad7120f4d679f1640f7b83f4798bedf95203c5041691fb5"
+checksum = "sha256:970dc323271d2b9334c046b0b031b2fbff5815fb20d040968280fcb486ca3b80"
 
 [[file]]
 path = ".github/workflows/anvil-pr.yml"
@@ -77,7 +77,7 @@ checksum = "sha256:db16171eb0e10240221083d7d89e2f2f1f16b667ce6ae96f00f6a02bf6316
 
 [[file]]
 path = ".github/workflows/anvil-scheduled-impl.yml"
-checksum = "sha256:65276707452f7104d49d85c1ca31c034dfc1df9f7e8882672e99a6bc988a9632"
+checksum = "sha256:60dafee85245997334f961359806d519fbf2a06cddb987c8c88323b473344b60"
 
 [[file]]
 path = ".github/workflows/anvil-scheduled.yml"
@@ -175,6 +175,11 @@ checksum = "sha256:2dd7c0f21339fd17092b8dedfe924aa86732c3520baab84f914c2d8f4103a
 
 [[region]]
 host = "crates/cargo-ensure-no-default-features/Cargo.toml"
+id = "anvil-lints"
+checksum = "sha256:2dd7c0f21339fd17092b8dedfe924aa86732c3520baab84f914c2d8f4103ac40"
+
+[[region]]
+host = "crates/cargo-ensure-no-test-features/Cargo.toml"
 id = "anvil-lints"
 checksum = "sha256:2dd7c0f21339fd17092b8dedfe924aa86732c3520baab84f914c2d8f4103ac40"
 

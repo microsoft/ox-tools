@@ -1102,6 +1102,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn download_entry_point_forwards_the_custom_timeout() {
+        struct PendingAttempt(Arc<AtomicU32>);
+
+        impl Drop for PendingAttempt {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let cancelled = Arc::new(AtomicU32::new(0));
+        let download = resilient_download("custom_deadline", (), Some(Duration::ZERO), {
+            let cancelled = Arc::clone(&cancelled);
+            move |()| {
+                let attempt = PendingAttempt(Arc::clone(&cancelled));
+                async move {
+                    let _attempt = attempt;
+                    core::future::pending::<crate::Result<()>>().await
+                }
+            }
+        });
+        let mut download = std::pin::pin!(download);
+
+        assert!(futures_util::poll!(&mut download).is_pending());
+        assert_eq!(
+            cancelled.load(Ordering::Relaxed),
+            1,
+            "the zero custom deadline must cancel the pending attempt before retry backoff"
+        );
+    }
+
+    #[tokio::test]
     #[cfg_attr(miri, ignore = "requires tokio timers")]
     async fn download_uses_exactly_the_configured_number_of_retries() {
         let attempts = Arc::new(AtomicU32::new(0));

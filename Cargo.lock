@@ -433,7 +433,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-anvil"
-version = "0.28.4"
+version = "0.28.5"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -586,6 +586,17 @@ dependencies = [
  "ohno",
  "tempfile",
  "toml",
+]
+
+[[package]]
+name = "cargo-ensure-no-test-features"
+version = "0.1.0"
+dependencies = [
+ "cargo_metadata",
+ "clap",
+ "ohno",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -775,7 +786,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-unused-deps"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "cargo_metadata",
  "clap",

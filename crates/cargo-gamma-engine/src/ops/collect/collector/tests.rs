@@ -39,6 +39,22 @@ fn with_source_facts(source: &str, selector: &str, check: impl FnOnce(&mut Colle
 }
 
 #[test]
+fn result_shaped_identity_aliases_do_not_enable_direct_default_replacements() {
+    for (name, expected_count) in [("Result", 0), ("Value", 1)] {
+        let source = format!("type {name}<T> = T; fn f(value: {name}<u8>) -> {name}<u8> {{ return value; }}");
+        let file = SourceFile::parse("fixture.rs", source.clone()).unwrap();
+
+        for selector in ["parameter.default_shadow", "return_value.default"] {
+            let candidates = collect_in(&file, &Selection::parse(selector).unwrap(), &CfgSet::unconditional());
+            assert_eq!(candidates.len(), expected_count, "{selector}: {source}: {candidates:?}");
+            for candidate in candidates {
+                assert!(candidate.replacement.contains("Default::default()"), "{candidate:?}");
+            }
+        }
+    }
+}
+
+#[test]
 fn unrelated_package_declarations_do_not_reintroduce_literal_default_mutants() {
     let cfg = CfgSet::unconditional();
     let root = SourceFile::parse("lib.rs", "mod consumer; mod unrelated { pub struct Default; }".into()).unwrap();

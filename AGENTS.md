@@ -10,6 +10,18 @@ The spell checker dictionary is in the `.spelling` file, one word per line in ar
 
 Do not manually edit `CHANGELOG.md` files. Changelogs are automatically updated on release.
 
+## Tool Versioning
+
+When creating a PR that changes a tool's externally observable behavior,
+suggest an appropriate version bump for each affected tool if the PR does not
+already include one. Call out whether the new behavior will remain unpublished
+until a separate release. Do not silently expand the PR into a release unless
+the user requests it or a repository rule requires it.
+
+Use `.\scripts\release-crate.ps1 <crate> -Version <new-version>` for requested
+version bumps so the crate version, generated changelog, README, and
+`Cargo.lock` stay synchronized.
+
 ## cargo-anvil Versioning
 
 When a PR changes cargo-anvil's catalog (including template-only updates),

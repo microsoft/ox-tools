@@ -208,7 +208,6 @@ fn find_libclang(environment: &Environment, probe: &mut impl Probe) -> Result<Pa
     } else {
         if let Some(prefix) = optional_directory_command(probe, &environment.llvm_config, &["--prefix"], &mut notes) {
             for name in ["bin", "lib", "lib64"] {
-                // #[gamma::skip(call_result.default, tag = "equivalent", reason = "default_after still executes this side-effecting call and replaces its unit result with unit.")]
                 append_optional_paths(
                     search_directory(environment, &prefix.join(name), probe),
                     &mut candidates,
@@ -220,7 +219,6 @@ fn find_libclang(environment: &Environment, probe: &mut impl Probe) -> Result<Pa
         if environment.target.platform == Platform::MacOs
             && let Some(prefix) = optional_directory_command(probe, std::ffi::OsStr::new("xcode-select"), &["--print-path"], &mut notes)
         {
-            // #[gamma::skip(call_result.default, tag = "equivalent", reason = "default_after still executes this side-effecting call and replaces its unit result with unit.")]
             append_optional_paths(
                 search_directory(environment, &prefix.join("Toolchains/XcodeDefault.xctoolchain/usr/lib"), probe),
                 &mut candidates,
@@ -229,7 +227,6 @@ fn find_libclang(environment: &Environment, probe: &mut impl Probe) -> Result<Pa
             );
         }
         for directory in &environment.ld_library_path {
-            // #[gamma::skip(call_result.default, tag = "equivalent", reason = "default_after still executes this side-effecting call and replaces its unit result with unit.")]
             append_optional_paths(
                 search_directory(environment, directory, probe),
                 &mut candidates,
@@ -239,10 +236,8 @@ fn find_libclang(environment: &Environment, probe: &mut impl Probe) -> Result<Pa
         }
         for pattern in directory_patterns(&environment.target) {
             let mut directories = Vec::new();
-            // #[gamma::skip(call_result.default, tag = "equivalent", reason = "default_after still executes this side-effecting call and replaces its unit result with unit.")]
             append_optional_paths(probe.glob(pattern, false), &mut directories, &mut notes, &mut first_search_error);
             for directory in directories {
-                // #[gamma::skip(call_result.default, tag = "equivalent", reason = "default_after still executes this side-effecting call and replaces its unit result with unit.")]
                 append_optional_paths(
                     search_directory(environment, &directory, probe),
                     &mut candidates,

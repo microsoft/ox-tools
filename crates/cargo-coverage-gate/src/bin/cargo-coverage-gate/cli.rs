@@ -95,6 +95,10 @@ pub(crate) struct CollectionArgs {
     #[arg(long, value_name = "PATH", default_value = "target/coverage")]
     pub(crate) coverage_dir: PathBuf,
 
+    /// Publish raw LCOV for later joint filtering and evaluation, without a verdict summary.
+    #[arg(long, conflicts_with = "no_coverage_targets")]
+    pub(crate) collect_only: bool,
+
     /// Run tests without coverage or gating on this Rust target.
     ///
     /// May be repeated. Matches the explicit `--target` or resolved rustc host.
@@ -167,7 +171,27 @@ mod tests {
         assert_eq!(run.no_coverage_targets, ["aarch64-pc-windows-msvc", "wasm32-unknown-unknown"]);
         assert_eq!(run.jobs.map(NonZeroUsize::get), Some(4));
         assert_eq!(run.coverage_dir, PathBuf::from("coverage"));
+        assert!(!run.collect_only);
         assert_eq!(args.packages, ["alpha"]);
         assert_eq!(args.target.as_deref(), Some("x86_64-unknown-linux-gnu"));
+    }
+
+    #[test]
+    fn collect_only_requires_instrumented_collection() {
+        let CargoCli::CoverageGate(args) =
+            CargoCli::try_parse_from(["cargo", "coverage-gate", "run", "--collect-only"]).expect("collection-only invocation must parse");
+        let CoverageGateCommand::Run(run) = args.command.expect("run subcommand must be selected");
+        assert!(run.collect_only);
+
+        let error = CargoCli::try_parse_from([
+            "cargo",
+            "coverage-gate",
+            "run",
+            "--collect-only",
+            "--no-coverage-target",
+            "aarch64-pc-windows-msvc",
+        ])
+        .expect_err("plain-test mode cannot publish coverage reports");
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 }

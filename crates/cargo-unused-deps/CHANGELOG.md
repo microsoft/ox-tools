@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-26
+
+- ✨ Features
+
+  - unused-deps: accept package selection files ([#395](https://github.com/microsoft/ox-tools/pull/395))
+
 ## [0.2.1] - 2026-11-25
 
 - ✨ Features
