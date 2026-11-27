@@ -11,7 +11,7 @@ that floor universally.
 
 | Group | Checks |
 |-------|--------|
-| `pr-fast` | fmt, clippy, cargo-sort, license-headers, ensure-no-cyclic-deps, ensure-no-default-features, deny-test-features, doc-build, readme-check, spellcheck, pr-title, deny, audit, unused-deps, udeps, external-types |
+| `pr-fast` | fmt, clippy, cargo-sort, license-headers, ensure-no-cyclic-deps, ensure-no-default-features, deny-test-features, doc-build, readme-check, spellcheck, pr-title, deny (without advisories), audit, unused-deps, udeps, external-types |
 | `pr-test` | llvm-cov, doc-test, examples |
 | `pr-msrv` | msrv-test |
 | `pr-runtime-analysis` | miri, careful, loom |
@@ -59,7 +59,7 @@ Locally, recipes run on the host OS. See [github.md](./github.md) and
 | `readme-check` | Checks generated READMEs for publishable crates except `[package.metadata.ox-gen-readme]` opt-outs. Library/proc-macro rustdoc takes precedence over binary rustdoc. |
 | `spellcheck` | Checks spelling with cargo-spellcheck and repository configuration. |
 | `pr-title` | Validates `PR_TITLE`; skips when it is unset or empty. CI retrieves the current title and fails if a known PR's title cannot be read. |
-| `deny` | Enforces cargo-deny policy. |
+| `deny` | Enforces dependency bans, licenses, and sources without consulting advisory databases. |
 | `audit` | Checks the lockfile against security advisories. |
 | `unused-deps` | Always checks workspace dependency inheritance; compiler-backed checks for unused/misplaced package dependencies use the required impact tier and include doctest evidence. Check-only by default; local `--fix` removes uninherited workspace catalog entries only. |
 | `udeps` | Checks unused dependencies with all features, both for default targets and for all targets. This catches unused dev-dependencies and regular dependencies used only by tests, benches, or examples. |
@@ -221,6 +221,11 @@ within a configuration are reported; a failed configuration stops the check
 before the next one.
 
 ### `scheduled-advisories`
+
+Cargo-deny runs all checks in this scheduled group, including advisories. In
+`pr-fast`, it checks only bans, licenses, and sources. Direct `just anvil-deny`
+runs all checks; `just anvil-deny --advisories false` selects the PR subset.
+`cargo-audit` runs in `pr-fast` and `scheduled-advisories`.
 
 `deny`, `audit`, and `aprz` check external policy, vulnerability, and dependency
 risk data; `clippy` checks the selected compiler's lint set. Despite the group

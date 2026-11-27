@@ -18,7 +18,7 @@ anvil-pr-fast: anvil-pr-fast-validate-prereqs \
     anvil-readme-check \
     anvil-spellcheck \
     anvil-pr-title \
-    anvil-deny \
+    (anvil-deny "false") \
     anvil-audit \
     anvil-unused-deps \
     anvil-udeps \

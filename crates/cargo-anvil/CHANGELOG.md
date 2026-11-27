@@ -2,6 +2,32 @@
 
 ## [Unreleased]
 
+## [0.29.5] - 2026-11-27
+
+- 📚 Documentation
+
+  - cargo-anvil: name cargo-audit execution groups
+
+- ✔️ Tasks
+
+  - cargo-anvil: regenerate split deny check artifacts
+  - cargo-anvil: release 0.28.0 and regenerate scheduled deny routing
+
+- 🔄 Continuous Integration
+
+  - cargo-anvil: retain advisory-independent deny checks in PRs
+  - cargo-anvil: move cargo-deny to scheduled checks
+
+- 🧩 Miscellaneous
+
+  - Merge main and preserve deny split with test-feature checks
+  - Merge main and preserve deny split with gamma 0.8.0
+  - Merge main and preserve deny split with portable recipes
+  - Merge main and preserve deny split with unused-deps checks
+  - Merge main and preserve deny split with disk diagnostics
+  - Merge main and preserve cargo-deny advisory split
+  - Merge main and reconcile cargo-anvil 0.29.0 catalog
+
 ## [0.29.1] - 2026-11-27
 
 - ✨ Features

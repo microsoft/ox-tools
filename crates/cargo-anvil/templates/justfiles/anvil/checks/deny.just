@@ -5,5 +5,6 @@
 # Regenerate with cargo-anvil to update this file.
 
 # Validate dependency licenses, bans, sources, and advisories.
-anvil-deny: anvil-deny-validate-prereqs
-    cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} deny check
+[arg("advisories", long, pattern='(?:true|false)')]
+anvil-deny advisories="true": anvil-deny-validate-prereqs
+    cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} deny check {{ if advisories == "true" { "all" } else { "bans licenses sources" } }}
