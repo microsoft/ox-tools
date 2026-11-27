@@ -848,6 +848,36 @@ anvil-pr-runtime-analysis-validate-prereqs: \
     anvil-careful-validate-prereqs \
     anvil-loom-validate-prereqs
 
+[private]
+anvil-pr-runtime-analysis-miri-setup installer="install": \
+    (anvil-tool-cargo-delta-install installer) \
+    (anvil-miri-setup installer)
+
+[private]
+anvil-pr-runtime-analysis-miri-validate-prereqs: \
+    anvil-tool-cargo-delta-validate-prereqs \
+    anvil-miri-validate-prereqs
+
+[private]
+anvil-pr-runtime-analysis-careful-setup installer="install": \
+    (anvil-tool-cargo-delta-install installer) \
+    (anvil-careful-setup installer)
+
+[private]
+anvil-pr-runtime-analysis-careful-validate-prereqs: \
+    anvil-tool-cargo-delta-validate-prereqs \
+    anvil-careful-validate-prereqs
+
+[private]
+anvil-pr-runtime-analysis-loom-setup installer="install": \
+    (anvil-tool-cargo-delta-install installer) \
+    (anvil-loom-setup installer)
+
+[private]
+anvil-pr-runtime-analysis-loom-validate-prereqs: \
+    anvil-tool-cargo-delta-validate-prereqs \
+    anvil-loom-validate-prereqs
+
 # Install prerequisites for the `anvil-pr-fuzzing` recipe.
 [private]
 anvil-pr-fuzzing-setup installer="install":
@@ -919,6 +949,30 @@ anvil-scheduled-runtime-analysis-validate-prereqs: \
     anvil-miri-tree-borrows-validate-prereqs \
     anvil-miri-strict-provenance-validate-prereqs \
     anvil-miri-race-coverage-validate-prereqs
+
+[private]
+anvil-scheduled-runtime-analysis-miri-setup installer="install": (anvil-miri-setup installer)
+
+[private]
+anvil-scheduled-runtime-analysis-miri-validate-prereqs: anvil-miri-validate-prereqs
+
+[private]
+anvil-scheduled-runtime-analysis-miri-tree-borrows-setup installer="install": (anvil-miri-tree-borrows-setup installer)
+
+[private]
+anvil-scheduled-runtime-analysis-miri-tree-borrows-validate-prereqs: anvil-miri-tree-borrows-validate-prereqs
+
+[private]
+anvil-scheduled-runtime-analysis-miri-strict-provenance-setup installer="install": (anvil-miri-strict-provenance-setup installer)
+
+[private]
+anvil-scheduled-runtime-analysis-miri-strict-provenance-validate-prereqs: anvil-miri-strict-provenance-validate-prereqs
+
+[private]
+anvil-scheduled-runtime-analysis-miri-race-coverage-setup installer="install": (anvil-miri-race-coverage-setup installer)
+
+[private]
+anvil-scheduled-runtime-analysis-miri-race-coverage-validate-prereqs: anvil-miri-race-coverage-validate-prereqs
 
 # Install prerequisites for the `anvil-scheduled-exhaustive` recipe.
 [private]

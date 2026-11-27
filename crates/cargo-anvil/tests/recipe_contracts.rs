@@ -237,6 +237,50 @@ fn codecov_uploads_the_canonical_merged_report_only() {
 }
 
 #[test]
+fn runtime_analysis_workflows_shard_long_checks_without_changing_family_fan_in() {
+    let pr = include_str!("../templates/github/pr-impl-workflow.yml");
+    assert!(pr.contains("check: [miri, careful, loom]"));
+    assert!(pr.contains("group: pr-runtime-analysis-${{ matrix.check }}"));
+    assert!(pr.contains("      - pr-runtime-analysis\n"));
+    assert!(pr.contains("PR_RUNTIME_ANALYSIS: ${{ needs.pr-runtime-analysis.result }}"));
+
+    let scheduled = include_str!("../templates/github/scheduled-impl-workflow.yml");
+    assert!(scheduled.contains("profile: [miri, miri-tree-borrows, miri-strict-provenance, miri-race-coverage]"));
+    assert!(scheduled.contains("group: scheduled-runtime-analysis-${{ matrix.profile }}"));
+    assert!(scheduled.contains("      - scheduled-runtime-analysis\n"));
+
+    let generated = generated();
+    for recipe in [
+        "anvil-pr-runtime-analysis-miri",
+        "anvil-pr-runtime-analysis-careful",
+        "anvil-pr-runtime-analysis-loom",
+        "anvil-scheduled-runtime-analysis-miri",
+        "anvil-scheduled-runtime-analysis-miri-tree-borrows",
+        "anvil-scheduled-runtime-analysis-miri-strict-provenance",
+        "anvil-scheduled-runtime-analysis-miri-race-coverage",
+    ] {
+        assert!(
+            generated.groups.lines().any(|line| line.starts_with(&format!("{recipe}:"))),
+            "missing sharded runtime-analysis recipe: {recipe}"
+        );
+    }
+    for setup in [
+        "anvil-pr-runtime-analysis-miri-setup",
+        "anvil-pr-runtime-analysis-careful-setup",
+        "anvil-pr-runtime-analysis-loom-setup",
+        "anvil-scheduled-runtime-analysis-miri-setup",
+        "anvil-scheduled-runtime-analysis-miri-tree-borrows-setup",
+        "anvil-scheduled-runtime-analysis-miri-strict-provenance-setup",
+        "anvil-scheduled-runtime-analysis-miri-race-coverage-setup",
+    ] {
+        assert!(
+            generated.setup.lines().any(|line| line.starts_with(&format!("{setup} "))),
+            "missing sharded runtime-analysis setup: {setup}"
+        );
+    }
+}
+
+#[test]
 fn coverage_setup_prefers_a_workspace_catalog_tool_before_external_installation() {
     let setup = include_str!("../templates/justfiles/anvil/setup/checks/llvm-cov.just");
     assert!(

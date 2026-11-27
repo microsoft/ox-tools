@@ -10,3 +10,18 @@ anvil-pr-runtime-analysis: anvil-pr-runtime-analysis-validate-prereqs \
     anvil-miri \
     anvil-careful \
     anvil-loom
+
+# Run the Miri slice used by hosted PR runtime-analysis jobs.
+[group("anvil")]
+anvil-pr-runtime-analysis-miri: anvil-pr-runtime-analysis-miri-validate-prereqs \
+    anvil-miri
+
+# Run the Careful slice used by hosted PR runtime-analysis jobs.
+[group("anvil")]
+anvil-pr-runtime-analysis-careful: anvil-pr-runtime-analysis-careful-validate-prereqs \
+    anvil-careful
+
+# Run the Loom slice used by hosted PR runtime-analysis jobs.
+[group("anvil")]
+anvil-pr-runtime-analysis-loom: anvil-pr-runtime-analysis-loom-validate-prereqs \
+    anvil-loom

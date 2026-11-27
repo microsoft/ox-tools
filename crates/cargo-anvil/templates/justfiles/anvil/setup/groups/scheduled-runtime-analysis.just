@@ -19,3 +19,27 @@ anvil-scheduled-runtime-analysis-validate-prereqs: \
     anvil-miri-tree-borrows-validate-prereqs \
     anvil-miri-strict-provenance-validate-prereqs \
     anvil-miri-race-coverage-validate-prereqs
+
+[private]
+anvil-scheduled-runtime-analysis-miri-setup installer="install": (anvil-miri-setup installer)
+
+[private]
+anvil-scheduled-runtime-analysis-miri-validate-prereqs: anvil-miri-validate-prereqs
+
+[private]
+anvil-scheduled-runtime-analysis-miri-tree-borrows-setup installer="install": (anvil-miri-tree-borrows-setup installer)
+
+[private]
+anvil-scheduled-runtime-analysis-miri-tree-borrows-validate-prereqs: anvil-miri-tree-borrows-validate-prereqs
+
+[private]
+anvil-scheduled-runtime-analysis-miri-strict-provenance-setup installer="install": (anvil-miri-strict-provenance-setup installer)
+
+[private]
+anvil-scheduled-runtime-analysis-miri-strict-provenance-validate-prereqs: anvil-miri-strict-provenance-validate-prereqs
+
+[private]
+anvil-scheduled-runtime-analysis-miri-race-coverage-setup installer="install": (anvil-miri-race-coverage-setup installer)
+
+[private]
+anvil-scheduled-runtime-analysis-miri-race-coverage-validate-prereqs: anvil-miri-race-coverage-validate-prereqs

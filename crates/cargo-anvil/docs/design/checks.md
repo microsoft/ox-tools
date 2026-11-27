@@ -232,8 +232,9 @@ which can exhaust GitHub's rate limit and wait for quota renewal.
 
 ### `scheduled-runtime-analysis`
 
-All Miri profiles cover the full workspace. Profiles run sequentially within
-each platform job; executables within a profile run concurrently.
+All Miri profiles cover the full workspace. Local and non-GitHub aggregate
+recipes run profiles sequentially, while generated GitHub jobs run each profile
+in an independent OS leg. Executables within a profile run concurrently.
 
 | Check | Additional behavior | Per-test exclusion cfg |
 |-------|---------------------|------------------------|

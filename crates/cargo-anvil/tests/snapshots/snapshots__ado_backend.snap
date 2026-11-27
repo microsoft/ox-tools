@@ -2387,6 +2387,21 @@ anvil-pr-runtime-analysis: anvil-pr-runtime-analysis-validate-prereqs \
     anvil-careful \
     anvil-loom
 
+# Run the Miri slice used by hosted PR runtime-analysis jobs.
+[group("anvil")]
+anvil-pr-runtime-analysis-miri: anvil-pr-runtime-analysis-miri-validate-prereqs \
+    anvil-miri
+
+# Run the Careful slice used by hosted PR runtime-analysis jobs.
+[group("anvil")]
+anvil-pr-runtime-analysis-careful: anvil-pr-runtime-analysis-careful-validate-prereqs \
+    anvil-careful
+
+# Run the Loom slice used by hosted PR runtime-analysis jobs.
+[group("anvil")]
+anvil-pr-runtime-analysis-loom: anvil-pr-runtime-analysis-loom-validate-prereqs \
+    anvil-loom
+
 # Run the pull request fuzzing smoke checks.
 [group("anvil")]
 anvil-pr-fuzzing: anvil-pr-fuzzing-validate-prereqs \
@@ -2407,6 +2422,22 @@ anvil-scheduled-advisories: (_anvil-unscoped "scheduled-advisories")
 # Run full-workspace Miri profiles on the schedule.
 [group("anvil")]
 anvil-scheduled-runtime-analysis: (_anvil-unscoped "scheduled-runtime-analysis")
+
+# Run the standard scheduled Miri profile in an independent hosted job.
+[group("anvil")]
+anvil-scheduled-runtime-analysis-miri: (_anvil-unscoped "scheduled-runtime-analysis-miri")
+
+# Run the tree-borrows scheduled Miri profile in an independent hosted job.
+[group("anvil")]
+anvil-scheduled-runtime-analysis-miri-tree-borrows: (_anvil-unscoped "scheduled-runtime-analysis-miri-tree-borrows")
+
+# Run the strict-provenance scheduled Miri profile in an independent hosted job.
+[group("anvil")]
+anvil-scheduled-runtime-analysis-miri-strict-provenance: (_anvil-unscoped "scheduled-runtime-analysis-miri-strict-provenance")
+
+# Run the race-coverage scheduled Miri profile in an independent hosted job.
+[group("anvil")]
+anvil-scheduled-runtime-analysis-miri-race-coverage: (_anvil-unscoped "scheduled-runtime-analysis-miri-race-coverage")
 
 # Run full mutation, feature-combination, and benchmark checks.
 [group("anvil")]
@@ -2682,6 +2713,22 @@ _anvil-scheduled-runtime-analysis: anvil-scheduled-runtime-analysis-validate-pre
     anvil-miri \
     anvil-miri-tree-borrows \
     anvil-miri-strict-provenance \
+    anvil-miri-race-coverage
+
+[private]
+_anvil-scheduled-runtime-analysis-miri: anvil-scheduled-runtime-analysis-miri-validate-prereqs \
+    anvil-miri
+
+[private]
+_anvil-scheduled-runtime-analysis-miri-tree-borrows: anvil-scheduled-runtime-analysis-miri-tree-borrows-validate-prereqs \
+    anvil-miri-tree-borrows
+
+[private]
+_anvil-scheduled-runtime-analysis-miri-strict-provenance: anvil-scheduled-runtime-analysis-miri-strict-provenance-validate-prereqs \
+    anvil-miri-strict-provenance
+
+[private]
+_anvil-scheduled-runtime-analysis-miri-race-coverage: anvil-scheduled-runtime-analysis-miri-race-coverage-validate-prereqs \
     anvil-miri-race-coverage
 
 # Used by anvil-scheduled-exhaustive to run exhaustive workspace checks.
@@ -3542,6 +3589,36 @@ anvil-pr-runtime-analysis-validate-prereqs: \
     anvil-careful-validate-prereqs \
     anvil-loom-validate-prereqs
 
+[private]
+anvil-pr-runtime-analysis-miri-setup installer="install": \
+    (anvil-tool-cargo-delta-install installer) \
+    (anvil-miri-setup installer)
+
+[private]
+anvil-pr-runtime-analysis-miri-validate-prereqs: \
+    anvil-tool-cargo-delta-validate-prereqs \
+    anvil-miri-validate-prereqs
+
+[private]
+anvil-pr-runtime-analysis-careful-setup installer="install": \
+    (anvil-tool-cargo-delta-install installer) \
+    (anvil-careful-setup installer)
+
+[private]
+anvil-pr-runtime-analysis-careful-validate-prereqs: \
+    anvil-tool-cargo-delta-validate-prereqs \
+    anvil-careful-validate-prereqs
+
+[private]
+anvil-pr-runtime-analysis-loom-setup installer="install": \
+    (anvil-tool-cargo-delta-install installer) \
+    (anvil-loom-setup installer)
+
+[private]
+anvil-pr-runtime-analysis-loom-validate-prereqs: \
+    anvil-tool-cargo-delta-validate-prereqs \
+    anvil-loom-validate-prereqs
+
 # Install prerequisites for the `anvil-pr-fuzzing` recipe.
 [private]
 anvil-pr-fuzzing-setup installer="install":
@@ -3613,6 +3690,30 @@ anvil-scheduled-runtime-analysis-validate-prereqs: \
     anvil-miri-tree-borrows-validate-prereqs \
     anvil-miri-strict-provenance-validate-prereqs \
     anvil-miri-race-coverage-validate-prereqs
+
+[private]
+anvil-scheduled-runtime-analysis-miri-setup installer="install": (anvil-miri-setup installer)
+
+[private]
+anvil-scheduled-runtime-analysis-miri-validate-prereqs: anvil-miri-validate-prereqs
+
+[private]
+anvil-scheduled-runtime-analysis-miri-tree-borrows-setup installer="install": (anvil-miri-tree-borrows-setup installer)
+
+[private]
+anvil-scheduled-runtime-analysis-miri-tree-borrows-validate-prereqs: anvil-miri-tree-borrows-validate-prereqs
+
+[private]
+anvil-scheduled-runtime-analysis-miri-strict-provenance-setup installer="install": (anvil-miri-strict-provenance-setup installer)
+
+[private]
+anvil-scheduled-runtime-analysis-miri-strict-provenance-validate-prereqs: anvil-miri-strict-provenance-validate-prereqs
+
+[private]
+anvil-scheduled-runtime-analysis-miri-race-coverage-setup installer="install": (anvil-miri-race-coverage-setup installer)
+
+[private]
+anvil-scheduled-runtime-analysis-miri-race-coverage-validate-prereqs: anvil-miri-race-coverage-validate-prereqs
 
 # Install prerequisites for the `anvil-scheduled-exhaustive` recipe.
 [private]

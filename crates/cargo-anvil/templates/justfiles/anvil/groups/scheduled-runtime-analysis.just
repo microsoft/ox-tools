@@ -7,3 +7,19 @@
 # Run full-workspace Miri profiles on the schedule.
 [group("anvil")]
 anvil-scheduled-runtime-analysis: (_anvil-unscoped "scheduled-runtime-analysis")
+
+# Run the standard scheduled Miri profile in an independent hosted job.
+[group("anvil")]
+anvil-scheduled-runtime-analysis-miri: (_anvil-unscoped "scheduled-runtime-analysis-miri")
+
+# Run the tree-borrows scheduled Miri profile in an independent hosted job.
+[group("anvil")]
+anvil-scheduled-runtime-analysis-miri-tree-borrows: (_anvil-unscoped "scheduled-runtime-analysis-miri-tree-borrows")
+
+# Run the strict-provenance scheduled Miri profile in an independent hosted job.
+[group("anvil")]
+anvil-scheduled-runtime-analysis-miri-strict-provenance: (_anvil-unscoped "scheduled-runtime-analysis-miri-strict-provenance")
+
+# Run the race-coverage scheduled Miri profile in an independent hosted job.
+[group("anvil")]
+anvil-scheduled-runtime-analysis-miri-race-coverage: (_anvil-unscoped "scheduled-runtime-analysis-miri-race-coverage")

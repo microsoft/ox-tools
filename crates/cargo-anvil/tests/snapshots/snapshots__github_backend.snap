@@ -2055,6 +2055,21 @@ anvil-pr-runtime-analysis: anvil-pr-runtime-analysis-validate-prereqs \
     anvil-careful \
     anvil-loom
 
+# Run the Miri slice used by hosted PR runtime-analysis jobs.
+[group("anvil")]
+anvil-pr-runtime-analysis-miri: anvil-pr-runtime-analysis-miri-validate-prereqs \
+    anvil-miri
+
+# Run the Careful slice used by hosted PR runtime-analysis jobs.
+[group("anvil")]
+anvil-pr-runtime-analysis-careful: anvil-pr-runtime-analysis-careful-validate-prereqs \
+    anvil-careful
+
+# Run the Loom slice used by hosted PR runtime-analysis jobs.
+[group("anvil")]
+anvil-pr-runtime-analysis-loom: anvil-pr-runtime-analysis-loom-validate-prereqs \
+    anvil-loom
+
 # Run the pull request fuzzing smoke checks.
 [group("anvil")]
 anvil-pr-fuzzing: anvil-pr-fuzzing-validate-prereqs \
@@ -2075,6 +2090,22 @@ anvil-scheduled-advisories: (_anvil-unscoped "scheduled-advisories")
 # Run full-workspace Miri profiles on the schedule.
 [group("anvil")]
 anvil-scheduled-runtime-analysis: (_anvil-unscoped "scheduled-runtime-analysis")
+
+# Run the standard scheduled Miri profile in an independent hosted job.
+[group("anvil")]
+anvil-scheduled-runtime-analysis-miri: (_anvil-unscoped "scheduled-runtime-analysis-miri")
+
+# Run the tree-borrows scheduled Miri profile in an independent hosted job.
+[group("anvil")]
+anvil-scheduled-runtime-analysis-miri-tree-borrows: (_anvil-unscoped "scheduled-runtime-analysis-miri-tree-borrows")
+
+# Run the strict-provenance scheduled Miri profile in an independent hosted job.
+[group("anvil")]
+anvil-scheduled-runtime-analysis-miri-strict-provenance: (_anvil-unscoped "scheduled-runtime-analysis-miri-strict-provenance")
+
+# Run the race-coverage scheduled Miri profile in an independent hosted job.
+[group("anvil")]
+anvil-scheduled-runtime-analysis-miri-race-coverage: (_anvil-unscoped "scheduled-runtime-analysis-miri-race-coverage")
 
 # Run full mutation, feature-combination, and benchmark checks.
 [group("anvil")]
@@ -2350,6 +2381,22 @@ _anvil-scheduled-runtime-analysis: anvil-scheduled-runtime-analysis-validate-pre
     anvil-miri \
     anvil-miri-tree-borrows \
     anvil-miri-strict-provenance \
+    anvil-miri-race-coverage
+
+[private]
+_anvil-scheduled-runtime-analysis-miri: anvil-scheduled-runtime-analysis-miri-validate-prereqs \
+    anvil-miri
+
+[private]
+_anvil-scheduled-runtime-analysis-miri-tree-borrows: anvil-scheduled-runtime-analysis-miri-tree-borrows-validate-prereqs \
+    anvil-miri-tree-borrows
+
+[private]
+_anvil-scheduled-runtime-analysis-miri-strict-provenance: anvil-scheduled-runtime-analysis-miri-strict-provenance-validate-prereqs \
+    anvil-miri-strict-provenance
+
+[private]
+_anvil-scheduled-runtime-analysis-miri-race-coverage: anvil-scheduled-runtime-analysis-miri-race-coverage-validate-prereqs \
     anvil-miri-race-coverage
 
 # Used by anvil-scheduled-exhaustive to run exhaustive workspace checks.
@@ -3210,6 +3257,36 @@ anvil-pr-runtime-analysis-validate-prereqs: \
     anvil-careful-validate-prereqs \
     anvil-loom-validate-prereqs
 
+[private]
+anvil-pr-runtime-analysis-miri-setup installer="install": \
+    (anvil-tool-cargo-delta-install installer) \
+    (anvil-miri-setup installer)
+
+[private]
+anvil-pr-runtime-analysis-miri-validate-prereqs: \
+    anvil-tool-cargo-delta-validate-prereqs \
+    anvil-miri-validate-prereqs
+
+[private]
+anvil-pr-runtime-analysis-careful-setup installer="install": \
+    (anvil-tool-cargo-delta-install installer) \
+    (anvil-careful-setup installer)
+
+[private]
+anvil-pr-runtime-analysis-careful-validate-prereqs: \
+    anvil-tool-cargo-delta-validate-prereqs \
+    anvil-careful-validate-prereqs
+
+[private]
+anvil-pr-runtime-analysis-loom-setup installer="install": \
+    (anvil-tool-cargo-delta-install installer) \
+    (anvil-loom-setup installer)
+
+[private]
+anvil-pr-runtime-analysis-loom-validate-prereqs: \
+    anvil-tool-cargo-delta-validate-prereqs \
+    anvil-loom-validate-prereqs
+
 # Install prerequisites for the `anvil-pr-fuzzing` recipe.
 [private]
 anvil-pr-fuzzing-setup installer="install":
@@ -3281,6 +3358,30 @@ anvil-scheduled-runtime-analysis-validate-prereqs: \
     anvil-miri-tree-borrows-validate-prereqs \
     anvil-miri-strict-provenance-validate-prereqs \
     anvil-miri-race-coverage-validate-prereqs
+
+[private]
+anvil-scheduled-runtime-analysis-miri-setup installer="install": (anvil-miri-setup installer)
+
+[private]
+anvil-scheduled-runtime-analysis-miri-validate-prereqs: anvil-miri-validate-prereqs
+
+[private]
+anvil-scheduled-runtime-analysis-miri-tree-borrows-setup installer="install": (anvil-miri-tree-borrows-setup installer)
+
+[private]
+anvil-scheduled-runtime-analysis-miri-tree-borrows-validate-prereqs: anvil-miri-tree-borrows-validate-prereqs
+
+[private]
+anvil-scheduled-runtime-analysis-miri-strict-provenance-setup installer="install": (anvil-miri-strict-provenance-setup installer)
+
+[private]
+anvil-scheduled-runtime-analysis-miri-strict-provenance-validate-prereqs: anvil-miri-strict-provenance-validate-prereqs
+
+[private]
+anvil-scheduled-runtime-analysis-miri-race-coverage-setup installer="install": (anvil-miri-race-coverage-setup installer)
+
+[private]
+anvil-scheduled-runtime-analysis-miri-race-coverage-validate-prereqs: anvil-miri-race-coverage-validate-prereqs
 
 # Install prerequisites for the `anvil-scheduled-exhaustive` recipe.
 [private]
@@ -4145,12 +4246,14 @@ jobs:
         run: Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
 
   pr-runtime-analysis:
-    name: "Check Group: Runtime Analysis (${{ matrix.os }})"
+    name: "Check Group: Runtime Analysis (${{ matrix.os }}, ${{ matrix.check }})"
     permissions:
       contents: read
       statuses: write
-    # Stricter-runtime correctness: miri + careful + loom.
-    # 4-leg matrix -- these checks compile per host target and can
+    # Stricter-runtime correctness: miri, careful, and loom.
+    # Each check gets an independent 4-OS matrix leg so no GitHub job
+    # combines their multi-hour runtime. The family remains one aggregate
+    # matrix dependency for the required-check fan-in. All checks compile per host target and can
     # surface OS/arch-specific bugs. All are impact-scoped so the
     # wall-clock is proportional to the PR's blast radius.
     needs: [impact-linux, impact-windows]
@@ -4158,6 +4261,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [linux, windows, linux-arm, windows-arm]
+        check: [miri, careful, loom]
     runs-on: ${{ matrix.os == 'linux' && inputs.linux_runner
       || matrix.os == 'windows' && inputs.windows_runner
       || matrix.os == 'linux-arm' && inputs.linux_arm_runner
@@ -4175,7 +4279,7 @@ jobs:
           path: target/anvil/impact
       - uses: ./.anvil/github/actions/run-group
         with:
-          group: pr-runtime-analysis
+          group: pr-runtime-analysis-${{ matrix.check }}
           publish_commit_statuses: ${{ inputs.publish_commit_statuses }}
           impact_mode: consume
 
@@ -4472,12 +4576,14 @@ jobs:
         run: Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
 
   scheduled-runtime-analysis:
-    # Each OS leg runs all Miri profiles sequentially so they share setup and
-    # artifacts; OS legs run in parallel.
+    name: "Scheduled Runtime Analysis (${{ matrix.os }}, ${{ matrix.profile }})"
+    # Each Miri profile gets an independent OS matrix leg. The scheduled
+    # runtime family remains one aggregate matrix dependency for failure fan-in.
     strategy:
       fail-fast: false
       matrix:
         os: [linux, windows, linux-arm, windows-arm]
+        profile: [miri, miri-tree-borrows, miri-strict-provenance, miri-race-coverage]
     runs-on: ${{ matrix.os == 'linux' && inputs.linux_runner
       || matrix.os == 'windows' && inputs.windows_runner
       || matrix.os == 'linux-arm' && inputs.linux_arm_runner
@@ -4488,7 +4594,7 @@ jobs:
           lfs: true
       - uses: ./.anvil/github/actions/run-group
         with:
-          group: scheduled-runtime-analysis
+          group: scheduled-runtime-analysis-${{ matrix.profile }}
 
       - name: Report disk usage
         if: always()

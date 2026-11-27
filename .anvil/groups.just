@@ -58,6 +58,21 @@ anvil-pr-runtime-analysis: anvil-pr-runtime-analysis-validate-prereqs \
     anvil-careful \
     anvil-loom
 
+# Run the Miri slice used by hosted PR runtime-analysis jobs.
+[group("anvil")]
+anvil-pr-runtime-analysis-miri: anvil-pr-runtime-analysis-miri-validate-prereqs \
+    anvil-miri
+
+# Run the Careful slice used by hosted PR runtime-analysis jobs.
+[group("anvil")]
+anvil-pr-runtime-analysis-careful: anvil-pr-runtime-analysis-careful-validate-prereqs \
+    anvil-careful
+
+# Run the Loom slice used by hosted PR runtime-analysis jobs.
+[group("anvil")]
+anvil-pr-runtime-analysis-loom: anvil-pr-runtime-analysis-loom-validate-prereqs \
+    anvil-loom
+
 # Run the pull request fuzzing smoke checks.
 [group("anvil")]
 anvil-pr-fuzzing: anvil-pr-fuzzing-validate-prereqs \
@@ -78,6 +93,22 @@ anvil-scheduled-advisories: (_anvil-unscoped "scheduled-advisories")
 # Run full-workspace Miri profiles on the schedule.
 [group("anvil")]
 anvil-scheduled-runtime-analysis: (_anvil-unscoped "scheduled-runtime-analysis")
+
+# Run the standard scheduled Miri profile in an independent hosted job.
+[group("anvil")]
+anvil-scheduled-runtime-analysis-miri: (_anvil-unscoped "scheduled-runtime-analysis-miri")
+
+# Run the tree-borrows scheduled Miri profile in an independent hosted job.
+[group("anvil")]
+anvil-scheduled-runtime-analysis-miri-tree-borrows: (_anvil-unscoped "scheduled-runtime-analysis-miri-tree-borrows")
+
+# Run the strict-provenance scheduled Miri profile in an independent hosted job.
+[group("anvil")]
+anvil-scheduled-runtime-analysis-miri-strict-provenance: (_anvil-unscoped "scheduled-runtime-analysis-miri-strict-provenance")
+
+# Run the race-coverage scheduled Miri profile in an independent hosted job.
+[group("anvil")]
+anvil-scheduled-runtime-analysis-miri-race-coverage: (_anvil-unscoped "scheduled-runtime-analysis-miri-race-coverage")
 
 # Run full mutation, feature-combination, and benchmark checks.
 [group("anvil")]
