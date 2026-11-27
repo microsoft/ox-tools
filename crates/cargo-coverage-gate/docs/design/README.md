@@ -519,14 +519,15 @@ Feature configurations and concurrent invocations never share instrumented
 build/profile state: each configuration uses
 `target/coverage-gate/run-<pid>-<nonce>/cargo-target/<configuration>` (under
 Cargo's resolved target directory). A private target starts empty, so `run`
-does not invoke `cargo llvm-cov clean`; it removes only the enclosing
-per-invocation scratch directory after a passing evaluation or an evaluation
-error. If collection, publication, or a coverage gate fails, `run` retains that
-directory and prints its path. It preserves raw profiles and reports for
-diagnosis without changing the original error or exit code. Collection and
-publication errors never publish incomplete consumer reports. A gate failure
-keeps both raw evidence and the completed filtered reports so export and
-filtering can be compared. Remove the retained directory after diagnosis.
+does not invoke `cargo llvm-cov clean`. After its LCOV report is complete,
+the collector removes that configuration target before starting the next
+configuration. If collection stops before cleanup, the current target and raw
+profiles remain in the per-invocation scratch for diagnosis. Publication and
+gate failures happen after completed targets have already been removed; those
+failures retain raw LCOV in scratch and completed consumer reports under
+`--coverage-dir`, but not binaries or raw profiles from successful
+configurations. Collection and publication errors never publish incomplete
+consumer reports. Remove the retained scratch directory after diagnosis.
 Shared cargo-llvm-cov
 HTML/text reports, trybuild targets, UI test targets, and ordinary Cargo target
 state are never cleanup inputs. `CARGO_TARGET_DIR` is set to the same private
@@ -567,7 +568,8 @@ reduce disk use while retaining coverage line mapping. Matching the profiles
 also keeps Gamma's nested `cargo build --tests` artifacts consistent with
 nextest's test-profile inventory. Both feature configurations, coverage
 instrumentation, and coverage thresholds remain unchanged. On failure, it uploads
-raw profiles, merged profiles, profile lists, and LCOV reports for seven days.
+raw profiles and merged profiles that remain after a collection failure, plus
+profile lists and LCOV reports for seven days.
 It also uploads the APRZ and Gamma library-test executables to inspect their
 instrumentation, plus their test fingerprint JSON files to inspect compiler
 inputs. Hidden-file upload permits these fingerprints under `.fingerprint`.

@@ -65,7 +65,13 @@ The optional `run` mode keeps collection and evaluation separated internally:
    private directory, so metadata-derived trybuild, UI, and report paths do not
    cross configuration or invocation boundaries. Configurations and concurrent
    invocations therefore cannot merge each other's profiles.
-   After evaluation, a pure combiner gives evaluation errors precedence over
+   After collection completes, targets have already been released. A collection
+   or publication error retains the invocation scratch, whose contents can
+   include the target that stopped before cleanup; a nonzero rendered gate
+   verdict retains raw LCOV and stable consumer reports but not completed
+   configuration targets. A passing run or operational evaluation error cleans
+   the remaining scratch.
+   A pure combiner gives evaluation errors precedence over
    cleanup errors, preserves nonzero rendered verdicts with an explicit cleanup
    warning, and converts a passing evaluation plus cleanup failure into an
    operational error. On Windows, explicit cleanup disarms the guard before

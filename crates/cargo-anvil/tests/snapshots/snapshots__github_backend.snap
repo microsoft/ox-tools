@@ -2939,12 +2939,14 @@ anvil-license-headers-validate-prereqs: anvil-tool-cargo-heather-validate-prereq
 # Install prerequisites for the `anvil-llvm-cov` recipe.
 [group("anvil-setup")]
 [private]
-anvil-llvm-cov-setup installer="install": anvil-component-nightly-llvm-tools-install (anvil-tool-cargo-llvm-cov-install installer) (anvil-tool-cargo-nextest-install installer) (anvil-tool-cargo-coverage-gate-install installer) (anvil-tool-cargo-each-install installer)
+anvil-llvm-cov-setup installer="install": anvil-component-nightly-llvm-tools-install (anvil-tool-cargo-llvm-cov-install installer) (anvil-tool-cargo-nextest-install installer) (anvil-tool-cargo-each-install installer)
+    {{ if anvil_coverage_gate_local_command == "" { just_executable() + " anvil-tool-cargo-coverage-gate-install " + installer } else { "# the workspace supplies the cargo-coverage-gate command" } }}
 
 # Validate prerequisites for the `anvil-llvm-cov` recipe.
 [group("anvil-setup")]
 [private]
-anvil-llvm-cov-validate-prereqs: anvil-component-nightly-llvm-tools-validate-prereqs anvil-tool-cargo-llvm-cov-validate-prereqs anvil-tool-cargo-nextest-validate-prereqs anvil-tool-cargo-coverage-gate-validate-prereqs anvil-tool-cargo-each-validate-prereqs
+anvil-llvm-cov-validate-prereqs: anvil-component-nightly-llvm-tools-validate-prereqs anvil-tool-cargo-llvm-cov-validate-prereqs anvil-tool-cargo-nextest-validate-prereqs anvil-tool-cargo-each-validate-prereqs
+    {{ if anvil_coverage_gate_local_command == "" { just_executable() + " anvil-tool-cargo-coverage-gate-validate-prereqs" } else { "# the workspace supplies the cargo-coverage-gate command" } }}
 
 # Install prerequisites for the `anvil-loom` recipe.
 [group("anvil-setup")]

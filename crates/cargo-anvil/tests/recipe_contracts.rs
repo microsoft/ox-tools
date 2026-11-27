@@ -212,7 +212,8 @@ fn lightweight_workspace_checks_do_not_require_impact() {
 
 #[test]
 fn coverage_is_one_domain_tool_invocation() {
-    let recipes = generated().checks;
+    let generated = generated();
+    let recipes = &generated.checks;
     assert!(recipes.contains("cargo +{{ rust_nightly }} each {{ anvil_affected_selection }} --once --"));
     assert!(recipes.contains("{{ anvil_coverage_gate_command }} {{ anvil_explicit_package_args }} run"));
     assert!(recipes.contains("--configuration all-features --configuration no-default-features"));
@@ -220,6 +221,20 @@ fn coverage_is_one_domain_tool_invocation() {
     assert!(recipes.contains("--no-coverage-target aarch64-pc-windows-msvc"));
     assert!(!recipes.contains("Invoke-AnvilLcovReport"));
     assert!(!recipes.contains("llvm-cov.rsp"));
+}
+
+#[test]
+fn coverage_setup_prefers_a_workspace_catalog_tool_before_external_installation() {
+    let setup = include_str!("../templates/justfiles/anvil/setup/checks/llvm-cov.just");
+    assert!(setup.contains(
+        r#"{{ if anvil_coverage_gate_local_command == "" { just_executable() + " anvil-tool-cargo-coverage-gate-install " + installer }"#
+    ));
+    assert!(setup.contains(
+        r#"{{ if anvil_coverage_gate_local_command == "" { just_executable() + " anvil-tool-cargo-coverage-gate-validate-prereqs" }"#
+    ));
+    assert!(!setup.contains(
+        r#"anvil-llvm-cov-setup installer="install": anvil-component-nightly-llvm-tools-install (anvil-tool-cargo-llvm-cov-install installer) (anvil-tool-cargo-nextest-install installer) (anvil-tool-cargo-coverage-gate-install installer)"#
+    ));
 }
 
 #[test]

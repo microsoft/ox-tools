@@ -117,7 +117,7 @@ fn complete_collection(
     };
     scratch.armed = false;
     eprintln!(
-        "coverage-gate: retained failed coverage run at `{}`; inspect its raw profiles and reports, then remove this directory",
+        "coverage-gate: retained failed coverage diagnostics at `{}`; inspect retained LCOV and any configuration targets left after a collection failure, then remove this directory",
         diagnostic_path(scratch.path())
     );
     result
@@ -1471,7 +1471,8 @@ fn remove_windows_dir_if_present_with(
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
+    use std::collections::BTreeMap;
     use std::num::NonZeroUsize;
     #[cfg(unix)]
     use std::os::unix::process::ExitStatusExt as _;
@@ -1489,7 +1490,12 @@ mod tests {
 
     /// Verifies that per-configuration target removal leaves every raw report
     /// available for final publication and evaluation.
-    fn assert_reports_survive_target_cleanup(execution: &CollectionExecution<'_>, collected: &[CollectedReport]) {
+    fn assert_reports_survive_target_cleanup(
+        execution: &CollectionExecution<'_>,
+        collected: &[CollectedReport],
+        raw_reports: &RefCell<BTreeMap<PathBuf, String>>,
+        stable_reports: &RefCell<BTreeMap<PathBuf, String>>,
+    ) {
         let evaluated = Cell::new(false);
         filter_then_evaluate_with(
             execution,
@@ -1498,7 +1504,12 @@ mod tests {
                 let paths = collected
                     .iter()
                     .map(|report| {
-                        fs::copy(&report.raw_path, &report.stable_path).expect("publish retained raw report");
+                        let contents = raw_reports
+                            .borrow()
+                            .get(&report.raw_path)
+                            .expect("raw report must survive target cleanup")
+                            .clone();
+                        stable_reports.borrow_mut().insert(report.stable_path.clone(), contents);
                         report.stable_path.clone()
                     })
                     .collect();
@@ -1508,7 +1519,13 @@ mod tests {
                 assert_eq!(
                     paths
                         .iter()
-                        .map(|path| fs::read_to_string(path).expect("read published report"))
+                        .map(|path| {
+                            stable_reports
+                                .borrow()
+                                .get(path)
+                                .expect("published report must reach evaluation")
+                                .clone()
+                        })
                         .collect::<Vec<_>>(),
                     [RAW_ALL_FEATURES, RAW_NO_DEFAULT]
                 );
@@ -1522,15 +1539,11 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "uses temporary directories, which Miri isolation does not support")]
     fn completed_configuration_targets_are_removed_before_the_next_collection_and_reports_survive() {
-        let parent = tempdir().expect("owned collection directory");
-        let scratch_dir = parent.path().join("scratch");
+        let scratch_dir = PathBuf::from("synthetic-scratch");
         let target_root = scratch_dir.join("cargo-target");
-        fs::create_dir_all(&target_root).expect("create target root");
-        let coverage_dir = parent.path().join("coverage");
-        fs::create_dir_all(&coverage_dir).expect("create coverage output directory");
-        let workspace = workspace(parent.path());
+        let coverage_dir = PathBuf::from("synthetic-coverage");
+        let workspace = workspace(Path::new("synthetic-workspace"));
         let selection = Selection {
             explicit: false,
             members: workspace.members.clone(),
@@ -1555,58 +1568,57 @@ mod tests {
         };
         let configurations = [FeatureConfiguration::AllFeatures, FeatureConfiguration::NoDefaultFeatures];
 
-        let mut collected_configs = Vec::new();
+        let completed_configs = RefCell::new(Vec::new());
+        let targets = RefCell::new(BTreeSet::new());
+        let raw_reports = RefCell::new(BTreeMap::new());
+        let stable_reports = RefCell::new(BTreeMap::new());
         let collected = collect_configurations_with(
             &configurations,
             |configuration| {
-                if let Some(previous) = configurations
-                    .iter()
-                    .position(|candidate| *candidate == configuration)
-                    .and_then(|index| index.checked_sub(1))
-                    .map(|index| configuration_target_dir(&execution, configurations[index]))
-                {
-                    assert!(
-                        !previous.exists(),
-                        "the previous target must be released before collecting {}",
-                        configuration.artifact_name()
-                    );
-                }
+                assert!(
+                    targets.borrow().is_empty(),
+                    "the previous target must be released before collecting {}",
+                    configuration.artifact_name()
+                );
                 let target_dir = configuration_target_dir(&execution, configuration);
-                fs::create_dir_all(&target_dir).expect("create configuration target");
-                fs::write(target_dir.join("large-intermediate"), b"instrumented build state").expect("create build state");
+                targets.borrow_mut().insert(target_dir.join("large-intermediate"));
                 let raw_path = scratch_dir.join(format!("raw-lcov-{}.info", configuration.artifact_name()));
                 let stable_path = coverage_dir.join(format!("lcov-{}.info", configuration.artifact_name()));
-                fs::write(
-                    &raw_path,
+                raw_reports.borrow_mut().insert(
+                    raw_path.clone(),
                     if configuration == FeatureConfiguration::AllFeatures {
-                        RAW_ALL_FEATURES
+                        RAW_ALL_FEATURES.to_owned()
                     } else {
-                        RAW_NO_DEFAULT
+                        RAW_NO_DEFAULT.to_owned()
                     },
-                )
-                .expect("write raw report before target cleanup");
-                collected_configs.push(configuration);
+                );
+                completed_configs.borrow_mut().push(configuration);
                 Ok(CollectedReport {
                     raw_path,
                     stable_path,
                     configuration,
                 })
             },
-            |configuration| cleanup_configuration_target(&execution, configuration),
+            |configuration| {
+                let target = configuration_target_dir(&execution, configuration).join("large-intermediate");
+                assert!(targets.borrow_mut().remove(&target), "collected target must exist before cleanup");
+                Ok(())
+            },
         )
         .expect("collect both configurations");
 
-        assert_eq!(collected_configs, configurations);
-        for configuration in configurations {
+        assert_eq!(*completed_configs.borrow(), configurations);
+        assert!(
+            targets.borrow().is_empty(),
+            "completed configuration targets survive batch collection"
+        );
+        for report in &collected {
             assert!(
-                !configuration_target_dir(&execution, configuration).exists(),
-                "completed configuration target survives batch collection"
+                raw_reports.borrow().contains_key(&report.raw_path),
+                "raw report must survive target cleanup"
             );
         }
-        for report in &collected {
-            assert!(report.raw_path.is_file(), "raw report must survive target cleanup");
-        }
-        assert_reports_survive_target_cleanup(&execution, &collected);
+        assert_reports_survive_target_cleanup(&execution, &collected, &raw_reports, &stable_reports);
     }
 
     #[test]

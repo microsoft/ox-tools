@@ -49,7 +49,7 @@ checksum = "sha256:745af1a2241e5535a848d2dfefb58784ceb2e8674be8ddd98001b09842a4c
 
 [[file]]
 path = ".anvil/setup.just"
-checksum = "sha256:636206a3de7e5d70b7ac5fc8070bd54e16c3ce89ee424adc167f04214295e285"
+checksum = "sha256:cb02d9d1c04362fbd1f8aca1519583793a3436546f02b5057622a94088ae41b8"
 
 [[file]]
 path = ".github/instructions/cargo-anvil.instructions.md"
