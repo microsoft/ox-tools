@@ -5,10 +5,12 @@
 
 #![cfg(not(miri))] // Requires host filesystem access and child processes.
 
-use std::io::{self, Write};
+use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::path::Path;
-use std::process::{Command, Output, Stdio};
-use std::{env, fs};
+use std::{env, fs, io};
+
+use cargo_ark::release_dependencies::{Candidates, CargoInvoker, check};
 
 const BOTH_BUMPED: &str = r#"[
     {"name":"ark-fixture-consumer","old_version":"0.1.0","new_version":"0.1.1"},
@@ -19,110 +21,49 @@ const ONLY_CONSUMER_BUMPED: &str = r#"[
 ]"#;
 
 #[test]
-fn handles_discovery_input_before_looking_for_a_workspace() -> io::Result<()> {
-    let temp = tempfile::tempdir()?;
-    let mut command = Command::new(env!("CARGO_BIN_EXE_cargo-ark"));
-    command.arg("release-dependencies").current_dir(temp.path());
-    let empty = run_report(&mut command, "[]")?;
-    assert!(empty.status.success(), "{empty:?}");
-    assert!(
-        String::from_utf8_lossy(&empty.stdout).contains("no release candidates"),
-        "{empty:?}"
-    );
-
-    let invalid = run_report(&mut command, r#"[{"name":"ark-fixture-peer"}]"#)?;
-    assert_error(&invalid, "candidate is missing its version");
-
-    let invalid_encoding = run_report(&mut command, [0xff])?;
-    assert_error(&invalid_encoding, "stream did not contain valid UTF-8");
-
-    let no_workspace = run_report(&mut command, BOTH_BUMPED)?;
-    assert_error(&no_workspace, "locating the Cargo workspace failed");
+fn validates_candidate_input() -> Result<(), Box<dyn std::error::Error>> {
+    assert!(Candidates::from_report("[]")?.is_empty());
+    let invalid = Candidates::from_report(r#"[{"name":"ark-fixture-peer"}]"#).unwrap_err();
+    assert_eq!(invalid.to_string(), "candidate is missing its version");
     Ok(())
 }
 
 #[test]
-fn validates_shipped_tests_and_reports_release_failures() -> io::Result<()> {
+fn validates_shipped_tests_with_both_candidates() -> Result<(), Box<dyn std::error::Error>> {
+    run_check(BOTH_BUMPED, false)
+}
+
+#[test]
+fn rejects_a_stale_candidate_version() {
+    let stale_report = r#"[{"name":"ark-fixture-peer","new_version":"0.1.0"}]"#;
+    let stale = run_check(stale_report, false).expect_err("the stale candidate must not package");
+    assert_error(stale.as_ref(), "cargo package for release candidates failed");
+}
+
+#[test]
+fn reports_a_failing_default_feature_test() {
+    let failure = run_check(BOTH_BUMPED, true).expect_err("the default-mode test must fail");
+    assert_error(
+        failure.as_ref(),
+        "ark-fixture-consumer: cargo test (default features) from package archive failed",
+    );
+}
+
+#[test]
+fn fails_to_package_without_the_unpublished_peer() {
+    let missing = run_check(ONLY_CONSUMER_BUMPED, false).expect_err("the unpublished peer must not resolve");
+    assert_error(missing.as_ref(), "cargo package for release candidates failed");
+}
+
+fn run_check(report: &str, fail_shipped_test: bool) -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
-    let checkout = temp.path().join("checkout");
-    fs::create_dir(&checkout)?;
-    let workspace = checkout.join("workspace");
+    let workspace = temp.path().join("workspace");
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/release-dependencies");
     copy_fixture(&fixture, &workspace)?;
 
-    let success = ark(&workspace, BOTH_BUMPED, false)?;
-    let stdout = String::from_utf8_lossy(&success.stdout);
-    let stderr = String::from_utf8_lossy(&success.stderr);
-    assert!(success.status.success(), "{stderr}");
-    assert!(stderr.contains("Packaging ark-fixture-peer v0.1.1"), "{stderr}");
-    assert!(stderr.contains("Packaging ark-fixture-consumer v0.1.1"), "{stderr}");
-    assert!(!stderr.contains("Packaging ark-fixture-stable"), "{stderr}");
-    assert!(stdout.contains("archive_all ... ok"), "{stdout}");
-    assert!(stdout.contains("archive_none ... ok"), "{stdout}");
-    assert!(stdout.contains("archive_default ... ok"), "{stdout}");
-
-    let internal_scratch = run_report(
-        ark_command(&workspace, temp.path())?
-            .arg("--temp-dir")
-            .arg(workspace.join("consumer")),
-        BOTH_BUMPED,
-    )?;
-    assert_error(&internal_scratch, "select a temporary directory outside the source workspace");
-
-    let nonexistent_parent = temp.path().join("nonexistent");
-    let mut command = ark_command(&workspace, temp.path())?;
-    command.args(["--temp-dir"]).arg(&nonexistent_parent);
-    let unavailable_scratch = run_report(&mut command, BOTH_BUMPED)?;
-    assert_error(&unavailable_scratch, "preparing release scratch directory in");
-    assert!(String::from_utf8_lossy(&unavailable_scratch.stderr).contains("nonexistent"));
-
-    let stale_report = r#"[{"name":"ark-fixture-peer","new_version":"0.1.0"}]"#;
-    let stale = ark(&workspace, stale_report, false)?;
-    assert_error(&stale, "cargo package for release candidates failed");
-    assert!(
-        String::from_utf8_lossy(&stale.stderr).contains("ark-fixture-peer@0.1.0"),
-        "{stale:?}"
-    );
-
-    let failure = ark(&workspace, BOTH_BUMPED, true)?;
-    let stdout = String::from_utf8_lossy(&failure.stdout);
-    assert_error(
-        &failure,
-        "ark-fixture-consumer: cargo test (default features) from package archive failed",
-    );
-    assert!(stdout.contains("archive_all ... ok"), "{stdout}");
-    assert!(stdout.contains("archive_none ... ok"), "{stdout}");
-    assert!(stdout.contains("deliberately failing shipped test"), "{stdout}");
-
-    let missing = ark(&workspace, ONLY_CONSUMER_BUMPED, false)?;
-    let stderr = String::from_utf8_lossy(&missing.stderr);
-    assert_error(&missing, "cargo package for release candidates failed");
-    assert!(stderr.contains("no matching package named `ark-fixture-peer` found"), "{stderr}");
-    assert!(stderr.contains("location searched: crates.io index"), "{stderr}");
-    Ok(())
-}
-
-fn ark(workspace: &Path, report: &str, fail_shipped_test: bool) -> io::Result<Output> {
-    let parent = workspace
-        .parent()
-        .expect("the fixture workspace is a child of the test temp directory");
-    let home = tempfile::tempdir_in(parent)?;
-    let relative_home = Path::new("..")
-        .join("..")
-        .join(home.path().file_name().expect("tempdir_in creates a named subdirectory"));
-    let mut command = ark_command(&workspace.join("consumer"), &relative_home)?;
-    command
-        .arg("--temp-dir")
-        .arg(home.path())
-        .env("ARK_FIXTURE_CARGO_HOME", home.path());
-    if fail_shipped_test {
-        command.env("ARK_FIXTURE_FAIL_TEST", "1");
-    }
-    run_report(&mut command, report)
-}
-
-fn ark_command(working_dir: &Path, home: &Path) -> io::Result<Command> {
-    // Keep using the test's toolchain after leaving its workspace and Cargo home.
+    let home = tempfile::tempdir_in(temp.path())?;
+    let home_path = std::path::absolute(home.path())?.into_os_string();
+    // Use the toolchain that built this integration test.
     let path = env::join_paths(
         Path::new(env!("CARGO"))
             .parent()
@@ -131,31 +72,23 @@ fn ark_command(working_dir: &Path, home: &Path) -> io::Result<Command> {
             .chain(env::split_paths(&env::var_os("PATH").unwrap_or_default())),
     )
     .map_err(io::Error::other)?;
-    let mut command = Command::new(env!("CARGO_BIN_EXE_cargo-ark"));
-    command
-        .args(["ark", "release-dependencies"])
-        .current_dir(working_dir)
-        .env("PATH", path)
-        .env("CARGO_HOME", home)
-        .env("CARGO_NET_OFFLINE", "true")
-        .env("CARGO_TERM_COLOR", "never")
-        .env_remove("ARK_FIXTURE_FAIL_TEST");
-    Ok(command)
+    let child_env = BTreeMap::<OsString, OsString>::from([
+        ("PATH".into(), path),
+        ("CARGO_HOME".into(), home_path.clone()),
+        ("CARGO_NET_OFFLINE".into(), "true".into()),
+        ("CARGO_TERM_COLOR".into(), "never".into()),
+        ("ARK_FIXTURE_CARGO_HOME".into(), home_path),
+        (
+            "ARK_FIXTURE_FAIL_TEST".into(),
+            if fail_shipped_test { "1".into() } else { "0".into() },
+        ),
+    ]);
+    let cargo = CargoInvoker::new(&workspace, child_env, Some(home.path()))?;
+    check(Candidates::from_report(report)?, cargo)
 }
 
-fn run_report(command: &mut Command, report: impl AsRef<[u8]>) -> io::Result<Output> {
-    command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = command.spawn()?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(report.as_ref())?;
-    }
-    child.wait_with_output()
-}
-
-fn assert_error(output: &Output, message: &str) {
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(output.status.code(), Some(1), "{stderr}");
-    assert!(stderr.contains(&format!("cargo ark release-dependencies: {message}")), "{stderr}");
+fn assert_error(error: &dyn std::error::Error, message: &str) {
+    assert!(error.to_string().contains(message), "expected `{message}` in `{error}`");
 }
 
 fn copy_fixture(source: &Path, destination: &Path) -> io::Result<()> {

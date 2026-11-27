@@ -2,11 +2,11 @@
 // Licensed under the MIT License.
 
 use std::collections::BTreeMap;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
-use std::io::{self, Read};
+use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Command, ExitStatus, Output, Stdio};
 
 use flate2::read::GzDecoder;
 use serde_json::Value;
@@ -15,65 +15,78 @@ use toml_edit::{DocumentMut, value};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
+/// A validated set of release candidates.
+#[derive(Debug)]
+pub struct Candidates {
+    packages: BTreeMap<String, String>,
+}
+
+impl Candidates {
+    /// Parses and validates a candidate report.
+    ///
+    /// Identical entries count as one candidate. The report is rejected if one
+    /// package name is associated with more than one version.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the JSON is invalid, the required fields are not
+    /// strings, or one package is reported with conflicting versions.
+    pub fn from_report(report: &str) -> Result<Self> {
+        let report: Vec<Value> = serde_json::from_str(report)?;
+        let mut packages = BTreeMap::new();
+        for candidate in report {
+            let name = candidate["name"].as_str().ok_or("candidate is missing its name")?;
+            let version = candidate["new_version"].as_str().ok_or("candidate is missing its version")?;
+            if let Some(reported_version) = packages.insert(name.to_owned(), version.to_owned())
+                && reported_version != version
+            {
+                return Err(format!("report lists two versions for `{name}`: `{reported_version}` and `{version}`; keep one").into());
+            }
+        }
+        Ok(Self { packages })
+    }
+
+    /// Reports whether the candidate set contains no packages.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.packages.is_empty()
+    }
+}
+
+/// Validates release candidates by packaging and testing their archives.
+///
+/// The invoker owns the scratch directory for this call and is consumed after
+/// the check completes. An empty candidate set succeeds without launching
+/// Cargo, although callers can avoid preparing an invoker for that case.
+///
 /// # Errors
 ///
-/// Returns an error if the candidate list cannot be read, scratch cannot be
-/// created outside the workspace, or packaging or archive testing fails.
-pub(super) fn check(temp_dir: Option<&Path>) -> Result<()> {
-    let mut json = String::new();
-    io::stdin().read_to_string(&mut json)?;
-    let candidates = parse_candidates(&json)?;
+/// Returns an error if scratch cannot be used, packaging fails, an archive is
+/// missing or cannot be extracted, or a shipped test fails.
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Taking ownership keeps the invoker and its scratch directory single-use."
+)]
+pub fn check(candidates: Candidates, cargo: CargoInvoker) -> Result<()> {
     if candidates.is_empty() {
-        println!("cargo ark release-dependencies: no release candidates");
         return Ok(());
     }
 
-    let cargo = ReleaseCargo::discover(std::env::var_os("CARGO_HOME"), Command::output)?;
-    let scratch = scratch_directory(&cargo.root, temp_dir)?;
-    let archives = package_candidates(&cargo, scratch.path(), &candidates)?;
-    validate_packages(&cargo, scratch.path(), &archives, candidates)
+    let archives = package_candidates(&cargo, &candidates.packages)?;
+    validate_packages(&cargo, &archives, candidates.packages)
 }
 
-fn parse_candidates(json: &str) -> Result<BTreeMap<String, String>> {
-    let report: Vec<Value> = serde_json::from_str(json)?;
-    let mut candidates = BTreeMap::new();
-    for candidate in report {
-        let name = candidate["name"].as_str().ok_or("candidate is missing its name")?;
-        let version = candidate["new_version"].as_str().ok_or("candidate is missing its version")?;
-        if let Some(reported_version) = candidates.insert(name.to_owned(), version.to_owned())
-            && reported_version != version
-        {
-            return Err(format!("report lists two versions for `{name}`: `{reported_version}` and `{version}`; keep one").into());
-        }
-    }
-    Ok(candidates)
-}
-
-fn scratch_directory(root: &Path, temp_dir: Option<&Path>) -> Result<tempfile::TempDir> {
-    let temporary = temp_dir.map_or_else(std::env::temp_dir, Path::to_path_buf);
-    let scratch_error = |error| format!("preparing release scratch directory in {}: {error}", temporary.display());
-    let parent = temporary.canonicalize().map_err(scratch_error)?;
-    if parent.starts_with(root.canonicalize()?) {
-        return Err("select a temporary directory outside the source workspace".into());
-    }
-    tempfile::tempdir_in(parent).map_err(|error| scratch_error(error).into())
-}
-
-fn package_candidates(cargo: &ReleaseCargo, scratch: &Path, candidates: &BTreeMap<String, String>) -> Result<PathBuf> {
+fn package_candidates(cargo: &CargoInvoker, candidates: &BTreeMap<String, String>) -> Result<PathBuf> {
     // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "Both Cargo and archive lookup use this private directory under fresh scratch; neither replacement collides with other scratch paths.")]
-    let artifacts = scratch.join("artifacts");
-    let mut package = cargo.command(scratch);
-    package.args(["package", "--allow-dirty", "--target-dir"]).arg(&artifacts);
-    for (name, version) in candidates {
-        package.arg("--package").arg(format!("{name}@{version}"));
-    }
-    run(&mut package, "cargo package for release candidates")?;
+    let artifacts = cargo.scratch.path().join("artifacts");
+    let mut package = cargo.package_command(candidates);
+    run(&mut package, "cargo package for release candidates", Command::status)?;
     Ok(artifacts.join("package"))
 }
 
-fn validate_packages(cargo: &ReleaseCargo, scratch: &Path, archives: &Path, candidates: BTreeMap<String, String>) -> Result<()> {
-    let sources = unpack_candidates(archives, scratch, candidates)?;
-    test_archives(cargo, scratch, &sources)
+fn validate_packages(cargo: &CargoInvoker, archives: &Path, candidates: BTreeMap<String, String>) -> Result<()> {
+    let sources = unpack_candidates(archives, cargo.scratch.path(), candidates)?;
+    test_archives(cargo, &sources)
 }
 
 fn unpack_candidates(archives: &Path, scratch: &Path, candidates: BTreeMap<String, String>) -> Result<BTreeMap<String, PathBuf>> {
@@ -92,26 +105,30 @@ fn unpack_candidates(archives: &Path, scratch: &Path, candidates: BTreeMap<Strin
     Ok(sources)
 }
 
-fn test_archives(cargo: &ReleaseCargo, scratch: &Path, sources: &BTreeMap<String, PathBuf>) -> Result<()> {
+fn test_archives(cargo: &CargoInvoker, sources: &BTreeMap<String, PathBuf>) -> Result<()> {
     // #[gamma::skip(literal.str_to_xyzzy, reason = "The same private file is written and passed to Cargo by explicit --config path.")]
-    let patch = scratch.join("candidates.toml");
+    let patch = cargo.scratch.path().join("candidates.toml");
     fs::write(&patch, patch_config(sources)?.to_string())?;
     for (name, source) in sources {
         let manifest = source.join("Cargo.toml");
-        for feature_flag in [Some("--all-features"), Some("--no-default-features"), None] {
+        for feature_flag in ARCHIVE_FEATURE_MODES {
             let mode = feature_flag.unwrap_or("(default features)");
             run(
-                cargo
-                    .archive_command(scratch, &patch)
-                    .arg("test")
-                    .args(feature_flag)
-                    .arg("--manifest-path")
-                    .arg(&manifest),
+                &mut archive_test_command(cargo, &patch, &manifest, feature_flag),
                 &format!("{name}: cargo test {mode} from package archive"),
+                Command::status,
             )?;
         }
     }
     Ok(())
+}
+
+const ARCHIVE_FEATURE_MODES: [Option<&str>; 3] = [Some("--all-features"), Some("--no-default-features"), None];
+
+fn archive_test_command(cargo: &CargoInvoker, patch: &Path, manifest: &Path, feature_flag: Option<&str>) -> Command {
+    let mut command = cargo.archive_command(patch);
+    command.arg("test").args(feature_flag).arg("--manifest-path").arg(manifest);
+    command
 }
 
 fn patch_config(sources: &BTreeMap<String, PathBuf>) -> Result<DocumentMut> {
@@ -124,55 +141,120 @@ fn patch_config(sources: &BTreeMap<String, PathBuf>) -> Result<DocumentMut> {
     Ok(config)
 }
 
-struct ReleaseCargo {
+/// Configures Cargo commands for one release-dependency check.
+///
+/// The invoker owns the check's scratch directory. It can be passed to
+/// [`check`] once; moving it into that call prevents a scratch directory from
+/// being reused by another check.
+#[derive(Debug)]
+pub struct CargoInvoker {
     root: PathBuf,
-    toolchain: String,
-    cargo_home: Option<PathBuf>,
+    child_env: BTreeMap<OsString, OsString>,
+    scratch: tempfile::TempDir,
 }
 
-impl ReleaseCargo {
-    fn discover(cargo_home: Option<OsString>, mut run_output: impl FnMut(&mut Command) -> io::Result<Output>) -> Result<Self> {
-        let manifest = capture(
-            Command::new("cargo").args(["locate-project", "--workspace", "--message-format", "plain"]),
-            "locating the Cargo workspace",
-            &mut run_output,
-        )?;
-        let root = Path::new(&manifest)
-            .parent()
-            .ok_or("workspace manifest has no parent directory")?
-            .to_path_buf();
-        let toolchain = capture(
-            Command::new("rustc").args(["--print", "sysroot"]),
-            "selecting Rust toolchain",
-            run_output,
-        )?;
-        let cargo_home = cargo_home.filter(|home| !home.is_empty()).map(std::path::absolute).transpose()?;
-        Ok(Self {
-            root,
-            toolchain,
-            cargo_home,
-        })
+impl CargoInvoker {
+    /// Prepares Cargo for a known workspace without launching any processes.
+    ///
+    /// Cargo runs from `workspace_root` with the supplied child environment
+    /// overrides. Callers must select the desired toolchain and supply an
+    /// absolute path if setting `CARGO_HOME`. Use [`Self::discover`] to find
+    /// the workspace and toolchain from an invocation directory instead.
+    /// `temp_dir`, when present, selects the existing parent of the private
+    /// scratch directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if either path cannot be resolved, scratch cannot be
+    /// created, or its parent is the workspace or a directory inside it.
+    pub fn new(workspace_root: &Path, child_env: BTreeMap<OsString, OsString>, temp_dir: Option<&Path>) -> Result<Self> {
+        let root = workspace_root.canonicalize()?;
+        let temporary = temp_dir.map_or_else(std::env::temp_dir, Path::to_path_buf);
+        let scratch_error = |error| format!("preparing release scratch directory in {}: {error}", temporary.display());
+        let parent = temporary.canonicalize().map_err(scratch_error)?;
+        if parent.starts_with(&root) {
+            return Err("select a temporary directory outside the source workspace".into());
+        }
+        let scratch = tempfile::tempdir_in(parent).map_err(scratch_error)?;
+        Ok(Self { root, child_env, scratch })
     }
 
-    fn command(&self, scratch: &Path) -> Command {
+    /// Discovers a workspace and prepares one Cargo invocation context.
+    ///
+    /// Discovery starts in `invocation_dir`. Any `CARGO_HOME` in `child_env`
+    /// is made absolute relative to that directory. `temp_dir`, when present,
+    /// selects the existing parent directory for the private scratch area.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the invocation directory or scratch parent cannot
+    /// be used, Cargo or rustc cannot be executed, discovery reports a failure,
+    /// or the scratch parent resolves to the workspace itself or a child
+    /// directory.
+    pub fn discover(invocation_dir: PathBuf, child_env: BTreeMap<OsString, OsString>, temp_dir: Option<&Path>) -> Result<Self> {
+        Self::discover_with(invocation_dir, child_env, temp_dir, Command::output)
+    }
+
+    fn discover_with(
+        invocation_dir: PathBuf,
+        mut child_env: BTreeMap<OsString, OsString>,
+        temp_dir: Option<&Path>,
+        mut run_output: impl FnMut(&mut Command) -> io::Result<Output>,
+    ) -> Result<Self> {
+        let invocation_dir = std::path::absolute(invocation_dir)?;
+        if let Some(home) = child_env.remove(OsStr::new("CARGO_HOME"))
+            && !home.is_empty()
+        {
+            let home = PathBuf::from(home);
+            let home = if home.is_absolute() { home } else { invocation_dir.join(home) };
+            child_env.insert("CARGO_HOME".into(), std::path::absolute(home)?.into());
+        }
+
+        let mut locate = Command::new("cargo");
+        locate
+            .current_dir(&invocation_dir)
+            .args(["locate-project", "--workspace", "--message-format", "plain"])
+            .envs(&child_env);
+        let manifest = capture(&mut locate, "locating the Cargo workspace", &mut run_output)?;
+        let manifest = manifest.trim_end_matches(['\r', '\n']);
+        let root = Path::new(manifest).parent().ok_or("workspace manifest has no parent directory")?;
+
+        let mut select_toolchain = Command::new("rustc");
+        select_toolchain
+            .current_dir(&invocation_dir)
+            .args(["--print", "sysroot"])
+            .envs(&child_env);
+        let toolchain = capture(&mut select_toolchain, "selecting Rust toolchain", run_output)?;
+        child_env.insert("RUSTUP_TOOLCHAIN".into(), toolchain.trim().into());
+        Self::new(root, child_env, temp_dir)
+    }
+
+    fn command(&self) -> Command {
         let mut command = Command::new("cargo");
         // #[gamma::skip(literal.str_to_xyzzy, reason = "Renaming the private build subdirectory leaves Cargo's output isolated in scratch.")]
-        let build = scratch.join("build");
+        let build = self.scratch.path().join("build");
         command
             // Cargo loads configuration from this directory, not from --manifest-path.
             .current_dir(&self.root)
-            .env("RUSTUP_TOOLCHAIN", self.toolchain.trim())
+            .envs(&self.child_env)
             .env("CARGO_BUILD_BUILD_DIR", build);
-        if let Some(home) = &self.cargo_home {
-            command.env("CARGO_HOME", home);
+        command
+    }
+
+    fn package_command(&self, candidates: &BTreeMap<String, String>) -> Command {
+        let artifacts = self.scratch.path().join("artifacts");
+        let mut command = self.command();
+        command.args(["package", "--allow-dirty", "--target-dir"]).arg(&artifacts);
+        for (name, version) in candidates {
+            command.arg("--package").arg(format!("{name}@{version}"));
         }
         command
     }
 
-    fn archive_command(&self, scratch: &Path, patch: &Path) -> Command {
-        let mut command = self.command(scratch);
+    fn archive_command(&self, patch: &Path) -> Command {
+        let mut command = self.command();
         // #[gamma::skip(literal.str_to_xyzzy, reason = "Renaming the private target subdirectory leaves Cargo's output isolated in scratch.")]
-        let target = scratch.join("target");
+        let target = self.scratch.path().join("target");
         command.env("CARGO_TARGET_DIR", target).arg("--config").arg(patch);
         command
     }
@@ -186,8 +268,8 @@ fn capture(command: &mut Command, operation: &str, run_output: impl FnOnce(&mut 
     Ok(String::from_utf8(output.stdout)?)
 }
 
-fn run(command: &mut Command, operation: &str) -> Result<()> {
-    let status = command.status()?;
+fn run(command: &mut Command, operation: &str, run_status: impl FnOnce(&mut Command) -> io::Result<ExitStatus>) -> Result<()> {
+    let status = run_status(command)?;
     if !status.success() {
         return Err(format!("{operation} failed ({status})").into());
     }
@@ -195,220 +277,4 @@ fn run(command: &mut Command, operation: &str) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::ffi::OsStr;
-    use std::process::ExitStatus;
-
-    use super::*;
-
-    fn probe_output(status: ExitStatus, stdout: &[u8]) -> Output {
-        Output {
-            status,
-            stdout: stdout.to_vec(),
-            stderr: Vec::new(),
-        }
-    }
-
-    fn discovery_error(probes: impl IntoIterator<Item = (&'static str, Output)>) -> Box<dyn std::error::Error> {
-        let mut probes = probes.into_iter();
-        let error = ReleaseCargo::discover(None, |command| {
-            let (program, output) = probes.next().expect("discovery ran a probe beyond the scripted failure");
-            assert_eq!(command.get_program(), program);
-            Ok(output)
-        })
-        .err()
-        .expect("the scripted probe results cannot yield a workspace and toolchain");
-        assert!(probes.next().is_none(), "discovery stopped before the failing probe");
-        error
-    }
-
-    #[test]
-    fn rejects_a_workspace_manifest_without_a_parent() {
-        let error = discovery_error([("cargo", probe_output(ExitStatus::default(), b""))]);
-        assert_eq!(error.to_string(), "workspace manifest has no parent directory");
-    }
-
-    #[cfg(any(unix, windows))]
-    #[test]
-    fn reports_a_failed_rustc_sysroot_probe() {
-        #[cfg(unix)]
-        let status = <ExitStatus as std::os::unix::process::ExitStatusExt>::from_raw(7 << 8);
-        #[cfg(windows)]
-        let status = <ExitStatus as std::os::windows::process::ExitStatusExt>::from_raw(7);
-        let error = discovery_error([
-            ("cargo", probe_output(ExitStatus::default(), b"workspace/Cargo.toml")),
-            ("rustc", probe_output(status, b"")),
-        ]);
-        assert_eq!(error.to_string(), format!("selecting Rust toolchain failed ({status})"));
-    }
-
-    #[test]
-    fn rejects_non_utf8_probe_output() {
-        let error = discovery_error([("cargo", probe_output(ExitStatus::default(), &[0xff]))]);
-        assert!(error.is::<std::string::FromUtf8Error>(), "{error}");
-    }
-
-    #[test]
-    fn discovery_leaves_cargo_home_to_cargo_when_unset_or_empty() -> Result<()> {
-        for home in [None, Some(OsString::new())] {
-            let cargo = ReleaseCargo::discover(home, |command| match command.get_program().to_str() {
-                Some("cargo") => Ok(probe_output(ExitStatus::default(), b"workspace/Cargo.toml")),
-                Some("rustc") => Ok(probe_output(ExitStatus::default(), b"workspace-toolchain\n")),
-                _ => panic!("unexpected discovery probe: {command:?}"),
-            })?;
-            assert!(cargo.cargo_home.is_none());
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn reads_candidate_versions_and_ignores_discovery_metadata() -> Result<()> {
-        let report = r#"[{"name":"peer","new_version":"1.2.0","old_version":"1.1.0","classification":"compatible"}]"#;
-        assert_eq!(parse_candidates(report)?, BTreeMap::from([("peer".into(), "1.2.0".into())]));
-        assert!(parse_candidates("[]")?.is_empty());
-        Ok(())
-    }
-
-    #[test]
-    fn deduplicates_candidates_with_the_same_name_and_version() -> Result<()> {
-        let report = r#"[
-            {"name":"peer","new_version":"1.2.0"},
-            {"name":"other","new_version":"1.2.0"},
-            {"name":"peer","new_version":"1.2.0"}
-        ]"#;
-        assert_eq!(
-            parse_candidates(report)?,
-            BTreeMap::from([("other".into(), "1.2.0".into()), ("peer".into(), "1.2.0".into())])
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn rejects_invalid_candidate_reports() {
-        for report in ["", "{}"] {
-            assert!(parse_candidates(report).is_err(), "{report}");
-        }
-        for (report, diagnostic) in [
-            (r#"[{"new_version":"1.2.0"}]"#, "candidate is missing its name"),
-            (r#"[{"name":"peer","old_version":"1.1.0"}]"#, "candidate is missing its version"),
-            (
-                r#"[{"name":"peer","new_version":"1.1.0"},{"name":"peer","new_version":"1.2.0"}]"#,
-                "report lists two versions for `peer`: `1.1.0` and `1.2.0`; keep one",
-            ),
-        ] {
-            assert_eq!(parse_candidates(report).unwrap_err().to_string(), diagnostic);
-        }
-    }
-
-    #[test]
-    #[cfg_attr(miri, ignore = "uses the host filesystem")]
-    fn validate_packages_reports_the_missing_candidate_archive() -> Result<()> {
-        let scratch = tempfile::tempdir()?;
-        let archives = tempfile::tempdir_in(scratch.path())?;
-        let candidates = BTreeMap::from([("peer".into(), "1.2.0".into())]);
-        let cargo = ReleaseCargo {
-            root: PathBuf::from("workspace"),
-            toolchain: String::new(),
-            cargo_home: None,
-        };
-        let error = validate_packages(&cargo, scratch.path(), archives.path(), candidates)
-            .expect_err("peer was reported as packaged, but its archive is missing");
-        let missing = archives.path().join("peer-1.2.0.crate");
-        assert!(
-            error.to_string().starts_with(&format!("extracting {}:", missing.display())),
-            "{error}"
-        );
-        Ok(())
-    }
-
-    #[test]
-    #[cfg_attr(miri, ignore = "uses the host filesystem")]
-    fn reports_a_missing_workspace_when_preparing_scratch() -> Result<()> {
-        let parent = tempfile::tempdir()?;
-        let error = scratch_directory(&parent.path().join("missing-workspace"), Some(parent.path())).unwrap_err();
-        assert_eq!(error.downcast_ref::<io::Error>().unwrap().kind(), io::ErrorKind::NotFound);
-        Ok(())
-    }
-
-    #[test]
-    #[cfg_attr(miri, ignore = "uses the host filesystem")]
-    fn reports_when_the_candidate_patch_cannot_be_written() -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        let cargo = ReleaseCargo {
-            root: temp.path().to_path_buf(),
-            toolchain: String::new(),
-            cargo_home: None,
-        };
-        let scratch = temp.path().join("missing-scratch");
-        let error = test_archives(&cargo, &scratch, &BTreeMap::new()).unwrap_err();
-        assert_eq!(error.downcast_ref::<io::Error>().unwrap().kind(), io::ErrorKind::NotFound);
-        Ok(())
-    }
-
-    #[cfg(any(unix, windows))]
-    #[test]
-    fn reports_paths_cargo_cannot_represent_in_patch_toml() {
-        #[cfg(unix)]
-        let directory = {
-            use std::os::unix::ffi::OsStringExt;
-            std::ffi::OsString::from_vec(vec![0xff])
-        };
-        #[cfg(windows)]
-        let directory = {
-            use std::os::windows::ffi::OsStringExt;
-            std::ffi::OsString::from_wide(&[0xd800])
-        };
-        let sources = BTreeMap::from([("candidate".into(), directory.into())]);
-        let cargo = ReleaseCargo {
-            root: PathBuf::from("workspace"),
-            toolchain: String::new(),
-            cargo_home: None,
-        };
-        // The invalid path must fail before Ark tries to write into scratch.
-        let scratch = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
-        assert_eq!(
-            test_archives(&cargo, &scratch, &sources).unwrap_err().to_string(),
-            "candidate archive path must be UTF-8"
-        );
-    }
-
-    #[test]
-    #[cfg_attr(miri, ignore = "attempts to spawn a host process")]
-    fn reports_when_the_required_cargo_process_cannot_start() -> Result<()> {
-        let scratch = tempfile::tempdir()?;
-        let mut missing = Command::new(scratch.path().join("unavailable-cargo"));
-        for error in [
-            capture(&mut missing, "locating the Cargo workspace", Command::output).unwrap_err(),
-            run(&mut missing, "testing a candidate").unwrap_err(),
-        ] {
-            assert_eq!(error.downcast_ref::<io::Error>().unwrap().kind(), io::ErrorKind::NotFound);
-        }
-        Ok(())
-    }
-
-    #[test]
-    #[cfg_attr(all(miri, windows), ignore = "Windows Command environment uses CompareStringOrdinal")]
-    fn archive_commands_use_workspace_config_and_keep_builds_in_scratch() {
-        let root = PathBuf::from("workspace");
-        let scratch = PathBuf::from("scratch");
-        let patch = scratch.join("patch.toml");
-        let cargo = ReleaseCargo {
-            root: root.clone(),
-            toolchain: "workspace-toolchain\n".into(),
-            cargo_home: None,
-        };
-        let command = cargo.archive_command(&scratch, &patch);
-        assert_eq!(command.get_current_dir(), Some(root.as_path()));
-        assert_eq!(command.get_args().collect::<Vec<_>>(), ["--config".as_ref(), patch.as_os_str()]);
-        let env: BTreeMap<_, _> = command.get_envs().collect();
-        assert_eq!(
-            env.get(OsStr::new("RUSTUP_TOOLCHAIN")),
-            Some(&Some(OsStr::new("workspace-toolchain")))
-        );
-        for key in ["CARGO_TARGET_DIR", "CARGO_BUILD_BUILD_DIR"] {
-            let directory = env.get(OsStr::new(key)).copied().flatten().map(Path::new).unwrap();
-            assert!(directory.starts_with(&scratch) && directory != scratch);
-        }
-        assert!(!env.contains_key(OsStr::new("CARGO_HOME")));
-    }
-}
+mod tests;

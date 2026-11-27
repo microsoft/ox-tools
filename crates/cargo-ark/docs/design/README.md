@@ -34,3 +34,12 @@ out of date, `cargo package` may update it in your checkout.
 
 The command reports errors and exits nonzero if the input is invalid or if
 packaging or testing fails. It does not discover candidates or publish crates.
+
+The `cargo_ark` library implements release dependency validation in `check`.
+The CLI validates the report with `Candidates::from_report` and, if there
+are candidates, uses `CargoInvoker::discover` to locate the workspace and
+prepare Cargo. The CLI passes both inputs to `check` and reports the result.
+The invoker owns the scratch directory and is consumed by `check`, tying that
+directory to one run. Callers with a known workspace and toolchain can use
+`CargoInvoker::new` to skip discovery. Integration tests use this path: `check`
+still runs Cargo to package and test the archives without launching the Ark binary.

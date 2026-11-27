@@ -2,29 +2,16 @@
 // Licensed under the MIT License.
 
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![doc = include_str!("../docs/cli.md")]
 
-//! Anvil Release Kit (ARK) provides tools for Rust release workflows through `cargo ark`.
-//!
-//! # Release dependency validation
-//!
-//! `cargo ark release-dependencies` checks whether the selected packages build and
-//! pass their shipped tests from their `.crate` archives. Run it from the workspace
-//! and pass the candidates as a JSON array on standard input:
-//!
-//! ```sh
-//! echo '[{"name":"my-crate","new_version":"1.2.0"}]' | cargo ark release-dependencies
-//! ```
-//!
-//! The command runs each package's tests with all features, with no default
-//! features, and without feature flags (Cargo's default selection).
-//! It does not discover candidates or publish packages.
-
+use std::collections::BTreeMap;
+use std::ffi::OsString;
+use std::io::{self, Read};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use cargo_ark::release_dependencies::{Candidates, CargoInvoker, check};
 use clap::{Parser, Subcommand};
-
-mod release_dependencies;
 
 #[derive(Parser)]
 #[command(name = "cargo ark", version, about)]
@@ -53,11 +40,71 @@ fn main() -> ExitCode {
     let Cli {
         command: ArkCommand::ReleaseDependencies { temp_dir },
     } = Cli::parse_from(args);
-    match release_dependencies::check(temp_dir.as_deref()) {
+    match check_release_dependencies(io::stdin(), temp_dir) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("cargo ark release-dependencies: {error}");
             ExitCode::FAILURE
         }
+    }
+}
+
+fn check_release_dependencies(input: impl Read, temp_dir: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+    check_release_dependencies_with(input, temp_dir, |invocation_dir, child_env, temp_dir| {
+        CargoInvoker::discover(invocation_dir, child_env, temp_dir.as_deref())
+    })
+}
+
+fn check_release_dependencies_with(
+    mut input: impl Read,
+    temp_dir: Option<PathBuf>,
+    discover: impl FnOnce(PathBuf, BTreeMap<OsString, OsString>, Option<PathBuf>) -> Result<CargoInvoker, Box<dyn std::error::Error>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut report = String::new();
+    input.read_to_string(&mut report)?;
+    let candidates = Candidates::from_report(&report)?;
+    if candidates.is_empty() {
+        println!("cargo ark release-dependencies: no release candidates");
+        return Ok(());
+    }
+
+    let mut child_env = BTreeMap::<OsString, OsString>::new();
+    if let Some(home) = std::env::var_os("CARGO_HOME") {
+        child_env.insert("CARGO_HOME".into(), home);
+    }
+    let cargo = discover(std::env::current_dir()?, child_env, temp_dir)?;
+    check(candidates, cargo)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use super::*;
+
+    #[test]
+    fn accepts_an_empty_report_without_discovering_a_workspace() {
+        check_release_dependencies_with(Cursor::new("[]"), None, |_, _, _| {
+            panic!("an empty report attempted workspace discovery")
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn rejects_non_utf8_report_input() {
+        let error = check_release_dependencies_with(Cursor::new([0xff]), None, |_, _, _| {
+            panic!("an invalid report attempted workspace discovery")
+        })
+        .unwrap_err();
+        assert_eq!(error.downcast_ref::<io::Error>().unwrap().kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn rejects_an_invalid_report_without_discovering_a_workspace() {
+        let error = check_release_dependencies_with(Cursor::new(r#"[{"name":"peer"}]"#), None, |_, _, _| {
+            panic!("an invalid report attempted workspace discovery")
+        })
+        .unwrap_err();
+        assert_eq!(error.to_string(), "candidate is missing its version");
     }
 }
