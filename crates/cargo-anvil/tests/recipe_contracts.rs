@@ -228,6 +228,7 @@ fn setup_uses_lazy_inventory_and_exact_install_policy() {
     assert!(!recipes.contains(r#"source_command=(if name == "cargo-each""#));
     assert!(!recipes.contains("anvil-toolchain-stable-install"));
     assert!(generated.setup.contains("set lazy"));
+    assert!(!generated.setup.contains("set lists"));
     assert!(recipes.contains("--disable-strategies compile"));
     assert!(!recipes.contains("`rustup run {{"));
     assert!(!generated.helpers.contains("`rustc +{{"));
@@ -397,9 +398,12 @@ fn container_context_and_setup_use_all_generated_recipe_files() {
         assert!(ignore.contains(&format!("!.anvil/{path}")));
         assert!(generated.container.contains(&format!("'.anvil/{path}'")));
     }
-    assert!(dockerfile.contains("import '.anvil/anvil.just'"));
+    assert!(dockerfile.contains("set unstable\\nimport '.anvil/anvil.just'"));
     assert!(dockerfile.contains("ARG ANVIL_ROOT_MSRV"));
+    assert!(dockerfile.contains("rustup toolchain install stable --profile minimal"));
     assert!(dockerfile.contains("setup_toolchain=stable"));
+    assert!(dockerfile.contains("ANVIL_CARGO_BINSTALL=\"${CARGO_HOME}/bin/cargo-binstall\""));
+    assert!(dockerfile.contains("ANVIL_CARGO_INSTALL_TOOLCHAIN=stable"));
     assert!(dockerfile.contains("RUSTUP_TOOLCHAIN=\"${setup_toolchain}\" just anvil-setup"));
 }
 
@@ -408,6 +412,7 @@ fn generated_root_imports_only_the_hub() {
     let generated = generated();
     let root = std::fs::read_to_string(generated.temp.path().join("Justfile")).unwrap();
     assert!(root.contains("import '.anvil/anvil.just'"));
+    assert_eq!(root.matches("set unstable").count(), 1);
     assert!(!root.contains("checks.just"));
     assert!(!root.contains("setup.just"));
     assert!(!root.contains("container.just"));

@@ -22,10 +22,12 @@ See [local execution](./local.md) for the recipes it wraps,
 The host needs Git, `just`, PowerShell Core (`pwsh`), and a running container
 engine. Anvil installs none of these and manages no virtual machine.
 
-The image installs tools through `just anvil-setup binstall`. A root
-`rust-toolchain.toml` or `rust-toolchain` is honored when present; otherwise the
-declared root MSRV selects the default compiler. The host's `RUSTUP_TOOLCHAIN`
-is not inherited.
+The image installs tools through `just anvil-setup binstall`. Cargo tools use
+current stable Rust so source fallbacks are not limited by an older workspace
+MSRV. A root `rust-toolchain.toml` or `rust-toolchain` is honored for repository
+components and checks; otherwise the declared root MSRV selects the default
+compiler. The MSRV toolchain remains installed for its separate validation
+group. The host's `RUSTUP_TOOLCHAIN` is not inherited.
 
 ## 2. Commands and controls
 

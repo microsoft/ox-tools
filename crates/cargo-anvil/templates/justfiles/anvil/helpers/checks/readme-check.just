@@ -4,9 +4,9 @@
 # Update cargo-anvil and regenerate; repository-specific edits stop automatic updates.
 # Regenerate with cargo-anvil to update this file.
 
-anvil_readme_template := if path_exists("crates/README.j2") {
+anvil_readme_template := if path_exists("crates/README.j2") == "true" {
     absolute_path("crates/README.j2")
-} else if path_exists("README.j2") {
+} else if path_exists("README.j2") == "true" {
     absolute_path("README.j2")
 } else {
     ""

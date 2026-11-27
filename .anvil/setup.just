@@ -5,13 +5,22 @@
 # Regenerate with cargo-anvil to update this file.
 
 set lazy
-set lists
 
 # Cargo's inventory is captured once, and only when a setup or validation
 # recipe actually references it.
 installed_cargo_tools := `cargo install --list`
 cargo_binstall_version := replace_regex(installed_cargo_tools, '(?ms)\A.*^cargo-binstall v([^:\r\n]+):\r?$.*\z', '$1')
-cargo_binstall_found := if cargo_binstall_version == installed_cargo_tools { "false" } else { "true" }
+cargo_binstall_path := env("ANVIL_CARGO_BINSTALL", "")
+cargo_binstall_found := if cargo_binstall_version != installed_cargo_tools {
+    "true"
+} else if cargo_binstall_path == "" {
+    "false"
+} else if path_exists(cargo_binstall_path) == "true" {
+    "true"
+} else {
+    "false"
+}
+anvil_cargo_install_toolchain := env("ANVIL_CARGO_INSTALL_TOOLCHAIN", env("RUSTUP_TOOLCHAIN", ""))
 bolero_command_prefix := if os() == "linux" { "" } else { "# " }
 anvil_nightly_sysroot := shell("rustup run " + rust_nightly + " rustc --print sysroot")
 anvil_nightly_host := shell("rustup run " + rust_nightly + " rustc --print host-tuple")
@@ -28,16 +37,19 @@ anvil-tool-cargo-spellcheck-source-deps-check: anvil-tool-cargo-spellcheck-helpe
 # lets cargo-binstall compile when no binary strategy succeeds; installer mode
 # is caller policy.
 [arg("installer", pattern="^(install|binstall)$")]
+[env("RUSTUP_TOOLCHAIN", anvil_cargo_install_toolchain)]
 [private]
 _install-tool name minimum installer="install" extracted=(replace_regex(installed_cargo_tools, ('(?ms)\A.*^' + name + ' v([^:\r\n]+):\r?$.*\z'), '$1')) found=(if extracted == installed_cargo_tools { "false" } else { "true" }) installed=(if found == "true" { extracted } else { "" }) satisfied=(if found == "true" { semver_matches(installed, ">=" + minimum) } else { "false" }) source_command=("cargo install --locked --version =" + minimum + " " + name) binary_command=("cargo binstall --no-confirm --locked --version =" + minimum + " " + name):
     {{ if satisfied == "true" { "# cargo-binstall not needed" } else if installer == "binstall" { if cargo_binstall_found == "true" { "# cargo-binstall already available" } else { "cargo install --locked cargo-binstall" } } else { "# cargo-binstall not needed" } }}
     {{ if satisfied == "true" { "# " + name + " " + installed + " satisfies >= " + minimum } else if installer == "install" { source_command } else { binary_command } }}
 
+[env("RUSTUP_TOOLCHAIN", anvil_cargo_install_toolchain)]
 [private]
 _install-source-tool name minimum prerequisite extracted=(replace_regex(installed_cargo_tools, ('(?ms)\A.*^' + name + ' v([^:\r\n]+):\r?$.*\z'), '$1')) found=(if extracted == installed_cargo_tools { "false" } else { "true" }) satisfied=(if found == "true" { semver_matches(extracted, ">=" + minimum) } else { "false" }):
     {{ if satisfied == "true" { "# binary install satisfied the requirement" } else { just_executable() + " " + prerequisite } }}
     {{ if satisfied == "true" { "# source fallback not needed" } else { "cargo install --locked --version =" + minimum + " " + name } }}
 
+[env("RUSTUP_TOOLCHAIN", anvil_cargo_install_toolchain)]
 _binstall-with-source-fallback name minimum prerequisite:
     {{ if cargo_binstall_found == "true" { "# cargo-binstall already available" } else { "cargo install --locked cargo-binstall" } }}
     -cargo binstall --no-confirm --locked --disable-strategies compile --version ={{ minimum }} {{ name }}
@@ -131,7 +143,7 @@ anvil-component-nightly-rust-src-install: anvil-toolchain-nightly-install (_inst
 [group("anvil-setup")]
 [private]
 anvil-component-nightly-rust-src-validate-prereqs: anvil-toolchain-nightly-validate-prereqs
-    {{ if path_exists(anvil_nightly_rust_src_dir) { "# rust-src component available" } else { error("rust-src is missing from " + rust_nightly + "; run `just anvil-component-nightly-rust-src-install`") } }}
+    {{ if path_exists(anvil_nightly_rust_src_dir) == "true" { "# rust-src component available" } else { error("rust-src is missing from " + rust_nightly + "; run `just anvil-component-nightly-rust-src-install`") } }}
 
 [group("anvil-setup")]
 [private]
@@ -140,7 +152,7 @@ anvil-component-nightly-llvm-tools-install: anvil-toolchain-nightly-install (_in
 [group("anvil-setup")]
 [private]
 anvil-component-nightly-llvm-tools-validate-prereqs: anvil-toolchain-nightly-validate-prereqs
-    {{ if path_exists(anvil_nightly_llvm_profdata) { "# llvm-tools component available" } else { error("llvm-tools is missing from " + rust_nightly + "; run `just anvil-component-nightly-llvm-tools-install`") } }}
+    {{ if path_exists(anvil_nightly_llvm_profdata) == "true" { "# llvm-tools component available" } else { error("llvm-tools is missing from " + rust_nightly + "; run `just anvil-component-nightly-llvm-tools-install`") } }}
 
 # Cargo subcommands.
 [group("anvil-setup")]

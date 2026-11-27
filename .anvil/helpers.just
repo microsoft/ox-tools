@@ -46,7 +46,7 @@ anvil_impact_skip_prefix := if anvil_impact_mode != "" {
 } else {
     ""
 }
-anvil_impact_config_arg := if path_exists(".delta.toml") { "--config " + quote(absolute_path(".delta.toml")) } else { "" }
+anvil_impact_config_arg := if path_exists(".delta.toml") == "true" { "--config " + quote(absolute_path(".delta.toml")) } else { "" }
 anvil_impact_toolchain := if anvil_impact_mode == "" {
     trim(shell("rustc " + anvil_stable_toolchain_arg + " --print sysroot"))
 } else {
@@ -95,9 +95,9 @@ workspace_rust_version_line := if anvil_root_msrv == "" {
 workspace_rust_version := replace(workspace_rust_version_line, "workspace-rust-version=", "")
 
 anvil_stable_toolchain_arg := if env("RUSTUP_TOOLCHAIN", "") == "" {
-    if path_exists(justfile_directory() + "/rust-toolchain.toml") {
+    if path_exists(justfile_directory() + "/rust-toolchain.toml") == "true" {
         ""
-    } else if path_exists(justfile_directory() + "/rust-toolchain") {
+    } else if path_exists(justfile_directory() + "/rust-toolchain") == "true" {
         ""
     } else if workspace_rust_version == "" {
         ""
@@ -114,7 +114,7 @@ anvil_msrv_workspace_selection := if workspace_rust_version == "" { "--none" } e
 # Validate downloaded inputs without invoking cargo-delta or recomputing impact.
 [private]
 _anvil-impact-consume-file tier file=(anvil_impact_input_dir + "/" + tier + ".packages"):
-    {{ if anvil_impact_mode != "consume" { "# no downloaded impact input required" } else if path_exists(file) { if read(file) == "" { "# empty impact selection: " + tier } else { "# downloaded impact selection: " + tier } } else { error("anvil-impact: ANVIL_IMPACT=consume requires " + file + "; download a complete impact artifact or correct ANVIL_IMPACT_INPUT_DIR") } }}
+    {{ if anvil_impact_mode != "consume" { "# no downloaded impact input required" } else if path_exists(file) == "true" { if read(file) == "" { "# empty impact selection: " + tier } else { "# downloaded impact selection: " + tier } } else { error("anvil-impact: ANVIL_IMPACT=consume requires " + file + "; download a complete impact artifact or correct ANVIL_IMPACT_INPUT_DIR") } }}
 
 # Used by anvil-scheduled and _anvil-full to fan out all scheduled groups.
 [private]
@@ -134,7 +134,7 @@ anvil_bolero_host_target := shell("rustc +" + rust_nightly + " --print host-tupl
 # Used by anvil-bolero to create its JSONL output directory after impact analysis.
 [private]
 _ensure-target-dir: anvil-impact
-    {{ if path_exists("target") { "# target directory already exists" } else { "mkdir target" } }}
+    {{ if path_exists("target") == "true" { "# target directory already exists" } else { "mkdir target" } }}
 
 anvil_careful_prefix := if anvil_impact_mode == "off" {
     ""
@@ -147,7 +147,7 @@ anvil_careful_target_dir := if anvil_careful_prefix == "" {
     "target" / "anvil" / "careful" / sha256(
         shell("rustup run " + rust_nightly + " rustc -vV")
         + "\n"
-        + sha256_file(which("cargo-careful"))
+        + sha256_file(require("cargo-careful"))
     )
 } else {
     ""
@@ -200,9 +200,9 @@ anvil_cargo_env_config(name, value) := "--config " + quote("env." + name + ".val
 [env("__CARGO_TEMPORARY_BUILD_DIR_NEW_LAYOUT_OPT_OUT", anvil_miri_build_dir_layout_opt_out)]
 [private]
 _anvil-miri-test profile package="" test_filter="" example="": anvil-impact _ensure-target-dir
-    {{ if profile == "standard" || profile == "tree-borrows" || profile == "strict-provenance" || profile == "race-coverage" { "# valid Miri profile" } else { error("anvil miri: unknown profile '" + profile + "'") } }}
-    {{ if test_filter != "" && example != "" { error("anvil-miri: choose exactly one of --test or --example") } else { "# valid test/example selection" } }}
-    {{ if example != "" && package == "" { error("anvil-miri: --example requires --package to avoid workspace ambiguity") } else { "# valid example package selection" } }}
+    {{ if profile == "standard" { "# valid Miri profile" } else if profile == "tree-borrows" { "# valid Miri profile" } else if profile == "strict-provenance" { "# valid Miri profile" } else if profile == "race-coverage" { "# valid Miri profile" } else { error("anvil miri: unknown profile '" + profile + "'") } }}
+    {{ if test_filter == "" { "# valid test/example selection" } else if example == "" { "# valid test/example selection" } else { error("anvil-miri: choose exactly one of --test or --example") } }}
+    {{ if example == "" { "# valid example package selection" } else if package == "" { error("anvil-miri: --example requires --package to avoid workspace ambiguity") } else { "# valid example package selection" } }}
     {{ if example == "" { "# " } else { "" } }}cargo +{{ rust_nightly }} {{ anvil_cargo_env_config("MIRIFLAGS", anvil_miri_flags(profile)) }} {{ anvil_cargo_env_config("RUSTFLAGS", anvil_miri_rustflags(profile)) }} each {{ anvil_miri_selection(package) }} --filter {{ quote("not metadata:anvil.miri.exclude=true") }} --once -- cargo +{{ rust_nightly }} miri run '{packages}' --all-features --locked --example {{ quote(example) }}
     {{ if example != "" { "# " } else { "" } }}cargo +{{ rust_nightly }} {{ anvil_cargo_env_config("MIRIFLAGS", anvil_miri_flags(profile)) }} {{ anvil_cargo_env_config("RUSTFLAGS", anvil_miri_rustflags(profile)) }} each {{ anvil_miri_selection(package) }} --filter {{ quote("not metadata:anvil.miri.exclude=true") }} --once -- cargo +{{ rust_nightly }} miri test '{packages}' --all-features --tests --no-run --locked --message-format=json,json-render-diagnostics > {{ quote(anvil_miri_artifacts_file) }}
     {{ if example != "" { "# " } else { "" } }}cargo +{{ rust_nightly }} {{ anvil_cargo_env_config("MIRIFLAGS", anvil_miri_flags(profile)) }} each --json-lines-file {{ quote(anvil_miri_artifacts_file) }} --json-filter {{ quote("reason=compiler-artifact and profile.test=true and executable") }} --json-work-dir-parent manifest_path --jobs {{ quote(env("ANVIL_MIRI_JOBS", "auto")) }} --keep-going -- rustup run {{ rust_nightly }} cargo-miri runner '{json:executable}' {{ if test_filter == "" { "" } else { quote(test_filter) } }}
@@ -217,9 +217,9 @@ anvil_pr_title := env("PR_TITLE", "")
 anvil_pr_title_pattern := '^(?i:feat|fix|chore|docs|refactor|test|build|ci|perf|revert)(?:\([^)]+\))?!?: .+$'
 anvil_pr_title_error := "PR title '" + anvil_pr_title + "' does not match the accepted Conventional Commits subset.\nAllowed patterns: <type>: <description>, <type>(<scope>): <description>, <type>!: <description>, <type>(<scope>)!: <description>\nAllowed types (case-insensitive): feat, fix, chore, docs, refactor, test, build, ci, perf, revert"
 
-anvil_readme_template := if path_exists("crates/README.j2") {
+anvil_readme_template := if path_exists("crates/README.j2") == "true" {
     absolute_path("crates/README.j2")
-} else if path_exists("README.j2") {
+} else if path_exists("README.j2") == "true" {
     absolute_path("README.j2")
 } else {
     ""

@@ -1,7 +1,7 @@
 version = 2
 tool = "anvil"
-tool_version = "0.28.5"
-catalog_checksum = "sha256:e218b577c26bd357193804693334b7f8bf523b309d9a21861f79e72db83b27e2"
+tool_version = "0.28.6"
+catalog_checksum = "sha256:a42d1ba09fa69a0ec05f35cf15ee504efc67c29fb561ea9285a2a554e06a83aa"
 
 [[file]]
 path = ".anvil/anvil.just"
@@ -9,7 +9,7 @@ checksum = "sha256:607eeaa37d75a2feade07c55370b277333c2fa66997f0b643c937c7a5a9ee
 
 [[file]]
 path = ".anvil/checks.just"
-checksum = "sha256:3430299c2cdbc5c97b4bbca8af1ca616a0c94f3d4c7131c5bbc518eec980ddd8"
+checksum = "sha256:296a1bbf0aa3e42ce7e18d899bf6d041257e3fa53c96f629a1dabf64cf25cf60"
 
 [[file]]
 path = ".anvil/container.just"
@@ -45,11 +45,11 @@ checksum = "sha256:47256006c8fec29073a93c095eb6c13aba6e47801db1752da7dfba3ea588f
 
 [[file]]
 path = ".anvil/helpers.just"
-checksum = "sha256:745af1a2241e5535a848d2dfefb58784ceb2e8674be8ddd98001b09842a4ccf3"
+checksum = "sha256:8f9386e70b588570a39d0b581db9c9cddff051d51826bb1d096945fe141c622b"
 
 [[file]]
 path = ".anvil/setup.just"
-checksum = "sha256:cc1873782a889a67e88cc9a649dbe4ce8f6756837c00bc8cf652107ffe033123"
+checksum = "sha256:adb9cfe8db75013f5999ec78b93062bd425e272f242175936dad717d4eba658f"
 
 [[file]]
 path = ".github/instructions/cargo-anvil.instructions.md"
@@ -101,7 +101,7 @@ checksum = "sha256:7b409a9b560c214e10b50f74330fb6f8c0c12c3d83494e0dcf016f2411b50
 [[region]]
 host = ".anvil/container/Dockerfile"
 id = "anvil-container-setup"
-checksum = "sha256:ac0819ec6199ca5de958ff28da9992aa8a2a35aad60ed0cf0e38d6dbc7e17958"
+checksum = "sha256:991e2c6d599712d7b057f67405f6d08de9b6420d1af9908f7f1926d3a86cc478"
 
 [[region]]
 host = ".anvil/container/Dockerfile"

@@ -15,7 +15,7 @@ anvil_careful_target_dir := if anvil_careful_prefix == "" {
     "target" / "anvil" / "careful" / sha256(
         shell("rustup run " + rust_nightly + " rustc -vV")
         + "\n"
-        + sha256_file(which("cargo-careful"))
+        + sha256_file(require("cargo-careful"))
     )
 } else {
     ""

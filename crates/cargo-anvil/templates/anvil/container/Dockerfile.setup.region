@@ -20,17 +20,17 @@
 # volume over each, and an engine seeds a new volume from the image path it
 # covers; a path that does not exist seeds as root-owned 0755, which the
 # `--user` mapping cannot write, so the first cargo fetch fails with EACCES.
-# The driver passes the declared root MSRV as ANVIL_ROOT_MSRV. Installing
-# and selecting it before setup gives Cargo a deterministic bootstrap without
-# copying workspace member manifests into the narrowed build context. When the
-# repository declares no MSRV, a copied root toolchain file remains responsible
-# for selecting Rust. If neither declaration exists, setup uses current stable
-# as an explicit bootstrap instead of asking cargo-each to inspect manifests
-# that are intentionally absent from the narrowed context.
+# The driver passes the declared root MSRV as ANVIL_ROOT_MSRV. Installing and
+# selecting it before setup preserves the repository toolchain for components
+# and the separate MSRV validation. Cargo tools install with current stable so
+# their source fallbacks are not constrained by an older workspace MSRV.
+# A copied root toolchain file remains responsible for selection when no MSRV
+# is declared. If neither declaration exists, stable is the explicit bootstrap.
 WORKDIR /opt/anvil
 COPY . ./
 ARG ANVIL_ROOT_MSRV
 RUN : "${ANVIL_ROOT_MSRV:?pass --build-arg ANVIL_ROOT_MSRV=<declared-rust-version>}" \
+    && rustup toolchain install stable --profile minimal \
     && setup_toolchain="${ANVIL_ROOT_MSRV}" \
     && if [ "${setup_toolchain}" = "none" ] \
         && [ ! -f rust-toolchain.toml ] \
@@ -41,10 +41,13 @@ RUN : "${ANVIL_ROOT_MSRV:?pass --build-arg ANVIL_ROOT_MSRV=<declared-rust-versio
         rustup toolchain install "${setup_toolchain}" --profile minimal \
         && rustup default "${setup_toolchain}"; \
     fi \
-    && printf "import '.anvil/anvil.just'\n" > Justfile \
+    && printf "set unstable\nimport '.anvil/anvil.just'\n" > Justfile \
     && if [ "${setup_toolchain}" = "none" ]; then \
-        just anvil-setup binstall; \
+        ANVIL_CARGO_BINSTALL="${CARGO_HOME}/bin/cargo-binstall" \
+        ANVIL_CARGO_INSTALL_TOOLCHAIN=stable just anvil-setup binstall; \
     else \
+        ANVIL_CARGO_BINSTALL="${CARGO_HOME}/bin/cargo-binstall" \
+        ANVIL_CARGO_INSTALL_TOOLCHAIN=stable \
         RUSTUP_TOOLCHAIN="${setup_toolchain}" just anvil-setup binstall; \
     fi \
     && rm -rf "${CARGO_HOME}/registry/cache" "${CARGO_HOME}/registry/src" \

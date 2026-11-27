@@ -9,4 +9,4 @@ anvil_bolero_host_target := shell("rustc +" + rust_nightly + " --print host-tupl
 # Used by anvil-bolero to create its JSONL output directory after impact analysis.
 [private]
 _ensure-target-dir: anvil-impact
-    {{ if path_exists("target") { "# target directory already exists" } else { "mkdir target" } }}
+    {{ if path_exists("target") == "true" { "# target directory already exists" } else { "mkdir target" } }}

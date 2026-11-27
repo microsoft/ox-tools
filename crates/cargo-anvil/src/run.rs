@@ -1240,14 +1240,14 @@ fn push_region_at_with_scanner(
     } else {
         DeltaRegionBody::Managed
     } {
-        DeltaRegionBody::Managed => spec.body.as_str(),
+        DeltaRegionBody::Managed => rendered_managed_region_body(current.as_deref(), spec),
         DeltaRegionBody::PreserveRepositoryKey => {
             plan.note(
                 "The repository's .delta.toml already defines top-level `trip_wire_patterns`; \
                  the managed anvil-delta region was left empty. Remove the repository key to \
                  adopt the managed trip-wire list.",
             );
-            ""
+            String::new()
         }
         DeltaRegionBody::Malformed(reason) => {
             plan.refusal(format!(
@@ -1267,7 +1267,7 @@ fn push_region_at_with_scanner(
     let request = ManagedRegionRequest {
         host_relpath: &host,
         region_id: spec.id.as_str(),
-        rendered_body: body,
+        rendered_body: &body,
         syntax: spec.syntax,
         placement,
         newline: hosts.newlines.get(&host).copied(),
@@ -1313,6 +1313,29 @@ fn push_region_at_with_scanner(
     }
     plan.push(item);
     Ok(())
+}
+
+fn rendered_managed_region_body(current: Option<&str>, spec: &RegionSpec) -> String {
+    if spec.id.as_str() != artifacts::justfile::JUSTFILE_REGION_ID
+        || !matches!(&spec.host, HostSelector::Path(path) if path.eq_ignore_ascii_case(artifacts::justfile::JUSTFILE_PATH))
+    {
+        return spec.body.clone();
+    }
+
+    let current = current.unwrap_or_default();
+    let managed_range = find_region(current, spec.id.as_str(), spec.syntax)
+        .expect("marker repair above validated the Justfile import region")
+        .map(|region| region.start_line.start..region.end_line.end);
+    let mut offset = 0;
+    for line in current.split_inclusive('\n') {
+        let line_start = offset;
+        offset += line.len();
+        if line.trim() == "set unstable" && managed_range.as_ref().is_none_or(|range| !range.contains(&line_start)) {
+            return spec.body.clone();
+        }
+    }
+
+    format!("set unstable\n{}", spec.body)
 }
 
 fn seed_justfile_scaffold_if_absent(hosts: &mut HostTextCache, host: &str, spec: &RegionSpec, current: Option<String>) -> Option<String> {
