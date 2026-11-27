@@ -360,7 +360,7 @@ function Anvil-PrepareEnv {
         $script = $launcher
         $escapedRoot = $caseRoot.Replace("'", "''")
         $replacements = [ordered]@{
-            '{{ replace(command, "''", "''''") }}' = $Command
+            '{{ replace(join(command, " "), "''", "''''") }}' = $Command
             '{{ replace(just_executable(), "''", "''''") }}' = 'Invoke-Just'
             '{{ replace(justfile_directory(), "''", "''''") }}' = $escapedRoot
             '{{ replace(invocation_directory_native(), "''", "''''") }}' = $escapedRoot
