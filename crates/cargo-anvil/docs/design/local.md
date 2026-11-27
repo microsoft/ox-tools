@@ -17,8 +17,8 @@ compatibility, not a universal Rust/Cargo 1.95 minimum. Passing prerequisite
 validation with an older compiler does not make that configuration supported.
 
 Local execution also requires rustup and **just 1.47.0+**. PowerShell 7+
-(`pwsh`) is needed for container commands and the scoped unused-dependency
-check. Impact analysis uses portable Just logic and cargo-delta. Spellcheck
+(`pwsh`) is needed only for container commands. Non-container recipes use
+portable Just logic and Cargo tools. Impact analysis uses cargo-delta. Spellcheck
 dictionary preparation and source-build prerequisite checks use
 `cargo-spellcheck-helper` without PowerShell. Setup installs catalog tools and
 Rust components; install the prerequisites needed by the selected recipes

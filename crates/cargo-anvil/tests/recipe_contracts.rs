@@ -114,18 +114,6 @@ fn generated_recipes_are_split_by_responsibility() {
 }
 
 #[test]
-fn unused_deps_keeps_scope_and_fixes_explicit() {
-    let generated = generated();
-    assert!(generated.checks.contains(r#"[arg("fix", long, value="true")]"#));
-    assert!(generated.checks.contains(r#"anvil-unused-deps fix="false":"#));
-    assert!(generated.checks.contains(r#"anvil_impact_input_dir + "/required.packages""#));
-    assert!(generated.checks.contains("$pkg += @('--package', $spec)"));
-    assert!(generated.checks.contains("Where-Object { -not [string]::IsNullOrWhiteSpace($_) }"));
-    assert!(generated.setup.contains("cargo_unused_deps_version"));
-    assert!(generated.setup.contains("anvil-tool-cargo-unused-deps-validate-prereqs"));
-}
-
-#[test]
 fn unused_deps_runs_immediately_before_udeps_in_pr_fast() {
     assert!(
         cargo_anvil::artifacts::justfile::groups::pr_fast()
@@ -133,13 +121,6 @@ fn unused_deps_runs_immediately_before_udeps_in_pr_fast() {
             .contains("    anvil-unused-deps \\\n    anvil-udeps \\\n"),
         "execution order must keep unused-deps immediately before udeps"
     );
-}
-
-#[test]
-fn unused_deps_rejects_whitespace_only_package_files() {
-    let generated = generated();
-    assert!(generated.checks.contains("IsNullOrWhiteSpace($packageText)"));
-    assert!(generated.checks.contains("contains whitespace but no package specs"));
 }
 
 #[test]

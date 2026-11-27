@@ -766,17 +766,15 @@ did not happen would send the reviewer hunting for text that is not in the diff.
 ## 7. CI integration
 
 The complete check is intended to replace both `cargo-udeps` and `cargo-machete`.
-Anvil retains `cargo-udeps` in `pr-fast`. The unused-deps recipe is currently an
-opt-in standalone check. Moving it into `pr-fast` requires `cargo-unused-deps`
-0.2.1 to be available on crates.io and will happen in a separate follow-up.
+Anvil runs both `cargo-unused-deps` and `cargo-udeps` in `pr-fast`.
 
-Generated setup installs the pinned 0.2.0 release from crates.io rather than
+Generated setup installs the pinned 0.3.0 release from crates.io rather than
 relying on an unpublished local build.
 
 The Anvil recipe always examines workspace dependencies, even when there are no
 required packages. After `anvil-impact` completes, it obtains the `required` tier
-from the current invocation's `required.packages` file and forwards each exact
-package spec as `--package <spec>`. An empty file produces no package selectors,
+by passing the current invocation's `required.packages` file directly with
+`--package-file`, without PowerShell. An empty file produces no package selectors,
 so only the workspace inheritance check runs. A nonempty whitespace-only file is
 malformed and fails rather than silently suppressing package analysis. With
 impact disabled, the recipe passes `--workspace` and checks every workspace package.
