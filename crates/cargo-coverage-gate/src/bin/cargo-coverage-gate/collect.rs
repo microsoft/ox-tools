@@ -724,8 +724,17 @@ fn collect_configurations_with(
 
 /// Removes one completed configuration's target while retaining its raw LCOV.
 fn cleanup_configuration_target(execution: &CollectionExecution<'_>, configuration: FeatureConfiguration) -> Result<(), AppError> {
+    cleanup_configuration_target_with(execution, configuration, remove_dir_if_present)
+}
+
+/// Adapts a native removal result to the configuration-cleanup error contract.
+fn cleanup_configuration_target_with(
+    execution: &CollectionExecution<'_>,
+    configuration: FeatureConfiguration,
+    remove: impl FnOnce(&Path) -> io::Result<()>,
+) -> Result<(), AppError> {
     let target_dir = configuration_target_dir(execution, configuration);
-    let result = remove_dir_if_present(&target_dir);
+    let result = remove(&target_dir);
     let context = cleanup_error_context(&target_dir, result.as_ref().err());
     result.into_app_err(context)
 }
@@ -1645,6 +1654,95 @@ mod tests {
         assert_eq!(error.to_string(), "scripted configuration cleanup failure");
         assert_eq!(collected.get(), 1);
         assert_eq!(cleaned.get(), 1);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "exercises native directory cleanup, which Miri isolation does not support")]
+    fn configuration_cleanup_removes_the_selected_target_and_preserves_raw_lcov() {
+        let parent = tempdir().expect("owned collection directory");
+        let workspace = workspace(parent.path());
+        let selection = Selection {
+            explicit: false,
+            members: workspace.members.clone(),
+        };
+        let args = collection_args();
+        let tools = ToolPrograms {
+            cargo: OsString::from("never-invoked"),
+            rustc: OsString::from("never-invoked"),
+        };
+        let scratch_dir = parent.path().join("scratch");
+        let target_root = scratch_dir.join("cargo-target");
+        let execution = CollectionExecution {
+            workspace: &workspace,
+            selection: &selection,
+            args: &args,
+            scratch_dir: &scratch_dir,
+            coverage_target_root: &target_root,
+            target: None,
+            tools: &tools,
+            quiet: false,
+        };
+        let configuration = FeatureConfiguration::AllFeatures;
+        let target_dir = configuration_target_dir(&execution, configuration);
+        let raw_path = scratch_dir.join(format!("raw-lcov-{}.info", configuration.artifact_name()));
+        fs::create_dir_all(target_dir.join("nested")).expect("create configuration target");
+        fs::write(target_dir.join("nested/profile.profraw"), b"profile").expect("create raw profile");
+        fs::create_dir_all(&scratch_dir).expect("create scratch root");
+        fs::write(&raw_path, RAW_ALL_FEATURES).expect("write completed raw LCOV");
+
+        cleanup_configuration_target(&execution, configuration).expect("remove completed target");
+
+        assert!(!target_dir.exists(), "the selected configuration target must be removed");
+        assert_eq!(fs::read_to_string(raw_path).expect("read retained raw LCOV"), RAW_ALL_FEATURES);
+    }
+
+    #[test]
+    fn configuration_cleanup_failure_retains_the_native_error_and_context() {
+        let workspace = workspace(Path::new("synthetic-workspace"));
+        let selection = Selection {
+            explicit: false,
+            members: workspace.members.clone(),
+        };
+        let args = collection_args();
+        let tools = ToolPrograms {
+            cargo: OsString::from("never-invoked"),
+            rustc: OsString::from("never-invoked"),
+        };
+        let target_root = PathBuf::from("synthetic-scratch/cargo-target");
+        let scratch_dir = PathBuf::from("synthetic-scratch");
+        let execution = CollectionExecution {
+            workspace: &workspace,
+            selection: &selection,
+            args: &args,
+            scratch_dir: &scratch_dir,
+            coverage_target_root: &target_root,
+            target: None,
+            tools: &tools,
+            quiet: false,
+        };
+        let configuration = FeatureConfiguration::AllFeatures;
+        let expected_path = configuration_target_dir(&execution, configuration);
+        let native_error = io::Error::from_raw_os_error(32);
+        let expected_context = cleanup_error_context(&expected_path, Some(&native_error));
+        let observed_path = RefCell::new(None);
+        let error = cleanup_configuration_target_with(&execution, configuration, |path| {
+            observed_path.replace(Some(path.to_path_buf()));
+            Err(io::Error::from_raw_os_error(32))
+        })
+        .expect_err("injected removal failure must propagate");
+
+        assert_eq!(observed_path.into_inner(), Some(expected_path));
+        assert!(
+            error.to_string().contains(&expected_context),
+            "cleanup failure must retain `{expected_context}`: {error}"
+        );
+        assert_eq!(
+            error
+                .find_source::<io::Error>()
+                .expect("cleanup must retain the native removal error")
+                .raw_os_error(),
+            Some(32)
+        );
     }
 
     #[test]
