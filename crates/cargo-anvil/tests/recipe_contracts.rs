@@ -231,6 +231,7 @@ fn codecov_uploads_the_canonical_merged_report_only() {
     ] {
         assert!(workflow.contains("hashFiles('target/coverage/lcov-merged.info') != ''"));
         assert!(workflow.contains("files: target/coverage/lcov-merged.info"));
+        assert!(workflow.contains("disable_search: true"));
         assert!(!workflow.contains("files: target/coverage/lcov-all-features.info,target/coverage/lcov-no-default.info"));
     }
 }
