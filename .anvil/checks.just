@@ -65,6 +65,13 @@ anvil-clippy: anvil-clippy-validate-prereqs anvil-impact
 anvil-deny advisories="true": anvil-deny-validate-prereqs
     cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} deny check {{ if advisories == "true" { "all" } else { "bans licenses sources" } }}
 
+anvil_test_feature_policy := justfile_directory() + "/.anvil/deny-test-features.json"
+
+# Reject test-only features in dependencies and defaults of publishable packages.
+[group("anvil")]
+anvil-deny-test-features: anvil-deny-test-features-validate-prereqs
+    cargo ensure-no-test-features --manifest-path {{ quote(justfile_directory() + "/Cargo.toml") }} {{ if path_exists(anvil_test_feature_policy) { "--policy " + quote(anvil_test_feature_policy) } else { "" } }}
+
 # Build required-package documentation with rustdoc warnings denied.
 [arg("open", long, value="true")]
 anvil-doc-build open="false": anvil-doc-build-validate-prereqs anvil-impact

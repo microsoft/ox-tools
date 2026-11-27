@@ -224,6 +224,14 @@ anvil-tool-cargo-ensure-no-default-features-validate-prereqs: (_check-tool "carg
 
 [group("anvil-setup")]
 [private]
+anvil-tool-cargo-ensure-no-test-features-install installer="install": (_install-tool "cargo-ensure-no-test-features" cargo_ensure_no_test_features_version installer)
+
+[group("anvil-setup")]
+[private]
+anvil-tool-cargo-ensure-no-test-features-validate-prereqs: (_check-tool "cargo-ensure-no-test-features" cargo_ensure_no_test_features_version)
+
+[group("anvil-setup")]
+[private]
 anvil-tool-cargo-hack-install installer="install": (_install-tool "cargo-hack" cargo_hack_version installer)
 [group("anvil-setup")]
 [private]

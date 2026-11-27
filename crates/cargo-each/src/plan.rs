@@ -166,8 +166,6 @@ impl Plan {
             ..
         } = options;
 
-        let uses_cargo_spec = command.iter().any(|arg| arg.contains("{cargo-spec}"));
-
         let invocations = match mode {
             Mode::PerPackage => members
                 .iter()
@@ -175,7 +173,7 @@ impl Plan {
                     let placeholders = Placeholders::Package {
                         name: m.name.clone(),
                         spec: m.spec(),
-                        cargo_spec: if uses_cargo_spec { m.cargo_spec() } else { String::new() },
+                        cargo_spec: m.cargo_spec(),
                         version: m.version.clone(),
                         manifest: m.manifest_path.display().to_string(),
                         workspace_rust_version: workspace_rust_version.map(str::to_owned),
@@ -191,7 +189,6 @@ impl Plan {
             Mode::PerTarget => members
                 .iter()
                 .flat_map(|member| {
-                    let mut cargo_spec = None;
                     member
                         .targets
                         .iter()
@@ -200,9 +197,7 @@ impl Plan {
                             let placeholders = Placeholders::Target {
                                 name: member.name.clone(),
                                 spec: member.spec(),
-                                cargo_spec: cargo_spec
-                                    .get_or_insert_with(|| if uses_cargo_spec { member.cargo_spec() } else { String::new() })
-                                    .clone(),
+                                cargo_spec: member.cargo_spec(),
                                 version: member.version.clone(),
                                 manifest: member.manifest_path.display().to_string(),
                                 target: target.name.clone(),
@@ -218,9 +213,11 @@ impl Plan {
                 })
                 .collect::<Vec<_>>(),
             Mode::Once => {
-                let packages = packages_flags(members, packages);
+                let cargo_specs = packages_flags(members, packages, Member::cargo_spec);
+                let packages = packages_flags(members, packages, Member::spec);
                 let placeholders = Placeholders::Once {
                     packages,
+                    cargo_specs,
                     workspace_rust_version: workspace_rust_version.map(str::to_owned),
                 };
                 vec![Invocation {
@@ -370,12 +367,12 @@ fn validate_target_requirement(members: &[&Member], options: BuildOptions<'_>) -
 }
 
 /// The `{packages}` expansion: `--workspace` for the whole workspace, else an
-/// explicit `--package name@version` per member.
-fn packages_flags(members: &[&Member], packages: PackagesExpansion) -> Vec<String> {
+/// explicit `--package` pair per member, using the requested spec representation.
+fn packages_flags(members: &[&Member], packages: PackagesExpansion, spec: impl Fn(&Member) -> String) -> Vec<String> {
     if packages == PackagesExpansion::Workspace {
         return vec!["--workspace".to_owned()];
     }
-    members.iter().flat_map(|member| ["--package".to_owned(), member.spec()]).collect()
+    members.iter().flat_map(|member| ["--package".to_owned(), spec(member)]).collect()
 }
 
 #[cfg(test)]
@@ -388,6 +385,7 @@ mod tests {
 
     fn member(name: &str) -> Member {
         Member {
+            package_id: format!("metadata-id-{name}"),
             name: name.to_owned(),
             version: "1.2.3".to_owned(),
             rust_version: Some("1.70.0".parse().expect("valid Rust version")),
@@ -901,7 +899,7 @@ mod tests {
     }
 
     #[test]
-    fn per_target_reuses_member_selectors_without_resolving_unmatched_members() {
+    fn per_target_emits_member_ids_only_for_matching_targets() {
         let mut a = member("alpha");
         a.targets = ["first", "second"]
             .into_iter()
@@ -913,6 +911,7 @@ mod tests {
             .collect();
         let mut b = a.clone();
         b.name = "beta".to_owned();
+        b.package_id = "metadata-id-beta".to_owned();
         b.manifest_path = member("beta").manifest_path;
         let mut unmatched = member("unmatched");
         // This sentinel cannot become a file URL and must remain unresolved.
@@ -938,13 +937,12 @@ mod tests {
         )
         .expect("unmatched members do not need a source URL");
 
-        let root = if cfg!(windows) { "file:///C:/ws" } else { "file:///ws" };
         let expected = ["alpha", "beta"]
             .into_iter()
             .flat_map(|name| {
                 ["first", "second"].map(|target| Invocation {
                     label: Some(format!("{name}::{target}")),
-                    argv: cmd(&["cargo", "run", "-p", &format!("{root}/{name}#{name}@1.2.3"), "--example", target]),
+                    argv: cmd(&["cargo", "run", "-p", &format!("metadata-id-{name}"), "--example", target]),
                     work_dir: None,
                 })
             })
@@ -1172,7 +1170,7 @@ mod tests {
         let a = member("alpha");
         let b = member("beta");
         assert_eq!(
-            packages_flags(&[&b, &a], PackagesExpansion::Explicit),
+            packages_flags(&[&b, &a], PackagesExpansion::Explicit, Member::spec),
             ["--package", "beta@1.2.3", "--package", "alpha@1.2.3"]
         );
     }

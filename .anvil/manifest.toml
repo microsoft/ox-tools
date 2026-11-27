@@ -1,7 +1,7 @@
 version = 2
 tool = "anvil"
-tool_version = "0.29.3"
-catalog_checksum = "sha256:cd863b6cc777e4e60fd6efbc4545c7ea021fdc4c7ecb31d2b09ab2746aa83a00"
+tool_version = "0.29.4"
+catalog_checksum = "sha256:0e7fcebfcde8ee15200f367b2b579cff9225b814d482178d33312dbafcedc0cf"
 
 [[file]]
 path = ".anvil/anvil.just"
@@ -9,7 +9,7 @@ checksum = "sha256:607eeaa37d75a2feade07c55370b277333c2fa66997f0b643c937c7a5a9ee
 
 [[file]]
 path = ".anvil/checks.just"
-checksum = "sha256:8b2f811af0d9ce6623e0387ef3ea38373b11c39282ebc448b656946a5f92b930"
+checksum = "sha256:d547d2f8275cd57592e6cd9fe0506158766de0696d632cac40f9f5195023e72c"
 
 [[file]]
 path = ".anvil/container.just"
@@ -41,7 +41,7 @@ checksum = "sha256:957b1ccebc39b2111cb0efe8eeeab442ec515869d5505dcc13b8898df8994
 
 [[file]]
 path = ".anvil/groups.just"
-checksum = "sha256:bcac8871ef7d29fb4a4504703d563ad517c593f2d356f44a3b3cfd4b78341913"
+checksum = "sha256:2ed0dc2f8f9e4fdf6e80034c4ed2bfb15a3f9c9d586547675a2432fa0662b718"
 
 [[file]]
 path = ".anvil/helpers.just"
@@ -49,7 +49,7 @@ checksum = "sha256:745af1a2241e5535a848d2dfefb58784ceb2e8674be8ddd98001b09842a4c
 
 [[file]]
 path = ".anvil/setup.just"
-checksum = "sha256:cc1873782a889a67e88cc9a649dbe4ce8f6756837c00bc8cf652107ffe033123"
+checksum = "sha256:f29a157492422f0285a9b96d8903eef2606dda9398762400ef5882f471617cbb"
 
 [[file]]
 path = ".github/instructions/cargo-anvil.instructions.md"

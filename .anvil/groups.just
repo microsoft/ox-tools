@@ -25,6 +25,7 @@ anvil-pr-fast: anvil-pr-fast-validate-prereqs \
     anvil-license-headers \
     anvil-ensure-no-cyclic-deps \
     anvil-ensure-no-default-features \
+    anvil-deny-test-features \
     anvil-doc-build \
     anvil-readme-check \
     anvil-spellcheck \

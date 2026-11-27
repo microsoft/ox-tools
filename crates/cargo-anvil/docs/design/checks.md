@@ -11,7 +11,7 @@ that floor universally.
 
 | Group | Checks |
 |-------|--------|
-| `pr-fast` | fmt, clippy, cargo-sort, license-headers, ensure-no-cyclic-deps, ensure-no-default-features, doc-build, readme-check, spellcheck, pr-title, deny (without advisories), audit, unused-deps, udeps, external-types |
+| `pr-fast` | fmt, clippy, cargo-sort, license-headers, ensure-no-cyclic-deps, ensure-no-default-features, deny-test-features, doc-build, readme-check, spellcheck, pr-title, deny (without advisories), audit, unused-deps, udeps, external-types |
 | `pr-test` | llvm-cov, doc-test, examples |
 | `pr-msrv` | msrv-test |
 | `pr-runtime-analysis` | miri, careful, loom |
@@ -54,6 +54,7 @@ Locally, recipes run on the host OS. See [github.md](./github.md) and
 | `license-headers` | Checks workspace license headers with cargo-heather. |
 | `ensure-no-cyclic-deps` | Rejects workspace dependency cycles. |
 | `ensure-no-default-features` | Checks the workspace's default-feature policy. |
+| `deny-test-features` | Rejects denied feature requests on production dependencies and in the default features of publishable packages. |
 | `doc-build` | Builds all-features documentation for selected packages without dependency documentation; rustdoc warnings fail. Local `--open` opens the result. |
 | `readme-check` | Checks generated READMEs for publishable crates except `[package.metadata.ox-gen-readme]` opt-outs. Library/proc-macro rustdoc takes precedence over binary rustdoc. |
 | `spellcheck` | Checks spelling with cargo-spellcheck and repository configuration. |
@@ -81,6 +82,14 @@ PR titles accept these forms:
 
 Types are case-insensitive: `feat`, `fix`, `chore`, `docs`, `refactor`, `test`,
 `build`, `ci`, `perf`, and `revert`. Additional lines of title content are rejected.
+
+#### Test-only features
+
+`just anvil-deny-test-features` runs the checker once for the whole workspace,
+even when impact analysis selects no packages. To override its bundled policy,
+commit `.anvil/deny-test-features.json`. See the
+[`cargo-ensure-no-test-features` documentation](https://docs.rs/cargo-ensure-no-test-features)
+for the default deny list, policy format, and exceptions.
 
 ### `pr-test`
 
