@@ -83,9 +83,9 @@ runs:
       id: cargo-cache
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
-        # The job suffix avoids concurrent saves; the prefix shares completed
+        # Job and check suffixes avoid concurrent matrix saves; the prefix shares completed
         # caches across sibling jobs without crossing catalog/toolchain changes.
-        key: anvil-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.cargo/config.toml', 'rust-toolchain', 'rust-toolchain.toml', '.anvil/setup.just') }}-${{ github.job }}
+        key: anvil-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.cargo/config.toml', 'rust-toolchain', 'rust-toolchain.toml', '.anvil/setup.just') }}-${{ github.job }}-${{ inputs.group }}
         restore-keys: |
           anvil-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.cargo/config.toml', 'rust-toolchain', 'rust-toolchain.toml', '.anvil/setup.just') }}-
         # Cargo's install ledgers make cached binaries visible to

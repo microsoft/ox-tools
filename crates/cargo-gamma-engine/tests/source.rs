@@ -6,6 +6,7 @@
 
 use cargo_gamma_engine::ops::collect::{collect, into_definitions};
 use cargo_gamma_engine::ops::registry::Selection;
+use cargo_gamma_engine::parse::nesting::{CHAIN_FACTOR, NESTING_LIMIT};
 use cargo_gamma_engine::parse::{SourceFile, exceeds_nesting_limit};
 use cargo_gamma_engine::schema::{AssignedMutant, Ordinal, instrument};
 
@@ -51,6 +52,7 @@ fn shebang_spans_and_instrumentation_preserve_the_interpreter_line() {
 
 #[test]
 fn operand_keywords_are_bounded_before_recursive_parsing() {
+    let repetitions = if cfg!(miri) { NESTING_LIMIT * CHAIN_FACTOR + 1 } else { 1000 };
     for keyword in [
         "return ",
         "break ",
@@ -60,18 +62,19 @@ fn operand_keywords_are_bounded_before_recursive_parsing() {
         "yield ",
         "become ",
     ] {
-        let deep = format!("fn f() {{ {}1 }}", keyword.repeat(1000));
+        let deep = format!("fn f() {{ {}1 }}", keyword.repeat(repetitions));
         assert!(exceeds_nesting_limit(&deep), "{keyword}");
         assert!(SourceFile::parse("deep.rs", deep).unwrap_err().is_skippable());
         assert!(!exceeds_nesting_limit(&format!("fn f() {{ {}1 }}", keyword.repeat(8))));
     }
 
-    assert!(!exceeds_nesting_limit(&"fn f() { return_value(); }".repeat(1000)));
+    assert!(!exceeds_nesting_limit(&"fn f() { return_value(); }".repeat(repetitions)));
 }
 
 #[test]
 fn bom_and_shebang_are_normalized_before_both_nesting_checks() {
-    let interpreter = format!("#!/{}{}", "(".repeat(1000), "return ".repeat(1000));
+    let repetitions = if cfg!(miri) { NESTING_LIMIT * CHAIN_FACTOR + 1 } else { 1000 };
+    let interpreter = format!("#!/{}{}", "(".repeat(repetitions), "return ".repeat(repetitions));
     for ending in ["\n", "\r\n", ""] {
         let body = if ending.is_empty() { "" } else { "fn f() {}" };
         let text = format!("\u{feff}{interpreter}{ending}{body}");
@@ -82,7 +85,7 @@ fn bom_and_shebang_are_normalized_before_both_nesting_checks() {
             Some(format!("{interpreter}{}", ending.trim_end_matches('\n')).as_str())
         );
     }
-    let deep = format!("\u{feff}#!/x\nfn f() {{ {}1 }}", "return ".repeat(1000));
+    let deep = format!("\u{feff}#!/x\nfn f() {{ {}1 }}", "return ".repeat(repetitions));
     assert!(exceeds_nesting_limit(&deep));
     assert!(SourceFile::parse("deep.rs", deep).unwrap_err().is_skippable());
 }

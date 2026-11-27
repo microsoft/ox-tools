@@ -65,7 +65,9 @@ use crate::cgroup::Cgroup;
 #[cfg(not(loom))]
 const SLOTS: usize = 1024;
 #[cfg(loom)]
-const SLOTS: usize = 2;
+// Every model registers at most one group and one cgroup. Extra empty slots
+// add sweep interleavings without adding another watched identity.
+const SLOTS: usize = 1;
 
 /// How many children this module can watch at once.
 ///
@@ -1617,16 +1619,18 @@ mod tests {
 }
 
 #[cfg(loom)]
-mod loom_models {
-    use loom::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use loom::sync::{Arc, Mutex};
+pub(crate) mod loom_models {
+    use core::cell::Cell;
+
+    use loom::sync::Arc;
+    use loom::sync::atomic::{AtomicBool, Ordering};
 
     use super::Registry;
 
     /// An arbitrary positive process-group identifier, distinct from the registry's empty marker.
     const PROCESS_GROUP: i32 = 41;
 
-    pub(super) fn extracted_kills_finish_before_release_reap_and_reuse() {
+    pub fn extracted_kills_finish_before_release_reap_and_reuse() {
         loom::model(|| {
             let registry = Arc::new(Registry::new());
             let slot = registry.claim(PROCESS_GROUP, &|_| {}).expect("free slot");
@@ -1649,7 +1653,7 @@ mod loom_models {
     }
 
     #[cfg(target_os = "linux")]
-    pub(super) fn extracted_cgroup_writes_finish_before_descriptor_close_and_reuse() {
+    pub fn extracted_cgroup_writes_finish_before_descriptor_close_and_reuse() {
         loom::model(|| {
             let registry = Arc::new(Registry::new());
             let slot = registry.claim_cgroup(17, &|_| {}).expect("free descriptor slot");
@@ -1673,7 +1677,7 @@ mod loom_models {
         });
     }
 
-    pub(super) fn only_the_final_cleanup_owner_can_take_fatal_responsibility() {
+    pub fn only_the_final_cleanup_owner_can_take_fatal_responsibility() {
         for final_close in [false, true] {
             loom::model(move || {
                 let registry = Arc::new(Registry::new());
@@ -1684,13 +1688,11 @@ mod loom_models {
                 }
                 let groups_done = Arc::new(AtomicBool::new(false));
                 let cgroups_done = Arc::new(AtomicBool::new(false));
-                let fatalities = Arc::new(AtomicUsize::new(0));
                 let mut threads = Vec::new();
                 for closing in [false, final_close] {
                     let registry = Arc::clone(&registry);
                     let groups_done = Arc::clone(&groups_done);
                     let cgroups_done = Arc::clone(&cgroups_done);
-                    let fatalities = Arc::clone(&fatalities);
                     threads.push(loom::thread::spawn(move || {
                         let kill = |group| {
                             assert_eq!(group, PROCESS_GROUP);
@@ -1710,49 +1712,55 @@ mod loom_models {
                         if fatal.is_some() {
                             assert!(groups_done.load(Ordering::SeqCst), "fatal before the extracted group kill");
                             assert!(cgroups_done.load(Ordering::SeqCst), "fatal before the extracted cgroup kill");
-                            let _previous = fatalities.fetch_add(1, Ordering::SeqCst);
                         }
+                        fatal.is_some()
                     }));
                 }
-                for thread in threads {
-                    thread.join().expect("cleanup owner");
-                }
-                assert!(fatalities.load(Ordering::SeqCst) >= 1, "fatal responsibility was lost");
+                let fatalities = threads
+                    .into_iter()
+                    .map(|thread| usize::from(thread.join().expect("cleanup owner")))
+                    .sum::<usize>();
+                assert!(fatalities >= 1, "fatal responsibility was lost");
             });
         }
     }
 
-    pub(super) fn claim_versus_sweep_never_orphans_the_claimed_group() {
+    pub fn claim_versus_sweep_never_orphans_the_claimed_group() {
         loom::model(|| {
             let registry = Arc::new(Registry::new());
-            let killed = Arc::new(Mutex::new(Vec::new()));
 
             let claiming = {
                 let registry = Arc::clone(&registry);
-                let killed = Arc::clone(&killed);
-
                 loom::thread::spawn(move || {
-                    let kill = |group| killed.lock().expect("kill recorder").push(group);
+                    let killed = Cell::new(false);
+                    let kill = |group| {
+                        assert_eq!(group, PROCESS_GROUP);
+                        killed.set(true);
+                    };
 
                     assert!(registry.claim(PROCESS_GROUP, &kill).is_some());
+                    killed.get()
                 })
             };
             let sweeping = {
                 let registry = Arc::clone(&registry);
-                let killed = Arc::clone(&killed);
-
                 loom::thread::spawn(move || {
-                    let kill = |group| killed.lock().expect("kill recorder").push(group);
+                    let killed = Cell::new(false);
+                    let kill = |group| {
+                        assert_eq!(group, PROCESS_GROUP);
+                        killed.set(true);
+                    };
 
                     assert_eq!(registry.interrupt(libc::SIGINT, &kill), Some(libc::SIGINT));
+                    killed.get()
                 })
             };
 
-            claiming.join().expect("claim thread");
-            sweeping.join().expect("sweep thread");
+            let killed_on_claim = claiming.join().expect("claim thread");
+            let killed_on_sweep = sweeping.join().expect("sweep thread");
 
             assert!(
-                killed.lock().expect("kill recorder").contains(&PROCESS_GROUP),
+                killed_on_claim || killed_on_sweep,
                 "the claimed group escaped both sides of the protocol"
             );
         });
@@ -1768,17 +1776,18 @@ mod loom_models {
     ///
     /// Fails as soon as either side's sequentially consistent operation or fence is weakened,
     /// because Dekker's argument is the only thing holding the two reads together.
-    pub(super) fn a_spawn_window_never_leaves_an_unwatched_child() {
+    pub fn a_spawn_window_never_leaves_an_unwatched_child() {
         loom::model(|| {
             let registry = Arc::new(Registry::new());
-            let killed = Arc::new(Mutex::new(Vec::new()));
 
             let spawning = {
                 let registry = Arc::clone(&registry);
-                let killed = Arc::clone(&killed);
-
                 loom::thread::spawn(move || {
-                    let kill = |group| killed.lock().expect("kill recorder").push(group);
+                    let killed = Cell::new(false);
+                    let kill = |group| {
+                        assert_eq!(group, PROCESS_GROUP);
+                        killed.set(true);
+                    };
 
                     registry.open();
 
@@ -1794,26 +1803,29 @@ mod loom_models {
 
                     let _death = registry.close(&kill);
 
-                    created
+                    (created, killed.get())
                 })
             };
             let handling = {
                 let registry = Arc::clone(&registry);
-                let killed = Arc::clone(&killed);
-
                 loom::thread::spawn(move || {
-                    let kill = |group| killed.lock().expect("kill recorder").push(group);
+                    let killed = Cell::new(false);
+                    let kill = |group| {
+                        assert_eq!(group, PROCESS_GROUP);
+                        killed.set(true);
+                    };
 
                     let _death = registry.interrupt(libc::SIGINT, &kill);
+                    killed.get()
                 })
             };
 
-            let created = spawning.join().expect("spawn thread");
+            let (created, killed_on_spawn) = spawning.join().expect("spawn thread");
 
-            handling.join().expect("handler thread");
+            let killed_on_interrupt = handling.join().expect("handler thread");
 
             assert!(
-                !created || killed.lock().expect("kill recorder").contains(&PROCESS_GROUP),
+                !created || killed_on_spawn || killed_on_interrupt,
                 "a child created during an interrupt was left running by both sides"
             );
         });
@@ -1824,19 +1836,14 @@ mod loom_models {
     /// The other half of the same protocol, and the one a missing kill would not reveal. A handler
     /// that finds a window open defers re-raising the signal to the last spawner leaving the
     /// window. The model records that responsibility rather than process termination itself.
-    pub(super) fn a_terminal_signal_always_has_a_reraise_owner() {
+    pub fn a_terminal_signal_always_has_a_reraise_owner() {
         loom::model(|| {
             let registry = Arc::new(Registry::new());
-            let killed = Arc::new(Mutex::new(Vec::new()));
-            let reraises = Arc::new(Mutex::new(0_usize));
 
             let spawning = {
                 let registry = Arc::clone(&registry);
-                let killed = Arc::clone(&killed);
-                let reraises = Arc::clone(&reraises);
-
                 loom::thread::spawn(move || {
-                    let kill = |group| killed.lock().expect("kill recorder").push(group);
+                    let kill = |group| assert_eq!(group, PROCESS_GROUP);
 
                     registry.open();
 
@@ -1845,43 +1852,25 @@ mod loom_models {
                     }
 
                     // A window that was open when the handler ran owns the deferred re-raise.
-                    if registry.close(&kill).is_some() {
-                        *reraises.lock().expect("re-raise recorder") += 1;
-                    }
+                    registry.close(&kill).is_some()
                 })
             };
             let handling = {
                 let registry = Arc::clone(&registry);
-                let killed = Arc::clone(&killed);
-                let reraises = Arc::clone(&reraises);
-
                 loom::thread::spawn(move || {
-                    let kill = |group| killed.lock().expect("kill recorder").push(group);
+                    let kill = |group| assert_eq!(group, PROCESS_GROUP);
 
-                    if registry.interrupt(libc::SIGINT, &kill).is_some() {
-                        *reraises.lock().expect("re-raise recorder") += 1;
-                    }
+                    registry.interrupt(libc::SIGINT, &kill).is_some()
                 })
             };
 
-            spawning.join().expect("spawn thread");
-            handling.join().expect("handler thread");
+            let spawn_reraises = spawning.join().expect("spawn thread");
+            let handler_reraises = handling.join().expect("handler thread");
 
             assert!(
-                *reraises.lock().expect("re-raise recorder") >= 1,
+                spawn_reraises || handler_reraises,
                 "neither side accepted responsibility for re-raising the terminal signal"
             );
         });
     }
-}
-
-#[cfg(loom)]
-pub(crate) fn run_loom_models() {
-    loom_models::extracted_kills_finish_before_release_reap_and_reuse();
-    #[cfg(target_os = "linux")]
-    loom_models::extracted_cgroup_writes_finish_before_descriptor_close_and_reuse();
-    loom_models::only_the_final_cleanup_owner_can_take_fatal_responsibility();
-    loom_models::claim_versus_sweep_never_orphans_the_claimed_group();
-    loom_models::a_spawn_window_never_leaves_an_unwatched_child();
-    loom_models::a_terminal_signal_always_has_a_reraise_owner();
 }

@@ -2741,8 +2741,8 @@ mod tests {
 
 #[cfg(loom)]
 pub(crate) mod loom_models {
+    use loom::sync::Arc;
     use loom::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-    use loom::sync::{Arc, Mutex};
 
     use super::{claim_reaper, next_name_ticket, release_reaper_claim};
 
@@ -2756,29 +2756,19 @@ pub(crate) mod loom_models {
     ///
     /// Fails as soon as the read-modify-write becomes a load followed by a store, which is the one
     /// edit that looks harmless here.
-    pub(super) fn concurrent_leaf_creations_never_share_a_name() {
+    pub fn concurrent_leaf_creations_never_share_a_name() {
         loom::model(|| {
             let sequence = Arc::new(AtomicU64::new(0));
-            let handed_out = Arc::new(Mutex::new(Vec::new()));
 
             let workers: Vec<_> = (0..2)
                 .map(|_worker| {
                     let sequence = Arc::clone(&sequence);
-                    let handed_out = Arc::clone(&handed_out);
 
-                    loom::thread::spawn(move || {
-                        let ticket = next_name_ticket(&sequence);
-
-                        handed_out.lock().expect("ticket recorder").push(ticket);
-                    })
+                    loom::thread::spawn(move || next_name_ticket(&sequence))
                 })
                 .collect();
 
-            for worker in workers {
-                worker.join().expect("ticket thread");
-            }
-
-            let mut tickets = handed_out.lock().expect("ticket recorder").clone();
+            let mut tickets: Vec<_> = workers.into_iter().map(|worker| worker.join().expect("ticket thread")).collect();
 
             tickets.sort_unstable();
 
@@ -2799,29 +2789,22 @@ pub(crate) mod loom_models {
     ///
     /// Fails as soon as the claim becomes a load followed by a store, which lets both callers see
     /// `false`.
-    pub(super) fn only_one_caller_ever_starts_the_reaper() {
+    pub fn only_one_caller_ever_starts_the_reaper() {
         loom::model(|| {
             let running = Arc::new(AtomicBool::new(false));
-            let starters = Arc::new(Mutex::new(0_usize));
 
             let callers: Vec<_> = (0..2)
                 .map(|_caller| {
                     let running = Arc::clone(&running);
-                    let starters = Arc::clone(&starters);
-
-                    loom::thread::spawn(move || {
-                        if claim_reaper(&running) {
-                            *starters.lock().expect("start recorder") += 1;
-                        }
-                    })
+                    loom::thread::spawn(move || claim_reaper(&running))
                 })
                 .collect();
 
-            for caller in callers {
-                caller.join().expect("claim thread");
-            }
-
-            assert_eq!(*starters.lock().expect("start recorder"), 1, "the number of reaper threads started");
+            let starters = callers
+                .into_iter()
+                .map(|caller| usize::from(caller.join().expect("claim thread")))
+                .sum::<usize>();
+            assert_eq!(starters, 1, "the number of reaper threads started");
         });
     }
 
@@ -2832,10 +2815,9 @@ pub(crate) mod loom_models {
     /// that need one are exactly the ones foreground cleanup already gave up on. Modelled against
     /// a concurrent claimant so that handing the claim back cannot instead take it away from
     /// somebody who has already started the thread.
-    pub(super) fn a_reaper_claim_handed_back_can_be_taken_again() {
+    pub fn a_reaper_claim_handed_back_can_be_taken_again() {
         loom::model(|| {
             let running = Arc::new(AtomicBool::new(false));
-            let started = Arc::new(Mutex::new(0_usize));
 
             // The caller whose thread spawn fails: it claims, cannot start, and gives the claim up.
             let failing = {
@@ -2850,35 +2832,17 @@ pub(crate) mod loom_models {
 
             let retrying = {
                 let running = Arc::clone(&running);
-                let started = Arc::clone(&started);
-
-                loom::thread::spawn(move || {
-                    if claim_reaper(&running) {
-                        *started.lock().expect("start recorder") += 1;
-                    }
-                })
+                loom::thread::spawn(move || claim_reaper(&running))
             };
 
             failing.join().expect("failing thread");
-            retrying.join().expect("retrying thread");
+            let started = retrying.join().expect("retrying thread");
 
             // Whoever ends up holding the claim, the run must not be left believing a reaper is
             // running when none is: either the second caller started one, or the claim is free for
             // the next abandoned leaf to try again.
             let running_now = running.load(Ordering::SeqCst);
-            let started_now = *started.lock().expect("start recorder");
-
-            assert!(
-                started_now == 1 || !running_now,
-                "the reaper claim was left held with no reaper behind it"
-            );
+            assert!(started || !running_now, "the reaper claim was left held with no reaper behind it");
         });
-    }
-
-    /// Runs every cgroup atomic model.
-    pub(crate) fn run() {
-        concurrent_leaf_creations_never_share_a_name();
-        only_one_caller_ever_starts_the_reaper();
-        a_reaper_claim_handed_back_can_be_taken_again();
     }
 }

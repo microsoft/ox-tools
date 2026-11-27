@@ -51,14 +51,14 @@ pub use situation::Situation;
 #[doc(inline)]
 pub use support::support;
 
-/// Runs the deterministic concurrency models selected by the dedicated Loom test target.
-#[cfg(all(loom, unix))]
+/// Deterministic concurrency models selected by the dedicated Loom test target.
+#[cfg(loom)]
 #[doc(hidden)]
-pub fn run_loom_models() {
-    interrupt::run_loom_models();
-
+pub mod loom_models {
     #[cfg(target_os = "linux")]
-    cgroup::loom_models::run();
+    pub use crate::cgroup::loom_models::*;
+    #[cfg(unix)]
+    pub use crate::interrupt::loom_models::*;
 }
 
 /// There are no Unix signal-registry models on non-Unix targets.

@@ -131,7 +131,7 @@ needed; see [toolchain selection](./local.md#the-stable-rust-toolchain).
 |-------|----------|
 | `miri` | Runs all-features unit and integration tests under the catalog nightly's interpreter. Supports targeted local runs, concurrency control, and package/test exclusions. |
 | `careful` | Runs all-features tests with debug-instrumented standard libraries. Its target directory identity includes the pinned compiler details and cargo-careful executable, so either change selects a fresh cache without running `cargo clean`. |
-| `loom` | Runs declared Loom test targets in release mode with all features, `cfg(loom)`, and one test thread. |
+| `loom` | Runs declared Loom test targets through Nextest in release mode with all features and `cfg(loom)`. Independent tests run concurrently and report individual durations. An empty declared test target fails. |
 
 See [Miri configuration](./local.md#5-miri-execution-customization) for supported
 overrides. Loom harnesses must declare `loom` in `required-features`:
@@ -142,10 +142,16 @@ name = "concurrency"
 required-features = ["loom"]
 ```
 
-Loom tests run per package; ordinary tests are excluded. A package declaring
+Loom tests run per package; ordinary tests are excluded. The Loom cfg is added
+through Cargo's matching target flags so target-triple rustflags cannot hide it.
+An overriding `RUSTFLAGS` or `CARGO_ENCODED_RUSTFLAGS` must also enable `cfg(loom)`;
+compiling every test out is an error, not a successful check. A package declaring
 Loom support without a matching test target fails. No Loom targets means a
 successful skip. Anvil supplies no global exploration bound; each model must
 bound its own search.
+
+PR CI runs Miri, Careful, and Loom in independent jobs consuming the same
+OS-specific impact selection. The local group retains their sequential order.
 
 #### Miri workload scope
 
