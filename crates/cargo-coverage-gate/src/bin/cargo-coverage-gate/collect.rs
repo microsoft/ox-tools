@@ -782,8 +782,18 @@ fn read_raw_lcov(path: &Path) -> Result<String, AppError> {
 fn filter_and_publish_reports_with_reader(
     execution: &CollectionExecution<'_>,
     collected: &[CollectedReport],
+    read: impl FnMut(&Path) -> Result<String, AppError>,
+    filter: impl FnMut(&[&str], &Path) -> Result<Vec<String>, AppError>,
+) -> Result<Vec<PathBuf>, AppError> {
+    filter_and_publish_reports_with_reader_and_remove(execution, collected, read, filter, remove_file_if_present)
+}
+
+fn filter_and_publish_reports_with_reader_and_remove(
+    execution: &CollectionExecution<'_>,
+    collected: &[CollectedReport],
     mut read: impl FnMut(&Path) -> Result<String, AppError>,
     mut filter: impl FnMut(&[&str], &Path) -> Result<Vec<String>, AppError>,
+    remove_merged: impl FnOnce(&Path) -> io::Result<()>,
 ) -> Result<Vec<PathBuf>, AppError> {
     // Finish reading, validating, filtering, and staging the complete batch
     // before publishing. Each final rename is still an independent atomic
@@ -823,13 +833,14 @@ fn filter_and_publish_reports_with_reader(
         })
         .collect::<Vec<_>>();
     if execution.args.collect_only {
-        remove_file_if_present(&merged_path).into_app_err(format!(
+        remove_merged(&merged_path).into_app_err(format!(
             "failed to withhold merged LCOV report `{}` during split collection",
             diagnostic_path(&merged_path)
         ))?;
     } else {
         let merged = merge_lcov(&published.iter().map(String::as_str).collect::<Vec<_>>())
             .into_app_err("failed to merge filtered LCOV reports for publication")?;
+        // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "The temporary staging label is internal and has no observable contract after publication.", tag = "equivalent")]
         reports.push((merged_path, "merged-published.info".to_owned(), merged));
     }
     publish_reports(
@@ -841,7 +852,11 @@ fn filter_and_publish_reports_with_reader(
 }
 
 fn remove_file_if_present(path: &Path) -> io::Result<()> {
-    match fs::remove_file(path) {
+    remove_file_if_present_with(path, |path| fs::remove_file(path))
+}
+
+fn remove_file_if_present_with(path: &Path, remove: impl FnOnce(&Path) -> io::Result<()>) -> io::Result<()> {
+    match remove(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
@@ -1861,6 +1876,123 @@ mod tests {
         assert_eq!(
             outputs[1], outputs[0],
             "split collection must preserve the same joint-filter inputs"
+        );
+    }
+
+    #[test]
+    fn collect_only_returns_merged_report_removal_errors() {
+        let workspace = workspace(Path::new("synthetic-workspace"));
+        let selection = Selection {
+            explicit: false,
+            members: workspace.members.clone(),
+        };
+        let args = CollectionArgs {
+            collect_only: true,
+            coverage_dir: PathBuf::from("synthetic-coverage"),
+            ..collection_args()
+        };
+        let tools = ToolPrograms {
+            cargo: OsString::from("never-invoked"),
+            rustc: OsString::from("never-invoked"),
+        };
+        let execution = CollectionExecution {
+            workspace: &workspace,
+            selection: &selection,
+            args: &args,
+            scratch_dir: Path::new("synthetic-scratch"),
+            coverage_target_root: Path::new("synthetic-scratch/cargo-target"),
+            target: None,
+            tools: &tools,
+            quiet: false,
+        };
+        let collected = [CollectedReport {
+            raw_path: PathBuf::from("synthetic-raw.info"),
+            stable_path: PathBuf::from("synthetic-coverage/lcov-all-features.info"),
+            configuration: FeatureConfiguration::AllFeatures,
+        }];
+        let merged_path = PathBuf::from("synthetic-coverage/lcov-merged.info");
+        let observed = RefCell::new(None);
+        let error = filter_and_publish_reports_with_reader_and_remove(
+            &execution,
+            &collected,
+            |_| Ok(RAW_ALL_FEATURES.to_owned()),
+            |_, _| panic!("collect-only must not filter"),
+            |path| {
+                observed.replace(Some(path.to_path_buf()));
+                Err(io::Error::from(io::ErrorKind::PermissionDenied))
+            },
+        )
+        .expect_err("merged-report removal failure must stop publication");
+
+        assert_eq!(observed.into_inner(), Some(merged_path.clone()));
+        assert!(
+            error.to_string().contains(&format!(
+                "failed to withhold merged LCOV report `{}` during split collection",
+                diagnostic_path(&merged_path)
+            )),
+            "{error}"
+        );
+        assert_eq!(
+            error
+                .find_source::<io::Error>()
+                .expect("withholding must preserve the removal error")
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn collect_only_merged_removal_accepts_missing_and_preserves_other_errors() {
+        let path = Path::new("synthetic-coverage/lcov-merged.info");
+        remove_file_if_present_with(path, |_| Err(io::Error::from(io::ErrorKind::NotFound)))
+            .expect("missing merged report is already withheld");
+        let error = remove_file_if_present_with(path, |_| Err(io::Error::from(io::ErrorKind::PermissionDenied)))
+            .expect_err("other removal failures must propagate");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn merged_publication_preserves_merge_failure_context() {
+        let workspace = workspace(Path::new("synthetic-workspace"));
+        let selection = Selection {
+            explicit: false,
+            members: workspace.members.clone(),
+        };
+        let args = CollectionArgs {
+            coverage_dir: PathBuf::from("synthetic-coverage"),
+            ..collection_args()
+        };
+        let tools = ToolPrograms {
+            cargo: OsString::from("never-invoked"),
+            rustc: OsString::from("never-invoked"),
+        };
+        let execution = CollectionExecution {
+            workspace: &workspace,
+            selection: &selection,
+            args: &args,
+            scratch_dir: Path::new("synthetic-scratch"),
+            coverage_target_root: Path::new("synthetic-scratch/cargo-target"),
+            target: None,
+            tools: &tools,
+            quiet: false,
+        };
+        let collected = [CollectedReport {
+            raw_path: PathBuf::from("synthetic-raw.info"),
+            stable_path: PathBuf::from("synthetic-coverage/lcov-all-features.info"),
+            configuration: FeatureConfiguration::AllFeatures,
+        }];
+        let error = filter_and_publish_reports_with_reader_and_remove(
+            &execution,
+            &collected,
+            |_| Ok(RAW_ALL_FEATURES.to_owned()),
+            |_, _| Ok(vec!["invalid filtered LCOV".to_owned()]),
+            |_| panic!("joint filtering does not remove a merged report"),
+        )
+        .expect_err("invalid filtered LCOV must fail merged publication");
+
+        assert!(
+            error.to_string().contains("failed to merge filtered LCOV reports for publication"),
+            "{error}"
         );
     }
 
