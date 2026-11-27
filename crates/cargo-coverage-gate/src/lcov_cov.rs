@@ -248,13 +248,15 @@ mod tests {
 
     #[test]
     fn merged_lcov_uses_max_hits_and_matches_multi_input_evaluation() {
-        let all_features = "TN:\nSF:fixture.rs\nDA:1,2,all\nDA:2,0,no-default\nDA:3,1,exactly-once\nend_of_record\n";
-        let no_default = "TN:\nSF:fixture.rs\nDA:1,1,all\nDA:2,4,no-default\nDA:3,0\nend_of_record\n";
+        let all_features = "TN:\nSF:fixture.rs\nDA:1,2,all\nDA:2,0,no-default\nDA:3,1,exactly-once\nDA:4,0\nend_of_record\n";
+        let no_default = "TN:\nSF:fixture.rs\nDA:1,1,all\nDA:2,4,no-default\nDA:3,0\nDA:4,0\nend_of_record\n";
 
         let merged = crate::merge_lcov(&[all_features, no_default]).expect("merge compatible reports");
         assert!(merged.contains("DA:1,2,all\n"), "{merged}");
         assert!(merged.contains("DA:2,4,no-default\n"), "{merged}");
         assert!(merged.contains("DA:3,1,exactly-once\n"), "{merged}");
+        assert!(merged.contains("DA:4,0\n"), "{merged}");
+        assert!(merged.contains("LF:4\nLH:3\n"), "{merged}");
         assert!(!merged.contains("DA:1,3"), "{merged}");
         let merged_report = CoverageReport::from_str(&merged).expect("parse merged report");
         let separate_report = CoverageReport::from_strs(&[all_features, no_default]).expect("evaluate separate reports");
