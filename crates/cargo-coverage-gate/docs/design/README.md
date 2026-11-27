@@ -240,6 +240,30 @@ package with no metadata anywhere will only pass if every measured line is
 covered. To opt a package out of gating, set `min-lines-percent = 0.0` explicitly
 (at the package or workspace level). There is no implicit opt-out.
 
+Released-surface LCOV reports omit records owned by packages whose effective
+numeric threshold is **exactly zero**, after resolving package, workspace and
+target-specific policy. This is configured policy, not measured coverage:
+packages with nonzero reduced thresholds retain all released-surface records,
+even with zero hits. Filtering is workspace-wide, independent of the selected
+verdict packages, and uses the same longest-prefix ownership as evaluation.
+Source, line and merged-checksum validation happens before policy omissions;
+unknown or invalid data is not silently discarded.
+
+The omission applies to `filter_lcov`, `filter_lcov_many`, released-surface
+evaluation, and the reports published by `run`. `filter_lcov_many_for_target`
+accepts an explicit policy target; other filtering APIs use host-target policy.
+`run` uses its collection target. Its published reports are the upload inputs
+for Anvil, so no additional Codecov ignore list is needed. Opted-out package
+rows still pass but have no measured counters in these filtered reports.
+`expect-no-coverable-lines = true` is never an omission policy, including when
+the workspace default is zero: unexpected released code remains visible and
+fails the assertion. Instrumentation and test execution are unchanged, as are
+raw `--collect-only` exports and the explicit `evaluate_unfiltered*` APIs.
+Policy omission also removes any zero-line source witness owned by an opted-out
+package. Published reports should be uploaded directly or evaluated with
+`evaluate_unfiltered*`, as `run` does, rather than rediscovering source ownership
+after that evidence has been removed.
+
 #### Qualified test attributes
 
 The compiler-owned `#[test]` and `#[bench]` attributes are always test-only.

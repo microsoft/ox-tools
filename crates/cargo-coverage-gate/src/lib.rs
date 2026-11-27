@@ -99,8 +99,12 @@
 //! 3. The built-in default of `100.0` — full coverage required.
 //!
 //! Setting `min-lines-percent = 0.0` explicitly opts a package out of
-//! gating: it always passes, regardless of attributed data. Thresholds must
-//! be in the inclusive range `0.0..=100.0`.
+//! gating: it always passes, regardless of attributed data. Released-surface
+//! reports omit records owned by packages whose effective threshold is exactly
+//! zero, including workspace defaults and target overrides. Tests remain
+//! instrumented and can cover other packages. Nonzero thresholds retain their
+//! records, even when measured coverage is zero. Thresholds must be in the
+//! inclusive range `0.0..=100.0`.
 //!
 //! ### Packages with no coverable lines
 //!
@@ -275,7 +279,9 @@
 //! ## Public API
 //!
 //! [`filter_lcov`] and [`filter_lcov_many`] produce released-surface LCOV
-//! artifacts without evaluating policy. [`evaluate`], [`evaluate_many`], and
+//! artifacts without computing a verdict, omitting effective zero-threshold
+//! packages. [`filter_lcov_many_for_target`] selects an explicit policy target.
+//! [`evaluate`], [`evaluate_many`], and
 //! [`evaluate_many_for_target`] apply that filtering before evaluating policy.
 //! Callers that intentionally need unfiltered attribution use the explicitly
 //! named `evaluate_unfiltered*` functions.
@@ -322,6 +328,12 @@ pub use error::CoverageGateError;
 /// `test`, or an exact qualified attribute listed in workspace metadata).
 /// Function and branch records are omitted because the proof is line-granular.
 ///
+/// After source validation, records owned by packages with an effective
+/// `min-lines-percent` of exactly zero are omitted. Policy includes workspace
+/// defaults and host-target overrides. No-coverable-lines assertions are never
+/// omitted, even with a zero workspace default. Invalid sources and conflicting
+/// checksums remain errors, including in packages omitted from the output.
+///
 /// When a potentially released source macro or a measured graph gap makes indirect ownership
 /// uncertain, filtering warns on stderr, retains ambiguous source counters,
 /// and excludes only file-local test-only ranges. This conservative result
@@ -348,7 +360,9 @@ pub use error::CoverageGateError;
 /// input. When conservative filtering depends on a measured source-graph gap,
 /// a zero-line `SF:` record preserves that evidence even if all counters for
 /// that source are test-only. It adds no coverable lines or hits and keeps
-/// filtering idempotent.
+/// source filtering idempotent. Zero-threshold policy also removes witnesses
+/// owned by opted-out packages; evaluate published output with the unfiltered
+/// APIs rather than repeating source discovery after such evidence is omitted.
 ///
 /// Qualified framework test macros are configured explicitly:
 ///
@@ -382,6 +396,7 @@ pub use error::CoverageGateError;
 /// cannot be resolved/read/parsed, target ownership cannot be determined, or
 /// LCOV line data does not match the current source tree. Compiler-source
 /// discovery failures are also returned when provenance is needed.
+/// Invalid coverage policy and target-resolution failures are returned as well.
 #[cfg_attr(coverage_nightly, coverage(off))]
 // This adapter only selects the real metadata loader; the injected implementation below is mutation-covered.
 pub fn filter_lcov(lcov_text: &str, manifest_path: Option<&Path>) -> Result<String, CoverageGateError> {
@@ -394,7 +409,8 @@ pub fn filter_lcov(lcov_text: &str, manifest_path: Option<&Path>) -> Result<Stri
 /// The returned vector preserves input order and length.
 /// An empty input returns an empty vector without workspace discovery.
 /// Each output carries any zero-line source witness needed to preserve the
-/// batch's conservative classification when that output is filtered on its own.
+/// batch's conservative classification, unless its owning package is omitted
+/// by zero-threshold policy.
 ///
 /// # Errors
 ///
@@ -402,6 +418,38 @@ pub fn filter_lcov(lcov_text: &str, manifest_path: Option<&Path>) -> Result<Stri
 /// as [`filter_lcov`]; any failing input aborts the operation.
 pub fn filter_lcov_many(lcov_texts: &[&str], manifest_path: Option<&Path>) -> Result<Vec<String>, CoverageGateError> {
     filter_lcov_many_with_metadata_loader(lcov_texts, manifest_path, workspace::load_metadata)
+}
+
+/// Filter tracefiles using released-surface rules and a selected policy target.
+///
+/// Like [`filter_lcov_many`], this omits packages whose effective numeric
+/// threshold is exactly zero. `target` selects the Rust target triple for
+/// package policy overrides; omission uses the rustc host when needed.
+/// Input order and length are preserved; an empty input skips discovery.
+///
+/// For example, filter cross-target exports before uploading them:
+///
+/// ```no_run
+/// let raw = std::fs::read_to_string("target/coverage/linux-raw.info")?;
+/// let reports = cargo_coverage_gate::filter_lcov_many_for_target(
+///     &[&raw],
+///     None,
+///     Some("x86_64-unknown-linux-gnu"),
+/// )?;
+/// std::fs::write("target/coverage/linux-released.info", &reports[0])?;
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+///
+/// # Errors
+///
+/// Returns [`CoverageGateError`] under the same conditions as
+/// [`filter_lcov_many`], including target-policy resolution failures.
+pub fn filter_lcov_many_for_target(
+    lcov_texts: &[&str],
+    manifest_path: Option<&Path>,
+    target: Option<&str>,
+) -> Result<Vec<String>, CoverageGateError> {
+    filter_lcov_many_for_target_with_metadata_loader(lcov_texts, manifest_path, target, workspace::load_metadata)
 }
 
 fn filter_lcov_with_metadata_loader(
@@ -418,12 +466,51 @@ fn filter_lcov_many_with_metadata_loader(
     manifest_path: Option<&Path>,
     load_metadata: impl FnOnce(Option<&Path>) -> Result<cargo_metadata::Metadata, CoverageGateError>,
 ) -> Result<Vec<String>, CoverageGateError> {
+    filter_lcov_many_for_target_with_metadata_loader(lcov_texts, manifest_path, None, load_metadata)
+}
+
+fn filter_lcov_many_for_target_with_metadata_loader(
+    lcov_texts: &[&str],
+    manifest_path: Option<&Path>,
+    target: Option<&str>,
+    load_metadata: impl FnOnce(Option<&Path>) -> Result<cargo_metadata::Metadata, CoverageGateError>,
+) -> Result<Vec<String>, CoverageGateError> {
     let reports = source_filter::parse_reports(lcov_texts)?;
     if reports.is_empty() {
         return Ok(Vec::new());
     }
     let metadata = load_metadata(manifest_path)?;
-    source_filter::filter_reports_with_metadata(reports, &metadata)
+    let ws = workspace::Workspace::from_metadata(&metadata, target)?;
+    filter_reports_with_policy(reports, &metadata, &ws)
+}
+
+fn filter_reports_with_policy(
+    reports: Vec<lcov::Report>,
+    metadata: &cargo_metadata::Metadata,
+    workspace: &workspace::Workspace,
+) -> Result<Vec<String>, CoverageGateError> {
+    filter_reports_with_policy_using(reports, metadata, workspace, source_filter::filter_reports_with_metadata)
+}
+
+fn filter_reports_with_policy_using(
+    reports: Vec<lcov::Report>,
+    metadata: &cargo_metadata::Metadata,
+    workspace: &workspace::Workspace,
+    filter_sources: impl FnOnce(Vec<lcov::Report>, &cargo_metadata::Metadata) -> Result<Vec<String>, CoverageGateError>,
+) -> Result<Vec<String>, CoverageGateError> {
+    let filtered = filter_sources(reports, metadata)?;
+    let refs = filtered.iter().map(String::as_str).collect::<Vec<_>>();
+    // Validate merged checksums before omitting any package's evidence.
+    lcov_cov::CoverageReport::from_strs(&refs)?;
+    let mut reports = source_filter::parse_reports(&refs)?;
+    for report in &mut reports {
+        report.sections.retain(|key, _| {
+            attribute::owning_member(&key.source_file, &workspace.members).is_none_or(|member| {
+                member.expect_no_coverable_lines || threshold::Threshold::resolve(member, workspace).min_lines_percent != 0.0
+            })
+        });
+    }
+    Ok(reports.into_iter().map(source_filter::serialize_report).collect())
 }
 
 /// Outcome of a coverage-gate evaluation.
@@ -589,10 +676,10 @@ fn evaluate_reports_with_metadata(
     gated_packages: &[String],
     target: Option<&str>,
 ) -> Result<EvaluatedReport, CoverageGateError> {
-    let filtered = source_filter::filter_reports_with_metadata(reports, metadata)?;
+    let ws = workspace::Workspace::from_metadata(metadata, target)?;
+    let filtered = filter_reports_with_policy(reports, metadata, &ws)?;
     let filtered_refs = filtered.iter().map(String::as_str).collect::<Vec<_>>();
     let report = lcov_cov::CoverageReport::from_strs(&filtered_refs)?;
-    let ws = workspace::Workspace::from_metadata(metadata, target)?;
     let inner = verdict::evaluate(&report, &ws, gated_packages)?;
     Ok(EvaluatedReport { inner })
 }
@@ -687,6 +774,7 @@ mod tests {
                     for result in [
                         filter_lcov("", manifest.as_deref()).map(|_| ()),
                         filter_lcov_many(&[""], manifest.as_deref()).map(|_| ()),
+                        filter_lcov_many_for_target(&[""], manifest.as_deref(), Some("x86_64-unknown-linux-gnu")).map(|_| ()),
                         evaluate("", manifest.as_deref(), &[]).map(|_| ()),
                         evaluate_many(&[""], manifest.as_deref(), &[]).map(|_| ()),
                         evaluate_many_for_target(&[""], manifest.as_deref(), &[], None).map(|_| ()),
@@ -694,12 +782,15 @@ mod tests {
                         evaluate_unfiltered_many(&[""], manifest.as_deref(), &[]).map(|_| ()),
                         evaluate_unfiltered_many_for_target(&[""], manifest.as_deref(), &[], None).map(|_| ()),
                     ] {
-                        let error = result.unwrap_err().to_string();
-                        assert!(error.contains("public-wrapper-manifest-probe"), "{error}");
+                        let error = result.unwrap_err();
+                        assert_eq!(
+                            error_cause::<crate::error::InvalidPackageSelectorError>(&error).selector,
+                            "public-wrapper-manifest-probe"
+                        );
                     }
                 },
             );
-            assert_eq!(calls.get(), 8);
+            assert_eq!(calls.get(), 9);
         }
     }
 
@@ -755,7 +846,10 @@ mod tests {
     }
 
     fn fixture_metadata() -> cargo_metadata::Metadata {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/source-index");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("source-index");
         let member = root.join("member");
         let package_id = "path+file:///coverage-public-wrapper#member@0.1.0";
         serde_json::from_value(json!({
@@ -773,7 +867,7 @@ mod tests {
                     "kind": ["lib"],
                     "crate_types": ["lib"],
                     "name": "member",
-                    "src_path": member.join("src/lib.rs"),
+                    "src_path": member.join("src").join("lib.rs"),
                     "edition": "2024",
                     "doc": true,
                     "doctest": true,
@@ -804,6 +898,235 @@ mod tests {
             "version": 1
         }))
         .expect("fixture metadata parses")
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "source filtering canonicalizes checked-in paths")]
+    fn policy_omission_uses_exact_effective_zero_and_never_omits_assertions() {
+        let metadata = fixture_metadata();
+        let source = metadata.packages[0].targets[0].src_path.as_std_path();
+        let raw = format!("TN:\nSF:{}\nDA:4,0\nend_of_record\n", source.display());
+        for (package, default, assertion, omitted) in [
+            (None, None, false, false),
+            (None, Some(0.0), false, true),
+            (Some(0.0), Some(50.0), false, true),
+            (Some(0.0001), Some(0.0), false, false),
+            (None, Some(0.0), true, false),
+        ] {
+            let mut workspace = workspace::Workspace::from_metadata(&metadata, None).unwrap();
+            workspace.default_min_lines_percent = default;
+            workspace.members[0].min_lines_percent = package;
+            workspace.members[0].expect_no_coverable_lines = assertion;
+            let filtered = filter_reports_with_policy(source_filter::parse_reports(&[&raw]).unwrap(), &metadata, &workspace).unwrap();
+            let expected = if omitted { String::new() } else { canonical_lcov(&raw) };
+            assert_eq!(filtered, [expected], "{package:?}, {default:?}, {assertion}");
+        }
+    }
+
+    fn error_cause<E: std::error::Error + 'static>(error: &CoverageGateError) -> &E {
+        std::iter::successors(Some(error as &(dyn std::error::Error + 'static)), |source| source.source())
+            .find_map(<dyn std::error::Error>::downcast_ref::<E>)
+            .expect("the tested failure must preserve its typed error cause")
+    }
+
+    fn canonical_lcov(input: &str) -> String {
+        let report = lcov::Report::from_reader(lcov::Reader::new(input.as_bytes())).unwrap();
+        let mut output = String::new();
+        for record in report.into_records() {
+            use std::fmt::Write as _;
+            writeln!(&mut output, "{record}").unwrap();
+        }
+        output
+    }
+
+    fn policy_metadata() -> cargo_metadata::Metadata {
+        let mut metadata = fixture_metadata();
+        let root = metadata.workspace_root.clone();
+        let mut outer = metadata.packages[0].clone();
+        outer.name = serde_json::from_value(json!("outer")).unwrap();
+        outer.id = cargo_metadata::PackageId {
+            repr: "path+file:///coverage-policy#outer@0.1.0".to_owned(),
+        };
+        outer.manifest_path = root.join("Cargo.toml");
+        outer.targets[0].name = "outer".to_owned();
+        outer.targets[0].src_path = root.join("external-lib.rs");
+        outer.metadata = json!({"coverage-gate": {"min-lines-percent": 0}});
+        metadata.workspace_members.push(outer.id.clone());
+        metadata.packages.push(outer);
+        metadata
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "source filtering reads immutable checked-in fixtures")]
+    fn policy_reports_preserve_batch_order_nested_owners_and_cross_package_hits() {
+        let metadata = policy_metadata();
+        let outer = metadata.packages[1].targets[0].src_path.as_std_path();
+        let member = metadata.packages[0].targets[0].src_path.as_std_path();
+        let misses = format!(
+            "TN:outer-tests\nSF:{}\nDA:4,0\nend_of_record\n\
+             TN:member-tests\nSF:{}\nDA:4,0\nend_of_record\n",
+            outer.display(),
+            member.display()
+        );
+        let hits = format!("TN:outer-tests\nSF:{}\nDA:4,5\nend_of_record\n", member.display());
+        let ws = workspace::Workspace::from_metadata(&metadata, None).unwrap();
+        let filtered = filter_reports_with_policy(source_filter::parse_reports(&[&misses, &hits]).unwrap(), &metadata, &ws).unwrap();
+        let expected_miss = format!("TN:member-tests\nSF:{}\nDA:4,0\nend_of_record\n", member.display());
+        assert_eq!(filtered, [canonical_lcov(&expected_miss), canonical_lcov(&hits)]);
+        let report = evaluate_reports_with_metadata(
+            source_filter::parse_reports(&[&misses, &hits]).unwrap(),
+            &metadata,
+            &["member".to_owned()],
+            None,
+        )
+        .unwrap();
+        assert_eq!(report.verdict(), Verdict::Pass);
+        let outcome = &report.inner.outcomes[0];
+        assert_eq!(
+            (&outcome.name, outcome.totals.count, outcome.totals.covered),
+            (&"member".to_owned(), 1, 1)
+        );
+
+        let raw = evaluate_unfiltered_many_for_target_with_metadata_loader(&[&misses], None, &["outer".to_owned()], None, |_| Ok(metadata))
+            .unwrap();
+        assert_eq!(raw.inner.outcomes[0].totals.count, 1);
+        assert_eq!(raw.inner.outcomes[0].totals.covered, 0);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "source filtering reads immutable checked-in fixtures")]
+    fn policy_reports_resolve_target_replacements_without_querying_host_tools() {
+        let mut metadata = fixture_metadata();
+        metadata.packages[0].metadata = json!({"coverage-gate": {
+            "min-lines-percent": 0,
+            "target": {
+                "cfg(unix)": {"min-lines-percent": 0},
+                "x86_64-unknown-linux-gnu": {"min-lines-percent": 50},
+                "aarch64-unknown-linux-gnu": {"expect-no-coverable-lines": true}
+            }
+        }});
+        let source = metadata.packages[0].targets[0].src_path.as_std_path();
+        let raw = format!("TN:\nSF:{}\nDA:4,0\nend_of_record\n", source.display());
+        metadata.workspace_metadata = json!({"coverage-gate": {"min-lines-percent": 0}});
+        for (base, triple, cfg, expected) in [
+            (0, "x86_64-unknown-linux-gnu", &["unix"][..], canonical_lcov(&raw)),
+            (0, "aarch64-unknown-linux-gnu", &["unix"][..], canonical_lcov(&raw)),
+            (0, "x86_64-pc-windows-msvc", &["windows"][..], String::new()),
+            (100, "powerpc64-unknown-linux-gnu", &["unix"][..], String::new()),
+        ] {
+            metadata.packages[0].metadata["coverage-gate"]["min-lines-percent"] = json!(base);
+            let ws =
+                workspace::Workspace::from_metadata_with_target_resolver(&metadata, || Ok(target::TargetContext::from_parts(triple, cfg)))
+                    .unwrap();
+            let filtered = filter_reports_with_policy(source_filter::parse_reports(&[&raw]).unwrap(), &metadata, &ws).unwrap();
+            assert_eq!(filtered, [expected]);
+            if triple == "aarch64-unknown-linux-gnu" {
+                let coverage = lcov_cov::CoverageReport::from_strs(&[&filtered[0]]).unwrap();
+                let report = verdict::evaluate(&coverage, &ws, &[]).unwrap();
+                assert_eq!(report.verdict(), Verdict::Fail);
+                assert_eq!(report.outcomes[0].status, verdict::Status::UnexpectedCoverableLines);
+                assert_eq!(
+                    report.outcomes[0].diagnostics,
+                    [verdict::LineDiagnostic {
+                        path: PathBuf::from("src").join("lib.rs"),
+                        lines: vec![4],
+                    }]
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "source filtering reads immutable checked-in fixtures")]
+    fn policy_reports_validate_line_bounds_before_omitting_zero_packages() {
+        let mut metadata = fixture_metadata();
+        metadata.packages[0].metadata = json!({"coverage-gate": {"min-lines-percent": 0}});
+        let source = metadata.packages[0].targets[0].src_path.as_std_path();
+        let raw = format!("SF:{}\nDA:999999,0\nend_of_record\n", source.display());
+        let ws = workspace::Workspace::from_metadata(&metadata, None).unwrap();
+        let error = filter_reports_with_policy(source_filter::parse_reports(&[&raw]).unwrap(), &metadata, &ws).unwrap_err();
+        let cause = error_cause::<crate::error::CoverageLineOutOfRangeError>(&error);
+        assert_eq!(cause.path, source.display().to_string());
+        assert_eq!(cause.line, 999_999);
+        assert_eq!(
+            cause.line_count,
+            include_str!("../tests/fixtures/source-index/member/src/lib.rs").lines().count()
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "source filtering reads immutable checked-in fixtures")]
+    fn policy_reports_validate_merged_checksums_before_omitting_zero_packages() {
+        let mut metadata = fixture_metadata();
+        metadata.packages[0].metadata = json!({"coverage-gate": {"min-lines-percent": 0}});
+        let source = metadata.packages[0].targets[0].src_path.as_std_path();
+        let first = format!("TN:first\nSF:{}\nDA:4,0,first\nend_of_record\n", source.display());
+        let second = format!("TN:second\nSF:{}\nDA:4,1,second\nend_of_record\n", source.display());
+        let ws = workspace::Workspace::from_metadata(&metadata, None).unwrap();
+        for inputs in [vec![first.clone(), second.clone()], vec![format!("{first}{second}")]] {
+            let refs = inputs.iter().map(String::as_str).collect::<Vec<_>>();
+            let error = filter_reports_with_policy(source_filter::parse_reports(&refs).unwrap(), &metadata, &ws).unwrap_err();
+            let cause = error_cause::<crate::error::MergedSourceChecksumError>(&error);
+            assert_eq!(cause.path, source.display().to_string());
+            assert_eq!(cause.line, 4);
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "source filtering reads immutable checked-in fixtures")]
+    fn policy_reports_reject_unowned_sources_with_scripted_compiler_provenance() {
+        let mut metadata = fixture_metadata();
+        metadata.packages[0].metadata = json!({"coverage-gate": {"min-lines-percent": 0}});
+        let source = metadata.workspace_root.join("external-lib.rs");
+        let raw = format!("SF:{source}\nDA:4,0\nend_of_record\n");
+        let ws = workspace::Workspace::from_metadata(&metadata, None).unwrap();
+        let calls = std::cell::Cell::new(0);
+        let error = filter_reports_with_policy_using(
+            source_filter::parse_reports(&[&raw]).unwrap(),
+            &metadata,
+            &ws,
+            |reports, metadata| {
+                source_filter::filter_reports_with_compiler_loader(reports, metadata, |root| {
+                    assert_eq!(root, metadata.workspace_root.as_std_path());
+                    calls.set(calls.get() + 1);
+                    Ok(None)
+                })
+            },
+        )
+        .unwrap_err();
+        assert_eq!(calls.get(), 1);
+        assert_eq!(
+            error_cause::<crate::error::UnownedCoverageSourceError>(&error).path,
+            source.as_str()
+        );
+    }
+
+    #[test]
+    fn policy_filter_rejects_malformed_lcov_before_metadata_discovery() {
+        let input = "not lcov";
+        let error = filter_lcov_many_for_target_with_metadata_loader(&[input], None, None, |_| {
+            panic!("malformed LCOV must not discover workspace or target state")
+        })
+        .unwrap_err();
+        let _ = error_cause::<crate::error::ParseLcovError>(&error);
+        let cause = error_cause::<lcov::report::ParseError>(&error);
+        let expected = lcov::Report::from_reader(lcov::Reader::new(input.as_bytes())).unwrap_err();
+        assert_eq!(cause.to_string(), expected.to_string());
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "source filtering reads immutable checked-in fixtures")]
+    fn policy_reports_omit_zero_line_source_witnesses() {
+        let mut metadata = fixture_metadata();
+        metadata.packages[0].metadata = json!({"coverage-gate": {"min-lines-percent": 0}});
+        let source = metadata.workspace_root.join("member").join("src").join("test-include-root.rs");
+        let raw = format!("TN:\nSF:{source}\nDA:5,0\nend_of_record\n");
+        let ws = workspace::Workspace::from_metadata(&metadata, None).unwrap();
+        let sources = source_filter::filter_reports_with_metadata(source_filter::parse_reports(&[&raw]).unwrap(), &metadata).unwrap();
+        let witness = format!("TN:\nSF:{source}\nend_of_record\n");
+        assert_eq!(sources, [witness]);
+        let filtered = filter_reports_with_policy(source_filter::parse_reports(&[&raw]).unwrap(), &metadata, &ws).unwrap();
+        assert_eq!(filtered, [String::new()]);
     }
 
     fn assert_unknown_selector(error: &CoverageGateError, expected: &str) {

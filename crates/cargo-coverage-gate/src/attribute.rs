@@ -16,6 +16,7 @@
 //! The caller emits a single aggregated warning.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use crate::lcov_cov::FileReport;
 use crate::workspace::Member;
@@ -32,27 +33,22 @@ pub(crate) struct AttributionOutcome<'f> {
 
 /// Group `files` by owning workspace member.
 pub(crate) fn attribute<'f>(files: &'f [FileReport], members: &[Member]) -> AttributionOutcome<'f> {
-    // Longest-prefix-first: when paths nest, the deeper member wins.
-    let mut order: Vec<usize> = (0..members.len()).collect();
-    order.sort_by(|&left, &right| {
-        members[right]
-            .manifest_dir
-            .components()
-            .count()
-            .cmp(&members[left].manifest_dir.components().count())
-    });
-
     let mut out = AttributionOutcome::default();
-    'files: for f in files {
-        for &i in &order {
-            if f.filename.starts_with(&members[i].manifest_dir) {
-                out.by_member.entry(members[i].name.clone()).or_default().push(f);
-                continue 'files;
-            }
+    for f in files {
+        if let Some(member) = owning_member(&f.filename, members) {
+            out.by_member.entry(member.name.clone()).or_default().push(f);
+        } else {
+            out.unattributed.push(f);
         }
-        out.unattributed.push(f);
     }
     out
+}
+
+pub(crate) fn owning_member<'m>(path: &Path, members: &'m [Member]) -> Option<&'m Member> {
+    members
+        .iter()
+        .filter(|member| path.starts_with(&member.manifest_dir))
+        .max_by_key(|member| member.manifest_dir.components().count())
 }
 
 #[cfg(test)]

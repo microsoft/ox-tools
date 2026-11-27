@@ -1714,11 +1714,15 @@ fn filter_report_with<'a>(
     }
     report.sections = filtered;
 
+    Ok(serialize_report(report))
+}
+
+pub(crate) fn serialize_report(report: lcov::Report) -> String {
     let mut output = String::new();
     for record in report.into_records() {
         writeln!(&mut output, "{record}").expect("writing LCOV records to a String cannot fail");
     }
-    Ok(output)
+    output
 }
 
 fn validate_section_lines(path: &Path, section: &lcov::report::section::Value, line_count: usize) -> Result<(), CoverageGateError> {
@@ -1741,7 +1745,7 @@ pub(crate) fn filter_reports_with_metadata(reports: Vec<lcov::Report>, metadata:
     filter_reports_with_compiler_loader(reports, metadata, discover_compiler_library)
 }
 
-fn filter_reports_with_compiler_loader(
+pub(crate) fn filter_reports_with_compiler_loader(
     reports: Vec<lcov::Report>,
     metadata: &Metadata,
     load_compiler_library: impl FnOnce(&Path) -> Result<Option<PathBuf>, CoverageGateError>,

@@ -91,7 +91,7 @@ impl Workspace {
         Self::from_metadata_with_target_resolver(metadata, || TargetContext::resolve(target))
     }
 
-    fn from_metadata_with_target_resolver(
+    pub(crate) fn from_metadata_with_target_resolver(
         metadata: &Metadata,
         resolve_target: impl FnOnce() -> Result<TargetContext, CoverageGateError>,
     ) -> Result<Self, CoverageGateError> {
