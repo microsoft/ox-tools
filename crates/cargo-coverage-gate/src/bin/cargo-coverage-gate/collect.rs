@@ -41,7 +41,8 @@ pub(crate) fn run(args: &CoverageGateArgs, collection: &CollectionArgs) -> Resul
 
     let tools = ToolPrograms::from_env();
     let (workspace, selection, collection) = prepare_collection(args, collection, &tools, WorkspaceInfo::load, resolved_collection)?;
-    withhold_merged_report_with(&collection.coverage_dir.join("lcov-merged.info"), remove_file_if_present)?;
+    // #[gamma::skip(try.propagate_to_unwrap, reason = "The injected helper is tested with native removal failures; constructing a permission-denied path portably at this run-level call would require global filesystem manipulation.", tag = "native-boundary")]
+    withhold_merged_report_with(&merged_lcov_path(&collection.coverage_dir), |path| fs::remove_file(path))?;
     let configurations = normalized_configurations(&collection.configurations);
     let effective_target = EffectiveTarget::resolve(&workspace, args.target.as_deref(), &tools)?;
 
@@ -786,7 +787,7 @@ fn filter_and_publish_reports_with_reader(
     read: impl FnMut(&Path) -> Result<String, AppError>,
     filter: impl FnMut(&[&str], &Path) -> Result<Vec<String>, AppError>,
 ) -> Result<Vec<PathBuf>, AppError> {
-    filter_and_publish_reports_with_reader_and_remove(execution, collected, read, filter, remove_file_if_present)
+    filter_and_publish_reports_with_reader_and_remove(execution, collected, read, filter, |path| fs::remove_file(path))
 }
 
 fn filter_and_publish_reports_with_reader_and_remove(
@@ -818,7 +819,7 @@ fn filter_and_publish_reports_with_reader_and_remove(
         let manifest = execution.workspace.root.join("Cargo.toml");
         filter(&raw_refs, &manifest)?
     };
-    let merged_path = execution.args.coverage_dir.join("lcov-merged.info");
+    let merged_path = merged_lcov_path(&execution.args.coverage_dir);
     let mut reports = collected
         .iter()
         .enumerate()
@@ -849,17 +850,13 @@ fn filter_and_publish_reports_with_reader_and_remove(
     Ok(collected.iter().map(|report| report.stable_path.clone()).collect())
 }
 
-fn remove_file_if_present(path: &Path) -> io::Result<()> {
-    remove_file_if_present_with(path, |path| fs::remove_file(path))
+fn merged_lcov_path(coverage_dir: &Path) -> PathBuf {
+    coverage_dir.join("lcov-merged.info")
 }
 
 /// Removes a prior canonical report before work that cannot recreate it.
 fn withhold_merged_report_with(path: &Path, remove: impl FnOnce(&Path) -> io::Result<()>) -> Result<(), AppError> {
-    let result = match remove(path) {
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        result => result,
-    };
-    result.into_app_err(format!(
+    remove_file_if_present_with(path, remove).into_app_err(format!(
         "failed to withhold merged LCOV report `{}` during collection",
         diagnostic_path(path)
     ))
@@ -1934,6 +1931,11 @@ mod tests {
     #[test]
     fn collect_only_merged_removal_accepts_missing_and_preserves_other_errors() {
         let path = Path::new("synthetic-coverage/lcov-merged.info");
+        assert_eq!(
+            merged_lcov_path(Path::new("synthetic-coverage")),
+            path,
+            "the canonical merged filename is a shared contract"
+        );
         let stale = Cell::new(true);
         withhold_merged_report_with(path, |_| {
             assert!(stale.replace(false), "the stale report starts present");
