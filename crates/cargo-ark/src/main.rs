@@ -15,7 +15,8 @@
 //! echo '[{"name":"my-crate","new_version":"1.2.0"}]' | cargo ark release-dependencies
 //! ```
 //!
-//! The command runs each package's tests with all features and with no default features.
+//! The command runs each package's tests with all features, with no default
+//! features, and without feature flags (Cargo's default selection).
 //! It does not discover candidates or publish packages.
 
 use std::path::PathBuf;

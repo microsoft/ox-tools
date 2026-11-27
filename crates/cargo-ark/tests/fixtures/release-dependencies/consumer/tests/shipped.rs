@@ -24,5 +24,11 @@ fn archive_all() {
 #[cfg(not(any(feature = "baseline", feature = "extra")))]
 fn archive_none() {
     check_archive();
+}
+
+#[test]
+#[cfg(all(feature = "baseline", not(feature = "extra")))]
+fn archive_default() {
+    check_archive();
     assert!(std::env::var_os("ARK_FIXTURE_FAIL_TEST").is_none(), "deliberately failing shipped test");
 }

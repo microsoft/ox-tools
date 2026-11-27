@@ -95,13 +95,16 @@ fn test_archives(cargo: &ReleaseCargo, scratch: &Path, sources: &BTreeMap<String
     fs::write(&patch, patch_config(sources)?.to_string())?;
     for (name, source) in sources {
         let manifest = source.join("Cargo.toml");
-        for features in ["--all-features", "--no-default-features"] {
+        for feature_flag in [Some("--all-features"), Some("--no-default-features"), None] {
+            let mode = feature_flag.unwrap_or("(default features)");
             run(
                 cargo
                     .archive_command(scratch, &patch)
-                    .args(["test", features, "--manifest-path"])
+                    .arg("test")
+                    .args(feature_flag)
+                    .arg("--manifest-path")
                     .arg(&manifest),
-                &format!("{name}: cargo test {features} from package archive"),
+                &format!("{name}: cargo test {mode} from package archive"),
             )?;
         }
     }

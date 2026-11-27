@@ -59,6 +59,7 @@ fn validates_shipped_tests_and_reports_release_failures() -> io::Result<()> {
     assert!(!stderr.contains("Packaging ark-fixture-stable"), "{stderr}");
     assert!(stdout.contains("archive_all ... ok"), "{stdout}");
     assert!(stdout.contains("archive_none ... ok"), "{stdout}");
+    assert!(stdout.contains("archive_default ... ok"), "{stdout}");
 
     let internal_scratch = run_report(
         ark_command(&workspace, temp.path())?
@@ -87,9 +88,10 @@ fn validates_shipped_tests_and_reports_release_failures() -> io::Result<()> {
     let stdout = String::from_utf8_lossy(&failure.stdout);
     assert_error(
         &failure,
-        "ark-fixture-consumer: cargo test --no-default-features from package archive failed",
+        "ark-fixture-consumer: cargo test (default features) from package archive failed",
     );
     assert!(stdout.contains("archive_all ... ok"), "{stdout}");
+    assert!(stdout.contains("archive_none ... ok"), "{stdout}");
     assert!(stdout.contains("deliberately failing shipped test"), "{stdout}");
 
     let missing = ark(&workspace, ONLY_CONSUMER_BUMPED, false)?;

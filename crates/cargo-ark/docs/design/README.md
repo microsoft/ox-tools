@@ -11,11 +11,12 @@ running Cargo.
 
 Ark packages exactly the listed versions together with Cargo's normal package
 verification and registry selection. It then runs the tests from each `.crate`
-archive separately with `--all-features` and `--no-default-features`. Extracted
-candidates are available to tests through a crates.io patch; Cargo resolves
-remaining dependencies using the workspace's Cargo configuration, including
-any existing source overrides. A relative `CARGO_HOME` is resolved from the
-directory where Ark was invoked.
+archive separately with `--all-features`, with `--no-default-features`, and with
+no feature flags so Cargo enables the package's `default` feature if one exists.
+Extracted candidates are available to tests through a crates.io patch; Cargo
+resolves remaining dependencies using the workspace's Cargo configuration,
+including any existing source overrides. A relative `CARGO_HOME` is resolved
+from the directory where Ark was invoked.
 
 Ark extracts archives and writes build outputs to a temporary directory outside
 the source workspace. This keeps validation artifacts out of the checkout and
