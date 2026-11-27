@@ -175,6 +175,42 @@ fn common_checks_are_direct_cargo_each_invocations() {
 }
 
 #[test]
+fn formatting_does_not_require_impact_or_package_dispatch() {
+    let recipe = include_str!("../templates/justfiles/anvil/checks/fmt.just");
+    let setup = include_str!("../templates/justfiles/anvil/setup/checks/fmt.just");
+    assert!(recipe.contains(r#"cargo +{{ rust_nightly }} fmt --all {{ if fix == "true" { "" } else { "--check" } }}"#));
+    for contents in [recipe, setup] {
+        for scoped_dependency in [
+            "anvil-impact",
+            "anvil_modified_selection",
+            "cargo-each",
+            "cargo each",
+            "cargo-delta",
+        ] {
+            assert!(!contents.contains(scoped_dependency), "unexpected dependency: {scoped_dependency}");
+        }
+    }
+}
+
+#[test]
+fn lightweight_workspace_checks_do_not_require_impact() {
+    for (recipe, command) in [
+        (
+            include_str!("../templates/justfiles/anvil/checks/cargo-sort.just"),
+            "cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} sort --workspace --grouped --check --check-format",
+        ),
+        (
+            include_str!("../templates/justfiles/anvil/checks/license-headers.just"),
+            "cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} heather",
+        ),
+    ] {
+        assert!(recipe.lines().any(|line| line.trim() == command));
+        assert!(!recipe.contains("anvil-impact"));
+        assert!(!recipe.contains("anvil_modified_selection"));
+    }
+}
+
+#[test]
 fn coverage_is_one_domain_tool_invocation() {
     let recipes = generated().checks;
     assert!(recipes.contains("cargo +{{ rust_nightly }} each {{ anvil_affected_selection }} --once --"));
