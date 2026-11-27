@@ -818,6 +818,8 @@ fn nextest_command_for_host(execution: &CollectionExecution<'_>, configuration: 
     let target_dir = configuration_target_dir(execution, configuration);
     let mut command = coverage_command(execution.workspace, &target_dir, execution.tools);
     command.args(["llvm-cov", "nextest", "--no-report"]);
+    // Eight LLVM-managed merge slots allow concurrent writers without one raw profile per test process.
+    command.env("LLVM_PROFILE_FILE_NAME", "coverage-%8m.profraw");
     // cargo-llvm-cov's wrapper misses flags inside Cargo's Windows response files.
     if windows_host {
         command.arg("--no-rustc-wrapper");
@@ -2412,6 +2414,12 @@ mod tests {
                 for windows_host in [false, true] {
                     let instrumented = nextest_command_for_host(&execution, configuration, windows_host);
                     let report = report_command_for_host(&execution, configuration, Path::new("lcov.info"), windows_host);
+                    assert!(
+                        instrumented
+                            .get_envs()
+                            .any(|(key, value)| key == "LLVM_PROFILE_FILE_NAME" && value == Some(OsStr::new("coverage-%8m.profraw"))),
+                        "every instrumented configuration must merge profiles across test processes"
+                    );
                     assert_command_selection(&instrumented, &expected);
                     assert_command_selection(&report, &expected);
                 }

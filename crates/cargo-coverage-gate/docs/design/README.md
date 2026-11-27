@@ -479,7 +479,15 @@ For each requested feature configuration, `run`:
 2. allocates a fresh private coverage target for each feature configuration
    beneath a unique per-invocation scratch directory;
 3. invokes cargo-llvm-cov with nextest, `--no-report`, `--no-tests=pass`, and
-   `--locked` for the selected package set;
+   `--locked` for the selected package set. It sets
+   `LLVM_PROFILE_FILE_NAME=coverage-%8m.profraw` for this invocation:
+   LLVM merges counters online into an eight-slot pool per instrumented binary
+   signature instead of creating a profile per test process. Eight slots bound
+   raw-profile growth while allowing concurrent writers; LLVM owns profile
+   locking and counter merging. The pattern deliberately omits `%p`, which
+   would isolate each process and defeat reuse. This overrides an inherited
+   filename pattern, remains inside the configuration's private target, and
+   does not change test selection or coverage policy;
 4. invokes `cargo llvm-cov report --lcov` for the same package and target
    selection, delegating raw-profile merging, ordinary and nested trybuild
    object discovery, and the complete default filename exclusions to
