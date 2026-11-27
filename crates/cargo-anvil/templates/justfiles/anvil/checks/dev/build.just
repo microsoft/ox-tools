@@ -8,4 +8,4 @@
 [arg("package", long, pattern='(?:[A-Za-z0-9_.-]+)?')]
 [arg("profile", long, pattern='(?:[A-Za-z0-9_.-]+)?')]
 anvil-build package="" profile="": anvil-build-validate-prereqs
-    cargo each {{ if package == "" { "--workspace" } else { "--package " + quote(package) } }} --once -- cargo {{ anvil_stable_toolchain_arg }} build '{packages}' {{ if profile == "" { "" } else { "--profile " + quote(profile) } }} --all-features --all-targets --locked
+    cargo each {{ if package == "" { "--workspace" } else { "--package " + quote(package) } }} --once -- cargo {{ anvil_stable_toolchain_arg }} build '{cargo-specs}' {{ if profile == "" { "" } else { "--profile " + quote(profile) } }} --all-features --all-targets --locked

@@ -146,8 +146,8 @@ fn unused_deps_rejects_whitespace_only_package_files() {
 fn common_checks_are_direct_cargo_each_invocations() {
     let recipes = generated().checks;
     for command in [
-        "cargo each {{ anvil_affected_selection }} --once -- cargo {{ anvil_stable_toolchain_arg }} clippy '{packages}'",
-        "cargo each {{ anvil_required_selection }} --once -- cargo {{ anvil_stable_toolchain_arg }} hack '{packages}'",
+        "cargo each {{ anvil_affected_selection }} --once -- cargo {{ anvil_stable_toolchain_arg }} clippy '{cargo-specs}'",
+        "cargo each {{ anvil_required_selection }} --once -- cargo {{ anvil_stable_toolchain_arg }} hack '{cargo-specs}'",
         "cargo +{{ rust_nightly_external_types }} each {{ anvil_affected_selection }} --filter target-kind:lib",
         "cargo each {{ anvil_affected_selection }} --filter doctest -- cargo {{ anvil_stable_toolchain_arg }} test --doc --package '{cargo-spec}'",
         "cargo each {{ anvil_affected_selection }} --filter feature:loom --each-target test --target-filter required-feature:loom --require-target-per-package",
@@ -172,6 +172,41 @@ fn common_checks_are_direct_cargo_each_invocations() {
         ),
         "examples must use one target-mode command for automatic and explicit selection"
     );
+}
+
+#[test]
+fn cargo_commands_preserve_workspace_member_source_identity() {
+    use cargo_anvil::artifacts::justfile::{checks, dev, helpers};
+
+    for artifact in [
+        checks::bench(),
+        checks::careful(),
+        checks::cargo_hack(),
+        checks::clippy(),
+        checks::doc_build(),
+        checks::examples(),
+        checks::msrv_test(),
+        checks::udeps(),
+        dev::build(),
+        helpers::checks::miri(),
+    ] {
+        let body = artifact.body();
+        let commands = body.lines().filter(|line| line.contains("--once -- cargo")).collect::<Vec<_>>();
+        assert!(!commands.is_empty(), "missing aggregate Cargo command: {body}");
+        for command in commands {
+            assert!(
+                command.contains("'{cargo-specs}'"),
+                "Cargo must receive source-qualified members: {command}"
+            );
+            assert!(!command.contains("'{packages}'"), "name/version alone can be ambiguous: {command}");
+        }
+    }
+
+    for artifact in [checks::check_all_targets(), checks::bolero()] {
+        let body = artifact.body();
+        assert!(body.contains("--package '{cargo-spec}'"), "missing scalar Cargo identity: {body}");
+        assert!(!body.contains("--package '{spec}'") && !body.contains("--package '{name}'"));
+    }
 }
 
 #[test]
@@ -208,6 +243,19 @@ fn lightweight_workspace_checks_do_not_require_impact() {
         assert!(!recipe.contains("anvil-impact"));
         assert!(!recipe.contains("anvil_modified_selection"));
     }
+}
+
+#[test]
+fn domain_tool_selectors_keep_their_own_input_contracts() {
+    use cargo_anvil::artifacts::justfile::{checks, helpers};
+
+    assert!(
+        helpers::impact()
+            .body()
+            .contains(r#"if anvil_impact_mode == "off" { "" } else { "'{packages}'" }"#)
+    );
+    assert!(checks::llvm_cov().body().contains("{{ anvil_explicit_package_args }} run"));
+    assert!(checks::bolero().body().contains("--package '{json:package}' '{json:test}'"));
 }
 
 #[test]
@@ -277,7 +325,7 @@ fn released_domain_tool_versions_are_pinned() {
         "cargo_aprz_version := \"1.2.2\"",
         "cargo_coverage_gate_version := \"0.7.5\"",
         "cargo_delta_version := \"0.5.0\"",
-        "cargo_each_version := \"0.8.0\"",
+        "cargo_each_version := \"0.9.0\"",
         "cargo_gamma_version := \"0.8.0\"",
     ] {
         assert!(recipes.contains(pin), "missing released tool pin: {pin}");

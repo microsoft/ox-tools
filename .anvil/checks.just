@@ -18,7 +18,7 @@ anvil-impact: (_check-tool "cargo-delta" cargo_delta_version if anvil_impact_mod
 [arg("package", long, pattern='(?:[A-Za-z0-9_.-]+)?')]
 [arg("profile", long, pattern='(?:[A-Za-z0-9_.-]+)?')]
 anvil-build package="" profile="": anvil-build-validate-prereqs
-    cargo each {{ if package == "" { "--workspace" } else { "--package " + quote(package) } }} --once -- cargo {{ anvil_stable_toolchain_arg }} build '{packages}' {{ if profile == "" { "" } else { "--profile " + quote(profile) } }} --all-features --all-targets --locked
+    cargo each {{ if package == "" { "--workspace" } else { "--package " + quote(package) } }} --once -- cargo {{ anvil_stable_toolchain_arg }} build '{cargo-specs}' {{ if profile == "" { "" } else { "--profile " + quote(profile) } }} --all-features --all-targets --locked
 
 # Assess dependency feature and version risk with cargo-aprz.
 anvil-aprz: anvil-aprz-validate-prereqs
@@ -30,22 +30,22 @@ anvil-audit: anvil-audit-validate-prereqs
 
 # Compile affected benchmarks without running them.
 anvil-bench: anvil-bench-validate-prereqs anvil-impact
-    cargo each {{ anvil_affected_selection }} --once -- cargo {{ anvil_stable_toolchain_arg }} bench '{packages}' --all-features --no-run
+    cargo each {{ anvil_affected_selection }} --once -- cargo {{ anvil_stable_toolchain_arg }} bench '{cargo-specs}' --all-features --no-run
 
 # Discover and fuzz affected Bolero targets.
 anvil-bolero campaign="pr": anvil-bolero-validate-prereqs _ensure-target-dir
     {{ if campaign == "pr" || campaign == "scheduled" { "# valid campaign" } else { error("unknown Bolero campaign '" + campaign + "'; expected 'pr' or 'scheduled'") } }}
-    {{ bolero_command_prefix }}cargo +{{ rust_nightly }} each {{ anvil_affected_selection }} -- cargo +{{ rust_nightly }} bolero list --profile release --target {{ quote(anvil_bolero_host_target) }} --package '{name}' > {{ quote(anvil_bolero_targets_file) }}
+    {{ bolero_command_prefix }}cargo +{{ rust_nightly }} each {{ anvil_affected_selection }} -- cargo +{{ rust_nightly }} bolero list --profile release --target {{ quote(anvil_bolero_host_target) }} --package '{cargo-spec}' > {{ quote(anvil_bolero_targets_file) }}
     {{ bolero_command_prefix }}cargo +{{ rust_nightly }} each --json-lines-file {{ quote(anvil_bolero_targets_file) }} --keep-going -- cargo +{{ rust_nightly }} bolero test --profile release --target {{ quote(anvil_bolero_host_target) }} --engine libfuzzer {{ if campaign == "pr" { "--runs 30000 -S 2027" } else { "-T 90s" } }} --package '{json:package}' '{json:test}'
     {{ bolero_command_prefix }}rm {{ quote(anvil_bolero_targets_file) }}
 
 # Run affected tests with cargo-careful runtime checks.
 anvil-careful: anvil-careful-validate-prereqs anvil-impact
-    {{ anvil_careful_prefix }}cargo +{{ rust_nightly }} each {{ anvil_affected_selection }} --once -- cargo +{{ rust_nightly }} careful test '{packages}' --all-features --locked --target-dir {{ quote(anvil_careful_target_dir) }}
+    {{ anvil_careful_prefix }}cargo +{{ rust_nightly }} each {{ anvil_affected_selection }} --once -- cargo +{{ rust_nightly }} careful test '{cargo-specs}' --all-features --locked --target-dir {{ quote(anvil_careful_target_dir) }}
 
 # Check required packages across bounded feature combinations.
 anvil-cargo-hack: anvil-cargo-hack-validate-prereqs anvil-impact
-    cargo each {{ anvil_required_selection }} --once -- cargo {{ anvil_stable_toolchain_arg }} hack '{packages}' --feature-powerset --depth 2 check
+    cargo each {{ anvil_required_selection }} --once -- cargo {{ anvil_stable_toolchain_arg }} hack '{cargo-specs}' --feature-powerset --depth 2 check
 
 # Verify Cargo manifests are sorted and formatted consistently.
 anvil-cargo-sort: anvil-cargo-sort-validate-prereqs
@@ -53,12 +53,12 @@ anvil-cargo-sort: anvil-cargo-sort-validate-prereqs
 
 # Compile each affected package independently with and without default features.
 anvil-check-all-targets: anvil-check-all-targets-validate-prereqs anvil-impact
-    cargo each {{ anvil_affected_selection }} --keep-going -- cargo {{ anvil_stable_toolchain_arg }} check --package '{spec}' --all-targets --locked
-    cargo each {{ anvil_affected_selection }} --keep-going -- cargo {{ anvil_stable_toolchain_arg }} check --package '{spec}' --all-targets --no-default-features --locked
+    cargo each {{ anvil_affected_selection }} --keep-going -- cargo {{ anvil_stable_toolchain_arg }} check --package '{cargo-spec}' --all-targets --locked
+    cargo each {{ anvil_affected_selection }} --keep-going -- cargo {{ anvil_stable_toolchain_arg }} check --package '{cargo-spec}' --all-targets --no-default-features --locked
 
 # Lint affected packages and all targets with warnings denied.
 anvil-clippy: anvil-clippy-validate-prereqs anvil-impact
-    cargo each {{ anvil_affected_selection }} --once -- cargo {{ anvil_stable_toolchain_arg }} clippy '{packages}' --all-targets --all-features --locked -- -D warnings
+    cargo each {{ anvil_affected_selection }} --once -- cargo {{ anvil_stable_toolchain_arg }} clippy '{cargo-specs}' --all-targets --all-features --locked -- -D warnings
 
 # Validate dependency licenses, bans, sources, and advisories.
 anvil-deny: anvil-deny-validate-prereqs
@@ -74,7 +74,7 @@ anvil-deny-test-features: anvil-deny-test-features-validate-prereqs
 # Build required-package documentation with rustdoc warnings denied.
 [arg("open", long, value="true")]
 anvil-doc-build open="false": anvil-doc-build-validate-prereqs anvil-impact
-    cargo each {{ anvil_required_selection }} --once -- cargo {{ anvil_stable_toolchain_arg }} doc '{packages}' --config {{ quote('build.rustdocflags=["-D","warnings"]') }} --all-features --no-deps {{ if open == "true" { "--open" } else { "" } }}
+    cargo each {{ anvil_required_selection }} --once -- cargo {{ anvil_stable_toolchain_arg }} doc '{cargo-specs}' --config {{ quote('build.rustdocflags=["-D","warnings"]') }} --all-features --no-deps {{ if open == "true" { "--open" } else { "" } }}
 
 # Run affected package doctests with all and default features.
 anvil-doc-test: anvil-doc-test-validate-prereqs anvil-impact
@@ -94,7 +94,7 @@ anvil-ensure-no-default-features: anvil-ensure-no-default-features-validate-prer
 [arg("example", long, pattern='(?:[A-Za-z0-9_.-]+)?')]
 [arg("timeout", long, pattern='(?:[1-9][0-9]{0,2}|[12][0-9]{3}|3[0-5][0-9]{2}|3600)')]
 anvil-examples package="" example="" timeout="30": anvil-examples-validate-prereqs anvil-impact
-    cargo each {{ if example == "" { if package == "" { anvil_affected_selection } else { "--package " + quote(package) } } else if package == "" { error("--example requires --package") } else { "--package " + quote(package) } }} --once -- cargo {{ anvil_stable_toolchain_arg }} build '{packages}' {{ if example == "" { "--examples" } else { "--example " + quote(example) } }} --all-features --locked
+    cargo each {{ if example == "" { if package == "" { anvil_affected_selection } else { "--package " + quote(package) } } else if package == "" { error("--example requires --package") } else { "--package " + quote(package) } }} --once -- cargo {{ anvil_stable_toolchain_arg }} build '{cargo-specs}' {{ if example == "" { "--examples" } else { "--example " + quote(example) } }} --all-features --locked
     cargo each {{ if package == "" { anvil_affected_selection } else { "--package " + quote(package) } }} --each-target example --target-filter {{ quote(if example == "" { "not name-in-metadata:anvil.examples.no-run" } else { "name:" + example }) }} {{ if example == "" { "" } else { "--require-target-per-package" } }} --timeout {{ timeout }}s --keep-going -- cargo {{ anvil_stable_toolchain_arg }} run --config {{ quote('env.ANVIL_EXAMPLE="1"') }} --package '{cargo-spec}' --example '{target}' --all-features --locked
 
 # Reject unapproved external types in affected public APIs.
@@ -137,8 +137,8 @@ anvil-miri-tree-borrows: anvil-miri-tree-borrows-validate-prereqs (_anvil-miri-t
 
 # Run affected tests under the declared workspace MSRV; no MSRV is a no-op.
 anvil-msrv-test: anvil-msrv-test-validate-prereqs anvil-impact
-    cargo each {{ anvil_msrv_selection }} --once -- cargo '+{workspace-rust-version}' test '{packages}' --tests --all-features --locked
-    cargo each {{ anvil_msrv_selection }} --once -- cargo '+{workspace-rust-version}' test '{packages}' --tests --locked
+    cargo each {{ anvil_msrv_selection }} --once -- cargo '+{workspace-rust-version}' test '{cargo-specs}' --tests --all-features --locked
+    cargo each {{ anvil_msrv_selection }} --once -- cargo '+{workspace-rust-version}' test '{cargo-specs}' --tests --locked
 
 # Mutation-test code changed from the selected base branch.
 anvil-mutants-diff: anvil-mutants-diff-validate-prereqs anvil-impact
@@ -167,8 +167,8 @@ anvil-spellcheck: anvil-spellcheck-validate-prereqs
 
 # Check required packages for unused normal and development dependencies.
 anvil-udeps: anvil-udeps-validate-prereqs anvil-impact
-    cargo +{{ rust_nightly }} each {{ anvil_required_selection }} --once -- cargo +{{ rust_nightly }} udeps '{packages}' --all-features
-    cargo +{{ rust_nightly }} each {{ anvil_required_selection }} --once -- cargo +{{ rust_nightly }} udeps '{packages}' --all-features --all-targets
+    cargo +{{ rust_nightly }} each {{ anvil_required_selection }} --once -- cargo +{{ rust_nightly }} udeps '{cargo-specs}' --all-features
+    cargo +{{ rust_nightly }} each {{ anvil_required_selection }} --once -- cargo +{{ rust_nightly }} udeps '{cargo-specs}' --all-features --all-targets
 
 # Check global catalog inheritance and required packages' unused/misplaced dependencies.
 [arg("fix", long, value="true")]

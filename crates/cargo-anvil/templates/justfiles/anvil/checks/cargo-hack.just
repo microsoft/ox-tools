@@ -6,4 +6,4 @@
 
 # Check required packages across bounded feature combinations.
 anvil-cargo-hack: anvil-cargo-hack-validate-prereqs anvil-impact
-    cargo each {{ anvil_required_selection }} --once -- cargo {{ anvil_stable_toolchain_arg }} hack '{packages}' --feature-powerset --depth 2 check
+    cargo each {{ anvil_required_selection }} --once -- cargo {{ anvil_stable_toolchain_arg }} hack '{cargo-specs}' --feature-powerset --depth 2 check

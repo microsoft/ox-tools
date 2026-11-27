@@ -6,5 +6,5 @@
 
 # Compile each affected package independently with and without default features.
 anvil-check-all-targets: anvil-check-all-targets-validate-prereqs anvil-impact
-    cargo each {{ anvil_affected_selection }} --keep-going -- cargo {{ anvil_stable_toolchain_arg }} check --package '{spec}' --all-targets --locked
-    cargo each {{ anvil_affected_selection }} --keep-going -- cargo {{ anvil_stable_toolchain_arg }} check --package '{spec}' --all-targets --no-default-features --locked
+    cargo each {{ anvil_affected_selection }} --keep-going -- cargo {{ anvil_stable_toolchain_arg }} check --package '{cargo-spec}' --all-targets --locked
+    cargo each {{ anvil_affected_selection }} --keep-going -- cargo {{ anvil_stable_toolchain_arg }} check --package '{cargo-spec}' --all-targets --no-default-features --locked

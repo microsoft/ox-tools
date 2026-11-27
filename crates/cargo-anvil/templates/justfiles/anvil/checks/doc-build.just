@@ -7,4 +7,4 @@
 # Build required-package documentation with rustdoc warnings denied.
 [arg("open", long, value="true")]
 anvil-doc-build open="false": anvil-doc-build-validate-prereqs anvil-impact
-    cargo each {{ anvil_required_selection }} --once -- cargo {{ anvil_stable_toolchain_arg }} doc '{packages}' --config {{ quote('build.rustdocflags=["-D","warnings"]') }} --all-features --no-deps {{ if open == "true" { "--open" } else { "" } }}
+    cargo each {{ anvil_required_selection }} --once -- cargo {{ anvil_stable_toolchain_arg }} doc '{cargo-specs}' --config {{ quote('build.rustdocflags=["-D","warnings"]') }} --all-features --no-deps {{ if open == "true" { "--open" } else { "" } }}
