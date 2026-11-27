@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+## [0.7.6] - 2026-11-27
+
+- ✨ Features
+
+  - cargo-anvil: consolidate generated infrastructure ([#204](https://github.com/microsoft/ox-tools/pull/204))
+
+- 🐛 Bug Fixes
+
+  - cargo-coverage-gate: bound raw profiles with online merging ([#403](https://github.com/microsoft/ox-tools/pull/403))
+  - cargo-gamma: strengthen admission proofs and compiler isolation ([#367](https://github.com/microsoft/ox-tools/pull/367))
+  - stabilize scheduled checks and close Linux mutation coverage gaps ([#357](https://github.com/microsoft/ox-tools/pull/357))
+
+- ✔️ Tasks
+
+  - update Anvil to cargo-gamma 0.8.0 ([#400](https://github.com/microsoft/ox-tools/pull/400))
+
 ## [0.7.5] - 2026-11-06
 
 - 🐛 Bug Fixes
