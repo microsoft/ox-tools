@@ -56,7 +56,7 @@
 //! the repository's declared MSRV. Building this release of cargo-anvil from
 //! source requires **Rust 1.97 or newer**. Generated recipes require
 //! **Just 1.47.0 or newer**, Git, and rustup. PowerShell Core (`pwsh`) is
-//! needed for container commands and scoped unused-dependency checks.
+//! needed only for container commands, not for non-container checks.
 //! They target one Cargo workspace or single-crate package at the repository root.
 //! Older adopter toolchains and multi-workspace orchestration are unsupported.
 //!

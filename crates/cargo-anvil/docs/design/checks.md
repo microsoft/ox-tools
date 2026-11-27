@@ -65,8 +65,12 @@ Locally, recipes run on the host OS. See [github.md](./github.md) and
 | `external-types` | Checks exposed dependency types in selected libraries with a schema-matched nightly. Bin-only packages are skipped; tool/nightly incompatibility fails. |
 
 `unused-deps` runs immediately before `udeps` in `pr-fast`, using the catalog's
-`cargo-unused-deps 0.2.1` pin. The checker resolves workspace package selectors
-without ambiguity when a registry dependency has the same name and version.
+`cargo-unused-deps 0.3.0` pin. The recipe passes the required impact tier directly
+with `--package-file`, or `--workspace` when impact is disabled, without a
+PowerShell wrapper. An empty package file still runs the workspace inheritance
+check; malformed or unreadable files fail before checks or fixes. The checker
+resolves workspace package selectors without ambiguity when a registry
+dependency has the same name and version.
 `udeps` remains alongside it so the two complementary evidence models continue
 to run in the mandatory PR group.
 
@@ -274,10 +278,10 @@ Cargo-delta selects packages from the committed diff against the base.
 
 README templates and spelling dictionaries can be repository-level inputs, so
 their checks are unscoped. Empty categories skip package-scoped work
-successfully. For `unused-deps`, `--skip` skips package analysis but still runs
-the workspace dependency inheritance check. Invalid reports, unknown package
-names, and failed metadata/discovery commands fail rather than silently
-skipping work.
+successfully. For `unused-deps`, an empty required package file skips package
+analysis but still runs the workspace dependency inheritance check. Invalid
+reports, unknown package names, and failed metadata/discovery commands fail
+rather than silently skipping work.
 
 Coverage currently receives `name@version` package selectors. A registry
 dependency sharing both a workspace member's name and version can make that

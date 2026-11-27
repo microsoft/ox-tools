@@ -118,10 +118,15 @@ fn unused_deps_keeps_scope_and_fixes_explicit() {
     let generated = generated();
     assert!(generated.checks.contains(r#"[arg("fix", long, value="true")]"#));
     assert!(generated.checks.contains(r#"anvil-unused-deps fix="false":"#));
-    assert!(generated.checks.contains(r#"anvil_impact_input_dir + "/required.packages""#));
-    assert!(generated.checks.contains("$pkg += @('--package', $spec)"));
-    assert!(generated.checks.contains("Where-Object { -not [string]::IsNullOrWhiteSpace($_) }"));
-    assert!(generated.setup.contains("cargo_unused_deps_version"));
+    assert!(
+        generated.checks.contains(
+            "cargo +{{ rust_nightly }} unused-deps {{ anvil_required_selection }} {{ if fix == 'true' { '--fix' } else { '' } }}"
+        )
+    );
+    assert!(generated.helpers.contains(
+        "anvil_required_selection := if anvil_impact_mode == \"off\" {\n    \"--workspace\"\n} else {\n    \"--package-file \" + quote(anvil_impact_input_dir + \"/required.packages\")\n}"
+    ));
+    assert!(generated.setup.contains("cargo_unused_deps_version := \"0.3.0\""));
     assert!(generated.setup.contains("anvil-tool-cargo-unused-deps-validate-prereqs"));
 }
 
@@ -136,10 +141,17 @@ fn unused_deps_runs_immediately_before_udeps_in_pr_fast() {
 }
 
 #[test]
-fn unused_deps_rejects_whitespace_only_package_files() {
+fn non_container_recipes_do_not_require_powershell() {
     let generated = generated();
-    assert!(generated.checks.contains("IsNullOrWhiteSpace($packageText)"));
-    assert!(generated.checks.contains("contains whitespace but no package specs"));
+    for recipes in [
+        &generated.hub,
+        &generated.checks,
+        &generated.groups,
+        &generated.helpers,
+        &generated.setup,
+    ] {
+        assert!(!recipes.contains("pwsh"), "non-container recipes must not require PowerShell");
+    }
 }
 
 #[test]
