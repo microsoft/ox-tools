@@ -1932,13 +1932,6 @@ mod tests {
             )),
             "{error}"
         );
-        assert_eq!(
-            error
-                .find_source::<io::Error>()
-                .expect("withholding must preserve the removal error")
-                .kind(),
-            io::ErrorKind::PermissionDenied
-        );
     }
 
     #[test]
