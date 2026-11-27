@@ -591,6 +591,9 @@ Each line retains the maximum hit count across inputs, so hosted coverage sees
 the same union that the gate evaluates from the individual files. The separate
 reports remain stable gate inputs and the merged report is the canonical
 single-file upload for coverage services.
+`--collect-only` removes any stale merged report and publishes only individual
+raw configuration artifacts, because split collection does not own the joint
+filtering batch needed for a canonical upload.
 
 Scratch cleanup has explicit result precedence. An evaluation error remains the
 primary error and carries any cleanup failure as additional context. A rendered

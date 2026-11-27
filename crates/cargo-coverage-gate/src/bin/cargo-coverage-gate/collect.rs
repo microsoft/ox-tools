@@ -807,8 +807,7 @@ fn filter_and_publish_reports_with_reader(
         let manifest = execution.workspace.root.join("Cargo.toml");
         filter(&raw_refs, &manifest)?
     };
-    let merged = merge_lcov(&published.iter().map(String::as_str).collect::<Vec<_>>())
-        .into_app_err("failed to merge filtered LCOV reports for publication")?;
+    let merged_path = execution.args.coverage_dir.join("lcov-merged.info");
     let mut reports = collected
         .iter()
         .enumerate()
@@ -823,17 +822,30 @@ fn filter_and_publish_reports_with_reader(
             )
         })
         .collect::<Vec<_>>();
-    reports.push((
-        execution.args.coverage_dir.join("lcov-merged.info"),
-        "merged-published.info".to_owned(),
-        merged,
-    ));
+    if execution.args.collect_only {
+        remove_file_if_present(&merged_path).into_app_err(format!(
+            "failed to withhold merged LCOV report `{}` during split collection",
+            diagnostic_path(&merged_path)
+        ))?;
+    } else {
+        let merged = merge_lcov(&published.iter().map(String::as_str).collect::<Vec<_>>())
+            .into_app_err("failed to merge filtered LCOV reports for publication")?;
+        reports.push((merged_path, "merged-published.info".to_owned(), merged));
+    }
     publish_reports(
         reports
             .iter()
             .map(|(path, label, contents)| (path.as_path(), label.clone(), contents.as_str())),
     )?;
     Ok(collected.iter().map(|report| report.stable_path.clone()).collect())
+}
+
+fn remove_file_if_present(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 fn cargo_command(workspace: &WorkspaceInfo, tools: &ToolPrograms) -> Command {
@@ -1784,6 +1796,8 @@ mod tests {
                 cargo: OsString::from("never-invoked"),
                 rustc: OsString::from("never-invoked"),
             };
+            let merged_path = parent.path().join("lcov-merged.info");
+            fs::write(&merged_path, "stale merged report").expect("seed stale merged report");
             let collected = [
                 CollectedReport {
                     raw_path: PathBuf::from("scripted-all.info"),
@@ -1831,6 +1845,10 @@ mod tests {
                     ExitCode::SUCCESS
                 );
                 assert!(!scratch_path.exists(), "successful collection must release its build scratch");
+                assert!(
+                    !merged_path.exists(),
+                    "collect-only publication must withhold the canonical merged report"
+                );
             }
             outputs.push(
                 collected

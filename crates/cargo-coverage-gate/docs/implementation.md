@@ -102,7 +102,9 @@ The optional `run` mode keeps collection and evaluation separated internally:
    batch is also merged with maximum per-line hit counts and published as
    `lcov-merged.info`, after the individual reports have all completed. This is
    the canonical hosted-reporting artifact and has the same line coverage as
-   multi-input evaluation.
+   multi-input evaluation. `--collect-only` publishes only the raw
+   configuration reports and removes any stale merged artifact, so split
+   collection cannot represent one incomplete configuration as canonical.
    `no-default-features` maps to `lcov-no-default.info`.
 
 The Windows response-file retry also writes only to scratch. Successful retry
