@@ -589,6 +589,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "cargo-ensure-no-test-features"
+version = "0.1.0"
+dependencies = [
+ "cargo_metadata",
+ "clap",
+ "ohno",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "cargo-gamma"
 version = "0.8.0"
 dependencies = [

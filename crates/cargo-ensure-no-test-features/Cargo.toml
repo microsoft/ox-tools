@@ -1,0 +1,33 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+name = "cargo-ensure-no-test-features"
+description = "A Cargo subcommand that rejects test-only feature requests in publishable workspace packages"
+version = "0.1.0"
+readme = "README.md"
+keywords = ["cargo", "subcommand", "features", "ci"]
+categories = ["command-line-utilities", "development-tools::cargo-plugins"]
+
+edition.workspace = true
+# Match the Rust 1.95 floor of the standalone installer and the ohno dependency.
+rust-version = "1.95"
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-ensure-no-test-features"
+
+[package.metadata.anvil]
+catalog-tool = "cargo-ensure-no-test-features"
+
+[dependencies]
+cargo_metadata = { workspace = true }
+clap = { workspace = true, features = ["std", "derive", "help", "error-context", "usage"] }
+ohno = { workspace = true, features = ["app-err"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true, features = ["std"] }
+
+# >>> anvil-managed: anvil-lints
+[lints]
+workspace = true
+# <<< anvil-managed: anvil-lints
