@@ -141,27 +141,26 @@ stages:
     displayName: anvil pr-runtime-analysis (miri + careful + loom)
     dependsOn: [impact]
     jobs:
-      - ${{ each check in split('miri,careful,loom', ',') }}:
-          - template: steps/job.yml
-            parameters:
-              name: linux_${{ check }}
-              stage: pr_runtime_analysis
-              pool: ${{ parameters.linuxPool }}
-              inputArtifacts:
-                - name: anvil-impact-linux
-                  path: target/anvil/impact
-              steps:
-                - template: steps/${{ check }}.yml
-          - template: steps/job.yml
-            parameters:
-              name: windows_${{ check }}
-              stage: pr_runtime_analysis
-              pool: ${{ parameters.windowsPool }}
-              inputArtifacts:
-                - name: anvil-impact-windows
-                  path: target/anvil/impact
-              steps:
-                - template: steps/${{ check }}.yml
+      - template: steps/job.yml
+        parameters:
+          name: linux
+          stage: pr_runtime_analysis
+          pool: ${{ parameters.linuxPool }}
+          inputArtifacts:
+            - name: anvil-impact-linux
+              path: target/anvil/impact
+          steps:
+            - template: steps/pr-runtime-analysis.yml
+      - template: steps/job.yml
+        parameters:
+          name: windows
+          stage: pr_runtime_analysis
+          pool: ${{ parameters.windowsPool }}
+          inputArtifacts:
+            - name: anvil-impact-windows
+              path: target/anvil/impact
+          steps:
+            - template: steps/pr-runtime-analysis.yml
 
   - stage: pr_fuzzing
     displayName: anvil pr-fuzzing (bolero)

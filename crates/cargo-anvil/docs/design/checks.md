@@ -150,9 +150,6 @@ Loom support without a matching test target fails. No Loom targets means a
 successful skip. Anvil supplies no global exploration bound; each model must
 bound its own search.
 
-PR CI runs Miri, Careful, and Loom in independent jobs consuming the same
-OS-specific impact selection. The local group retains their sequential order.
-
 #### Miri workload scope
 
 For Anvil itself, repeated substring scans of embedded pipeline and recipe text are

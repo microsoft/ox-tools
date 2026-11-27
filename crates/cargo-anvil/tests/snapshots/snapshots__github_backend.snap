@@ -1878,9 +1878,9 @@ runs:
       id: cargo-cache
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
-        # Job and check suffixes avoid concurrent matrix saves; the prefix shares completed
+        # The job suffix avoids concurrent saves; the prefix shares completed
         # caches across sibling jobs without crossing catalog/toolchain changes.
-        key: anvil-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.cargo/config.toml', 'rust-toolchain', 'rust-toolchain.toml', '.anvil/setup.just') }}-${{ github.job }}-${{ inputs.group }}
+        key: anvil-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.cargo/config.toml', 'rust-toolchain', 'rust-toolchain.toml', '.anvil/setup.just') }}-${{ github.job }}
         restore-keys: |
           anvil-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.cargo/config.toml', 'rust-toolchain', 'rust-toolchain.toml', '.anvil/setup.just') }}-
         # Cargo's install ledgers make cached binaries visible to
@@ -4120,18 +4120,19 @@ jobs:
         run: Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
 
   pr-runtime-analysis:
-    name: "Check Group: Runtime Analysis / ${{ matrix.check }} (${{ matrix.os }})"
+    name: "Check Group: Runtime Analysis (${{ matrix.os }})"
     permissions:
       contents: read
       statuses: write
-    # Independent analyses overlap instead of adding their execution times.
-    # Each check keeps its host-target coverage and OS-specific impact scope.
+    # Stricter-runtime correctness: miri + careful + loom.
+    # 4-leg matrix -- these checks compile per host target and can
+    # surface OS/arch-specific bugs. All are impact-scoped so the
+    # wall-clock is proportional to the PR's blast radius.
     needs: [impact-linux, impact-windows]
     strategy:
       fail-fast: false
       matrix:
         os: [linux, windows, linux-arm, windows-arm]
-        check: [miri, careful, loom]
     runs-on: ${{ matrix.os == 'linux' && inputs.linux_runner
       || matrix.os == 'windows' && inputs.windows_runner
       || matrix.os == 'linux-arm' && inputs.linux_arm_runner
@@ -4149,7 +4150,7 @@ jobs:
           path: target/anvil/impact
       - uses: ./.anvil/github/actions/run-group
         with:
-          group: ${{ matrix.check }}
+          group: pr-runtime-analysis
           publish_commit_statuses: ${{ inputs.publish_commit_statuses }}
           impact_mode: consume
 

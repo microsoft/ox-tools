@@ -201,24 +201,6 @@ mod tests {
         assert!(SETUP_ACTION.contains("run: rustup toolchain install --profile minimal"));
     }
 
-    #[test]
-    #[cfg_attr(miri, ignore = "workflow text contracts run natively and under Careful")]
-    fn runtime_checks_have_independent_jobs_with_shared_impact_and_required_gate() {
-        let runtime = PR_IMPL_WORKFLOW
-            .split_once("\n  pr-runtime-analysis:\n")
-            .unwrap()
-            .1
-            .split_once("\n  pr-fuzzing:\n")
-            .unwrap()
-            .0;
-        assert!(runtime.contains("check: [miri, careful, loom]"));
-        assert!(runtime.contains("group: ${{ matrix.check }}"));
-        assert!(runtime.contains("impact_mode: consume"));
-        assert!(runtime.contains("fail-fast: false"));
-        assert!(runtime.contains("os: [linux, windows, linux-arm, windows-arm]"));
-        assert!(PR_IMPL_WORKFLOW.lines().any(|line| line.trim() == "- pr-runtime-analysis"));
-    }
-
     fn run_group_step_for_group(group: &str, fake_output: &str, fake_status: i32) -> (ExitStatus, String) {
         let temp = tempdir().expect("the test must be able to create a temporary action workspace");
         let output_path = temp.path().join("github-output");

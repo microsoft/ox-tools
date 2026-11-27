@@ -63,9 +63,6 @@ const GROUPS: &[&str] = &[
     "pr-test",
     "pr-msrv",
     "pr-runtime-analysis",
-    "miri",
-    "careful",
-    "loom",
     "pr-fuzzing",
     "pr-mutants",
     "scheduled-test",
@@ -238,9 +235,6 @@ pub(crate) const GROUP_STEPS: &[(&str, &str)] = &[
     ("pr-test", ".anvil/ado/steps/pr-test.yml"),
     ("pr-msrv", ".anvil/ado/steps/pr-msrv.yml"),
     ("pr-runtime-analysis", ".anvil/ado/steps/pr-runtime-analysis.yml"),
-    ("miri", ".anvil/ado/steps/miri.yml"),
-    ("careful", ".anvil/ado/steps/careful.yml"),
-    ("loom", ".anvil/ado/steps/loom.yml"),
     ("pr-fuzzing", ".anvil/ado/steps/pr-fuzzing.yml"),
     ("pr-mutants", ".anvil/ado/steps/pr-mutants.yml"),
     ("scheduled-test", ".anvil/ado/steps/scheduled-test.yml"),
@@ -339,32 +333,6 @@ mod tests {
         let body = render_group_step("pr-fast");
         assert!(body.contains("template: setup.yml"));
         assert!(body.contains("group: pr-fast"));
-    }
-
-    #[test]
-    #[cfg_attr(miri, ignore = "pipeline text contracts run natively and under Careful")]
-    fn runtime_checks_have_independent_jobs_consuming_their_os_impact() {
-        let runtime = PR_STAGES
-            .split_once("\n  - stage: pr_runtime_analysis\n")
-            .unwrap()
-            .1
-            .split_once("\n  - stage: pr_fuzzing\n")
-            .unwrap()
-            .0;
-        assert!(runtime.contains("each check in split('miri,careful,loom', ',')"));
-        assert!(runtime.contains("name: linux_${{ check }}"));
-        assert!(runtime.contains("name: windows_${{ check }}"));
-        assert!(runtime.contains("template: steps/${{ check }}.yml"));
-        for os in ["linux", "windows"] {
-            assert!(runtime.contains(&format!("name: anvil-impact-{os}")));
-        }
-        for check in ["miri", "careful", "loom"] {
-            assert!(GROUP_STEPS.contains(&(check, group_step_path(check).as_str())));
-            let step = render_group_step(check);
-            assert!(step.contains(&format!("group: {check}")));
-            assert!(step.contains(&format!("just anvil-{check}")));
-            assert!(step.contains(r#"ANVIL_IMPACT: "consume""#));
-        }
     }
 
     #[test]

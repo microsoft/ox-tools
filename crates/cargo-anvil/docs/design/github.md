@@ -50,10 +50,6 @@ Linux x64 and ARM64; scheduled exhaustive checks run only on Linux and Windows
 x64. Changing these axes requires customizing the implementation workflows.
 Excluding a check from the catalog does not remove its workflow job.
 
-The runtime-analysis matrix has a separate `miri`, `careful`, and `loom` leg
-per platform. Each installs only its own prerequisites; all legs contribute
-to the existing required-checks aggregate.
-
 The GitHub backend also emits a code-review skill and linked test-review rules
 under `.github/skills/code-review/`. These are agent guidance, not CI jobs.
 The adoption skill and repository-wide Anvil instructions under `.github/`

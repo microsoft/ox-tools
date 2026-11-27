@@ -34,10 +34,6 @@ Linux-only. **No ARM jobs are generated.** Self-hosted ARM coverage or other
 matrix changes require customizing the stages templates; an empty pool object
 does not remove a job. Excluding a check does not remove its stage or setup.
 
-The PR runtime-analysis stage runs Miri, Careful, and Loom in separate jobs
-per OS. Each consumes its OS-specific impact artifact and installs only that
-check's prerequisites.
-
 ## Repository extension points
 
 The default job wrapper appends a non-blocking `Report disk usage` step after
