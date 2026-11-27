@@ -10,6 +10,7 @@
 
 - 🐛 Bug Fixes
 
+  - cargo-anvil: join list-valued container arguments
   - cargo-anvil: reject preparation engine selector overrides
   - cargo-anvil: inspect regular hard-linked cache files
   - cargo-anvil: select preparation tools outside workspace overrides
@@ -18,6 +19,7 @@
 
 - ✔️ Tasks
 
+  - cargo-anvil: reconcile consolidated main catalog
   - cargo-anvil: reconcile main release metadata
   - cargo-anvil: regenerate reserved engine-control artifacts
   - cargo-anvil: regenerate regular hard-link inspection artifacts

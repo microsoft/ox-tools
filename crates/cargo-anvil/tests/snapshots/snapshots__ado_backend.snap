@@ -1931,10 +1931,9 @@ _anvil-container-image:
 [script("pwsh", "-NoProfile")]
 anvil-container *command:
     $ErrorActionPreference = 'Stop'
-    # `*command` joins its parts with spaces, so the string is split back into
-    # argv here. Whitespace is the only separator, so an argument containing a
-    # space does not survive; pass such a value through the environment.
-    $argv = @('{{ replace(command, "'", "''") }}' -split '\s+' | Where-Object { $_ })
+    # Join the variadic list before escaping it for PowerShell. Whitespace
+    # remains the separator; pass values containing spaces through the environment.
+    $argv = @('{{ replace(join(command, " "), "'", "''") }}' -split '\s+' | Where-Object { $_ })
     $forwardGithubToken = $argv.Count -gt 0 -and $argv[0] -ceq '--github-token'
     if ($forwardGithubToken) {
         $argv = @($argv | Select-Object -Skip 1)
