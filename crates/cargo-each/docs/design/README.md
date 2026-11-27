@@ -173,28 +173,52 @@ arbitrary-command + metadata-filter spine do not overlap.
 
 ## 4. CLI surface
 
-### Source-qualified per-package selection
+### Source-qualified selection and output
 
-`{cargo-spec}` is a per-package/per-target placeholder with the form
-`file:///...#name@version`. Its URL-encoded source is the absolute manifest
-directory; name and version come from structured package metadata. Metadata IDs
-are opaque and are never parsed or exposed. `{spec}` and `{packages}` are
-not source-qualified. Selector construction runs only for templates containing
-`{cargo-spec}`.
+`{cargo-spec}` is a per-package/per-target placeholder that copies the selected
+member's exact Cargo metadata package ID. IDs are opaque: output never parses
+or reconstructs them from a manifest path. `{spec}` and `{packages}` remain
+name/version-based.
+
+In once mode, standalone `{cargo-specs}` expands to the same selection flags
+as `{packages}`, but explicit `--package` values use each member's
+`{cargo-spec}` representation. Both preserve the untouched whole-workspace
+`--workspace` fast path and empty-selection no-op. `{packages}` remains
+name/version-based for explicit selections.
+
+`--package`, `--package-file`, and `--exclude` automatically accept existing
+name/version patterns, exact current-workspace Cargo metadata package IDs,
+and the former `file:///...#name@version` source-qualified spelling. All resolve to workspace
+members before output expansion, so the input form does not dictate the
+output form. A file may mix forms; matches are deduplicated in workspace
+member order. Unknown, registry-only, and stale checkout identities fail
+rather than falling back to a bare name. Metadata IDs are matched literally,
+not parsed or rewritten.
+
+Package-file lines are matched against current workspace metadata IDs before
+ordinary selector syntax is validated. An exact opaque ID may therefore contain
+spaces or other characters that are invalid in an ordinary name/version
+selector; malformed non-ID entries remain errors, including with `--none` or
+`--workspace`.
+
+The former spelling is matched using the current member's absolute manifest
+directory, name, and version solely for input compatibility. Output always
+uses the package ID supplied by Cargo metadata.
 
 All selections resolve against workspace members only, not registry packages or
 target names. Existing `-p` and `--package-file` inputs suffice for portable
 name/version selections; no cargo-delta dependency or record parser is involved.
-Selectors belong to the current checkout and are reconstructed from its
-metadata after relocation. Discovery preserves inherited Cargo/toolchain
+Source-qualified identities belong to the current checkout; portable
+name/version inputs resolve against its current metadata after relocation.
+Discovery preserves inherited Cargo/toolchain
 selection; it does not resolve a separate metadata toolchain.
 
 Aggregate `cargo build`/`cargo test` consumers can use ordinary Cargo
 `--workspace --exclude ...` selection without cargo-each. Cargo resolves that
 selection against workspace members, avoiding registry collisions and
 checkout-local selectors. Callers must skip explicitly empty selections:
-excluding every member is an error, not a Cargo no-op. Aggregate selection
-output and literal metadata-ID adapters are outside cargo-each's scope.
+excluding every member is an error, not a Cargo no-op. `{cargo-specs}` provides
+source-qualified aggregate execution without changing legacy placeholders.
 
 ```
 cargo each [SELECTION | JSON INPUT] [FILTERS] [EXECUTION] -- <COMMAND> [ARG...]
@@ -207,7 +231,7 @@ beyond placeholder substitution.
 
 | Flag | Meaning |
 |------|---------|
-| `-p`, `--package <SPEC>` | Select a member. Repeatable. `SPEC` is a package name, a `name@version` spec, or a Unix glob (`tokio-*`), matching `cargo-coverage-gate`'s existing `-p` idiom. |
+| `-p`, `--package <SPEC>` | Select a member. Repeatable. `SPEC` is a package name, a `name@version` spec, a Unix glob (`tokio-*`), an exact current-workspace Cargo metadata package ID, or the former `file:///...#name@version` spelling. Forms may be mixed. |
 | `--package-file <PATH>` | Read package specs from a UTF-8 file, one spec per nonempty line. A single leading UTF-8 byte-order mark is ignored. Repeatable; specs are unioned with `--package`. A present empty file is an explicit empty selection. |
 | `--workspace`, `--all` | Select every workspace member. |
 | `--exclude <SPEC>` | Remove a member from the selection (requires `--workspace`). Repeatable. |
@@ -345,17 +369,18 @@ Substituted inside each `ARG` of the command template:
 |-------|-----------|------|
 | `{name}` | bare package name (`cargo-anvil`) | per-package |
 | `{spec}` | `name@version` | per-package |
-| `{cargo-spec}` | source-qualified `file:///...#name@version` for the member's absolute manifest directory, with URL encoding | per-package |
+| `{cargo-spec}` | the member's exact opaque Cargo metadata package ID, copied without reconstruction | per-package |
 | `{version}` | package version | per-package |
 | `{manifest}` | absolute path to the member's `Cargo.toml` | per-package |
 | `{target}` | Cargo target name | per-target |
 | `{packages}` | the cargo selection flags for the resolved set: `--workspace` when the whole workspace was selected via `--workspace`/`--all` with no excludes **and no package filters applied**, else `--package name@version …` (one pair per member). Only valid as a standalone `ARG`; it expands to multiple tokens. | once |
+| `{cargo-specs}` | the same selection flags and workspace fast path as `{packages}`, but explicit `--package` values use each member's exact Cargo metadata ID. Only valid as a standalone `ARG`. | once |
 | `{workspace-rust-version}` | Root `[workspace.package].rust-version`, or root `[package].rust-version` in a single-package repository; empty when the root declaration is absent. | Cargo-backed per-package, per-target, once |
 | `{json:dotted.path}` | The nested string field at `dotted.path` in the current JSON object. Missing or non-string referenced fields are errors. Inserted values are not rescanned for placeholder-shaped text. | JSON-record |
 
 Per-target mode accepts all per-package placeholders plus `{target}`. Using a
 per-package or per-target token in `--once` mode, `{target}` in per-package
-mode, or `{packages}` outside `--once` is a usage error.
+mode, or `{packages}`/`{cargo-specs}` outside `--once` is a usage error.
 
 Substitution scans each template argument once. Text inserted for one
 placeholder is never scanned as another placeholder, so literal token-shaped
