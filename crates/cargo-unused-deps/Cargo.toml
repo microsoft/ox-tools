@@ -8,6 +8,7 @@ version = "0.3.0"
 readme = "README.md"
 keywords = ["oxidizer", "cargo", "subcommand", "dependencies", "ci"]
 categories = ["command-line-utilities", "development-tools::cargo-plugins"]
+exclude = ["/tests/repository_policy.rs"]
 
 edition.workspace = true
 rust-version.workspace = true

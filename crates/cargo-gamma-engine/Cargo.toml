@@ -15,12 +15,7 @@ authors.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-gamma-engine"
-exclude = [
-    "tests/identity.rs",
-    "tests/source.rs",
-    "tests/text.rs",
-    "tests/text_corpus/**",
-]
+exclude = ["tests/repository_policy.rs"]
 
 [package.metadata.docs.rs]
 all-features = true

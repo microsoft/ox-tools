@@ -13,6 +13,7 @@ readme = "README.md"
 repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil"
 keywords = ["cargo", "subcommand", "workflows", "just", "github-actions"]
 categories = ["development-tools::cargo-plugins"]
+exclude = ["/tests/repository_policy.rs"]
 
 [package.metadata.cargo_check_external_types]
 # - `ohno::app::error::AppError`: project-wide app error type from

@@ -525,7 +525,7 @@ fn recovery_preflight_checks_the_resolved_default_campaign_but_not_dry_runs() {
 fn plan_at(root: &Utf8Path) -> Plan {
     let fixture = Utf8Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/completed-recovery");
     fs::create_dir_all(root.join("src")).expect("the private recovery output directory is writable");
-    fs::copy(fixture.join("Cargo.toml"), root.join("Cargo.toml"))
+    fs::copy(fixture.join("Cargo.toml.in"), root.join("Cargo.toml"))
         .expect("the immutable recovery manifest can be copied into private output");
     fs::copy(fixture.join("lib.rs"), root.join("src/lib.rs")).expect("the immutable recovery source can be copied into private output");
     Plan {
@@ -663,11 +663,9 @@ fn partial_exact_id_ledger_cannot_suppress_unrecorded_same_mutator_sites() {
     let root = Utf8PathBuf::from_path_buf(directory.path().to_owned()).unwrap();
     let path = root.join("src/lib.rs");
     fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let fixture = Utf8Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../cargo-gamma-engine/src/ops/collect/collector/resource/fixtures/campaign/report/text.rs");
-    fs::copy(&fixture, &path).unwrap();
-    let source = fs::read_to_string(&fixture).unwrap();
-    let parsed = parse::SourceFile::parse("src/lib.rs", source.clone()).unwrap();
+    let source = "pub fn sum(a: i32, b: i32, c: i32) -> i32 { a + b + c }\n";
+    fs::write(&path, source).unwrap();
+    let parsed = parse::SourceFile::parse("src/lib.rs", source.to_owned()).unwrap();
     let selection = ops::Selection::parse("arith.add_to_sub").unwrap();
     let candidates = ops::into_mutants(&parsed, "subject", ops::collect_candidates(&parsed, &selection));
     let first = candidates

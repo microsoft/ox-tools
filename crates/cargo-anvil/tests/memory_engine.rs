@@ -23,7 +23,7 @@ use ohno::{AppError, app_err};
 
 const HISTORICAL_HOST: &str = include_str!("fixtures/update-0.20.1/gitattributes");
 const HISTORICAL_LOCK: &str = include_str!("fixtures/update-0.20.1/anvil.lock");
-const CARGO: &str = include_str!("fixtures/single-crate/Cargo.toml");
+const CARGO: &str = include_str!("fixtures/single-crate/Cargo.toml.in");
 
 fn repository() -> MemoryRepository {
     let mut io = MemoryRepository::default();

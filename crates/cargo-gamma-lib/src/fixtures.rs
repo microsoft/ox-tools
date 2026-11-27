@@ -174,6 +174,40 @@ pub(crate) fn crate_dir(name: &str, source: &str) -> (tempfile::TempDir, Utf8Pat
     crate_dir_in(crate::testing::workdir(name), source)
 }
 
+/// Commits `pathspec` in a new fixture repository and returns its HEAD.
+#[cfg(not(miri))]
+pub(crate) fn commit_git_fixture(root: &camino::Utf8Path, pathspec: &str) -> String {
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .output()
+            .expect("the native Git fixture requires git on PATH");
+        assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        output.stdout
+    };
+    git(&["init", "--quiet"]);
+    // Fixture files are written with LF. Linked worktrees must also check them out unchanged.
+    git(&["config", "--local", "core.autocrlf", "input"]);
+    git(&["add", "--", pathspec]);
+    git(&[
+        "-c",
+        "user.name=cargo-gamma test",
+        "-c",
+        "user.email=cargo-gamma@example.invalid",
+        "commit",
+        "--no-gpg-sign",
+        "--quiet",
+        "-m",
+        "fixture",
+    ]);
+    String::from_utf8(git(&["rev-parse", "HEAD"]))
+        .expect("Git object names are ASCII")
+        .trim()
+        .to_owned()
+}
+
 pub(crate) fn private_crate_dir(name: &str, source: &str) -> (tempfile::TempDir, Utf8PathBuf) {
     crate_dir_in(crate::testing::private_system_tempdir(name), source)
 }

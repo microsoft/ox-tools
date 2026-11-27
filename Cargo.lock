@@ -657,10 +657,10 @@ dependencies = [
  "blake3",
  "bolero",
  "camino",
+ "cargo-gamma-attrs",
  "cargo-gamma-attrs-impl",
  "cargo-gamma-engine",
  "cargo-gamma-process",
- "cargo-gamma-process-test-helper",
  "cargo-gamma-rt",
  "cargo-gamma-unsafe",
  "cargo_metadata",
@@ -697,16 +697,11 @@ version = "0.8.0"
 dependencies = [
  "bolero",
  "camino",
- "cargo-gamma-process-test-helper",
  "cargo-gamma-unsafe",
  "libc",
  "ohno",
  "tempfile",
 ]
-
-[[package]]
-name = "cargo-gamma-process-test-helper"
-version = "0.0.0"
 
 [[package]]
 name = "cargo-gamma-rt"

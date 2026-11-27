@@ -4,16 +4,14 @@
 use core::fmt;
 use core::panic::AssertUnwindSafe;
 use core::time::Duration;
-use std::fs;
 use std::io::{self, ErrorKind, Read as _};
-use std::path::Path;
 use std::process::Command;
 use std::sync::mpsc;
 
 use camino::Utf8Path;
 
 pub fn helper_binary_path() -> &'static Utf8Path {
-    Utf8Path::new(cargo_gamma_process_test_helper::PATH)
+    Utf8Path::new(env!("CARGO_GAMMA_PROCESS_HELPER"))
 }
 
 pub fn directive(step: impl fmt::Display) -> String {
@@ -21,12 +19,9 @@ pub fn directive(step: impl fmt::Display) -> String {
 }
 
 pub fn workdir(prefix: &str) -> tempfile::TempDir {
-    let work = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-work");
-
-    fs::create_dir_all(&work).expect("the test work directory should be creatable");
     tempfile::Builder::new()
         .prefix(prefix)
-        .tempdir_in(work)
+        .tempdir()
         .expect("the temporary directory should be creatable")
 }
 
@@ -153,7 +148,7 @@ mod tests {
     }
 
     #[test]
-    fn a_workdir_is_created_under_the_shared_test_work_directory() {
+    fn a_workdir_is_created_for_the_test() {
         let dir = workdir("gamma-testing-workdir-check");
 
         assert!(dir.path().is_dir());

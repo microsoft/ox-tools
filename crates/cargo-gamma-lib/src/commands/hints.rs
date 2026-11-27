@@ -390,13 +390,14 @@ mod tests {
         #[test]
         fn survivor_actual_hint_command_distinguishes_incremental_and_replacement_knowledge() {
             let (_directory, mut args, id) = survivor_campaign(Some(crate::model::Outcome::CompileError));
+            let head = crate::fixtures::commit_git_fixture(&args.dir, "src/lib.rs");
             let id = id.expect("the actual parsed source produced an unviable mutant");
             for replace in [false, true] {
                 let _existing = promotion_fixture(&args.dir, 'a', Some("deadbeefcafe"));
                 args.replace = replace;
-                hints(&mut Sink::default(), &args, Styler::new(false))
-                    .expect("actual offline promotion can capture the enclosing repository identity");
+                hints(&mut Sink::default(), &args, Styler::new(false)).expect("actual offline promotion can capture the fixture commit");
                 let published = std::fs::read_to_string(hints_path(&args.dir)).expect("promotion published its checked artifact");
+                assert!(published.contains(&head), "{published}");
                 assert!(published.contains(&id), "{published}");
                 assert_eq!(published.contains("deadbeefcafe"), !replace, "{published}");
             }

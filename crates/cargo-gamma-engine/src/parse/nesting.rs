@@ -403,10 +403,6 @@ fn identifier_end(text: &str, at: usize) -> Option<usize> {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use core::num::NonZeroUsize;
-    use std::{env, fs};
-
-    use camino::Utf8Path;
-    use walkdir::WalkDir;
 
     use super::super::comment::scan_comments;
     use super::super::source_file::line_starts;
@@ -1004,33 +1000,5 @@ mod tests {
 
     fn text_offset(text: &str, needle: &str) -> usize {
         text.find(needle).expect("the oracle needle is present")
-    }
-
-    /// Every source file in this workspace passes its own guard, at the limit the run uses.
-    ///
-    /// The counts added here are proxies, and a proxy that refuses ordinary Rust is worse than the
-    /// crash it prevents. This is the check that keeps them calibrated against real code.
-    #[test]
-    fn this_workspace_is_within_the_limit() {
-        // Gamma's scratch tree contains instrumented source whose guard expressions are
-        // intentionally deeper than the source this calibration test is meant to measure.
-        let _ = env::var_os("CARGO_GAMMA").is_none().then(assert_workspace_is_within_limit);
-    }
-
-    fn assert_workspace_is_within_limit() {
-        let root = Utf8Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-
-        for entry in WalkDir::new(root.as_std_path()).into_iter().filter_map(Result::ok) {
-            let path = entry.path();
-
-            if path.extension() != Some("rs".as_ref()) {
-                continue;
-            }
-
-            let actual = fs::read_to_string(path).ok().and_then(|text| beyond_limit(&text, NESTING_LIMIT));
-            let message = format!("{} is refused by its own guard", path.display());
-
-            assert_eq!(actual, None, "{message}");
-        }
     }
 }

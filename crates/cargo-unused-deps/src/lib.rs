@@ -1137,7 +1137,7 @@ mod source_campaign_tests {
 
     #[test]
     fn package_file_reader_rejects_malformed_disk_input_before_checks_or_fixing() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/invalid.packages");
         let cli = Cli::try_parse_from([
             OsString::from("cargo"),
             SUBCOMMAND.into(),
@@ -1146,11 +1146,11 @@ mod source_campaign_tests {
             "--fix".into(),
         ])
         .expect("package-file supports --fix");
-        let error = run(cli).expect_err("a Cargo manifest is not a package selection file");
+        let error = run(cli).expect_err("the second fixture entry contains whitespace");
         assert_eq!(
             error.to_string(),
             format!(
-                "invalid package spec in {} at line 1: \"# Copyright (c) Microsoft Corporation.\"; expected an exact package name or name@version, without whitespace, comments, glob patterns, or command-line tokens",
+                "invalid package spec in {} at line 2: \"not a package name\"; expected an exact package name or name@version, without whitespace, comments, glob patterns, or command-line tokens",
                 path.display()
             )
         );

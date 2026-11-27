@@ -15,6 +15,9 @@
 
 #![cfg(not(miri))]
 
+#[path = "support/workspace.rs"]
+mod workspace;
+
 #[gamma::resource("cargo-aprz-cargo-subprocess")]
 mod cargo_subprocess_resource {}
 
@@ -63,6 +66,8 @@ impl Host for TestHost {
 #[cfg_attr(miri, ignore = "Miri cannot call CreateIoCompletionPort")]
 async fn test_validate_without_config_file_errors() {
     let mut host = TestHost::new();
+    let workspace = workspace::stage("tiny-crate");
+    let manifest = workspace.path().join("Cargo.toml");
     cargo_aprz_lib::run(
         &mut host,
         [
@@ -70,7 +75,7 @@ async fn test_validate_without_config_file_errors() {
             "aprz",
             "validate",
             "--manifest-path",
-            "tests/fixtures/tiny-crate/Cargo.toml",
+            manifest.to_str().expect("test paths are UTF-8"),
         ],
     )
     .await;

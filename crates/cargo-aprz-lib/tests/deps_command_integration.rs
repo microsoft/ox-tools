@@ -18,18 +18,22 @@
 #![cfg(not(miri))]
 
 mod support;
+#[path = "support/workspace.rs"]
+mod workspace;
 
 #[gamma::resource("cargo-aprz-cargo-subprocess")]
 mod cargo_subprocess_resource {}
 
 use serde_json::Value;
-use support::{MockWorld, run_cli};
+use support::{MockWorld, TestHost, run_cli};
 
-/// Path to the fixture crate's Cargo.toml, relative to `cargo-aprz-lib/`.
-const FIXTURE_MANIFEST: &str = "tests/fixtures/tiny-crate/Cargo.toml";
-
-/// Path to the virtual workspace fixture's Cargo.toml, relative to `cargo-aprz-lib/`.
-const VIRTUAL_WS_MANIFEST: &str = "tests/fixtures/tiny-virtual-workspace/Cargo.toml";
+async fn run_deps(world: &MockWorld, fixture: &str, options: &[&str]) -> TestHost {
+    let workspace = workspace::stage(fixture);
+    let manifest = workspace.path().join("Cargo.toml");
+    let mut args = vec!["deps", "--manifest-path", manifest.to_str().expect("test paths are UTF-8")];
+    args.extend_from_slice(options);
+    run_cli(world, &args).await
+}
 
 /// Reads a JSON report and returns the names of the appraised crates, sorted.
 fn report_names(json_path: &std::path::Path) -> Vec<String> {
@@ -51,12 +55,10 @@ async fn test_deps_command_all_report_types() {
     let html_path = temp_dir.path().join("report.html");
     let excel_path = temp_dir.path().join("report.xlsx");
 
-    let host = run_cli(
+    let host = run_deps(
         &world,
+        "tiny-crate",
         &[
-            "deps",
-            "--manifest-path",
-            FIXTURE_MANIFEST,
             "--json",
             json_path.to_str().expect("valid path"),
             "--csv",
@@ -118,7 +120,7 @@ async fn test_deps_command_all_report_types() {
 #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
 async fn test_deps_command_console_output() {
     let world = MockWorld::new().await;
-    let host = run_cli(&world, &["deps", "--manifest-path", FIXTURE_MANIFEST, "--console"]).await;
+    let host = run_deps(&world, "tiny-crate", &["--console"]).await;
 
     assert!(host.error_str().is_empty(), "deps command failed: {}", host.error_str());
 
@@ -134,17 +136,7 @@ async fn test_deps_command_csv_output() {
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
     let csv_path = temp_dir.path().join("report.csv");
 
-    let host = run_cli(
-        &world,
-        &[
-            "deps",
-            "--manifest-path",
-            FIXTURE_MANIFEST,
-            "--csv",
-            csv_path.to_str().expect("valid path"),
-        ],
-    )
-    .await;
+    let host = run_deps(&world, "tiny-crate", &["--csv", csv_path.to_str().expect("valid path")]).await;
 
     assert!(host.error_str().is_empty(), "deps command failed: {}", host.error_str());
     assert!(csv_path.exists(), "CSV report should be created");
@@ -163,17 +155,10 @@ async fn test_deps_command_standard_deps_only() {
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
     let json_path = temp_dir.path().join("report.json");
 
-    let host = run_cli(
+    let host = run_deps(
         &world,
-        &[
-            "deps",
-            "--manifest-path",
-            FIXTURE_MANIFEST,
-            "--dependency-types",
-            "standard",
-            "--json",
-            json_path.to_str().expect("valid path"),
-        ],
+        "tiny-crate",
+        &["--dependency-types", "standard", "--json", json_path.to_str().expect("valid path")],
     )
     .await;
 
@@ -190,17 +175,10 @@ async fn test_deps_command_dev_deps_only() {
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
     let json_path = temp_dir.path().join("report.json");
 
-    let host = run_cli(
+    let host = run_deps(
         &world,
-        &[
-            "deps",
-            "--manifest-path",
-            FIXTURE_MANIFEST,
-            "--dependency-types",
-            "dev",
-            "--json",
-            json_path.to_str().expect("valid path"),
-        ],
+        "tiny-crate",
+        &["--dependency-types", "dev", "--json", json_path.to_str().expect("valid path")],
     )
     .await;
 
@@ -215,18 +193,7 @@ async fn test_deps_command_dev_deps_only() {
 #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
 async fn test_deps_command_nonexistent_package() {
     let world = MockWorld::new().await;
-    let host = run_cli(
-        &world,
-        &[
-            "deps",
-            "--manifest-path",
-            FIXTURE_MANIFEST,
-            "--package",
-            "no-such-package",
-            "--console",
-        ],
-    )
-    .await;
+    let host = run_deps(&world, "tiny-crate", &["--package", "no-such-package", "--console"]).await;
 
     let err_msg = host.error_str();
     assert!(!err_msg.is_empty(), "should fail for nonexistent package");
@@ -244,17 +211,10 @@ async fn test_deps_command_with_package_flag() {
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
     let json_path = temp_dir.path().join("report.json");
 
-    let host = run_cli(
+    let host = run_deps(
         &world,
-        &[
-            "deps",
-            "--manifest-path",
-            FIXTURE_MANIFEST,
-            "--package",
-            "tiny-crate",
-            "--json",
-            json_path.to_str().expect("valid path"),
-        ],
+        "tiny-crate",
+        &["--package", "tiny-crate", "--json", json_path.to_str().expect("valid path")],
     )
     .await;
 
@@ -279,17 +239,10 @@ async fn test_deps_command_package_flag_on_leaf_member() {
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
     let json_path = temp_dir.path().join("report.json");
 
-    let host = run_cli(
+    let host = run_deps(
         &world,
-        &[
-            "deps",
-            "--manifest-path",
-            FIXTURE_MANIFEST,
-            "--package",
-            "miniz_oxide",
-            "--json",
-            json_path.to_str().expect("valid path"),
-        ],
+        "tiny-crate",
+        &["--package", "miniz_oxide", "--json", json_path.to_str().expect("valid path")],
     )
     .await;
 
@@ -305,16 +258,10 @@ async fn test_deps_command_with_workspace_flag() {
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
     let json_path = temp_dir.path().join("report.json");
 
-    let host = run_cli(
+    let host = run_deps(
         &world,
-        &[
-            "deps",
-            "--manifest-path",
-            FIXTURE_MANIFEST,
-            "--workspace",
-            "--json",
-            json_path.to_str().expect("valid path"),
-        ],
+        "tiny-crate",
+        &["--workspace", "--json", json_path.to_str().expect("valid path")],
     )
     .await;
 
@@ -336,15 +283,10 @@ async fn test_deps_command_virtual_workspace() {
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
     let json_path = temp_dir.path().join("report.json");
 
-    let host = run_cli(
+    let host = run_deps(
         &world,
-        &[
-            "deps",
-            "--manifest-path",
-            VIRTUAL_WS_MANIFEST,
-            "--json",
-            json_path.to_str().expect("valid path"),
-        ],
+        "tiny-virtual-workspace",
+        &["--json", json_path.to_str().expect("valid path")],
     )
     .await;
 
@@ -366,16 +308,10 @@ async fn test_deps_command_all_features() {
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
     let json_path = temp_dir.path().join("report.json");
 
-    let host = run_cli(
+    let host = run_deps(
         &world,
-        &[
-            "deps",
-            "--manifest-path",
-            FIXTURE_MANIFEST,
-            "--all-features",
-            "--json",
-            json_path.to_str().expect("valid path"),
-        ],
+        "tiny-crate",
+        &["--all-features", "--json", json_path.to_str().expect("valid path")],
     )
     .await;
 
@@ -395,12 +331,10 @@ async fn test_deps_command_all_features_ignores_unknown_selected_features() {
     let world = MockWorld::new().await;
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
     let json_path = temp_dir.path().join("report.json");
-    let host = run_cli(
+    let host = run_deps(
         &world,
+        "tiny-crate",
         &[
-            "deps",
-            "--manifest-path",
-            FIXTURE_MANIFEST,
             "--all-features",
             "--features",
             "definitely-not-a-feature",
@@ -425,16 +359,10 @@ async fn test_deps_command_no_default_features() {
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
     let json_path = temp_dir.path().join("report.json");
 
-    let host = run_cli(
+    let host = run_deps(
         &world,
-        &[
-            "deps",
-            "--manifest-path",
-            FIXTURE_MANIFEST,
-            "--no-default-features",
-            "--json",
-            json_path.to_str().expect("valid path"),
-        ],
+        "tiny-crate",
+        &["--no-default-features", "--json", json_path.to_str().expect("valid path")],
     )
     .await;
 
@@ -456,12 +384,10 @@ async fn test_deps_command_explicit_features() {
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
     let json_path = temp_dir.path().join("report.json");
 
-    let host = run_cli(
+    let host = run_deps(
         &world,
+        "tiny-crate",
         &[
-            "deps",
-            "--manifest-path",
-            FIXTURE_MANIFEST,
             "--no-default-features",
             "-F",
             "extra",

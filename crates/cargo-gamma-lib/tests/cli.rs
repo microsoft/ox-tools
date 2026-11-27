@@ -865,11 +865,6 @@ fn the_effective_artifact_directory_report_selects_only_its_genuine_survivor_ide
     assert_eq!(selected_ids, [survivor]);
 }
 
-/// Writes a run record naming the first mutant unviable and the second one killed by a named test.
-///
-/// Written as text rather than through the tool so that the on-disk shape of the record is pinned
-/// by something outside the code that produces it. A promotion that silently stopped reading a
-/// field would otherwise still pass every test it has.
 fn commit_workspace(dir: &TempDir) {
     let git = |arguments: &[&str]| {
         Command::new("git")
@@ -891,6 +886,7 @@ fn commit_workspace(dir: &TempDir) {
     };
 
     assert_git(&["init", "--quiet"]);
+    assert_git(&["config", "core.autocrlf", "false"]);
     assert_git(&["add", "Cargo.toml", "src"]);
     assert_git(&[
         "-c",
@@ -904,6 +900,11 @@ fn commit_workspace(dir: &TempDir) {
     ]);
 }
 
+/// Writes a run record naming the first mutant unviable and the second one killed by a named test.
+///
+/// Written as text rather than through the tool so that the on-disk shape of the record is pinned
+/// by something outside the code that produces it. A promotion that silently stopped reading a
+/// field would otherwise still pass every test it has.
 fn seed_record(dir: &TempDir, population: &[(String, String)]) {
     commit_workspace(dir);
     let base = scratch_base(dir);

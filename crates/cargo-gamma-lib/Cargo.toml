@@ -8,6 +8,8 @@ version = "0.8.0"
 readme = "README.md"
 keywords = ["cargo", "mutation-testing", "testing"]
 categories = ["development-tools::testing"]
+# Live repository policy and sibling agreement targets; the portable tests remain in the archive.
+exclude = ["/tests/checkout/"]
 
 edition.workspace = true
 rust-version.workspace = true
@@ -87,17 +89,18 @@ libc = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
 bolero = { workspace = true }
+cargo-gamma-attrs = { workspace = true }
 # Cargo omits versionless dev-dependencies from published packages. The local path keeps the
 # cross-crate agreement tests available without adding a registry or release-order dependency.
 cargo-gamma-attrs-impl = { path = "../cargo-gamma-attrs-impl", features = ["agreement"] }
 cargo-gamma-process = { workspace = true, features = ["fault-injection"] }
-cargo-gamma-process-test-helper = { path = "../cargo-gamma-process/tests/support/output-helper" }
 quote = { workspace = true }
 tempfile = { workspace = true }
 tick = { workspace = true, features = ["test-util"] }
 
 [[test]]
 name = "agreement"
+path = "tests/checkout/agreement.rs"
 required-features = ["internals"]
 
 [[test]]
@@ -114,6 +117,11 @@ required-features = ["internals"]
 
 [[test]]
 name = "docs"
+path = "tests/checkout/docs.rs"
+required-features = ["internals"]
+
+[[test]]
+name = "reference"
 required-features = ["internals"]
 
 [[test]]

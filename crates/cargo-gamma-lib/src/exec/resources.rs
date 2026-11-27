@@ -396,6 +396,10 @@ const fn digit(byte: u8) -> Option<u8> {
 }
 
 #[cfg(test)]
+#[path = "../../tests/support/resource_markers.rs"]
+mod resource_markers;
+
+#[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::sync::mpsc;
@@ -404,31 +408,6 @@ mod tests {
 
     use super::*;
     use crate::testing::test_binary;
-
-    #[test]
-    fn resource_name_alphabets_agree_across_macro_and_scheduler() {
-        for (name, accepted) in [
-            ("a", true),
-            ("A0", true),
-            ("a.b", true),
-            ("a_b", true),
-            ("a-b", true),
-            ("0a", false),
-            (".a", false),
-            ("_a", false),
-            ("-a", false),
-            ("café", false),
-            ("", false),
-            ("two words", false),
-        ] {
-            let attr = format!("{name:?}").parse().expect("a quoted string tokenizes");
-            let item = "#[test] fn annotated() {}".parse().expect("the fixture is valid Rust");
-            let expanded = cargo_gamma_attrs_impl::resource(attr, item).to_string();
-            let macro_accepts = !expanded.contains("compile_error");
-            assert_eq!(macro_accepts, accepted, "macro accepted {name:?}: {expanded}");
-            assert_eq!(ResourceLimit::new(name, 1).is_ok(), accepted, "scheduler accepted {name:?}");
-        }
-    }
 
     #[test]
     fn an_unconfigured_required_resource_has_one_slot_and_returns_it_without_waiting() {
@@ -774,18 +753,8 @@ mod tests {
     }
 
     #[test]
-    fn proc_macro_markers_are_understood_by_resource_discovery() {
-        for (spelling, decoded) in [("resolves_metadata", "resolves_metadata"), ("r#type", "type"), ("café", "café")] {
-            let expanded = cargo_gamma_attrs_impl::resource(
-                "\"cargo-subprocess\"".parse().expect("resource argument"),
-                format!("#[test] fn {spelling}() {{}}").parse().expect("annotated test"),
-            )
-            .to_string();
-            let marker_name = expanded
-                .split_ascii_whitespace()
-                .find(|token| token.starts_with(MARKER_PREFIX))
-                .expect("the expansion carries a resource marker");
-
+    fn resource_discovery_recovers_the_test_names_from_macro_markers() {
+        for &(_, decoded, marker_name) in resource_markers::CASES {
             assert_eq!(
                 marker(marker_name),
                 Some(Marker::Test {

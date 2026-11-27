@@ -4,7 +4,6 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
-exclude = ["crates/cargo-gamma-process/tests/support/output-helper"]
 
 [workspace.package]
 edition = "2024"

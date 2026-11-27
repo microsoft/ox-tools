@@ -6448,33 +6448,7 @@ pub(super) mod tests {
             ],
         );
 
-        let run_git = |arguments: &[&str]| {
-            let output = Command::new("git")
-                .arg("-C")
-                .arg(source)
-                .args(arguments)
-                .output()
-                .expect("git runs");
-            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-            output
-        };
-        let _ = run_git(&["init", "--quiet"]);
-        let _ = run_git(&["add", "."]);
-        let _ = run_git(&[
-            "-c",
-            "user.name=cargo-gamma test",
-            "-c",
-            "user.email=cargo-gamma@example.invalid",
-            "commit",
-            "--quiet",
-            "-m",
-            "fixture",
-        ]);
-
-        String::from_utf8(run_git(&["rev-parse", "HEAD"]).stdout)
-            .expect("Git hashes are UTF-8")
-            .trim()
-            .to_owned()
+        crate::fixtures::commit_git_fixture(source, ".")
     }
 
     fn assert_external_target_preserves_git_context(source: &Utf8Path, target: &Utf8Path, expected_head: &str) {

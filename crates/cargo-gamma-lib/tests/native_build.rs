@@ -58,7 +58,7 @@ fn trivial_workspace(prefix: &str) -> (tempfile::TempDir, Workspace) {
     let directory = testing::workdir(prefix);
     let root = Utf8PathBuf::from_path_buf(directory.path().join("schema")).expect("the private output directory is UTF-8");
     fs::create_dir_all(root.join("src")).expect("the private schema output directory is writable");
-    let manifest = Utf8Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/completed-recovery/Cargo.toml");
+    let manifest = Utf8Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/completed-recovery/Cargo.toml.in");
     fs::copy(manifest, root.join("Cargo.toml")).expect("the immutable manifest can be copied into private schema output");
     let target = Utf8PathBuf::from_path_buf(directory.path().join("target")).expect("the private target output directory is UTF-8");
     (directory, Workspace::adopt(root, target))

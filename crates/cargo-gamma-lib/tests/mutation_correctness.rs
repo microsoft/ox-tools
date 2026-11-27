@@ -10,8 +10,9 @@
 extern crate gamma_rt as runtime;
 extern crate self as gamma_rt;
 
-// Compiler fixtures must use checkout helpers even when an older Gamma vendors its runtime.
-#[path = "../../cargo-gamma-rt/src/mutation.rs"]
+// An older Gamma can substitute its own runtime while testing this release. The checkout
+// agreement test pins this distributable oracle to the helpers this release actually generates.
+#[path = "fixtures/correctness/runtime_mutation.rs"]
 mod mutation_runtime;
 
 use core::num::NonZeroU8;

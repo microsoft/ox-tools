@@ -16,10 +16,9 @@
     reason = "panic-on-failure idioms are appropriate in tests"
 )]
 
-use std::collections::BTreeSet;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::{env, fs};
 
 use tempfile::TempDir;
 
@@ -93,7 +92,12 @@ fn copy_tree(source: &Path, destination: &Path) -> std::io::Result<()> {
     fs::create_dir_all(destination)?;
     for entry in fs::read_dir(source)? {
         let entry = entry?;
-        let target = destination.join(entry.file_name());
+        // An actual Cargo.toml here would make Cargo omit the whole fixture subtree.
+        let target = if entry.file_name() == "Cargo.toml.in" {
+            destination.join("Cargo.toml")
+        } else {
+            destination.join(entry.file_name())
+        };
         if entry.file_type()?.is_dir() {
             copy_tree(&entry.path(), &target)?;
         } else {
@@ -944,65 +948,6 @@ fn unknown_package_selection_fails_loudly() {
 
     assert!(!output.status.success(), "an unknown package selector must be rejected");
     assert!(String::from_utf8_lossy(&output.stderr).contains("did not match any workspace member"));
-}
-
-/// The tool's own workspace may report only cargo-gamma's injected runtime
-/// dependencies during mutation instrumentation; ordinary runs must be clean.
-fn only_injected_runtime_dependencies(dependencies: &BTreeSet<String>) -> bool {
-    !dependencies.is_empty()
-        && dependencies
-            .iter()
-            .all(|name| matches!(name.as_str(), "cargo-gamma-rt" | "gamma_rt"))
-}
-
-#[test]
-fn injected_runtime_catalog_findings_allow_either_alias_but_nothing_else() {
-    for (names, expected) in [
-        (vec!["gamma_rt"], true),
-        (vec!["cargo-gamma-rt"], true),
-        (vec!["cargo-gamma-rt", "gamma_rt"], true),
-        (vec![], false),
-        (vec!["gamma_rt", "unrelated"], false),
-        (vec!["unrelated"], false),
-    ] {
-        let dependencies = names.into_iter().map(str::to_owned).collect();
-        assert_eq!(only_injected_runtime_dependencies(&dependencies), expected);
-    }
-}
-
-#[test]
-fn the_tools_own_catalog_has_no_unexpected_findings() {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("the crate lives two levels below the workspace root")
-        .join("Cargo.toml");
-
-    let output = command()
-        .arg("unused-deps")
-        .arg("--manifest-path")
-        .arg(&manifest)
-        .output()
-        .expect("failed to execute the binary");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-
-    if output.status.success() {
-        return;
-    }
-
-    if env::var_os("CARGO_GAMMA").is_some() {
-        let dependencies = stderr
-            .lines()
-            .filter_map(|line| line.strip_prefix("  - "))
-            .map(str::to_owned)
-            .collect::<BTreeSet<_>>();
-        assert!(
-            only_injected_runtime_dependencies(&dependencies),
-            "the instrumented catalog should differ only by cargo-gamma's injected runtime dependencies: {stderr}"
-        );
-    } else {
-        panic!("this repository's catalog should be clean: {stderr}");
-    }
 }
 
 #[test]
