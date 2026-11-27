@@ -10,6 +10,7 @@
 
 - 🐛 Bug Fixes
 
+  - cargo-anvil: use documented list-to-string conversion
   - cargo-anvil: join list-valued container arguments
   - cargo-anvil: reject preparation engine selector overrides
   - cargo-anvil: inspect regular hard-linked cache files
@@ -19,6 +20,7 @@
 
 - ✔️ Tasks
 
+  - cargo-anvil: regenerate list argument artifacts
   - cargo-anvil: reconcile consolidated main catalog
   - cargo-anvil: reconcile main release metadata
   - cargo-anvil: regenerate reserved engine-control artifacts

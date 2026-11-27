@@ -694,7 +694,7 @@ anvil-container *command:
     $ErrorActionPreference = 'Stop'
     # Join the variadic list before escaping it for PowerShell. Whitespace
     # remains the separator; pass values containing spaces through the environment.
-    $argv = @('{{ replace(join(command, " "), "'", "''") }}' -split '\s+' | Where-Object { $_ })
+    $argv = @('{{ replace(join_list(command), "'", "''") }}' -split '\s+' | Where-Object { $_ })
     $forwardGithubToken = $argv.Count -gt 0 -and $argv[0] -ceq '--github-token'
     if ($forwardGithubToken) {
         $argv = @($argv | Select-Object -Skip 1)
