@@ -10,6 +10,7 @@
 
 - 🐛 Bug Fixes
 
+  - cargo-anvil: enable list settings in image bootstrap
   - cargo-anvil: use documented list-to-string conversion
   - cargo-anvil: join list-valued container arguments
   - cargo-anvil: reject preparation engine selector overrides
@@ -20,6 +21,7 @@
 
 - ✔️ Tasks
 
+  - cargo-anvil: regenerate list conversion artifacts
   - cargo-anvil: regenerate list argument artifacts
   - cargo-anvil: reconcile consolidated main catalog
   - cargo-anvil: reconcile main release metadata
